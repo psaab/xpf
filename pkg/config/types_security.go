@@ -183,10 +183,14 @@ type SecurityConfig struct {
 	NAT            NATConfig
 	Screen         map[string]*ScreenProfile // keyed by profile name
 	AddressBook    *AddressBook
-	Log            LogConfig
-	Flow           FlowConfig
-	ALG            ALGConfig
-	IPsec          IPsecConfig
+	// NamedAddressBooks holds `security address-book <name>` books
+	// (#15672), keyed by book name. Attached books are folded into their
+	// attached zones by resolveNamedAddressBooks15672 during compile.
+	NamedAddressBooks map[string]*NamedAddressBook `json:",omitempty"`
+	Log               LogConfig
+	Flow              FlowConfig
+	ALG               ALGConfig
+	IPsec             IPsecConfig
 	// PKI (#15752, G18-01) captures `security pki` ca-profiles. xpf has no
 	// SCEP/CMPv2/CRL lifecycle runtime: the stanza is captured so
 	// ValidateConfig can emit the accepted-only advisory instead of the
@@ -1682,8 +1686,18 @@ type SynFloodConfig struct {
 
 // AddressBook holds named addresses and address sets.
 type AddressBook struct {
+	// Description is the book-level Junos `description` (#15672), for the
+	// global book, a zone-local book, or a named book.
+	Description string
 	Addresses   map[string]*Address
 	AddressSets map[string]*AddressSet
+	// AttachedBookName / AttachedBookConflict are compile-time
+	// bookkeeping for the named-book fold (#15672), never persisted.
+	// AttachedBookName names the named book attached to a zone-local
+	// book; AttachedBookConflict marks a zone whose attachment is
+	// ambiguous (two attached books, or attached + inline book).
+	AttachedBookName     string `json:"-"`
+	AttachedBookConflict bool   `json:"-"`
 	// UnknownBookEntries records unsupported direct children so compilation can
 	// reject commits and tolerant loads can warn and quarantine references.
 	UnknownBookEntries []AddressBookUnknownEntry `json:"-"`
@@ -1691,6 +1705,16 @@ type AddressBook struct {
 	// because more than one definition claimed the same operator-visible name.
 	// It is compiler metadata, not persisted configuration or wire state.
 	CollidingNames map[string]struct{} `json:"-"`
+}
+
+// NamedAddressBook is a `security address-book <name>` book (#15672).
+// Entries compile exactly like a zone-local book; AttachedZones lists the
+// zones from `attach { zone <z>; }`. During compile an attached book is
+// folded into each attached zone's namespace (zone-local semantics).
+type NamedAddressBook struct {
+	Name string
+	AddressBook
+	AttachedZones []string
 }
 
 type AddressBookUnknownEntry struct {

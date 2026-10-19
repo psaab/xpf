@@ -190,6 +190,19 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #15672: fold attached named books into their zones, then gate the
+	// attachment. Runs before resolveZoneLocalAddressBooks so attached
+	// entries get identical zone-local treatment; the pristine gates
+	// above already validated the named books' own entries.
+	resolveNamedAddressBooks15672(&cfg.Security)
+	if err := validateNamedAddressBookAttachStrict(cfg); err != nil {
+		if opts.lenientNamedAddressBookAttach15672 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("named address-book attachment (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #3061 — fold zone-local address books into the global book under
 	// zone-qualified internal names and rewrite policy match tokens. Runs after
 	// the name gate (above) and before the policy match-address resolution

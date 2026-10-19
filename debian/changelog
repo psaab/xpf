@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Support standard Junos named address books
+    (`security address-book <book> { ... attach { zone <z>; } }`) and
+    book-level `description`: named books were schema-rejected on commit
+    and silently dropped on lenient load. They now compile, fold into
+    their attached zones with zone-local semantics, and attachment
+    conflicts (two books per zone, attached+inline, undefined zone)
+    fail closed (#15672).
+
+
   * Close the `vrrp-inet6-group` validator bypass: the Junos IPv6 alias
     now goes through the VRRP authentication reject/drop, misplaced-auth
     collector, and single-track-interface gates exactly like

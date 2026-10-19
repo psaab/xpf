@@ -39,6 +39,11 @@ func init() {
 			}
 		}
 	}
+	if ab := schemaSecurity.children["address-book"]; ab != nil && ab.wildcard != nil {
+		if a := ab.wildcard.children["address"]; a != nil {
+			addressBookAddressNodes14424[a] = true
+		}
+	}
 	if zones := schemaSecurity.children["zones"]; zones != nil {
 		if zone := zones.children["security-zone"]; zone != nil {
 			if book := zone.children["address-book"]; book != nil {

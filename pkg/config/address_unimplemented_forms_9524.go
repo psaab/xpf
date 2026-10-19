@@ -67,6 +67,11 @@ func validateAddressUnimplementedFormsStrict(cfg *Config) error {
 	if err := check("", cfg.Security.AddressBook); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := check("address-book "+bn+" ", &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+	}
 	zones := make([]string, 0, len(cfg.Security.Zones))
 	for z := range cfg.Security.Zones {
 		zones = append(zones, z)

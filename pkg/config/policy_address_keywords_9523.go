@@ -78,6 +78,11 @@ func validateReservedAddressNamesStrict(cfg *Config) error {
 	if err := checkBook("security address-book global", cfg.Security.AddressBook); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := checkBook("security address-book "+bn, &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+	}
 	for _, z := range sortedKeys9523(cfg.Security.Zones) {
 		if zone := cfg.Security.Zones[z]; zone != nil {
 			if err := checkBook(fmt.Sprintf("security-zone %q address-book", z), zone.AddressBook); err != nil {

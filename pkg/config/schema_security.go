@@ -101,6 +101,27 @@ func sessionLogModeLeaf(desc string) *schemaNode {
 	}
 }
 
+// addressBookEntryChildren15672 builds the entry grammar shared by the
+// global book, a zone-local book, and a named address book (#15672).
+// A factory (not a shared var) so each attachment point owns independent
+// schemaNode maps. `description` is the BOOK-level description (args:1);
+// the address-set `description` remains metadata-only inside each set.
+func addressBookEntryChildren15672() map[string]*schemaNode {
+	return map[string]*schemaNode{
+		"description": {desc: "Address book description", args: 1, placeholder: "<text>", children: nil},
+		"address":     {desc: "Named address (name and prefix)", args: 2, multi: true, placeholder: "<address-name>", children: nil},
+		"address-set": {desc: "Address set name", args: 1, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", closedWorld: true, children: map[string]*schemaNode{
+			"address":     {desc: "Address to include in this set", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+			"address-set": {desc: "Nested address set to include", args: 1, multi: true, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", children: nil},
+			// NOT tagged scalar:true (#3332): AddressSet has no Description
+			// field (types_security.go), so its metadata value is accepted
+			// but not stored. parseAddressBookEntries still extracts any
+			// address/address-set members packed after the description.
+			"description": {desc: "Address set description", args: 1, placeholder: "<text>", children: nil},
+		}},
+	}
+}
+
 // hostInboundSchemaChildren builds the shared `host-inbound-traffic { ... }`
 // child set used at BOTH the zone level and the per-interface override (#3362,
 // #3703). system-services / protocols are multi-value value-tail leaves: a
@@ -359,18 +380,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			// directly under the zone (no `global` wrapper). A policy in
 			// this zone resolves a name against the zone-local book first,
 			// then falls back to the global book.
-			"address-book": {desc: "Zone-local address book", packedStatements: true, children: map[string]*schemaNode{
-				"address": {desc: "Named address (name and prefix)", args: 2, multi: true, placeholder: "<address-name>", children: nil},
-				"address-set": {desc: "Address set name", args: 1, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", closedWorld: true, children: map[string]*schemaNode{
-					"address":     {desc: "Address to include in this set", args: 1, multi: true, placeholder: "<address-name>", children: nil},
-					"address-set": {desc: "Nested address set to include", args: 1, multi: true, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", children: nil},
-					// NOT tagged scalar:true (#3332): AddressSet has no Description
-					// field (types_security.go), so its metadata value is accepted
-					// but not stored. parseAddressBookEntries still extracts any
-					// address/address-set members packed after the description.
-					"description": {desc: "Address set description", args: 1, placeholder: "<text>", children: nil},
-				}},
-			}},
+			"address-book": {desc: "Zone-local address book", packedStatements: true, children: addressBookEntryChildren15672()},
 		}},
 	}},
 	// #9878: closed-world arm. Leaf-completeness audit: policies children =
@@ -970,20 +980,23 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			}},
 		}},
 	}},
+	// #15672: `global` plus named books via wildcard. A book named
+	// `global` would be claimed by the wildcard if `global` were not a
+	// declared child (declared children win in schemaChildFor).
 	"address-book": {desc: "Address books", children: map[string]*schemaNode{
-		"global": {desc: "Global address book", packedStatements: true, children: map[string]*schemaNode{
-			"address": {desc: "Named address (name and prefix)", args: 2, multi: true, placeholder: "<address-name>", children: nil},
-			"address-set": {desc: "Address set name", args: 1, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", closedWorld: true, children: map[string]*schemaNode{
-				"address":     {desc: "Address to include in this set", args: 1, multi: true, placeholder: "<address-name>", children: nil},
-				"address-set": {desc: "Nested address set to include", args: 1, multi: true, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", children: nil},
-				// NOT tagged scalar:true (#3332): AddressSet has no Description
-				// field (types_security.go), so its metadata value is accepted
-				// but not stored. parseAddressBookEntries still extracts any
-				// address/address-set members packed after the description.
-				"description": {desc: "Address set description", args: 1, placeholder: "<text>", children: nil},
-			}},
+		"global": {desc: "Global address book", packedStatements: true, children: addressBookEntryChildren15672()},
+	}, wildcard: &schemaNode{desc: "Named address book", placeholder: "<book-name>", packedStatements: true, children: map[string]*schemaNode{
+		"description": {desc: "Address book description", args: 1, placeholder: "<text>", children: nil},
+		"address":     {desc: "Named address (name and prefix)", args: 2, multi: true, placeholder: "<address-name>", children: nil},
+		"address-set": {desc: "Address set name", args: 1, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", closedWorld: true, children: map[string]*schemaNode{
+			"address":     {desc: "Address to include in this set", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+			"address-set": {desc: "Nested address set to include", args: 1, multi: true, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", children: nil},
+			"description": {desc: "Address set description", args: 1, placeholder: "<text>", children: nil},
 		}},
-	}},
+		"attach": {desc: "Attach this book to security zones", children: map[string]*schemaNode{
+			"zone": {desc: "Zone to attach this book to", args: 1, multi: true, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: nil},
+		}},
+	}}},
 	"log": {desc: "Security logging configuration", children: map[string]*schemaNode{
 		// #3349: typed enum/value leaves so a typo (`mode steam`,
 		// `format sdsyslog`, `severity wraning`, `facility locl0`,

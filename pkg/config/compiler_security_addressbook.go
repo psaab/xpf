@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"net"
+	"sort"
 	"strings"
 )
 
@@ -136,6 +138,151 @@ func DisplayAddressNames(tokens []string) []string {
 		out[i] = DisplayAddressName(t)
 	}
 	return out
+}
+
+// sortedNamedBookNames15672 / sortedZoneNamesForBooks15672: deterministic
+// iteration helpers for the named-book passes (#15672).
+func sortedNamedBookNames15672(m map[string]*NamedAddressBook) []string {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// mergeAddressBookEntries15672 unions src entries into dst (find-or-create
+// via parseAddressBookEntries merge semantics are per-node; here entries
+// are already compiled, so copy pointers for new names and record a
+// collision when both sides define the same name).
+func mergeAddressBookEntries15672(dst, src *AddressBook) {
+	if dst.Addresses == nil {
+		dst.Addresses = make(map[string]*Address)
+	}
+	if dst.AddressSets == nil {
+		dst.AddressSets = make(map[string]*AddressSet)
+	}
+	for name, a := range src.Addresses {
+		if _, exists := dst.Addresses[name]; exists {
+			if dst.CollidingNames == nil {
+				dst.CollidingNames = make(map[string]struct{})
+			}
+			dst.CollidingNames[name] = struct{}{}
+			continue
+		}
+		if _, exists := dst.AddressSets[name]; exists {
+			if dst.CollidingNames == nil {
+				dst.CollidingNames = make(map[string]struct{})
+			}
+			dst.CollidingNames[name] = struct{}{}
+			continue
+		}
+		dst.Addresses[name] = a
+	}
+	for name, s := range src.AddressSets {
+		if _, exists := dst.AddressSets[name]; exists {
+			if dst.CollidingNames == nil {
+				dst.CollidingNames = make(map[string]struct{})
+			}
+			dst.CollidingNames[name] = struct{}{}
+			continue
+		}
+		if _, exists := dst.Addresses[name]; exists {
+			if dst.CollidingNames == nil {
+				dst.CollidingNames = make(map[string]struct{})
+			}
+			dst.CollidingNames[name] = struct{}{}
+			continue
+		}
+		dst.AddressSets[name] = s
+	}
+	dst.UnknownBookEntries = append(dst.UnknownBookEntries, src.UnknownBookEntries...)
+	for n := range src.CollidingNames {
+		if dst.CollidingNames == nil {
+			dst.CollidingNames = make(map[string]struct{})
+		}
+		dst.CollidingNames[n] = struct{}{}
+	}
+}
+
+// resolveNamedAddressBooks15672 folds each attached named book into its
+// attached zones (#15672). It MUST run before the pristine validators and
+// resolveZoneLocalAddressBooks: afterwards an attached book is
+// indistinguishable from an inline zone-local book, so every pristine
+// gate (name collision, reserved names, duplicate prefixes, ...) sees
+// its entries under the zone scope. Conflict bookkeeping:
+//   - zone already has an inline AddressBook -> AttachedBookConflict,
+//     entries still merged; the strict gate rejects, the tolerant path
+//     quarantines same-name references via CollidingNames.
+//   - second book attaches to the same zone -> both marked conflict.
+//
+// Undefined attached zones are left for validateNamedAddressBookAttachStrict.
+func resolveNamedAddressBooks15672(sec *SecurityConfig) {
+	if len(sec.NamedAddressBooks) == 0 {
+		return
+	}
+	for _, bookName := range sortedNamedBookNames15672(sec.NamedAddressBooks) {
+		nb := sec.NamedAddressBooks[bookName]
+		if nb == nil {
+			continue
+		}
+		for _, zoneName := range nb.AttachedZones {
+			z := sec.Zones[zoneName]
+			if z == nil {
+				continue
+			}
+			if z.AddressBook == nil {
+				z.AddressBook = &AddressBook{Addresses: make(map[string]*Address), AddressSets: make(map[string]*AddressSet)}
+				z.AddressBook.AttachedBookName = bookName
+				mergeAddressBookEntries15672(z.AddressBook, &nb.AddressBook)
+				continue
+			}
+			// Inline book or a previous attachment already present.
+			z.AddressBook.AttachedBookConflict = true
+			nb.AddressBook.AttachedBookConflict = true
+			if z.AddressBook.AttachedBookName != "" && z.AddressBook.AttachedBookName != bookName {
+				if other := sec.NamedAddressBooks[z.AddressBook.AttachedBookName]; other != nil {
+					other.AddressBook.AttachedBookConflict = true
+				}
+			}
+			mergeAddressBookEntries15672(z.AddressBook, &nb.AddressBook)
+		}
+	}
+}
+
+// validateNamedAddressBookAttachStrict (#15672) rejects: attach to an
+// undefined zone, a zone with two attached books, and a zone combining
+// an attached book with an inline `address-book`. Strict rejects;
+// tolerant warns and the fold quarantines conflicting names.
+func validateNamedAddressBookAttachStrict(cfg *Config) error {
+	if cfg == nil || len(cfg.Security.NamedAddressBooks) == 0 {
+		return nil
+	}
+	for _, bookName := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		nb := cfg.Security.NamedAddressBooks[bookName]
+		if nb == nil {
+			continue
+		}
+		for _, z := range nb.AttachedZones {
+			if cfg.Security.Zones[z] == nil {
+				return fmt.Errorf("security address-book %q attach zone %q: zone is not defined (#15672)", bookName, z)
+			}
+		}
+		if nb.AddressBook.AttachedBookConflict {
+			return fmt.Errorf("security address-book %q: its attached zone already has an address book (inline zone address-book or another attached book); a zone has at most one attached address book and cannot combine it with an inline address-book (#15672)", bookName)
+		}
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for z := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, z)
+	}
+	sort.Strings(zoneNames)
+	for _, zn := range zoneNames {
+		if z := cfg.Security.Zones[zn]; z != nil && z.AddressBook != nil && z.AddressBook.AttachedBookConflict {
+			return fmt.Errorf("security zone %q address-book: zone already has an address book (inline zone address-book or another attached book); a zone has at most one attached address book and cannot combine it with an inline address-book (#15672)", zn)
+		}
+	}
+	return nil
 }
 
 // resolveZoneLocalAddressBooks folds every zone-local address book (#3061)
@@ -391,70 +538,104 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 // still merge as before.
 func compileAddressBook(node *Node, sec *SecurityConfig) error {
 	globals := node.FindChildren("global")
-	if len(globals) == 0 {
-		return nil
-	}
-
-	if sec.AddressBook == nil {
-		sec.AddressBook = &AddressBook{
-			Addresses:   make(map[string]*Address),
-			AddressSets: make(map[string]*AddressSet),
-		}
-	}
 	for _, g := range globals {
+		if sec.AddressBook == nil {
+			sec.AddressBook = &AddressBook{
+				Addresses:   make(map[string]*Address),
+				AddressSets: make(map[string]*AddressSet),
+			}
+		}
 		parseAddressBookEntries(g, sec.AddressBook)
+	}
+	// #15672: named books `security address-book <name> { ... }`. The
+	// schema wildcard delivers each as a child whose Keys[0] is the book
+	// name (flat-set shape may pack the whole body onto Keys). Parse
+	// entries like the global book, plus `attach { zone <z>; }`.
+	for _, child := range node.Children {
+		if child == nil || child.Name() == "global" || child.Name() == "" {
+			continue
+		}
+		if isApplyStatementKeyword(child.Name()) {
+			continue
+		}
+		name := child.Name()
+		if sec.NamedAddressBooks == nil {
+			sec.NamedAddressBooks = make(map[string]*NamedAddressBook)
+		}
+		nb := sec.NamedAddressBooks[name]
+		if nb == nil {
+			nb = &NamedAddressBook{Name: name}
+			nb.Addresses = make(map[string]*Address)
+			nb.AddressSets = make(map[string]*AddressSet)
+			sec.NamedAddressBooks[name] = nb
+		}
+		parseAddressBookEntries(child, &nb.AddressBook)
+		for _, a := range attachZones15672(child) {
+			seen := false
+			for _, z := range nb.AttachedZones {
+				if z == a {
+					seen = true
+				}
+			}
+			if !seen {
+				nb.AttachedZones = append(nb.AttachedZones, a)
+			}
+		}
+		// Flat-set packed shape: `address-book <name> address ...` packs
+		// the statement onto the book node's own Keys.
+		if len(child.Keys) >= 3 && (child.Keys[1] == "address" || child.Keys[1] == "address-set") {
+			if nb.CollidingNames == nil {
+				nb.CollidingNames = make(map[string]struct{})
+			}
+			nb.CollidingNames[child.Keys[2]] = struct{}{}
+		}
 	}
 	return nil
 }
 
-// recordDroppedNamedAddressBookCollisions quarantines a token present in both
-// the compiled global book and an unsupported named-book stanza. Schema
-// validation rejects named books on strict commits, but tolerant loads keep
-// compiling and compileAddressBook intentionally reads only `global`; without
-// this marker a policy reference silently resolves to the unrelated global row.
-func recordDroppedNamedAddressBookCollisions(tree *ConfigTree, cfg *Config) {
-	if tree == nil || cfg == nil || cfg.Security.AddressBook == nil {
-		return
-	}
-	global := cfg.Security.AddressBook
-	markIfGlobalName := func(name string) {
-		if _, exists := global.Addresses[name]; !exists {
-			if _, exists := global.AddressSets[name]; !exists {
-				return
-			}
+// attachZones15672 extracts `attach { zone <z>; }` values from a named
+// book node across flat-set (Keys-packed / child leaves) and hierarchical
+// (attach container with zone children) shapes.
+func attachZones15672(book *Node) []string {
+	var zones []string
+	add := func(z string) {
+		if z != "" {
+			zones = append(zones, z)
 		}
-		if global.CollidingNames == nil {
-			global.CollidingNames = make(map[string]struct{})
-		}
-		global.CollidingNames[name] = struct{}{}
 	}
-	for _, root := range tree.Children {
-		if root == nil || root.Name() != "security" {
+	for _, child := range book.Children {
+		if child == nil {
 			continue
 		}
-		for _, addressBook := range root.FindChildren("address-book") {
-			for _, namedBook := range addressBook.Children {
-				if namedBook.Name() == "global" {
-					continue
+		if child.Name() == "attach" {
+			for _, z := range child.FindChildren("zone") {
+				for _, v := range z.Keys[1:] {
+					add(v)
 				}
-				for _, entry := range namedInstances(namedBook.FindChildren("address")) {
-					markIfGlobalName(entry.name)
+				for _, c := range z.Children {
+					add(c.Name())
 				}
-				for _, entry := range namedInstances(namedBook.FindChildren("address-set")) {
-					markIfGlobalName(entry.name)
+			}
+			// Packed: attach zone <z> on the attach node's Keys.
+			if len(child.Keys) >= 3 && child.Keys[1] == "zone" {
+				for _, v := range child.Keys[2:] {
+					add(v)
 				}
-				// #12215: in set form, an unsupported named book has no schema
-				// child, so SetPath packs the entry into one leaf like
-				// Keys=["red", "address", NAME, VALUE] (or address-set). The
-				// typed compiler drops that leaf; quarantine its defined NAME
-				// without treating the trailing value/member refs as names.
-				if len(namedBook.Keys) >= 3 &&
-					(namedBook.Keys[1] == "address" || namedBook.Keys[1] == "address-set") {
-					markIfGlobalName(namedBook.Keys[2])
+			}
+			for _, c := range child.Children {
+				if c.Name() != "zone" {
+					add(c.Name())
 				}
 			}
 		}
 	}
+	// Packed on the book node: ... attach zone <z>
+	for i, k := range book.Keys {
+		if k == "attach" && i+2 < len(book.Keys) && book.Keys[i+1] == "zone" {
+			add(book.Keys[i+2])
+		}
+	}
+	return zones
 }
 
 // addressSetMemberValues extracts every value carried by an address-set
@@ -561,6 +742,21 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 		}
 	}
 	for _, child := range node.Children {
+		// #15672: book-level `description` (global, zone-local, or named
+		// book). Checked before the entry switch so it never lands in
+		// UnknownBookEntries. Flat-set shape packs it as
+		// Keys=[description <text>]; hierarchical as a child node.
+		if child.Name() == "description" {
+			if v := nodeVal(child); v != "" {
+				ab.Description = v
+			}
+			continue
+		}
+		// #15672: `attach` is consumed by compileAddressBook for named
+		// books; on any other book it is not an entry.
+		if child.Name() == "attach" {
+			continue
+		}
 		switch child.Name() {
 		case "address":
 			// A single Junos `address <name>` may render as MULTIPLE sibling

@@ -1200,6 +1200,17 @@ func validateAddressBookEntryNamesStrict(cfg *Config) error {
 	if err := checkBook("address-book entry", cfg.Security.AddressBook); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := checkBook("security address-book "+bn+" entry", &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+		if bn == "global" {
+			return fmt.Errorf("security address-book %q uses a reserved name: %q is the global address book — rename the book (#15672)", bn, "global")
+		}
+		if strings.HasPrefix(bn, zoneLocalNamePrefix) {
+			return fmt.Errorf("security address-book name %q must not begin with the reserved %q prefix (#15672)", bn, zoneLocalNamePrefix)
+		}
+	}
 
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for z := range cfg.Security.Zones {

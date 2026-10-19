@@ -2020,6 +2020,11 @@ type compileOpts struct {
 	// config bootable (#1960) but UsableValue refuses the entry so every
 	// resolver fails closed. Same doctrine as lenientAddressBookNameCollision.
 	lenientAddressBookDuplicatePrefix bool
+	// lenientNamedAddressBookAttach15672 (#15672) downgrades the
+	// named-book attachment gate (validateNamedAddressBookAttachStrict)
+	// to a warning on tolerant load / peer-sync; conflicting entries are
+	// quarantined via CollidingNames so references fail closed.
+	lenientNamedAddressBookAttach15672 bool
 	// lenientZoneInterfaceMembership (#3072) downgrades the zone-interface
 	// membership gate (validateZoneInterfaceMembershipStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3712,6 +3717,7 @@ func lenientCompileOpts() compileOpts {
 		lenientHelperStateFile:                 true,
 		lenientAddressBookNameCollision:        true,
 		lenientAddressBookDuplicatePrefix:      true,
+		lenientNamedAddressBookAttach15672:     true,
 		lenientRIDualClaim11060:                true,
 		lenientRIMgmtMember11392:               true,
 		lenientZoneInterfaceMembership:         true,
