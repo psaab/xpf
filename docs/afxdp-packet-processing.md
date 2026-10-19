@@ -263,20 +263,28 @@ Packets that pass all checks get a `UserspaceDpMeta` header prepended via
 
 A live `USERSPACE_SESSION_ACTION_PASS_TO_KERNEL` row is terminal in the XDP shim:
 matching host-bound packets go to the kernel without reaching worker screen stage
-10. The shim now drops equal source/destination addresses on that PASS arm. This
-LAND check is intentionally unconditional, unlike the worker's profile-gated
-check; loopback traffic does not traverse the XDP hook.
-
-Since #13953 the same unconditional LAND drop also guards every other
-terminal kernel-pass arm in the shim: the healthy session-miss
-local-destination and ICMP-to-interface-NAT-local arms, the WireGuard
-steer fallthrough, the early-filter pass, and the degraded path
+10. The shim therefore decides the LAND (equal source/destination) disposition
+itself, once, after the tagged-only VID-0 drop and the adjudicated-interface
+gate, in both the healthy and the control-disabled entry paths — covering
+every terminal kernel-pass arm: the healthy session-miss local-destination
+and ICMP-to-interface-NAT-local arms, the WireGuard steer fallthrough, the
+early-filter pass, the established PASS_TO_KERNEL arm, and the degraded path
 (control-disabled, missing/not-ready binding, stale heartbeat), whose
-local/control predicate has no session dimension. The check runs once,
-after the tagged-only VID-0 drop and the adjudicated-interface gate, in
-both the healthy and the control-disabled entry paths, and increments the
-`land_drop` degraded-path counter (plus the shared transit/strict drop
-counters). Screens other than LAND apply to host-bound traffic only as
+local/control predicate has no session dimension. Loopback traffic does not
+traverse the XDP hook.
+
+Since #15789 that disposition follows the ingress zone's resolved
+`ScreenProfile.land` / `alarm-without-drop`, published per zone (StableZoneID)
+into `userspace_land_screen` by the Go control plane: LAND-enabled zones drop
+with the `land_drop` degraded-path counter (plus the shared transit/strict
+drop counters); LAND-enabled zones in audit mode count `land_alarm` and pass
+to the kernel; a zone with no row (no screen configured, LAND disabled, or a
+pre-#15789 control plane that never publishes the map) fails closed to the
+drop — the #13953 posture. Before #15789 the drop was unconditional, which
+made the worker's profile-gated `check_land` unreachable on these arms and
+bypassed audit-mode accounting.
+
+Screens other than LAND apply to host-bound traffic only as
 follows: flood screens are mirrored for XDP-passed traffic by the
 `xpf_hostinbound` input chain below; the remaining worker screens
 (stateless/TCP-flag/fragment, scan/sweep, limit-session) do not run on

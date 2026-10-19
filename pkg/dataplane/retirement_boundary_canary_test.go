@@ -164,6 +164,7 @@ var userspaceShimAllowedMapTypes = map[string]ebpf.MapType{
 	// admission; both are pinned shared maps consumed by the XDP shim.
 	"userspace_wg_ingress_zones":  ebpf.Hash,
 	"userspace_wg_zone_admission": ebpf.Hash,
+	"userspace_land_screen":       ebpf.Hash, // #15789 per-zone LAND disposition
 	"userspace_xsk_map":           ebpf.XSKMap,
 }
 

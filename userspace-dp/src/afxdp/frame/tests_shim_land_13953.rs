@@ -19,7 +19,10 @@
 #[path = "../../../../userspace-xdp/src/land.rs"]
 mod shim_land;
 
-use shim_land::is_land;
+use shim_land::{
+    LAND_SCREEN_ALARM, LAND_SCREEN_DROP, LAND_SCREEN_PASS, LandDisposition, is_land,
+    land_disposition,
+};
 
 fn v4(a: u8, b: u8, c: u8, d: u8) -> [u8; 16] {
     let mut buf = [0u8; 16];
@@ -68,4 +71,48 @@ fn distinct_addresses_are_not_land_13953() {
     // 16-byte field and are not LAND.
     let mapped = v6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1]);
     assert!(!is_land(&v4(192, 0, 2, 1), &mapped), "cross-family spellings must pass");
+}
+
+/// #15789 fail-on-revert: the published disposition byte decides the
+/// shim's LAND verdict for a resolved zone. Reverting
+/// `land_disposition` to always-Drop (the #13953 unconditional
+/// behaviour) makes the PASS and ALARM rows RED; dropping the
+/// unresolved-zone fail-closed arm makes the last rows RED.
+#[test]
+fn land_disposition_follows_published_screen_byte_15789() {
+    assert_eq!(
+        land_disposition(true, LAND_SCREEN_DROP),
+        LandDisposition::Drop,
+        "LAND enabled without audit mode must drop at the shim"
+    );
+    assert_eq!(
+        land_disposition(true, LAND_SCREEN_ALARM),
+        LandDisposition::AlarmPass,
+        "LAND enabled under alarm-without-drop must alarm and pass"
+    );
+    assert_eq!(
+        land_disposition(true, LAND_SCREEN_PASS),
+        LandDisposition::Pass,
+        "LAND disabled must pass unscreened at the shim"
+    );
+    // Unresolved zone: no WG ingress-zone row named a zone, so no
+    // published byte may admit the packet — fail closed to Drop
+    // (#13953 posture for unscreened zones and version skew).
+    assert_eq!(
+        land_disposition(false, LAND_SCREEN_PASS),
+        LandDisposition::Drop,
+        "unresolved zone must fail closed even with a PASS byte"
+    );
+    assert_eq!(
+        land_disposition(false, LAND_SCREEN_ALARM),
+        LandDisposition::Drop,
+        "unresolved zone must fail closed even with an ALARM byte"
+    );
+    // Unrecognised bytes fail closed too: a corrupt/future value must
+    // never turn the shim fail-open.
+    assert_eq!(
+        land_disposition(true, 0xff),
+        LandDisposition::Drop,
+        "unknown disposition byte must fail closed to drop"
+    );
 }

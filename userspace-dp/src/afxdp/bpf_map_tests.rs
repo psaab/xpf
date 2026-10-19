@@ -338,7 +338,7 @@ fn fragment_sentinel_never_publishes_a_live_row_14648() {
 
 #[test]
 fn degraded_path_reason_names_cover_retained_shim_actions() {
-    assert_eq!(DEGRADED_PATH_REASON_NAMES.len(), 20);
+    assert_eq!(DEGRADED_PATH_REASON_NAMES.len(), 21);
     assert_eq!(DEGRADED_PATH_REASON_NAMES[4], "heartbeat_missing");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[5], "heartbeat_stale");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[11], "interface_nat_no_session");
@@ -349,6 +349,7 @@ fn degraded_path_reason_names_cover_retained_shim_actions() {
     assert_eq!(DEGRADED_PATH_REASON_NAMES[17], "stag_drop");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[18], "tagged_only_local_drop");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[19], "land_drop");
+    assert_eq!(DEGRADED_PATH_REASON_NAMES[20], "land_alarm");
 }
 
 #[test]

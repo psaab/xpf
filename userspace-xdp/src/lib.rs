@@ -55,7 +55,8 @@ const USERSPACE_FALLBACK_REASON_QINQ_DROP: u32 = 16;
 const USERSPACE_FALLBACK_REASON_STAG_DROP: u32 = 17;
 const USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP: u32 = 18;
 const USERSPACE_FALLBACK_REASON_LAND_DROP: u32 = 19;
-const USERSPACE_FALLBACK_REASON_MAX: u32 = 20;
+const USERSPACE_FALLBACK_REASON_LAND_ALARM: u32 = 20;
+const USERSPACE_FALLBACK_REASON_MAX: u32 = 21;
 const USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED: u8 =
     degraded_ctrl_disabled::INGRESS_IFACE_FLAG_ADJUDICATED;
 const USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY: u8 = 2;
@@ -102,7 +103,7 @@ use ipv6_ext_walk::{
     read_bytes,
 };
 use ipv6_len_gate::{ipv6_declared_end, ipv6_udp_first_payload_byte_in_datagram};
-use land::is_land;
+use land::{LandDisposition, is_land, land_disposition};
 use tunnel_frag::{
     degraded_interface_nat_esp_passes_to_kernel, interface_nat_tunnel_passes_to_kernel,
 };
@@ -481,6 +482,14 @@ static USERSPACE_INGRESS_DOMAINS: HashMap<UserspaceIngressDomainKey, u32> =
 static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u16> =
     HashMap::with_max_entries(65_536, 0);
 
+// #15789: per-ingress-zone LAND screen disposition (see `land`). Keyed by
+// the StableZoneID zone id the WG ingress-zone map already resolves; the
+// value is a LAND_SCREEN_* byte. An absent row fails closed to DROP, so a
+// pre-#15789 control plane (which never publishes this map) keeps the
+// #13953 unconditional-drop behaviour until the new sync runs.
+#[map(name = "userspace_land_screen")]
+static USERSPACE_LAND_SCREEN: HashMap<u16, u8> = HashMap::with_max_entries(65536, 0);
+
 // Entries exist only for unique local-address owners and WG ports served by
 // that same zone. Zone 0 and missing keys both fail closed.
 #[map(name = "userspace_wg_zone_admission")]
@@ -722,16 +731,27 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
-    // #13953: every kernel-pass arm below this point is terminal — the worker's
-    // screen stage 10 never sees the packet, and no other screen runs. Drop
-    // equal source/destination packets here so the session-miss local,
-    // interface-NAT-ICMP, WireGuard-steer, early-filter, and degraded arms are
-    // all covered by one compare (the predicate lives in `land`, host-executed
-    // by the userspace-dp regression). Ordered after the tagged-only VID-0
-    // drop so that shape keeps its own counter, and after the #8279 authority
-    // gate so a non-adjudicated ifindex still takes cpumap_or_pass untouched.
+    // #13953/#15789: every kernel-pass arm below this point is terminal —
+    // the worker's screen stage 10 never sees the packet, and no other
+    // screen runs. The LAND disposition therefore lives here, but it now
+    // follows the ingress zone's resolved ScreenProfile.land /
+    // alarm-without-drop (published in userspace_land_screen) instead of
+    // dropping unconditionally: DROP drops with land_drop, ALARM counts
+    // land_alarm and falls through to the normal kernel-pass arms, and
+    // an absent zone row fails closed to DROP. Ordered after the
+    // tagged-only VID-0 drop so that shape keeps its own counter, and
+    // after the #8279 authority gate so a non-adjudicated ifindex still
+    // takes cpumap_or_pass untouched.
     if is_land(&parsed.src_addr, &parsed.dst_addr) {
-        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
+        match land_disposition_for_packet(&parsed, ingress_ifindex) {
+            LandDisposition::Pass => {}
+            LandDisposition::Drop => {
+                return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
+            }
+            LandDisposition::AlarmPass => {
+                incr_fallback_stat(USERSPACE_FALLBACK_REASON_LAND_ALARM);
+            }
+        }
     }
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
@@ -953,14 +973,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // LOCAL DELIVERY: this is for packets destined to the firewall
                 // itself (management SSH, control plane, etc.). NOT transit.
                 // Safe in strict mode — local delivery must always work.
-                // #11087: established PASS rows bypass worker stage 10, so
-                // enforce LAND here. This is intentionally unconditional and
-                // differs from the worker's profile-gated check_land: an
-                // equal-address host-bound packet is pathological, and
-                // loopback never traverses this XDP hook.
-                if is_land(&parsed.src_addr, &parsed.dst_addr) {
-                    return Ok(xdp_action::XDP_DROP);
-                }
+                // #15789: no LAND gate here — the profile-gated gate above
+                // (after the tagged-only VID-0 drop) already decided this
+                // packet's LAND disposition for every arm below it,
+                // including this one. A second check here was the dead
+                // code the unconditional shim drop left behind.
                 record_trace(
                     ctrl.flags,
                     ingress_ifindex,
@@ -1615,10 +1632,20 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
-    // #13953: the ctrl-disabled local/control pass is terminal like every
-    // healthy kernel-pass arm; a LAND packet must not ride it to local sockets.
+    // #13953/#15789: the ctrl-disabled local/control pass is terminal like
+    // every healthy kernel-pass arm, so the same profile-gated LAND
+    // disposition applies: DROP drops, ALARM counts and falls through to
+    // the local/control decision below, absent fails closed to DROP.
     if is_land(&parsed.src_addr, &parsed.dst_addr) {
-        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
+        match land_disposition_for_packet(&parsed, ingress_ifindex) {
+            LandDisposition::Pass => {}
+            LandDisposition::Drop => {
+                return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
+            }
+            LandDisposition::AlarmPass => {
+                incr_fallback_stat(USERSPACE_FALLBACK_REASON_LAND_ALARM);
+            }
+        }
     }
     let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain);
     match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
@@ -2316,6 +2343,35 @@ fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
         AF_INET6 => early_filter::ipv6_early_pass_to_kernel(pkt.dst_addr, false),
         _ => true,
     }
+}
+
+// #15789: resolve the ingress zone's published LAND disposition for this
+// packet. Reuses the WG ingress-zone resolver's (ifindex, wire VLAN) key
+// so the zone identity is the same StableZoneID the Go sync publishes.
+// A resolved zone reads its land_screen byte (absent = PASS, the Go sync
+// publishes explicit PASS rows for screened zones with LAND disabled);
+// an unresolved zone fails closed to Drop regardless of any byte.
+#[inline(never)]
+fn land_disposition_for_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> LandDisposition {
+    let ingress_key = UserspaceWgIngressZoneKey {
+        ifindex: ingress_ifindex,
+        vlan_id: if pkt.vlan_present {
+            pkt.vlan_id
+        } else {
+            u16::MAX
+        },
+        reserved: 0,
+    };
+    let zone_id = (unsafe { USERSPACE_WG_INGRESS_ZONES.get(&ingress_key) })
+        .copied()
+        .unwrap_or(0);
+    if zone_id == 0 {
+        return land_disposition(false, 0);
+    }
+    let screen_byte = (unsafe { USERSPACE_LAND_SCREEN.get(&zone_id) })
+        .copied()
+        .unwrap_or(0);
+    land_disposition(true, screen_byte)
 }
 
 fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {

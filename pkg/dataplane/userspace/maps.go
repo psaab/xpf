@@ -51,6 +51,7 @@ const (
 	mapNameUserspaceInterfaceNATv6  = "userspace_interface_nat_v6_domain"
 	mapNameUserspaceWgIngressZones  = "userspace_wg_ingress_zones"
 	mapNameUserspaceWgZoneAdmission = "userspace_wg_zone_admission"
+	mapNameUserspaceLandScreen      = "userspace_land_screen"
 	// userspace_ingress_ifaces is a bitset: bit 0 marks a live adjudicated
 	// ingress, bit 1 marks VID 0 as unowned on a tagged-only bind.
 	userspaceIngressIfaceFlagAdjudicated uint8 = 1

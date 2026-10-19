@@ -444,6 +444,12 @@ func injectUserspaceBootstrapMaps(t *testing.T, m *Manager) {
 		MaxEntries: 8192,
 	})
 	injectUserspaceWGZoneMaps(t, m)
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLandScreen, &ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    2,
+		ValueSize:  1,
+		MaxEntries: userspaceLandScreenMapCapacity,
+	})
 }
 
 func injectUserspaceWGZoneMaps(t *testing.T, m *Manager) {
