@@ -666,6 +666,15 @@ func (m *Manager) priorSet14589(prior []byte, havePrior bool) (map[string]bool, 
 func (m *Manager) prevHashFor14589(name string) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// #15261: seed the persisted fingerprints before reading them.
+	// Recovery (priorSet14589) runs before the first promoteConnNames
+	// on a restarted Manager, so without this the in-memory map is
+	// still empty and every prior hash comes back absent: promotion
+	// then tears down every unchanged prior tunnel against the empty
+	// hash and persists empty fingerprints, so a later rotation is
+	// adopted silently under the #10878 legacy-adoption rule. Seeding
+	// is once-only (stateSeeded); on a warm Manager this is a no-op.
+	m.seedFromStateLocked()
 	if m.prevConnHashes == nil {
 		return "", false
 	}

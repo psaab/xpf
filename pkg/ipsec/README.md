@@ -36,7 +36,14 @@ the apply path pays no fsync (the file is regenerated on every apply).
   under its old content, so the verification reload's before/after
   loaded-content fingerprints (`LoadedConn.Content`) are compared and a
   content change diverts to the same true rollback, keeping the prior
-  hash so a later loadable generation tears the stale SA down. Either
+  hash so a later loadable generation tears the stale SA down. The
+  prior set's hashes come from the Manager's remembered fingerprints;
+  after an xpfd restart those live only in the persisted conn-state
+  file, so `prevHashFor14589` seeds from it (`seedFromStateLocked`)
+  before reading (#15261) — recovery runs before the first promotion
+  that would otherwise seed, and promoting the prior set with empty
+  hashes would tear down every unchanged prior tunnel and persist
+  empty fingerprints, adopting a later rotation silently. Either
   way the recovered set is promoted (departed SAs
   torn down, `Loaded` not fired) and the partial error is still returned,
   so disk, `swanctl --list-conns`, and `prevConnNames` name the same set
