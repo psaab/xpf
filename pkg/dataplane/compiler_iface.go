@@ -1551,7 +1551,15 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					// parent carries the source: a tagged-only parent renders
 					// exactly as before.
 					VLANParentAddresses: parentAddrs,
-					KeepAddresses:       len(parentAddrs) > 0,
+					// #9721 KeepAddresses when the parent carries the RETH
+					// advert source; #15061: also when an untagged unit
+					// carries a standalone vrrp-group, whose instance binds
+					// to this parent device and installs its VIPs here.
+					// Tagged-only parents render exactly as before.
+					KeepAddresses: len(parentAddrs) > 0 || interfaceCarriesStandaloneVRRP(effectiveCfg),
+					// #15061: an untagged standalone VIP is foreign (never
+					// rendered); a tagged-only parent keeps neither flag.
+					KeepForeignStatic: interfaceCarriesStandaloneVRRP(effectiveCfg),
 				})
 			}
 			// VLAN sub-interfaces get their own .network file
@@ -1594,8 +1602,10 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 							Disable:          unitDisabled,
 							MTU:              unit.MTU,
 							Description:      unit.Description,
-							KeepAddresses:    isVRRPReth && !unitDisabled,
-							VRFName:          mgmtVRFName,
+							KeepAddresses:    (isVRRPReth || unitCarriesStandaloneVRRP(unit)) && !unitDisabled,
+							// #15061: the standalone VIP is foreign to networkd.
+							KeepForeignStatic: unitCarriesStandaloneVRRP(unit) && !unitDisabled,
+							VRFName:           mgmtVRFName,
 						})
 					}
 				}
@@ -1698,7 +1708,11 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					MTU:              mtu,
 					VRFName:          mgmtVRFName,
 					Description:      ifCfg.Description,
-					KeepAddresses:    isVRRPReth && !allUnitsDisabled,
+					// #15061: compose with the RETH keep — a standalone
+					// vrrp-group's VIPs are foreign to networkd on any row.
+					KeepAddresses: (isVRRPReth || interfaceCarriesStandaloneVRRP(effectiveCfg)) && !allUnitsDisabled,
+					// #15061: standalone VIPs are foreign to networkd.
+					KeepForeignStatic: interfaceCarriesStandaloneVRRP(effectiveCfg) && !allUnitsDisabled,
 				})
 			}
 		}
