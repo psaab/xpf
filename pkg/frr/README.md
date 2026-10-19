@@ -1662,25 +1662,40 @@ step. Both are required — neither sees the other's case:
   permit entry contained in the route, so any one member matched the
   whole list and `from community X` was widened from ALL to ANY.
   `renderCommunityListDefinitions` therefore renders the public name
-  as ONE permit entry: all literals space-joined on a `standard`
-  line (bgpd's `community_match` requires every value of the parsed
-  set to be present — exact AND), or, when any member is a regex, one
-  `expanded` entry whose pattern is a conjunction of positive
-  lookaheads over the joined sorted community string, with literal
-  members first anchored to a whole token (`(^| )m( |$)`) so
-  `65000:100` cannot match inside `65000:1000` or across a token
-  boundary. Single-member and empty definitions render byte-identically
-  to before; duplicate members collapse. `then community delete X`
-  cannot use the AND entry (FRR's `community_list_match_delete` strips
-  a value only when one entry matches that single value), so delete
-  targets a generated per-member backing
-  (`<frrName>-xpf-del-<digest>`, `communityDeleteListName`) whose
-  per-member lines strip each value; `communityListCollision`
-  (wired into `ApplyFull`) fails the apply closed when two operator
-  names normalize to one FRR name or an operator name forges a
-  backing. Caveat: regex members using backreferences or an embedded
-  `(?=` interact with the lookahead wrapping; author-written `^`/`$`
-  keep whole-string meaning, which can be stricter than Junos's
+  as conjunctive permit entries: all literals space-joined on ONE
+  `standard` line (bgpd's `community_match` requires every value of
+  the parsed set to be present — exact AND), or, when any member is
+  a regex, `expanded` entries forming the conjunction. #15779: the
+  original #15008 expanded form used Perl-style `(?=.*factor)`
+  lookaheads, which POSIX ERE (FRR `regcomp(REG_EXTENDED)`) rejects
+  with `CMD_WARNING_CONFIG_FAILED`, aborting the whole frr-reload.
+  POSIX ERE cannot express an unordered conjunction in one
+  consuming pattern, so the expanded conjunction is now the
+  disjunction of its ordered sequences: one permit entry per
+  permutation of the member factors (joined with `.*`) over the
+  joined sorted community string, with literal members first
+  anchored to a whole token (`(^| )m( |$)`) so `65000:100` cannot
+  match inside `65000:1000` or across a token boundary. A list
+  matches when ANY entry matches, and each entry requires every
+  factor in its order, so the set matches exactly the routes
+  satisfying every member. The entry count is factorial, so
+  expanded conjunctions are bounded at
+  `maxExpandedCommunityConjunctionMembers` (4 members, 24 entries);
+  a definition past the bound renders nothing and is reported
+  missing at render, so referencing terms fail closed (#10822
+  posture). Single-member and empty definitions render
+  byte-identically to before; duplicate members collapse. `then
+  community delete X` cannot use the AND entries (FRR's
+  `community_list_match_delete` strips a value only when one entry
+  matches that single value), so delete targets a generated
+  per-member backing (`<frrName>-xpf-del-<digest>`,
+  `communityDeleteListName`) whose per-member lines strip each
+  value; `communityListCollision` (wired into `ApplyFull`) fails
+  the apply closed when two operator names normalize to one FRR
+  name or an operator name forges a backing. Caveat: regex members
+  using backreferences interact with sequencing; author-written
+  `^`/`$` keep whole-string meaning when the member lands
+  first/last in a permutation, which can be stricter than Junos's
   per-value match for anchored multi-member regexes.
 - **Policy community references are validated at commit (#2881).** A
   policy-statement term's `from community <name>` renders `match community

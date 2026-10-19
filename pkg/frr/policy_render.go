@@ -58,32 +58,45 @@ const communityRegexChars = config.CommunityRegexChars
 // contained in the route, so any ONE member matched the whole list —
 // `from community X` was widened from ALL to ANY.
 //
-// The public name therefore renders as ONE permit entry whose value
+// The public name therefore renders as permit entries whose value
 // is the conjunction:
 //   - all-literal (standard): all members space-joined on one line.
 //     bgpd parses the value with community_str2com into a SET and
 //     community_match requires every value of that set to be present
 //     in the route — exact AND over the literals.
-//   - any-regex (expanded): one entry whose pattern is a conjunction
-//     of positive lookaheads over the joined, sorted community string
+//   - any-regex (expanded): #15779 — POSIX ERE (FRR regcomp
+//     REG_EXTENDED) has no lookahead, so the pre-#15779
+//     `(?=.*factor)` conjunction was rejected with
+//     CMD_WARNING_CONFIG_FAILED and aborted the whole frr-reload.
+//     POSIX ERE also cannot express an unordered conjunction in one
+//     consuming pattern. The conjunction is therefore rendered as
+//     the disjunction of its ORDERED sequences: one expanded permit
+//     entry per permutation of the member factors, factors joined
+//     with ".*". FRR matches a list when ANY permit entry matches,
+//     and a sequence entry matches only when every factor matches,
+//     in that order, against the joined, sorted community string
 //     FRR matches expanded entries against (community_str joins the
-//     numerically sorted values with single spaces). Each member
-//     becomes its own factor: a literal member, whose textual form
-//     could appear as a substring of a longer value (65000:100 inside
-//     65000:1000) or split across a token boundary (1:2 inside the
-//     two tokens "65000:1 2:3"), is first anchored to a whole token —
-//     `(^| )member( |$)` — then wrapped as `(?=.*factor)`. A regex
-//     member is wrapped directly; its author-written anchors keep
-//     their meaning against the whole attribute string. Factors are
-//     joined with ".*" separators and the pattern ends with ".*": a
-//     pure sequence of lookaheads is not a consuming pattern, and
-//     FRR's unanchored regexec would otherwise have no match span to
-//     succeed on. This preserves the documented unanchored-regex
+//     numerically sorted values with single spaces) — so the
+//     permutation set matches exactly the routes satisfying every
+//     member, in whatever position. A literal member, whose textual
+//     form could appear as a substring of a longer value (65000:100
+//     inside 65000:1000) or split across a token boundary (1:2
+//     inside the two tokens "65000:1 2:3"), is first anchored to a
+//     whole token — `(^| )member( |$)` — before sequencing. A regex
+//     member is sequenced directly; its author-written anchors keep
+//     their meaning when the member lands first/last in a
+//     permutation. This preserves the documented unanchored-regex
 //     semantics of single regex members (#2643) while requiring
-//     every member to be satisfied. Operational caveat: members that
-//     use backreferences, or an embedded "(?=" of their own, can
-//     interact with the wrapping; such members are vanishingly rare
-//     and the strict ValidCommunityMember gate still applies.
+//     every member to be satisfied. Operational caveat: members
+//     that use backreferences interact with sequencing as they did
+//     with the lookahead wrapping; such members are vanishingly
+//     rare and the strict ValidCommunityMember gate still applies.
+//     The permutation count is factorial, so expanded conjunctions
+//     are bounded (maxExpandedCommunityConjunctionMembers); a
+//     definition past the bound renders nothing and is reported
+//     missing at render, so referencing terms fail closed (#10822
+//     posture) instead of emitting an unbounded pattern set or a
+//     silently ANY-widened list.
 //
 // `then community delete <name>` CANNOT reuse that AND entry: FRR's
 // community_list_match_delete strips a route value only when ONE
@@ -148,13 +161,44 @@ func communityDeleteListName(name string) string {
 	return base + communityDeleteNamespace + string(hashHex[:])
 }
 
-// communityExpandedConjunction builds the single expanded permit
-// pattern requiring EVERY member (see the #15008 note above).
-// Duplicate members collapse to one factor. A single regex member
-// returns itself unchanged, preserving the pre-#15008 expanded render.
-func communityExpandedConjunction(members []string) string {
+// maxExpandedCommunityConjunctionMembers bounds the #15779 expanded
+// conjunction: the permutation disjunction has one permit entry per
+// ordering of the distinct members, so the entry count is factorial
+// in the member count (4 members = 24 entries; 5 = 120). Expanded
+// (regex-bearing) multi-member definitions are an uncommon spelling,
+// and four members cover them with a bounded, still-readable render.
+// A definition past the bound is unrenderable: it emits nothing and
+// communityListMissingAtRender reports it missing, so referencing
+// terms fail closed (#10822) instead of an unbounded render, a
+// POSIX-invalid lookahead, or a silently ANY-widened list.
+const maxExpandedCommunityConjunctionMembers = 4
+
+// expandedCommunityConjunctionRenderable reports whether an expanded
+// (any-regex) definition can render as a #15779 permutation
+// conjunction: the deduplicated member count is within the
+// permutation bound. Standard (all-literal) definitions are always
+// renderable on this axis — the joined standard line is a linear
+// render with no factorial growth. The ValidCommunityMember axis
+// stays in communityListRenderable; both predicates are shared by
+// the definition loop, communityListMissingAtRender, and
+// communityDeleteTarget so they cannot drift.
+func expandedCommunityConjunctionRenderable(members []string) bool {
+	if communityListKind(members) != "expanded" {
+		return true
+	}
+	return len(dedupStrings(members)) <= maxExpandedCommunityConjunctionMembers
+}
+
+// communityExpandedConjunctionPatterns builds the expanded permit
+// patterns requiring EVERY member (see the #15008/#15779 note
+// above): one ordered sequence per permutation of the distinct
+// member factors, factors joined with ".*". Duplicate members
+// collapse to one factor. A single member returns itself unchanged,
+// preserving the pre-#15008 expanded render. Callers gate the
+// member count with expandedCommunityConjunctionRenderable.
+func communityExpandedConjunctionPatterns(members []string) []string {
 	if len(members) == 1 {
-		return sanitizeFRRValue(members[0])
+		return []string{sanitizeFRRValue(members[0])}
 	}
 	seen := make(map[string]bool, len(members))
 	factors := make([]string, 0, len(members))
@@ -168,9 +212,28 @@ func communityExpandedConjunction(members []string) string {
 		if !communityMemberIsRegex(member) {
 			factor = `(^| )` + factor + `( |$)`
 		}
-		factors = append(factors, `(?=.*`+factor+`)`)
+		factors = append(factors, factor)
 	}
-	return strings.Join(factors, ".*") + ".*"
+	patterns := make([]string, 0, 24)
+	var permute func(prefix string, rest []string)
+	permute = func(prefix string, rest []string) {
+		if len(rest) == 0 {
+			patterns = append(patterns, prefix)
+			return
+		}
+		for i, factor := range rest {
+			next := make([]string, 0, len(rest)-1)
+			next = append(next, rest[:i]...)
+			next = append(next, rest[i+1:]...)
+			joined := factor
+			if prefix != "" {
+				joined = prefix + ".*" + factor
+			}
+			permute(joined, next)
+		}
+	}
+	permute("", factors)
+	return patterns
 }
 
 // communityListCollision fails the apply CLOSED when rendered
@@ -207,7 +270,7 @@ func communityListCollision(po *config.PolicyOptionsConfig) error {
 			continue
 		}
 		uniq := dedupStrings(cd.Members)
-		if len(uniq) < 2 || !communityListRenderable(cd.Members) {
+		if len(uniq) < 2 || !communityListRenderable(cd.Members) || !expandedCommunityConjunctionRenderable(cd.Members) {
 			continue
 		}
 		backing := communityDeleteListName(name)
@@ -242,12 +305,20 @@ func dedupStrings(in []string) []string {
 }
 
 // renderCommunityListDefinitions emits the match-facing conjunctive
-// entry for one community definition plus, for a multi-member
-// definition, its per-member delete backing. Unrenderable definitions
-// emit nothing (#8449). Empty/duplicate-collapsed single entries keep
-// the historical single-line render.
+// entries for one community definition plus, for a multi-member
+// definition, its per-member delete backing. Unrenderable
+// definitions emit nothing (#8449; #15779 adds the expanded
+// permutation bound — such a definition also emits no delete
+// backing, and communityListMissingAtRender reports it missing so
+// referencing terms fail closed). Empty/duplicate-collapsed single
+// entries keep the historical single-line render.
 func renderCommunityListDefinitions(b *strings.Builder, name string, cd *config.CommunityDef) {
 	if cd == nil || !communityListRenderable(cd.Members) {
+		return
+	}
+	if !expandedCommunityConjunctionRenderable(cd.Members) {
+		slog.Warn("frr: omitting expanded community-list past the conjunction bound; referencing terms fail closed",
+			"community", name, "members", len(dedupStrings(cd.Members)), "max", maxExpandedCommunityConjunctionMembers)
 		return
 	}
 	members := dedupStrings(cd.Members)
@@ -257,7 +328,9 @@ func renderCommunityListDefinitions(b *strings.Builder, name string, cd *config.
 	kind := communityListKind(cd.Members)
 	fn := frrName(name)
 	if kind == "expanded" {
-		fmt.Fprintf(b, "bgp community-list expanded %s permit %s\n", fn, communityExpandedConjunction(members))
+		for _, pattern := range communityExpandedConjunctionPatterns(members) {
+			fmt.Fprintf(b, "bgp community-list expanded %s permit %s\n", fn, pattern)
+		}
 	} else {
 		vals := make([]string, len(members))
 		for i, member := range members {
@@ -677,15 +750,17 @@ func asPathListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool
 
 // communityListMissingAtRender reports whether `match community <name>` would
 // dangle: no such definition, or one the community-list loop omits because it
-// has no (deduplicated) members or contains a member that fails
-// ValidCommunityMember. Same predicates as renderCommunityListDefinitions
-// (communityListRenderable + dedup), so the two cannot drift.
+// has no (deduplicated) members, contains a member that fails
+// ValidCommunityMember, or is an expanded definition past the #15779
+// permutation bound. Same predicates as renderCommunityListDefinitions
+// (communityListRenderable + expandedCommunityConjunctionRenderable +
+// dedup), so the two cannot drift.
 func communityListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool {
 	cd := po.Communities[name]
 	if cd == nil || len(dedupStrings(cd.Members)) == 0 {
 		return true
 	}
-	return !communityListRenderable(cd.Members)
+	return !communityListRenderable(cd.Members) || !expandedCommunityConjunctionRenderable(cd.Members)
 }
 
 // communityDeleteTarget resolves a `then community delete <name>`
@@ -696,7 +771,7 @@ func communityListMissingAtRender(po *config.PolicyOptionsConfig, name string) b
 // dangling as before, out of #15008 scope).
 func communityDeleteTarget(po *config.PolicyOptionsConfig, name string) string {
 	if po != nil {
-		if cd := po.Communities[name]; cd != nil && len(dedupStrings(cd.Members)) >= 2 && communityListRenderable(cd.Members) {
+		if cd := po.Communities[name]; cd != nil && len(dedupStrings(cd.Members)) >= 2 && communityListRenderable(cd.Members) && expandedCommunityConjunctionRenderable(cd.Members) {
 			return communityDeleteListName(name)
 		}
 	}

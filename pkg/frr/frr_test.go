@@ -3752,7 +3752,11 @@ func TestGeneratePolicyOptionsCommunityExpandedVsStandard(t *testing.T) {
 		// under the name — the literal member must NOT regress to a
 		// standard line, since the same list name cannot be both kinds
 		// in FRR. Both members survive inside the conjunction.
-		"bgp community-list expanded MIXED permit (?=.*(^| )65000:100( |$)).*(?=.*65001:.*).*",
+		// #15779: POSIX ERE has no lookahead, so the conjunction is the
+		// two ordered-sequence permutations, not one `(?=...)` pattern
+		// (which FRR regcomp rejected, aborting frr-reload).
+		"bgp community-list expanded MIXED permit (^| )65000:100( |$).*65001:.*",
+		"bgp community-list expanded MIXED permit 65001:.*.*(^| )65000:100( |$)",
 		// Brace-bound member must render expanded, not standard.
 		"bgp community-list expanded BOUND permit 65000:1{2,3}",
 	}
