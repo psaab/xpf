@@ -426,6 +426,7 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 		// in (resolved ports, parsed timeouts/icmp, normalized protocol) so an
 		// alias restate (icmp / junos-icmp-all) is not a false conflict.
 		var dupDirectLeaves []string
+		var directICMPTypeRaw []string
 		var (
 			incompleteDirectLeaves                       []string
 			protoSet, dstSet, srcSet, algSet, timeoutSet bool
@@ -505,28 +506,25 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 				}
 			case "icmp-type":
 				// #3348: explicit ICMP/ICMPv6 message-type constraint for a
-				// custom application. The schema range-validates 0..255 on the
-				// strict commit path (schema_security.go ValidateInteger). The
-				// tolerant load / peer-sync path does NOT run SchemaValidate, so
-				// record a malformed value (mirroring UnknownTimeouts) rather than
-				// silently dropping it — a dropped value would leave an ICMP app
+				// custom application. The schema validates numeric-or-symbolic
+				// on the strict commit path (schema_security.go
+				// ValidateICMPTypeValue). The tolerant load / peer-sync path
+				// does NOT run SchemaValidate, so record a malformed value
+				// (mirroring UnknownTimeouts) rather than silently dropping
+				// it — a dropped value would leave an ICMP app
 				// UNCONSTRAINED (matches all types), a fail-open widening.
+				// #15198: Junos symbolic names are resolved AFTER the loop
+				// by resolveDirectICMPAfterProtocol, because `protocol` may
+				// follow this leaf and selects the family table. Stash the
+				// raw token here; the deferred pass is authoritative.
 				hasDirectBody = true
 				if v := nodeVal(prop); v != "" {
-					if t, ok := parseICMPTypeCode(v); ok {
-						if itypeSet && *t != itypeVal {
-							dupDirectLeaves = append(dupDirectLeaves, "icmp-type")
-						}
-						itypeSet, itypeVal = true, *t
-						app.ICMPType = t
-					} else {
-						app.UnknownICMP = append(app.UnknownICMP, v)
-					}
+					directICMPTypeRaw = append(directICMPTypeRaw, v)
 				}
 			case "icmp-code":
 				hasDirectBody = true
 				if v := nodeVal(prop); v != "" {
-					if c, ok := parseICMPTypeCode(v); ok {
+					if c, ok := parseApplicationICMPCode(v); ok {
 						if icodeSet && *c != icodeVal {
 							dupDirectLeaves = append(dupDirectLeaves, "icmp-code")
 						}
@@ -590,6 +588,23 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 		// (all ICMP, #11340); junos-icmp-ping is the predefined echo-only object.
 		// Apply the default AFTER the child loop so an explicit `icmp-type` leaf
 		// still wins.
+		// #15198: resolve stashed direct icmp-type tokens now that the
+		// final protocol is known (the leaf may precede `protocol`).
+		// Duplicate tracking mirrors the other direct scalars: a repeat
+		// resolving to a different value is a conflict, an alias restate
+		// (echo-request then 8 on icmp) is idempotent.
+		for _, v := range directICMPTypeRaw {
+			if t, ok := parseApplicationICMPType(v, app.Protocol); ok {
+				if itypeSet && *t != itypeVal {
+					dupDirectLeaves = append(dupDirectLeaves, "icmp-type")
+				}
+				itypeSet, itypeVal = true, *t
+				app.ICMPType = t
+			} else {
+				app.UnknownICMP = append(app.UnknownICMP, v)
+			}
+		}
+
 		if app.ICMPType == nil {
 			if t := aliasEchoICMPType(app.Protocol); t != nil {
 				app.ICMPType = t
@@ -763,6 +778,7 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 	var timeout int
 	var badTimeouts []string
 	var icmpType, icmpCode *uint8
+	var icmpTypeRaw []string
 	var badICMP []string
 	// #3366: a scalar (single-valued) leaf repeated inside one term with a
 	// DIFFERENT value — via apply-groups, flat-set ordering, or hand authoring —
@@ -858,28 +874,14 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 		case "icmp-type":
 			if i+1 < len(keys) {
 				i++
-				if t, ok := parseICMPTypeCode(keys[i]); ok {
-					// #6766: value-aware duplicate tracking, mirroring the
-					// ports above — a conflicting repeat is recorded for the
-					// strict structure gate; an idempotent same-value repeat
-					// is accepted.
-					if icmpTypeSet && *t != icmpTypeVal {
-						dupTermLeaves = append(dupTermLeaves, "icmp-type")
-					}
-					icmpTypeSet, icmpTypeVal = true, *t
-					icmpType = t
-				} else {
-					// #3348: a malformed inline-term icmp-type. The schema does
-					// NOT validate inside an opaque `term`, so silently dropping
-					// it would leave the term UNCONSTRAINED (matches all ICMP) —
-					// a fail-open widening. Record it for the strict gate.
-					badICMP = append(badICMP, keys[i])
-				}
+				// #15198: stash raw; resolved per-protocol after the loop
+				// (protocol may follow, and a term may carry several).
+				icmpTypeRaw = append(icmpTypeRaw, keys[i])
 			}
 		case "icmp-code":
 			if i+1 < len(keys) {
 				i++
-				if c, ok := parseICMPTypeCode(keys[i]); ok {
+				if c, ok := parseApplicationICMPCode(keys[i]); ok {
 					if icmpCodeSet && *c != icmpCodeVal {
 						dupTermLeaves = append(dupTermLeaves, "icmp-code")
 					}
@@ -960,6 +962,25 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 		}
 	}
 
+	// #15198: a single-protocol term resolves its stashed icmp-type
+	// tokens once here (shared duplicate tracking). A multi-protocol
+	// term resolves per generated application below, because the same
+	// name (echo-request) is 8 on icmp and 128 on icmpv6.
+	singleProto := len(unique) == 1
+	if singleProto {
+		for _, raw := range icmpTypeRaw {
+			if t, ok := parseApplicationICMPType(raw, unique[0]); ok {
+				if icmpTypeSet && *t != icmpTypeVal {
+					dupTermLeaves = append(dupTermLeaves, "icmp-type")
+				}
+				icmpTypeSet, icmpTypeVal = true, *t
+				icmpType = t
+			} else {
+				badICMP = append(badICMP, raw)
+			}
+		}
+	}
+
 	var result []*Application
 	for _, proto := range unique {
 		name := parentName + "-" + termName
@@ -970,12 +991,32 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 			}
 			name = parentName + "-" + termName + "-" + suffix
 		}
+		it := icmpType
+		bad := badICMP
+		dups := dupTermLeaves
+		if !singleProto {
+			it = nil
+			bad = append([]string(nil), badICMP...)
+			dups = append([]string(nil), dupTermLeaves...)
+			set := false
+			var val uint8
+			for _, raw := range icmpTypeRaw {
+				if t, ok := parseApplicationICMPType(raw, proto); ok {
+					if set && *t != val {
+						dups = append(dups, "icmp-type")
+					}
+					set, val = true, *t
+					it = t
+				} else {
+					bad = append(bad, raw)
+				}
+			}
+		}
 		// An explicit inline-term `icmp-type` wins; otherwise fall back to the
 		// echo type implied by the XPF custom-app junos-ping/junos-pingv6 alias
 		// (#3348) — UNLESS the same term also lists an unconstrained ICMP alias
 		// that dedups onto this protocol, in which case the union is all-ICMP and
 		// the echo narrowing must be suppressed.
-		it := icmpType
 		if it == nil && !unconstrainedICMP[proto] {
 			it = echoByProto[proto]
 		}
@@ -989,10 +1030,10 @@ func parseApplicationTerms(parentName string, keys []string) []*Application {
 			UnknownTimeouts:      badTimeouts,
 			ICMPType:             it,
 			ICMPCode:             icmpCode,
-			UnknownICMP:          badICMP,
+			UnknownICMP:          bad,
 			UnknownTermLeaves:    badTermLeaves,
 			IncompleteTermLeaves: incompleteTermLeaves,
-			DuplicateTermLeaves:  dupTermLeaves,
+			DuplicateTermLeaves:  dups,
 		})
 	}
 	return result
@@ -1059,16 +1100,25 @@ func aliasEchoICMPType(proto string) *uint8 {
 	}
 }
 
-// parseICMPTypeCode parses an application `icmp-type` / `icmp-code` token. It
-// returns the value and true when the token is a base-10 integer in [0,255]
-// (the ICMP/ICMPv6 type and code wire range); otherwise (nil, false). The
-// strict commit path validates the range earlier via the schema
-// (schema_security.go ValidateInteger(0,255)), so this is the compile-time
-// projection of an already-accepted token; an unparsable value is dropped
-// rather than widening the term.
-func parseICMPTypeCode(raw string) (*uint8, bool) {
-	n, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || n < 0 || n > 255 {
+// parseApplicationICMPType resolves an application `icmp-type` token
+// (#15198): numeric 0..255 or a Junos symbolic name chosen by protocol
+// via resolveApplicationICMPType (shared icmpTypeNames/icmp6TypeNames).
+// Returns (nil, false) for anything unrecognized so the caller records
+// it on UnknownICMP and the strict gate fails closed.
+func parseApplicationICMPType(raw, protocol string) (*uint8, bool) {
+	n, ok := resolveApplicationICMPType(raw, protocol)
+	if !ok {
+		return nil, false
+	}
+	v := uint8(n)
+	return &v, true
+}
+
+// parseApplicationICMPCode resolves an application `icmp-code` token
+// (#15198): numeric 0..255 only (see resolveApplicationICMPCode).
+func parseApplicationICMPCode(raw string) (*uint8, bool) {
+	n, ok := resolveApplicationICMPCode(raw)
+	if !ok {
 		return nil, false
 	}
 	v := uint8(n)

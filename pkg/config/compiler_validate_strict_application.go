@@ -307,24 +307,27 @@ func validateApplicationSpecsStrict(cfg *Config) error {
 					"configured one)",
 				name, app.UnknownTimeouts[0], appTimeoutMin, appTimeoutMax)
 		}
-		// #3348: a malformed icmp-type / icmp-code (non-integer or outside
-		// 0..255). The schema range-validates the TOP-LEVEL application leaves at
-		// commit-check, but an inline `term` is opaque to the schema walk
-		// (children:nil), so a bad inline icmp-type would otherwise be silently
-		// dropped by parseICMPTypeCode — leaving the term UNCONSTRAINED (matching
-		// EVERY ICMP type), a fail-open widening that is the exact inverse of this
-		// issue's fix. compileApplications records the raw token in app.UnknownICMP
-		// (mirroring UnknownTimeouts); reject the first one here so the silent
-		// widening becomes an operator-visible commit error. Strict on the
-		// commit / commit-check path; the call site (compiler.go,
-		// lenientApplicationSpecs) downgrades it to a warning on the tolerant
-		// load / peer-sync path (#1960 no-brick).
+		// #3348/#15198: an icmp-type/icmp-code that resolves neither as a
+		// number 0..255 nor (for icmp-type) as a Junos symbolic name for
+		// the application's protocol. The schema validates the TOP-LEVEL
+		// application leaves at commit-check, but an inline `term` is
+		// opaque to the schema walk (children:nil), so a bad inline value
+		// would otherwise be silently dropped — leaving the term
+		// UNCONSTRAINED (matching EVERY ICMP type), a fail-open widening.
+		// compileApplications records the raw token in app.UnknownICMP
+		// (mirroring UnknownTimeouts); reject the first one here so the
+		// silent widening becomes an operator-visible commit error. Strict
+		// on the commit / commit-check path; the call site (compiler.go,
+		// lenientApplicationSpecs) downgrades it to a warning on the
+		// tolerant load / peer-sync path (#1960 no-brick).
 		if len(app.UnknownICMP) > 0 {
 			return fmt.Errorf(
-				"application %q: invalid icmp-type/icmp-code %q; must be an integer "+
-					"in 0..255 (a non-numeric or out-of-range value is silently dropped "+
-					"and leaves the application matching EVERY ICMP type instead of the "+
-					"intended one)",
+				"application %q: invalid icmp-type/icmp-code %q; icmp-type must be "+
+					"an integer in 0..255 or a Junos icmp-type name for the "+
+					"application's protocol (e.g. echo-request), and icmp-code "+
+					"must be an integer in 0..255 (an unresolvable value is "+
+					"silently dropped and leaves the application matching EVERY "+
+					"ICMP type instead of the intended one)",
 				name, app.UnknownICMP[0])
 		}
 		// #3348: an icmp-type/icmp-code constraint is only meaningful on an

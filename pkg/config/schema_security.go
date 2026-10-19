@@ -1747,8 +1747,11 @@ var schemaApplications = &schemaNode{desc: "Applications", children: map[string]
 		// but the grammar previously did not. Range-validated at the strict
 		// commit gate; validateApplicationSpecsStrict additionally rejects the
 		// constraint on a non-ICMP protocol (and a code without a type).
-		"icmp-type": {desc: "ICMP/ICMPv6 message type", args: 1, valueType: ValueInteger, valueDesc: "ICMP type (e.g. 8 = echo-request, 128 = ICMPv6 echo-request)", valueExamples: []string{"8", "128"}, validator: ValidateInteger(0, 255), placeholder: "<type>", children: nil},
-		"icmp-code": {desc: "ICMP/ICMPv6 message code", args: 1, valueType: ValueInteger, valueDesc: "ICMP code", valueExamples: []string{"0"}, validator: ValidateInteger(0, 255), placeholder: "<code>", children: nil},
+		// #15198: icmp-type also accepts a Junos symbolic name (echo-request,
+		// ...), resolved by protocol in the compiler via the shared
+		// icmpTypeNames/icmp6TypeNames tables; icmp-code stays numeric-only.
+		"icmp-type": {desc: "ICMP/ICMPv6 message type", args: 1, valueType: ValueInteger, valueDesc: "ICMP type (numeric 0..255 or Junos name, e.g. echo-request = 8, ICMPv6 echo-request = 128)", valueExamples: []string{"8", "128", "echo-request"}, validator: ValidateICMPTypeValue, placeholder: "<type>", children: nil},
+		"icmp-code": {desc: "ICMP/ICMPv6 message code", args: 1, valueType: ValueInteger, valueDesc: "ICMP code", valueExamples: []string{"0"}, validator: ValidateICMPCodeValue, placeholder: "<code>", children: nil},
 		"term":      {desc: "Term", args: 1, placeholder: "<term>", children: nil},
 	}},
 	// #8825: the members were undeclared, so the brace-elision pass was never

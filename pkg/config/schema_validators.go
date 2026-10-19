@@ -226,6 +226,39 @@ func ValidateInteger(min, max int64) LeafValidator {
 	}
 }
 
+// ValidateICMPTypeValue accepts an application `icmp-type` value (#15198):
+// a numeric 0..255 or a Junos symbolic name from EITHER family table.
+// SchemaValidate has no protocol context, so family selection happens in
+// the compiler (resolveApplicationICMPType); a name valid only for the
+// other family passes here and is then recorded on UnknownICMP when the
+// compiler cannot resolve it for the application's protocol, so the
+// strict spec gate still fails closed.
+func ValidateICMPTypeValue(raw string, _ *Config) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("missing value (expected integer 0..255 or a Junos icmp-type name such as echo-request)")
+	}
+	if _, ok := resolveICMPTypeToken(raw, "inet"); ok {
+		return nil
+	}
+	if _, ok := resolveICMPTypeToken(raw, "inet6"); ok {
+		return nil
+	}
+	return fmt.Errorf("not an ICMP type: %q (expected an integer 0..255 or a Junos icmp-type name such as echo-request/echo-reply/destination-unreachable/time-exceeded)", raw)
+}
+
+// ValidateICMPCodeValue accepts an application `icmp-code` value (#15198):
+// numeric 0..255 only, mirroring resolveICMPCodeToken — Junos application
+// icmp-code is numeric and symbolic codes fail closed on both paths.
+func ValidateICMPCodeValue(raw string, _ *Config) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("missing value (expected integer 0..255)")
+	}
+	if _, ok := resolveICMPCodeToken(raw); ok {
+		return nil
+	}
+	return fmt.Errorf("not an ICMP code: %q (expected an integer 0..255; symbolic icmp-code names are not accepted)", raw)
+}
+
 // MaxLogicalUnit is the logical `unit <n>` ceiling: Junos accepts a logical
 // unit number of 0 through 16385 and the runtime keys
 // InterfaceConfig.Units by this int (#5829).

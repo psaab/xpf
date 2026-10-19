@@ -216,6 +216,32 @@ func resolveICMPCodeToken(tok string) (int, bool) {
 	return 0, false
 }
 
+// resolveApplicationICMPType resolves an application `icmp-type` token
+// (#15198): a numeric 0..255, or a Junos symbolic name chosen by the
+// application's protocol — icmp6TypeNames for ICMPv6 protocols
+// (icmpv6/icmp6/icmp-v6/junos-icmp6-all/junos-pingv6/58), icmpTypeNames
+// otherwise (icmp/junos-icmp-all/junos-ping/1 and any not-yet-validated
+// token, mirroring resolveICMPTypeToken's non-inet6 default; the strict
+// spec gate rejects a non-ICMP protocol separately). Returns ok=false
+// for anything unrecognized so the caller records it on UnknownICMP and
+// the strict gate fails closed.
+func resolveApplicationICMPType(tok, protocol string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "icmpv6", "icmp6", "icmp-v6", "junos-icmp6-all", "junos-pingv6", "58":
+		return resolveICMPTypeToken(tok, "inet6")
+	default:
+		return resolveICMPTypeToken(tok, "inet")
+	}
+}
+
+// resolveApplicationICMPCode resolves an application `icmp-code` token
+// (#15198): numeric 0..255 only. Junos application icmp-code is numeric
+// (Range: 0 through 255) and the filter path likewise fails closed on
+// symbolic codes (resolveICMPCodeToken), so no code-name table is added.
+func resolveApplicationICMPCode(tok string) (int, bool) {
+	return resolveICMPCodeToken(tok)
+}
+
 // resolveSinglePort resolves one port token (a number 1..65535 or a Junos
 // service name) to its numeric value. Port 0 is rejected (Junos filter ports
 // are 1..65535 and the dataplane port parser rejects 0).
