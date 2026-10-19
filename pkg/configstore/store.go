@@ -385,7 +385,8 @@ type Store struct {
 	// Config lock tracking: session ID of the holder (for auto-release on disconnect)
 	configHolder string // unique session ID of the config lock holder
 	// reclaimedHolders records the sessions whose lock reclaimStaleLockLocked
-	// took on the idle lease (#9632). ensureHolderLocked refuses them while the
+	// took on the idle lease (#9632) or ForceExitConfigure evicted (#14990).
+	// ensureHolderLocked refuses them while the
 	// lock has no recorded holder: that empty holder is the internal / local
 	// EnterConfigure() path, and #5059 deliberately lets OTHER user sessions
 	// edit it. The session that was reclaimed must not ride that pass straight

@@ -313,14 +313,23 @@ func (s *Store) ExitConfigureSession(sessionID string) bool {
 
 // ForceExitConfigure exits configuration mode regardless of who holds the lock.
 // Used for stale lock cleanup.
+//
+// #14990: like reclaimStaleLockLocked (#9632), it records the evicted holder
+// in reclaimedHolders before clearing the holder fields. Without the mark,
+// ensureHolderLocked's empty-holder pass let the evicted session keep
+// editing — and, via AuthorizeCommitAs, minting commit authority for — the
+// internal/unowned candidate that replaced its own. Re-entering configure
+// clears the mark.
 func (s *Store) ForceExitConfigure() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.configDir {
 		return
 	}
-	slog.Warn("force-releasing stale config lock", "holder", s.configHolder,
+	slog.Warn("force-releasing stale config lock", "holder", s.effectiveHolderLocked(),
 		"held_for", time.Since(s.configLockAt).Round(time.Second))
+	// #14990/#9632: remember whose lock this was before clearing it.
+	s.markReclaimedHolderLocked(s.effectiveHolderLocked())
 	s.candidate = nil
 	s.bumpCandidateGenLocked() // #5848: candidate discarded — advance the generation
 	s.configDir = false

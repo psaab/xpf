@@ -159,6 +159,18 @@ func (s *Store) AuthorizeCommit(sessionID string) (CommitAuthority, error) {
 // principal attached for audit attribution. The principal is supplied by the
 // REST/gRPC handler that already resolved it; this method never trusts a
 // caller-controlled identity for authorization.
+//
+// #14990: a non-empty sessionID that does not hold the lock must never be
+// minted an internal authority. Previously a named session that passed
+// ensureHolderLocked only via the !configDir / empty-holder bypasses
+// received InternalCommitterAs — an unexpiring authority that
+// verifyCommitAuthorityLocked accepts unconditionally — so a non-holder or
+// evicted session could promote another operator's candidate at any later
+// time. Only sessionID == "" (the explicit internal/system caller) may
+// receive internal authority; a named session must be the recorded holder
+// and receives a holder-bound (epoch-bound) authority, otherwise it is
+// refused with ErrConfigLockedByOther. ensureHolderLocked already refuses
+// reclaimed holders on an unowned lock, so that refusal is preserved here.
 func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,13 +180,8 @@ func (s *Store) AuthorizeCommitAs(sessionID, principal string) (CommitAuthority,
 	if sessionID == "" {
 		return InternalCommitterAs(principal), nil
 	}
-	// A session that passed ensureHolderLocked while NOT in config mode, or
-	// against an unowned lock, holds nothing an epoch could bind — both are
-	// documented bypasses of the holder check, not ownership. Treat them as
-	// internal so behaviour is unchanged for those paths; the turnover this
-	// closes requires a real recorded holder.
-	if !s.configDir || s.effectiveHolderLocked() == "" {
-		return InternalCommitterAs(principal), nil
+	if !s.configDir || s.effectiveHolderLocked() != sessionID {
+		return CommitAuthority{}, fmt.Errorf("%w", ErrConfigLockedByOther)
 	}
 	return CommitAuthority{
 		kind:             authorityHolder,
