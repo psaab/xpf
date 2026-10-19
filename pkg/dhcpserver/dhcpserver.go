@@ -1343,6 +1343,10 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 		Reservations  []keaReservation `json:"reservations,omitempty"`
 	}
 
+	// #15206: a group left with no usable interface (every member was a
+	// phantom the belt dropped) renders no subnets: its per-subnet
+	// selector would otherwise name the phantom. Mixed groups keep
+	// address-based selection via the surviving members.
 	m.warnAmbiguousV4SubnetSelection(cfg.DHCPLocalServer)
 
 	var subnets []keaSubnet4
@@ -1360,6 +1364,9 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	// node's set position), so even the colliding pair resolves to the same id
 	// on both nodes (#5203).
 	for _, group := range stableGroups(cfg.DHCPLocalServer.Groups) {
+		if len(group.Interfaces) == 0 {
+			continue
+		}
 		for _, pool := range stablePools(group.Pools) {
 			if pool.Subnet == "" {
 				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",
@@ -1519,6 +1526,9 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 	// collision resolveSubnetID probes a CIDR-DERIVED sequence so the colliding
 	// pair still resolves identically on both nodes (#5203).
 	for _, group := range stableGroups(cfg.DHCPv6LocalServer.Groups) {
+		if len(group.Interfaces) == 0 {
+			continue
+		}
 		for _, pool := range stablePools(group.Pools) {
 			if pool.Subnet == "" {
 				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",

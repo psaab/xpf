@@ -1895,9 +1895,11 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	// reports as a started service with all-zero counters.
 	warnings = append(warnings, validateDHCPRelayInterfaceRefWarnings(cfg)...)
 
-	// #9407: the same class one service over. A DHCP-SERVER group member whose
-	// unit is undeclared is the one case the kernel-name resolver cannot
-	// resolve, so it is the one case that has to be said out loud.
+	// #9407/#15206: the same class one service over. A DHCP-SERVER group
+	// member whose unit is undeclared is the one case the kernel-name
+	// resolver cannot resolve; #15206 hard-rejects it at strict commit
+	// and this advisory (whole-family wording) covers a config already
+	// carrying it on the recompute-from-active alarm surfaces.
 	warnings = append(warnings, validateDHCPServerInterfaceRefWarnings(cfg)...)
 
 	warnings = append(warnings, validateHostInboundZoneLevelDHCPWarnings(cfg)...)

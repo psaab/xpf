@@ -259,6 +259,33 @@ committed clean.
   kept pool is the first by name, not necessarily the older one; commit refuses
   the pair, so only a config that arrived through the tolerant path reaches it.
 
+## Undeclared group interface refs — #15206
+
+A DHCP group interface ref naming no configured interface or unit
+(`reth1.7`, `reth9.0`) resolves verbatim through
+`Config.ResolveKernelIfName` and would render into `interfaces-config`
+— and into the per-subnet selector of a single-interface group — as a
+device the kernel does not have. Kea refuses the whole rendered file
+for the unknown interface, so every pool of the family stops; the
+#9407 advisory's "the segment gets no leases" understated that.
+
+- **Commit:** `validateDHCPServerInterfaceRefStrict` (`pkg/config`)
+  refuses the ref at strict commit / commit-check, naming family,
+  group, ref, the declared-ness reason (`unresolvedInterfaceRef`), and
+  the device Kea would have been given. Declared bare/unit/VLAN/reth
+  refs, dash spellings, and legitimately dotted declared names stay
+  legal.
+- **Tolerant load and peer sync:** the gate downgrades to a
+  `cfg.Warnings` entry (`lenientDHCPServerIfaceRef`), so a persisted
+  config still boots (#1960). The #9407 `ValidateConfig` advisory
+  remains with the corrected whole-family wording for the
+  recompute-from-active alarm surfaces.
+- **Render belt:** `FilterKeaInterfaces15206`
+  (`kea_phantom_interface_15206.go`), applied by the daemon on the
+  resolved standalone and cluster copies, drops any interface name no
+  declared interface of the active config resolves to, with a warning;
+  the generators render no subnets for a group left with no interfaces.
+
 ## Duplicate group interfaces resolving to one device — #15028
 
 Every group's interface refs are resolved to kernel devices by the daemon

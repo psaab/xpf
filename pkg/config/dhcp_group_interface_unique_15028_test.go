@@ -47,6 +47,7 @@ func TestDuplicateDHCPGroupInterfaceIsRefusedAtCommit15028(t *testing.T) {
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",
 		"set interfaces reth1 unit 0 family inet address 10.0.61.1/24",
+		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.62.1/24",
 	}
 	grp := func(server, group, iface, subnet, low, high string) []string {
 		p := "set system services " + server + " group " + group
