@@ -471,6 +471,40 @@ func widenKeyCountToGroupEnd(grouped []bool, from, end int) int {
 	return end
 }
 
+// leafPromotableToContainer reports whether an existing same-key leaf may
+// be promoted to a container when a later SetPath descends into it
+// (#15696, generalizing #15682). Only two measured shapes qualify:
+//
+//   - `feed-name <feed>` under a `feed-server` (#15682): the bare leaf is
+//     the same feed later refined with `path <path>`.
+//   - a declared container with value args and children whose children
+//     are all leaf schemas (children == nil && wildcard == nil), e.g.
+//     RA `prefix <cidr>` (args:1, children are lifetime/flag leaves).
+//     The bare `set ... prefix P` leaf and the later
+//     `set ... prefix P no-autonomous` container are one prefix; leaving
+//     both twins compiled duplicate conflicting PIOs.
+//
+// Everything else keeps the two-node split: policy `then permit`
+// (args:0, children==nil) must stay split so the #3114/#3115/#3141
+// gates (#3377) see the extended node, and wildcard containers with
+// their own grouping rules are untouched.
+func leafPromotableToContainer(nodeKeys []string, childSchema *schemaNode, path []string) bool {
+	if len(nodeKeys) >= 2 && nodeKeys[0] == "feed-name" &&
+		containsAnyOf(path, "feed-server") {
+		return true
+	}
+	if childSchema == nil || childSchema.args <= 0 || childSchema.multi ||
+		len(childSchema.children) == 0 {
+		return false
+	}
+	for _, sub := range childSchema.children {
+		if sub == nil || sub.children != nil || sub.wildcard != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // bracketGroupStartLen reports the length of an authored bracket group that
 // begins exactly at from, or 0 when from is not a group's first token (#6668).
 // Used only where no schema level is available to supply a starting arity, so
@@ -1041,22 +1075,23 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 		} else {
 			for _, n := range *current {
 				if keysEqual(n.Keys, nodeKeys) {
-					// #15682: an existing leaf with the same keys is the
+					// #15682/#15696: an existing leaf with the same keys is the
 					// same statement now gaining children — the bare
 					// `feed-name <feed>` later refined with `path <path>`
-					// under the same feed-server. Promote it instead of
+					// under the same feed-server, or a bare RA
+					// `prefix <cidr>` later refined with a flag/lifetime.
+					// Promote it (leafPromotableToContainer) instead of
 					// appending a duplicate sibling container the compiler
-					// would read as two feeds.
+					// would read as two entries.
 					//
-					// Scoped to that feed-name container under feed-server:
-					// other bare-leaf+extended pairs are meaningful
-					// two-node shapes the strict gates inspect verbatim
+					// Scoped by leafPromotableToContainer: other
+					// bare-leaf+extended pairs are meaningful two-node
+					// shapes the strict gates inspect verbatim
 					// (policy `then permit` + `then permit
 					// application-services …`, #3114/#3115/#3141 via
 					// #3377), and merging them would hide the specific
 					// diagnostic those gates exist to emit.
-					if n.IsLeaf && len(nodeKeys) >= 2 && nodeKeys[0] == "feed-name" &&
-						containsAnyOf(path, "feed-server") {
+					if n.IsLeaf && leafPromotableToContainer(nodeKeys, childSchema, path) {
 						n.IsLeaf = false
 					} else if n.IsLeaf {
 						continue
