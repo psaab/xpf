@@ -1320,6 +1320,69 @@ func resolveSubnetID(subnet string, used map[int]bool) int {
 	return id // unreachable: subnet count is always << keaSubnetIDMax
 }
 
+// SubnetIDAssignments15694 returns, per family, the Kea subnet-id each
+// rendered pool subnet receives, in the same stable (sorted-group,
+// sorted-pool) walk generateKea4Config / generateKea6Config use (#15694).
+// The keys are the pool subnet CIDRs as authored. Pools the generators
+// skip — subnet-less pools, pools in interface-less groups, and later
+// duplicates of an already-claimed masked prefix (#9785) — take no id and
+// are absent, mirroring resolveSubnetID being reached only after those
+// skips. Display renderers use this to show the id beside each pool so an
+// operator can correlate a lease's Subnet column with its pool; the id is
+// a pure function of the rendered set (hash of the canonical CIDR, with
+// the CIDR-derived collision probe), so both HA nodes compute the same
+// map for the same committed config. The v6 multi-interface / narrowed-
+// group render refusal is not reproduced here: it aborts the whole v6
+// render, so no Kea config (and no lease) exists to correlate against.
+func SubnetIDAssignments15694(cfg *config.DHCPServerConfig) (v4, v6 map[string]int) {
+	v4 = make(map[string]int)
+	v6 = make(map[string]int)
+	if cfg == nil {
+		return v4, v6
+	}
+	if srv := cfg.DHCPLocalServer; srv != nil {
+		used := make(map[int]bool)
+		seen := make(map[netip.Prefix]string)
+		for _, group := range stableGroups(srv.Groups) {
+			if group == nil || len(group.Interfaces) == 0 {
+				continue
+			}
+			for _, pool := range stablePools(group.Pools) {
+				if pool == nil || pool.Subnet == "" {
+					continue
+				}
+				if _, dup := claimPoolSubnet(seen, group.Name, pool); dup {
+					continue
+				}
+				id := resolveSubnetID(pool.Subnet, used)
+				used[id] = true
+				v4[pool.Subnet] = id
+			}
+		}
+	}
+	if srv := cfg.DHCPv6LocalServer; srv != nil {
+		used := make(map[int]bool)
+		seen := make(map[netip.Prefix]string)
+		for _, group := range stableGroups(srv.Groups) {
+			if group == nil || len(group.Interfaces) == 0 {
+				continue
+			}
+			for _, pool := range stablePools(group.Pools) {
+				if pool == nil || pool.Subnet == "" {
+					continue
+				}
+				if _, dup := claimPoolSubnet(seen, group.Name, pool); dup {
+					continue
+				}
+				id := resolveSubnetID(pool.Subnet, used)
+				used[id] = true
+				v6[pool.Subnet] = id
+			}
+		}
+	}
+	return v4, v6
+}
+
 func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	type keaPool struct {
 		Pool string `json:"pool"`

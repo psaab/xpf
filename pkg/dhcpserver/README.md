@@ -180,6 +180,22 @@ subtree with an IPv6 `fixed-address`.)
   separate companion gap, #2239.) ISC Kea handles static reservations
   entirely in the config file, independent of its HA hook.
 
+## `show dhcp server detail` pool display — #15694
+
+Both detail renderers (`pkg/cli` `showDHCPServer` and `pkg/grpcapi`
+`showDHCPServerDetail`) print the full compiled pool: sorted group order,
+v4 `domain-name` + `static-binding`, v6 `dns-server` + `domain-name` +
+`lease-time` + `static-binding` (binding hostnames via
+`termsafe.SanitizeForDisplay`), and the Kea subnet-id beside each subnet.
+The id comes from `SubnetIDAssignments15694`, which replays the
+generators' stable walk (sorted groups/pools, subnet-less/interface-less/
+duplicate-prefix skips, then `resolveSubnetID`) so the displayed id is the
+id in the rendered Kea config and correlates with the lease table's
+`Subnet` column. Guard:
+`TestSubnetIDAssignmentsMatchKeaRender_15694` asserts the map equals the
+rendered conf, and the two `*_15694` renderer tests assert the fields,
+order, and ids on both surfaces.
+
 ## Stable subnet IDs — #2668 / #5041 / #5203
 
 `generateKea4Config`/`generateKea6Config` assign each rendered subnet a Kea

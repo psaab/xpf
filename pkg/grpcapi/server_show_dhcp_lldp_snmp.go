@@ -171,18 +171,32 @@ func (s *Server) showDHCPServerDetail(cfg *config.Config, buf *strings.Builder) 
 		buf.WriteString("No DHCP server configured\n")
 		return
 	}
-	// Pool configuration
+	// Pool configuration. #15694: mirror the Kea render — sorted group
+	// order, every compiled pool field (v4 domain-name/static-binding;
+	// v6 dns-server/domain-name/lease-time/static-binding), and the Kea
+	// subnet-id beside each pool so leases correlate to pools.
+	subnetIDs4, subnetIDs6 := dhcpserver.SubnetIDAssignments15694(&cfg.System.DHCPServer)
 	if srv := cfg.System.DHCPServer.DHCPLocalServer; srv != nil && len(srv.Groups) > 0 {
 		buf.WriteString("DHCPv4 Server Configuration:\n")
-		for name, group := range srv.Groups {
+		for _, name := range sortedMapKeys(srv.Groups) {
+			group := srv.Groups[name]
+			if group == nil {
+				continue
+			}
 			fmt.Fprintf(buf, "  Group: %s\n", name)
 			if len(group.Interfaces) > 0 {
 				fmt.Fprintf(buf, "    Interfaces: %s\n", strings.Join(group.Interfaces, ", "))
 			}
 			for _, pool := range group.Pools {
+				if pool == nil {
+					continue
+				}
 				fmt.Fprintf(buf, "    Pool: %s\n", pool.Name)
 				if pool.Subnet != "" {
 					fmt.Fprintf(buf, "      Subnet: %s\n", pool.Subnet)
+					if id, ok := subnetIDs4[pool.Subnet]; ok {
+						fmt.Fprintf(buf, "      Subnet ID: %d\n", id)
+					}
 				}
 				if pool.RangeLow != "" {
 					fmt.Fprintf(buf, "      Range: %s - %s\n", pool.RangeLow, pool.RangeHigh)
@@ -193,8 +207,21 @@ func (s *Server) showDHCPServerDetail(cfg *config.Config, buf *strings.Builder) 
 				if len(pool.DNSServers) > 0 {
 					fmt.Fprintf(buf, "      DNS: %s\n", strings.Join(pool.DNSServers, ", "))
 				}
+				if pool.Domain != "" {
+					fmt.Fprintf(buf, "      Domain: %s\n", pool.Domain)
+				}
 				if pool.LeaseTime > 0 {
 					fmt.Fprintf(buf, "      Lease time: %ds\n", pool.LeaseTime)
+				}
+				for _, sb := range pool.StaticBindings {
+					if sb == nil {
+						continue
+					}
+					if sb.HostName != "" {
+						fmt.Fprintf(buf, "      Static binding: %s fixed-address %s hostname %s\n", sb.MACAddress, sb.FixedAddress, termsafe.SanitizeForDisplay(sb.HostName))
+					} else {
+						fmt.Fprintf(buf, "      Static binding: %s fixed-address %s\n", sb.MACAddress, sb.FixedAddress)
+					}
 				}
 			}
 		}
@@ -202,18 +229,47 @@ func (s *Server) showDHCPServerDetail(cfg *config.Config, buf *strings.Builder) 
 	}
 	if srv := cfg.System.DHCPServer.DHCPv6LocalServer; srv != nil && len(srv.Groups) > 0 {
 		buf.WriteString("DHCPv6 Server Configuration:\n")
-		for name, group := range srv.Groups {
+		for _, name := range sortedMapKeys(srv.Groups) {
+			group := srv.Groups[name]
+			if group == nil {
+				continue
+			}
 			fmt.Fprintf(buf, "  Group: %s\n", name)
 			if len(group.Interfaces) > 0 {
 				fmt.Fprintf(buf, "    Interfaces: %s\n", strings.Join(group.Interfaces, ", "))
 			}
 			for _, pool := range group.Pools {
+				if pool == nil {
+					continue
+				}
 				fmt.Fprintf(buf, "    Pool: %s\n", pool.Name)
 				if pool.Subnet != "" {
 					fmt.Fprintf(buf, "      Subnet: %s\n", pool.Subnet)
+					if id, ok := subnetIDs6[pool.Subnet]; ok {
+						fmt.Fprintf(buf, "      Subnet ID: %d\n", id)
+					}
 				}
 				if pool.RangeLow != "" {
 					fmt.Fprintf(buf, "      Range: %s - %s\n", pool.RangeLow, pool.RangeHigh)
+				}
+				if len(pool.DNSServers) > 0 {
+					fmt.Fprintf(buf, "      DNS: %s\n", strings.Join(pool.DNSServers, ", "))
+				}
+				if pool.Domain != "" {
+					fmt.Fprintf(buf, "      Domain: %s\n", pool.Domain)
+				}
+				if pool.LeaseTime > 0 {
+					fmt.Fprintf(buf, "      Lease time: %ds\n", pool.LeaseTime)
+				}
+				for _, sb := range pool.StaticBindings {
+					if sb == nil {
+						continue
+					}
+					if sb.HostName != "" {
+						fmt.Fprintf(buf, "      Static binding: %s fixed-address %s hostname %s\n", sb.MACAddress, sb.FixedAddress, termsafe.SanitizeForDisplay(sb.HostName))
+					} else {
+						fmt.Fprintf(buf, "      Static binding: %s fixed-address %s\n", sb.MACAddress, sb.FixedAddress)
+					}
 				}
 			}
 		}
