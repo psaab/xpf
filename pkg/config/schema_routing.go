@@ -498,6 +498,11 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 						"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
 							"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
+							"teardown": {desc: "Teardown session on overflow (default is log-only); optional warning percentage and idle-timeout", args: 1, placeholder: "[percentage] [idle-timeout (forever|minutes)]", tailValidator: ValidateBGPPrefixLimitTeardownTail15010, children: map[string]*schemaNode{
+								"idle-timeout": {desc: "Keep torn-down session down for minutes (1..2400) or forever", args: 1, placeholder: "(forever|minutes)", children: nil},
+							}},
+							"drop-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
+							"hide-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
 						}},
 					}},
 				}},
@@ -505,6 +510,11 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 						"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
 							"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
+							"teardown": {desc: "Teardown session on overflow (default is log-only); optional warning percentage and idle-timeout", args: 1, placeholder: "[percentage] [idle-timeout (forever|minutes)]", tailValidator: ValidateBGPPrefixLimitTeardownTail15010, children: map[string]*schemaNode{
+								"idle-timeout": {desc: "Keep torn-down session down for minutes (1..2400) or forever", args: 1, placeholder: "(forever|minutes)", children: nil},
+							}},
+							"drop-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
+							"hide-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
 						}},
 					}},
 				}},
@@ -533,6 +543,11 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 						"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 							"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
 								"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
+								"teardown": {desc: "Teardown session on overflow (default is log-only); optional warning percentage and idle-timeout", args: 1, placeholder: "[percentage] [idle-timeout (forever|minutes)]", tailValidator: ValidateBGPPrefixLimitTeardownTail15010, children: map[string]*schemaNode{
+									"idle-timeout": {desc: "Keep torn-down session down for minutes (1..2400) or forever", args: 1, placeholder: "(forever|minutes)", children: nil},
+								}},
+								"drop-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
+								"hide-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
 							}},
 						}},
 					}},
@@ -540,6 +555,11 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 						"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 							"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
 								"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
+								"teardown": {desc: "Teardown session on overflow (default is log-only); optional warning percentage and idle-timeout", args: 1, placeholder: "[percentage] [idle-timeout (forever|minutes)]", tailValidator: ValidateBGPPrefixLimitTeardownTail15010, children: map[string]*schemaNode{
+									"idle-timeout": {desc: "Keep torn-down session down for minutes (1..2400) or forever", args: 1, placeholder: "(forever|minutes)", children: nil},
+								}},
+								"drop-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
+								"hide-excess": {desc: "Not supported: rejected (no FRR equivalent; use teardown or import policy)", args: 1, placeholder: "<percentage>", children: nil},
 							}},
 						}},
 					}},

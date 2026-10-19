@@ -38,10 +38,11 @@ func parsePrefixLimit(famNode *Node) (int, bool, error) {
 	return int(n), true, nil
 }
 
-// applyPrefixLimit11793 updates one compiled limit while preserving an
-// inherited neighbor limit when that neighbor supplies no override. Invalid
-// inputs fail strict compilation; tolerant loads warn and keep the prior
-// value, so a bad per-neighbor override cannot silently remove the group cap.
+// applyPrefixLimit11793 is retained only as the maximum-only core used
+// by parsePrefixLimit; production group/neighbor compilation goes
+// through applyPrefixLimitFull15010 (#15010), which also carries the
+// teardown action. Do not add new callers here.
+
 func applyPrefixLimit11793(famNode *Node, target *int, clearWhenAbsent bool, scope string, opts compileOpts, warnings *[]string) error {
 	limit, present, err := parsePrefixLimit(famNode)
 	if err != nil {

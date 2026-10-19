@@ -28,6 +28,15 @@ xpf (0.0.0) unstable; urgency=medium
     a rule-set committed cleanly, then failed the validate-before-mutate
     pre-pass and blocked all later commits from reaching the dataplane
     (#15000).
+  * Render BGP prefix-limit maximum as FRR warning-only by default,
+    matching Junos log-only semantics, and model teardown [percentage]
+    [idle-timeout (forever|minutes)] to maximum-prefix threshold/restart.
+    Previously a bare hard maximum-prefix tore the session down with no
+    automatic restart. drop-excess/hide-excess are rejected (no FRR
+    equivalent) instead of being silently ignored (#15010).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Refuse a loopback management server that merely shares the
     caller's own non-root uid in the CLI/upgrade dial verification:
     only uid 0 (what xpfd runs as) is trusted on loopback, so a

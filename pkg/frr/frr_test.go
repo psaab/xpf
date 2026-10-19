@@ -3887,11 +3887,11 @@ func TestGenerateProtocols_BGPPrefixLimit(t *testing.T) {
 		},
 	}
 	got := m.generateProtocols(nil, nil, bgp, nil, nil, "", 1, nil, nil)
-	if !strings.Contains(got, "neighbor 10.0.0.2 maximum-prefix 1000\n") {
-		t.Errorf("missing IPv4 maximum-prefix in:\n%s", got)
+	if !strings.Contains(got, "neighbor 10.0.0.2 maximum-prefix 1000 warning-only\n") {
+		t.Errorf("missing IPv4 maximum-prefix (log-only default, #15010) in:\n%s", got)
 	}
-	if !strings.Contains(got, "neighbor fd00::2 maximum-prefix 500\n") {
-		t.Errorf("missing IPv6 maximum-prefix in:\n%s", got)
+	if !strings.Contains(got, "neighbor fd00::2 maximum-prefix 500 warning-only\n") {
+		t.Errorf("missing IPv6 maximum-prefix (log-only default, #15010) in:\n%s", got)
 	}
 }
 

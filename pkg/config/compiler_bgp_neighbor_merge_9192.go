@@ -370,14 +370,14 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 					neighbor.FamilyInet = neighbor.FamilyInet || unicast
 					neighbor.UnsupportedInetSAFI = neighbor.UnsupportedInetSAFI || unsupported
 					if unicast {
-						return applyPrefixLimit11793(familyNode, &neighbor.PrefixLimitInet, false, scope, opts, warnings)
+						return applyPrefixLimitFull15010(familyNode, bgpPrefixLimitTarget15010{maximum: &neighbor.PrefixLimitInet, teardown: &neighbor.PrefixLimitTeardownInet, pct: &neighbor.PrefixLimitTeardownPctInet, idle: &neighbor.PrefixLimitIdleTimeoutInet, forever: &neighbor.PrefixLimitIdleForeverInet}, false, scope, opts, warnings)
 					}
 					return nil
 				}
 				neighbor.FamilyInet6 = neighbor.FamilyInet6 || unicast
 				neighbor.UnsupportedInet6SAFI = neighbor.UnsupportedInet6SAFI || unsupported
 				if unicast {
-					return applyPrefixLimit11793(familyNode, &neighbor.PrefixLimitInet6, false, scope, opts, warnings)
+					return applyPrefixLimitFull15010(familyNode, bgpPrefixLimitTarget15010{maximum: &neighbor.PrefixLimitInet6, teardown: &neighbor.PrefixLimitTeardownInet6, pct: &neighbor.PrefixLimitTeardownPctInet6, idle: &neighbor.PrefixLimitIdleTimeoutInet6, forever: &neighbor.PrefixLimitIdleForeverInet6}, false, scope, opts, warnings)
 				}
 				return nil
 			}
