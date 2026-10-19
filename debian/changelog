@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Reject a single-rate firewall policer missing either
+    if-exceeding bandwidth-limit or burst-size-limit at strict
+    commit, and close the policer/if-exceeding schema so typos such
+    as if-exceding or bandwith-limit are refused instead of
+    compiling to a 0-limit policer that drops all policed traffic.
+    Tolerant load warns instead of failing (#15125).
   * Capture SIGHUP in xpfd as an explicitly ignored, logged no-op
     instead of letting the default disposition terminate the daemon
     with no shutdown sequence (no HA fence, no rg_active clear, no
