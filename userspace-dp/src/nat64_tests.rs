@@ -132,6 +132,7 @@ fn napt64_deterministic_v6_routes_through_block_allocator() {
         port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
+    ..Default::default()
     };
     let state = Nat64State::from_snapshots(&[det_snap]);
     assert!(
@@ -240,6 +241,7 @@ fn napt64_deterministic_v6_unsupported_prefix_len_falls_back() {
         port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
+        ..Default::default()
     }]);
     assert!(
         state.prefixes[0].deterministic_v6.is_none(),
@@ -290,6 +292,7 @@ fn napt64_deterministic_v6_host_count_overflow_warns_operator() {
         port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
+        ..Default::default()
     }]);
     assert!(
         state.prefixes[0].deterministic_v6.is_none(),
@@ -457,6 +460,7 @@ fn nat64_14624_deterministic_duplicate_pool_matches_single() {
         port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
+    ..Default::default()
     };
     let dup = Nat64State::from_snapshots(&[mk(vec![
         "198.51.100.1".to_string(),
@@ -9134,6 +9138,7 @@ fn det_nat64_snap_15178(block_size: u16, host_base: &str, prefix_len: u8) -> NAT
         port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
+    ..Default::default()
     }
 }
 
@@ -9399,4 +9404,77 @@ fn nat64_15283_range_change_resets_allocator() {
         .allocate_source(0, crate::ip_proto::PROTO_TCP, c2, dst_v4, 5000, 443, 2)
         .expect("alloc C changed range");
     assert_eq!(pc, 4000, "#15283: changed range must start a fresh allocator at the new low");
+}
+
+// #15678: scoped NAT64 classification. A zone-scoped prefix must not match
+// traffic from another zone; a source-scoped prefix must not match sources
+// outside its list; an unscoped prefix still matches everything.
+// Fail-on-revert: dropping `prefix_scope_matches` from the scoped match makes
+// the cross-zone / cross-source assertions return MatchReady.
+fn scoped_snap(from_zone: &str, ri: &str, sources: Vec<String>) -> NAT64RuleSnapshot {
+    NAT64RuleSnapshot {
+        name: "scoped".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        from_zone: from_zone.to_string(),
+        from_routing_instance: ri.to_string(),
+        source_addresses: sources,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn nat64_scoped_zone_match_15678() {
+    let state = Nat64State::from_snapshots(&[scoped_snap("trust", "", vec![])]);
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    assert!(matches!(
+        state.classify_ipv6_packet_scoped(src, dst, "trust", ""),
+        Nat64Match::MatchReady { .. }
+    ));
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(src, dst, "untrust", ""),
+        Nat64Match::NoPrefixMatch,
+        "cross-zone traffic must not match a trust-scoped prefix"
+    );
+    // The unscoped dest-only path is unchanged.
+    assert!(state.match_ipv6_dest(dst).is_some());
+}
+
+#[test]
+fn nat64_scoped_source_match_15678() {
+    let state = Nat64State::from_snapshots(&[scoped_snap(
+        "",
+        "blue",
+        vec!["2001:db8:1::/48".to_string()],
+    )]);
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let inside: Ipv6Addr = "2001:db8:1::5".parse().unwrap();
+    let outside: Ipv6Addr = "2001:db8:2::5".parse().unwrap();
+    assert!(matches!(
+        state.classify_ipv6_packet_scoped(inside, dst, "", "blue"),
+        Nat64Match::MatchReady { .. }
+    ));
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(outside, dst, "", "blue"),
+        Nat64Match::NoPrefixMatch,
+        "source outside the authored list must not match"
+    );
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(inside, dst, "", "red"),
+        Nat64Match::NoPrefixMatch,
+        "wrong routing-instance must not match"
+    );
+}
+
+#[test]
+fn nat64_scoped_unparseable_source_fails_closed_15678() {
+    let state = Nat64State::from_snapshots(&[scoped_snap("", "", vec!["garbage".to_string()])]);
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(src, dst, "", ""),
+        Nat64Match::NoPrefixMatch,
+        "an all-unparseable source list must match nothing, never widen to any"
+    );
 }

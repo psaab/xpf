@@ -15378,6 +15378,26 @@ lenient strict-reject → warn + valid-no-warning). Compiler-side only — not a
 typed `setSchema` leaf (a schema `keyValidator` has no lenient mode and would
 hard-reject on the load path too, re-introducing the #1960 boot-brick).
 
+### #15678 — NAT64 rule-set ingress scoping + retired 4-prefix cap
+
+A NAT64 rule-set now accepts optional ingress scoping, mirroring the other
+NAT rule-sets: `from zone <z>` XOR `from routing-instance <ri>`, and
+`match source-address <ipv6-prefix>` / `match source-address-name <name>`
+(multi-value). `NAT64RuleSet` carries the scope, `compileNAT64` reads it
+via `collectNATScopes`, and `validateNAT64ScopeStrict` rejects mixed from
+axes, undefined zone/RI, non-IPv6/unparsable source entries, and undefined
+address-book names at strict commit (lenient warns). `NAT64RuleSnapshot`
+carries the scope (names pre-resolved, feed-aware) under ProtocolVersion
+60; the Rust `Nat64Prefix` enforces first-match on (/96, zone, RI, source)
+via `classify_ipv6_packet_scoped`, failing closed on an all-unparseable
+source list. `nat64PrefixOwnerKeyScoped` folds the scope into the #5144
+owner key and shadowing is scope-aware. The retired-eBPF
+`MAX_NAT64_PREFIXES = 4` break in `compileNAT64WithStaging` is removed —
+every rule-set now gets a pool ID and persistent-NAT registration; the
+Rust #6982 aggregate budget is the only bound. Tests:
+`nat64_scope_15678_test.go` (config + userspace),
+`compiler_nat64_cap_15678_test.go`, `nat64_scoped_*_15678` (Rust).
+
 ### #2217 — firewall / application undefined-reference validation
 
 Three firewall/application cross-references compiled cleanly with no operator

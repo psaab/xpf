@@ -289,7 +289,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		SourceNAT:             buildSourceNATSnapshotsWithFeeds(cfg, natCounterIDs, feedOverlay),
 		StaticNAT:             buildStaticNATSnapshots(cfg, natCounterIDs),
 		DestinationNAT:        buildDestinationNATSnapshotsWithFeeds(cfg, natCounterIDs, feedOverlay),
-		NAT64:                 buildNAT64Snapshots(cfg),
+		NAT64:                 buildNAT64SnapshotsWithFeeds(cfg, feedOverlay),
 		Nptv6:                 buildNptv6Snapshots(cfg),
 		Screens:               buildScreenSnapshots(cfg),
 		ScreenMissingProfiles: buildScreenMissingProfileRefs(cfg),

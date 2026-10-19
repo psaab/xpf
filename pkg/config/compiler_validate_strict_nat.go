@@ -3185,6 +3185,107 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 	return warnings, nil
 }
 
+// validateNAT64ScopeStrict (#15678) validates the optional NAT64 ingress
+// scoping (`from zone|routing-instance`, `match source-address[-name]`).
+//
+// Strict (commit): reject a rule-set carrying BOTH from axes or a repeated
+// from value (compileNAT64 stamps every scope; two axes would AND in the
+// dataplane in a way the operator never authored as a conjunction, and the
+// Junos single-kind rule forbids it), an undefined from-zone / routing
+// instance, an unparsable or non-IPv6 source-address, and an undefined
+// source-address-name. Lenient: warn per defect (#1960); the dataplane
+// still fails closed — an unknown zone/RI name never equals a packet's
+// resolved scope, and an all-unparseable source list matches nothing.
+func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	var warnings []string
+	emit := func(msg string) error {
+		if lenient {
+			warnings = append(warnings, msg+" (tolerant load: this NAT64 rule-set's scoping is not enforced as authored until corrected)")
+			return nil
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	zones := make(map[string]bool, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zones[name] = true
+	}
+	for _, rs := range cfg.Security.NAT.NAT64 {
+		if rs == nil {
+			continue
+		}
+		if rs.FromZone != "" && rs.FromRoutingInstance != "" {
+			if err := emit(fmt.Sprintf(
+				"security nat nat64 rule-set %q has both `from zone %q` and `from routing-instance %q`; specify exactly one from scope (zone XOR routing-instance) — a mixed clause is never OR-widened (#15678)",
+				rs.Name, rs.FromZone, rs.FromRoutingInstance)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if rs.FromZone != "" && !zones[rs.FromZone] {
+			if err := emit(fmt.Sprintf(
+				"security nat nat64 rule-set %q from-zone %q is not defined; define `set security zones security-zone %s` in the same commit (#15678)",
+				rs.Name, rs.FromZone, rs.FromZone)); err != nil {
+				return nil, err
+			}
+		}
+		if rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance) {
+			if err := emit(fmt.Sprintf(
+				"security nat nat64 rule-set %q from routing-instance %q is not defined; define `set routing-instances %s ...` in the same commit (#15678)",
+				rs.Name, rs.FromRoutingInstance, rs.FromRoutingInstance)); err != nil {
+				return nil, err
+			}
+		}
+		for _, a := range rs.SourceAddresses {
+			if a == "" || a == "any" || a == "::/0" {
+				continue
+			}
+			pfx, err := netip.ParsePrefix(a)
+			if err != nil {
+				if addr, aerr := netip.ParseAddr(a); aerr != nil || !addr.Is6() {
+					if err := emit(fmt.Sprintf(
+						"security nat nat64 rule-set %q match source-address %q is not a valid IPv6 prefix or host; the dataplane matches no source for an unparseable entry (#15678)",
+						rs.Name, a)); err != nil {
+						return nil, err
+					}
+				}
+				continue
+			}
+			if !pfx.Addr().Is6() {
+				if err := emit(fmt.Sprintf(
+					"security nat nat64 rule-set %q match source-address %q is not IPv6; NAT64 sources are IPv6 (#15678)",
+					rs.Name, a)); err != nil {
+					return nil, err
+				}
+			}
+		}
+		for _, n := range rs.SourceAddressNames {
+			if n == "" || n == "any" {
+				continue
+			}
+			found := false
+			if ab := cfg.Security.AddressBook; ab != nil {
+				if _, ok := ab.Addresses[n]; ok {
+					found = true
+				}
+				if _, ok := ab.AddressSets[n]; ok {
+					found = true
+				}
+			}
+			if !found {
+				if err := emit(fmt.Sprintf(
+					"security nat nat64 rule-set %q match source-address-name %q is not defined in the address book; define `security address-book global address %s <prefix>` in the same commit (#15678)",
+					rs.Name, n, n)); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return warnings, nil
+}
+
 // validateStaticNATThenTargetStrict rejects a static-NAT rule that would install
 // with an EMPTY translation target (#4290). Two causes both leave Then=="":
 //
@@ -5044,7 +5145,12 @@ func natPoolOverlapOwners(cfg *Config) []natAllocOwner {
 		if pool == nil {
 			continue
 		}
-		prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
+		// #15678: key by (prefix, from-zone, routing-instance, pool) so two
+		// same-prefix rule-sets in different scopes sharing one pool are
+		// distinct owners; the overlap gate then still rejects them (they
+		// share one pool's external tuples) — scoping does not mint a
+		// separate allocator per scope in the dataplane's pool identity.
+		prefixKey, ok := nat64PrefixOwnerKeyScoped(rs)
 		if !ok {
 			continue
 		}
@@ -5122,6 +5228,26 @@ func nat64PrefixOwnerKey(prefix string) (string, bool) {
 	return netip.PrefixFrom(addr, 96).Masked().String(), true
 }
 
+// nat64PrefixOwnerKeyScoped (#15678) folds the optional from-zone /
+// routing-instance scope into the allocator owner key, so two rule-sets
+// sharing one /96 in DIFFERENT ingress scopes are distinct owners (each
+// mints from its own pool for its own scope) while same-scope duplicates
+// still collide. The unscoped key is a strict sub-key: an unscoped rule-set
+// matches every scope, so it must collide with any scoped sibling — the
+// caller therefore keys unscoped rule-sets by the bare prefix key and
+// scoped ones by prefix+scope, and treats an unscoped owner as covering
+// every scope (see nat64ShadowedRuleSets).
+func nat64PrefixOwnerKeyScoped(rs *NAT64RuleSet) (string, bool) {
+	if rs == nil {
+		return "", false
+	}
+	prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
+	if !ok {
+		return "", false
+	}
+	return prefixKey + "\x00" + rs.FromZone + "\x00" + rs.FromRoutingInstance, true
+}
+
 // nat64ShadowedRuleSets maps every NAT64 rule-set the dataplane can NEVER select
 // to the earlier rule-set that shadows it (#9555).
 //
@@ -5144,21 +5270,43 @@ func nat64ShadowedRuleSets(cfg *Config) map[*NAT64RuleSet]*NAT64RuleSet {
 	if cfg == nil {
 		return shadowed
 	}
+	// #15678: shadowing is scope-aware. The dataplane selects the FIRST
+	// built prefix whose /96 AND ingress scope (from-zone / routing-instance)
+	// AND source-address set all match. An earlier rule-set therefore only
+	// shadows a later one when its scope covers the later one's: same scope,
+	// or an unscoped earlier rule-set (covers every scope). Source-address
+	// narrowing is ignored here (conservative: over-refusal of shadowing,
+	// never under-refusal — a source-scoped earlier rule-set is treated as
+	// covering, matching the pre-#15678 same-prefix behaviour).
 	first := make(map[string]*NAT64RuleSet)
+	unscopedFirst := make(map[string]*NAT64RuleSet)
 	for _, rs := range cfg.Security.NAT.NAT64 {
 		if rs == nil || rs.Prefix == "" {
 			continue
 		}
-		key, ok := nat64PrefixOwnerKey(rs.Prefix)
+		prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
 		if !ok {
 			continue
 		}
-		if earlier, seen := first[key]; seen {
+		scopedKey, _ := nat64PrefixOwnerKeyScoped(rs)
+		isUnscoped := rs.FromZone == "" && rs.FromRoutingInstance == ""
+		if earlier, seen := first[scopedKey]; seen {
 			shadowed[rs] = earlier
 			continue
 		}
+		if !isUnscoped {
+			if earlier, seen := unscopedFirst[prefixKey]; seen {
+				shadowed[rs] = earlier
+				continue
+			}
+		}
 		if nat64RuleSetDefinitelyBuilt(cfg, rs) {
-			first[key] = rs
+			first[scopedKey] = rs
+			if isUnscoped {
+				if _, seen := unscopedFirst[prefixKey]; !seen {
+					unscopedFirst[prefixKey] = rs
+				}
+			}
 		}
 	}
 	return shadowed

@@ -442,7 +442,11 @@ const (
 	// tcp_rst_sequence_check and tcp_maximum_window; a v58 helper ignores
 	// them and keeps dropping tunnel mid-stream TCP, never invalidates on
 	// RST, and never validates RST sequence (the defects).
-	ProtocolVersion = 59
+	// v59 -> v60 (#15678): NAT64RuleSnapshot carries from_zone /
+	// from_routing_instance / source_addresses ingress scoping. A v59
+	// helper ignores them and translates for every zone/VRF/source —
+	// the fail-open defect — so exact-equality versioning fences it.
+	ProtocolVersion = 60
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

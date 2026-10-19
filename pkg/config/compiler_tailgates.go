@@ -228,6 +228,16 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, nat64PrefixWarnings...)
 
+	// #15678: NAT64 ingress-scoping gate (from zone / routing-instance /
+	// match source-address[-name]). Strict rejects mixed/undefined scopes
+	// and unparsable source entries; lenient warns. The dataplane fails
+	// closed for every defect class, so a tolerant load never widens.
+	nat64ScopeWarnings, err := validateNAT64ScopeStrict(cfg, opts.lenientNAT64Prefix)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, nat64ScopeWarnings...)
+
 	// #5144: source-NAT / NAT64 external-tuple overlap gate — the source-NAT
 	// analog of the #2241 NPTv6 overlap check above. Differently-named
 	// overlapping source pools, a source pool that also backs a NAT64 rule-set,
