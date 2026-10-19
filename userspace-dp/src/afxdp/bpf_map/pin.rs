@@ -98,6 +98,7 @@ pub(in crate::afxdp) const DEGRADED_PATH_REASON_NAMES: &[&str] = &[
     "qinq_drop",                // 16
     "stag_drop",                // 17
     "tagged_only_local_drop",   // 18
+    "land_drop",                // 19
 ];
 
 #[cfg(feature = "debug-log")]
