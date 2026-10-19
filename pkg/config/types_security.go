@@ -374,8 +374,8 @@ type TCPSessionConfig struct {
 	// TCP receive window used for sequence validation. 0 = default.
 	MaximumWindow int
 	// TimeWaitStateSessionTimeout (`time-wait-state session-timeout`, #15753).
-	TimeWaitStateSessionTimeout int
-	TimeWaitStateSessionAgeout  bool
+	TimeWaitStateSessionTimeout    int
+	TimeWaitStateSessionAgeout     bool
 	TimeWaitStateApplyToHalfClosed bool
 	// NoSequenceCheck disables TCP sequence-number validation for flow
 	// sessions (`set security flow tcp-session no-sequence-check`, #2008 M9).
@@ -1455,6 +1455,17 @@ type NATPool struct {
 	// in this mode. Before #3906 the token was silently dropped and the pool
 	// PAT-translated the port anyway.
 	PortNoTranslation bool
+	// PortRandomAllocation records `port random-allocation` (#15675).
+	// Junos default is random port allocation; xpf's allocator seeds a
+	// random offset (pkg/dataplane/maps_nat.go), so true is a no-op and
+	// false (`no-random-allocation`) is accepted-but-inert with an
+	// advisory (ValidateConfig), matching the port-overloading doctrine.
+	PortRandomAllocation bool
+	// PortNoRandomAllocationAuthored records that `no-random-allocation`
+	// was explicitly authored (vs the false default), so ValidateConfig
+	// warns only for an explicit opt-out (#15675). `json:"-"` compile-time
+	// marker, never serialized.
+	PortNoRandomAllocationAuthored bool `json:"-"`
 	// PortOverloadingFactor records the source-pool `port-overloading-factor
 	// <n>` knob (#4291). Junos scales the number of concurrent translations a
 	// single pool address may serve. xpf accepts and records it but does NOT

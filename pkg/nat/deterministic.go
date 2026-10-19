@@ -399,6 +399,12 @@ func poolParams(pool *config.NATPool, nat64Referenced bool) (detParams, *LookupE
 	if pool == nil || pool.Deterministic == nil {
 		return p, lerrf(ErrCodeNotDeterministic, "pool has no deterministic port allocation configured")
 	}
+	// #15675: `port no-translation` + `port deterministic` is rejected
+	// at strict compile; a tolerated load must not answer as if the
+	// pool were deterministic (it round-robins / address-only).
+	if pool.PortNoTranslation {
+		return p, lerrf(ErrCodeNotDeterministic, "pool combines port no-translation with port deterministic (mutually exclusive)")
+	}
 	det := pool.Deterministic
 	if det.BlockSize <= 0 || det.HostAddress == "" {
 		return p, lerrf(ErrCodeNotDeterministic, "deterministic pool missing block-size or subscriber host address")

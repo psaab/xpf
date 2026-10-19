@@ -46,6 +46,11 @@ func deterministicNAT64V6Fields(pool *config.NATPool) (blockSize, blocksPerIP ui
 	if pool == nil || pool.Deterministic == nil {
 		return 0, 0, 0, "", false
 	}
+	// #15675: no-translation + deterministic is rejected at strict
+	// compile; never emit mode-2 fields for it on the tolerant path.
+	if pool.PortNoTranslation {
+		return 0, 0, 0, "", false
+	}
 	det := pool.Deterministic
 	if det.BlockSize <= 0 || det.HostAddress == "" {
 		return 0, 0, 0, "", false
