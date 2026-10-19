@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 
@@ -43,6 +44,145 @@ import (
 // overlays are supplied by the daemon from its live feed manager: passing nil
 // here would make every declared binding unresolved, collapse an entire policy
 // side to the unsupported-address sentinel, and hide static sibling changes.
+
+// canonicalResolvedRule returns the fingerprint-normalized copy of a resolved
+// rule (#15666). The fingerprint answers one question: did the RESOLVED
+// verdict-relevant content of this policy change? Runtime and bookkeeping
+// fields that never decide a verdict must therefore not move the hash:
+//
+//   - PolicyID is a positional runtime slot: inserting, deleting, or
+//     reordering earlier policies changes it without changing behavior.
+//   - LogSessionInit / LogSessionClose gate only the per-policy SYSLOG
+//     records; toggling `then log` re-labels logging, it does not change
+//     whether a session is permitted.
+//   - SchedulerName / Inactive: PolicyResolvedFingerprints is built with
+//     activeState=nil, so any named scheduler stamps Inactive=true. Scheduler
+//     transitions are a separate gate (policySchedulerBecameInactive owns
+//     the active->inactive verdict change, evaluated against live scheduler
+//     state), so a name or liveness flip must not double-fire here.
+//   - RuleID carries identity only; the fingerprint map key already pins it.
+//
+// Match collections are SETS for verdict purposes — what the dataplane
+// matches is union membership — so each is canonicalized to sorted,
+// duplicate-free form. That includes ApplicationTerms: term order decides
+// only which overlapping term stamps the per-application inactivity
+// timeout (first-term-wins on the session), never the permit/deny/reject
+// verdict or the set of flows matched, so it is not resolved match content
+// for rematch purposes. MatchFromZone / MatchToZone are derived from the
+// plural sets (config.ScopeSingular) so normalizing the sets and
+// re-deriving the singulars keeps the two consistent.
+//
+// Everything else — action, match inversion flags, book IDs, literals,
+// expanded addresses, application terms' content, zone scope membership —
+// stays hashed, so a genuine referenced-object change (an address-set
+// tightening, an application redefinition) still moves the fingerprint.
+func canonicalResolvedRule(r PolicyRuleSnapshot) PolicyRuleSnapshot {
+	r.PolicyID = 0
+	r.RuleID = ""
+	r.LogSessionInit = false
+	r.LogSessionClose = false
+	r.SchedulerName = ""
+	r.Inactive = false
+	r.SourceAddresses = canonicalStringSet(r.SourceAddresses)
+	r.DestinationAddresses = canonicalStringSet(r.DestinationAddresses)
+	r.SourceBookIDs = canonicalBookIDSet(r.SourceBookIDs)
+	r.DestinationBookIDs = canonicalBookIDSet(r.DestinationBookIDs)
+	r.SourceLiterals = canonicalStringSet(r.SourceLiterals)
+	r.DestinationLiterals = canonicalStringSet(r.DestinationLiterals)
+	r.Applications = canonicalStringSet(r.Applications)
+	r.ApplicationTerms = canonicalApplicationTerms(r.ApplicationTerms)
+	r.MatchFromZones = canonicalStringSet(r.MatchFromZones)
+	r.MatchToZones = canonicalStringSet(r.MatchToZones)
+	r.MatchFromZone = config.ScopeSingular(r.MatchFromZones)
+	r.MatchToZone = config.ScopeSingular(r.MatchToZones)
+	return r
+}
+
+// canonicalStringSet returns a sorted, duplicate-free copy of in. Nil and
+// empty both canonicalize to nil so an absent dimension and an empty one
+// hash identically (they match identically in the dataplane).
+func canonicalStringSet(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(in)
+	sort.Strings(sorted)
+	out := sorted[:1]
+	for _, s := range sorted[1:] {
+		if s != out[len(out)-1] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// canonicalBookIDSet returns a sorted, duplicate-free copy of in.
+func canonicalBookIDSet(in []uint32) []uint32 {
+	if len(in) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(in)
+	slices.Sort(sorted)
+	out := sorted[:1]
+	for _, id := range sorted[1:] {
+		if id != out[len(out)-1] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// canonicalApplicationTerms returns the terms sorted by their JSON encoding
+// with duplicates removed. marshalApplicationTermKey cannot fail for this
+// plain-data struct; a failure is mapped to the empty key so the sort stays
+// total and deterministic rather than panicking on the commit path.
+func canonicalApplicationTerms(in []PolicyApplicationSnapshot) []PolicyApplicationSnapshot {
+	if len(in) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(in)
+	slices.SortFunc(sorted, func(a, b PolicyApplicationSnapshot) int {
+		return strings.Compare(marshalApplicationTermKey(a), marshalApplicationTermKey(b))
+	})
+	out := sorted[:1]
+	for _, term := range sorted[1:] {
+		if marshalApplicationTermKey(term) != marshalApplicationTermKey(out[len(out)-1]) {
+			out = append(out, term)
+		}
+	}
+	return out
+}
+
+func marshalApplicationTermKey(term PolicyApplicationSnapshot) string {
+	blob, err := json.Marshal(term)
+	if err != nil {
+		return ""
+	}
+	return string(blob)
+}
+
+// fingerprintResolvedRules hashes canonicalized rules per stable policy key:
+// every expanded slot of a policy contributes its canonical blob, sorted, so
+// the fingerprint is independent of slot order.
+func fingerprintResolvedRules(rules []PolicyRuleSnapshot) (map[string]string, bool) {
+	perKey := make(map[string][]string, len(rules))
+	for _, r := range rules {
+		blob, err := json.Marshal(canonicalResolvedRule(r))
+		if err != nil {
+			return nil, false
+		}
+		key := stablePolicyRuleID(r.FromZone, r.ToZone, r.Name)
+		perKey[key] = append(perKey[key], string(blob))
+	}
+	out := make(map[string]string, len(perKey))
+	for key, parts := range perKey {
+		sort.Strings(parts)
+		sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+		out[key] = hex.EncodeToString(sum[:])
+	}
+	return out, true
+}
+
 func PolicyResolvedFingerprints(cfg *config.Config, feedOverlay map[string][]string) map[string]string {
 	if cfg == nil {
 		return nil
@@ -67,26 +207,9 @@ func PolicyResolvedFingerprints(cfg *config.Config, feedOverlay map[string][]str
 	// the pre-quarantine config, so policy-rematch never re-evaluates
 	// live sessions of the dropped/narrowed rule.
 	rules, _ = policySnapshotAfterZoneQuarantine(cfg, rules)
-	// A policy expanded into several rule slots (application-set expansion)
-	// contributes every slot, sorted, so the fingerprint is order-independent.
-	perKey := make(map[string][]string, len(rules))
-	for _, r := range rules {
-		// PolicyID is a positional runtime slot, not resolved policy content.
-		// Inserting, deleting, or reordering earlier policies can change it
-		// without changing this policy's behavior.
-		r.PolicyID = 0
-		blob, err := json.Marshal(r)
-		if err != nil {
-			return nil
-		}
-		key := stablePolicyRuleID(r.FromZone, r.ToZone, r.Name)
-		perKey[key] = append(perKey[key], string(blob))
-	}
-	out := make(map[string]string, len(perKey))
-	for key, parts := range perKey {
-		sort.Strings(parts)
-		sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-		out[key] = hex.EncodeToString(sum[:])
+	out, ok := fingerprintResolvedRules(rules)
+	if !ok {
+		return nil
 	}
 	return out
 }
@@ -112,11 +235,15 @@ func PolicyResolvedIdentityStrippedFingerprints(cfg *config.Config, feedOverlay 
 	// must be absent here too, or rename-ancestry validation could infer
 	// continuity for a rule the helper no longer enforces.
 	rules, _ = policySnapshotAfterZoneQuarantine(cfg, rules)
+	// Identity-stripping runs on top of the same canonicalization as
+	// PolicyResolvedFingerprints (#15666): non-verdict fields and match-set
+	// order must not break rename continuity either. The key is still taken
+	// from the rule BEFORE stripping, so an unrelated add/delete never mints
+	// a shared "" key.
 	perKey := make(map[string][]string, len(rules))
 	for _, rule := range rules {
 		key := stablePolicyRuleID(rule.FromZone, rule.ToZone, rule.Name)
-		rule.RuleID = ""
-		rule.PolicyID = 0
+		rule = canonicalResolvedRule(rule)
 		rule.Name = ""
 		rule.FromZone = ""
 		rule.ToZone = ""
