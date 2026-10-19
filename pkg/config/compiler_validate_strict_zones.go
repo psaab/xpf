@@ -1336,14 +1336,24 @@ func validateZoneInterfacesNonEmptyStrict(tree *ConfigTree) error {
 			if zonesNode.Name() != "zones" {
 				continue
 			}
+			var zoneBodies []struct {
+				name string
+				node *Node
+			}
 			for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
-				if hasPackedZoneInterfaces13108(inst.node.Children) {
-					return fmt.Errorf(
-						"security zone %q has a packed `interfaces` resolving run; "+
-							"the interface body is ambiguous with zone-level properties — "+
-							"rewrite the stanza using explicit blocks",
-						inst.name)
-				}
+				zoneBodies = append(zoneBodies, struct {
+					name string
+					node *Node
+				}{inst.name, inst.node})
+			}
+			// #15668: same gate for the management functional zone.
+			for _, mgmt := range managementFunctionalZoneInstances15668(zonesNode) {
+				zoneBodies = append(zoneBodies, struct {
+					name string
+					node *Node
+				}{"management", mgmt})
+			}
+			for _, inst := range zoneBodies {
 				for _, prop := range inst.node.Children {
 					if prop.Name() != "interfaces" {
 						continue
@@ -1453,7 +1463,26 @@ func validateZoneInterfacePackedTailStrict(tree *ConfigTree) error {
 			if zonesNode.Name() != "zones" {
 				continue
 			}
+			var zoneBodies []struct {
+				name string
+				node *Node
+			}
 			for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
+				zoneBodies = append(zoneBodies, struct {
+					name string
+					node *Node
+				}{inst.name, inst.node})
+			}
+			// #15668: the management functional zone compiles into zone
+			// "management" through the same body compiler, so its
+			// interfaces stanzas take the same packed-tail gate.
+			for _, mgmt := range managementFunctionalZoneInstances15668(zonesNode) {
+				zoneBodies = append(zoneBodies, struct {
+					name string
+					node *Node
+				}{"management", mgmt})
+			}
+			for _, inst := range zoneBodies {
 				if hasPackedZoneInterfaces13108(inst.node.Children) {
 					return fmt.Errorf(
 						"security zone %q has a packed `interfaces` resolving run; "+
