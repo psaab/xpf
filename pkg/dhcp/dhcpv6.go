@@ -630,9 +630,27 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 		rebind := mode == exchangeRebind
 		// Renew/rebind echo the actual held IA_NA/IA_PD, so use only the
 		// client-id + ORO modifiers — NOT the acquisition IA_PD hint
-		// (which would merge a hint prefix into our real IA_PD).
+		// (which would merge a hint prefix into our real IA_PD). When no
+		// PD is held but ia-pd is configured, buildV6RenewMessage
+		// re-requests the delegation with an empty IA_PD carrying this
+		// hint instead (#15069).
 		renewMods := m.buildDHCPv6RenewModifiers(ifaceName, v6opts)
-		msg, err := buildV6RenewMessage(client.InterfaceAddr(), prev, prevPDs, rebind, renewMods)
+		var (
+			iaTypes []string
+			pdHint  *dhcpv6.OptIAPrefix
+		)
+		if v6opts != nil {
+			iaTypes = v6opts.IATypes
+			if n, ok := pdHintPrefixLength(ifaceName, v6opts.PDPrefLen); ok {
+				pdHint = &dhcpv6.OptIAPrefix{
+					Prefix: &net.IPNet{
+						IP:   net.IPv6zero,
+						Mask: net.CIDRMask(n, 128),
+					},
+				}
+			}
+		}
+		msg, err := buildV6RenewMessage(client.InterfaceAddr(), prev, prevPDs, rebind, renewMods, iaTypes, pdHint)
 		if err != nil {
 			return nil, fmt.Errorf("DHCPv6 build %s: %w", mode, err)
 		}
@@ -1104,8 +1122,9 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 
 // buildDHCPv6RenewModifiers constructs the modifiers for a RENEW/REBIND
 // message: the persistent client-id and the requested-option list, but
-// NOT the IA_NA/IA_PD options (the renew echoes the held bindings, which
-// buildV6RenewMessage adds explicitly). Reusing buildDHCPv6Modifiers here
+// NOT the IA_NA/IA_PD options (buildV6RenewMessage adds the held-binding
+// echo, or the empty re-request IA_PD when no delegation is held and
+// ia-pd is configured, #15069). Reusing buildDHCPv6Modifiers here
 // would merge the acquisition IA_PD hint into our real IA_PD (#2994).
 func (m *Manager) buildDHCPv6RenewModifiers(ifaceName string, opts *DHCPv6Options) []dhcpv6.Modifier {
 	var mods []dhcpv6.Modifier

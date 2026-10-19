@@ -60,7 +60,7 @@ func v6TeardownPrev() (*Lease, []DelegatedPrefix) {
 func v6TeardownRequest(t *testing.T, prev *Lease, pds []DelegatedPrefix, rebind bool) *dhcpv6.Message {
 	t.Helper()
 	hw := net.HardwareAddr{0x02, 0, 0, 0, 0, 1}
-	req, err := buildV6RenewMessage(hw, prev, pds, rebind, []dhcpv6.Modifier{dhcpv6.WithClientID(v6TeardownClientDUID)})
+	req, err := buildV6RenewMessage(hw, prev, pds, rebind, []dhcpv6.Modifier{dhcpv6.WithClientID(v6TeardownClientDUID)}, nil, nil)
 	if err != nil {
 		t.Fatalf("build renew/rebind: %v", err)
 	}

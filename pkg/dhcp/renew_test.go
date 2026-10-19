@@ -95,7 +95,7 @@ func TestBuildV6RenewMessage(t *testing.T) {
 	}
 
 	t.Run("renew echoes server-id and bindings", func(t *testing.T) {
-		msg, err := buildV6RenewMessage(hw, prev, prevPDs, false, nil)
+		msg, err := buildV6RenewMessage(hw, prev, prevPDs, false, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +114,7 @@ func TestBuildV6RenewMessage(t *testing.T) {
 	})
 
 	t.Run("rebind omits server-id", func(t *testing.T) {
-		msg, err := buildV6RenewMessage(hw, prev, prevPDs, true, nil)
+		msg, err := buildV6RenewMessage(hw, prev, prevPDs, true, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
