@@ -964,7 +964,8 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	// pam_faillock state when their common-auth stack is the supported Debian
 	// baseline. Unknown host PAM stacks remain administrator-owned and are
 	// reported without changing them.
-	if err := applySSHPAMFaillock(); err != nil {
+	faillockInstalled, err := applySSHPAMFaillockChanged()
+	if err != nil {
 		if errors.Is(err, errSSHPAMFaillockUnsupported) {
 			slog.Warn("SSH cross-connection password lockout not applied; host PAM stack is not the supported Debian baseline",
 				"err", err)
@@ -972,6 +973,24 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 			return fmt.Errorf("apply SSH cross-connection password lockout: %w", err)
 		}
 	}
+	// #14973: if this apply changed common-auth (installed or upgraded the
+	// managed faillock rules) and the apply as a whole fails, strip those
+	// rules again so a failed apply leaves no lockout policy behind — the
+	// same posture as revertDropIn for the sshd drop-in. Keyed on the final
+	// named result so every failure site is covered without per-site
+	// wiring: direct returns (content-build, legacy/remove errors) set
+	// retErr before returning, and the validate/reload paths join into
+	// retErr via fail(). A nested recovery apply (live-config repair) is a
+	// separate invocation with its own faillockInstalled, so it never
+	// strips on behalf of an outer failure, and stripping is a no-op when
+	// this apply changed nothing (pre-existing admin faillock survives).
+	defer func() {
+		if retErr != nil {
+			if serr := stripSSHPAMFaillockOnRollback(faillockInstalled); serr != nil {
+				retErr = errors.Join(retErr, serr)
+			}
+		}
+	}()
 	content, contentErr := buildSSHDConfigErr(ssh)
 	if contentErr != nil {
 		// #14111: a nonempty algorithm restriction that filters to nothing
@@ -980,7 +999,9 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 		// silently revert sshd to its built-in algorithm defaults; leaving
 		// the previously installed drop-in in force and reporting the
 		// error keeps the last known restriction until the config is fixed.
-		return fmt.Errorf("render sshd config: %w", contentErr)
+		// naked return semantics: retErr is non-nil (contentErr joined),
+		// so the deferred #14973 faillock rollback fires.
+		return fmt.Errorf("render sshd config: %w", errors.Join(contentErr, retErr))
 	}
 	if content == "" {
 		if live := d.liveConfig12169(); live != nil && live.System.Services != nil &&
