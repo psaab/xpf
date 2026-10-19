@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Stop reporting authoritative zero traffic for VLAN subinterfaces
+    in userspace mode: ReadInterfaceCounters resolved only the exact
+    BindingStatus.Ifindex, which the helper sets solely on the parent
+    physical netdev, so every ge-0/0/0.<vlan> read as (0,0,0,0) with
+    no error. A VLAN child now resolves through the retained snapshot
+    to its parent binding's aggregated counters, and an ifindex no
+    binding or snapshot parent covers fails closed with an error
+    (REST rows flag Unavailable, Prometheus omits the sample and bumps
+    the counter-read-error metric) instead of a confident zero. A
+    directly bound idle interface still returns its real zero (#15656).
   * Fix the WireGuard per-peer underlay PTB test failing on master
     (0 vs 1425): the #14373 degenerate-key hydrate gate correctly
     drops tunnel rows whose peer keys are repeated-byte placeholders,

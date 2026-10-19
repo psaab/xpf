@@ -3,7 +3,9 @@
 // Contract:
 //   - ReadInterfaceCounters sums RX/TX packets/bytes across all cached helper
 //     bindings for the requested ifindex (multi-queue).
-//   - Unknown ifindex reads as zero with no error (idle interface).
+//   - An ifindex no binding covers fails closed with an error (#15656);
+//     a VLAN subinterface resolves to its parent binding (see
+//     vlan_subinterface_counters_15656_test.go).
 //   - No cached helper status fails closed with an error so callers do not emit
 //     confident zeros when counters cannot be read.
 //   - The published LegacyDataPlaneAdapter delegates to Manager rather than
@@ -50,15 +52,18 @@ func TestReadInterfaceCountersAggregatesBindings13273(t *testing.T) {
 	}
 }
 
+// #15656 supersedes the #13273 "unknown ifindex = authoritative zero"
+// expectation: an ifindex no binding covers (and no snapshot VLAN parent
+// resolves) must fail closed, never report success+zero.
 func TestReadInterfaceCountersUnknownIfindexZero13273(t *testing.T) {
 	m := New()
 	seedStatus13273(m, ProcessStatus{PID: 1234, Bindings: []BindingStatus{{Ifindex: 7, RXPackets: 10}}})
 	got, err := NewLegacyDataPlaneAdapter(m).ReadInterfaceCounters(999)
-	if err != nil {
-		t.Fatalf("ReadInterfaceCounters(999): %v", err)
+	if err == nil {
+		t.Fatalf("ReadInterfaceCounters(999) = %+v, nil error; want fail-closed error (#15656)", got)
 	}
 	if got != (dataplane.InterfaceCounterValue{}) {
-		t.Fatalf("ReadInterfaceCounters(999) = %+v, want zero", got)
+		t.Fatalf("ReadInterfaceCounters(999) = %+v on error, want zero value", got)
 	}
 }
 
