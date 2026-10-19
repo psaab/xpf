@@ -661,7 +661,29 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 					}},
 			}},
 		}},
-		"dns": {desc: "DNS service", children: nil},
+		// #15698: model the dns-proxy subtree so SetPath/DeletePath and
+		// tab-completion treat dns and dns-proxy as containers. Bare
+		// `set system services dns` still works: it terminates at the dns
+		// node as a flag leaf. The proxy runtime is not implemented, so
+		// these leaves are accepted for vSRX import compatibility and the
+		// compiler records DNSProxyConfigured for the commit warning.
+		"dns": {desc: "DNS service", children: map[string]*schemaNode{
+			"dns-proxy": {desc: "DNS proxy/forwarder (accepted but NOT served — commit warns, see docs/next-features/dns-proxy.md)", children: map[string]*schemaNode{
+				"interface":      {desc: "DNS proxy listening interface", args: 1, multi: true, placeholder: "<interface-name>", children: nil},
+				"default-domain": {desc: "DNS proxy default domain", args: 1, placeholder: "<domain>", valueType: ValueHostname, valueDesc: "Default domain (e.g. example.net or * for all)", valueExamples: []string{"example.net", "*"}, children: nil},
+				"forwarders":     {desc: "DNS proxy upstream forwarders", children: map[string]*schemaNode{
+					// A wildcard value slot: each child node is one forwarder
+					// address (`forwarders { 1.1.1.1; }`, keys=[1.1.1.1]).
+					// The container wrapper lets the hierarchical and flat
+						// spellings converge on the same child shape.
+				}, wildcard: &schemaNode{desc: "Forwarder address", placeholder: "<address>", children: nil}},
+				"view": {desc: "DNS proxy view (accepted but NOT served)", wildcard: &schemaNode{desc: "View name", placeholder: "<view-name>", children: map[string]*schemaNode{
+					"default-domain": {desc: "View default domain", args: 1, placeholder: "<domain>", children: nil},
+					"forwarders":     {desc: "View upstream forwarders", children: map[string]*schemaNode{}, wildcard: &schemaNode{desc: "Forwarder address", placeholder: "<address>", children: nil}},
+				}}},
+				"cache-size": {desc: "DNS proxy cache size", args: 1, placeholder: "<size>", children: nil},
+			}},
+		}},
 		// packedTail (#6821): compileDHCPLocalServer reads this container's
 		// packed tail (`dhcp-local-server dhcp-socket-type udp;`), so the
 		// walker must validate the same expansion. Without the pairing the

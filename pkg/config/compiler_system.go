@@ -1106,8 +1106,12 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			}
 			sys.Services.NetconfSSH = true
 		}
-		// DNS service
-		if dnsNode := svcNode.FindChild("dns"); dnsNode != nil {
+		// DNS service (#15698: iterate every `dns` sibling — a bare
+		// `set system services dns` leaf beside a braced dns container
+		// is a legitimate two-node shape, and FindChild alone could
+		// return the bare leaf and miss the proxy underneath it).
+
+		for _, dnsNode := range svcNode.FindChildren("dns") {
 			if sys.Services == nil {
 				sys.Services = &SystemServicesConfig{}
 			}
@@ -1576,10 +1580,27 @@ func compileSystemDataplaneType(node *Node) (string, error) {
 	return dpType, nil
 }
 
+// hasDNSProxyChild reports whether a `dns` node carries a `dns-proxy`
+// stanza in any authored shape (#15698): as a real child (the braced
+// spelling and, after the schema model, the flat-set spelling) or packed
+// onto the dns node's own keys (`dns dns-proxy ...` collapsed onto one
+// node, or a bare `dns dns-proxy` leaf). Checking only Children missed
+// the packed shapes, so the commit warning for the unimplemented proxy
+// runtime was silently skipped for those spellings.
 func hasDNSProxyChild(node *Node) bool {
+	for _, k := range node.Keys[1:] {
+		if k == "dns-proxy" {
+			return true
+		}
+	}
 	for _, child := range node.Children {
 		if child.Name() == "dns-proxy" {
 			return true
+		}
+		for _, k := range child.Keys[1:] {
+			if k == "dns-proxy" {
+				return true
+			}
 		}
 	}
 	return false
