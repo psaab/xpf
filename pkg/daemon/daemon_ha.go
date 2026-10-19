@@ -1479,11 +1479,15 @@ func (d *Daemon) reconcileRGState() {
 	// Evaluate per-RG readiness for the takeover gate.
 	noRethVRRP := d.isNoRethVRRP()
 
-	// Check fabric readiness — only relevant when peer is alive.
+	// Check fabric readiness — only relevant when peer is alive. Either
+	// populated fabric suffices: fab1 is a fully forwarding-capable
+	// secondary, so fab0-down/fab1-up must not block takeover (#15683).
+	// Single-fabric nodes never set fabric1Populated, so this reduces to
+	// the fab0-only gate there.
 	fabricReady := true
 	if d.cluster.PeerAlive() {
 		d.fabricMu.RLock()
-		fp := d.fabricPopulated
+		fp := d.fabricPopulated || d.fabric1Populated
 		d.fabricMu.RUnlock()
 		if !fp {
 			d.triggerFabricRefresh()
