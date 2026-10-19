@@ -1220,7 +1220,11 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	// #5683: once the running steering-rule count reaches the number of
 	// lookup/terminator pairs that fit in the PBR window, no further term can
 	// be materialized. buildPBRFromFilter enforces the same remaining budget
-	// before expanding a Cartesian product.
+	// before expanding a Cartesian product. overflowed is set only when a
+	// build actually exhausted the window; on genuine exhaustion the
+	// remaining terms are re-scanned so the degraded error names (and the
+	// degraded count includes) every skipped term rather than only the
+	// one that crossed (#15271 B21-02).
 	overflowed := false
 	build := func(atts []pbrAttachment, filters map[string]*config.FirewallFilter, family int) {
 		for _, att := range atts {
@@ -1309,7 +1313,19 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 			rules = append(rules, r...)
 			errs = append(errs, e...)
 			if of {
+				// #15271 B21-02: the window is genuinely full, so no
+				// later term, attachment, or family can materialize a
+				// rule. Account for every one of them as skipped so the
+				// degraded error and count name all that is lost — not
+				// only the term that crossed the budget. The rescan is
+				// cheap: it reuses the same budget-0 accounting pass
+				// (every steering term is over budget at once) without
+				// expanding any Cartesian product.
 				overflowed = true
+				accountPBRWindowExhausted(&errs, atts, att.Filter, filters, family, tableIDs, pls)
+				if family == unix.AF_INET {
+					accountPBRWindowExhausted(&errs, inet6Attached, "", fw.FiltersInet6, unix.AF_INET6, tableIDs, pls)
+				}
 				return
 			}
 		}
@@ -1354,6 +1370,39 @@ func PBRBuildRulesAndStats(cfg *config.Config) (rules []PBRRule, degraded int) {
 		return rules, len(u.Unwrap())
 	}
 	return rules, 1
+}
+
+// accountPBRWindowExhausted records one degraded (overflow) error for every
+// routing-instance term that the full PBR window leaves unbuilt, so the
+// degraded error and count name all that is lost rather than only the term
+// that crossed the budget (#15271 B21-02). It walks the attachments of one
+// family in build order; skipFilter names the filter of the attachment whose
+// build triggered the exhaustion — that attachment and every later one are
+// accounted, except that the triggering filter's own remaining terms were
+// already each accounted by its partial build (an over-budget term there
+// returns one error per remaining steering term when budget hits zero
+// exactly), so accounting resumes at the NEXT attachment. The accounting
+// itself expands no Cartesian product: with budget 0 every steering term
+// fails the size check immediately, and the returned rules are discarded.
+// Loopback and VRF-member attachments are not special-cased here: their
+// steering was already doomed by those arms, and the overflow error is an
+// additional accurate description of why the window never reached them.
+func accountPBRWindowExhausted(errs *[]error, atts []pbrAttachment, skipFilter string, filters map[string]*config.FirewallFilter, family int, tableIDs map[string]int, pls map[string]*config.PrefixList) {
+	pastTrigger := skipFilter == ""
+	for _, att := range atts {
+		if !pastTrigger {
+			if att.Filter == skipFilter {
+				pastTrigger = true
+			}
+			continue
+		}
+		filter := filters[att.Filter]
+		if filter == nil {
+			continue
+		}
+		_, e, _ := buildPBRFromFilter(filter, family, tableIDs, pls, 0)
+		*errs = append(*errs, e...)
+	}
 }
 
 // pbrAttachment binds a firewall filter to the Linux ingress interface it is
@@ -1467,8 +1516,11 @@ func sortAttachments(atts []pbrAttachment) {
 // WHOLE (fail-safe under-steer to the main table) with a degraded error rather
 // than materialized and then truncated (#5683). This makes the pre-cap
 // memory/CPU blow-up impossible: the full product is never allocated. The
-// returned bool is true when such an overflow drop occurred, signalling the
-// caller to stop feeding further attachments (the window is full).
+// returned bool is true only when the running total has actually reached the
+// budget (len(rules) >= budget) after a drop, signalling the caller that the
+// window is full; a term dropped while room remains returns false so later
+// terms and families are still built (#15271 B21-02).
+
 func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[string]int, pls map[string]*config.PrefixList, budget int) ([]PBRRule, []error, bool) {
 	var rules []PBRRule
 	var errs []error
@@ -1707,7 +1759,17 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 					"total stays within %d rules",
 				filter.Name, term.Name, pbrProductString(product), max(remaining, 0),
 				maxPBRSteeringRules, maxPBRSteeringRules))
-			return rules, errs, true
+			// #15271 B21-02: a single over-budget term does NOT mean the
+			// window is full. If the rules built so far still leave room
+			// (len(rules) < budget), later — smaller — terms can still
+			// fit, so skip only this term and keep building. Dropped terms
+			// were already appended to precedingTerminating above, so
+			// first-match shadowing for later terms is preserved. Only a
+			// genuinely exhausted window stops the build.
+			if len(rules) >= budget {
+				return rules, errs, true
+			}
+			continue
 		}
 
 		for _, t := range dscps {
