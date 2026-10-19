@@ -180,9 +180,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     let previous_reservation = sessions.entry_with_origin(&key);
     // #9412: the Copy fields read after the install, captured before
     // `into_session_install` consumes the entry. It carries the peer's stable
-    // RT_FLOW id (#5212) and close class (#9412) onto the install.
     let (entry_origin, entry_decision, leak_incarnation) =
         (entry.origin, entry.decision, entry.leak_incarnation);
+    let pptp_call_ids = entry.pptp_call_ids;
     let leak_key = entry.key.clone();
     if sessions.upsert_synced_with_origin(entry.into_session_install(now_ns), allow_replace_local) {
         if leak_incarnation != 0 {
@@ -282,6 +282,34 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
                 now_ns,
                 worker_id,
             );
+        }
+        // #15153 (B11-01): re-derive the PPTP association from the pair the
+        // shared entry still carries. A worker respawn / full reconcile
+        // replays only UpsertSynced (replicate_session_upsert, replay_late,
+        // and the #11360/#15105 repair re-read all funnel here), so without
+        // this the respawned worker holds the Pptp(H) session but no
+        // association to resolve GRE data to Pptp(H) — it falls to
+        // pre-#7699 unassociated/flowless handling. The import-time
+        // InstallPptpAssociation command cannot cover this: it is queued
+        // once per import on the OLD worker generation. Synthesized
+        // reverse companions carry pptp_call_ids 0, and a reverse key's
+        // endpoints are swapped, so gating on the forward Pptp(_)
+        // discriminator plus a decodable pair keeps this exact. The
+        // install is idempotent for an identical call and preserves a
+        // local control binding; a handle mismatch (pair decodes to a
+        // different handle than the key names) is not re-derived — that
+        // disagreement was already refused at HA import.
+        if let crate::session::TunnelDiscriminator::Pptp(handle) = key.discriminator {
+            if let Some(call) = crate::session::pptp::PptpCall::from_wire_call_ids_in_domain(
+                key.routing_domain,
+                pptp_call_ids,
+                key.src_ip,
+                key.dst_ip,
+            ) {
+                if call.handle() == handle {
+                    let _ = sessions.pptp_mut().install_synced_association(call, now_ns);
+                }
+            }
         }
         publish_worker_session_map_entry(
             session_map,

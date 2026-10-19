@@ -13294,3 +13294,263 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     assert_eq!(lenient, SyncedDeleteOutcome::Applied);
 }
 
+
+/// #15153 (B11-01): after a full reconcile / worker respawn, synced PPTP GRE
+/// sessions are replayed (UpsertSynced) but the PPTP call association that
+/// makes them matchable was not, so the call's GRE data was unassociated on
+/// the respawned worker. The shared entry still carries the verified pair
+/// (entry.pptp_call_ids, #14303), so handle_upsert_synced must re-derive it.
+///
+/// This cell seeds a PPTP forward entry in shared authority exactly as an
+/// HA import leaves it, drives the REAL bring-up replay
+/// (replay_preserved_sessions -> replay_synced_sessions ->
+/// replicate_session_upsert) into a fresh worker queue, drains it through
+/// the REAL apply_worker_commands into a FRESH SessionTable (the respawned
+/// worker), and asserts the worker resolves the call's GRE to Pptp(H).
+///
+/// FAIL-ON-REVERT: remove the re-derivation in handle_upsert_synced and the
+/// respawned worker holds the session but resolve_in_domain returns None.
+/// Controls: a non-PPTP entry replayed the same way gains no association,
+/// and a PPTP entry whose pair is absent (0) gains none either.
+#[test]
+fn v42_b11_01_replay_queues_pptp_association_15153() {
+    use std::collections::BTreeMap;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let src = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    let dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let call = crate::session::pptp::PptpCall::new(src, 0x1111, dst, 0x2222);
+    let handle = call.handle();
+
+    let pptp_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_GRE,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: 0,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::Pptp(handle),
+        routing_domain: 0,
+    };
+    // Control: an ordinary TCP entry replayed alongside.
+    let control_key = f4_key();
+
+    let mut coordinator = Coordinator::new();
+    // Seed the PPTP entry in shared authority (SyncImport origin + pair).
+    {
+        let mut entry = import_entry_9718(&pptp_key, 20000);
+        entry.key = pptp_key.clone();
+        entry.protocol = crate::ip_proto::PROTO_GRE;
+        entry.pptp_call_ids = call.to_wire_call_ids();
+        entry.decision.nat = crate::nat::NatDecision::default();
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .insert(pptp_key.clone(), entry);
+    }
+    f4_seed_shared_only(
+        &coordinator,
+        &control_key,
+        crate::nat::TranslatedTuple {
+            ip: "203.0.113.1".parse().unwrap(),
+            port: 20000,
+        },
+    );
+
+    let workers: BTreeMap<u32, Vec<crate::afxdp::BindingPlan>> =
+        BTreeMap::from([(0u32, Vec::new())]);
+    let queues = super::reconcile::bringup::replay_preserved_sessions(
+        &mut coordinator,
+        &workers,
+        &[],
+        crate::afxdp::bpf_map::SteeringMap {
+            fd: -1,
+            owners: &Default::default(),
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+        },
+    );
+    let commands = queues.get(&0).expect("one worker queue").clone();
+    {
+        let pending = crate::afxdp::worker_queue::lock_recover(&commands);
+        assert!(
+            pending.iter().any(|cmd| matches!(
+                cmd,
+                crate::afxdp::WorkerCommand::UpsertSynced(e) if e.key == pptp_key
+            )),
+            "fixture: the bring-up replay must queue the PPTP UpsertSynced"
+        );
+    }
+
+    // The respawned worker: a fresh SessionTable with no associations.
+    let mut worker_sessions = SessionTable::new();
+    assert_eq!(
+        worker_sessions.pptp().resolve_in_domain(0, dst, 0x2222),
+        None,
+        "fixture: the fresh worker must start unassociated"
+    );
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    // Drain in bounded slices exactly as the worker loop does.
+    for _ in 0..16 {
+        if crate::afxdp::worker_queue::lock_recover(&commands).is_empty() {
+            break;
+        }
+        crate::afxdp::session_glue::apply_worker_commands(
+            &commands,
+            &mut worker_sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &coordinator.forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            0,
+            &mut scratch,
+        );
+    }
+    assert!(
+        worker_sessions.entry_with_origin(&pptp_key).is_some(),
+        "the replayed PPTP session must be installed on the respawned worker"
+    );
+    assert_eq!(
+        worker_sessions.pptp().resolve_in_domain(0, dst, 0x2222),
+        Some(handle),
+        "#15153: the respawned worker must resolve the call's GRE (dst, \
+         hi_call_id) to Pptp(H); without the re-derivation it holds the \
+         session but no association and forwards the data flowless"
+    );
+    assert_eq!(
+        worker_sessions.pptp().resolve_in_domain(0, src, 0x1111),
+        Some(handle),
+        "#15153: the reverse direction (src, lo_call_id) must resolve too"
+    );
+    assert_eq!(
+        worker_sessions.pptp().call_for_handle(handle),
+        Some(call),
+        "#15153: the re-derived association must be the imported call"
+    );
+
+    // Control: the non-PPTP replay installed its session and no association
+    // beyond the one PPTP call exists for unrelated aliases.
+    assert!(
+        worker_sessions.entry_with_origin(&control_key).is_some(),
+        "control: the ordinary replayed session must still install"
+    );
+    assert_eq!(
+        worker_sessions.pptp().resolve_in_domain(0, dst, 0x9999),
+        None,
+        "control: an unrelated call id must stay unassociated"
+    );
+}
+
+/// #15153 (B11-01), import leg: a refused InstallPptpAssociation push at HA
+/// import must become session-import repair debt on the forward key (and
+/// report AppliedRepairPending), not be silently discarded. When the queue
+/// prefix drains, the repair re-reads the shared entry and
+/// handle_upsert_synced re-derives the association.
+///
+/// FAIL-ON-REVERT: restore the discarded push_bounded in
+/// upsert_synced_session_with_policy and the import reports Applied with
+/// no repair debt; the worker never resolves the call.
+#[test]
+fn v42_b11_01_refused_pptp_push_records_repair_debt_15153() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    const WORKER_ID: u32 = 127;
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+    let src = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    let dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let call = crate::session::pptp::PptpCall::new(src, 0x1111, dst, 0x2222);
+    let handle = call.handle();
+    let pptp_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_GRE,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: 0,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::Pptp(handle),
+        routing_domain: 0,
+    };
+
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        WORKER_ID,
+        WorkerRuntimeRecord::for_test({ let mut h = gre1881_fake_worker_handle(); h.commands = commands.clone(); h }),
+        None,
+    );
+    // Fill the queue so all three pushes (forward, reverse, PPTP) refuse.
+    {
+        let mut pending = commands.lock().expect("worker commands");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+    }
+
+    let mut entry = import_entry_9718(&pptp_key, 20000);
+    entry.key = pptp_key.clone();
+    entry.protocol = crate::ip_proto::PROTO_GRE;
+    entry.pptp_call_ids = call.to_wire_call_ids();
+    entry.decision.nat = crate::nat::NatDecision::default();
+    let outcome = coordinator
+        .session_domain()
+        .upsert_synced_session_with_pptp(entry, Some(call));
+    assert_eq!(
+        outcome,
+        crate::afxdp::SyncedImportOutcome::AppliedRepairPending,
+        "#15153: a refused PPTP association push must report repair-pending, \
+         not collapse into Applied"
+    );
+    assert!(
+        crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "#15153: the refused PPTP push must latch repair debt on the worker"
+    );
+
+    // Drain through the real command + repair paths into a fresh worker.
+    let mut worker_sessions = SessionTable::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    for _ in 0..64 {
+        if commands.lock().expect("commands").is_empty()
+            && !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID)
+        {
+            break;
+        }
+        let results = crate::afxdp::session_glue::apply_worker_commands(
+            &commands,
+            &mut worker_sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &coordinator.forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            WORKER_ID,
+            &mut scratch,
+        );
+        let mut stale = Vec::new();
+        let mut deleted = Vec::new();
+        crate::afxdp::session_glue::apply_session_import_repairs(
+            &results.session_import_repairs,
+            &coordinator.sessions.synced,
+            &mut worker_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &coordinator.forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            &mut stale,
+            &mut deleted,
+            WORKER_ID,
+        );
+    }
+    assert!(
+        !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "the PPTP repair debt must clear after the worker applies it"
+    );
+    assert_eq!(
+        worker_sessions.pptp().resolve_in_domain(0, dst, 0x2222),
+        Some(handle),
+        "#15153: after repair the worker must resolve the call's GRE to Pptp(H)"
+    );
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+}
