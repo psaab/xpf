@@ -250,6 +250,42 @@ pub(super) fn flowless_base_resolution(
     fabric_ingress_scope_ifindex: Option<i32>,
     route_override: Option<&str>,
 ) -> Option<FlowlessBaseResolution> {
+    // #15117: on-link NDP (ICMPv6 133-137, hop 255) to a NAT external must
+    // reach the kernel proxy-NDP, not be destination-translated to the
+    // internal host. Skip pre-routing NAT entirely and resolve the
+    // ORIGINAL destination locally when the NAT external / interface-NAT
+    // / local table owns it; otherwise fall through untranslated so the
+    // normal FIB/policy path adjudicates it (never a rewrite).
+    if super::frag_assoc::is_ndp_hop255(nat_wire_info) {
+        if let Some(local) =
+            flowless_local_resolution(forwarding, meta, l3_flow.dst_ip, route_override)
+        {
+            let resolution =
+                enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local);
+            return Some(FlowlessBaseResolution {
+                resolution,
+                nat: NatDecision::default(),
+                dnat_counter: None,
+            });
+        }
+        let resolution = enforce_ha_resolution_snapshot(
+            forwarding,
+            ha_state,
+            now_secs,
+            lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                l3_flow.dst_ip,
+                route_override,
+            )
+            .resolution,
+        );
+        return Some(FlowlessBaseResolution {
+            resolution,
+            nat: NatDecision::default(),
+            dnat_counter: None,
+        });
+    }
     let (nat, dnat_counter) = match super::frag_assoc::flowless_pre_routing_destination_nat(
         forwarding,
         l3_flow,

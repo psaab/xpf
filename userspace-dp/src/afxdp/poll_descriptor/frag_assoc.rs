@@ -425,6 +425,8 @@ pub(super) struct FlowlessNatWireInfo {
     is_non_first_fragment: bool,
     ipv6_fragment_next_header: Option<u8>,
     vrrp_version: Option<u8>,
+    /// #15117: ICMPv6 type (133-137) when hop limit is 255, else None.
+    ndp_type_hop255: Option<u8>,
 }
 
 #[inline]
@@ -453,6 +455,7 @@ pub(super) fn flowless_nat_wire_info(frame: &[u8], meta: UserspaceDpMeta) -> Flo
                 is_non_first_fragment,
                 ipv6_fragment_next_header: None,
                 vrrp_version,
+                ndp_type_hop255: None,
             }
         }
         libc::AF_INET6 => {
@@ -470,6 +473,22 @@ pub(super) fn flowless_nat_wire_info(frame: &[u8], meta: UserspaceDpMeta) -> Flo
                     _ => None,
                 }
             };
+            // #15117: NDP (133-137) with hop limit 255 must not be
+            // destination-translated. Hop limit is byte 7 of the IPv6
+            // header; the ICMPv6 type is the first byte at the L4 offset.
+            let ndp_type_hop255 = if protocol == Some(crate::ip_proto::PROTO_ICMPV6)
+                && packet.get(7) == Some(&255)
+            {
+                match walk.outcome {
+                    crate::afxdp::frame::ExtChainOutcome::L4(l4_off, _) => frame
+                        .get(l4_off)
+                        .copied()
+                        .filter(|t| (133..=137).contains(t)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             FlowlessNatWireInfo {
                 family: meta.addr_family,
                 protocol,
@@ -479,10 +498,17 @@ pub(super) fn flowless_nat_wire_info(frame: &[u8], meta: UserspaceDpMeta) -> Flo
                 is_non_first_fragment: walk.non_first_fragment_offset_seen,
                 ipv6_fragment_next_header,
                 vrrp_version: None,
+                ndp_type_hop255,
             }
         }
         _ => FlowlessNatWireInfo::default(),
     }
+}
+
+/// #15117: true for an on-link NDP message (ICMPv6 133-137, hop 255).
+#[inline]
+pub(super) fn is_ndp_hop255(wire: FlowlessNatWireInfo) -> bool {
+    wire.ndp_type_hop255.is_some()
 }
 
 #[inline]
@@ -496,6 +522,7 @@ fn flowless_destination_rewrite_supported(
     if decision.rewrite_dst.is_none()
         || decision.rewrite_dst_port.is_some()
         || wire.ah_sighted
+        || wire.ndp_type_hop255.is_some()
         || protocol == crate::ip_proto::PROTO_ESP
         || (wire.family == libc::AF_INET6 as u8
             && wire.is_non_first_fragment
@@ -1559,3 +1586,7 @@ pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
 #[cfg(test)]
 #[path = "flowless_icmp_nat_tests_11509.rs"]
 mod flowless_icmp_nat_tests_11509;
+
+#[cfg(test)]
+#[path = "flowless_ndp_nat_tests_15117.rs"]
+mod flowless_ndp_nat_tests_15117;

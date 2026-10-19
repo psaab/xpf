@@ -3534,6 +3534,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let resolution_target =
                             parse_packet_destination_from_frame(packet_frame, meta)
                                 .unwrap_or(flow.dst_ip);
+                        // #15117: on-link NDP (ICMPv6 133-137, hop 255) to
+                        // a v6 static-NAT / IP-only DNAT external must reach
+                        // the kernel proxy-NDP untranslated. Suppress every
+                        // destination translation for such a packet: the
+                        // resolution below then runs on the ORIGINAL
+                        // destination, so a locally owned external resolves
+                        // LocalDelivery and any other destination takes the
+                        // normal FIB/policy path — never a rewrite. Echo
+                        // (128) and off-link (hop != 255) are unaffected.
+                        let ndp_hop255 =
+                            crate::afxdp::frame::is_ndp_hop255_frame(packet_frame, meta);
                         // #6478: the cluster-peer return fast path was REMOVED.
                         // It fast-pathed session-less fabric-ingress TCP
                         // SYN-ACK / ACK / ICMP echo-reply forms into a NAT-less
@@ -3613,22 +3624,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // ICMP-type-constrained entry (fail closed).
                         let dnat_packet_icmp = policy_packet_icmp(packet_frame, meta);
                         // #6473 (Junos order): static DNAT first.
-                        let static_dnat_decision = worker_ctx
-                            .forwarding
-                            .static_nat
-                            .match_dnat_with_counter_scoped(
-                                resolution_target,
-                                flow.forward_key.dst_port,
-                                // #3435: gate the inbound static DNAT on the
-                                // packet SOURCE against `match source-address`.
-                                Some(flow.forward_key.src_ip),
-                                ingress_zone_name,
-                                ingress_ifname_dnat,
-                                ingress_ri_dnat,
-                            );
+                        // #15117: suppressed for on-link NDP (see above).
+                        let static_dnat_decision = if ndp_hop255 {
+                            None
+                        } else {
+                            worker_ctx
+                                .forwarding
+                                .static_nat
+                                .match_dnat_with_counter_scoped(
+                                    resolution_target,
+                                    flow.forward_key.dst_port,
+                                    Some(flow.forward_key.src_ip),
+                                    ingress_zone_name,
+                                    ingress_ifname_dnat,
+                                    ingress_ri_dnat,
+                                )
+                        };
                         let mut persistent_dnat = None;
                         let mut persistent_dnat_denied = false;
-                        if static_dnat_decision.is_none() {
+                        if !ndp_hop255 && static_dnat_decision.is_none() {
                             for rule in &worker_ctx.forwarding.source_nat_rules {
                                 if !rule.persistent_nat || !rule.pool_mode {
                                     continue;
@@ -3692,7 +3706,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // it must not fall through to NPTv6/NAT64/policy as
                         // untranslated transit.
                         let mut dnat_poisoned = false;
-                        let dnat_decision = if static_dnat_decision.is_none()
+                        let dnat_decision = if !ndp_hop255
+                            && static_dnat_decision.is_none()
                             && persistent_dnat.is_none()
                             && !worker_ctx.forwarding.dnat_table.is_empty()
                         {
@@ -3750,7 +3765,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // If dst matches an external NPTv6 prefix, translate the
                         // destination to the internal prefix. This is stateless
                         // prefix translation (RFC 6296) -- no L4 checksum update.
-                        let nptv6_inbound = if pre_routing_dnat.is_none() {
+                        let nptv6_inbound = if !ndp_hop255 && pre_routing_dnat.is_none() {
                             if let IpAddr::V6(mut dst_v6) = resolution_target {
                                 // #5176: gate NPTv6 inbound on the packet's
                                 // INGRESS zone so a rule-set scoped `from zone X`
@@ -3798,7 +3813,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // fail-OPEN that could leak it upstream on a default
                         // IPv6 route. Now MatchUnavailable fails CLOSED (drop +
                         // counter); only NoPrefixMatch continues IPv6 routing.
-                        let nat64_match = if pre_routing_dnat.is_none() && nptv6_inbound.is_none() {
+                        let nat64_match = if !ndp_hop255 && pre_routing_dnat.is_none() && nptv6_inbound.is_none() {
                             if let IpAddr::V6(dst_v6) = resolution_target {
                                 // #5623: gate on SOURCE eligibility BEFORE any
                                 // NAT64 allocation/translation. RFC 6146 §3.5
