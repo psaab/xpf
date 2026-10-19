@@ -92,7 +92,13 @@ type compileOpts struct {
 	// undeclared child (or the Junos spellings an older binary dropped)
 	// still boots (#1960). Commit / commit-check stay strict.
 	lenientVRRPGroupChildren15046 bool
-
+	// lenientJunos9Secret15051 downgrades the #15051 malformed Junos
+	// `$9$` routing authentication-key rejection to a warning on
+	// the tolerant load / peer-sync paths. A config an older binary
+	// accepted (it installed the blob verbatim) must still BOOT
+	// (#1960); the blob is kept undecoded and the render belts treat
+	// it as an ordinary key. Commit / commit-check stay strict.
+	lenientJunos9Secret15051 bool
 
 	// lenientRenderUnsafeInterfaceNames (#9886) turns the render-unsafe
 	// interface-name gate (validateRenderUnsafeInterfaceNamesAST) from a hard
@@ -3462,6 +3468,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPTrackDuplicates:             true,
 		lenientVRRPAuthentication:              true,
 		lenientVRRPGroupChildren15046:          true,
+		lenientJunos9Secret15051:               true,
 		lenientRenderUnsafeInterfaceNames:      true,
 		lenientDeviceMap:                       true,
 		lenientPolicyMatchAddress:              true,

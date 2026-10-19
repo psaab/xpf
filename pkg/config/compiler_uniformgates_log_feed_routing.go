@@ -11,6 +11,16 @@ import "fmt"
 // order (invariant #7) are preserved. See runUniformGates.
 func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 
+	// #15051 (A20-01): decode Junos `$9$` routing authentication
+	// keys BEFORE every gate and renderer below reads them, so a
+	// migrated config installs the plaintext key Junos would use —
+	// not the obfuscated blob. Strict refuses a malformed `$9$`;
+	// lenient keeps the blob and warns (#1960).
+	if w, err := decodeJunos9AtCompile(cfg, opts.lenientJunos9Secret15051); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #9105: an `authentication-key` with no `authentication-type` renders the
 	// key in PLAINTEXT, and an ABSENT type is indistinguishable at the render
 	// site from a CHOSEN plaintext one. Strict refuses so the operator states
