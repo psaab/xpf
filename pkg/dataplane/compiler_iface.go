@@ -2187,7 +2187,7 @@ func applyTunnelHostInbound(dp DataPlane, cfg *config.Config, result *CompileRes
 				continue
 			}
 			var flag uint32
-			if tun.Mode == "gre" || tun.Mode == "" {
+			if tun.Mode == "gre" || tun.Mode == "ip6gre" || tun.Mode == "" {
 				flag = HostInboundGRE
 			}
 			if flag == 0 {
@@ -2236,25 +2236,20 @@ func applyTunnelHostInbound(dp DataPlane, cfg *config.Config, result *CompileRes
 		if zone == nil {
 			continue
 		}
-		var existing uint32
-		if zone.HostInboundTraffic != nil {
-			for _, svc := range zone.HostInboundTraffic.SystemServices {
-				if f, ok := HostInboundServiceFlags[svc]; ok {
-					existing |= f
-				}
-			}
-			for _, proto := range zone.HostInboundTraffic.Protocols {
-				if f, ok := HostInboundProtocolFlags[proto]; ok {
-					existing |= f
-				}
-			}
+		// Rebuild the full ZoneConfig exactly as programZoneMaps did
+		// (ZoneID, ScreenProfileID, host-inbound, TCPRst) so the full-entry
+		// SetZoneConfig overwrite does not zero ZoneID/ScreenProfileID
+		// (#15765). buildZoneConfig already skips the screen lookup for
+		// DroppedEnforcementChild zones; quarantined/poisoned zones are
+		// excluded above via excludedZones, so this never resurrects one.
+		zc, err := buildZoneConfig(zone, zoneName, zid, result)
+		if err != nil {
+			slog.Warn("tunnel host-inbound: skipping zone with unresolvable screen profile",
+				"zone", zoneName, "err", err)
+			continue
 		}
-		if existing&flags != flags {
-			merged := existing | flags
-			zc := ZoneConfig{HostInbound: merged}
-			if zone.TCPRst {
-				zc.TCPRst = 1
-			}
+		if zc.HostInbound&flags != flags {
+			zc.HostInbound |= flags
 			dp.SetZoneConfig(zid, zc)
 			slog.Info("auto-added host-inbound for tunnel transport",
 				"zone", zoneName, "flags", fmt.Sprintf("0x%x", flags))

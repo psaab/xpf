@@ -712,6 +712,14 @@ func (t *tunnelManager) reconcileAnchorMTULocked(tc *config.TunnelConfig, link n
 	slog.Info("tunnel anchor mtu set", "name", tc.Name, "mtu", want)
 }
 
+// needsIP6GREEncapLimitNone reports whether a newly created IPv6 GRE
+// kernel tunnel needs the `ip link set ... type ip6gre encaplimit none`
+// exec: IPv6 family with a GRE-kind mode ("gre", explicit "ip6gre", or
+// the "" default which Gretun also renders as ip6gre) (#15765).
+func needsIP6GREEncapLimitNone(mode string, isIPv6 bool) bool {
+	return isIPv6 && (mode == "gre" || mode == "ip6gre" || mode == "")
+}
+
 // buildKernelTunnelLink constructs the desired netlink link for the
 // legacy (non-anchor) kernel tunnel branch.
 func buildKernelTunnelLink(tc *config.TunnelConfig, localIP, remoteIP net.IP, ttl uint8, isIPv6 bool) netlink.Link {
@@ -905,7 +913,7 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 		// drop IPv6 packets with extension headers (RFC 7872). Runs
 		// only on a real (re)create — it is a per-create device attr
 		// and the 15s-bounded exec must not run per commit (#1884).
-		if isIPv6 && (tc.Mode == "gre" || tc.Mode == "") {
+		if needsIP6GREEncapLimitNone(tc.Mode, isIPv6) {
 			// Timeout-bounded (#1794/#1800): Apply runs under
 			// applyConfigLocked's applySem (daemon_apply.go
 			// ApplyTunnels), so a wedged `ip` would block every commit.
