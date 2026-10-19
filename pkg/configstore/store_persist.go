@@ -216,7 +216,8 @@ func (s *Store) Load() error {
 	if err != nil {
 		return err
 	}
-	if err := s.migrateActiveAPIAuthSecrets(tree, committed, rollbackChanged, activeHashOnDisk); err != nil {
+	migrationDeferred, err := s.migrateActiveAPIAuthSecrets(tree, committed, rollbackChanged, activeHashOnDisk)
+	if err != nil {
 		return err
 	}
 	if _, staged := s.readAPIAuthMigrationStaging(); rollbackChanged || staged {
@@ -235,8 +236,13 @@ func (s *Store) Load() error {
 			return fmt.Errorf("persist hashed rollback api-auth credentials: %w", ErrConfigDBUnreadable)
 		}
 	}
-	if err := s.convergeAPIAuthMigrationStaging(); err != nil {
-		return fmt.Errorf("complete api-auth rollback migration: %w: %v", ErrConfigDBUnreadable, err)
+	// #15273: while the active rewrite is deferred, keep the staging record
+	// and the pre-migration sidecar binding intact for the next boot; do not
+	// converge/delete staging or rebind the manifest to the in-memory hash.
+	if !migrationDeferred {
+		if err := s.convergeAPIAuthMigrationStaging(); err != nil {
+			return fmt.Errorf("complete api-auth rollback migration: %w: %v", ErrConfigDBUnreadable, err)
+		}
 	}
 	if err := s.migrateRescueAPIAuthSecrets(); err != nil {
 		return err
@@ -349,31 +355,63 @@ func (s *Store) loadRescueFallbackLocked() error {
 	return ErrConfigRescueFallback
 }
 
+// confirmFileExists reports whether a confirm.json file is present in the
+// store's .configdb dir. A stat error other than not-exist also reads as
+// present so the migration path fails closed (defers the active rewrite)
+// rather than assuming no record is at risk (#15273).
+func (s *Store) confirmFileExists() bool {
+	if s.db == nil {
+		return false
+	}
+	if _, err := os.Stat(s.db.confirmPath()); err == nil {
+		return true
+	} else if !os.IsNotExist(err) {
+		return true
+	}
+	return false
+}
+
+// apiAuthMigrationConfirmAlias returns the staging file's old->new hash
+// pair (old, new, ok). ok is false when no staging record is present.
+func (s *Store) apiAuthMigrationConfirmAlias() (string, string, bool) {
+	f, ok := s.readAPIAuthMigrationStaging()
+	if !ok {
+		return "", "", false
+	}
+	return f.OldHash, f.NewHash, true
+}
+
 // migrateActiveAPIAuthSecrets hashes active credentials while preserving a
 // pending confirm record and staging the exact rollback outputs before any
 // active-generation change. The staging record makes each durable boundary
 // restartable without relaxing the ordinary generation checks.
-func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed, rollbackChanged bool, activeHashOnDisk string) error {
+//
+// #15273: when ReadConfirm fails AND a confirm.json file is present, the
+// active-tree rewrite on disk is DEFERRED to a later boot (see the
+// confirmReadFailed arm below).
+func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed, rollbackChanged bool, activeHashOnDisk string) (bool, error) {
 	hashed := tree.Clone()
 	activeChanged, err := config.HashAPIAuthSecrets(hashed)
 	if err != nil {
-		return fmt.Errorf("hash persisted api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+		return false, fmt.Errorf("hash persisted api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
 	}
 
 	var rec *confirmRecord
+	confirmReadFailed := false
 	if s.db != nil {
 		rec, err = s.db.ReadConfirm()
 		if err != nil {
 			// #8566: retain the unreadable record and let the tail of Load
 			// report degraded recovery; do not make legacy credentials fatal.
 			rec = nil
+			confirmReadFailed = s.confirmFileExists()
 		}
 	}
 	prevChanged := false
 	if rec != nil && rec.PrevTree != nil {
 		prevChanged, err = config.HashAPIAuthSecrets(rec.PrevTree)
 		if err != nil {
-			return fmt.Errorf("hash confirm rollback api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+			return false, fmt.Errorf("hash confirm rollback api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
 		}
 	}
 
@@ -393,7 +431,7 @@ func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed, 
 	}
 	if rec != nil && (prevChanged || liveRecord) {
 		if err := s.writeConfirmState(rec); err != nil {
-			return fmt.Errorf("persist confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
+			return false, fmt.Errorf("persist confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
 		}
 	}
 
@@ -424,25 +462,42 @@ func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed, 
 		if err := s.writeAPIAuthMigrationStaging(
 			stageOldHash, stageOldIdentity, stageNewHash,
 			originalGeneration, originalEntries, slotHashes, slotTombstones); err != nil {
-			return fmt.Errorf("stage api-auth credential migration: %w: %v", ErrConfigDBUnreadable, err)
+			return false, fmt.Errorf("stage api-auth credential migration: %w: %v", ErrConfigDBUnreadable, err)
 		}
 	}
 
 	if !activeChanged {
-		return nil
+		return false, nil
+	}
+	if confirmReadFailed {
+		// #15273: defer ONLY the durable active rewrite (and the
+		// PreviousHash finalize that pairs with it). Keep the hashed
+		// tree in memory so this boot's compiled config carries
+		// verifiers, but leave active.json at the pre-migration
+		// generation so the retained unreadable confirm record still
+		// binds it on the next boot, where it can be read, rebound
+		// (GuardedHash=hashed, PreviousHash=old), finalized, and only
+		// then stale-checked. The staging record above already carries
+		// OldHash->NewHash, so recovery also accepts that exact alias.
+		tree.Children = hashed.Children
+		slog.Warn("deferring durable api-auth active rewrite because the pending "+
+			"commit-confirmed record is unreadable; active.json keeps its "+
+			"pre-migration generation so the retained record is not stale-dropped "+
+			"on the next boot", "issue", "#15273")
+		return true, nil
 	}
 	tree.Children = hashed.Children
 	if err := s.writeActiveMarker(tree, committed); err != nil {
-		return fmt.Errorf("persist hashed api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+		return false, fmt.Errorf("persist hashed api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
 	}
 	if liveRecord {
 		rec.PreviousHash = ""
 		rec.PreviousDeadline = time.Time{}
 		if err := s.writeConfirmState(rec); err != nil {
-			return fmt.Errorf("finalize confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
+			return false, fmt.Errorf("finalize confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
 		}
 	}
-	return nil
+	return false, nil
 }
 
 func (s *Store) rollbackMigrationSlotHashes() ([]string, []bool) {
@@ -1002,6 +1057,14 @@ func (s *Store) recoverPendingConfirmLocked(rawActiveHash string) error {
 	// window or a prior rollback persistence is being superseded. Until the new
 	// active file is durable, recovery accepts the previous disk generation.
 	activeHash := guardedConfigHash(s.active)
+	// #15273: when a durable api-auth migration staging record exists, its
+	// exact OldHash->NewHash pair aliases the same generation either side
+	// of the deferred active rewrite. Accept a record binding OldHash while
+	// disk is at NewHash (and vice versa) so a record that was unreadable on
+	// the migration boot is not stale-dropped on the next boot. This is
+	// bounded to the staging record's exact pair: an unrelated generation
+	// matches neither side and is still stale (#5835).
+	stagingOldHash, stagingNewHash, stagingAliasOK := s.apiAuthMigrationConfirmAlias()
 	// #14168: Load normalized s.active (retired dataplane-type rewrite and
 	// control-character scrub) after capturing rawActiveHash from the bytes
 	// actually on disk. A record armed by an older build binds that raw
@@ -1010,7 +1073,21 @@ func (s *Store) recoverPendingConfirmLocked(rawActiveHash string) error {
 	// tree, not a normalization of the record's hashes: an unrelated
 	// generation matches neither and is still stale (#5835).
 	matchesActive := func(h string) bool {
-		return h != "" && (h == activeHash || h == rawActiveHash)
+		if h == "" {
+			return false
+		}
+		if h == activeHash || h == rawActiveHash {
+			return true
+		}
+		if stagingAliasOK {
+			if h == stagingOldHash && (activeHash == stagingNewHash || rawActiveHash == stagingNewHash) {
+				return true
+			}
+			if h == stagingNewHash && (activeHash == stagingOldHash || rawActiveHash == stagingOldHash) {
+				return true
+			}
+		}
+		return false
 	}
 	// A FIRST rollback may have written the active rollback marker and died
 	// before publishing the teardown marker. The retained expired confirm

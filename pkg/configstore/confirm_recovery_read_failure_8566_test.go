@@ -118,26 +118,25 @@ func TestBootReadFailureWithLegacyAPIAuthIsNonfatal_8566_10826(t *testing.T) {
 	if got, err := os.ReadFile(confirmFile); err != nil || string(got) != "{not json" {
 		t.Fatalf("unreadable confirm record = %q, %v; want retained original bytes", got, err)
 	}
+	// #15273: the durable active.json rewrite is DEFERRED while confirm.json
+	// is unreadable, so the on-disk bytes keep the pre-migration generation
+	// (plaintext included) until a later boot can read the record and
+	// rebind it before rewriting. The in-memory active config below must
+	// still carry usable verifiers this boot.
 	persisted, err := s2.db.ReadActive()
 	if err != nil {
-		t.Fatalf("read migrated active: %v", err)
+		t.Fatalf("read active after deferred migration: %v", err)
 	}
-	formatted := persisted.Format()
-	for _, secret := range []string{
-		"correct-horse-battery",
-		"machine-generated-key-alpha",
-		"automation-key-secret-alpha",
-	} {
-		if strings.Contains(formatted, secret) {
-			t.Fatalf("legacy api-auth credential %q remains cleartext after Load", secret)
-		}
+	if !strings.Contains(persisted.Format(), "correct-horse-battery") {
+		t.Fatalf("#15273: active.json must keep its pre-migration generation while "+
+			"confirm.json is unreadable:\n%s", persisted.Format())
 	}
 	apiAuth := s2.ActiveConfig().System.Services.WebManagement.APIAuth
 	if apiAuth == nil || len(apiAuth.Users) != 1 || len(apiAuth.APIKeys) != 1 || len(apiAuth.Keys) != 1 ||
 		!config.VerifyAPIAuthSecret(apiAuth.Users[0].Password.Reveal(), "correct-horse-battery") ||
 		!config.VerifyAPIAuthSecret(apiAuth.APIKeys[0].Reveal(), "machine-generated-key-alpha") ||
 		!config.VerifyAPIAuthSecret(apiAuth.Keys[0].Secret.Reveal(), "automation-key-secret-alpha") {
-		t.Fatal("legacy active credentials were not migrated to usable verifiers")
+		t.Fatal("legacy active credentials were not migrated to usable verifiers in memory")
 	}
 }
 

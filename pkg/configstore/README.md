@@ -1219,6 +1219,28 @@ per-path:
     commits and config-syncs, which supersede the lost window (previously
     only a new arm or an armed-window resolution cleared it, so /health
     stayed 503 after the condition had been superseded).
+  - **An unreadable confirm record defers the api-auth active rewrite
+    (#15273, C01-01).** The #10826 boot migration used to rewrite
+    `active.json` to the hashed generation even when `ReadConfirm` had
+    failed and the record could not be rebound (`GuardedHash`→hashed,
+    `PreviousHash`→old). On the next boot — once the transient fault
+    cleared — both the effective and raw on-disk hashes were the migrated
+    hash, so `matchesActive` rejected the record's old binding and
+    recovery stale-dropped it: the unconfirmed config became permanent
+    and the #8566 degraded signal vanished with the file. Now, when
+    `ReadConfirm` fails AND `confirm.json` is present on disk,
+    `migrateActiveAPIAuthSecrets` keeps the hashed tree in memory only
+    and leaves `active.json` at the pre-migration generation; `Load`
+    also skips staging convergence so the staging record and the
+    pre-migration rollback-manifest binding survive. A later boot that
+    can read the record rebinds and rewrites exactly as the readable
+    path does, and `recoverPendingConfirmLocked` additionally accepts
+    the staging record's exact `OldHash`→`NewHash` pair as an alias for
+    the same generation. Deliberate trade-off: legacy plaintext
+    credentials remain in `active.json` (0600) until that later boot —
+    the alternative silently destroys the rollback safety net. With no
+    confirm file, or a readable record, migration is unchanged.
+
   - **The removal debt is KEYED to the record it is owed for (#7675).**
     The retry above re-drove `removeConfirmState()` UNCONDITIONALLY, so it
     deleted whatever `confirm.json` was on disk. An operator who armed a
