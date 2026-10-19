@@ -11,6 +11,7 @@ import (
 func flatTreeFromSets(t *testing.T, sets ...string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
+	sets = prependNATZoneDefs15001(sets)
 	for _, s := range sets {
 		path, err := ParseSetCommand(s)
 		if err != nil {
@@ -26,6 +27,7 @@ func flatTreeFromSets(t *testing.T, sets ...string) *ConfigTree {
 // hierTree parses a hierarchical config block via NewParser.
 func hierTree(t *testing.T, src string) *ConfigTree {
 	t.Helper()
+	src = injectHierNATZones15001(src)
 	tree, err := NewParser(src).Parse()
 	if err != nil {
 		t.Fatalf("parse hierarchical config: %v", err)

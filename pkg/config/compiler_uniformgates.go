@@ -242,6 +242,24 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, gatewayRIRoutingWarnings...)
 
+	// #15001 (A08-04) NAT undefined-zone gate, appended dead-last so it
+	// cannot steal an established first-error slot (invariant #6): a
+	// config tripping an older gate still reports that gate first, and
+	// a config whose ONLY defect is the zone typo is rejected here.
+	// Strict rejects naming rule-set and zone; tolerant warns per
+	// offender and records the rule-sets for dataplane skip (#1960).
+	if err := validateNATUndefinedZoneStrict(cfg); err != nil {
+		if opts.lenientNATUndefinedZone {
+			for _, offender := range natUndefinedZoneOffenders(cfg) {
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("nat undefined zone (downgraded to warning on tolerant path): %s", offender))
+			}
+			cfg.LenientNATUndefinedZoneRuleSets = NATUndefinedZoneRuleSetNames(cfg)
+		} else {
+			return err
+		}
+	}
+
 	if err := runUniformGatesUnknownSecurityPoliciesChild12217(cfg, opts); err != nil {
 		return err
 	}

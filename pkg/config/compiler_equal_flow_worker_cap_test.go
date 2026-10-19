@@ -20,6 +20,7 @@ import (
 func buildTree(t *testing.T, lines []string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
+	lines = prependNATZoneDefs15001(lines)
 	for _, line := range lines {
 		path, err := ParseSetCommand(line)
 		if err != nil {

@@ -44,6 +44,7 @@ import (
 // hierarchical shape can express the duplicate this gate targets.
 func parseHier6454(t *testing.T, input string) *ConfigTree {
 	t.Helper()
+	input = injectHierNATZones15001(input)
 	tree, errs := NewParser(input).Parse()
 	if len(errs) > 0 {
 		t.Fatalf("parse: %v", errs)
@@ -53,6 +54,7 @@ func parseHier6454(t *testing.T, input string) *ConfigTree {
 
 func setTree6454(t *testing.T, cmds []string) *ConfigTree {
 	t.Helper()
+	cmds = prependNATZoneDefs15001(cmds)
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)

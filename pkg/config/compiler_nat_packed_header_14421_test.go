@@ -26,6 +26,7 @@ import (
 
 func buildPackedNATTree14421(t *testing.T, cfgText string) *ConfigTree {
 	t.Helper()
+	cfgText = injectHierNATZones15001(cfgText)
 	p := NewParser(cfgText)
 	tree, perrs := p.Parse()
 	if len(perrs) > 0 {

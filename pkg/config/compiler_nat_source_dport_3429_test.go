@@ -19,6 +19,8 @@ func compileSourceNATDPort(t *testing.T, dportCmd string) *NATRule {
 	t.Helper()
 	tree := &ConfigTree{}
 	cmds := []string{
+		"set security zones security-zone lan",
+		"set security zones security-zone wan",
 		"set security nat source rule-set RS from zone lan",
 		"set security nat source rule-set RS to zone wan",
 		dportCmd,

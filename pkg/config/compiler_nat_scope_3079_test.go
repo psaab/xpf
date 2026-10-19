@@ -19,6 +19,7 @@ import (
 
 func buildNATScopeTree(t *testing.T, cmds ...string) *ConfigTree {
 	t.Helper()
+	cmds = prependNATZoneDefs15001(cmds)
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		if err := tree.SetPath(strings.Fields(cmd)[1:]); err != nil {
@@ -185,6 +186,8 @@ func TestNATRuleSetScopeCommitsAndIsCaptured(t *testing.T) {
 func TestNATRuleSetZoneScopeStillCommits(t *testing.T) {
 	t.Run("from/to zone", func(t *testing.T) {
 		tree := buildNATScopeTree(t,
+			"set security zones security-zone trust",
+			"set security zones security-zone untrust",
 			"set security nat source rule-set RS from zone trust",
 			"set security nat source rule-set RS to zone untrust",
 			"set security nat source rule-set RS rule R1 then source-nat interface",

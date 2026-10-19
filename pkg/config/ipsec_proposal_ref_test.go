@@ -12,6 +12,7 @@ import (
 func buildTreeFromSet(t *testing.T, cmds []string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
+	cmds = prependNATZoneDefs15001(cmds)
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)
 		if err != nil {

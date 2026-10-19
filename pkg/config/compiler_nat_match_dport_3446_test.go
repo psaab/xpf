@@ -43,6 +43,8 @@ func snatTree(t *testing.T, dportCmd string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
 	cmds := []string{
+		"set security zones security-zone lan",
+		"set security zones security-zone wan",
 		"set security nat source rule-set RS from zone lan",
 		"set security nat source rule-set RS to zone wan",
 		dportCmd,

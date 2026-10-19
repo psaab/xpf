@@ -322,20 +322,12 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 		}
 	}
 
-	// Validate NAT zone references
-	for _, rs := range cfg.Security.NAT.Source {
-		if rs == nil { // #3494: tolerant/HA-sync path may carry a nil rule-set
-			continue
-		}
-		if rs.FromZone != "" && !zones[rs.FromZone] {
-			warnings = append(warnings, fmt.Sprintf(
-				"source-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
-		}
-		if rs.ToZone != "" && !zones[rs.ToZone] {
-			warnings = append(warnings, fmt.Sprintf(
-				"source-nat ruleset %q: to-zone %q not defined", rs.Name, rs.ToZone))
-		}
-	}
+	// Source/destination NAT undefined-zone references are no longer
+	// warned here: validateNATUndefinedZoneStrict (#15001) hard-rejects
+	// them at commit and emits the warning on the tolerant load /
+	// peer-sync path. Keeping the warn-only loop would duplicate the
+	// tolerant warning. Static NAT (below) has no dataplane zone error
+	// and remains warn-only.
 	// Static NAT rule-sets carry a `from zone` scope that the dataplane
 	// enforces on the inbound (DNAT) direction (static_nat.rs match_dnat:
 	// the entry is skipped unless its from_zone matches the ingress zone
@@ -352,20 +344,8 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 				"static-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
 		}
 	}
-	// Destination NAT also scopes its inbound rule-sets by the exact ingress
-	// zone name. An undefined from-zone therefore leaves the rule-set unable
-	// to match, so surface the typo like static NAT (#12245).
-	if dnat := cfg.Security.NAT.Destination; dnat != nil {
-		for _, rs := range dnat.RuleSets {
-			if rs == nil {
-				continue
-			}
-			if rs.FromZone != "" && !zones[rs.FromZone] {
-				warnings = append(warnings, fmt.Sprintf(
-					"destination-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
-			}
-		}
-	}
+	// Destination NAT undefined from-zone: validateNATUndefinedZoneStrict
+	// (#15001) — see the source-NAT note above.
 
 	// Validate screen references in zones
 	for name, zone := range cfg.Security.Zones {

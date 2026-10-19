@@ -39,6 +39,7 @@ import (
 // advisory come back under a rewording.
 func warningsFor8573(t *testing.T, setLines []string) []string {
 	t.Helper()
+	setLines = prependNATZoneDefs15001(setLines)
 	tree := &ConfigTree{}
 	for _, line := range setLines {
 		toks, err := ParseSetCommand(line)

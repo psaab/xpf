@@ -29,6 +29,7 @@ import (
 // testing gotcha in CLAUDE.md).
 func natOverlapTree(t *testing.T, cmds ...string) *ConfigTree {
 	t.Helper()
+	cmds = prependNATZoneDefs15001(cmds)
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)

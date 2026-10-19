@@ -11,6 +11,108 @@ import (
 	"strings"
 )
 
+// validateNATUndefinedZoneStrict (#15001, A08-04) hard-rejects a source-NAT
+// rule-set whose non-empty FromZone/ToZone, or a destination-NAT rule-set
+// whose non-empty FromZone, does not name a configured security zone.
+//
+// Before #15001 ValidateConfig only warned on this typo, yet the dataplane
+// compileNAT pre-pass (pkg/dataplane/compiler_nat.go, run from
+// CompileConfig's validate-before-mutate phase) returned
+// "source NAT from-zone/to-zone %q not found" /
+// "destination NAT from-zone %q not found" and aborted every apply — a
+// commit/apply split: a one-token zone typo that strict commit accepted
+// stalled all later applies. Promoting the check to a strict reject makes
+// the typo operator-visible at commit; the tolerant load / peer-sync path
+// downgrades to a warning via opts.lenientNATUndefinedZone (#1960
+// no-brick) and records the offending rule-sets in
+// cfg.LenientNATUndefinedZoneRuleSets so compileNAT can skip exactly
+// those rule-sets and their healthy siblings still apply. Static NAT has
+// no dataplane zone error and stays warn-only (out of scope).
+func validateNATUndefinedZoneStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	for _, rs := range natUndefinedZoneOffenders(cfg) {
+		return fmt.Errorf("%s", rs)
+	}
+	return nil
+}
+
+// natUndefinedZoneOffenders returns deterministic diagnostics for every
+// undefined-zone source/destination NAT rule-set, in config order
+// (source rule-sets first, then destination). Each diagnostic names the
+// rule-set and the undefined zone. Empty zone fields are unscoped and
+// are not offenders; nil rule-sets are skipped (#3494 tolerant shape).
+func natUndefinedZoneOffenders(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	zones := make(map[string]bool, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zones[name] = true
+	}
+	var out []string
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		if rs.FromZone != "" && !zones[rs.FromZone] {
+			out = append(out, fmt.Sprintf(
+				"source-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone))
+		}
+		if rs.ToZone != "" && !zones[rs.ToZone] {
+			out = append(out, fmt.Sprintf(
+				"source-nat rule-set %q: to-zone %q not defined", rs.Name, rs.ToZone))
+		}
+	}
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			if rs.FromZone != "" && !zones[rs.FromZone] {
+				out = append(out, fmt.Sprintf(
+					"destination-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone))
+			}
+		}
+	}
+	return out
+}
+
+// NATUndefinedZoneRuleSetNames returns the set of "kind\x00name" keys for
+// rule-sets carrying an undefined zone reference. It is the shared
+// predicate the tolerant compile records and the dataplane compileNAT
+// consults to skip exactly those rule-sets. Exported for pkg/dataplane.
+func NATUndefinedZoneRuleSetNames(cfg *Config) map[string]bool {
+	out := make(map[string]bool)
+	if cfg == nil {
+		return out
+	}
+	zones := make(map[string]bool, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zones[name] = true
+	}
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		if (rs.FromZone != "" && !zones[rs.FromZone]) || (rs.ToZone != "" && !zones[rs.ToZone]) {
+			out["source\x00"+rs.Name] = true
+		}
+	}
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			if rs.FromZone != "" && !zones[rs.FromZone] {
+				out["destination\x00"+rs.Name] = true
+			}
+		}
+	}
+	return out
+}
+
 // validateNATMatchApplicationsStrict hard-rejects a source- or
 // destination-NAT rule's `match application <name>` token that resolves to
 // NONE of: a predefined junos-* application, a user-defined `applications

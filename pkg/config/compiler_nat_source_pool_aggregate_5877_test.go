@@ -32,6 +32,7 @@ import (
 // NewParser — the flat-set testing gotcha in CLAUDE.md).
 func snat5877Tree(t *testing.T, cmds ...string) *ConfigTree {
 	t.Helper()
+	cmds = prependNATZoneDefs15001(cmds)
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)

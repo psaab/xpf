@@ -3085,7 +3085,7 @@ func TestScreenFloodScanNotConfiguredStaysOff(t *testing.T) {
 
 func TestNATSourceSetSyntax(t *testing.T) {
 	tree := &ConfigTree{}
-	for _, cmd := range []string{"set security nat source pool snat-pool address 203.0.113.0/24", "set security nat source rule-set trust-to-untrust from zone trust", "set security nat source rule-set trust-to-untrust to zone untrust", "set security nat source rule-set trust-to-untrust rule snat-rule match source-address 10.0.0.0/8", "set security nat source rule-set trust-to-untrust rule snat-rule then source-nat interface"} {
+	for _, cmd := range []string{"set security zones security-zone trust", "set security zones security-zone untrust", "set security nat source pool snat-pool address 203.0.113.0/24", "set security nat source rule-set trust-to-untrust from zone trust", "set security nat source rule-set trust-to-untrust to zone untrust", "set security nat source rule-set trust-to-untrust rule snat-rule match source-address 10.0.0.0/8", "set security nat source rule-set trust-to-untrust rule snat-rule then source-nat interface"} {
 		if err := tree.SetPath(strings.Fields(cmd)[1:]); err != nil {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
@@ -3396,6 +3396,13 @@ security {
 
 func TestNATMultiZoneBracketList(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone guest;
+        security-zone lan;
+        security-zone dmz;
+        security-zone Internet-ATT;
+        security-zone Internet-BCI;
+    }
     nat {
         source {
             rule-set multi-zone-snat {
@@ -3478,7 +3485,7 @@ func TestNATMultiZoneBracketList(t *testing.T) {
 
 func TestNATMultiZoneSetSyntax(t *testing.T) {
 	tree := &ConfigTree{}
-	for _, cmd := range []string{"set security nat source rule-set internal-to-internet from zone [ guest lan ]", "set security nat source rule-set internal-to-internet to zone Internet-ATT", "set security nat source rule-set internal-to-internet rule catch-all match source-address 0.0.0.0/0", "set security nat source rule-set internal-to-internet rule catch-all then source-nat interface"} {
+	for _, cmd := range []string{"set security zones security-zone Internet-ATT", "set security zones security-zone guest", "set security zones security-zone lan", "set security nat source rule-set internal-to-internet from zone [ guest lan ]", "set security nat source rule-set internal-to-internet to zone Internet-ATT", "set security nat source rule-set internal-to-internet rule catch-all match source-address 0.0.0.0/0", "set security nat source rule-set internal-to-internet rule catch-all then source-nat interface"} {
 		path, err := ParseSetCommand(cmd)
 		if err != nil {
 			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
@@ -3508,6 +3515,11 @@ func TestNATMultiZoneSetSyntax(t *testing.T) {
 
 func TestNATSourceOff(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone Internet;
+        security-zone internal;
+    }
+
     nat {
         source {
             rule-set exempt {
@@ -3575,7 +3587,7 @@ func TestNATSourceOff(t *testing.T) {
 
 func TestNATSourceOffSetSyntax(t *testing.T) {
 	tree := &ConfigTree{}
-	for _, cmd := range []string{"set security nat source rule-set exempt from zone internal", "set security nat source rule-set exempt to zone Internet", "set security nat source rule-set exempt rule no-nat match source-address 192.203.228.0/24", "set security nat source rule-set exempt rule no-nat then source-nat off"} {
+	for _, cmd := range []string{"set security zones security-zone Internet", "set security zones security-zone internal", "set security nat source rule-set exempt from zone internal", "set security nat source rule-set exempt to zone Internet", "set security nat source rule-set exempt rule no-nat match source-address 192.203.228.0/24", "set security nat source rule-set exempt rule no-nat then source-nat off"} {
 		if err := tree.SetPath(strings.Fields(cmd)[1:]); err != nil {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
@@ -3601,6 +3613,10 @@ func TestNATSourceOffSetSyntax(t *testing.T) {
 
 func TestDNATApplicationMatch(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone untrust;
+    }
+
     nat {
         destination {
             pool web-server {
@@ -4087,6 +4103,10 @@ func TestNATAddressPersistent(t *testing.T) {
 
 func TestDNATMultiPort(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone untrust;
+    }
+
     nat {
         destination {
             pool web-server {
@@ -4215,6 +4235,10 @@ func TestIPsecAggressiveModeSetSyntax(t *testing.T) {
 
 func TestDNATSourceAddressName(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone untrust;
+    }
+
     address-book {
         global {
             address srv1 10.0.1.100/32;
@@ -4276,7 +4300,7 @@ func TestDNATSourceAddressNameSetSyntax(t *testing.T) {
 	// #2416: the named entry must be defined in the address book or commit
 	// hard-rejects (validateNATSourceAddressNameReferencesStrict). Define
 	// `mynet` so this parse assertion still exercises the happy path.
-	lines := []string{"set security address-book global address mynet 192.0.2.0/24", "set security nat destination pool web1 address 10.0.30.100", "set security nat destination rule-set wan-dnat from zone untrust", "set security nat destination rule-set wan-dnat rule r1 match source-address-name mynet", "set security nat destination rule-set wan-dnat rule r1 match destination-address 50.0.0.1/32", "set security nat destination rule-set wan-dnat rule r1 match destination-port 443", "set security nat destination rule-set wan-dnat rule r1 then destination-nat pool web1"}
+	lines := []string{"set security zones security-zone untrust", "set security address-book global address mynet 192.0.2.0/24", "set security nat destination pool web1 address 10.0.30.100", "set security nat destination rule-set wan-dnat from zone untrust", "set security nat destination rule-set wan-dnat rule r1 match source-address-name mynet", "set security nat destination rule-set wan-dnat rule r1 match destination-address 50.0.0.1/32", "set security nat destination rule-set wan-dnat rule r1 match destination-port 443", "set security nat destination rule-set wan-dnat rule r1 then destination-nat pool web1"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		cmd, err := ParseSetCommand(line)
@@ -4303,6 +4327,10 @@ func TestDNATSourceAddressNameSetSyntax(t *testing.T) {
 
 func TestDNATPortRange(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone untrust;
+    }
+
     nat {
         destination {
             pool host1 {
@@ -4352,7 +4380,7 @@ func TestDNATPortRange(t *testing.T) {
 }
 
 func TestDNATPortRangeSetSyntax(t *testing.T) {
-	lines := []string{"set security nat destination pool web1 address 10.0.30.100", "set security nat destination rule-set wan-dnat from zone untrust", "set security nat destination rule-set wan-dnat rule r1 match destination-address 50.0.0.1/32", "set security nat destination rule-set wan-dnat rule r1 match destination-port 80", "set security nat destination rule-set wan-dnat rule r1 match destination-port 443", "set security nat destination rule-set wan-dnat rule r1 match destination-port 20000 to 20003", "set security nat destination rule-set wan-dnat rule r1 then destination-nat pool web1"}
+	lines := []string{"set security zones security-zone untrust", "set security nat destination pool web1 address 10.0.30.100", "set security nat destination rule-set wan-dnat from zone untrust", "set security nat destination rule-set wan-dnat rule r1 match destination-address 50.0.0.1/32", "set security nat destination rule-set wan-dnat rule r1 match destination-port 80", "set security nat destination rule-set wan-dnat rule r1 match destination-port 443", "set security nat destination rule-set wan-dnat rule r1 match destination-port 20000 to 20003", "set security nat destination rule-set wan-dnat rule r1 then destination-nat pool web1"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		cmd, err := ParseSetCommand(line)
@@ -4375,6 +4403,10 @@ func TestDNATPortRangeSetSyntax(t *testing.T) {
 
 func TestDNATProtocolGRE(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone untrust;
+    }
+
     nat {
         destination {
             pool gre-host {
@@ -4412,6 +4444,10 @@ func TestDNATProtocolGRE(t *testing.T) {
 
 func TestDNATProtocolICMP6(t *testing.T) {
 	input := `security {
+    zones {
+        security-zone untrust;
+    }
+
     nat {
         destination {
             pool icmp-host {
@@ -4450,6 +4486,11 @@ func TestDNATProtocolICMP6(t *testing.T) {
 func TestSNATMultipleSourceAddressBracketList(t *testing.T) {
 	input := `
 security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
+
     nat {
         source {
             rule-set rs1 {
@@ -4499,7 +4540,7 @@ security {
 }
 
 func TestSNATMultipleSourceAddressSetSyntax(t *testing.T) {
-	lines := []string{"set security nat source rule-set rs1 from zone trust", "set security nat source rule-set rs1 to zone untrust", "set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8", "set security nat source rule-set rs1 rule r1 match source-address 172.16.0.0/12", "set security nat source rule-set rs1 rule r1 match source-address 192.168.0.0/16", "set security nat source rule-set rs1 rule r1 then source-nat interface"}
+	lines := []string{"set security zones security-zone trust", "set security zones security-zone untrust", "set security nat source rule-set rs1 from zone trust", "set security nat source rule-set rs1 to zone untrust", "set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8", "set security nat source rule-set rs1 rule r1 match source-address 172.16.0.0/12", "set security nat source rule-set rs1 rule r1 match source-address 192.168.0.0/16", "set security nat source rule-set rs1 rule r1 then source-nat interface"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		path, err := ParseSetCommand(line)
@@ -4535,6 +4576,10 @@ func TestSNATMultipleSourceAddressSetSyntax(t *testing.T) {
 func TestDNATApplicationMatching(t *testing.T) {
 	input := `
 security {
+    zones {
+        security-zone untrust;
+    }
+
     nat {
         destination {
             pool web-pool {
@@ -4597,6 +4642,10 @@ applications {
     }
 }
 security {
+    zones {
+        security-zone untrust;
+    }
+
     nat {
         destination {
             pool unifi-pool {
@@ -4653,6 +4702,11 @@ security {
 func TestSNATDestinationAddressBracketList(t *testing.T) {
 	input := `
 security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
+
     nat {
         source {
             rule-set rs1 {
@@ -4700,7 +4754,7 @@ security {
 }
 
 func TestSNATMultipleAddressPairsSetSyntax(t *testing.T) {
-	lines := []string{"set security nat source rule-set rs1 from zone trust", "set security nat source rule-set rs1 to zone untrust", "set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8", "set security nat source rule-set rs1 rule r1 match source-address 172.16.0.0/12", "set security nat source rule-set rs1 rule r1 match destination-address 203.0.113.0/24", "set security nat source rule-set rs1 rule r1 match destination-address 198.51.100.0/24", "set security nat source rule-set rs1 rule r1 then source-nat off"}
+	lines := []string{"set security zones security-zone trust", "set security zones security-zone untrust", "set security nat source rule-set rs1 from zone trust", "set security nat source rule-set rs1 to zone untrust", "set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8", "set security nat source rule-set rs1 rule r1 match source-address 172.16.0.0/12", "set security nat source rule-set rs1 rule r1 match destination-address 203.0.113.0/24", "set security nat source rule-set rs1 rule r1 match destination-address 198.51.100.0/24", "set security nat source rule-set rs1 rule r1 then source-nat off"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		path, err := ParseSetCommand(line)

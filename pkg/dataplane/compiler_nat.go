@@ -369,6 +369,19 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 	compiledPools := make(map[string]bool)
 
 	for _, rs := range natCfg.Source {
+		if rs == nil {
+			continue
+		}
+		// #15001: on the tolerant path config compile records rule-sets
+		// with an undefined zone; skip exactly those (fail-closed for that
+		// rule-set, healthy siblings still compile) instead of aborting
+		// every apply. A cfg without the record (strict, hand-built, or
+		// JSON-round-tripped) keeps the fail-closed errors below.
+		if cfg.LenientNATUndefinedZoneRuleSets["source\x00"+rs.Name] {
+			compileWarn(dp, "source NAT rule-set skipped: undefined zone",
+				"rule-set", rs.Name, "from", rs.FromZone, "to", rs.ToZone)
+			continue
+		}
 		// #12525: validate provenance per side. A non-empty scope or the
 		// compiler stamp for that absent clause is required independently;
 		// one side's stamp must never authorize an empty scope on the other.
@@ -639,6 +652,15 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 	// Destination NAT
 	if natCfg.Destination != nil {
 		for _, rs := range natCfg.Destination.RuleSets {
+			if rs == nil {
+				continue
+			}
+			// #15001: tolerant skip, as for source NAT above.
+			if cfg.LenientNATUndefinedZoneRuleSets["destination\x00"+rs.Name] {
+				compileWarn(dp, "destination NAT rule-set skipped: undefined zone",
+					"rule-set", rs.Name, "from", rs.FromZone)
+				continue
+			}
 			if !rs.HasNATFromScopeStamp() {
 				return fmt.Errorf("destination NAT from-zone %q not found", rs.FromZone)
 			}
