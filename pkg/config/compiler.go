@@ -1198,6 +1198,11 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
 	}
+	// #15650: zero-ingress port-mirroring gate runs on the fully merged
+	// table (a later forwarding-options root may supply the ingress).
+	if err := validatePortMirroringZeroIngress15650(&cfg.ForwardingOptions, opts.lenientPortMirroring15256, &cfg.Warnings); err != nil {
+		return nil, fmt.Errorf("forwarding-options: %w", err)
+	}
 	if opts.lenientAddressBookNameCollision {
 		recordDroppedNamedAddressBookCollisions(tree, cfg)
 	}

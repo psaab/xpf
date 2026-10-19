@@ -1861,7 +1861,7 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 		}
 	}
 
-	if pmNode := node.FindChild("port-mirroring"); pmNode != nil {
+	for _, pmNode := range node.FindChildren("port-mirroring") {
 		if err := compilePortMirroring(pmNode, fo, opts.lenientPortMirroring15256, warnings); err != nil {
 			return err
 		}
@@ -1876,8 +1876,18 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 }
 
 func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig, lenient bool, warnings *[]string) error {
-	pm := &PortMirroringConfig{
-		Instances: make(map[string]*PortMirrorInstance),
+	// #15650: reuse/merge fo.PortMirroring across repeated port-mirroring
+	// blocks and repeated forwarding-options roots (compileSections calls
+	// compileForwardingOptionsWithOpts once per root). Fresh allocation here
+	// dropped every earlier block.
+	pm := fo.PortMirroring
+	if pm == nil {
+		pm = &PortMirroringConfig{
+			Instances: make(map[string]*PortMirrorInstance),
+		}
+	}
+	if pm.Instances == nil {
+		pm.Instances = make(map[string]*PortMirrorInstance)
 	}
 	// #15256 A85-04: shape gate. Before this, any child other than
 	// instance/input{rate,ingress/interface}/output/interface was silently
@@ -1915,9 +1925,23 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig, lenient bool,
 	// Linux ("ge-0-0-0.0") spellings of one interface are recognized as the
 	// same source (matching the snapshot builder's ifindex dedup).
 	ingressOwner := make(map[string]string)
+	// Seed owners from already-merged instances so a duplicate ingress in a
+	// later repeated block is still rejected, not silently appended.
+	for name, existing := range pm.Instances {
+		if existing == nil {
+			continue
+		}
+		for _, v := range existing.Input {
+			ingressOwner[LinuxIfName(v)] = name
+		}
+	}
 
 	for _, inst := range namedInstances(node.FindChildren("instance")) {
-		mi := &PortMirrorInstance{Name: inst.name}
+		mi := pm.Instances[inst.name]
+		if mi == nil {
+			mi = &PortMirrorInstance{Name: inst.name}
+			pm.Instances[inst.name] = mi
+		}
 		for _, child := range inst.node.Children {
 			switch child.Name() {
 			case "input", "output":
@@ -1927,7 +1951,7 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig, lenient bool,
 				shapeErr("port-mirroring instance %q: unknown statement %q is not modelled; it would be silently dropped — remove it", inst.name, child.Name())
 			}
 		}
-		if inputNode := inst.node.FindChild("input"); inputNode != nil {
+		for _, inputNode := range inst.node.FindChildren("input") {
 			for _, child := range inputNode.Children {
 				switch child.Name() {
 				case "rate", "ingress":
@@ -1945,14 +1969,14 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig, lenient bool,
 				}
 			}
 		}
-		if outputNode := inst.node.FindChild("output"); outputNode != nil {
+		for _, outputNode := range inst.node.FindChildren("output") {
 			for _, child := range outputNode.Children {
 				if child.Name() != "interface" {
 					shapeErr("port-mirroring instance %q: unknown output statement %q is not modelled; it would be silently dropped — remove it", inst.name, child.Name())
 				}
 			}
 		}
-		if inputNode := inst.node.FindChild("input"); inputNode != nil {
+		for _, inputNode := range inst.node.FindChildren("input") {
 			if rateNode := inputNode.FindChild("rate"); rateNode != nil {
 				if v := nodeVal(rateNode); v != "" {
 					n, err := strconv.Atoi(v)
@@ -2010,16 +2034,16 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig, lenient bool,
 			}
 		}
 
-		if outputNode := inst.node.FindChild("output"); outputNode != nil {
+		for _, outputNode := range inst.node.FindChildren("output") {
 			if ifNode := outputNode.FindChild("interface"); ifNode != nil {
 				mi.Output = nodeVal(ifNode)
 			}
 		}
 
-		if len(mi.Input) == 0 {
-			shapeErr("port-mirroring instance %q: no ingress interfaces configured (an instance with zero ingress interfaces mirrors nothing) — add `input ingress interface <if>` or remove the instance", inst.name)
-		}
-		pm.Instances[mi.Name] = mi
+		// Zero-ingress is NOT reported here: a later repeated block or
+		// forwarding-options root may still supply the ingress (#15650 split
+		// input/output). validatePortMirroringZeroIngress15650 runs after
+		// compileSections on the fully merged table.
 	}
 	if len(shapeErrs) > 0 {
 		if !lenient {
@@ -2030,6 +2054,36 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig, lenient bool,
 		}
 	}
 	fo.PortMirroring = pm
+	return nil
+}
+
+// validatePortMirroringZeroIngress15650 is the #15256 zero-ingress shape
+// gate, deferred to after all forwarding-options roots have merged
+// (#15650). Strict rejects; lenient warns (#1960).
+func validatePortMirroringZeroIngress15650(fo *ForwardingOptionsConfig, lenient bool, warnings *[]string) error {
+	if fo == nil || fo.PortMirroring == nil {
+		return nil
+	}
+	var names []string
+	for name, inst := range fo.PortMirroring.Instances {
+		if inst == nil || len(inst.Input) == 0 {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	var errs []string
+	for _, name := range names {
+		errs = append(errs, fmt.Sprintf("port-mirroring instance %q: no ingress interfaces configured (an instance with zero ingress interfaces mirrors nothing) — add `input ingress interface <if>` or remove the instance", name))
+	}
+	if !lenient {
+		return fmt.Errorf("%s", errs[0])
+	}
+	if warnings != nil {
+		*warnings = append(*warnings, errs...)
+	}
 	return nil
 }
 

@@ -48,6 +48,9 @@ import (
 var dupBlockMergeSites9023 = []struct{ parent, keyword string }{
 	{"snmp", "trap-group"},
 	{"sampling", "instance"},
+	// #15650: repeated `instance span1` blocks under one port-mirroring
+	// stanza merge (input from one, output from another).
+	{"port-mirroring", "instance"},
 	{"routing-instances", "*"},
 	// #11791: the named groups' import-rib lists accumulate across blocks.
 	{"rib-groups", "*"},
