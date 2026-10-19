@@ -1116,3 +1116,36 @@ fn vrrp_multicast_is_dual_family_default_deny_and_override_scoped_11571() {
         "the explicit any-service wildcard must retain its full-admit semantics",
     );
 }
+
+// #15671: ndp token admits ND 133-136 per-zone; `ndp except`
+// (ndp_excluded) withdraws the ND default in host_inbound_admits.
+#[test]
+fn ndp_token_and_except_15671() {
+    let mut hi = ZoneHostInbound::default();
+    classify_protocol("ndp", &mut hi);
+    for t in [133u8, 134, 135, 136] {
+        assert!(hi.admits(58, 0, true, t), "ndp must admit ICMPv6 type {t}");
+    }
+    assert!(!hi.admits(58, 0, true, 137), "ndp must not admit Redirect 137");
+    assert!(!hi.admits(1, 0, false, 133), "ndp must not admit on ICMPv4");
+    // Global accept no longer covers ND.
+    for t in [133u8, 134, 135, 136, 137] {
+        assert!(
+            !is_icmp_host_inbound_global_accept(58, true, t),
+            "ND type {t} must not ride the global accept (#15671)"
+        );
+    }
+    // Excluded zone: ND denied via the admit entry point.
+    let mut state = ForwardingState::default();
+    let mut excluded = zone_host_inbound_from_tokens_except(
+        &[],
+        &["ospf".to_string()],
+        &["ndp".to_string()],
+    );
+    assert!(excluded.ndp_excluded);
+    state.zone_host_inbound.insert(7, excluded.clone());
+    assert!(!host_inbound_admits(&state, 7, 58, 0, true, 135));
+    excluded.ndp_excluded = false;
+    state.zone_host_inbound.insert(7, excluded);
+    assert!(host_inbound_admits(&state, 7, 58, 0, true, 135), "ND default must admit when not excluded");
+}

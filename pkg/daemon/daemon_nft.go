@@ -1620,7 +1620,7 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 			xnft.HostInboundStaleReplyFenceRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts),
 		)...)
 	}
-	mandatory := hostInboundFenceMandatoryAdmits()
+	mandatory := hostInboundFenceMandatoryAdmitsViews(views)
 	if guardStaleReplies {
 		rules = append(rules, mandatory[0])
 		emitHostInboundMulticastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
@@ -1657,17 +1657,44 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 // return traffic and core L3 control, NOT a service exposure. Shared by the
 // whole-table cold-boot and additive gap fences so their mandatory posture
 // cannot drift apart.
+// hostInboundNDPDefaultText mirrors xnft's netlink helper (#15671).
+func hostInboundNDPDefaultText(views []dpuserspace.ZoneHostInboundView) bool {
+	for _, v := range views {
+		if ndpTextExcluded(v.ProtocolsExcept) {
+			return false
+		}
+	}
+	return true
+}
+
+func ndpTextExcluded(except []string) bool {
+	for _, tok := range except {
+		if tok == "ndp" {
+			return true
+		}
+	}
+	return false
+}
+
 func hostInboundFenceMandatoryAdmits() []string {
-	return []string{
+	return hostInboundFenceMandatoryAdmitsViews(nil)
+}
+
+// hostInboundFenceMandatoryAdmitsViews: ND is mandatory unless a view
+// excluded ndp (#15671). Nil views (no config) keep ND.
+func hostInboundFenceMandatoryAdmitsViews(views []dpuserspace.ZoneHostInboundView) []string {
+	out := []string{
 		// Raw ESP (50) / AH (51) remains globally admitted before the
 		// catalog-group drops; established/related follows those guards.
 		"    meta l4proto { 50, 51 } accept",
 		"    ct state established,related accept",
-		// IPv6 ND + v4/v6 PMTUD/error control messages — mandatory link operation.
 		"    icmpv6 type { 1, 2, 3, 4 } accept",
-		"    icmpv6 type { 133, 134, 135, 136 } accept",
-		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
 	}
+	if hostInboundNDPDefaultText(views) {
+		out = append(out, "    icmpv6 type { 133, 134, 135, 136 } accept")
+	}
+	return append(out,
+		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept")
 }
 
 // emitHostInboundFenceWGAdmits scopes the whole-table cold-boot/lo0 fence's
@@ -1970,7 +1997,7 @@ func buildHostInboundGapFencePayloadForTable(tableName string, priority int, vie
 	rules = append(rules, hostInboundStaleReplyGuardText(
 		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
 	)...)
-	rules = append(rules, hostInboundFenceMandatoryAdmits()...)
+	rules = append(rules, hostInboundFenceMandatoryAdmitsViews(views)...)
 	emitHostInboundGapFenceWGAdmits(&rules, views, uncoveredV4, uncoveredV6, wgZonePorts)
 	emitDHCPBackstopAdmits(&rules, vrfBackstop)
 	// #10751 M1/Opus9: admit shared values on lifeline ingress ahead of
@@ -2468,7 +2495,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		}
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
-		emitHostInboundICMPAccepts(&rules)
+		emitHostInboundICMPAccepts(&rules, views)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2498,7 +2525,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		// residual accept only after the ingress-zone rules below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
-		emitHostInboundICMPAccepts(&rules)
+		emitHostInboundICMPAccepts(&rules, views)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2584,9 +2611,12 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 // counter (global rules, not per-zone). Factored out (#4146) so the payload
 // builder can place it either before the per-zone rules (no junos-host program)
 // or AFTER the fine junos-host DROP (coarse-then-fine order).
-func emitHostInboundICMPAccepts(rules *[]string) {
+func emitHostInboundICMPAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView) {
 	*rules = append(*rules, "    icmpv6 type { 1, 2, 3, 4 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6Error)+"\" accept")
-	*rules = append(*rules, "    icmpv6 type { 133, 134, 135, 136 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
+	// #15671: ND default accept — only when no view excluded ndp.
+	if hostInboundNDPDefaultText(views) {
+		*rules = append(*rules, "    icmpv6 type { 133, 134, 135, 136 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
+	}
 	*rules = append(*rules, "    icmp type { destination-unreachable, time-exceeded, parameter-problem } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP4Error)+"\" accept")
 }
 

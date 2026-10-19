@@ -1447,6 +1447,7 @@ type InterfaceSnapshot struct {
 	HostInboundConfigured     bool     `json:"host_inbound_configured,omitempty"`
 	HostInboundSystemServices []string `json:"host_inbound_system_services,omitempty"`
 	HostInboundProtocols      []string `json:"host_inbound_protocols,omitempty"`
+	HostInboundProtocolsExcept []string `json:"host_inbound_protocols_except,omitempty"` // #15671
 	// IsUnit is the STRUCTURAL row identity: true when this row was emitted
 	// for a logical unit, false for an interface (base) row (#9821 #22).
 	// Name shape cannot answer this — a declared interface may itself

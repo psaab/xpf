@@ -15,18 +15,29 @@ package nftables
 // WireGuard admissions have serving-zone scope; no named counters are added to
 // the transient fence.
 func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan) {
+	hostInboundFenceMandatoryAdmitsNetlinkViews(p, nil)
+}
+
+// hostInboundFenceMandatoryAdmitsNetlinkViews is the views-aware form
+// (#15671): ND is mandatory unless a view excluded ndp. Nil views
+// (early barrier, no config) keep the mandatory ND admit.
+func hostInboundFenceMandatoryAdmitsNetlinkViews(p *nlPlan, views []HostInboundZoneView) {
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
-	emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p)
+	emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p, views)
 }
 
-func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan) {
+func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan, views []HostInboundZoneView) {
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
-	emitHostInboundFenceL3AdmitsNetlink(p)
+	emitHostInboundFenceL3AdmitsNetlink(p, views)
 }
 
-func emitHostInboundFenceL3AdmitsNetlink(p *nlPlan) {
+func emitHostInboundFenceL3AdmitsNetlink(p *nlPlan, views []HostInboundZoneView) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).emit(verdictAccept()...)
-	p.rule().icmpType(famV6, []uint8{133, 134, 135, 136}).emit(verdictAccept()...)
+	// #15671: the fence has no config at cold boot, so ND stays a
+	// mandatory admit EXCEPT when a view excluded ndp.
+	if hostInboundNDPDefaultNetlink(views) {
+		p.rule().icmpType(famV6, []uint8{133, 134, 135, 136}).emit(verdictAccept()...)
+	}
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
 }
 
@@ -183,7 +194,7 @@ func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
 	// the non-unicast fence, which in turn must precede established flows.
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 	emitHostInboundMulticastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
-	emitHostInboundFenceL3AdmitsNetlink(p)
+	emitHostInboundFenceL3AdmitsNetlink(p, spec.Views)
 	p.rule().daddr(famV6, []string{"ff02::/16"}, false).
 		icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictReturn()...)
 	emitHostInboundNonUnicastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
@@ -200,7 +211,7 @@ func buildLo0FenceNetlink(p *nlPlan, spec FenceSpec) {
 }
 
 func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
-	hostInboundFenceMandatoryAdmitsNetlink(p)
+	hostInboundFenceMandatoryAdmitsNetlinkViews(p, spec.Views)
 	buildFenceDropsAfterMandatoryAdmitsNetlink(p, spec)
 }
 
@@ -235,7 +246,7 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
 	))
-	hostInboundFenceMandatoryAdmitsNetlink(p)
+	hostInboundFenceMandatoryAdmitsNetlinkViews(p, spec.Views)
 	emitHostInboundGapFenceWGAdmitsNetlink(p, spec)
 	emitDHCPBackstopAdmitsNetlink(p, spec.DHCPv6Admit, spec.DHCPv6AdmitVRFSlaves)
 	// #10751 M1/Opus9: lifeline-shared values stay reachable on

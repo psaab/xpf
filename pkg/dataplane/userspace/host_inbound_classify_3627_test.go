@@ -128,3 +128,17 @@ func TestClassifyHostInboundFamilyGate(t *testing.T) {
 		t.Fatalf("dhcp v6 udp/67: got %+v, want denied (dhcp is IPv4-only)", got)
 	}
 }
+
+// #15671: ND is token-admitted by ndp, default-admitted without an
+// ndp exclusion, and denied when ndp was excepted.
+func TestClassifyHostInboundNDP15671(t *testing.T) {
+	const ICMPv6 = uint8(58)
+	ndpCfg := cfgWithHostInbound("edge", nil, []string{"ndp"})
+	if got := ClassifyHostInbound(ndpCfg, "edge", ICMPv6, true, 0, u8ptr(135), "ip6"); got.Status != HostInboundTokenAdmit || got.Token != "ndp" {
+		t.Fatalf("ndp zone NS: got %+v, want token-admit ndp", got)
+	}
+	plain := cfgWithHostInbound("edge", nil, []string{"ospf"})
+	if got := ClassifyHostInbound(plain, "edge", ICMPv6, true, 0, u8ptr(135), "ip6"); got.Status != HostInboundGlobalAccept {
+		t.Fatalf("plain zone NS: got %+v, want global-accept (ND default)", got)
+	}
+}

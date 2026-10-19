@@ -63,6 +63,19 @@ func effectiveHostInboundTokens(zone *config.ZoneConfig, ref string, ifaceHI *co
 // the classifier, which is set-based, but a gratuitous change to a snapshot
 // other tests compare exactly. Dedup on the LOWER-CASED token, exactly as this
 // function did before it delegated.
+// effectiveHostInboundExcept returns the effective `protocols X
+// except` tokens (#15671) for the same resolution as
+// effectiveHostInboundTokens: interface stanza replaces zone stanza.
+func effectiveHostInboundExcept(zone *config.ZoneConfig, ifaceHI *config.HostInboundTraffic) []string {
+	if ifaceHI != nil {
+		return lowerDedup(ifaceHI.ProtocolsExceptTokens())
+	}
+	if zone != nil && zone.HostInboundTraffic != nil {
+		return lowerDedup(zone.HostInboundTraffic.ProtocolsExceptTokens())
+	}
+	return nil
+}
+
 func lowerDedup(in []string) []string {
 	if len(in) == 0 {
 		return nil

@@ -71,7 +71,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
 		}
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
-		emitHostInboundICMPAcceptsNetlink(p)
+		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
@@ -84,7 +84,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
-		emitHostInboundICMPAcceptsNetlink(p)
+		emitHostInboundICMPAcceptsNetlink(p, spec.Views)
 	}
 
 	// #10751/#11577: scoped DHCPv6 server replies pass before the backstop
@@ -275,14 +275,31 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	}
 }
 
+// hostInboundNDPDefaultNetlink reports whether ANY view retains the
+// ND default (#15671); the global accept is unscoped, so one
+// ndp-excluding view withdraws it chain-wide.
+func hostInboundNDPDefaultNetlink(views []HostInboundZoneView) bool {
+	for _, v := range views {
+		for _, tok := range v.ProtocolsExcept {
+			if tok == "ndp" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // emitHostInboundICMPAcceptsNetlink mirrors emitHostInboundICMPAccepts: the
-// global ND + v4/v6 PMTUD/error accepts, each carrying its named aggregate
-// counter (#4759).
-func emitHostInboundICMPAcceptsNetlink(p *nlPlan) {
+// v4/v6 PMTUD/error accepts plus the ND default accept (#15671 —
+// emitted only when no view excluded ndp), each carrying its named
+// aggregate counter (#4759).
+func emitHostInboundICMPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6Error)).emit(verdictAccept()...)
-	p.rule().icmpType(famV6, []uint8{133, 134, 135, 136}).
-		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6ND)).emit(verdictAccept()...)
+	if hostInboundNDPDefaultNetlink(views) {
+		p.rule().icmpType(famV6, []uint8{133, 134, 135, 136}).
+			counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6ND)).emit(verdictAccept()...)
+	}
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP4Error)).emit(verdictAccept()...)
 }

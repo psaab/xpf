@@ -102,6 +102,7 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 			Zone:                 v.Zone,
 			SystemServices:       v.SystemServices,
 			Protocols:            v.Protocols,
+			ProtocolsExcept:      v.ProtocolsExcept,
 			MulticastRules:       v.MulticastRules,
 			V4Addrs:              v.V4Addrs,
 			V6Addrs:              v.V6Addrs,

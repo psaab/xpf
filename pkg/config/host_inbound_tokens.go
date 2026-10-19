@@ -166,6 +166,7 @@ var KnownHostInboundProtocols = map[string]bool{
 	"ldp":              true,
 	"msdp":             true,
 	"nhrp":             true,
+	"ndp":              true,
 	"router-discovery": true,
 	// #3341: additional routing-control protocols Junos/vSRX accepts under
 	// host-inbound-traffic. All ride IP (none are L2), so each maps to a
@@ -605,6 +606,8 @@ var HostInboundProtocolFamily = map[string]string{
 	// multicast routing protocol — like igmp it must not open proto 2 on the v6
 	// path. rsvp/pgm/sap are dual-family (absent here).
 	"dvmrp": "ip",
+	// #15671: ndp is IPv6 Neighbor Discovery (ICMPv6 133-136), IPv6-only.
+	"ndp": "ip6",
 }
 
 // ---------------------------------------------------------------------------
@@ -915,15 +918,48 @@ func HostInboundProtocolMatch(token, family string) []L4Match {
 	case "isis":
 		// #3311: rides L2 (OSI/CLNP), no IP match — handled by FRR over LLC.
 		return nil
+	case "ndp":
+		// #15671: IPv6 Neighbor Discovery — RS/RA/NS/NA. The ND default
+		// (HostInboundNDPExcluded) admits these when no view in
+		// the zone excludes ndp; the per-zone ndp token is the positive
+		// admission the global default already provides. Redirect 137
+		// is never included.
+		return []L4Match{
+			hiICMP(HostInboundProtoICMPv6, 133), hiICMP(HostInboundProtoICMPv6, 134),
+			hiICMP(HostInboundProtoICMPv6, 135), hiICMP(HostInboundProtoICMPv6, 136),
+		}
 	case "router-discovery":
 		if family == "ip6" {
-			// v6 RS/RA are part of the always-accepted ND set (global accept).
+			// v6 RS/RA ride the ndp admission (global default or the
+			// per-zone ndp token, #15671).
 			return nil
 		}
 		return []L4Match{hiICMP(HostInboundProtoICMP, 9), hiICMP(HostInboundProtoICMP, 10)}
 	default:
 		return nil
 	}
+}
+
+// ProtocolsExceptTokens returns the raw `protocols X except` tokens
+// recorded on this stanza (#15671 wire parity for Rust ND withdrawal).
+func (h *HostInboundTraffic) ProtocolsExceptTokens() []string {
+	if h == nil {
+		return nil
+	}
+	return append([]string(nil), h.protocolsExcept...)
+}
+
+// HostInboundNDPExcluded reports whether any view's raw except tokens
+// name ndp (#15671) — the only withdrawal of the ND default.
+func HostInboundNDPExcluded(viewsExcept [][]string) bool {
+	for _, except := range viewsExcept {
+		for _, tok := range except {
+			if strings.ToLower(strings.TrimSpace(tok)) == "ndp" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // HostInboundFullAdmitService reports whether a `system-services` token opens

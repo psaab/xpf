@@ -31,6 +31,7 @@ type ZoneSnapshot struct {
 	HostInboundConfigured     bool     `json:"host_inbound_configured,omitempty"`
 	HostInboundSystemServices []string `json:"host_inbound_system_services,omitempty"`
 	HostInboundProtocols      []string `json:"host_inbound_protocols,omitempty"`
+	HostInboundProtocolsExcept []string `json:"host_inbound_protocols_except,omitempty"` // #15671
 	// TCPRst carries the Junos `security zones security-zone <z> tcp-rst`
 	// knob (#3071). When true, a non-SYN TCP transit packet dropped for a
 	// session miss may receive a TCP RST toward its source when this is its

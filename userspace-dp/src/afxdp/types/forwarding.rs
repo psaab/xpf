@@ -783,6 +783,8 @@ pub(in crate::afxdp) struct ZoneHostInbound {
     pub(in crate::afxdp) mcast_dvmrp: bool,
     pub(in crate::afxdp) mcast_vrrp: bool,
     pub(in crate::afxdp) mcast_router_discovery: bool,
+    /// #15671: `protocols ndp except` authored — ND default withdrawn.
+    pub(in crate::afxdp) ndp_excluded: bool,
 }
 
 impl ZoneHostInbound {

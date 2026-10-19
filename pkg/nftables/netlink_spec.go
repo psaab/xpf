@@ -40,6 +40,7 @@ type HostInboundZoneView struct {
 	Zone                 string
 	SystemServices       []string
 	Protocols            []string
+	ProtocolsExcept      []string // #15671: raw except tokens
 	MulticastRules       []config.HostInboundMulticastRule
 	V4Addrs              []string
 	V6Addrs              []string
