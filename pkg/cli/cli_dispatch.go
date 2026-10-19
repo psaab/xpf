@@ -505,21 +505,14 @@ func (c *CLI) dispatchConfig(line string) error {
 		}
 		fmt.Printf("[edit %s]\n", strings.Join(c.store.GetEditPath(), " "))
 		return nil
-	case "top":
-		c.store.NavigateTop()
-		c.rl.SetPrompt(c.configPrompt())
-		fmt.Println("[edit]")
-		return nil
-	case "up":
-		c.store.NavigateUp()
-		c.rl.SetPrompt(c.configPrompt())
-		editPath := c.store.GetEditPath()
-		if len(editPath) > 0 {
-			fmt.Printf("[edit %s]\n", strings.Join(editPath, " "))
-		} else {
-			fmt.Println("[edit]")
-		}
-		return nil
+	case "top", "up":
+		// #15082: `top <cmd>` / `up [n] <cmd>` execute cmd at the
+		// target level and restore the cursor. Bare top/up stay
+		// pure navigation. Previously the trailing command was
+		// silently dropped with a nil return, so e.g.
+		// `top delete ... policy allow-all` left the permit
+		// policy in the candidate and committed it.
+		return c.dispatchTopUp15082(line)
 	case "set":
 		if len(parts) < 2 {
 			return fmt.Errorf("set: missing path")
@@ -634,4 +627,38 @@ func (c *CLI) dispatchConfig(line string) error {
 	default:
 		return fmt.Errorf("unknown command: %s (in configuration mode)", parts[0])
 	}
+}
+
+// dispatchTopUp15082 handles bare and prefixed top/up (#15082).
+// The gate above has already adjudicated any inner mutation at the
+// target cursor (configMutationPaths unwraps the same prefix), so
+// execution here must act on exactly that command and cursor.
+func (c *CLI) dispatchTopUp15082(line string) error {
+	saved := c.store.GetEditPath()
+	target, inner, ok := config.ParseTopUpPrefix15082(saved, line)
+	if !ok {
+		return fmt.Errorf("%s: invalid up count or malformed prefix", strings.Fields(line)[0])
+	}
+	if len(inner) == 0 {
+		c.store.SetEditPath(target)
+		if c.rl != nil {
+			c.rl.SetPrompt(c.configPrompt())
+		}
+		if len(target) > 0 {
+			fmt.Printf("[edit %s]\n", strings.Join(target, " "))
+		} else {
+			fmt.Println("[edit]")
+		}
+		return nil
+	}
+	if inner[0] == "top" || inner[0] == "up" || inner[0] == "edit" {
+		return fmt.Errorf("%s: %s cannot follow a top/up prefix", strings.Fields(line)[0], inner[0])
+	}
+	c.store.SetEditPath(target)
+	err := c.dispatchConfig(strings.Join(inner, " "))
+	c.store.SetEditPath(saved)
+	if c.rl != nil {
+		c.rl.SetPrompt(c.configPrompt())
+	}
+	return err
 }
