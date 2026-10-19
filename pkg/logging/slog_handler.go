@@ -272,6 +272,8 @@ func slogLevelToSyslog(level slog.Level) int {
 		return SyslogError
 	case level >= slog.LevelWarn:
 		return SyslogWarning
+	case level < slog.LevelInfo:
+		return SyslogDebug
 	default:
 		return SyslogInfo
 	}
