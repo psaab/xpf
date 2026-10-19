@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -522,76 +523,212 @@ func FormatCompare(oldTree, newTree *ConfigTree) string {
 	return b.String()
 }
 
+// alignSiblings aligns two sibling lists as sequences (#15168, B24-01).
+//
+// Pairing is by KeyPath, but duplicates are content-aware: among siblings
+// sharing a KeyPath, a content-equal old/new pair is matched first, so with
+// repeated containers (two `from-zone trust to-zone untrust` blocks) removing
+// a policy from one block reports that policy — not a same-KeyPath survivor
+// from the other block — as removed. Leftover duplicates pair in occurrence
+// order. A pair is a move when it falls off the longest increasing
+// subsequence of new indices (pairs taken in old order): it renders as -/+
+// at its old/new positions instead of as unchanged.
+type siblingAlignment struct {
+	pairs    [][2]int // (oldIdx, newIdx) for every KeyPath-matched pair
+	movedOld map[int]bool
+	movedNew map[int]bool
+	oldOnly  []int
+	newOnly  []int
+}
+
+func alignSiblings(oldNodes, newNodes []*Node) siblingAlignment {
+	// Authored slice order is the sequence. canonicalOrder is deliberately
+	// NOT applied: it only swaps match/from before then within one node,
+	// which nodesEqual already normalizes, and applying it to sibling lists
+	// would hide authored policy order.
+	oldByKey := make(map[string][]int)
+	for i, n := range oldNodes {
+		k := n.KeyPath()
+		oldByKey[k] = append(oldByKey[k], i)
+	}
+	newByKey := make(map[string][]int)
+	for i, n := range newNodes {
+		k := n.KeyPath()
+		newByKey[k] = append(newByKey[k], i)
+	}
+	a := siblingAlignment{
+		movedOld: make(map[int]bool),
+		movedNew: make(map[int]bool),
+	}
+	matchedOld := make(map[int]bool)
+	matchedNew := make(map[int]bool)
+	for k, olds := range oldByKey {
+		news := newByKey[k]
+		usedNew := make(map[int]bool, len(news))
+		paired := make(map[int]int, len(olds))
+		// Content-equal duplicates pair first (shape 2 above).
+		for _, oi := range olds {
+			for _, ni := range news {
+				if !usedNew[ni] && nodesEqual(oldNodes[oi], newNodes[ni]) {
+					paired[oi] = ni
+					usedNew[ni] = true
+					break
+				}
+			}
+		}
+		var remNew []int
+		for _, ni := range news {
+			if !usedNew[ni] {
+				remNew = append(remNew, ni)
+			}
+		}
+		next := 0
+		for _, oi := range olds {
+			ni, ok := paired[oi]
+			if !ok {
+				if next >= len(remNew) {
+					continue // old-only: removed duplicate occurrence
+				}
+				ni = remNew[next]
+				next++
+			}
+			a.pairs = append(a.pairs, [2]int{oi, ni})
+			matchedOld[oi] = true
+			matchedNew[ni] = true
+		}
+	}
+	markMovedPairs(&a)
+	for i := range oldNodes {
+		if !matchedOld[i] {
+			a.oldOnly = append(a.oldOnly, i)
+		}
+	}
+	for i := range newNodes {
+		if !matchedNew[i] {
+			a.newOnly = append(a.newOnly, i)
+		}
+	}
+	return a
+}
+
+// markMovedPairs flags pairs off the longest increasing subsequence of new
+// indices (pairs in old order) as moves. Anchored pairs keep their relative
+// order; a moved pair is the minimal set whose removal restores monotonicity.
+func markMovedPairs(a *siblingAlignment) {
+	if len(a.pairs) == 0 {
+		return
+	}
+	sorted := make([][2]int, len(a.pairs))
+	copy(sorted, a.pairs)
+	slices.SortFunc(sorted, func(x, y [2]int) int { return x[0] - y[0] })
+	n := len(sorted)
+	dpL := make([]int, n)
+	prev := make([]int, n)
+	best := 0
+	for i := range n {
+		dpL[i] = 1
+		prev[i] = -1
+		for j := range i {
+			if sorted[j][1] < sorted[i][1] && dpL[j]+1 > dpL[i] {
+				dpL[i] = dpL[j] + 1
+				prev[i] = j
+			}
+		}
+		if dpL[i] > dpL[best] {
+			best = i
+		}
+	}
+	onLIS := make(map[int]bool, n)
+	for i := best; i >= 0; i = prev[i] {
+		onLIS[sorted[i][0]] = true
+		if prev[i] < 0 {
+			break
+		}
+	}
+	for _, p := range a.pairs {
+		if !onLIS[p[0]] {
+			a.movedOld[p[0]] = true
+			a.movedNew[p[1]] = true
+		}
+	}
+}
+
+// siblingChanged reports whether the aligned old/new pair at this level
+// differs, including order-only moves of the pair itself or of any descendant
+// (descendant order is judged by nodesEqual, which is order-aware).
+func siblingChanged(oldNode, newNode *Node, moved bool) bool {
+	if moved {
+		return true
+	}
+	return !nodesEqual(oldNode, newNode)
+}
+
 // diffNodes compares two sets of children at the same tree level.
 // It recurses into modified containers to find the deepest [edit] context,
 // only showing siblings at the level where actual leaf changes occur.
+// Sibling lists are compared as sequences (#15168): duplicates pair by
+// occurrence and a reordered sibling renders as -/+ at its old/new positions.
 func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string) {
-	oldByKey := make(map[string]*Node, len(oldNodes))
-	for _, n := range oldNodes {
-		oldByKey[n.KeyPath()] = n
-	}
-	newByKey := make(map[string]*Node, len(newNodes))
-	for _, n := range newNodes {
-		newByKey[n.KeyPath()] = n
+	al := alignSiblings(oldNodes, newNodes)
+	oldIdxOfNew := make(map[int]int, len(al.pairs))
+	for _, p := range al.pairs {
+		oldIdxOfNew[p[1]] = p[0]
 	}
 
-	// Collect changed entries at this level.
 	type diffEntry struct {
 		oldNode *Node
 		newNode *Node
+		moved   bool
 	}
 
-	// Use canonical ordering from new tree, then appended removed-only entries.
-	seen := make(map[string]bool)
+	// Collect changed entries: anchored pairs that differ, moved pairs,
+	// removed-only and added-only siblings.
 	var entries []diffEntry
-	for _, n := range canonicalOrder(newNodes) {
-		kp := n.KeyPath()
-		seen[kp] = true
-		old := oldByKey[kp]
-		if old == nil || !nodesEqual(old, n) {
-			entries = append(entries, diffEntry{oldNode: old, newNode: n})
+	changed := false
+	for _, p := range al.pairs {
+		o, n := oldNodes[p[0]], newNodes[p[1]]
+		mv := al.movedOld[p[0]]
+		if siblingChanged(o, n, mv) {
+			changed = true
+			entries = append(entries, diffEntry{oldNode: o, newNode: n, moved: mv})
 		}
 	}
-	for _, n := range canonicalOrder(oldNodes) {
-		kp := n.KeyPath()
-		if !seen[kp] {
-			entries = append(entries, diffEntry{oldNode: n, newNode: nil})
-		}
+	if len(al.oldOnly) > 0 || len(al.newOnly) > 0 {
+		changed = true
 	}
-
-	if len(entries) == 0 {
+	if !changed {
 		return
 	}
-
-	// Check if all changes can be recursed into (both old and new are blocks).
-	// If so, recurse without printing siblings at this level.
-	allRecursable := true
+	// Pure reorders / pure add-remove at this level are shown here, not
+	// recursed past: recursing into a moved container would hide the move.
+	hasMoveOrUnpaired := len(al.oldOnly) > 0 || len(al.newOnly) > 0
 	for _, e := range entries {
-		if e.oldNode == nil || e.newNode == nil {
-			allRecursable = false
-			break
-		}
-		if e.oldNode.IsLeaf || e.newNode.IsLeaf {
-			allRecursable = false
-			break
-		}
-		// #2008 H1: a pure block-level activate/deactivate (identical
-		// content, flipped Inactive) has NO child diff to recurse into —
-		// it must be shown at this level as a removed/added pair, not
-		// silently dropped by recursing into an unchanged subtree.
-		if e.oldNode.Inactive != e.newNode.Inactive {
-			allRecursable = false
+		if e.moved {
+			hasMoveOrUnpaired = true
 			break
 		}
 	}
 
-	if allRecursable {
-		// All changes are in modified sub-containers — recurse deeper without showing this level.
+	if !hasMoveOrUnpaired {
+		// Check if all changes can be recursed into (both old and new are blocks).
+		allRecursable := true
 		for _, e := range entries {
-			childPath := append(append([]string{}, editPath...), strings.Fields(e.oldNode.KeyPath())...)
-			diffNodes(b, e.oldNode.Children, e.newNode.Children, childPath)
+			if e.oldNode.IsLeaf || e.newNode.IsLeaf {
+				allRecursable = false
+				break
+			}
+			if e.oldNode.Inactive != e.newNode.Inactive {
+				allRecursable = false
+				break
+			}
 		}
-		return
+		if allRecursable {
+			for _, e := range entries {
+				childPath := append(append([]string{}, editPath...), strings.Fields(e.oldNode.KeyPath())...)
+				diffNodes(b, e.oldNode.Children, e.newNode.Children, childPath)
+			}
+			return
+		}
 	}
 
 	// Print [edit <path>] header — this is the level where leaf changes exist.
@@ -599,56 +736,56 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 		fmt.Fprintf(b, "[edit %s]\n", strings.Join(editPath, " "))
 	}
 
-	// Show all children at this level: unchanged as collapsed, added/removed with prefix.
-	// Merge all nodes from both old and new in canonical order (new first, then old-only).
-	seen2 := make(map[string]bool)
-	var allEntries []diffEntry
-	for _, n := range canonicalOrder(newNodes) {
-		kp := n.KeyPath()
-		seen2[kp] = true
-		allEntries = append(allEntries, diffEntry{oldNode: oldByKey[kp], newNode: n})
+	indent := "    "
+	// Removals (deleted and moved-out) render in old order first, then the
+	// new-order list renders additions, moves-in, modified and unchanged
+	// siblings. A move therefore appears as - <node> ... + <node> within
+	// the same [edit] block, naming the moved stanza on both arms.
+	removedSet := make(map[int]bool)
+	for _, oi := range al.oldOnly {
+		removedSet[oi] = true
 	}
-	for _, n := range canonicalOrder(oldNodes) {
-		if !seen2[n.KeyPath()] {
-			allEntries = append(allEntries, diffEntry{oldNode: n, newNode: nil})
+	for oi := range al.movedOld {
+		removedSet[oi] = true
+	}
+	// Old-order removals (moved-out and deleted) first.
+	for oi, o := range oldNodes {
+		if removedSet[oi] {
+			formatPrefixed(b, "-", indent, o)
 		}
 	}
-
-	indent := "    "
-	for _, e := range allEntries {
+	// New-order list: additions, moves-in, modified and unchanged siblings.
+	for ni, n := range newNodes {
+		oi, paired := oldIdxOfNew[ni]
 		switch {
-		case e.oldNode == nil:
-			// Added
-			formatPrefixed(b, "+", indent, e.newNode)
-		case e.newNode == nil:
-			// Removed
-			formatPrefixed(b, "-", indent, e.oldNode)
-		case nodesEqual(e.oldNode, e.newNode):
-			// Unchanged — show collapsed
-			if e.oldNode.IsLeaf {
-				fmt.Fprintf(b, " %s%s%s;\n", indent, inactivePrefix(e.oldNode), e.oldNode.QuotedKeyPath())
-			} else {
-				fmt.Fprintf(b, " %s%s%s { ... }\n", indent, inactivePrefix(e.oldNode), e.oldNode.QuotedKeyPath())
-			}
+		case !paired:
+			formatPrefixed(b, "+", indent, n)
+		case al.movedNew[ni]:
+			formatPrefixed(b, "+", indent, n)
 		default:
-			// Modified
-			if !e.oldNode.IsLeaf && !e.newNode.IsLeaf &&
-				e.oldNode.Inactive == e.newNode.Inactive {
-				// Both are blocks with the same active/inactive state — show
-				// [edit] context for the sub-container. A pure block-level
-				// activate/deactivate (#2008 H1) falls through to the -/+
-				// pair below so the change is visible.
-				childPath := append(append([]string{}, editPath...), strings.Fields(e.oldNode.KeyPath())...)
-				diffNodes(b, e.oldNode.Children, e.newNode.Children, childPath)
-			} else {
-				formatPrefixed(b, "-", indent, e.oldNode)
-				formatPrefixed(b, "+", indent, e.newNode)
+			o := oldNodes[oi]
+			switch {
+			case nodesEqual(o, n):
+				if o.IsLeaf {
+					fmt.Fprintf(b, " %s%s%s;\n", indent, inactivePrefix(o), o.QuotedKeyPath())
+				} else {
+					fmt.Fprintf(b, " %s%s%s { ... }\n", indent, inactivePrefix(o), o.QuotedKeyPath())
+				}
+			case !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
+				childPath := append(append([]string{}, editPath...), strings.Fields(o.KeyPath())...)
+				diffNodes(b, o.Children, n.Children, childPath)
+			default:
+				formatPrefixed(b, "-", indent, o)
+				formatPrefixed(b, "+", indent, n)
 			}
 		}
 	}
 }
 
 // nodesEqual returns true if two nodes have identical content (deep comparison).
+// Children are compared as a sequence (#15168): same KeyPaths in a different
+// order, or a different duplicate count, are NOT equal — sibling order is
+// semantic for first-match constructs (policies, terms, rules).
 func nodesEqual(a, b *Node) bool {
 	if a.KeyPath() != b.KeyPath() {
 		return false
@@ -668,16 +805,10 @@ func nodesEqual(a, b *Node) bool {
 	if len(a.Children) != len(b.Children) {
 		return false
 	}
-	bByKey := make(map[string]*Node, len(b.Children))
-	for _, n := range b.Children {
-		bByKey[n.KeyPath()] = n
-	}
-	for _, ac := range a.Children {
-		bc, ok := bByKey[ac.KeyPath()]
-		if !ok {
-			return false
-		}
-		if !nodesEqual(ac, bc) {
+	aOrd := canonicalOrder(a.Children)
+	bOrd := canonicalOrder(b.Children)
+	for i := range aOrd {
+		if !nodesEqual(aOrd[i], bOrd[i]) {
 			return false
 		}
 	}
