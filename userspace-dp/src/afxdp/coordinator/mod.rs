@@ -2315,6 +2315,10 @@ impl Coordinator {
 mod routing_domain;
 
 #[cfg(test)]
+#[path = "ipsec_inner_dead_worker_15149_tests.rs"]
+mod ipsec_inner_dead_worker_15149_tests;
+
+#[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
 

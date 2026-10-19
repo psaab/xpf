@@ -1696,6 +1696,12 @@ pub(crate) struct IpsecInnerWorkerTransport {
     tombstones: IpsecInnerTombstones,
     active: Mutex<Vec<ActiveIpsecDescriptor>>,
     retired: Mutex<BTreeMap<u32, Option<Arc<IpsecInnerIngressQueue>>>>,
+    /// #15149: terminal Deny verdicts for descriptors reaped by
+    /// `retire_worker` / `join_worker_after_termination`. The reaper has
+    /// already claimed the request tombstones, so these bypass the active-
+    /// entry verdict drain; the coordinator sweep drains them to the
+    /// Go-facing completion core.
+    reaped_verdicts: Mutex<Vec<IpsecInnerVerdict>>,
 }
 
 impl IpsecInnerWorkerTransport {
@@ -1725,6 +1731,7 @@ impl IpsecInnerWorkerTransport {
             tombstones: IpsecInnerTombstones::new(),
             active: Mutex::new(Vec::with_capacity(IPSEC_INNER_SLAB_CAP)),
             retired: Mutex::new(BTreeMap::new()),
+            reaped_verdicts: Mutex::new(Vec::new()),
         }
     }
 
@@ -2020,6 +2027,20 @@ impl IpsecInnerWorkerTransport {
             if self.tombstones.claim_stale(desc.request_id) {
                 self.pool.reclaim_after_worker_death(desc.slab_id);
                 self.router.release(desc.flow_tag);
+                // #15149: the Go-facing request must complete as Denied,
+                // not by ack timeout. Recorded here because this reap is
+                // the terminalization point; the coordinator sweep drains
+                // these via `take_reaped_terminal_verdicts`.
+                self.reaped_verdicts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(IpsecInnerVerdict::Deny {
+                        request_id: desc.request_id,
+                        connection_id: desc.connection_id,
+                        stage: "d11_worker_dead",
+                        reason: reason::SUBMIT_UNAVAILABLE,
+                        policy_id: 0,
+                    });
                 reaped += 1;
             }
         }
@@ -2074,7 +2095,22 @@ impl IpsecInnerWorkerTransport {
                     continue;
                 }
                 let entry = active.swap_remove(index);
-                self.tombstones.claim_stale(entry.desc.request_id);
+                // #15149: only a successful stale claim terminalizes the
+                // request; an already-posted worker verdict (VERDICT_POSTED)
+                // must remain the single terminal, so no Deny is recorded
+                // when the claim loses.
+                if self.tombstones.claim_stale(entry.desc.request_id) {
+                    self.reaped_verdicts
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(IpsecInnerVerdict::Deny {
+                            request_id: entry.desc.request_id,
+                            connection_id: entry.desc.connection_id,
+                            stage: "d11_worker_dead",
+                            reason: reason::SUBMIT_UNAVAILABLE,
+                            policy_id: 0,
+                        });
+                }
                 self.pool
                     .reclaim_after_worker_death(entry.desc.slab_id);
                 self.router.release(entry.desc.flow_tag);
@@ -2085,6 +2121,26 @@ impl IpsecInnerWorkerTransport {
             reaped += self.reap_closed_queue(&queue);
         }
         reaped
+    }
+
+    /// #15149: take the terminal Deny verdicts recorded for every descriptor
+    /// reaped by `retire_worker` + `join_worker_after_termination`. The
+    /// coordinator sweep that invokes the pair (the worker has exited) drains
+    /// these so Go-facing requests complete as Denied instead of by ack
+    /// timeout. Tombstone exactly-once accounting already happened in the
+    /// reap, so these verdicts bypass `drain_verdicts_into` (which would
+    /// discard them for lack of an active entry). Returns the count taken.
+    pub(crate) fn take_reaped_terminal_verdicts(
+        &self,
+        out: &mut Vec<IpsecInnerVerdict>,
+    ) -> usize {
+        let mut reaped = self
+            .reaped_verdicts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let taken = reaped.len();
+        out.extend(reaped.drain(..));
+        taken
     }
 }
 
