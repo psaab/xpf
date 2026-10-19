@@ -444,6 +444,148 @@ func TestRunDHCPv4RebindingNAKRestartsDiscover(t *testing.T) {
 	}
 }
 
+// TestRunDHCPv4ForceDiscover15692 pins #15692: with `force-discover`
+// configured, the T1/T2 renewal MUST be a full DISCOVER (exchangeAcquire)
+// rather than a unicast RENEWING / broadcast REBINDING DHCPREQUEST, while
+// the held lease stays installed until the DISCOVER exchange replaces it
+// or reaches Obtained+LeaseTime. Without ForceDiscover the neighbouring
+// RFC 2131 renew/rebind path (#2994) must be unchanged.
+func TestRunDHCPv4ForceDiscover15692(t *testing.T) {
+	run := func(t *testing.T, forceDiscover bool, want []dhcpExchangeMode) []dhcpExchangeMode {
+		t.Helper()
+		leaseA := &Lease{
+			Interface: "wan0",
+			Family:    AFInet,
+			Address:   netip.MustParsePrefix("192.0.2.50/24"),
+			serverID:  netip.MustParseAddr("192.0.2.1"),
+			LeaseTime: 100 * time.Second,
+			Obtained:  time.Now(),
+		}
+		var modes []dhcpExchangeMode
+		var leaseSeenOnRenewFailure bool
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		m := &Manager{
+			leases:       map[clientKey]*Lease{},
+			delegatedPDs: map[string][]DelegatedPrefix{},
+			v4opts:       map[string]*DHCPv4Options{"wan0": {ForceDiscover: forceDiscover}},
+			afterForTest: immediateAfter,
+		}
+		m.doV4ExchangeForTest = func(_ context.Context, _ string, mode dhcpExchangeMode, prev *Lease) (*Lease, error) {
+			modes = append(modes, mode)
+			switch len(modes) {
+			case 1: // initial acquire
+				return leaseA, nil
+			case 2:
+				// First renewal step fails (either renew or DISCOVER).
+				return nil, context.DeadlineExceeded
+			case 3:
+				// Second renewal step: lease must still be held.
+				if got := m.LeaseFor("wan0", AFInet); got != nil && got.Address == leaseA.Address {
+					leaseSeenOnRenewFailure = true
+				}
+				return nil, context.DeadlineExceeded
+			default:
+				// Post-failure re-acquire: stop the loop.
+				cancel()
+				return nil, context.Canceled
+			}
+		}
+		done := make(chan struct{})
+		go func() { m.runDHCPv4(ctx, "wan0"); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("runDHCPv4 did not terminate")
+		}
+		if len(modes) != len(want) {
+			t.Fatalf("exchange modes = %v, want %v", modes, want)
+		}
+		for i, w := range want {
+			if modes[i] != w {
+				t.Errorf("exchange %d mode = %s, want %s (all=%v)", i, modes[i], w, modes)
+			}
+		}
+		if !leaseSeenOnRenewFailure {
+			t.Errorf("held lease was dropped before second renewal step; modes=%v", modes)
+		}
+		return modes
+	}
+
+	t.Run("force-discover uses DISCOVER at T1 and T2", func(t *testing.T) {
+		run(t, true, []dhcpExchangeMode{
+			exchangeAcquire, exchangeAcquire, exchangeAcquire, exchangeAcquire,
+		})
+	})
+	t.Run("default still renews and rebinds", func(t *testing.T) {
+		run(t, false, []dhcpExchangeMode{
+			exchangeAcquire, exchangeRenew, exchangeRebind, exchangeAcquire,
+		})
+	})
+}
+
+// TestRunDHCPv4ForceDiscoverKeepsLeaseUntilExpiry15692 pins the failure
+// half of #15692: when every force-discover exchange fails, the held
+// lease is preserved until Obtained+LeaseTime (the run loop's absolute
+// deadline), not dropped at T1/T2.
+func TestRunDHCPv4ForceDiscoverKeepsLeaseUntilExpiry15692(t *testing.T) {
+	leaseA := &Lease{
+		Interface: "wan0",
+		Family:    AFInet,
+		Address:   netip.MustParsePrefix("192.0.2.50/24"),
+		serverID:  netip.MustParseAddr("192.0.2.1"),
+		LeaseTime: 2 * time.Second,
+		Obtained:  time.Now(),
+	}
+	var modes []dhcpExchangeMode
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &Manager{
+		leases:       map[clientKey]*Lease{},
+		delegatedPDs: map[string][]DelegatedPrefix{},
+		v4opts:       map[string]*DHCPv4Options{"wan0": {ForceDiscover: true}},
+		afterForTest: immediateAfter,
+	}
+	m.doV4ExchangeForTest = func(exCtx context.Context, _ string, mode dhcpExchangeMode, prev *Lease) (*Lease, error) {
+		modes = append(modes, mode)
+		switch len(modes) {
+		case 1:
+			return leaseA, nil
+		default:
+			// Renewal DISCOVERs block until the lease deadline cancels
+			// them, simulating a server that never answers.
+			<-exCtx.Done()
+			return nil, exCtx.Err()
+		}
+	}
+	done := make(chan struct{})
+	go func() { m.runDHCPv4(ctx, "wan0"); close(done) }()
+	select {
+	case <-done:
+		// Loop should have abandoned the expired lease and looped back
+		// to a fresh acquire that blocks on ctx; cancel to let it exit
+		// — but it must not have exited on its own before expiry.
+		t.Fatal("runDHCPv4 exited before lease expiry handling completed")
+	case <-time.After(2500 * time.Millisecond):
+		// After expiry the lease record must be gone (abandoned) even
+		// though DISCOVER never succeeded.
+		if got := m.LeaseFor("wan0", AFInet); got != nil {
+			cancel()
+			<-done
+			t.Fatalf("lease still held after expiry: %v", got.Address)
+		}
+		cancel()
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runDHCPv4 did not terminate after cancel")
+	}
+	if len(modes) < 2 || modes[1] != exchangeAcquire {
+		t.Fatalf("force-discover renewal modes = %v, want second exchange acquire", modes)
+	}
+}
+
 // mustV4ACK builds a minimal DHCPv4 ACK carrying yourIP and, when non-nil,
 // the given subnet mask (option 1). A nil mask omits the option so the
 // leaseFromACKv4 fallback path is exercised.
