@@ -1244,6 +1244,17 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 			// superseded too. No-op unless such a removal was pending.
 			s.clearConfirmResolutionPendingLocked()
 		}
+		// #14993: the synced config is durable and supersedes any
+		// FIRST-rollback teardown debt in-process (a sync that superseded
+		// a live window already discarded it via the confirm hook; this
+		// covers debt owed with no window pending). When the sync
+		// superseded a window, the drain above already noted fresh debt
+		// if the rollback write had been deferred — re-noting it from
+		// the retained confirm.json, so the discard below must not
+		// erase that fresh debt: skip it in that case.
+		if !s.confirmResolvePendingPersist {
+			s.discardSupersededFirstCommitTeardownLocked(guardedConfigHash(s.active))
+		}
 	}
 
 	s.journalLog(&JournalEntry{
