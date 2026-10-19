@@ -38,7 +38,17 @@ type SystemConfig struct {
 	NTPThresholdAction string // "accept" or "reject"
 	NoRedirects        bool   // disable ICMP redirects
 	BackupRouter       string // backup default gateway IP
-	BackupRouterDst    string // backup router destination prefix
+	// BackupRouterDst is the FIRST explicit destination prefix, retained
+	// as a scalar for consumers that only need one prefix. It is kept in
+	// sync with BackupRouterDsts[0] by the compiler; new code MUST read
+	// BackupRouterDsts.
+	BackupRouterDst string
+	// BackupRouterDsts holds EVERY explicit `destination` prefix of
+	// `system backup-router <addr> destination [ p1 p2 ... ]` (and repeated
+	// `destination` leaves), in authored order (#15780). Empty means no
+	// explicit destination: the daemon installs the next-hop-family
+	// default (0.0.0.0/0 or ::/0).
+	BackupRouterDsts   []string
 	Lo0FilterInputV4   string // lo0 unit 0 family inet filter input (host-bound filtering)
 	Lo0FilterInputV6   string // lo0 unit 0 family inet6 filter input (host-bound filtering)
 	DataplaneType      string // empty defaults to "userspace"; explicit "ebpf" is legacy; "dpdk" is retired (#1525) and tolerated via rewriteRetiredDataplaneType (pkg/configstore/dataplane_retire.go) at both Store.Load and Store.SyncApply for stored-config rolling upgrade

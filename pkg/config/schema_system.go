@@ -111,7 +111,14 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		allChildKeysAreValues: true,
 	},
 	"backup-router": {desc: "Backup router", args: 1, placeholder: "<address>", closedWorld: true, children: map[string]*schemaNode{
-		"destination": {desc: "Destination network", args: 1, placeholder: "<network>", children: nil},
+		// #15780: Junos allows a LIST of destination prefixes
+		// (`destination [ 0.0.0.0/1 128.0.0.0/1 ]`) and repeated
+		// `destination` leaves. multi+allChildKeysAreValues makes the
+		// schema walk validate EVERY prefix (flat Keys tail and
+		// hierarchical block children) with ValidateRouteDestination,
+		// and SetPath keeps repeated leaves as siblings instead of
+		// replacing the previous one.
+		"destination": {desc: "Destination network", args: 1, multi: true, placeholder: "<network>", valueType: ValueCIDR, valueDesc: "Destination prefix (CIDR, e.g. 0.0.0.0/0 or 2001:db8::/32)", valueExamples: []string{"0.0.0.0/0", "10.0.0.0/8", "::/0"}, validator: ValidateRouteDestination, children: nil, allChildKeysAreValues: true},
 	}},
 	// packedStatements (issue 8858): SSHKeys is a []string, so a packed
 	// `root-authentication ssh-ed25519 <k1> ssh-ed25519 <k2>` run must split

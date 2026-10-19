@@ -988,9 +988,17 @@ kernel table 999. An empty destination defaults to `0.0.0.0/0` for IPv4 or
 global FRR route, so it does not change the data table and continues to work
 when FRR is stopped.
 
+Since #15780 the destination is a LIST: `destination [ p1 p2 … ]` and
+repeated `destination` leaves all compile into `System.BackupRouterDsts`
+(`BackupRouterDst` retains the first prefix), the daemon installs one
+table-999 route per destination, and `show system backup-router` lists
+every prefix (its empty-destination default label follows the next-hop
+family: `::/0` for IPv6).
+
 `validateBackupRouterDst` (`compiler_system.go`) rejects malformed next-hops,
 IPv4-mapped next-hops, malformed explicit destinations, and explicit
-destination/next-hop family mismatches at strict commit. The tolerant
+destination/next-hop family mismatches at strict commit — checking EVERY
+destination in the list (#15780), not just the first. The tolerant
 load/peer-sync path warns and retains bootability; the netlink reconciler
 skips values that cannot safely become a table-999 route. Family comparison
 uses the shared `FRRAddrFamily` predicate; mapped destinations classify as

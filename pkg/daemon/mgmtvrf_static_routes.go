@@ -151,18 +151,43 @@ func mgmtStaticRoutesDesired(
 		return desired
 	}
 
-	backup, backupFamily, hasBackup := mgmtBackupRouterRoute(cfg.System.BackupRouter, cfg.System.BackupRouterDst)
+	// #15780: one table-999 route PER explicit destination. Fall back to
+	// the scalar first destination for hand-built configs, and to the
+	// single default route (empty destination) when none is explicit.
+	backupDsts := cfg.System.BackupRouterDsts
+	if len(backupDsts) == 0 && cfg.System.BackupRouterDst != "" {
+		backupDsts = []string{cfg.System.BackupRouterDst}
+	}
+	if len(backupDsts) == 0 {
+		backupDsts = []string{""}
+	}
+	type backupRoute struct {
+		route  netlink.Route
+		family int
+	}
+	var backups []backupRoute
+	var backupFamily int
+	for _, dst := range backupDsts {
+		route, family, ok := mgmtBackupRouterRoute(cfg.System.BackupRouter, dst)
+		if !ok {
+			continue
+		}
+		backups = append(backups, backupRoute{route: route, family: family})
+		backupFamily = family
+	}
+	hasBackup := len(backups) > 0
 	// The backup-router gateway takes the same IPv6 next-hop inference as an
 	// interface-less static next-hop.
 	var backupV6Gateway string
 	var inferenceOverlay []config.RouteOverlayEntry
 	if hasBackup && backupFamily == netlink.FAMILY_V6 {
-		backupV6Gateway = backup.Gw.String()
+		backupV6Gateway = backups[0].route.Gw.String()
 		inferenceOverlay = []config.RouteOverlayEntry{{NextHop: backupV6Gateway}}
 	}
 	connected := [2][]netlink.Route{current[0], current[1]}
 	inferredV6 := inferIPv6StaticNextHopInterfaces(cfg, inferenceOverlay)[""]
-	if hasBackup {
+	for _, b := range backups {
+		backup := b.route
 		// #12583: the kernel lists a gateway route with the output link it
 		// chose, so the backup-router takes its gateway's management link
 		// like an interface-less static next-hop. The listed route then
@@ -172,11 +197,11 @@ func mgmtStaticRoutesDesired(
 		// reconcile replaces it, so the kernel re-checks the gateway, and an
 		// unreachable one fails the apply and has its stale route deleted
 		// (#5867).
-		if linkIndex, ok := mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, backup.Gw, backupFamily,
-			connected[mgmtStaticFamilyIndex(backupFamily)], inferredV6[backupV6Gateway]); ok {
+		if linkIndex, ok := mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, backup.Gw, b.family,
+			connected[mgmtStaticFamilyIndex(b.family)], inferredV6[backupV6Gateway]); ok {
 			backup.LinkIndex = linkIndex
 		}
-		mgmtAddStaticRoute(desired, backup, backupFamily)
+		mgmtAddStaticRoute(desired, backup, b.family)
 	}
 
 	exclusions := config.StaticRouteExclusions(cfg)

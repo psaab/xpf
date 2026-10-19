@@ -275,6 +275,9 @@ func TestSystemConfigExtended(t *testing.T) {
 	if sys.BackupRouterDst != "192.168.0.0/16" {
 		t.Errorf("BackupRouterDst = %q, want 192.168.0.0/16", sys.BackupRouterDst)
 	}
+	if len(sys.BackupRouterDsts) != 1 || sys.BackupRouterDsts[0] != "192.168.0.0/16" {
+		t.Errorf("BackupRouterDsts = %v, want [192.168.0.0/16] (#15780)", sys.BackupRouterDsts)
+	}
 	if sys.InternetOptions == nil {
 		t.Fatal("InternetOptions is nil")
 	}

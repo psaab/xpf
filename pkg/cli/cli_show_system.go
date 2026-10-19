@@ -301,8 +301,19 @@ func (c *CLI) showBackupRouter() error {
 		return nil
 	}
 	fmt.Printf("Backup router: %s\n", cfg.System.BackupRouter)
-	if cfg.System.BackupRouterDst != "" {
-		fmt.Printf("  Destination: %s\n", cfg.System.BackupRouterDst)
+	// #15780: show EVERY explicit destination; the default label must
+	// match the next-hop family (an IPv6 next-hop defaults to ::/0, not
+	// 0.0.0.0/0).
+	dsts := cfg.System.BackupRouterDsts
+	if len(dsts) == 0 && cfg.System.BackupRouterDst != "" {
+		dsts = []string{cfg.System.BackupRouterDst}
+	}
+	if len(dsts) > 0 {
+		for _, dst := range dsts {
+			fmt.Printf("  Destination: %s\n", dst)
+		}
+	} else if strings.Contains(cfg.System.BackupRouter, ":") {
+		fmt.Println("  Destination: ::/0 (default)")
 	} else {
 		fmt.Println("  Destination: 0.0.0.0/0 (default)")
 	}
