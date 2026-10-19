@@ -974,7 +974,14 @@ impl DnatTable {
                 .enumerate()
                 .map(|(i, _)| (key.protocol, key.dst_port, i))
                 .collect();
-            table.entries_by_dst.insert(key.dst_ip, indexed);
+            // #15534: multiple (proto,port) keys share one destination;
+            // insert() would keep only the last key's entries and hide
+            // the rest from every indexed probe.
+            table
+                .entries_by_dst
+                .entry(key.dst_ip)
+                .or_default()
+                .extend(indexed);
         }
         for (key, slots) in &table.prefix_entries {
             for (i, slot) in slots.iter().enumerate() {
@@ -1192,9 +1199,90 @@ impl DnatTable {
             hit_counter,
         ))
     }
-    /// #14947: tri-state variant of `lookup_with_counter_scoped`. A poisoned
-    /// match returns `Poisoned` (drop); a healthy `off` exemption and no
-    /// match both return `NoMatch` (forward untranslated).
+    /// #15534: single-pass outcome over the same tier chain
+    /// `lookup_with_counter_scoped` probes (exact -> wildcard-port ->
+    /// PROTO_ANY -> prefix LPM). That wrapper collapses `Exempt`/`Poisoned`
+    /// to `None`; callers that must distinguish them re-run the chain here
+    /// once instead of paying a second full lookup on every non-match.
+    #[allow(clippy::too_many_arguments)]
+    fn outcome_with_counter_scoped(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> Option<DnatOutcome> {
+        let protocol_u16 = u16::from(protocol);
+        self.match_entries(
+            self.entries.get(&DnatKey {
+                protocol: protocol_u16,
+                dst_ip,
+                dst_port,
+            }),
+            src_ip,
+            src_port,
+            dst_port,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            packet_icmp,
+        )
+        .or_else(|| {
+            self.match_entries(
+                self.entries.get(&DnatKey {
+                    protocol: protocol_u16,
+                    dst_ip,
+                    dst_port: 0,
+                }),
+                src_ip,
+                src_port,
+                dst_port,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+                packet_icmp,
+            )
+        })
+        .or_else(|| {
+            self.match_entries(
+                self.entries.get(&DnatKey {
+                    protocol: PROTO_ANY,
+                    dst_ip,
+                    dst_port: 0,
+                }),
+                src_ip,
+                src_port,
+                dst_port,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+                packet_icmp,
+            )
+        })
+        .or_else(|| {
+            self.match_prefix_lpm(
+                protocol_u16,
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+                packet_icmp,
+            )
+        })
+    }
+
+    /// #14947/#15534: tri-state variant of `lookup_with_counter_scoped`. A
+    /// poisoned match returns `Poisoned` (drop) together with the poisoned
+    /// rule's hit counter; a healthy `off` exemption and no match both
+    /// return `NoMatch` (forward untranslated).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lookup_result_with_counter_scoped(
         &self,
@@ -1208,7 +1296,7 @@ impl DnatTable {
         ingress_routing_instance: &str,
         packet_icmp: Option<(u8, u8)>,
     ) -> (DnatLookup, Option<Arc<NatRuleCounter>>) {
-        if let Some((decision, counter)) = self.lookup_with_counter_scoped(
+        match self.outcome_with_counter_scoped(
             protocol,
             src_ip,
             dst_ip,
@@ -1219,100 +1307,300 @@ impl DnatTable {
             ingress_routing_instance,
             packet_icmp,
         ) {
-            return (DnatLookup::Matched(decision), counter);
-        }
-        if self.poisoned_claims(
-            protocol,
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            ingress_zone,
-            ingress_ifname,
-            ingress_routing_instance,
-            packet_icmp,
-        ) {
-            (DnatLookup::Poisoned, None)
-        } else {
-            (DnatLookup::NoMatch, None)
+            Some(DnatOutcome::Translate(value, counter)) => {
+                let rewrite_dst_port = if crate::ip_proto::has_l4_ports(protocol)
+                    && value.new_dst_port != 0
+                    && value.new_dst_port != dst_port
+                {
+                    Some(value.new_dst_port)
+                } else {
+                    None
+                };
+                (
+                    DnatLookup::Matched(NatDecision {
+                        rewrite_src: None,
+                        rewrite_dst: Some(value.new_dst_ip),
+                        rewrite_src_port: None,
+                        rewrite_dst_port,
+                        source_nat_icmp: None,
+                        nat64: false,
+                        nptv6: false,
+                    }),
+                    counter,
+                )
+            }
+            Some(DnatOutcome::Poisoned(counter)) => (DnatLookup::Poisoned, counter),
+            Some(DnatOutcome::Exempt) | None => (DnatLookup::NoMatch, None),
         }
     }
 
+    /// #15534: does a poisoned DNAT entry claim this flowless packet?
+    ///
+    /// A flowless packet (GRE/fragment/ICMP, or the fragment-unknown
+    /// sentinel 255) has no reliable L4 ports, so the address-only
+    /// `lookup_with_counter_scoped(.., 0, 0)` the flowless path runs
+    /// mis-keys port-scoped poisoned entries (they sit under their real
+    /// destination port) and maps both `Exempt` and `Poisoned` to `None`.
+    /// This bounded variant decides only the poison question:
+    ///
+    /// * A winning address-only/PROTO_ANY poison (the ordinary tier chain
+    ///   at ports 0/0) claims directly.
+    /// * Otherwise any poisoned entry in this destination's tiers whose
+    ///   known scope/address/protocol/ICMP attributes could match claims,
+    ///   even when its L4 selector (destination port, port ranges, source
+    ///   ports) cannot be evaluated without ports. A healthy
+    ///   same-or-more-specific translate/`off` that ALSO matches
+    ///   address-only suppresses the possible claim (the packet then
+    ///   takes the ordinary precedence path, exactly as the flow-backed
+    ///   tri-state lookup would order it for a port-bearing flow whose
+    ///   port missed the poisoned rule); a poisoned entry suppressed
+    ///   this way is shadowed, not claimed.
+    /// * An address-only healthy `off` winner exempts: broader poison
+    ///   tiers never win over it.
+    ///
+    /// The unknown-protocol sentinel (255) is treated as possibly any
+    /// protocol, mirroring `flowless_l4_rule_possible`.
     #[allow(clippy::too_many_arguments)]
-    fn poisoned_claims(
+    pub(crate) fn flowless_poisoned_claim(
         &self,
         protocol: u8,
         src_ip: IpAddr,
         dst_ip: IpAddr,
-        src_port: u16,
-        dst_port: u16,
         ingress_zone: &str,
         ingress_ifname: &str,
         ingress_routing_instance: &str,
         packet_icmp: Option<(u8, u8)>,
-    ) -> bool {
-        let protocol_u16 = u16::from(protocol);
-        let outcome = self
-            .match_entries(
-                self.entries.get(&DnatKey {
-                    protocol: protocol_u16,
-                    dst_ip,
-                    dst_port,
-                }),
+    ) -> (bool, Option<Arc<NatRuleCounter>>) {
+        match self.outcome_with_counter_scoped(
+            protocol,
+            src_ip,
+            dst_ip,
+            0,
+            0,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            packet_icmp,
+        ) {
+            Some(DnatOutcome::Poisoned(counter)) => return (true, counter),
+            Some(DnatOutcome::Translate(..)) | Some(DnatOutcome::Exempt) => {
+                return (false, None)
+            }
+            None => {}
+        }
+        if protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4
+            && self.has_unknown_protocol_poisoned_match_scoped(
                 src_ip,
-                src_port,
-                dst_port,
+                dst_ip,
                 ingress_zone,
                 ingress_ifname,
                 ingress_routing_instance,
                 packet_icmp,
             )
-            .or_else(|| {
-                self.match_entries(
-                    self.entries.get(&DnatKey {
-                        protocol: protocol_u16,
+        {
+            return match self.flowless_poisoned_counter(
+                protocol,
+                src_ip,
+                dst_ip,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+                packet_icmp,
+            ) {
+                Some(counter) => (true, counter),
+                None => (true, None),
+            };
+        }
+        match self.flowless_poisoned_counter(
+            protocol,
+            src_ip,
+            dst_ip,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            packet_icmp,
+        ) {
+            Some(counter) => (true, counter),
+            None => (false, None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flowless_poisoned_counter(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> Option<Option<Arc<NatRuleCounter>>> {
+        let protocol_unknown =
+            protocol == u8::MAX || protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+        let protocol_u16 = u16::from(protocol);
+        let scope_matches = |entry: &DnatEntry| {
+            (entry.from_zone.is_empty() || entry.from_zone.as_ref() == ingress_zone)
+                && entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                && entry.source_matches(src_ip)
+        };
+        let icmp_possible = |entry: &DnatEntry| match (entry.match_icmp_type, packet_icmp) {
+            (None, _) => true,
+            (Some(want), Some((got, code))) => {
+                want == got && entry.match_icmp_code.is_none_or(|c| c == code)
+            }
+            (Some(_), None) => {
+                protocol_unknown
+                    || matches!(
+                        protocol,
+                        crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+                    )
+            }
+        };
+        let entry_claims = |entry: &DnatEntry, entry_protocol: u16| {
+            // #15534: the flowless packet's protocol is NOT the rule's
+            // match protocol — a GRE/fragment packet claiming a tcp/80
+            // DNAT destination is exactly the defect case (it has no
+            // ports to key the rule with). Protocol is therefore not a
+            // discriminator here; scope/source/ICMP still are.
+            let _ = entry_protocol;
+            entry.lenient_match_dropped && scope_matches(entry) && icmp_possible(entry)
+        };
+        let healthy_shadows = |entry: &DnatEntry, entry_protocol: u16, key_port: u16| {
+            !entry.lenient_match_dropped
+                && scope_matches(entry)
+                && icmp_possible(entry)
+                && (protocol_unknown
+                    || entry_protocol == PROTO_ANY
+                    || entry_protocol == protocol_u16)
+                && (entry_protocol == PROTO_ANY
+                    || key_port == 0
+                        && entry.match_src_ports.is_empty()
+                        && entry.match_dst_ports.is_empty())
+        };
+        // Exact-host tiers in precedence order (wildcard-port, then
+        // PROTO_ANY). The exact-port tier was already decided by the
+        // address-only outcome above (ports 0/0 only reach key_port 0,
+        // so a poisoned exact-port entry can only hide under its real
+        // port — scanned via the destination index below).
+        let mut poisoned: Option<Option<Arc<NatRuleCounter>>> = None;
+        let mut shadowed = false;
+        if let Some(indexed) = self.entries_by_dst.get(&dst_ip) {
+            for (proto, port, idx) in indexed {
+                let Some(entry) = self
+                    .entries
+                    .get(&DnatKey {
+                        protocol: *proto,
                         dst_ip,
-                        dst_port: 0,
-                    }),
-                    src_ip,
-                    src_port,
-                    dst_port,
-                    ingress_zone,
-                    ingress_ifname,
-                    ingress_routing_instance,
-                    packet_icmp,
-                )
-            })
-            .or_else(|| {
-                self.match_entries(
-                    self.entries.get(&DnatKey {
-                        protocol: PROTO_ANY,
-                        dst_ip,
-                        dst_port: 0,
-                    }),
-                    src_ip,
-                    src_port,
-                    dst_port,
-                    ingress_zone,
-                    ingress_ifname,
-                    ingress_routing_instance,
-                    packet_icmp,
-                )
-            })
-            .or_else(|| {
-                self.match_prefix_lpm(
-                    protocol_u16,
+                        dst_port: *port,
+                    })
+                    .and_then(|entries| entries.get(*idx))
+                else {
+                    continue;
+                };
+                if healthy_shadows(entry, *proto, *port) {
+                    shadowed = true;
+                }
+                if poisoned.is_none() && entry_claims(entry, *proto) {
+                    poisoned = Some(entry.hit_counter.clone());
+                }
+            }
+        }
+        if poisoned.is_none() {
+            for (key, entries) in &self.entries {
+                if key.dst_ip != dst_ip {
+                    continue;
+                }
+                for entry in entries {
+                    if healthy_shadows(entry, key.protocol, key.dst_port) {
+                        shadowed = true;
+                    }
+                    if poisoned.is_none() && entry_claims(entry, key.protocol) {
+                        poisoned = Some(entry.hit_counter.clone());
+                    }
+                }
+            }
+        }
+        if poisoned.is_some() {
+            return if shadowed { None } else { poisoned };
+        }
+        // Prefix tiers: scan this family's slots (operator-bounded).
+        let mut prefix_poisoned: Option<Option<Arc<NatRuleCounter>>> = None;
+        let mut prefix_shadowed = false;
+        for (key, idx) in &self.prefix_slots_by_family[usize::from(dst_ip.is_ipv6())] {
+            let Some(slot) = self
+                .prefix_entries
+                .get(key)
+                .and_then(|slots| slots.get(*idx))
+            else {
+                continue;
+            };
+            if !slot.contains(dst_ip) {
+                continue;
+            }
+            if healthy_shadows(&slot.entry, key.protocol, key.dst_port) {
+                prefix_shadowed = true;
+            }
+            if prefix_poisoned.is_none() && entry_claims(&slot.entry, key.protocol) {
+                prefix_poisoned = Some(slot.entry.hit_counter.clone());
+            }
+        }
+        if prefix_poisoned.is_some() && !prefix_shadowed {
+            return prefix_poisoned;
+        }
+        None
+    }
+
+    fn has_unknown_protocol_poisoned_match_scoped(
+        &self,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> bool {
+        let fragment_sentinel = u16::from(crate::session::SHIM_PROTO_FRAGMENT_NO_L4);
+        let mut configured_protocols = [0u64; 4];
+        for key in self.entries.keys() {
+            if key.protocol < fragment_sentinel && key.dst_ip == dst_ip {
+                let protocol = key.protocol as usize;
+                configured_protocols[protocol / 64] |= 1u64 << (protocol % 64);
+            }
+        }
+        for (key, slots) in &self.prefix_entries {
+            if key.protocol < fragment_sentinel && slots.iter().any(|slot| slot.contains(dst_ip)) {
+                let protocol = key.protocol as usize;
+                configured_protocols[protocol / 64] |= 1u64 << (protocol % 64);
+            }
+        }
+        let matches_protocol = |protocol| {
+            matches!(
+                self.outcome_with_counter_scoped(
+                    protocol,
                     src_ip,
                     dst_ip,
-                    src_port,
-                    dst_port,
+                    0,
+                    0,
                     ingress_zone,
                     ingress_ifname,
                     ingress_routing_instance,
                     packet_icmp,
-                )
-            });
-        matches!(outcome, Some(DnatOutcome::Poisoned(_)))
+                ),
+                Some(DnatOutcome::Poisoned(_))
+            )
+        };
+        let mut wildcard_probe_done = false;
+        for protocol in 0..usize::from(fragment_sentinel) {
+            let configured = configured_protocols[protocol / 64] & (1u64 << (protocol % 64)) != 0;
+            if configured || !wildcard_probe_done {
+                if matches_protocol(protocol as u8) {
+                    return true;
+                }
+                wildcard_probe_done |= !configured;
+            }
+        }
+        false
     }
     /// Whether a fragment whose shim metadata carries the protocol-unknown
     /// sentinel would match any same-family DNAT translation. Probe concrete
