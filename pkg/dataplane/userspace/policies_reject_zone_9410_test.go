@@ -285,3 +285,36 @@ func TestPolicyZoneRejectionEmptyElementClauseIsExercisable9410(t *testing.T) {
 			len(got), got)
 	}
 }
+
+// TestPolicyZoneRejectionMixedAnyScopeIsWildcard15660 pins the deliberate
+// divergence from issue #15660's second proposed hunk. The report suggested
+// making unresolvableScopeElement reject a scope that mixes "any" with an
+// unresolvable token, mirroring a Rust change to build_global_zone_scope.
+// That change is NOT made here: the Rust helper intentionally treats any
+// "any" element as GlobalZoneScope::Any (a corrupt/mixed-version snapshot
+// degrades to all-zones by design, and the Go strict gate already rejects
+// the mix at commit), so this Go mirror — whose contract is to reproduce
+// what the helper does — must keep accepting ["any", "ghost"]. Rejecting
+// it here while the helper accepts it would make `show security
+// match-policies` refuse a verdict for a snapshot the dataplane enforces,
+// the inverse #9410 divergence. The fail-open the report identified is
+// closed at the compiler instead (#15660): collapsed unsupported/fused
+// tokens on a global zone leaf now set LenientContentDropped, so such a
+// rule is poisoned before it can reach this mirror as a clean scope.
+func TestPolicyZoneRejectionMixedAnyScopeIsWildcard15660(t *testing.T) {
+	zs := zones9410("trust", 10, "untrust", 20)
+	for _, scope := range [][]string{{"any", "ghost"}, {"ghost", "any"}, {"any", "dynamic-application"}} {
+		if got := collectPolicyZoneRejections(
+			[]PolicyRuleSnapshot{globalRule9410("g", scope, nil)}, zs); len(got) != 0 {
+			t.Fatalf("#15660: scope %q contains \"any\" and must mirror the helper's "+
+				"GlobalZoneScope::Any wildcard (no rejection); got %v — this mirror must "+
+				"not diverge from build_global_zone_scope", scope, got)
+		}
+	}
+	// Control: the same unresolvable token WITHOUT "any" is still refused,
+	// so the acceptance above is the wildcard arm, not a broken gate.
+	if got := collectPolicyZoneRejections(
+		[]PolicyRuleSnapshot{globalRule9410("g", []string{"ghost"}, nil)}, zs); len(got) != 1 {
+		t.Fatalf("control: scope [ghost] must be refused exactly once; got %v", got)
+	}
+}

@@ -13871,6 +13871,30 @@ there from-zone/to-zone ARE siblings, so the collapse stops at them and they
 stay a legitimate direct-child match leaf. Coverage:
 `pkg/config/compiler_policy_match_3673_test.go`.
 
+**#15660 — the global-scope hole in that tail scan.** The sentence above was
+only half true: under a global policy the collapse stops at a *registered
+sibling*, but a keyword written after a global `from-zone`/`to-zone` leaf's
+own value still collapses onto THAT leaf — `match from-zone any
+dynamic-application junos:FTP` (flat set) yields one `from-zone` leaf whose
+tail carries the unsupported criterion, and `from-zone any` followed by
+`to-zone untrust;` with a missing semicolon (or `from-zone [ any to-zone
+untrust ]`) fuses the sibling zone keyword onto it. `policyUnsupportedMatchLeafFindings`
+short-circuited global zone leaves (`continue`) before scanning their tail,
+so strict commit misdiagnosed the tokens as undefined/mixed zones and
+tolerant load published an unscoped permit with `LenientContentDropped=false`.
+The gate now scans `firewallMatchValues` for global-only leaves exactly like
+supported leaves: unsupported keywords are rejected as unsupported leaves
+(#3113) and a fused `from-zone`/`to-zone` keyword as a swallowed structural
+token (#3673); a legitimate zone list (including a lone `any`) is never one
+of those keywords and still commits. The Rust/`IsWildcardZoneSet`
+contains-`any` wildcard is deliberately NOT changed: it is the documented
+tolerant backstop for a corrupt/mixed-version snapshot, the strict gate
+already rejects mixing `any` with concrete zones, and the #9410 mirror must
+keep agreeing with `build_global_zone_scope`. Coverage:
+`pkg/config/compiler_policy_match_15660_test.go`,
+`pkg/dataplane/userspace/policies_reject_zone_9410_test.go`
+(`TestPolicyZoneRejectionMixedAnyScopeIsWildcard15660`).
+
 On the wire the global policy keeps the `junos-global` sentinel on its
 structural from/to-zone (so the dataplane classifier keeps it in the global
 tier and preserves global config order) and carries the context on the additive

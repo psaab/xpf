@@ -152,10 +152,13 @@ var unsupportedPolicyMatchLeaves = map[string]bool{
 // rejected exactly as the unsupported leaves above (extending #3113/#3142 to
 // the zone-context tokens).
 //
-// Reachable only under a ZONE-PAIR policy: under a GLOBAL policy match
-// from-zone/to-zone ARE registered siblings (#3148, globalOnlyPolicyMatchLeaves
-// above), so the flat-set/bracket collapse stops at them and they become their
-// own legitimate match leaf — this tail case cannot arise in global scope.
+// Under a GLOBAL policy match from-zone/to-zone ARE registered siblings
+// (#3148, globalOnlyPolicyMatchLeaves above), so a flat-set collapse stops
+// at them and they become their own legitimate match leaf. The case CAN
+// still arise in global scope on the zone leaf itself: a hierarchical
+// missing semicolon or bracket list fuses the sibling zone keyword onto
+// the first zone leaf (`from-zone any` + `to-zone untrust;` as one leaf) —
+// #15660 scans that tail too.
 var swallowedStructuralMatchTokens = map[string]bool{
 	"from-zone": true,
 	"to-zone":   true,
@@ -197,10 +200,23 @@ func policyUnsupportedMatchLeafFindings(polNode *Node, isGlobal bool) []policyMa
 		// #3148: from-zone/to-zone are supported match context for a global
 		// policy only; under a zone-pair policy they fall through to the
 		// unsupported finding below.
-		if isGlobal && globalOnlyPolicyMatchLeaves[leaf] {
-			continue
-		}
-		if supportedPolicyMatchLeaves[leaf] {
+		//
+		// #15660: a global from-zone/to-zone leaf must NOT short-circuit
+		// before its collapsed tail is scanned. It is a multi:true leaf, so
+		// a trailing non-sibling keyword collapses onto its own node exactly
+		// as for `application` (#3142): `match from-zone any
+		// dynamic-application junos:FTP` yields one from-zone leaf whose tail
+		// carries the unsupported criterion, and `match from-zone [ any
+		// to-zone untrust ]` fuses the sibling zone keyword onto it. Skipping
+		// the leaf here let strict commit misdiagnose those tokens as
+		// undefined/mixed zones and let tolerant load publish an unscoped
+		// permit with LenientContentDropped=false. Scan global-only leaves
+		// with the same tail loop as supported leaves: unsupported keywords
+		// are flagged as unsupported leaves, and a fused from-zone/to-zone
+		// keyword is flagged as a swallowed structural token (it is match
+		// context, never a zone value). A legitimate zone list — including a
+		// lone `any` — is never one of those keywords, so it is not flagged.
+		if supportedPolicyMatchLeaves[leaf] || (isGlobal && globalOnlyPolicyMatchLeaves[leaf]) {
 			// #15200: `*-address-excluded` are boolean modifiers with no
 			// operand; compilePolicy sets the flag off the leaf name alone
 			// and ignores Keys[1:]/children, so any operand is silently
@@ -227,7 +243,10 @@ func policyUnsupportedMatchLeafFindings(polNode *Node, isGlobal bool) []policyMa
 				// #3673: from-zone/to-zone are not zone-pair match siblings, so
 				// they collapse onto this multi-value leaf's tail and are
 				// consumed as bogus application/address operands. Flag them as a
-				// reserved keyword masquerading as a value.
+				// reserved keyword masquerading as a value. #15660: under a
+				// global policy they ARE siblings, so a fused token here means
+				// the sibling keyword was swallowed by the other zone leaf
+				// (missing separator / bracket collapse) — same masquerade.
 				if swallowedStructuralMatchTokens[tok] {
 					out = append(out, policyMatchLeafFinding{swallowed: true, leaf: leaf, tok: tok})
 				}
@@ -270,15 +289,15 @@ func validatePolicyMatchLeavesStrict(nodes []*Node, lenient bool) ([]string, err
 	// emitSwallowed rejects a structural match keyword (from-zone/to-zone)
 	// absorbed as an operand of a supported multi-value leaf's collapsed tail
 	// (#3673). `leaf` names the multi-value leaf that swallowed the keyword
-	// (application / source-address / destination-address); `tok` is the
-	// reserved keyword.
+	// (application / source-address / destination-address, or a global
+	// from-zone/to-zone leaf under #15660); `tok` is the reserved keyword.
 	emitSwallowed := func(scope, policyName, leaf, tok string) error {
 		return report(fmt.Sprintf(
 			"security policies %s policy %q match %s absorbed the reserved "+
 				"match keyword %q as an operand (a flat-set or bracketed list "+
 				"collapsed a structural match keyword onto the %s leaf — the "+
-				"#2419 collapse); from-zone/to-zone are match context, never an "+
-				"application or address value, so the keyword is silently "+
+				"#2419 collapse); from-zone/to-zone are match context, never a "+
+				"match operand value, so the keyword is silently "+
 				"consumed as a bogus operand (widening or disarming the policy — "+
 				"a fail-open) — write %q as its own match leaf or remove it "+
 				"(#3673)",
