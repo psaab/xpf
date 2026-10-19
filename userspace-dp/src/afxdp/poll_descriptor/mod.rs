@@ -657,6 +657,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         &mut binding.tx_pipeline.free_tx_frames,
     );
     loop {
+        // #15243 (A60-01): a held packet that carries an owned inner frame
+        // replays from those bytes; the native descriptor is recycled by
+        // the ordinary `recycle_now` epilogue below (fail-closed if the
+        // frame cannot be sliced into scratch).
+        let mut replay_owned_frame: Option<Vec<u8>> = None;
         let (desc, injected_meta, is_injected, was_replay) =
             if let Some(held) = binding.pending_pmech_replay.pop_front() {
                 if held.is_injected {
@@ -665,6 +670,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         .pmech_injected_replay_addrs
                         .push(held.desc.addr);
                 }
+                replay_owned_frame = held.owned_frame;
                 (held.desc, Some(held.meta), held.is_injected, true)
             } else if let Some((desc, meta)) = injected_desc.take() {
                 (desc, Some(meta), true, false)
@@ -687,9 +693,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 telemetry.counters.validated_bytes += desc.len as u64;
                 // SAFETY: per the `area` contract in this function's
                 // header comment.
-                let Some(raw_frame) =
+                //
+                // #15243 (A60-01): a replayed held packet that carries an
+                // owned inner frame must be parsed from those bytes, not
+                // from the outer UMEM frame its descriptor still
+                // references. The owned bytes live in
+                // `replay_scratch_frame` for the rest of the pass; the
+                // native descriptor is recycled by the ordinary epilogue.
+                let mut replay_scratch_frame: Vec<u8> = Vec::new();
+                let raw_frame = if let Some(owned) = replay_owned_frame.take() {
+                    replay_scratch_frame = owned;
+                    replay_scratch_frame.as_slice()
+                } else if let Some(slice) =
                     unsafe { &*area }.slice(desc.addr as usize, desc.len as usize)
-                else {
+                {
+                    slice
+                } else {
                     telemetry.counters.touched = true;
                     telemetry.counters.umem_slice_dropped += 1;
                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -1858,6 +1877,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             owner_generation,
                             direction: crate::session::PMechDirection::Reverse,
                         } => {
+                            // #15243 (A60-01): a native GRE/WG-decapsulated
+                            // packet carries the INNER meta while `desc`
+                            // still references the OUTER UMEM frame.
+                            // Holding it would replay the outer frame
+                            // through the inner-meta slicing path (the
+                            // decap stage would return NotGre/NotWg and
+                            // the packet would never be delivered), so
+                            // refuse the hold: recycle the descriptor and
+                            // count the refusal, exactly like the over-cap
+                            // branch below, instead of stranding the
+                            // packet in the hold queue.
+                            if !pmech_replay::pmech_hold_admissible(
+                                is_injected,
+                                owned_packet_frame.is_some(),
+                            ) {
+                                telemetry.counters.touched = true;
+                                telemetry.counters.pmech_decap_hold_refused += 1;
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                             if binding.pending_pmech_reverse.len()
                                 < crate::session::PMECH_MAX_HELD_WAITERS_TOTAL
                             {
@@ -1891,6 +1930,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             token,
                                             owner_generation,
                                             is_injected,
+                                            owned_frame: None,
                                         },
                                     );
                                     continue;

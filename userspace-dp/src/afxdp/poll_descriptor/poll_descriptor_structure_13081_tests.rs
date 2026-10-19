@@ -85,6 +85,7 @@ mod pmech_drain_13766 {
             token,
             owner_generation,
             is_injected,
+            owned_frame: None,
         }
     }
 
@@ -193,4 +194,122 @@ mod pmech_drain_13766 {
             "the single native RX frame returns to scratch_recycle exactly once"
         );
     }
+}
+
+// #15243 (A60-01): hold-admission and replay-fidelity coverage.
+//
+// A native GRE/WG-decapsulated reverse packet carries the INNER packet's
+// meta while its descriptor still references the OUTER UMEM frame. Holding
+// it (as the pre-fix code did) strands it: replay slices the outer frame
+// at inner offsets and re-runs decap against inner bytes, which returns
+// NotGre/NotWg, so the packet is never delivered. The fix refuses such
+// holds (`pmech_hold_admissible`), and replay sources `raw_frame` from a
+// held packet's owned frame when one is present.
+//
+// These cells drive the real helpers: reverting the admissibility gate to
+// `true`, or making the replay path ignore the owned frame, turns them
+// RED (see the structural pin below for the replay half).
+mod pmech_hold_15243 {
+    use super::super::pmech_replay::pmech_hold_admissible;
+    use crate::afxdp::poll_stages::{GreDecapStage, stage_native_gre_decap};
+    use crate::afxdp::types::UserspaceDpMeta;
+
+    #[test]
+    fn native_decapped_reverse_packet_is_refused_at_hold_15243() {
+        assert!(
+            !pmech_hold_admissible(false, true),
+            "native decapped (owned_frame.is_some()) reverse packet MUST be refused at hold: \
+             its desc references the outer UMEM frame while meta describes the inner packet"
+        );
+    }
+
+    #[test]
+    fn native_plain_and_injected_packets_stay_admissible_15243() {
+        assert!(
+            pmech_hold_admissible(false, false),
+            "control: a native non-decapped reverse packet (meta describes its desc frame) stays holdable"
+        );
+        assert!(
+            pmech_hold_admissible(true, true),
+            "control: an injected packet's desc already holds its owned frame bytes (TX-pool frame), so it stays holdable"
+        );
+        assert!(
+            pmech_hold_admissible(true, false),
+            "control: an injected packet without an owned frame stays holdable"
+        );
+    }
+
+    // The second half of the mechanism: WHY a refused hold matters. The
+    // inner bytes a decapsulated packet carries are not a GRE frame, so
+    // feeding them back through the native GRE decap stage (what the
+    // pre-fix replay did, by slicing the outer frame at inner offsets and
+    // re-entering stage 6 with the inner meta) yields NotGre — the packet
+    // falls through as an ordinary non-GRE packet described by the inner
+    // meta, i.e. it is never delivered as the tunnel inner packet it is.
+    #[test]
+    fn inner_frame_fed_back_through_gre_decap_is_not_gre_15243() {
+        // A minimal inner IPv4/UDP packet (the shape a decapsulated GRE
+        // inner frame takes after `build_logical_ingress_ethernet_packet`:
+        // Ethernet header + inner IP). Its IP protocol is UDP, not GRE.
+        let mut inner = vec![0u8; 14 + 20 + 8];
+        inner[12] = 0x08;
+        inner[13] = 0x00;
+        inner[14] = 0x45; // IPv4, IHL 5
+        inner[14 + 9] = crate::ip_proto::PROTO_UDP;
+        let inner_meta = UserspaceDpMeta {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_UDP,
+            l3_offset: 14,
+            l4_offset: 14 + 20,
+            ..UserspaceDpMeta::default()
+        };
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &crate::afxdp::test_fixtures::native_gre_snapshot(false),
+        );
+        let mut reassembler = crate::afxdp::gre_reassembly::GreReassembler::default();
+        let mut allows = |_: &[u8], _: UserspaceDpMeta| true;
+        let stage = stage_native_gre_decap(
+            &inner,
+            inner_meta,
+            &forwarding,
+            &mut reassembler,
+            0,
+            &mut allows,
+        );
+        assert!(
+            matches!(stage, GreDecapStage::NotGre(_)),
+            "inner (decapsulated) bytes re-entered into GRE decap MUST come back NotGre — \
+             this is the drop the refused hold avoids"
+        );
+    }
+}
+
+// #15243 (A60-01): the replay half of the mechanism. The poll loop must
+// source `raw_frame` for a replayed held packet from its owned frame when
+// one is present — otherwise the fix's refused holds would be the only
+// thing standing between a decapsulated packet and a mis-parsed replay,
+// and any future admissible owned-frame hold would silently regress.
+// This is a structural pin (like the 13081 sibling-stage pin above)
+// because the full poll loop needs a UMEM area; the behavioral half is
+// `pmech_hold_15243` above. Removing either the `replay_owned_frame`
+// threading or the owned-frame slice turns this RED.
+#[test]
+fn pmech_replay_sources_owned_frame_for_held_packets_15243() {
+    let source = include_str!("mod.rs");
+    assert!(
+        source.contains("replay_owned_frame = held.owned_frame"),
+        "the replay pop must move the held packet's owned frame out for this pass"
+    );
+    assert!(
+        source.contains("replay_scratch_frame.as_slice()"),
+        "the replay pass must parse the owned frame bytes as raw_frame"
+    );
+    assert!(
+        source.contains("pmech_hold_admissible("),
+        "the hold site must consult the A60-01 admissibility gate"
+    );
+    assert!(
+        source.contains("pmech_decap_hold_refused"),
+        "a refused decapsulated hold must be counted"
+    );
 }

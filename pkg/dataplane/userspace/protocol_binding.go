@@ -80,6 +80,9 @@ type BindingStatus struct {
 	UMEMSliceDropped   uint64 `json:"umem_slice_dropped,omitempty"`
 	UnknownVLANDropped uint64 `json:"unknown_vlan_dropped,omitempty"`
 	DstMACDropped      uint64 `json:"dst_mac_dropped,omitempty"`
+	// #15243 (A60-01): native GRE/WG-decapsulated reverse packets refused
+	// at the PMech hold site (recycled, not held).
+	PMechDecapHoldRefused uint64 `json:"pmech_decap_hold_refused,omitempty"`
 	// #4743/#11413: destination-martian drops, including NoRoute
 	// classifications (IPv4 multicast/broadcast/unspecified/loopback, IPv6
 	// multicast/unspecified/loopback) and post-FIB transit rejections (IPv4

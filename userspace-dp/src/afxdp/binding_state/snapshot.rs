@@ -78,6 +78,7 @@ impl BindingLiveState {
             umem_slice_dropped: self.umem_slice_dropped.load(Ordering::Relaxed),
             unknown_vlan_dropped: self.unknown_vlan_dropped.load(Ordering::Relaxed),
             dst_mac_dropped: self.dst_mac_dropped.load(Ordering::Relaxed),
+            pmech_decap_hold_refused: self.pmech_decap_hold_refused.load(Ordering::Relaxed),
             neighbor_miss_packets: self.neighbor_miss_packets.load(Ordering::Relaxed),
             discard_route_packets: self.discard_route_packets.load(Ordering::Relaxed),
             next_table_packets: self.next_table_packets.load(Ordering::Relaxed),

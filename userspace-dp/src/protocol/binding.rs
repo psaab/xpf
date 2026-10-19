@@ -518,6 +518,10 @@ pub(crate) struct BindingStatus {
     pub unknown_vlan_dropped: u64,
     #[serde(rename = "dst_mac_dropped", default)]
     pub dst_mac_dropped: u64,
+    /// #15243 (A60-01): native GRE/WG-decapsulated reverse packets refused
+    /// at the PMech hold site (recycled, not held).
+    #[serde(rename = "pmech_decap_hold_refused", default)]
+    pub pmech_decap_hold_refused: u64,
     #[serde(rename = "neighbor_miss_packets", default)]
     pub neighbor_miss_packets: u64,
     #[serde(rename = "discard_route_packets", default)]

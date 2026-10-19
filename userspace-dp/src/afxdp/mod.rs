@@ -1145,6 +1145,13 @@ pub(in crate::afxdp) struct BatchCounters {
     umem_slice_dropped: u64,
     unknown_vlan_dropped: u64,
     dst_mac_dropped: u64,
+    // #15243 (A60-01): native GRE/WG-decapsulated reverse packets refused
+    // at the PMech hold site (recycled, not held) because the held
+    // descriptor still references the outer UMEM frame while `meta`
+    // already describes the inner packet; replay would mis-parse it.
+    // Batched here like the sibling named drops; pending decapsulated
+    // packets are bounded (at most 4 per token, 512 per binding).
+    pmech_decap_hold_refused: u64,
     neighbor_miss_packets: u64,
     discard_route_packets: u64,
     next_table_packets: u64,
@@ -1760,6 +1767,11 @@ impl BatchCounters {
             live.dst_mac_dropped
                 .fetch_add(self.dst_mac_dropped, Ordering::Relaxed);
             self.dst_mac_dropped = 0;
+        }
+        if self.pmech_decap_hold_refused != 0 {
+            live.pmech_decap_hold_refused
+                .fetch_add(self.pmech_decap_hold_refused, Ordering::Relaxed);
+            self.pmech_decap_hold_refused = 0;
         }
         if self.neighbor_miss_packets != 0 {
             live.neighbor_miss_packets

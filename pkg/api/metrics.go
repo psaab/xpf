@@ -814,9 +814,11 @@ type xpfCollector struct {
 	userspaceFabricUnstampedIngressDrops *prometheus.Desc
 	userspaceFabricAmbiguousZoneDrops    *prometheus.Desc
 	// #10498: pre-L3 admission counters, summed across bindings.
-	userspaceUMEMSliceDropped         *prometheus.Desc
-	userspaceUnknownVLANDropped       *prometheus.Desc
-	userspaceDstMACDropped            *prometheus.Desc
+	userspaceUMEMSliceDropped   *prometheus.Desc
+	userspaceUnknownVLANDropped *prometheus.Desc
+	userspaceDstMACDropped      *prometheus.Desc
+	// #15243 (A60-01): PMech hold refusals for decapsulated packets.
+	userspacePMechDecapHoldRefused    *prometheus.Desc
 	userspaceFlowCacheActiveFlows     *prometheus.Desc
 	userspaceFlowCacheCapacity        *prometheus.Desc
 	userspaceNptv6TranslationsTotal   *prometheus.Desc
@@ -1565,6 +1567,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceUMEMSliceDropped
 	ch <- c.userspaceUnknownVLANDropped
 	ch <- c.userspaceDstMACDropped
+	ch <- c.userspacePMechDecapHoldRefused
 	ch <- c.userspaceFlowCacheActiveFlows
 	ch <- c.userspaceFlowCacheCapacity
 	ch <- c.userspaceNptv6TranslationsTotal

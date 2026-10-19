@@ -505,6 +505,18 @@ pub(super) struct PendingNeighPacket {
 
 /// Reverse packet held by its arrival binding until the owning IPsec install
 /// becomes Live. The XDP descriptor remains in this worker's UMEM.
+///
+/// #15243 (A60-01): `owned_frame` carries the decapsulated inner frame
+/// whenever arrival decapsulation (native GRE / WireGuard at stage 6/6b, or
+/// the injected-plaintext copy) replaced `meta` with the INNER packet's
+/// meta. The native descriptor still references the OUTER UMEM frame, so
+/// replaying it through the outer-slicing path would re-run GRE/WG decap
+/// against inner bytes and drop the packet (`NotGre`/`NotWg`). The hold
+/// site therefore only admits native packets with
+/// `owned_frame.is_none()`; a decapsulated native packet is recycled and
+/// counted (`pmech_decap_hold_refused`) instead of held. Injected packets
+/// already describe their owned frame through their TX-pool descriptor,
+/// so they keep `owned_frame: None` and replay via that descriptor.
 pub(super) struct PendingPMechReversePacket {
     pub(super) desc: XdpDesc,
     pub(super) meta: UserspaceDpMeta,
@@ -512,6 +524,9 @@ pub(super) struct PendingPMechReversePacket {
     pub(super) token: u64,
     pub(super) owner_generation: u64,
     pub(super) is_injected: bool,
+    /// Decapsulated inner frame bytes when the held packet only exists as
+    /// an owned `Vec<u8>` (never set for natively-held packets — see above).
+    pub(super) owned_frame: Option<Vec<u8>>,
 }
 
 // Compile-time size guard: pending-neighbor retry carries the session key so

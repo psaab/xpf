@@ -34,6 +34,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.umem_slice_dropped = 0;
         binding.unknown_vlan_dropped = 0;
         binding.dst_mac_dropped = 0;
+        binding.pmech_decap_hold_refused = 0;
         binding.neighbor_miss_packets = 0;
         binding.discard_route_packets = 0;
         binding.next_table_packets = 0;

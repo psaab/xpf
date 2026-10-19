@@ -110,7 +110,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 // and emitted without labels. All six are emitted unconditionally so 0 is a
 // real "no such drops" signal, not an absent series.
 func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	var martian, dnsIllegalReply, ipv6ExtHeader, v4MappedIPv6, umemSlice, unknownVLAN, dstMAC uint64
+	var martian, dnsIllegalReply, ipv6ExtHeader, v4MappedIPv6, umemSlice, unknownVLAN, dstMAC, pmechDecapHoldRefused uint64
 	for _, b := range status.Bindings {
 		martian += b.MartianDropped
 		dnsIllegalReply += b.DNSIllegalReplyDropped
@@ -119,6 +119,7 @@ func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status
 		umemSlice += b.UMEMSliceDropped
 		unknownVLAN += b.UnknownVLANDropped
 		dstMAC += b.DstMACDropped
+		pmechDecapHoldRefused += b.PMechDecapHoldRefused
 	}
 	c.emitConstMetric(ch, c.userspaceMartianDropped, prometheus.CounterValue, float64(martian))
 	c.emitConstMetric(ch, c.userspaceDNSIllegalReplyDropped, prometheus.CounterValue, float64(dnsIllegalReply))
@@ -127,6 +128,7 @@ func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status
 	c.emitConstMetric(ch, c.userspaceUMEMSliceDropped, prometheus.CounterValue, float64(umemSlice))
 	c.emitConstMetric(ch, c.userspaceUnknownVLANDropped, prometheus.CounterValue, float64(unknownVLAN))
 	c.emitConstMetric(ch, c.userspaceDstMACDropped, prometheus.CounterValue, float64(dstMAC))
+	c.emitConstMetric(ch, c.userspacePMechDecapHoldRefused, prometheus.CounterValue, float64(pmechDecapHoldRefused))
 }
 
 // emitFabricSkipCounters exposes the #3773 (M13) fabric-link skip

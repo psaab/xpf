@@ -298,6 +298,15 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"Summed across bindings and emitted unconditionally (#10498).",
 		nil, nil,
 	)
+	c.userspacePMechDecapHoldRefused = prometheus.NewDesc(
+		"xpf_userspace_pmech_decap_hold_refused_total",
+		"Native GRE/WireGuard-decapsulated reverse packets refused at the "+
+			"PMech hold site (recycled, not held) because the held descriptor "+
+			"still references the outer UMEM frame while the packet meta "+
+			"already describes the inner packet, so replay would mis-parse "+
+			"it. Summed across bindings and emitted unconditionally (#15243).",
+		nil, nil,
+	)
 	c.userspaceEmbeddedQuoteSubminimalRefused = prometheus.NewDesc(
 		"xpf_userspace_embedded_quote_subminimal_refused_total",
 		"#9901 (F-077): embedded ICMP error quotes refused by the 8-byte "+
