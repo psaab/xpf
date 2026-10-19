@@ -1122,12 +1122,29 @@ func (s *Store) ConfirmCommit() error { return s.ConfirmCommitAs("") }
 // (#5059): a non-holder session must not confirm (and thereby cancel the
 // auto-rollback of) another session's pending commit-confirmed. sessionID == ""
 // bypasses ownership (internal/system caller, e.g. the confirm-on-sync path).
+//
+// #14985 (D36-05): a session-scoped caller must HOLD the lock, not merely
+// avoid conflicting with a recorded holder. ensureHolderLocked's deliberate
+// bypasses for OTHER mutators — "not in config mode" (short-circuit on
+// !s.configDir) and "no recorded holder" (the internal/local
+// EnterConfigure() state) — are fail-open here: a pending confirm window
+// SURVIVES ExitConfigure, so after the owner exits (or disconnects, or is
+// reclaimed) any well-formed session token could confirm a window it never
+// armed, permanently cancelling the auto-rollback. The extra check below
+// requires a recorded holder equal to the caller whenever a window is
+// actually pending. When nothing is pending the call still reaches the
+// "no pending confirmed commit" error, preserving existing behaviour for
+// holder and non-holder alike; when nothing is pending there is nothing
+// to protect. The internal ("") caller keeps its bypass.
 func (s *Store) ConfirmCommitAs(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := s.ensureHolderLocked(sessionID); err != nil {
 		return err
+	}
+	if sessionID != "" && s.confirmTimer != nil && s.effectiveHolderLocked() != sessionID {
+		return fmt.Errorf("%w", ErrConfigLockedByOther)
 	}
 	cleared, removeErr := s.clearPendingConfirmLocked()
 	if !cleared {
