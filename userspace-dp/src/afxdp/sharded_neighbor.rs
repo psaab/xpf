@@ -162,8 +162,8 @@ impl SolicitedShard {
 }
 
 /// Dynamic-neighbor metadata kept private to the sharded map. RX source
-/// learns are the only entries with an age lease; kernel and control-plane
-/// updates clear it.
+/// learns and XSK ARP/NDP learns carry an age lease; kernel and
+/// control-plane updates clear it.
 #[derive(Clone, Copy)]
 pub(crate) struct NeighborRecord {
     entry: NeighborEntry,
@@ -175,6 +175,13 @@ impl NeighborRecord {
         Self {
             entry,
             last_rx_learned_ns: None,
+        }
+    }
+
+    fn xsk_learned(entry: NeighborEntry, now_ns: u64) -> Self {
+        Self {
+            entry,
+            last_rx_learned_ns: Some(now_ns),
         }
     }
 }
@@ -697,6 +704,37 @@ impl ShardedNeighborMap {
         self.insert_ndp_na_if_override_allows(key, val, true, solicited)
     }
 
+    /// #15247 (A66-03): XSK ARP-reply learn. Userspace-learned (kernel
+    /// program is best-effort), so it carries an RX-style lease until a
+    /// kernel monitor update backs it via `mark_kernel_backed_if_same`.
+    pub(crate) fn insert_arp_reply_if_solicited_allows_at(
+        &self,
+        key: (i32, IpAddr),
+        val: NeighborEntry,
+        solicited: bool,
+        now_ns: u64,
+    ) -> Option<bool> {
+        self.insert_ndp_na_if_override_allows_inner(key, val, true, solicited, Some(now_ns))
+    }
+
+    /// #15247 (A66-03): XSK NDP-NA learn with an RX-style lease.
+    pub(crate) fn insert_ndp_na_if_override_allows_at(
+        &self,
+        key: (i32, IpAddr),
+        val: NeighborEntry,
+        override_flag: bool,
+        solicited: bool,
+        now_ns: u64,
+    ) -> Option<bool> {
+        self.insert_ndp_na_if_override_allows_inner(
+            key,
+            val,
+            override_flag,
+            solicited,
+            Some(now_ns),
+        )
+    }
+
     /// #9893: atomic NDP Neighbor-Advertisement learn honoring RFC 4861 §7.2.5
     /// Override under the key's shard lock.
     /// Returns `None` when an Override=0 NA meets a live entry with a
@@ -720,6 +758,17 @@ impl ShardedNeighborMap {
         override_flag: bool,
         solicited: bool,
     ) -> Option<bool> {
+        self.insert_ndp_na_if_override_allows_inner(key, val, override_flag, solicited, None)
+    }
+
+    fn insert_ndp_na_if_override_allows_inner(
+        &self,
+        key: (i32, IpAddr),
+        val: NeighborEntry,
+        override_flag: bool,
+        solicited: bool,
+        learn_now_ns: Option<u64>,
+    ) -> Option<bool> {
         let idx = shard_idx(&key);
         let mut shard = self.lock_shard(idx);
         let prior_mac = shard.get(&key).map(|existing| existing.entry.mac);
@@ -738,6 +787,18 @@ impl ShardedNeighborMap {
             return None;
         }
         if prior_mac == Some(val.mac) {
+            // #15247: an XSK re-advert refreshes the lease so a live
+            // neighbor is not aged out; kernel-monitor refreshes (None)
+            // leave the record authoritative.
+            if let Some(now_ns) = learn_now_ns
+                && let Some(record) = shard.get_mut(&key)
+            {
+                record.last_rx_learned_ns = Some(
+                    record
+                        .last_rx_learned_ns
+                        .map_or(now_ns, |seen| seen.max(now_ns)),
+                );
+            }
             return Some(false);
         }
         // #5673: a NEW learn (no prior entry for this key) that would grow
@@ -765,7 +826,11 @@ impl ShardedNeighborMap {
             // does not invalidate cached flows resolved to other shards.
             self.bump_shard_epoch(idx);
         }
-        shard.insert(key, NeighborRecord::authoritative(val));
+        let record = match learn_now_ns {
+            Some(now_ns) => NeighborRecord::xsk_learned(val, now_ns),
+            None => NeighborRecord::authoritative(val),
+        };
+        shard.insert(key, record);
         // #7156: AFTER the map write, Release-ordered — a worker that observes
         // this generation is guaranteed to see the entry it announces.
         self.insert_generation.fetch_add(1, Ordering::Release);

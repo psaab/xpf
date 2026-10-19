@@ -203,6 +203,15 @@ fn outline_arp_reply_learn_and_program(
     if neighbor_mac_is_learnable(arp.sender_mac)
         && neighbor_ip_is_learnable(arp.sender_ip)
         && !worker_ctx.forwarding.owns_configured_ip(arp.sender_ip)
+        // #15247 (A66-03): an ARP reply only proves a neighbor on the
+        // link it arrived on. Off-link senders are not learned (frame
+        // still recycled); on-link and link-local senders are.
+        && (matches!(arp.sender_ip, IpAddr::V4(v4) if v4.is_link_local())
+            || worker_ctx.forwarding.src_ip_on_link_for_ingress(
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+                arp.sender_ip,
+            ))
     {
         let ifindex = resolve_ingress_logical_ifindex(
             worker_ctx.forwarding,
@@ -218,12 +227,11 @@ fn outline_arp_reply_learn_and_program(
             .peek_arp_reply_solicited_for_mac(&key, Some(arp.sender_mac), now_ns);
         let Some(changed) = worker_ctx
             .dynamic_neighbors
-            .insert_arp_reply_if_solicited_allows(
+            .insert_arp_reply_if_solicited_allows_at(
                 key,
-                NeighborEntry {
-                    mac: arp.sender_mac,
-                },
+                NeighborEntry { mac: arp.sender_mac },
                 solicited,
+                now_ns,
             )
         else {
             if arp.gratuitous {
@@ -305,6 +313,15 @@ fn outline_ndp_na_learn_and_program(
     if neighbor_mac_is_learnable(mac)
         && neighbor_ip_is_learnable(na.target_ip)
         && !worker_ctx.forwarding.owns_configured_ip(na.target_ip)
+        // #15247 (A66-03): an NA only proves a neighbor on the link it
+        // arrived on. Off-link targets are not learned (frame still
+        // transits); on-link and link-local targets are.
+        && (matches!(na.target_ip, IpAddr::V6(v6) if v6.is_unicast_link_local())
+            || worker_ctx.forwarding.src_ip_on_link_for_ingress(
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+                na.target_ip,
+            ))
     {
         let ifindex = resolve_ingress_logical_ifindex(
             worker_ctx.forwarding,
@@ -317,15 +334,15 @@ fn outline_ndp_na_learn_and_program(
         // gate refused a live differing LLA (return without learning; the
         // NA frame still transits): either Override=0 (#9893, silent) or an
         // unsolicited Override=1 (#11069, counted + alarmed). `Some(changed)`
-        // feeds the #5288 limiter exactly as the old `insert_if_changed`
-        // bool did.
+        // feeds the #5288 limiter.
         let Some(changed) = worker_ctx
             .dynamic_neighbors
-            .insert_ndp_na_if_override_allows(
+            .insert_ndp_na_if_override_allows_at(
                 (ifindex, na.target_ip),
                 NeighborEntry { mac },
                 na.override_flag,
                 na.solicited,
+                now_ns,
             )
         else {
             if na.override_flag && !na.solicited {

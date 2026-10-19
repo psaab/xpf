@@ -786,6 +786,31 @@ fn rx_source_learn_age_preserves_manager_and_kernel_backed_neighbors_11406() {
     );
 }
 
+/// #15247 (A66-03) FAIL-ON-REVERT: XSK ARP/NA-learned entries carry an
+/// RX-style lease and age out; kernel-backed promotion clears it, and a
+/// same-MAC re-advert refreshes it.
+#[test]
+fn xsk_arp_na_learn_ages_unless_kernel_backed_15247() {
+    let map = ShardedNeighborMap::new();
+    let na_key = (7, IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x42)));
+    let arp_key = key_v4(7, 43);
+    let backed_key = key_v4(7, 44);
+    let mac = entry(0xAB);
+    assert_eq!(map.insert_ndp_na_if_override_allows_at(na_key, mac, true, true, 100), Some(true));
+    assert_eq!(map.insert_arp_reply_if_solicited_allows_at(arp_key, mac, true, 100), Some(true));
+    assert_eq!(map.insert_ndp_na_if_override_allows_at(backed_key, mac, true, true, 100), Some(true));
+    map.mark_kernel_backed_if_same(&backed_key, mac.mac);
+    assert_eq!(map.insert_ndp_na_if_override_allows_at(na_key, mac, true, true, 300), Some(false));
+    let manager_keys = FastSet::default();
+    let expiry = 300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+    assert_eq!(map.age_rx_learned_neighbors(expiry - 1, RX_LEARNED_NEIGHBOR_MAX_AGE_NS, &manager_keys), 1);
+    assert_eq!(map.get(&arp_key), None);
+    assert_eq!(map.get(&na_key), Some(mac));
+    assert_eq!(map.age_rx_learned_neighbors(expiry, RX_LEARNED_NEIGHBOR_MAX_AGE_NS, &manager_keys), 1);
+    assert_eq!(map.get(&na_key), None, "XSK NA learn must age out without kernel backing");
+    assert_eq!(map.get(&backed_key), Some(mac), "kernel-backed promotion must clear the lease");
+}
+
 // ---------------------------------------------------------------------------
 // #5673 (codex-review M02): aggregate cap on dynamically learned neighbors.
 //
