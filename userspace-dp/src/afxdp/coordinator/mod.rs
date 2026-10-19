@@ -1752,6 +1752,71 @@ impl Coordinator {
         self.nat_counters.clear();
     }
 
+    /// #15107: operator clear of firewall filter term counters (and the
+    /// per-colour policer counters `show firewall` renders beside them).
+    /// Resets the helper's live `FilterState` atomics so the pre-clear
+    /// totals are not snapped back on the next 1 s status poll — the
+    /// load-bearing half of the operator clear, exactly as
+    /// `clear_policy_counters`/`clear_nat_counters` are for their stores.
+    /// Per-thread pending filter batches recorded before the clear are
+    /// discarded by the counters' generation guard (#3448 discipline), so
+    /// they cannot resurrect the cleared totals at their next flush.
+    pub fn clear_filter_counters(&self) {
+        self.forwarding.filter_state.clear_filter_counters();
+    }
+
+    /// TEST SCAFFOLDING (#15107): seed one filter term counter and one
+    /// three-color policer with recorded hits, exactly as workers leave
+    /// them after `record_filter_counter` + a flush and a metered packet.
+    /// It exists because the binding that matters lives OUTSIDE this
+    /// package: `server::helpers::status::refresh_status` publishing these
+    /// rows, and the `clear_filter_counters` handler arm clearing them.
+    /// Those call sites were unbound precisely because every existing test
+    /// reached past them into `crate::afxdp`, which `pkg`-external tests
+    /// cannot do — the `seed_flood_counter_for_test` (#6938) precedent.
+    #[cfg(test)]
+    pub(crate) fn seed_filter_counter_for_test(&mut self) {
+        let state = crate::filter::parse_filter_state_with_three_color(
+            &[crate::FirewallFilterSnapshot {
+                name: "protect-RE".into(),
+                family: "inet".into(),
+                terms: vec![crate::FirewallTermSnapshot {
+                    name: "count-web".into(),
+                    action: "accept".into(),
+                    count: "web".into(),
+                    ..Default::default()
+                }],
+            }],
+            &[],
+            &[crate::ThreeColorPolicerSnapshot {
+                name: "wan-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1_000_000,
+                committed_burst_bytes: 10_000,
+                peak_or_excess_burst_bytes: 10_000,
+                then_action: "discard".into(),
+                ..Default::default()
+            }],
+            &[],
+            "",
+            "",
+        )
+        .expect("seed filter state compiles");
+        if let Some(filter) = state.filters.get("inet:protect-RE") {
+            if let Some(term) = filter.terms.first() {
+                for _ in 0..7 {
+                    crate::filter::record_filter_counter(&term.counter, 100);
+                }
+                crate::filter::flush_recorded_filter_counters();
+            }
+        }
+        if let Some(policer) = state.three_color_policers.first() {
+            policer.meter(1_000_000_000, 500, crate::filter::PacketColor::Green);
+        }
+        self.forwarding.filter_state = state;
+    }
+
     /// #3651: per-zone ingress/egress traffic-volume snapshot for
     /// `ProcessStatus.zone_traffic_counters`.
     ///

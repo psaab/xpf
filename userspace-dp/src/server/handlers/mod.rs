@@ -504,6 +504,19 @@ pub(crate) fn handle_stream(
                 refresh_status(&mut guard);
                 persist_state = true;
             }
+            // #15107: reset the helper-side firewall filter term counters
+            // (and the per-colour policer counters rendered beside them).
+            // Load-bearing half of the operator `clear firewall all` for the
+            // same reason as clear_policy_counters above: the helper reports
+            // cumulative totals every poll and the Go side mirrors them, so
+            // without this reset the cleared counts would snap back within
+            // <=1 s. Per-thread pending batches recorded before the clear
+            // are discarded by the counters' generation guard.
+            "clear_filter_counters" => {
+                guard.afxdp.clear_filter_counters();
+                refresh_status(&mut guard);
+                persist_state = true;
+            }
             "set_queue_state" => {
                 queue::set(
                     &mut guard,
