@@ -278,6 +278,37 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 		return nil
 	}
 	generation, known := state.RemoteGenerations[batch.OriginID]
+	if known && batch.Generation > generation {
+		// #14963: mirror the #14580 jump bound that ClearPersistentNATLeases-
+		// WithGeneration applies to forwarded clears. Without it, one forged
+		// or corrupted batch at MaxUint64 advanced the durable watermark
+		// straight to MaxUint64: the importer cleared every local lease and
+		// persisted the poisoned high-water mark, every genuine batch below
+		// it was then dropped as stale indefinitely, and the poison survived
+		// restart. An UNSEEN origin's first batch is accepted at any
+		// generation — there is no watermark to jump from, and rejecting it
+		// would break first contact with a long-lived peer.
+		if batch.Generation-generation > maxPersistentNatGenerationJump14580 {
+			persistentNatGenerationJumpsRejected.Add(1)
+			slog.Warn("persistent-NAT lease batch generation jump refused",
+				"origin", batch.OriginID, "generation", batch.Generation,
+				"watermark", generation, "max_jump", maxPersistentNatGenerationJump14580,
+				"jumps_rejected_total", persistentNatGenerationJumpsRejected.Load(),
+				"issue", "#14963")
+			return fmt.Errorf("persistent-NAT lease batch generation %d jumps implausibly from observed %d", batch.Generation, generation)
+		}
+	} else if !known && batch.Generation > 0 && len(state.RemoteGenerations) >= maxPersistentNatGenerationPeers11486 {
+		// #14963: mirror the #11486 peer-count cap that the forwarded-clear
+		// path applies. Without it, batch imports grew RemoteGenerations
+		// without bound, and a state file already holding more than
+		// maxPersistentNatGenerationPeers11486 peers then failed the loader
+		// peer-limit check on every restart, bricking persistent-NAT lease
+		// export/import. Generation-0 first contact is the carve-out below:
+		// it records a 0 watermark without a clear barrier, and genuine
+		// 2-node HA re-advertises at its durable (>=1) generation within one
+		// 30s tick.
+		return errors.New("persistent-NAT lease generation peer limit reached")
+	}
 	if !known && batch.Generation == 0 {
 		state = clonePersistentNatLeaseGenerationState11486(state)
 		state.RemoteGenerations[batch.OriginID] = 0
