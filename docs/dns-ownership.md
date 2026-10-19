@@ -87,25 +87,39 @@ rather than re-derive it. A filter keyed on the raw config token would be
 **inert for the canonical Junos slash spelling**, exactly as the #8963 remedy
 was.
 
-### Management-DHCP DNS routing (#11385)
+### Management-DHCP DNS routing (#11385, #14971, #15059)
 
-Management DHCP nameservers remain in `/etc/resolv.conf`, but host lookups
-must not send them through the unrelated main-table default route. For every
-valid nameserver on a live lease for a published management-VRF interface,
-the daemon installs a destination-scoped pair:
+Management DHCP nameservers remain in `/etc/resolv.conf`, but host DNS
+lookups must not send them through the unrelated main-table default route.
+For every valid nameserver on a live lease for a published management-VRF
+interface, the daemon installs DNS-scoped pairs (#14971) — one per transport:
 
-- `ip rule to <server>/32|/128 iif lo lookup 999 pref 2500`
-- an otherwise-identical `unreachable` rule at preference 2501
+- `ip rule to <server>/32|/128 iif lo ipproto udp dport 53 lookup 999 pref 2500`
+  plus an otherwise-identical `unreachable` shadow at preference 2501
+- `ip rule to <server>/32|/128 iif lo ipproto tcp dport 53 lookup 999 pref 2502`
+  plus an otherwise-identical `unreachable` shadow at preference 2503
 
-The first rule sends locally generated host lookups for that exact server
-through the lease's management-table route. The shadow makes a missing
-table-999 route fail closed rather than falling through to a WAN default.
-The merge publishes a management nameserver only after it observes the
-complete lookup/shadow pair; a failed install or rule-table read suppresses
-that DHCP entry. Both rules are reconciled on config apply and DHCP changes,
-so changing or withdrawing the lease removes the old nameserver rules. They
-run after the priority-2000 VRF-miss terminator: a tenant-VRF-bound local
-lookup cannot escape its VRF through a management nameserver rule.
+Only DNS (UDP/TCP destination port 53) is steered: non-DNS host traffic to
+the same address (SSH, syslog, NTP, monitoring) keeps its main-table route
+(`ip route get <server> ipproto udp dport 514` resolves via main while
+`dport 53` uses table 999). The shadow makes a missing table-999 route fail
+closed rather than falling through to a WAN default. The merge publishes a
+management nameserver only after it observes both complete lookup/shadow
+pairs; a failed install or rule-table read suppresses that DHCP entry. Both
+pairs are reconciled on config apply and DHCP changes, so changing or
+withdrawing the lease removes the old nameserver rules. They run after the
+priority-2000 VRF-miss terminator: a tenant-VRF-bound local lookup cannot
+escape its VRF through a management nameserver rule.
+
+Refusal (#15059): a nameserver already covered by a main-table connected or
+static route, or exactly matching a configured control-plane peer
+(`chassis cluster peer-address` / `fabric-peer-address` /
+`fabric1-peer-address`), is refused with a `SECURITY:` warning — no steering
+rules are installed (stale ones are removed) and it is not published as a
+management-steered resolver, so its DNS follows the main route the existing
+topology already selected instead of being diverted into table 999. If the
+main-table inventory cannot be read, steering and publication fail closed.
+Peer matching is exact-address only; neighbouring hosts are unaffected.
 
 ### Input-validation render belt (#4902, #5010)
 
