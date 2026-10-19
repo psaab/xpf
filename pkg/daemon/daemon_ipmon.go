@@ -560,8 +560,8 @@ func (d *Daemon) reconcileIPMon(cfg *config.Config) {
 // while primary for ANY data RG.
 //
 // The gate is IsLocalPrimaryAny() rather than IsLocalPrimary of the
-// lowest data RG (#3764). Probe HA gating is already per-RG
-// (filterRPMForHAGating / rpmProbeGatingRGs) — a gated probe runs only
+// lowest data RG (#3764). Probe HA gating is per test
+// (filterRPMForHAGating / rpmProbeTestGating, #15074) — a gated test runs only
 // on the node that is primary for its RETH's RG — so a node only ever
 // genuinely FAILs the policies whose RG it owns. Publishing whenever
 // this node is primary for ANY RG is therefore both safe and precise:
