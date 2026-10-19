@@ -23,13 +23,18 @@ import (
 // primary committed, and "a push was written" proves nothing in the heal window
 // itself, because the peer is still primary there and rejects it. So the store
 // keeps a mark instead:
-//   - a local promotion of the active config made while the peer is
-//     unreachable marks the new active as UNSHARED (persisted, so a restart
-//     before the heal does not lose it). The mark is sticky: a later local
+//   - every local promotion of the active config marks the new active as
+//     UNSHARED (persisted, so a restart before the heal does not lose it).
+//     #9530 marked only promotions made while the peer was unreachable;
+//     #15212 marks all of them, because a reachable peer may still fail to
+//     apply the pushed generation. The mark is sticky: a later local
 //     commit carries it to the new active;
-//   - the daemon clears it by pushing exactly that content while it is RG0
-//     primary and the peer reads secondary (NoteActiveSharedWithPeer). In the
-//     dual-active heal window the peer still reads primary, so the mark stays;
+//   - the daemon stamps the carrying wire generation when it pushes exactly
+//     that content (NoteActivePushedAtGeneration) and clears the mark only
+//     on a positive config-apply ACK at or beyond that generation
+//     (NotePeerConfigApplyAck). A queued write or a NACK never clears it.
+//     In the dual-active heal window the peer still reads primary and
+//     rejects the push, so no ACK arrives and the mark stays;
 //   - a peer sync that replaces a still-unshared active records a
 //     SyncDivergence and logs it at Error. The discarded config is in rollback
 //     history, and ConfigSyncDivergence names its slot.
@@ -39,6 +44,12 @@ import (
 type unsharedRecord struct {
 	Digest string    `json:"digest"`
 	At     time.Time `json:"at"`
+	// CarryingGen is the config generation whose push carries this exact
+	// content (#15212). 0 means no push has carried it yet (a partition
+	// commit, or content not yet pushed). The daemon clears the mark only
+	// on a positive config-apply ACK >= CarryingGen; a queued socket write
+	// or a NACK is not proof the peer holds the content.
+	CarryingGen uint64 `json:"carrying_gen,omitempty"`
 	// Discarded, when present, is a peer sync divergence (#15142): the
 	// unshared local commit DiscardedDigest was replaced by
 	// AdoptedDigest at At. The record itself persists until the
@@ -151,14 +162,17 @@ func (s *Store) noteLocalActivePromotionLocked() {
 		s.setUnsharedLocked(nil)
 	}
 	s.divergence = nil
-	if s.peerReachableFn == nil {
+	if s.peerReachableFn == nil && s.unshared == nil {
 		return
 	}
-	// The mark is sticky: a commit on top of unshared content still carries
-	// content the peer has not been shown to hold, even once the peer is back.
-	if s.unshared == nil && s.peerReachableFn() {
-		return
-	}
+	// #15212: mark EVERY local promotion, not only those made while the peer
+	// is unreachable. Reachability proves only that a push can be queued; the
+	// standby may still fail to apply that generation, and an unplanned RG0
+	// takeover before a successful re-push would then silently replace the
+	// commit. The mark clears only on a positive config-apply ACK at or
+	// beyond the carrying generation (NotePeerConfigApplyAck). CarryingGen
+	// resets to 0 here: the new active has not been carried by any push yet.
+	// A standalone store (nil peerReachableFn, no prior mark) never marks.
 	s.setUnsharedLocked(&unsharedRecord{Digest: activeTreeDigest(s.active), At: time.Now().UTC()})
 }
 
@@ -195,15 +209,50 @@ func (s *Store) clearUnsharedLocked() {
 	s.setUnsharedLocked(nil)
 }
 
-// NoteActiveSharedWithPeer records that pushedText reached a peer able to apply
-// it (#9530). The caller pushed it as RG0 primary while the peer read secondary.
-// The mark clears only when pushedText is exactly the marked content.
+// NoteActiveSharedWithPeer records that pushedText was queued to a peer able
+// to apply it (#9530, #15212). It NO LONGER clears the mark: a socket write
+// is not proof the peer holds the content. The mark clears only on a
+// positive config-apply ACK (NotePeerConfigApplyAck). Kept as a no-clear
+// stamp for callers without a wire generation.
 func (s *Store) NoteActiveSharedWithPeer(pushedText string) {
+	s.NoteActivePushedAtGeneration(pushedText, 0)
+}
+
+// NoteActivePushedAtGeneration records that pushedText was queued at wire
+// generation gen. When pushedText is exactly the marked content, the mark's
+// CarryingGen advances to gen (never regresses). It does NOT clear the mark.
+func (s *Store) NoteActivePushedAtGeneration(pushedText string, gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.unshared != nil && configTextDigest(pushedText) == s.unshared.Digest {
-		s.clearUnsharedLocked()
+	if s.unshared == nil || s.unshared.Discarded != nil {
+		return
 	}
+	if configTextDigest(pushedText) != s.unshared.Digest {
+		return
+	}
+	if gen <= s.unshared.CarryingGen {
+		return
+	}
+	rec := *s.unshared
+	rec.CarryingGen = gen
+	s.setUnsharedLocked(&rec)
+}
+
+// NotePeerConfigApplyAck clears the unshared mark when the peer positively
+// acknowledged applying a generation at or beyond the carrying generation
+// of the marked content (#15212). A stale ACK (< CarryingGen), an ACK with
+// no push carrying the marked content (CarryingGen == 0), or gen == 0 never
+// clears. A NACK never reaches here and must never clear.
+func (s *Store) NotePeerConfigApplyAck(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unshared == nil || gen == 0 || s.unshared.CarryingGen == 0 {
+		return
+	}
+	if gen < s.unshared.CarryingGen {
+		return
+	}
+	s.clearUnsharedLocked()
 }
 
 // classifySyncLocked decides, before a peer sync replaces the active config,

@@ -344,7 +344,12 @@ func (d *Daemon) wireSessionSyncConfigCallbacks(ss *cluster.SessionSync) {
 	ss.OnPeerConfigApplyFailed = func(gen uint64) {
 		slog.Warn("cluster: peer did not apply our config generation — re-arming the config-sync push marker",
 			"gen", gen)
-		d.invalidateConfigSyncPushed()
+		d.notePeerConfigApplyFailed(gen)
+	}
+	// #15212: a positive apply ACK is the only event that clears the #9530
+	// unshared mark, and only at or beyond its carrying generation.
+	ss.OnPeerConfigApplyAck = func(gen uint64) {
+		d.notePeerConfigApplyAck(gen)
 	}
 }
 

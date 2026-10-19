@@ -909,6 +909,14 @@ type Daemon struct {
 	configSyncHasPushed   bool
 	configSyncPushedEpoch uint64
 	configSyncPushedGen   uint64
+	// #15212: configSyncPushedDigest is the digest of the text carried by
+	// configSyncPushedWireGen, so a late ACK can be matched to the exact
+	// marked content it applied. configSyncAppliedGen is the highest wire
+	// generation positively ACKed by the peer on this daemon. All guarded
+	// by configSyncMu.
+	configSyncPushedDigest  string
+	configSyncPushedWireGen uint64
+	configSyncAppliedGen    uint64
 	// A peer snapshot-protocol deferral remains an alarm until a compatible
 	// generation is successfully shared. These fields share configSyncMu with
 	// the reconciliation marker.

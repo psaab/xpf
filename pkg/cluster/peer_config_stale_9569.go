@@ -57,3 +57,12 @@ func (s *SessionSync) PeerConfigStale() (bool, string) {
 	}
 	return false, ""
 }
+
+// PeerAppliedConfigGen returns the highest config generation the peer has
+// positively acknowledged as applied (#15212).
+func (s *SessionSync) PeerAppliedConfigGen() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.peerAppliedConfigGen.Load()
+}

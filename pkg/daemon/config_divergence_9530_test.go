@@ -26,6 +26,8 @@ var clusterLines9530 = []string{
 	"chassis cluster cluster-id 1",
 	"chassis cluster authentication-key test-cluster-psk-6611",
 	"chassis cluster node 0",
+	"chassis cluster redundancy-group 0 node 0 priority 200",
+	"chassis cluster redundancy-group 0 node 1 priority 100",
 	"chassis cluster configuration-synchronize",
 }
 
@@ -42,17 +44,20 @@ func winnerText9530(t *testing.T) string {
 	return renderSyncedConfigText(t, append(append([]string{}, clusterLines9530...), "system host-name winner")...)
 }
 
-// The reconcile push counts as sharing the marked commit only when the peer reads
-// RG0 secondary. In the dual-active heal window the peer is still primary and
-// rejects the push, so the mark must survive it.
+// #15212: a reconcile push alone never shares the marked commit — not even
+// when the peer reads RG0 secondary. Only a positive apply ACK at or beyond
+// the carrying generation clears the mark. In the dual-active heal window
+// the peer is still primary and rejects the push, so no ACK arrives either.
 func TestReconcilePushSharesTheCommitOnlyWhenThePeerReadsSecondary_9530(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		peerSecondary  bool
+		ack            bool
 		wantDivergence bool
 	}{
-		{"peer still reads primary", false, true},
-		{"peer reads secondary", true, false},
+		{"peer still reads primary, no ack", false, false, true},
+		{"peer reads secondary, push only", true, false, true},
+		{"peer reads secondary, acked", true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, pushes := newReconcileDaemon(t, true /*primary*/, 60*time.Second)
@@ -63,6 +68,13 @@ func TestReconcilePushSharesTheCommitOnlyWhenThePeerReadsSecondary_9530(t *testi
 			if got := pushes.Load(); got != 1 {
 				t.Fatalf("setup: the reconciler pushed %d times, want 1", got)
 			}
+			if tc.ack {
+				// The test seam carries no wire generation; stamp the
+				// active text at gen 1 and ACK it, modelling the peer's
+				// positive apply ACK for that push.
+				d.store.NoteActivePushedAtGeneration(d.store.ShowActive(), 1)
+				d.notePeerConfigApplyAck(1)
+			}
 
 			d.store.SetClusterReadOnly(true)
 			if _, err := d.store.SyncApply(winnerText9530(t), nil); err != nil {
@@ -70,7 +82,7 @@ func TestReconcilePushSharesTheCommitOnlyWhenThePeerReadsSecondary_9530(t *testi
 			}
 			_, _, got := d.store.ConfigSyncDivergence()
 			if got != tc.wantDivergence {
-				t.Errorf("after a push while the %s, the sync that replaced the partition commit reported divergence=%v, want %v",
+				t.Errorf("after %s, the sync that replaced the partition commit reported divergence=%v, want %v",
 					tc.name, got, tc.wantDivergence)
 			}
 		})
@@ -155,11 +167,14 @@ func TestDeferredConfigSyncPendingReportsDivergenceAtInfo12235(t *testing.T) {
 	}
 }
 
-// Standalone and reachable nodes never raise it.
+// An ACKed routine commit never raises it (#15212: reachable alone no longer
+// suffices; the ACK is what makes the failover routine).
 func TestHealthySyncRaisesNoDivergenceEvent_9530(t *testing.T) {
 	store := newConfigSyncStore(t, "c0-host")
 	store.SetPeerReachableFn(func() bool { return true })
 	commitHostName(t, store, "routine-commit")
+	store.NoteActivePushedAtGeneration(store.ShowActive(), 3)
+	store.NotePeerConfigApplyAck(3)
 	store.SetClusterReadOnly(true)
 	d := &Daemon{
 		cluster:          newClusterManager(false),

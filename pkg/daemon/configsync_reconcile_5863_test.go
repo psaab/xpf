@@ -25,6 +25,8 @@ func newConfigSyncStore(t *testing.T, hostName string) *configstore.Store {
 		"chassis cluster cluster-id 1",
 		"chassis cluster authentication-key test-cluster-psk-6611",
 		"chassis cluster node 0",
+		"chassis cluster redundancy-group 0 node 0 priority 200",
+		"chassis cluster redundancy-group 0 node 1 priority 100",
 		"chassis cluster configuration-synchronize",
 		"system host-name " + hostName,
 	} {

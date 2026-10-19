@@ -34,6 +34,8 @@ func commitConfirmedSnapshotGateDaemon10782(t *testing.T, peerVersion uint16, co
 		"chassis cluster cluster-id 1",
 		"chassis cluster authentication-key test-cluster-psk-10782",
 		"chassis cluster node 0",
+		"chassis cluster redundancy-group 0 node 0 priority 200",
+		"chassis cluster redundancy-group 0 node 1 priority 100",
 		"chassis cluster configuration-synchronize",
 		"security zones security-zone dmz",
 		"security zones security-zone trust",

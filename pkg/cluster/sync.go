@@ -993,6 +993,12 @@ type SessionSync struct {
 	// marker stands and a healthy connection still pushes a generation exactly
 	// once — the #5863 no-storm property is preserved.
 	OnPeerConfigApplyFailed func(gen uint64)
+	// OnPeerConfigApplyAck reports that the PEER positively acknowledged
+	// applying config generation gen (#15212). It fires on the sender when a
+	// syncMsgConfigApplyAck advances peerAppliedConfigGen. The daemon wires
+	// this to clear the #9530 unshared mark only when the ACK is at or beyond
+	// the carrying generation of the marked content; a NACK never clears it.
+	OnPeerConfigApplyAck func(gen uint64)
 	// OnIPsecSAReceived is called when an IPsec SA list arrives from the peer.
 	OnIPsecSAReceived func(connectionNames []string)
 	// OnDHCPLeasesReceived is called when a DHCP-server lease set arrives from
@@ -1738,6 +1744,7 @@ type SessionSync struct {
 	// Highest config generation the peer positively acknowledged as applied.
 	// PeerConfigStale compares this with lastSentConfigGen.
 	peerAppliedConfigGen atomic.Uint64
+
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
 	// applyingConfigGen is the apply-in-progress config fence (#6284, item 2).
