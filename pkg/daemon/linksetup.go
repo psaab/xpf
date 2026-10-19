@@ -141,6 +141,70 @@ type pciNIC struct {
 // real sysfs walk against a synthetic tree. Production leaves it unchanged.
 var sysClassNetRoot = "/sys/class/net"
 
+// liveInterfaceNamesFn lists the live kernel interface names. It backs
+// #15044's occupancy scan for live non-PCI NICs already wearing a
+// positional name; production reads sysfs, tests inject a fixture list.
+var liveInterfaceNamesFn = func() ([]string, error) {
+	entries, err := os.ReadDir(sysClassNetRoot)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// isPositionalName reports whether name is one positional naming assigns
+// (fxp0, cluster em0, ge-<fpc>-0-<n> for either FPC). Deliberately
+// syntactic: any live netdev wearing such a name is a positional holder
+// for #15044 occupancy purposes, whatever bus it sits on.
+func isPositionalName(name string, clusterMode bool) bool {
+	if name == "fxp0" {
+		return true
+	}
+	if clusterMode && name == "em0" {
+		return true
+	}
+	var fpc, idx int
+	if n, err := fmt.Sscanf(name, "ge-%d-0-%d", &fpc, &idx); err != nil || n != 2 {
+		return false
+	}
+	// Sscanf accepts trailing junk ("ge-0-0-1x"); require exact round-trip.
+	return name == fmt.Sprintf("ge-%d-0-%d", fpc, idx) && (fpc == 0 || fpc == 7)
+}
+
+// livePositionalHolders returns the sorted live interface names that wear
+// a positional name but are NOT among the enumerated PCI NICs. Under
+// #14595 enumeratePCINICs skips every non-PCI netdev, so a USB NIC that
+// a pre-#14595 build named fxp0 (the controller's BDF sorted ahead of the
+// PCI NICs) is invisible to renamePositional: without this scan its slot
+// is handed to a PCI NIC, 10-xpf-fxp0.link is rewritten to that NIC's
+// kernel name before the rename EEXISTs (warn-only at the boot caller),
+// and the next boot rebinds fxp0 onto the PCI cable (#15044). A scan
+// error is returned so the caller fails closed instead of re-indexing
+// blind.
+func livePositionalHolders(nics []pciNIC, clusterMode bool) ([]string, error) {
+	live, err := liveInterfaceNamesFn()
+	if err != nil {
+		return nil, err
+	}
+	enumerated := make(map[string]bool, len(nics))
+	for _, nic := range nics {
+		enumerated[nic.name] = true
+	}
+	var holders []string
+	for _, name := range live {
+		if enumerated[name] || !isPositionalName(name, clusterMode) {
+			continue
+		}
+		holders = append(holders, name)
+	}
+	sort.Strings(holders)
+	return holders, nil
+}
+
 // enumerateAndRenameInterfaces assigns vSRX-style names to all PCI NICs.
 //
 // Standalone (clusterMode=false):
@@ -168,6 +232,29 @@ func enumerateAndRenameInterfaces(nodeID int, clusterMode bool, userspaceWorkers
 	nics, err := enumeratePCINICsFn()
 	if err != nil {
 		return fmt.Errorf("enumerate NICs: %w", err)
+	}
+	// #15044: a live non-PCI NIC (e.g. a USB NIC a pre-#14595 build named
+	// fxp0 via its xHCI controller's BDF) already wearing a positional
+	// name is invisible to the PCI enumeration above. Re-indexing around
+	// it would rewrite its 10-xpf-<name>.link onto a PCI NIC and rebind
+	// the name to a different cable on the next boot. Refuse loudly
+	// before any .link write or rename; the operator resolves it with a
+	// chassis device-map or by removing the stale name. This runs even
+	// when no PCI NICs exist: a lone USB holder must not be silently
+	// ignored while its .link still claims the name. A scan failure is
+	// likewise fatal — re-indexing blind is the fail-open being removed.
+	holders, err := livePositionalHolders(nics, clusterMode)
+	if err != nil {
+		return fmt.Errorf("linksetup: cannot list live interfaces to check for "+
+			"non-PCI positional name holders (#15044): %w", err)
+	}
+	if len(holders) > 0 {
+		return fmt.Errorf("linksetup: refusing positional re-indexing: live "+
+			"non-PCI interface(s) %s already wear positional name(s) that the "+
+			"PCI enumeration cannot see (#15044); renaming would rewrite "+
+			"their .link files onto PCI NICs and rebind the names on the "+
+			"next boot — configure a chassis device-map for these NICs or "+
+			"remove the stale positional names", strings.Join(holders, ", "))
 	}
 	if len(nics) == 0 {
 		slog.Info("linksetup: no PCI network interfaces found")
