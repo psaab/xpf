@@ -2210,3 +2210,15 @@ peer-prefix matching read that same set. The userspace route snapshot also
 compacts connected prefixes, retaining one FIB row for a subnet. Keep dedup at
 the shared config derivation rather than only in the applier so validation and
 installation cannot disagree.
+**Generic-compile `${node}` fallback expands atomically (#15031):** the
+generic (standalone / `check-config`, nodeID<0) compile resolves
+`apply-groups "${node}"` with the node0 vars in ONE expansion, never by
+retrying on a tree a failed plain pass already partially merged. The old
+retry lost the earlier groups' merge provenance, so a group
+`default-policy` conflict selected through `${node}` resolved by order
+on the standalone path (permit-first fail-open) while the fresh node0
+compile rejected it. The generic result is now identical to the fresh
+node0 expansion: conflicting group defaults are strict-rejected and
+tolerant-load fail-closed exactly as on node0; identical actions,
+inline overrides, and the `resolved using default node0 context`
+warning are unchanged. See `docs/config-schema.md` "#15031".
