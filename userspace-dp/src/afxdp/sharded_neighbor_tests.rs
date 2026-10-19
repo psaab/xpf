@@ -811,6 +811,57 @@ fn xsk_arp_na_learn_ages_unless_kernel_backed_15247() {
     assert_eq!(map.get(&backed_key), Some(mac), "kernel-backed promotion must clear the lease");
 }
 
+/// #15769 fail-on-revert: a same-MAC XSK re-advert on a kernel-backed
+/// (lease-free, authoritative) record must NOT stamp an RX lease onto it.
+/// `insert` installs `None`; the pre-fix same-MAC arm set `Some(now)`
+/// via `map_or`, demoting it so `age_rx_learned_neighbors` evicted it
+/// after 60s+grace with no kernel reprogram (Some(false)). Covers both
+/// the ARP and NA entry points sharing the inner CAS.
+#[test]
+fn same_mac_xsk_refresh_preserves_kernel_backed_lease_free_15769() {
+    let map = ShardedNeighborMap::new();
+    let arp_key = key_v4(7, 157);
+    let na_key = (7, IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x9d)));
+    // A leased control proves the aging sweep is actually armed, so the
+    // survival of the kernel-backed keys is not vacuous.
+    let leased_key = key_v4(7, 158);
+    let mac = entry(0xAB);
+    map.insert(arp_key, mac);
+    map.insert(na_key, mac);
+    assert_eq!(
+        map.insert_arp_reply_if_solicited_allows_at(leased_key, mac, true, 100),
+        Some(true)
+    );
+    assert_eq!(
+        map.insert_arp_reply_if_solicited_allows_at(arp_key, mac, true, 300),
+        Some(false),
+        "same-MAC ARP re-advert is a no-change refresh"
+    );
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows_at(na_key, mac, true, true, 300),
+        Some(false),
+        "same-MAC NA re-advert is a no-change refresh"
+    );
+    let expiry = 300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+    let manager_keys = FastSet::default();
+    assert_eq!(
+        map.age_rx_learned_neighbors(expiry, RX_LEARNED_NEIGHBOR_MAX_AGE_NS, &manager_keys),
+        1,
+        "only the genuinely leased control may age out"
+    );
+    assert_eq!(map.get(&leased_key), None);
+    assert_eq!(
+        map.get(&arp_key),
+        Some(mac),
+        "same-MAC XSK ARP refresh must not demote a kernel-backed entry"
+    );
+    assert_eq!(
+        map.get(&na_key),
+        Some(mac),
+        "same-MAC XSK NA refresh must not demote a kernel-backed entry"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #5673 (codex-review M02): aggregate cap on dynamically learned neighbors.
 //

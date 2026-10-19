@@ -789,15 +789,17 @@ impl ShardedNeighborMap {
         if prior_mac == Some(val.mac) {
             // #15247: an XSK re-advert refreshes the lease so a live
             // neighbor is not aged out; kernel-monitor refreshes (None)
-            // leave the record authoritative.
+            // leave the record authoritative. #15769: refresh ONLY an
+            // already-leased record (mirrors `refresh_rx_learned_pair`)
+            // — stamping `Some(now)` onto a lease-free kernel-backed
+            // record demoted it to a 60s RX lease that then aged out
+            // with no kernel reprogram (this arm returns Some(false)).
             if let Some(now_ns) = learn_now_ns
                 && let Some(record) = shard.get_mut(&key)
+                && record.last_rx_learned_ns.is_some()
             {
-                record.last_rx_learned_ns = Some(
-                    record
-                        .last_rx_learned_ns
-                        .map_or(now_ns, |seen| seen.max(now_ns)),
-                );
+                record.last_rx_learned_ns =
+                    record.last_rx_learned_ns.map(|seen| seen.max(now_ns));
             }
             return Some(false);
         }
@@ -889,6 +891,32 @@ impl ShardedNeighborMap {
         let mut shard = self.lock_shard(shard_idx(key));
         if let Some(record) = shard.get_mut(key)
             && record.entry.mac == mac
+        {
+            record.last_rx_learned_ns = None;
+        }
+    }
+
+    /// #15769: promote a leased record to kernel-backed only on
+    /// independent kernel confirmation. Monitor events whose NUD state
+    /// the dataplane itself installs (`NUD_STALE`, #4475) must not clear
+    /// a live lease: `add_kernel_neighbor` programs STALE and the
+    /// monitor socket (bound to `RTNLGRP_NEIGH`) receives that install
+    /// back as an RTM_NEWNEIGH notification, so an unsolicited XSK learn
+    /// would otherwise self-promote. `confirmed == false` (STALE event on
+    /// an already-leased entry) leaves the lease untouched. A STALE
+    /// event on a lease-free or absent entry keeps the plain
+    /// [`Self::mark_kernel_backed_if_same`] behavior — the entry, if
+    /// any, is already authoritative.
+    pub(crate) fn mark_kernel_backed_if_confirmed(
+        &self,
+        key: &(i32, IpAddr),
+        mac: [u8; 6],
+        confirmed: bool,
+    ) {
+        let mut shard = self.lock_shard(shard_idx(key));
+        if let Some(record) = shard.get_mut(key)
+            && record.entry.mac == mac
+            && (confirmed || record.last_rx_learned_ns.is_none())
         {
             record.last_rx_learned_ns = None;
         }
