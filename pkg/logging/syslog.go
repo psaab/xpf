@@ -187,6 +187,7 @@ func currentSyslogHostname(fallback string, override func() (string, error)) str
 }
 
 type syslogEventWrite struct {
+	ts       time.Time
 	severity int
 	message  string
 	binary   []byte
@@ -261,7 +262,7 @@ func (w *syslogEventWriter) run() {
 			if item.isBinary {
 				_ = w.client.SendBinary(item.binary)
 			} else {
-				_ = w.client.Send(item.severity, item.message)
+				_ = w.client.SendAt(item.ts, item.severity, item.message)
 			}
 		case <-w.stopCh:
 			for {
@@ -299,13 +300,24 @@ func (s *SyslogClient) eventWriterForReader() *syslogEventWriter {
 // SendFromEventReader queues a text message for this client and returns
 // immediately. False means the bounded per-client queue was full or retired;
 // DroppedWrites reports it. Direct Send calls retain their synchronous API.
+// The header timestamp is stamped at dequeue (Send), matching the
+// pre-#15699 behavior for callers without an event timestamp.
 func (s *SyslogClient) SendFromEventReader(severity int, message string) bool {
+	return s.SendFromEventReaderAt(time.Time{}, severity, message)
+}
+
+// SendFromEventReaderAt is SendFromEventReader with the dataplane
+// decision timestamp (#15699): ts is carried through the queue so the
+// emitted header records when the packet was decided, not when the
+// async worker dequeued the record. A zero ts falls back to dequeue
+// time (see SendAt).
+func (s *SyslogClient) SendFromEventReaderAt(ts time.Time, severity int, message string) bool {
 	writer := s.eventWriterForReader()
 	if writer == nil {
 		s.droppedWrites.Add(1)
 		return false
 	}
-	return writer.enqueue(syslogEventWrite{severity: severity, message: message})
+	return writer.enqueue(syslogEventWrite{ts: ts, severity: severity, message: message})
 }
 
 // SendBinaryFromEventReader queues an immutable copy of a binary record for
@@ -996,10 +1008,20 @@ func (s *SyslogClient) DroppedDials() uint64 { return s.droppedDials.Load() }
 // suppressed by the cooldown window (observability).
 func (s *SyslogClient) DroppedCooldown() uint64 { return s.droppedCooldown.Load() }
 
-// Send sends a syslog message with the given severity.
-// For TCP/TLS, uses RFC 6587 octet-counting framing.
+// Send sends a syslog message with the given severity, stamped with the
+// current time. For TCP/TLS, uses RFC 6587 octet-counting framing.
 // On write failure for TCP/TLS, attempts one reconnect.
 func (s *SyslogClient) Send(severity int, msg string) error {
+	return s.SendAt(time.Time{}, severity, msg)
+}
+
+// SendAt is Send with an explicit header timestamp (#15699). A zero at
+// falls back to the client's clock (time.Now in production), preserving
+// the direct-caller contract; EventReader passes rec.Time so a queued
+// record keeps its dataplane decision instant instead of the async
+// worker's dequeue time. Formatting (not the clock seam used for
+// deadlines/cooldown) is the only consumer of at.
+func (s *SyslogClient) SendAt(at time.Time, severity int, msg string) error {
 	// #6585: neutralize control bytes before the message becomes a syslog
 	// frame. This is the LAST boundary before the wire and every caller passes
 	// through it, so a producer cannot be added that bypasses it — which is the
@@ -1029,6 +1051,15 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 	// allocation-free fast path for the already-clean case, which is every
 	// ordinary record.
 	msg = termsafe.SanitizeForDisplay(msg)
+	if at.IsZero() {
+		at = s.now()
+	} else {
+		// Normalize to local time: the pre-#15699 stamps came from
+		// time.Now()/s.now() (local), so an explicit instant (rec.Time is
+		// built by time.Unix, also local) must render the same wall clock
+		// regardless of the location the caller attached.
+		at = at.Local()
+	}
 
 	priority := s.Facility*8 + severity
 	hostname := sanitizeSyslogHostname(currentSyslogHostname(s.hostname, s.hostnameFn15231))
@@ -1038,13 +1069,13 @@ func (s *SyslogClient) Send(severity int, msg string) error {
 		// Junos sd-syslog (#14611): APP-NAME=RT_FLOW, MSGID=RT_FLOW_SESSION_*,
 		// SD=[junos@2636...]. msg carries the structured body for firewall
 		// events (ringbuf fanout); generic text keeps NILVALUE MSGID/SD.
-		ts := time.Now().Format("2006-01-02T15:04:05.000Z07:00")
+		ts := at.Format("2006-01-02T15:04:05.000Z07:00")
 		line = formatSDSyslogLine(priority, ts, hostname, msg, msg)
 	} else {
 		// RFC 3164: <PRI>TIMESTAMP HOSTNAME TAG: MSG. Structured keeps its
 		// Junos body here; strip the redundant "RT_FLOW - " lead-in so the
 		// wire is "xpf: RT_FLOW_SESSION_CREATE [junos@...]" (#14611).
-		ts := time.Now().Format(time.Stamp) // "Jan _2 15:04:05"
+		ts := at.Format(time.Stamp) // "Jan _2 15:04:05"
 		line = fmt.Sprintf("<%d>%s %s xpf: %s", priority, ts, hostname, stripRTFlowLeadIn(msg))
 	}
 

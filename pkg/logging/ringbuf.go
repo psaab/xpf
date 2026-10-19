@@ -956,7 +956,7 @@ func (er *EventReader) logEvent(data []byte) {
 				}
 				msg = stdMsg
 			}
-			_ = c.SendFromEventReader(severity, msg)
+			_ = c.SendFromEventReaderAt(rec.Time, severity, msg)
 		}
 	}
 
@@ -1016,7 +1016,7 @@ func (er *EventReader) logEvent(data []byte) {
 			// *os.File — plus an inline rotate() when the cap trips — parks all
 			// of them under disk distress. Hand off instead; a refusal means the
 			// line was dropped and counted (#3478's observable).
-			if !lw.SendFromEventReader(severity, msg) {
+			if !lw.SendFromEventReaderAt(rec.Time, severity, msg) {
 				slog.Debug("local log write dropped (queue full or writer retired)")
 			}
 		}
