@@ -7,12 +7,15 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #9641 END TO END ON REAL CHARON. The source fixture is the file ApplyGeneration wrote
-// (connections, secrets, then the marker pool). strongSwan 6.0.5 loaded it with
-// `swanctl --load-all --noprompt` (rc 0; negative control rejected; capture procedure in
-// docs/log/9641.md), and the other fixtures are what charon then listed. The writer, the
-// reader and the validator must all agree with that capture: the marker names the
-// generation, the loaded connections equal the expectation, and the marker is neither a
+// #9641 END TO END ON REAL CHARON. The list-conns/pools/SA fixtures are the
+// capture of what strongSwan 6.0.5 listed after `swanctl --load-all
+// --noprompt` (rc 0; negative control rejected; capture procedure in
+// docs/log/9641.md). The SOURCE fixtures are the renderer output charon
+// loaded; since #15193 they carry the default remote.id plus the local
+// PSK owner (the list fixtures, which record only conn/children/endpoints,
+// are unchanged by that render delta). The writer, the reader and the
+// validator must all agree: the marker names the generation, the loaded
+// connections equal the expectation, and the marker is neither a
 // connection nor an SA.
 
 func combinedProofConfig9641() (*config.IPsecConfig, string) {

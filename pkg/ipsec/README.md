@@ -874,15 +874,28 @@ all files stay in `package ipsec`, so the public API is unchanged.
   the `dynamic hostname` identity `@<fqdn>` for a dynamic peer (#14590),
   otherwise the concrete remote gateway address (strongSwan uses the peer
   IP as its default identity when no id is negotiated), and this is the
-  discriminator between two PSK VPNs to different peers. A configured
-  `local-id` rides along as a harmless extra owner (two VPNs on the same
-  firewall usually share the local id, so it never disambiguates on its
-  own, but it can never cause a wrong-peer match either). A dynamic
+  discriminator between two PSK VPNs to different peers. Since #15193
+  the render ALSO pins the Junos default remote identity on fixed-address
+  PSK gateways with no `remote-identity`/`local-identity` configured:
+  `remote { id = "<first gateway address>" }` (per-address PSK selectors
+  still cover the whole multi-address list), and the secret gains a LOCAL
+  owner so charon's initiator-side shared-key lookup selects it — the
+  configured `local-id` when set, else the pinned local address, else
+  `%any` (charon picks the source per attempt, so only the wildcard owner
+  matches whatever local IP it presents; `%any` as one owner among peer
+  selectors cannot cross peers because selection still requires the peer
+  selector). Before this, a default-shape (no identities) fixed-address
+  VPN rendered neither, charon-as-initiator looked the key up as
+  `(<local ip>, %any)` / `(%any, <remote ip>)`, found no matching secret,
+  and aborted IKE_AUTH — every xpf-initiated path failed and two
+  default-shape xpf boxes never established the tunnel. Pubkey
+  connections and responder-only gateways are unchanged. A dynamic
   responder-only peer (`remote_addrs = %any`) with no `remote-id` and no
   dynamic hostname has nothing to scope by: since #14591 such a PSK VPN
   is rejected at commit (`validateIPsecResponderIdentityStrict`) and
-  skipped at render, so an unscoped secret never loads — never a literal
-  `id = "%any"` (which would defeat the scoping and match all peers).
+  skipped at render, so an unscoped secret never loads. (The #14591 rule
+  targets the lone `%any` PEER selector, which would match all peers; the
+  #15193 local-owner `%any` never replaces the peer selector.)
   Configure `remote-identity` on the gateway (or use
   `dynamic hostname <fqdn>`); the peer presenting that identity with
   this VPN's key is then the only one the secret matches. A
