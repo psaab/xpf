@@ -2037,6 +2037,35 @@ fn unarmed_would_permit_keeps_deny_only_terminal_9506() {
 }
 
 #[test]
+fn armed_retained_would_permit_still_proceeds_15150() {
+    // #15150 join: a WouldPermit retained unchanged through a contended or
+    // true-full verdict queue reaches the armed entry as WouldPermit, so
+    // it must not terminalize it; the writer's pre-write check still
+    // proceeds and resolve_write emits Written. An Uncertain deny here
+    // (the pre-fix conversion) would terminalize the entry and cancel
+    // the permitted write.
+    let core = open_core();
+    assert!(core.admit(&frame(952, 19, 64)).admitted);
+    assert!(core.arm_write(&lease(952)));
+    assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::WouldPermit {
+        request_id: 952,
+        connection_id: 0,
+    }));
+    assert!(
+        core.peek_ready(8).is_empty(),
+        "a retained WouldPermit must leave the armed entry Queued"
+    );
+    assert!(matches!(
+        core.pre_write_check(&lease(952)),
+        super::PreWrite::Proceed
+    ));
+    assert!(core.resolve_write(&lease(952), written(64)));
+    let ready = core.peek_ready(8);
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].outcome, ReinjectOutcome::Written);
+}
+
+#[test]
 fn run_change_purges_inflight_entries_13195() {
     let core = open_core();
     assert!(core

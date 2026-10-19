@@ -376,6 +376,9 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	c.emitConstMetric(ch, c.userspaceIpsecInnerVerdictQueueFull,
 		prometheus.CounterValue,
 		float64(status.IpsecInnerVerdictQueueFullTotal))
+	c.emitConstMetric(ch, c.userspaceIpsecInnerVerdictQueueContended,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerVerdictQueueContendedTotal))
 	c.emitConstMetric(ch, c.userspaceIpsecInnerSlabExhausted,
 		prometheus.CounterValue,
 		float64(status.IpsecInnerSlabExhaustedTotal))

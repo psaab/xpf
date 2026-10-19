@@ -367,6 +367,11 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 		"IPsec-inner verdict posts refused by a full queue (#9506).",
 		nil, nil,
 	)
+	c.userspaceIpsecInnerVerdictQueueContended = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_verdict_queue_contended_total",
+		"IPsec-inner verdict posts refused only by mutex contention, never at queue depth (#15150).",
+		nil, nil,
+	)
 	c.userspaceIpsecInnerSlabExhausted = prometheus.NewDesc(
 		"xpf_userspace_ipsec_inner_slab_exhausted_total",
 		"IPsec-inner frames refused because the worker slab was exhausted (#9506).",

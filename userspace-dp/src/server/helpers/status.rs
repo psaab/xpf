@@ -251,6 +251,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         ipsec_inner.ipsec_inner_worker_queue_full_total;
     state.status.ipsec_inner_verdict_queue_full_total =
         ipsec_inner.ipsec_inner_verdict_queue_full_total;
+    state.status.ipsec_inner_verdict_queue_contended_total =
+        ipsec_inner.ipsec_inner_verdict_queue_contended_total;
     state.status.ipsec_inner_slab_exhausted_total = ipsec_inner.ipsec_inner_slab_exhausted_total;
     state.status.ipsec_inner_worker_retired_total = ipsec_inner.ipsec_inner_worker_retired_total;
     state.status.ipsec_inner_worker_orphan_reaped_total =

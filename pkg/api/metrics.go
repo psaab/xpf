@@ -719,21 +719,22 @@ type xpfCollector struct {
 	userspaceServerStatePoisonRecoveries *prometheus.Desc
 	userspaceServerHandlerPanics         *prometheus.Desc
 	// #10695 (#9506): IPsec-inner admission, parse, and D11 queue counters.
-	userspaceZoneGateUnzoned              *prometheus.Desc
-	userspaceZoneGateAmbiguous            *prometheus.Desc
-	userspaceZoneGateStale                *prometheus.Desc
-	userspaceZoneGateNoGeneration         *prometheus.Desc
-	userspaceIpsecInnerParseDrops         *prometheus.Desc
-	userspaceIpsecInnerEcnIllegalDrops    *prometheus.Desc
-	userspaceIpsecInnerWorkerQueueFull    *prometheus.Desc
-	userspaceIpsecInnerVerdictQueueFull   *prometheus.Desc
-	userspaceIpsecInnerSlabExhausted      *prometheus.Desc
-	userspaceIpsecInnerWorkerRetired      *prometheus.Desc
-	userspaceIpsecInnerWorkerOrphanReaped *prometheus.Desc
-	userspaceIpsecInnerOrphanProvisional  *prometheus.Desc
-	userspaceIpsecInnerPermitForwardArmed *prometheus.Desc
-	userspaceSyncedImportZoneUnresolved   *prometheus.Desc
-	userspaceSyncedImportUnpublished      *prometheus.Desc
+	userspaceZoneGateUnzoned                 *prometheus.Desc
+	userspaceZoneGateAmbiguous               *prometheus.Desc
+	userspaceZoneGateStale                   *prometheus.Desc
+	userspaceZoneGateNoGeneration            *prometheus.Desc
+	userspaceIpsecInnerParseDrops            *prometheus.Desc
+	userspaceIpsecInnerEcnIllegalDrops       *prometheus.Desc
+	userspaceIpsecInnerWorkerQueueFull       *prometheus.Desc
+	userspaceIpsecInnerVerdictQueueFull      *prometheus.Desc
+	userspaceIpsecInnerVerdictQueueContended *prometheus.Desc
+	userspaceIpsecInnerSlabExhausted         *prometheus.Desc
+	userspaceIpsecInnerWorkerRetired         *prometheus.Desc
+	userspaceIpsecInnerWorkerOrphanReaped    *prometheus.Desc
+	userspaceIpsecInnerOrphanProvisional     *prometheus.Desc
+	userspaceIpsecInnerPermitForwardArmed    *prometheus.Desc
+	userspaceSyncedImportZoneUnresolved      *prometheus.Desc
+	userspaceSyncedImportUnpublished         *prometheus.Desc
 	// #7398: three Coordinator counters that were computed and never shown.
 	userspaceSessionInstallStaleIgnored       *prometheus.Desc
 	userspaceSessionDeleteStaleIgnored        *prometheus.Desc
@@ -1522,6 +1523,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceIpsecInnerEcnIllegalDrops
 	ch <- c.userspaceIpsecInnerWorkerQueueFull
 	ch <- c.userspaceIpsecInnerVerdictQueueFull
+	ch <- c.userspaceIpsecInnerVerdictQueueContended
 	ch <- c.userspaceIpsecInnerSlabExhausted
 	ch <- c.userspaceIpsecInnerWorkerRetired
 	ch <- c.userspaceIpsecInnerWorkerOrphanReaped

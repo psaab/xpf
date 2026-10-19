@@ -889,12 +889,14 @@ type ProcessStatus struct {
 	// xpf_userspace_ipsec_inner_worker_orphan_reaped_total, and
 	// xpf_userspace_ipsec_inner_orphan_provisional_total. Omitempty for
 	// wire compat with older helpers (defaults to 0).
-	IpsecInnerWorkerQueueFullTotal    uint64 `json:"ipsec_inner_worker_queue_full_total,omitempty"`
-	IpsecInnerVerdictQueueFullTotal   uint64 `json:"ipsec_inner_verdict_queue_full_total,omitempty"`
-	IpsecInnerSlabExhaustedTotal      uint64 `json:"ipsec_inner_slab_exhausted_total,omitempty"`
-	IpsecInnerWorkerRetiredTotal      uint64 `json:"ipsec_inner_worker_retired_total,omitempty"`
-	IpsecInnerWorkerOrphanReapedTotal uint64 `json:"ipsec_inner_worker_orphan_reaped_total,omitempty"`
-	IpsecInnerOrphanProvisionalTotal  uint64 `json:"ipsec_inner_orphan_provisional_total,omitempty"`
+	IpsecInnerWorkerQueueFullTotal  uint64 `json:"ipsec_inner_worker_queue_full_total,omitempty"`
+	IpsecInnerVerdictQueueFullTotal uint64 `json:"ipsec_inner_verdict_queue_full_total,omitempty"`
+	// #15150: verdict posts refused only by mutex contention, never at depth.
+	IpsecInnerVerdictQueueContendedTotal uint64 `json:"ipsec_inner_verdict_queue_contended_total,omitempty"`
+	IpsecInnerSlabExhaustedTotal         uint64 `json:"ipsec_inner_slab_exhausted_total,omitempty"`
+	IpsecInnerWorkerRetiredTotal         uint64 `json:"ipsec_inner_worker_retired_total,omitempty"`
+	IpsecInnerWorkerOrphanReapedTotal    uint64 `json:"ipsec_inner_worker_orphan_reaped_total,omitempty"`
+	IpsecInnerOrphanProvisionalTotal     uint64 `json:"ipsec_inner_orphan_provisional_total,omitempty"`
 	// #9506 S9.5 permit join: leased adjudicated-TUN writes armed for
 	// worker-adjudicated WouldPermit frames (the Rust half of the
 	// permit-forward evidence; the Go half is the capture pipeline's

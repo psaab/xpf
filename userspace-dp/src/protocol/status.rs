@@ -648,6 +648,10 @@ pub(crate) struct ProcessStatus {
     pub ipsec_inner_worker_queue_full_total: u64,
     #[serde(rename = "ipsec_inner_verdict_queue_full_total", default)]
     pub ipsec_inner_verdict_queue_full_total: u64,
+    /// #15150: verdict posts that failed only on mutex contention, never
+    /// at depth. Additive / defaulted for backward compatibility.
+    #[serde(rename = "ipsec_inner_verdict_queue_contended_total", default)]
+    pub ipsec_inner_verdict_queue_contended_total: u64,
     #[serde(rename = "ipsec_inner_slab_exhausted_total", default)]
     pub ipsec_inner_slab_exhausted_total: u64,
     #[serde(rename = "ipsec_inner_worker_retired_total", default)]
