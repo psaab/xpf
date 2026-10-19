@@ -1819,3 +1819,10 @@ form from the same resolved sources (`redistributeEntries`) the other routers us
 - the levels come from the router's is-type, through the same `CanonicalISISLevel`
   the is-type line uses. level-1 renders level-1, level-1-2 renders one line per
   level, and anything else renders the narrow level-2 default.
+- **Junos `loops N` renders as FRR `allowas-in N-1` (#15009).**
+  Junos `loops` hides a route when the local AS is detected N or more
+  times (allows N-1 occurrences; `loops 1` is the default 0-allowed
+  behaviour), while FRR `allowas-in K` allows K occurrences and no line
+  allows 0. `renderBGPAllowASIn` therefore emits nothing for `loops 1`
+  and `allowas-in N-1` for N>=2 (`loops 10` -> `allowas-in 9`); copying
+  N verbatim accepted one extra local-AS occurrence per peer.

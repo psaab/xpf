@@ -3376,7 +3376,8 @@ func TestGenerateProtocols_BGPAllowASIn(t *testing.T) {
 		},
 	}
 	got := m.generateProtocols(nil, nil, bgp, nil, nil, "", 1, nil, nil)
-	if !strings.Contains(got, "neighbor 10.0.0.2 allowas-in 2\n") {
+	// #15009: loops 2 -> allowas-in 1.
+	if !strings.Contains(got, "neighbor 10.0.0.2 allowas-in 1\n") {
 		t.Errorf("missing allowas-in in:\n%s", got)
 	}
 }
