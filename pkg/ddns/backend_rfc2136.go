@@ -151,6 +151,28 @@ type rfc2136Updater struct {
 	// flag never leaks into a PTR or same-family guard.
 	siblingFamilyOwned bool
 
+	// siblingClientID is the client identity of the manager-owned
+	// opposite-family sibling record for the forward add in flight
+	// (#14995). dhcidForSibling digests it into the sibling's RFC 4701
+	// DHCID; the cross-family add paths require that exact DHCID on
+	// the wire before downgrading any guard, so the store flag alone
+	// never authorizes a claim. Set at the top of UpsertLease from
+	// rec.SiblingClientID; empty ⇒ no proven sibling.
+	siblingClientID string
+
+	// pairedClientID is the client identity of the same-device
+	// opposite-family lease desired in THIS pass (#14995), threaded
+	// as rec.PairedClientID. Pairing candidate for the cross-family
+	// proof when SiblingClientID is empty (first pass).
+	pairedClientID string
+
+	// siblingMarkerRR is the DHCID-shaped proof marker published by a
+	// successful cross-family add under skip-existing/strict-fail
+	// (#14995), which otherwise write no DHCID. It lets the SIBLING
+	// family's later add prove co-ownership. nil when no marker has
+	// been written yet in this updater's lifetime.
+	siblingMarkerRR *dns.DHCID
+
 	// selfOwned marks a backend that publishes the FIREWALL'S OWN records
 	// (Surface A router/interface-address publish, #2691 P2), as opposed to a
 	// DHCP-lease record claimed on behalf of a client. A self-owned record has
@@ -413,14 +435,49 @@ func canonicalReverseZone(ptrName string) string {
 	}
 }
 
-// selfOwnedSiblingForward reports whether this forward A/AAAA add is a
-// same-name sibling-family publish (#14604): the name is already xpf-owned
-// for the sibling family. Named for the backend-local decision (a
-// self-owned sibling pair), not the manager-facing SiblingFamilyOwned
-// flag it mirrors.
-func (u *rfc2136Updater) selfOwnedSiblingForward(rr dns.RR) bool {
-	return u.siblingFamilyOwned &&
-		(rr.Header().Rrtype == dns.TypeA || rr.Header().Rrtype == dns.TypeAAAA)
+// siblingProofIdentity returns the sibling client identity whose
+// DHCID the cross-family add must prove on the wire (#14995): the
+// durable store sibling (SiblingClientID) when present, else the
+// same-pass paired lease (PairedClientID). "" when neither was
+// threaded.
+func (u *rfc2136Updater) siblingProofIdentity() string {
+	if u.siblingClientID != "" {
+		return u.siblingClientID
+	}
+	return u.pairedClientID
+}
+
+// siblingDHCIDRR returns the RFC 4701 DHCID the SIBLING family's
+// publish wrote at this name, digested from the sibling identity
+// (siblingProofIdentity). ok=false when no sibling identity was
+// threaded, it yields no DHCID, or the sibling and claimant
+// identities do not pair to the same device (#14995): the wire
+// DHCIDs only coincide for a same-device pair (both digests are
+// device-canonicalized), so proof is only meaningful — and only
+// attempted — for such a pair.
+func (u *rfc2136Updater) siblingDHCIDRR(rr dns.RR) (*dns.DHCID, bool) {
+	sibID := u.siblingProofIdentity()
+	if sibID == "" || !sameDeviceClient(u.dhcidClientID, sibID) {
+		return nil, false
+	}
+	if d, ok := dhcidRR(sibID, rr.Header().Name, rr.Header().Ttl); ok {
+		return d, true
+	}
+	if u.siblingMarkerRR != nil && dns.CanonicalName(u.siblingMarkerRR.Hdr.Name) == dns.CanonicalName(rr.Header().Name) {
+		return u.siblingMarkerRR, true
+	}
+	return nil, false
+}
+
+// siblingCandidate reports whether this forward add carries a
+// cross-family sibling claim worth a wire proof attempt: the manager
+// flagged a store sibling OR a same-device sibling is desired this
+// pass. The claim still earns nothing until proveSiblingDHCID holds.
+func (u *rfc2136Updater) siblingCandidate(rr dns.RR) bool {
+	if !(rr.Header().Rrtype == dns.TypeA || rr.Header().Rrtype == dns.TypeAAAA) {
+		return false
+	}
+	return u.siblingProofIdentity() != ""
 }
 
 // UpsertLease publishes the forward A/AAAA and reverse PTR for a lease
@@ -430,6 +487,8 @@ func (u *rfc2136Updater) UpsertLease(ctx context.Context, rec LeaseDNSRecord) er
 	u.dhcidClientID = rec.ClientID
 	u.selfOwnedPrevAddr = rec.PrevAddr // #3739: value-specific self-owned replace
 	u.siblingFamilyOwned = rec.SiblingFamilyOwned
+	u.siblingClientID = rec.SiblingClientID
+	u.pairedClientID = rec.PairedClientID
 	forwardRR, err := u.forwardRR(rec)
 	if err != nil {
 		return err
@@ -624,6 +683,24 @@ func dnsCanonicalFQDN(fqdn string) string {
 	return dns.CanonicalName(dns.Fqdn(fqdn))
 }
 
+// dhcidDigestClientID returns the identity bytes folded into the
+// RFC 4701 DHCID digest for a lease client identity (#14995). When
+// the identity has a device-pairing key (pairedIdentityKey —
+// "mac:<MAC>" for a MAC-based DUID or the v4 hwaddr fallback, or an
+// exact "cid:<client-id>"), the digest is computed over the DEVICE
+// ("dev:"+key), so the SAME device produces ONE DHCID across both
+// families no matter which family-shaped form it presented — one
+// DHCID RR per owner name, as RFC 4701 §3.5 intends. An identity
+// with no pairing key digests verbatim (fail closed: it can only
+// ever match itself). Add and delete both go through dhcidRR, so
+// the canonicalization is symmetric and cannot orphan a record.
+func dhcidDigestClientID(clientID string) string {
+	if key := pairedIdentityKey(clientID); key != "" {
+		return "dev:" + key
+	}
+	return clientID
+}
+
 // dhcidRR builds the RFC 4701 DHCID resource record that proves xpf owns a
 // forward name. The RDATA is: 2-byte identifier-type || 1-byte digest-type
 // || SHA-256(client-identity || canonical-FQDN-in-wire-form) (RFC 4701
@@ -635,6 +712,12 @@ func dnsCanonicalFQDN(fqdn string) string {
 // different name or client cannot collide onto it. Returns ok=false when the
 // lease has no stable client identity (the caller then omits the DHCID and
 // uses the name-not-in-use prerequisite instead).
+//
+// #14995: the folded identity is the DEVICE identity
+// (dhcidDigestClientID), not the raw family-shaped string, so a
+// dual-stack device carries ONE DHCID across its A and AAAA instead
+// of two per-family DHCIDs. The identifier-TYPE octets still
+// describe the presenting identity's form (RFC 4701 §3.3).
 func dhcidRR(clientID, fqdn string, ttl uint32) (*dns.DHCID, bool) {
 	if clientID == "" {
 		return nil, false
@@ -649,11 +732,17 @@ func dhcidRR(clientID, fqdn string, ttl uint32) (*dns.DHCID, bool) {
 		return nil, false
 	}
 	h := sha256.New()
-	h.Write([]byte(clientID))
+	h.Write([]byte(dhcidDigestClientID(clientID)))
 	h.Write(wire[:off])
 	digest := h.Sum(nil)
 
 	idType := dhcidIdentifierType(clientID)
+	// #14995: a device-paired identity writes the DEVICE's marker:
+	// stamp the htype+chaddr form for a MAC pairing so both families
+	// write the IDENTICAL DHCID RR (second Insert is idempotent).
+	if strings.HasPrefix(pairedIdentityKey(clientID), "mac:") {
+		idType = dhcidIDTypeHTypeChaddr
+	}
 	rdata := make([]byte, 0, 3+len(digest))
 	rdata = append(rdata, byte(idType>>8), byte(idType&0xff))
 	rdata = append(rdata, byte(dhcidDigestTypeSHA256))
@@ -718,22 +807,29 @@ func (u *rfc2136Updater) sendAdd(ctx context.Context, zone string, rr dns.RR) er
 	if u.conflictPolicy != "skip-existing" && u.conflictPolicy != "strict-fail" {
 		return fmt.Errorf("ddns: invalid conflict-policy %q (valid: replace-owned, skip-existing, strict-fail); refusing ADD of %s", u.conflictPolicy, rr.Header().Name)
 	}
+	// #14995 sibling proof: when the manager claims a cross-family
+	// sibling, first prove the sibling's DHCID is on the wire with a
+	// dedicated prerequisite-only probe. Only a proven sibling earns
+	// the per-type guard below; an unproven claim (foreign client,
+	// stale intent) keeps the name-level guard and is refused.
+	siblingProven := false
+	if u.siblingCandidate(rr) {
+		if sib, ok := u.siblingDHCIDRR(rr); ok {
+			proven, perr := u.proveSiblingDHCID(ctx, zone, sib)
+			if perr != nil {
+				return perr
+			}
+			siblingProven = proven
+		}
+	}
 	m := new(dns.Msg)
 	m.SetUpdate(dns.Fqdn(zone))
-	// #14604: client-claimed forward adds are guarded name-level:
-	// NameNotUsed (ANY/NONE) refuses the add when ANY record exists at the
-	// name, not just the RRset being published. The backend cannot see the
-	// manager's durable ownership store, so a name it does already own
-	// across the sibling family is threaded in by the manager as
-	// SiblingFamilyOwned; the guarded add then keeps the per-type
-	// RRsetNotUsed guard so the already-owned sibling genuinely shares the
-	// name while a same-RRset stale row from someone else is still
-	// refused. The residual boundary: a foreign RR of another type
-	// co-resident with the manager's own sibling (e.g. AAAA xpf + MX
-	// third-party at one name) cannot be classified here, so the sibling
-	// signal accepts the cross-family publish.
+	// #14604/#14995: client-claimed forward adds are guarded
+	// name-level: NameNotUsed (ANY/NONE) refuses the add when ANY
+	// record exists at the name. Only a sibling whose DHCID was just
+	// proven on the wire keeps the per-type RRsetNotUsed guard.
 	switch {
-	case u.selfOwnedSiblingForward(rr):
+	case siblingProven:
 		m.RRsetNotUsed([]dns.RR{rr})
 	default:
 		m.NameNotUsed([]dns.RR{rr})
@@ -745,6 +841,25 @@ func (u *rfc2136Updater) sendAdd(ctx context.Context, zone string, rr dns.RR) er
 	}
 	switch resp.Rcode {
 	case dns.RcodeSuccess:
+		// #14995: under skip-existing/strict-fail the forward add
+		// wrote no DHCID, so a same-device sibling desired in this
+		// same pass has nothing on the wire to prove against.
+		// Publish the device proof marker now — once, in this
+		// updater's lifetime — so the sibling family's add present
+		// in this same pass can prove it. The marker is a normal
+		// DHCID RR; a delete under these policies never replays a
+		// DHCID prerequisite, so it cannot poison a later delete.
+		if u.siblingCandidate(rr) {
+			if sib, ok := u.siblingDHCIDRR(rr); ok && u.siblingMarkerRR == nil {
+				u.siblingMarkerRR = sib
+				mark := new(dns.Msg)
+				mark.SetUpdate(dns.Fqdn(zone))
+				mark.Insert([]dns.RR{sib})
+				if _, merr := u.exchange(ctx, mark); merr != nil {
+					return merr
+				}
+			}
+		}
 		return nil
 	case dns.RcodeYXRrset, dns.RcodeYXDomain:
 		// Prerequisite failed: a record already exists — a third party owns
@@ -802,50 +917,27 @@ func (u *rfc2136Updater) dhcidForRR(rr dns.RR) (*dns.DHCID, bool) {
 // name-not-in-use prerequisite alone gates the claim: a pre-existing name (by
 // anyone) is refused (same sentinel) and never adopted.
 func (u *rfc2136Updater) sendAddOwned(ctx context.Context, zone string, rr dns.RR) error {
-	// #14602: a manager-owned sibling forward record already occupies
-	// this name (the other family's A/AAAA — the manager threads
-	// SiblingFamilyOwned from its store, #14604). The sibling's DHCID
-	// was digested from a production-shaped identity string
-	// (`cid:`/`mac:` v4 vs `duid:` v6) that THIS family's identity can
-	// never reproduce, so Attempt B below could never match it and the
-	// second family would be refused forever. The manager store is
-	// the ownership proof here: add this family's forward RR + its
-	// OWN DHCID under a per-type RRsetNotUsed prerequisite. The
-	// sibling's forward RR and DHCID are left untouched; each
-	// family's delete later removes only its own forward RR + its
-	// own DHCID (sendRemoveForward replays the publishing identity).
-	// PTR adds never carry the sibling flag (UpsertLease sets it from
-	// the forward record only and sendAdd dispatches PTRs through the
-	// non-owned policies' caller — the flag is forward-scoped because
-	// selfOwnedSiblingForward requires an A/AAAA rrtype).
-	if u.selfOwnedSiblingForward(rr) {
-		dhcid, hasDHCID := u.dhcidForRR(rr)
-		m := new(dns.Msg)
-		m.SetUpdate(dns.Fqdn(zone))
-		m.RRsetNotUsed([]dns.RR{rr})
-		if hasDHCID {
-			m.Insert([]dns.RR{rr, dhcid})
-		} else {
-			m.Insert([]dns.RR{rr})
-		}
-		resp, err := u.exchange(ctx, m)
-		if err != nil {
-			return err
-		}
-		switch resp.Rcode {
-		case dns.RcodeSuccess:
-			return nil
-		case dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNXRrset, dns.RcodeNameError:
-			// Our own type already exists at the name (a re-add the
-			// manager's recordsEqual skip would normally prevent, or
-			// a foreign same-type RRset predating the sibling):
-			// refuse rather than adopt it.
-			if u.onConflict != nil {
-				u.onConflict()
+	// #14602/#14995: a manager-owned sibling forward record already
+	// occupies this name (the other family's A/AAAA — the manager
+	// threads SiblingFamilyOwned + SiblingClientID from its store,
+	// #14604). The sibling's DHCID was digested from a
+	// production-shaped identity string (`cid:`/`mac:` v4 vs `duid:` v6)
+	// that THIS family's identity can never reproduce, so Attempt B
+	// below could never match it. The store flag alone is NOT proof
+	// (#14995: any client that merely REQUESTED the hostname entered
+	// the store): prove the sibling's exact DHCID on the wire first.
+	// Only a proven sibling earns the per-type add below; an unproven
+	// claim falls through to Attempts A/B, whose name-level and
+	// own-DHCID guards refuse it without touching the victim.
+	if u.siblingCandidate(rr) {
+		if sib, ok := u.siblingDHCIDRR(rr); ok {
+			proven, perr := u.proveSiblingDHCID(ctx, zone, sib)
+			if perr != nil {
+				return perr
 			}
-			return errDDNSConflictRefused
-		default:
-			return rcodeError(resp.Rcode)
+			if proven {
+				return u.sendAddSiblingProven(ctx, zone, rr)
+			}
 		}
 	}
 	dhcid, hasDHCID := u.dhcidForRR(rr)
@@ -907,6 +999,68 @@ func (u *rfc2136Updater) sendAddOwned(ctx context.Context, zone string, rr dns.R
 		// name. Refuse to claim it — record NO ownership (the sentinel tells
 		// the manager not to put()), so a later release cannot delete it
 		// (#2648).
+		if u.onConflict != nil {
+			u.onConflict()
+		}
+		return errDDNSConflictRefused
+	default:
+		return rcodeError(resp.Rcode)
+	}
+}
+
+// proveSiblingDHCID reports whether the sibling's exact DHCID is
+// present on the wire at its name (#14995). It sends a
+// prerequisite-only RFC 2136 UPDATE (no update section): NOERROR
+// means the value-dependent Used prerequisite held; NXRRSET /
+// YXRRSET / YXDOMAIN / NXDOMAIN mean it did not. Any other rcode is
+// a transport-level failure. This is the wire proof the store flag
+// alone cannot provide — a write-ahead intent whose add never
+// landed, or a foreign client's store row, has no DHCID on the wire
+// and proves nothing.
+func (u *rfc2136Updater) proveSiblingDHCID(ctx context.Context, zone string, sib *dns.DHCID) (bool, error) {
+	m := new(dns.Msg)
+	m.SetUpdate(dns.Fqdn(zone))
+	m.Used([]dns.RR{dns.Copy(sib)})
+	resp, err := u.exchange(ctx, m)
+	if err != nil {
+		return false, err
+	}
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		return true, nil
+	case dns.RcodeNXRrset, dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNameError:
+		return false, nil
+	default:
+		return false, rcodeError(resp.Rcode)
+	}
+}
+
+// sendAddSiblingProven publishes this family's forward RR + its OWN
+// DHCID at a name whose sibling DHCID was just proven on the wire
+// (#14602/#14995). The per-type RRsetNotUsed prerequisite refuses a
+// same-type RRset that predates the sibling (foreign or stale); the
+// sibling's forward RR and DHCID are left untouched. Each family's
+// delete later removes only its own forward RR + its own DHCID
+// (sendRemoveForward replays the publishing identity — real deletes
+// never carry a sibling signal).
+func (u *rfc2136Updater) sendAddSiblingProven(ctx context.Context, zone string, rr dns.RR) error {
+	dhcid, hasDHCID := u.dhcidForRR(rr)
+	m := new(dns.Msg)
+	m.SetUpdate(dns.Fqdn(zone))
+	m.RRsetNotUsed([]dns.RR{rr})
+	if hasDHCID {
+		m.Insert([]dns.RR{rr, dhcid})
+	} else {
+		m.Insert([]dns.RR{rr})
+	}
+	resp, err := u.exchange(ctx, m)
+	if err != nil {
+		return err
+	}
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		return nil
+	case dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNXRrset, dns.RcodeNameError:
 		if u.onConflict != nil {
 			u.onConflict()
 		}

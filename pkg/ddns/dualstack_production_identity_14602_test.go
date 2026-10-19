@@ -27,8 +27,8 @@ import (
 // is the manager store, not a shared digest.
 
 const (
-	prodV4Identity = "cid:01:02:03"
-	prodV6Identity = "duid:00:01:00:01:22:33:44:55:66:77/16777216"
+	prodV4Identity = "cid:01000000000001"
+	prodV6Identity = "duid:00:03:00:01:00:00:00:00:00:01/16777216"
 	otherV4Ident   = "cid:aa:bb:cc"
 )
 

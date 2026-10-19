@@ -116,8 +116,8 @@ func TestManagerSkipExistingDualStackFreshPair14604(t *testing.T) {
 	srv.setStateful(true)
 	m, src := prodManagerTo(t, srv)
 	cfg := ddnsCfgSkipExisting(srv.addrUDP)
-	src.v4 = []Lease{{Family: 4, Address: "10.0.1.5", Identity: "cid:01:02:03", SubnetID: "1", HostName: "dual"}}
-	src.v6 = []Lease{{Family: 6, Address: "2001:db8::5", Identity: "duid:00:01:02:03/1", SubnetID: "1", HostName: "dual"}}
+	src.v4 = []Lease{{Family: 4, Address: "10.0.1.5", Identity: "cid:01000000000001", SubnetID: "1", HostName: "dual"}}
+	src.v6 = []Lease{{Family: 6, Address: "2001:db8::5", Identity: "duid:00:03:00:01:00:00:00:00:00:01/1", SubnetID: "1", HostName: "dual"}}
 	if err := m.Reconcile(context.Background(), cfg); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

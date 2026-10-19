@@ -369,6 +369,149 @@ func (r ownedRecord) scopeOf() ScopeKey {
 	return *r.Scope
 }
 
+// scopeNonFamily returns the record's scope with the Family axis
+// cleared, for sibling comparison (#14995): two records are in the
+// same scope for cross-family purposes iff every axis EXCEPT family
+// agrees (interface, unit, routing instance, RG owner, policy). The
+// zero/global lease scope compares equal across families, as it must
+// for the standalone dual-stack path.
+func (r ownedRecord) scopeNonFamily() ScopeKey {
+	s := r.scopeOf()
+	s.Family = 0
+	return s
+}
+
+// normalizeMACKey canonicalizes a MAC address for cross-family client
+// pairing (#14995): lower-cased, separators (\":\" / \"-\" / \".\")
+// stripped, hex-validated. ok=false for anything that is not a
+// 12-hex-digit MAC, so arbitrary client-id bytes never pair.
+func normalizeMACKey(s string) (string, bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, c := range s {
+		switch c {
+		case ':', '-', '.':
+			continue
+		}
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			b.WriteRune(c)
+			continue
+		}
+		return "", false
+	}
+	if b.Len() != 12 {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// pairedIdentityKey returns the device-pairing key for a raw lease
+// client identity (#14995), or "" when the identity carries no usable
+// cross-family pairing information. Pairing is CONSERVATIVE: it only
+// fires on forms that provably denote the same device on both
+// families, because a false pairing re-opens the #14995 hijack and a
+// missed pairing merely refuses a cross-family publish (fail closed).
+//
+//   - "mac:<MAC>" (v4 hwaddr fallback) pairs as "mac:<MAC>".
+//   - "duid:<DUID>[/<IAID>]" pairs as "mac:<MAC>" ONLY when the DUID
+//     is MAC-based: DUID-LLT (type 1) / DUID-LL (type 3) end with the
+//     link-layer address, so the trailing 6 octets are the device's
+//     MAC and match the v4 "mac:" form. An opaque DUID (e.g. DUID-EN)
+//     pairs on its full DUID string ("duid:<DUID>", IAID stripped) —
+//     it can only ever match the identical DUID, which in practice
+//     never spans families, so opaque-DUID v6 leases fail closed.
+//   - "cid:<client-id>" pairs ONLY as the exact client-id string
+//     ("cid:<client-id>"). Kea renders v4 client-ids as raw hex
+//     with no separators (e.g. "01aabbcc"), so a MAC must NOT be
+//     guessed out of them; the production dual-stack pair
+//     (cid: v4 / duid: v6) therefore does NOT pair and fails closed
+//     until the wire DHCID proves otherwise — see the RFC 4703
+//     sibling-DHCID prerequisite in sendAddOwned.
+//   - anything else (including "") does not pair.
+func pairedIdentityKey(clientID string) string {
+	switch {
+	case strings.HasPrefix(clientID, "duid:"):
+		rest := strings.TrimPrefix(clientID, "duid:")
+		if i := strings.LastIndex(rest, "/"); i >= 0 {
+			rest = rest[:i]
+		}
+		rest = strings.ToLower(strings.TrimSpace(rest))
+		if rest == "" {
+			return ""
+		}
+		if mac, ok := duidEmbeddedMAC(rest); ok {
+			return "mac:" + mac
+		}
+		return "duid:" + rest
+	case strings.HasPrefix(clientID, "mac:"):
+		if mac, ok := normalizeMACKey(strings.TrimPrefix(clientID, "mac:")); ok {
+			return "mac:" + mac
+		}
+		return ""
+	case strings.HasPrefix(clientID, "cid:"):
+		rest := strings.TrimSpace(strings.TrimPrefix(clientID, "cid:"))
+		if rest == "" {
+			return ""
+		}
+		if mac, ok := cidHardwareMAC(rest); ok {
+			return "mac:" + mac
+		}
+		return "cid:" + strings.ToLower(rest)
+	default:
+		return ""
+	}
+}
+
+// cidHardwareMAC returns the hardware address carried by a DHCPv4
+// client-id (#14995): the client-id option (RFC 2132 §9.14) is
+// "<htype><hardware address>" for the overwhelmingly common
+// Ethernet form, rendered by Kea as separator-free hex (e.g.
+// "01aabbccddeeff" = htype 1 + MAC aa:bb:cc:dd:ee:ff). Short
+// colon-hex test forms ("01:02:03") are NOT 7 octets and never
+// yield a MAC — they stay opaque client-ids, fail closed. ok=false
+// for any other shape so no MAC is ever guessed.
+func cidHardwareMAC(cid string) (string, bool) {
+	s := strings.ToLower(strings.TrimSpace(cid))
+	s = strings.NewReplacer(":", "", "-", "", ".", "").Replace(s)
+	if len(s) != 14 || s[:2] != "01" {
+		return "", false
+	}
+	return normalizeMACKey(s[2:])
+}
+
+// duidEmbeddedMAC returns the MAC embedded in a MAC-based DUID
+// (DUID-LLT type 1 / DUID-LL type 3, RFC 8415 §11): those DUIDs end
+// with the link-layer address, so the trailing 6 octets are the MAC.
+// The DUID is xpf's colon-hex rendering (e.g.
+// "00:01:00:01:22:33:44:55:66:77"). ok=false for any other DUID type
+// or a malformed value — an opaque DUID must not pair by a guessed
+// MAC tail.
+func duidEmbeddedMAC(duid string) (string, bool) {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(duid)), ":")
+	if len(parts) < 8 {
+		return "", false
+	}
+	// DUID type is the first 2 octets: 0001 (LLT) or 0003 (LL).
+	if parts[0] != "00" || (parts[1] != "01" && parts[1] != "03") {
+		return "", false
+	}
+	tail := strings.Join(parts[len(parts)-6:], ":")
+	return normalizeMACKey(tail)
+}
+
+// sameDeviceClient reports whether two raw client identities belong
+// to the SAME device for cross-family sibling purposes (#14995).
+// Verbatim-equal non-empty identities are the same device; otherwise
+// the device-pairing keys must agree. Two identities that both fail
+// to pair never match (fail closed — name+family is not proof).
+func sameDeviceClient(a, b string) bool {
+	if a != "" && a == b {
+		return true
+	}
+	ka, kb := pairedIdentityKey(a), pairedIdentityKey(b)
+	return ka != "" && ka == kb
+}
+
 // withScope returns r with its Scope set: a NON-zero scope is stored as a
 // pointer; the zero scope clears it to nil so the JSON stays pre-P1b-clean and
 // the in-memory key stays the global "identity|address" form.

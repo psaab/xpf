@@ -1050,61 +1050,94 @@ type desiredRecord struct {
 }
 
 // dhcidSharedWithOther reports whether ANOTHER owned record (a different store
-// key) shares the SAME RFC 4701 DHCID as `owned` — i.e. the same non-empty
-// ClientID and the same canonical FQDN (#2700). The DHCID digest is
-// SHA-256(client-identity || canonical-FQDN-in-wire-form) and folds in NEITHER
-// the address NOR the family, so a dual-stack client (an A and an AAAA under
-// one FQDN, same client identity) produces ONE shared DHCID across both
-// records. When such a sibling exists, deleting one family's A/AAAA must keep
-// the shared DHCID on the wire so the surviving family's record stays
-// DHCID-protected and its eventual delete still satisfies the DHCID-match
-// prerequisite — otherwise the survivor is left unprotected (a hijack window)
-// and then leaks on the wire (its delete prereq fails). Records with an empty
-// ClientID never wrote a DHCID (the delete takes the plain exact-RR path), so
-// they are never siblings. Caller holds m.mu.
+// key) shares the SAME RFC 4701 DHCID as `owned` (#2700/#14995): the same
+// canonical FQDN and the same DEVICE DHCID (dhcidDigestClientID — a
+// same-device dual-stack pair digests to ONE device DHCID across both
+// families, even though its family-shaped ClientID strings differ). When
+// such a sibling exists, deleting one family's A/AAAA must keep the shared
+// DHCID on the wire so the surviving family's record stays DHCID-protected
+// and its eventual delete still satisfies the DHCID-match prerequisite —
+// otherwise the survivor is left unprotected (a hijack window) and then
+// leaks on the wire (its delete prereq fails). Records with an empty
+// ClientID never wrote a DHCID (the delete takes the plain exact-RR path),
+// so they are never siblings. Caller holds m.mu.
 func (m *Manager) dhcidSharedWithOther(owned ownedRecord) bool {
 	if owned.ClientID == "" {
 		return false
 	}
 	ownedKey := ownedRecordKey(owned.scopeOf(), owned.Identity, owned.Address)
 	ownedFQDN := dnsCanonicalFQDN(owned.FQDN)
+	ownedDigest := dhcidDigestClientID(owned.ClientID)
 	for k, r := range m.state.records {
 		if k == ownedKey {
 			continue
 		}
-		if r.ClientID == owned.ClientID && dnsCanonicalFQDN(r.FQDN) == ownedFQDN {
+		if r.ClientID == "" {
+			continue
+		}
+		if dhcidDigestClientID(r.ClientID) == ownedDigest && dnsCanonicalFQDN(r.FQDN) == ownedFQDN {
 			return true
 		}
 	}
 	return false
 }
 
-// crossTypeSiblingOwned reports whether the manager already owns a record
-// at owned's canonical FQDN under the OPPOSITE address family (#14604).
-// The sibling may be (a) a durable store record, or (b) a still-desired
-// record whose write-ahead intent is already durable in this same pass
-// (the write-ahead put that precedes every UpsertLease, #2662): Pass-2
-// sibling evaluation runs one lease at a time, so relying on the store
-// alone is enough only because upsertLocked writes each family's intent
-// before its own wire add. The check is re-run per call, so sibling state
-// is re-proven per cycle for the duration of the pass. Records are matched
-// on the canonical FQDN and opposite family only, NOT on ClientID/Identity:
-// production-shaped dual-stack producers never share an identity across
-// families (cid:/mac: vs duid:), so an identity match would re-create the
-// Y13-02/#14602 bug. A third record sharing only the FQDN under the SAME
-// family/scope never sets the flag. PTR records are forward-type absent
-// from this store, so they never match.
-func (m *Manager) crossTypeSiblingOwned(owned ownedRecord) bool {
+// crossTypeSiblingOwned returns the manager-owned opposite-family
+// record at owned's canonical FQDN that may act as a sibling for
+// owned's publish, or nil when there is none (#14604/#14602).
+//
+// #14995 (D40-01): the pre-fix scan matched on canonical FQDN +
+// opposite family ONLY. A bare, unauthenticated DHCP REQUEST is the
+// only input that creates a lease row, so any client that merely
+// REQUESTED the victim's hostname from the opposite family became a
+// trusted "sibling": upsertLocked stamped SiblingFamilyOwned and the
+// RFC 2136 backend downgraded the foreign claim from the name-level
+// NameNotUsed / DHCID-match guards to a per-type RRsetNotUsed guard,
+// publishing a foreign A/AAAA plus a second DHCID at the victim's
+// name (RFC 4701 §3.5 allows ONE DHCID RR per owner name) and
+// recording phantom ownership whose later release aimed the DHCID
+// prerequisite at the victim's name.
+//
+// The sibling proof is therefore re-anchored:
+//   - same scope (every ScopeKey axis except Family) and same backend
+//     endpoint (BackendFingerprint): a record published to a
+//     different RG/interface/provider/server is not this name's
+//     sibling at this authority;
+//   - same-device client identity (pairedIdentityKey / sameDeviceClient):
+//     the RFC 4701 client-identity pairing (a DUID, or a MAC that is
+//     also the v4 client-id/hwaddr). Name+family alone NEVER proves
+//     a sibling.
+//
+// A non-nil return is NOT by itself wire authorization: the caller
+// threads the sibling's ClientID to the backend, which must still
+// prove the sibling's DHCID exists on the wire before downgrading
+// any guard (sendAddOwned sibling branch / skip-existing downgrade).
+// A stale write-ahead intent whose wire add never landed therefore
+// cannot authorize a cross-family claim. Caller holds m.mu.
+func (m *Manager) crossTypeSiblingOwned(owned ownedRecord) *ownedRecord {
 	ownedFQDN := dnsCanonicalFQDN(owned.FQDN)
 	for _, r := range m.state.records {
 		if r.Family == owned.Family {
 			continue
 		}
-		if dnsCanonicalFQDN(r.FQDN) == ownedFQDN {
-			return true
+		if dnsCanonicalFQDN(r.FQDN) != ownedFQDN {
+			continue
 		}
+		if r.scopeNonFamily() != owned.scopeNonFamily() {
+			continue
+		}
+		if r.BackendFingerprint != owned.BackendFingerprint {
+			continue
+		}
+		// No identity-equality filter here (#14995): pairing is a
+		// backend wire question (the sibling DHCID proof), and a
+		// foreign row at this scope+endpoint simply fails that
+		// proof. Filtering by identity in the store would hide the
+		// candidate the backend must refuse on the wire.
+		rc := r
+		return &rc
 	}
-	return false
+	return nil
 }
 
 // dhcidStillWanted reports whether the desired set itself still wants a
@@ -1119,8 +1152,9 @@ func dhcidStillWanted(owned ownedRecord, want map[string]*desiredRecord) bool {
 		return false
 	}
 	ownedFQDN := dnsCanonicalFQDN(owned.FQDN)
+	ownedDigest := dhcidDigestClientID(owned.ClientID)
 	for _, d := range want {
-		if d.ow.ClientID == owned.ClientID && dnsCanonicalFQDN(d.ow.FQDN) == ownedFQDN {
+		if d.ow.ClientID != "" && dhcidDigestClientID(d.ow.ClientID) == ownedDigest && dnsCanonicalFQDN(d.ow.FQDN) == ownedFQDN {
 			return true
 		}
 	}
@@ -1414,6 +1448,40 @@ func (m *Manager) reconcileOnceLocked(ctx context.Context, env *reconcileEnv, le
 		want[ownedRecordKey(scope, identity, l.Address)] = &desiredRecord{rec: rec, ow: ow}
 	}
 
+	// #14995: pair same-device dual-stack desires. Each desired
+	// record whose opposite-family counterpart in THIS pass belongs
+	// to the same device (sameDeviceClient) and the same scope
+	// (modulo family) + endpoint carries the counterpart's client
+	// identity as PairedClientID. The backend digests it into the
+	// sibling DHCID and requires that DHCID on the wire before
+	// downgrading any guard — covering the FIRST pass, when no
+	// durable store sibling exists yet. A foreign client that merely
+	// REQUESTED the same hostname never pairs (different device), so
+	// it receives no PairedClientID and stays refused. Pairing
+	// requires BOTH leases desired this pass; a single-family desire
+	// relies on the durable store sibling (SiblingClientID) instead.
+	for _, d := range want {
+		for _, other := range want {
+			if other == d || other.ow.Family == d.ow.Family {
+				continue
+			}
+			if dnsCanonicalFQDN(other.ow.FQDN) != dnsCanonicalFQDN(d.ow.FQDN) {
+				continue
+			}
+			if other.ow.scopeNonFamily() != d.ow.scopeNonFamily() {
+				continue
+			}
+			if other.ow.BackendFingerprint != d.ow.BackendFingerprint {
+				continue
+			}
+			if !sameDeviceClient(d.rec.ClientID, other.rec.ClientID) {
+				continue
+			}
+			d.rec.PairedClientID = other.rec.ClientID
+			break
+		}
+	}
+
 	var firstErr error
 	noteErr := func(e error) {
 		if e != nil && firstErr == nil {
@@ -1699,15 +1767,20 @@ func (m *Manager) providerIO(fn func() error) error {
 // safe: the #2648 DHCID-match / exact-RR delete prerequisite fails on a
 // non-existent RR, so the wire delete is a harmless no-op.
 func (m *Manager) upsertLocked(ctx context.Context, updater DNSUpdater, rec LeaseDNSRecord, ow ownedRecord) error {
-	// #14604: a name already owned under the opposite address family
-	// (durable store, or this pass's write-ahead intent for the sibling
-	// put by an earlier Pass-2 upsert) is xpf-owned, not foreign — signal
-	// the backend so its skip-existing/strict-fail guard stays per-type for
-	// that legitimate sibling publish instead of refusing the second family.
-	// The signal is recomputed from the store on every call and stamped
+	// #14604/#14995: a name already owned under the opposite address
+	// family BY THE SAME DEVICE (same scope modulo family, same
+	// backend endpoint, same-device client identity) is xpf-owned,
+	// not foreign — thread the sibling's client identity so the
+	// backend can PROVE the sibling's DHCID on the wire before it
+	// downgrades any guard for this cross-family publish. A foreign
+	// client that merely REQUESTED the same hostname (different
+	// device) yields no sibling here, so every name-level / DHCID
+	// guard stays in force and its claim is refused (#14995). The
+	// signal is recomputed from the store on every call and stamped
 	// only on UpsertLease paths; DeleteLease callers never receive it.
-	if m.crossTypeSiblingOwned(ow) {
+	if sib := m.crossTypeSiblingOwned(ow); sib != nil {
 		rec.SiblingFamilyOwned = true
+		rec.SiblingClientID = sib.ClientID
 	}
 	if isNopUpdater(updater) {
 		// No live backend: nothing is published, so record NO ownership and
