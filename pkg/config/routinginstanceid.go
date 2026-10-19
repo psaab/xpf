@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
-	"strings"
 )
 
 // RoutingInstanceTableIDBase and RoutingInstanceTableIDSpan define the reserved
@@ -411,17 +410,12 @@ func routingInstanceNameUnionAST(tree *ConfigTree, compiledNode *int) map[string
 
 // emitGenericExpandedRoutingInstancesAST collects the routing instances the
 // generic compile lands, expanding a clone exactly as compileConfigWithOpts
-// does: ExpandGroups, and on an undefined "${node}" group a retry with node0 on
-// the same clone. Any other failure contributes nothing (#9657).
+// does (#15031: one atomic ${node} -> node0 fallback expansion, never a
+// retry on a partially merged clone). Any failure contributes nothing (#9657).
 func emitGenericExpandedRoutingInstancesAST(tree *ConfigTree, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {
 	clone := tree.Clone()
-	if err := clone.ExpandGroups(); err != nil {
-		if !strings.Contains(err.Error(), `undefined group "${node}"`) {
-			return
-		}
-		if err := clone.ExpandGroupsWithVars(map[string]string{"node": "node0"}); err != nil {
-			return
-		}
+	if _, err := clone.ExpandGroupsNodeFallback15031(false); err != nil {
+		return
 	}
 	for _, ri := range clone.FindChildren("routing-instances") {
 		collectRoutingInstanceAST(ri, names, types)

@@ -12030,9 +12030,9 @@ reserved for whole-dataplane selection where a rewrite shim
   lenient warning named the active `ri7` as quarantined while the runtime kept
   it. `routingInstanceNameUnionAST` now unions every top-level
   `routing-instances` root with the names each compile path's own group
-  expansion lands: the generic compile (no node variables, and on an undefined
-  `"${node}"` group the node0 retry on the same tree, as
-  `compileConfigWithOpts` does) and each cluster node's expansion (node0 and
+  expansion lands: the generic compile (no node variables, with the
+  atomic `${node}` -> node0 fallback expansion of #15031, as
+  `compileConfigWithOpts` performs it) and each cluster node's expansion (node0 and
   node1, plus the requested node when a node compile passes any other ID,
   negative ones included, since `compileConfigForNodeWithOpts` accepts any
   integer). An expansion that fails contributes nothing, because the compile
@@ -16901,3 +16901,38 @@ and `hide-excess` have no FRR equivalent (bgpd either warns or CEASEs;
 it cannot drop/hide only the excess) and are **rejected** at commit
 rather than silently ignored — use an import policy / prefix-list to
 drop excess prefixes instead.
+### #15031 — Generic-compile `${node}` fallback re-expansion bypassed group-provenance gates
+
+The generic compile (`CompileConfig`, used by standalone commits and
+`xpfd check-config` with nodeID<0) used to expand groups without vars
+first and, on an `undefined group "${node}"` error, retry with
+`node=node0` vars on the SAME tree. The failed first pass had already
+merged every group applied before the `${node}` reference and stripped
+its `apply-groups` node, so the retry never re-merged it: its
+group-adopted stanzas (notably `security policies default-policy`) lost
+their #12823/#12923 merge provenance, met the next group's stanza as
+if authored inline, and took the inline-wins override. The conflicting
+pair the #11821/#11367/#12821 gates judge never materialized, so a
+standalone commit accepted — permit-first, fail-open — a
+`default-policy` conflict that the fresh node0 compile
+(`CompileConfigForNode(tree, 0)`) rejects.
+
+The fallback now expands exactly once with the node0 vars whenever the
+tree references a group through `${node}` (probing on a throwaway clone
+only to decide, so a genuinely undefined group, a cycle, or a group
+literally named `${node}` keeps its exact prior error/verdict). The
+generic expansion is Format-identical to the fresh node0 expansion;
+retry and fresh node0 results match, and the node=-1 row rejects.
+Every `${node}` fallback site shares the one atomic helper
+(`ExpandGroupsNodeFallback15031`): the generic compile, its tolerant
+policy-source clone, `schemaValidateExpandedTreeForNode` (nodeID<0),
+the routing-instance name union, and the master-password PRF resolver.
+Identical group actions, authored inline overrides, benign node0-only
+groups, and the `apply-groups "${node}" resolved using default node0
+context during generic compile` warning are unchanged.
+
+Regression coverage: `pkg/config/compiler_default_policy_node_fallback_15031_test.go`
+(conflict shape matrix in both orders with a node0 oracle, expansion
+Format-identity and stanza materialization, legitimate-config controls)
+and `pkg/configstore/node_fallback_15031_test.go` (standalone
+`CheckText` rejects the conflict, benign `${node}` config stays green).

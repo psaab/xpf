@@ -199,20 +199,17 @@ func effectiveMasterPasswordPRF(tree *config.ConfigTree) string {
 	}
 	stripped := tree.WithoutInactive()
 	expanded := stripped.Clone()
-	if err := expanded.ExpandGroups(); err != nil {
-		// A cluster ${node} group can only be expanded with the node var; the
-		// write path is node-agnostic and the envelope is self-describing
-		// (decrypt reads env.PRF), so a deterministic node0 substitution is
-		// enough to resolve a supported selector. Any residual error degrades
-		// to "" → the caller's supported default (the write must not fail).
-		if strings.Contains(err.Error(), `undefined group "${node}"`) {
-			vars := map[string]string{"node": "node0"}
-			if err2 := expanded.ExpandGroupsWithVars(vars); err2 != nil {
-				return ""
-			}
-		} else {
-			return ""
-		}
+	// #15031: one atomic ${node} -> node0 fallback expansion. A failed
+	// plain pass has already partially merged `expanded`; retrying
+	// with node0 vars on that same tree would resolve the selector
+	// from a provenance-stripped tree that no compile produces.
+	// A cluster ${node} group can only be expanded with the node var; the
+	// write path is node-agnostic and the envelope is self-describing
+	// (decrypt reads env.PRF), so a deterministic node0 substitution is
+	// enough to resolve a supported selector. Any residual error degrades
+	// to "" → the caller's supported default (the write must not fail).
+	if _, err := expanded.ExpandGroupsNodeFallback15031(false); err != nil {
+		return ""
 	}
 	return masterPasswordPRFInSystems(systemBlocksOf(expanded))
 }

@@ -123,6 +123,99 @@ func (t *ConfigTree) ExpandGroupsWithVarsTagged(vars map[string]string) error {
 	return t.expandGroups(true, vars)
 }
 
+// treeHasNodeVarApplyGroups15031 reports whether any apply-groups
+// statement in the tree names a group through the literal ${node}
+// placeholder (any key position, matching how appendApplyGroupNames
+// reads statement keys and block-spelling members). Callers that would
+// otherwise expand without vars first and retry with node=node0 on the
+// SAME (now partially merged) tree use this to expand exactly once —
+// see ExpandGroupsNodeFallback15031.
+func treeHasNodeVarApplyGroups15031(nodes []*Node) bool {
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		if n.Name() == "apply-groups" {
+			for _, name := range appendApplyGroupNames(nil, n, nil) {
+				if strings.Contains(name, "${node}") {
+					return true
+				}
+			}
+		}
+		if treeHasNodeVarApplyGroups15031(n.Children) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExpandGroupsNodeFallback15031 expands t exactly once for the generic
+// (node-less) compile: with the ${node} -> node0 vars when the tree
+// references a group through ${node}, and without vars otherwise. It
+// returns usedFallback=true when the vars expansion ran.
+//
+// #15031: the previous shape — ExpandGroups[Tagged] first, and on an
+// `undefined group "${node}"` error a retry with vars on the SAME tree —
+// was not atomic. The failed first pass had already merged every group
+// applied before the ${node} reference (and stripped those apply-groups
+// nodes) into the caller's tree, so the retry never re-merged them and
+// the group-provenance budget (#12823/#12923) was reset: a second
+// group's default-policy met the first group's already-adopted stanza
+// as if it were authored inline, took the inline-wins override, and the
+// pair the #11821/#11367/#12821 gates judge never materialized. A
+// standalone (nodeID<0) commit therefore accepted a default-policy
+// conflict the fresh node0 compile rejects — permit-first failed open.
+// Expanding once, on a clone when a retry would be needed, makes the
+// generic result Format-identical to the fresh node0 expansion.
+func (t *ConfigTree) ExpandGroupsNodeFallback15031(tagged bool) (usedFallback bool, err error) {
+	expandPlain := t.ExpandGroups
+	expandVars := func() error {
+		return t.ExpandGroupsWithVars(map[string]string{"node": "node0"})
+	}
+	if tagged {
+		expandPlain = t.ExpandGroupsTagged
+		expandVars = func() error {
+			return t.ExpandGroupsWithVarsTagged(map[string]string{"node": "node0"})
+		}
+	}
+	if !treeHasNodeVarApplyGroups15031(t.Children) {
+		// No ${node} reference: a single plain pass, exactly as before.
+		// An undefined-group error here names some other group and is
+		// returned unwrapped-for-retry by the caller.
+		return false, expandPlain()
+	}
+	// A ${node} reference exists, so the plain pass would partially
+	// merge and then fail. Run it on a throwaway clone only to learn
+	// whether the vars expansion is what this tree needs: if the plain
+	// pass succeeds (e.g. a group literally named "${node}" is defined),
+	// reproduce that success on the real tree; if it fails for any
+	// reason OTHER than the undefined ${node} group, the vars pass
+	// would fail differently (masking or altering the real error), so
+	// reproduce the plain failure exactly. Only the undefined-${node}
+	// failure — the fallback's documented trigger — expands with vars,
+	// and it expands t fresh, never the partially merged clone.
+	probe := t.Clone()
+	probePlain := probe.ExpandGroups
+	if tagged {
+		probePlain = probe.ExpandGroupsTagged
+	}
+	plainErr := probePlain()
+	if plainErr == nil {
+		return false, expandPlain()
+	}
+	if !strings.Contains(plainErr.Error(), `undefined group "${node}"`) {
+		// The plain pass fails on this tree for a reason the vars pass
+		// must not hide (a genuinely undefined group, a cycle, a budget
+		// refusal). Re-run it on t so the caller sees the identical
+		// error from the identical path.
+		return false, expandPlain()
+	}
+	if err := expandVars(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // resolveVars replaces ${key} placeholders in s with values from vars.
 func resolveVars(s string, vars map[string]string) string {
 	if vars == nil {

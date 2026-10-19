@@ -1058,15 +1058,12 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 		// keep satisfying shared-section references (#1319 PR 3).
 		return config.SchemaValidateWithDefinitions(expanded, stripped, nil)
 	}
-	if err := expanded.ExpandGroups(); err != nil {
-		if strings.Contains(err.Error(), `undefined group "${node}"`) {
-			vars := map[string]string{"node": "node0"}
-			if err2 := expanded.ExpandGroupsWithVars(vars); err2 != nil {
-				return fmt.Errorf("apply-groups: %w", err2)
-			}
-		} else {
-			return fmt.Errorf("apply-groups: %w", err)
-		}
+	// #15031: expand exactly once — a failed plain pass has already
+	// partially merged `expanded`, and retrying with node0 vars on that
+	// same tree would schema-validate a different (provenance-stripped)
+	// tree than the fresh node0 expansion the compiler produces.
+	if _, err := expanded.ExpandGroupsNodeFallback15031(false); err != nil {
+		return fmt.Errorf("apply-groups: %w", err)
 	}
 	return config.SchemaValidateWithDefinitions(expanded, stripped, nil)
 }
