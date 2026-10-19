@@ -43,7 +43,7 @@ func seedStaleFor(t *testing.T, uncovered string) string {
 	s := &Server{}
 	s.SetTLSCertDirForTest(dir)
 	host, _, _ := net.SplitHostPort(uncovered)
-	out := captureWarn(t, func() { _, _, _ = s.certGen(host) })
+	out := captureWarn(t, func() { _, _, _ = s.certGen([]string{host}) })
 	if !strings.Contains(out, bindHostMsg) {
 		t.Fatalf("precondition: a load for bind host %q must emit %q, else these "+
 			"cells count an absence that was never possible; got %q", host, bindHostMsg, out)
@@ -183,7 +183,7 @@ func TestHTTPSCertFailureAfterBindClosesTheListener_7041(t *testing.T) {
 	certErr := errors.New("cert: unreadable key material")
 	s := &Server{
 		listen: func(string, string) (net.Listener, error) { return ln, nil },
-		certGen: func(string) (tls.Certificate, *x509.Certificate, error) {
+		certGen: func([]string) (tls.Certificate, *x509.Certificate, error) {
 			return tls.Certificate{}, nil, certErr
 		},
 	}
@@ -224,7 +224,7 @@ func TestBindErrorWinsWhenBothFail_7041(t *testing.T) {
 	bindErr, certErr := errors.New("bind: cannot assign requested address"), errors.New("cert: unreadable key material")
 	s := &Server{
 		listen: func(string, string) (net.Listener, error) { return nil, bindErr },
-		certGen: func(string) (tls.Certificate, *x509.Certificate, error) {
+		certGen: func([]string) (tls.Certificate, *x509.Certificate, error) {
 			return tls.Certificate{}, nil, certErr
 		},
 	}
