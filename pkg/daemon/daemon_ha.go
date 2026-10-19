@@ -1108,6 +1108,13 @@ func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState, demotio
 					slog.Info("cluster: confirmed pending commit-confirmed on RG0 demotion")
 				}
 			}
+			// #15194: terminate the IKE SAs anchored on RG0 before going
+			// read-only, for the same reason clearRethServicesForRG
+			// terminates a demoted data RG's SAs: the VIP is leaving, and a
+			// stale SA left in charon collides with the returning owner's
+			// initiate on failback. Genuine demotions only — initial
+			// secondary seating never held these SAs in this incarnation.
+			go d.terminateDemotedRGIPsecSAs(0)
 		}
 		d.store.SetClusterReadOnly(true)
 	}
@@ -2203,6 +2210,17 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// #2691 P2: a partial demotion changes the per-RG Surface A gate too —
 	// nudge so the demoted RG's scopes stop publishing (never withdraw).
 	d.nudgeSurfaceADDNSReconcile()
+	// #15194: terminate the IKE/CHILD SAs anchored on the demoted RG. The
+	// VIP has just been removed (applyDirectVIPOwnership) or is leaving with
+	// the VRRP BACKUP transition, but charon keeps the SAs: MOBIKE defers
+	// teardown and a non-MOBIKE peer generates no traffic to trigger it.
+	// Left in place, the stale SA makes the returning owner's failback
+	// initiate fail with "existing duplicate" and black-holes traffic with
+	// SPIs the peer already deleted. Async: swanctl shells out per SA and
+	// this runs on the VRRP event path. Ungated by IPsecSASync — that flag
+	// governs peer advertisement/re-initiation, not local SA hygiene on a
+	// node-local demotion edge.
+	go d.terminateDemotedRGIPsecSAs(rgID)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by
@@ -2792,9 +2810,30 @@ func (d *Daemon) reinitiateIPsecSAs() {
 	if len(owned) == 0 {
 		return
 	}
+	// #15194 belt: terminate any STALE LOCAL duplicate before initiating.
+	// The demotion sweep should already have removed this node's SAs for
+	// the RG it lost, but a terminate that raced or failed leaves one in
+	// charon, and charon then refuses the initiate with "not establishing
+	// CHILD_SA ... due to existing duplicate" — the failback black hole.
+	// Only names present in the LOCAL live set are terminated; a name with
+	// no local SA initiates directly. A failed live read skips the belt
+	// (initiate proceeds as before) rather than guessing.
+	local := map[string]bool{}
+	if names2, err := d.ipsecActiveNames(); err == nil {
+		for _, n := range names2 {
+			local[n] = true
+		}
+	} else {
+		slog.Warn("cluster: failed to list local IPsec SAs before re-initiation; duplicate belt skipped", "err", err)
+	}
 	slog.Info("cluster: re-initiating IPsec SAs after failover", "count", len(owned))
 	initiate := d.ipsecInitiate
 	for _, name := range owned {
+		if local[name] {
+			if err := d.ipsecTerminate(name); err != nil {
+				slog.Warn("cluster: failed to terminate stale local IPsec SA before re-initiation", "name", name, "err", err)
+			}
+		}
 		if err := initiate(name); err != nil {
 			slog.Warn("cluster: failed to initiate IPsec SA", "name", name, "err", err)
 		} else {
@@ -2842,6 +2881,57 @@ func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 	return owned
 }
 
+// ipsecSAsForRG filters SA names to those whose connection is attributed
+// to rg (every candidate group must equal rg — see ownsIPsecConn's
+// all-candidates rule). Split from the terminate effect so the selection
+// can be driven without swanctl (#15194).
+func (d *Daemon) ipsecSAsForRG(names []string, rg int) []string {
+	cfg := d.ipsecAttributionConfig()
+	idx := d.cachedIPsecSANameIndex(cfg)
+	var out []string
+	for _, name := range names {
+		rgs := ipsecConnRedundancyGroups(cfg, idx, name)
+		match := len(rgs) > 0
+		for _, g := range rgs {
+			if g != rg {
+				match = false
+				break
+			}
+		}
+		if match {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// terminateDemotedRGIPsecSAs terminates this node's live IKE SAs anchored
+// on rg, which this node has just lost (#15194). It reads the live set
+// rather than the peer-advertised set: the SAs to kill are LOCAL, and a
+// node with SA sync off still holds them. A failed live-SA read terminates
+// nothing — guessing connection names could tear down a tunnel another RG
+// still owns. Individual terminate failures are logged, not latched: the
+// takeover belt in reinitiateIPsecSAs retries the same name before
+// initiating, and the next demotion edge re-reads the live set.
+func (d *Daemon) terminateDemotedRGIPsecSAs(rg int) {
+	if d.ipsec == nil && d.ipsecTerminateFn == nil {
+		return
+	}
+	names, err := d.ipsecActiveNames()
+	if err != nil {
+		slog.Warn("cluster: failed to list IPsec SAs on RG demotion; stale SAs may survive until failback belt",
+			"rg", rg, "err", err)
+		return
+	}
+	for _, name := range d.ipsecSAsForRG(names, rg) {
+		if err := d.ipsecTerminate(name); err != nil {
+			slog.Warn("cluster: failed to terminate demoted RG IPsec SA", "rg", rg, "name", name, "err", err)
+		} else {
+			slog.Info("cluster: terminated IPsec SA on RG demotion", "rg", rg, "name", name)
+		}
+	}
+}
+
 // ipsecInitiate is the swanctl call, behind a test seam.
 //
 // #9139 added it because BOTH halves of that fix are wiring — an advertise gate
@@ -2863,6 +2953,9 @@ func (d *Daemon) ipsecActiveNames() ([]string, error) {
 	if fn := d.ipsecActiveNamesFn; fn != nil {
 		return fn()
 	}
+	if d.ipsec == nil {
+		return nil, nil
+	}
 	return d.ipsec.ActiveConnectionNames()
 }
 
@@ -2871,6 +2964,17 @@ func (d *Daemon) ipsecInitiate(name string) error {
 		return fn(name)
 	}
 	return d.ipsec.InitiateConnection(name)
+}
+
+// ipsecTerminate is the swanctl terminate call, behind a test seam (#15194).
+func (d *Daemon) ipsecTerminate(name string) error {
+	if fn := d.ipsecTerminateFn; fn != nil {
+		return fn(name)
+	}
+	if d.ipsec == nil {
+		return nil
+	}
+	return d.ipsec.TerminateConnection(name)
 }
 
 // desiredStandaloneDHCPConfig returns the DHCP server config the STANDALONE
