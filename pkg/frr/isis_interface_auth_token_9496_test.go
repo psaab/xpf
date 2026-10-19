@@ -46,10 +46,13 @@ func TestISISInterfaceAuthSecretIsTokenBelted_9496(t *testing.T) {
 				if strings.Contains(got, " isis password ") {
 					t.Errorf("#9496: an IS-IS interface secret that is not a single vtysh token was emitted:\n%s", got)
 				}
-				// The interface must stay configured: omitting the auth line confines
-				// the damage to authentication on that circuit.
-				if !strings.Contains(got, "interface trust0") {
-					t.Errorf("the IS-IS interface was dropped along with its auth line:\n%s", got)
+				// #14977 supersedes the interface-kept half of #9496:
+				// keeping the interface with no password forms an
+				// UNAUTHENTICATED adjacency, so the interface is now
+				// withheld along with its auth line (fail closed on
+				// the enclosing capability).
+				if strings.Contains(got, "interface trust0") {
+					t.Errorf("the IS-IS interface was kept without its password (unauthenticated adjacency):\n%s", got)
 				}
 			})
 		}

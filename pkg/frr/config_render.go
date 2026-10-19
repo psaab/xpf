@@ -174,14 +174,31 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 	}
 	sort.Strings(names)
 
+	// FRR zebra's `bandwidth` grammar ceiling, in kbps (#14977):
+	// `bandwidth (1-100000000)`. A 200G/400G interface value above it
+	// made vtysh reject the line and fail the whole managed reload.
+	const frrMaxInterfaceBandwidthKbps14977 = 100_000_000
+
 	var b strings.Builder
 	for _, name := range names {
+		// #14977: never interpolate an interface name that is not a
+		// single FRR token (same belt as protocol interfaces, #9405);
+		// the raw value could split the line or inject a statement.
+		if !validFRRInterfaceOperand(name) {
+			slog.Warn("frr: omitting interface settings for an unrenderable interface name (#14977)",
+				"interface", sanitizeFRRValue(name))
+			continue
+		}
 		fmt.Fprintf(&b, "interface %s\n", name)
 		if bw, ok := fc.InterfaceBandwidths[name]; ok && bw > 0 {
-			// FRR bandwidth command takes kbps
+			// FRR bandwidth command takes kbps (1-100000000).
 			kbps := bw / 1000
 			if kbps == 0 {
 				kbps = 1
+			} else if kbps > frrMaxInterfaceBandwidthKbps14977 {
+				slog.Warn("frr: clamping interface bandwidth to the FRR maximum (#14977)",
+					"interface", sanitizeFRRValue(name), "kbps", kbps)
+				kbps = frrMaxInterfaceBandwidthKbps14977
 			}
 			fmt.Fprintf(&b, " bandwidth %d\n", kbps)
 		}
@@ -786,6 +803,19 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 					continue
 				}
 			}
+		}
+		// #14977: dest (default-normalized or classless) and dr.Gateway
+		// are interpolated raw into `ip route <dest> <gw> ...`. An empty,
+		// zoned, spaced or otherwise unparseable gateway — or a malformed
+		// classless destination the safety helpers above pass through
+		// silently (they return "" on parse error) — makes vtysh reject
+		// the line and fail the WHOLE managed reload, the same blast
+		// radius the static renderer belts against (#6795). Drop only
+		// this route; its healthy siblings still render.
+		if !validFRRRoutePrefix(dest) || !validFRRNextHopAddress(dr.Gateway) {
+			slog.Warn("frr: omitting a DHCP-learned route with an unrenderable destination or gateway (#14977)",
+				"destination", sanitizeFRRValue(dest), "gateway", sanitizeFRRValue(dr.Gateway), "vrf", dr.VRF)
+			continue
 		}
 		// #9136: dr.VRF is the BARE instance name (the suppression maps above
 		// key on it, and are internally consistent that way). FRR knows the

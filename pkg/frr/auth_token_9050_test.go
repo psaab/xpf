@@ -50,11 +50,13 @@ func TestWhitespaceAuthSecretIsNotEmitted9050(t *testing.T) {
 					"secret — or refuses the line, and a refused line fails the WHOLE "+
 					"frr-reload:\n%s", got)
 			}
-			// The neighbor itself must still be configured: omitting the auth
-			// line confines the damage to authentication, and dropping the whole
-			// neighbor would be a larger outage than the defect.
-			if !strings.Contains(got, " neighbor 10.0.0.1 remote-as 65001\n") {
-				t.Errorf("the neighbor was dropped along with its auth line:\n%s", got)
+			// #14977: the neighbor itself must NOT be configured either.
+			// #9050 kept it, reasoning the adjacency "fails to
+			// authenticate" — true only when the peer requires MD5; a
+			// peer that does not establishes an unauthenticated session.
+			// Fail closed on the enclosing capability instead.
+			if strings.Contains(got, " neighbor 10.0.0.1 remote-as 65001\n") {
+				t.Errorf("the neighbor with an unrenderable password was still declared (unauthenticated adjacency):\n%s", got)
 			}
 		})
 	}

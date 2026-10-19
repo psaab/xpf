@@ -43,10 +43,15 @@ import (
 // config applies at all", the first is the one to choose for a value that
 // should never have been persisted.
 //
-// NOT quoting it: whether vtysh accepts a quoted operand at each of these ten
-// sites (#9496 added the two IS-IS per-interface sites #9050 had missed)
-// sites is unmeasured, and guessing wrong reproduces the reload failure this
-// avoids.
+// #14977 (D33-05) extends this one step: at every activation site the
+// caller now also withholds the enclosing capability (OSPF interface
+// block, RIP enrollment, IS-IS stanza/interface, BGP neighbor) when a
+// CONFIGURED auth value cannot render — because "fails to
+// authenticate" only holds when the peer requires auth; a peer that
+// does not forms an unauthenticated adjacency with the password-less
+// activation this file's contract used to leave behind. The belt
+// itself (omit the LINE) is unchanged; the fail-closed escalation
+// lives at the callers in protocols_render.go.
 
 // frrAuthTokenUnsafe reports whether s cannot be emitted as a single vtysh
 // token. It mirrors config.frrTokenUnsafeIndex's character set deliberately: a

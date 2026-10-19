@@ -124,14 +124,19 @@ func TestRecognizedAuthTypesStillRender8443(t *testing.T) {
 	}
 }
 
-// An UNRECOGNIZED type takes the plaintext arm, not md5 and not silence.
+// An UNRECOGNIZED type carrying a key used to take the plaintext arm.
 //
-// Pinned deliberately: this is the tolerant-path behaviour, and it is the
-// behaviour a persisted config gets after the strict gate starts rejecting new
-// instances. Promoting it to md5 would flip a box running plaintext today into
-// md5 against a peer expecting plaintext and drop the adjacency on upgrade —
-// a silent downgrade traded for a silent outage, on the path (#1960) whose
-// purpose is that a persisted config still boots.
+// #8443 pinned that deliberately: promoting it to md5 would flip a box
+// running plaintext today into md5 against a peer expecting plaintext
+// and drop the adjacency on upgrade. #14977 (D33-05) supersedes the
+// render arm of that choice: plaintext-for-an-unrecognized-type is a
+// silently DOWNGRADED adjacency — the operator's `show configuration`
+// still claims the type they typed — so the renderer now fails closed
+// instead: no IS-IS activation and no RIP enrollment at all. That is
+// neither the md5 promotion #8443 rejected (nothing renders as md5)
+// nor the silent plaintext it accepted; the strict gate still rejects
+// new instances, and the tolerant path now withholds the adjacency
+// loudly (slog) rather than forming it weakened.
 func TestUnrecognizedAuthTypeRendersPlaintextNotMD5OrSilence8443(t *testing.T) {
 	m := New()
 	isis := &config.ISISConfig{
@@ -146,10 +151,10 @@ func TestUnrecognizedAuthTypeRendersPlaintextNotMD5OrSilence8443(t *testing.T) {
 		t.Fatalf("an unrecognized type was promoted to md5; that drops adjacencies "+
 			"on upgrade against a peer expecting plaintext:\n%s", got)
 	}
-	for _, want := range []string{"area-password clear s3cret", "ip rip authentication mode text"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("an unrecognized type rendered NO authentication (%q missing); "+
-				"silence is the one outcome that leaves the adjacency open:\n%s", want, got)
+	for _, bad := range []string{"area-password", "domain-password", "ip rip authentication", "network trust0", "ip router isis"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("an unrecognized type still activated routing (%q present); "+
+				"#14977 fails closed — no weakened adjacency:\n%s", bad, got)
 		}
 	}
 }

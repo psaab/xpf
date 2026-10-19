@@ -301,9 +301,40 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			// commit; a tolerant-loaded config must never run
 			// unauthenticated. Do NOT emit a keyless authentication line —
 			// FRR adjacency behaviour for it is not established.
-			if iface.AuthType == "simple" && iface.AuthKey == "" {
-				slog.Warn("frr: omitting OSPF interface with simple authentication configured but no key; refusing to activate it unauthenticated (#14397)",
-					"interface", sanitizeFRRValue(iface.Name), "authentication_type", iface.AuthType)
+			//
+			// #14977 (D33-05): the same fail-closed rule covers a simple
+			// key that is non-empty but unrenderable as a single vtysh
+			// token (pre-validate it HERE, before the interface header,
+			// and reuse the token below), and any non-empty AuthType
+			// that is neither md5 nor simple — including a key carried
+			// with no type at all. Previously those shapes emitted
+			// `ip ospf area` with zero authentication lines: an
+			// unauthenticated adjacency. OSPF's AuthType is assigned
+			// only from matched compiler keywords (pkg/config
+			// auth_type.go), so a foreign value can only arrive via a
+			// direct/tolerant construction; omitting the whole
+			// interface block is the #14388 answer.
+			var ospfSimpleTok14977 string
+			if iface.AuthType == "simple" {
+				if iface.AuthKey == "" {
+					slog.Warn("frr: omitting OSPF interface with simple authentication configured but no key; refusing to activate it unauthenticated (#14397)",
+						"interface", sanitizeFRRValue(iface.Name), "authentication_type", iface.AuthType)
+					continue
+				}
+				tok, ok := authTokenOrOmit("ospf-simple", iface.AuthKey.Reveal())
+				if !ok {
+					slog.Warn("frr: omitting OSPF interface with an unrenderable simple authentication key; refusing to activate it unauthenticated (#14977)",
+						"interface", sanitizeFRRValue(iface.Name))
+					continue
+				}
+				ospfSimpleTok14977 = tok
+			} else if iface.AuthType != "" && iface.AuthType != "md5" {
+				slog.Warn("frr: omitting OSPF interface with an unrecognized authentication-type; refusing to activate it unauthenticated (#14977)",
+					"interface", sanitizeFRRValue(iface.Name), "authentication_type", sanitizeFRRValue(iface.AuthType))
+				continue
+			} else if iface.AuthType == "" && iface.AuthKey != "" {
+				slog.Warn("frr: omitting OSPF interface with an authentication key but no authentication-type; refusing to activate it unauthenticated (#14977)",
+					"interface", sanitizeFRRValue(iface.Name))
 				continue
 			}
 			fmt.Fprintf(&b, "interface %s\n", iface.Name)
@@ -331,13 +362,11 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			}
 			if iface.AuthType == "md5" {
 				b.WriteString(md5Block.String())
-			} else if iface.AuthKey != "" && iface.AuthType == "simple" {
-				// #11462: the empty-key guard and token-first gate keep
-				// malformed simple authentication from bricking frr-reload.
-				if tok, ok := authTokenOrOmit("ospf-simple", iface.AuthKey.Reveal()); ok {
-					b.WriteString(" ip ospf authentication\n")
-					fmt.Fprintf(&b, " ip ospf authentication-key %s\n", tok)
-				}
+			} else if iface.AuthType == "simple" {
+				// #11462/#14977: emit only the token pre-validated above;
+				// an unrenderable key already omitted the whole block.
+				b.WriteString(" ip ospf authentication\n")
+				fmt.Fprintf(&b, " ip ospf authentication-key %s\n", ospfSimpleTok14977)
 			}
 			if iface.BFD {
 				if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
@@ -507,6 +536,26 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			// vtysh reject the WHOLE managed section.
 			if !validBGPNeighborAddress(n.Address) {
 				continue
+			}
+			// #14977 (D33-05): a configured TCP-MD5 password that is not
+			// a single vtysh token must fail closed HERE, at the same
+			// single exclusion point, not at the declaration site.
+			// #9050 omitted only the `password` line and kept the
+			// neighbor, reasoning that the adjacency then "fails to
+			// authenticate" — true only when the PEER requires MD5. A
+			// peer that does not (the common misconfiguration, and the
+			// exact tolerant-load scenario) establishes an
+			// UNAUTHENTICATED session and exchanges routes. Excluding
+			// the neighbor confines the damage exactly as #9050
+			// intended — that one adjacency does not come up — without
+			// the unauthenticated-session window, and every loop below
+			// inherits the exclusion so none can activate it.
+			if n.AuthPassword != "" {
+				if _, ok := authTokenOrOmit("bgp", n.AuthPassword.Reveal()); !ok {
+					slog.Warn("frr: omitting BGP neighbor with an unrenderable authentication password; refusing to establish it unauthenticated (#14977)",
+						"neighbor", sanitizeFRRValue(n.Address))
+					continue
+				}
 			}
 			validNeighbors = append(validNeighbors, n)
 		}
@@ -1024,6 +1073,22 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		// loudly; do NOT emit a keyless auth line (FRR behaviour for a
 		// keyless mode line is not established, and a rejected line
 		// would fail the whole managed-section reload).
+		//
+		// #14977 (D33-05): the same fail-closed rule covers the two
+		// shapes #14398 missed. (a) A non-empty key that is not a
+		// single vtysh token: previously every interface was enrolled
+		// and `ip rip authentication mode` rendered with NO string.
+		// (b) An UNRECOGNIZED type carrying a key: #8443 deliberately
+		// kept rendering it as plaintext (the recorded rationale is
+		// adjacency-flap avoidance on upgrade), but that leaves a
+		// silently DOWNGRADED adjacency — the operator's `show
+		// configuration` still claims the type they typed. #14977
+		// supersedes the render arm of that choice: fail closed and
+		// say so. Absent type + key keeps its #9105 plaintext render
+		// (a chosen plaintext and an absent type remain
+		// indistinguishable, and flipping it would flap adjacencies
+		// that never claimed a type); keyed md5/simple/text and the
+		// neither-leaf shape are byte-unchanged.
 		ripKeylessAuth14398 := !config.AuthTypeAbsent(rip.AuthType) && rip.AuthKey == ""
 		if ripKeylessAuth14398 {
 			slog.Warn("frr: rip authentication-type is set with NO authentication-key; "+
@@ -1031,242 +1096,307 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				"Set authentication-key to provide the key (#14398)",
 				"authentication_type", rip.AuthType)
 		}
-		fmt.Fprintf(&b, "router rip%s\n", vrfSuffix)
-		if !ripKeylessAuth14398 {
+		ripAuthTok14977, ripAuthTokOK14977 := "", true
+		if rip.AuthKey != "" {
+			ripAuthTok14977, ripAuthTokOK14977 = authTokenOrOmit("rip", rip.AuthKey.Reveal())
+		}
+		ripUnrecognized14977 := rip.AuthKey != "" && config.AuthTypeUnrecognized(rip.AuthType)
+		ripFailClosed14977 := ripKeylessAuth14398 || !ripAuthTokOK14977 || ripUnrecognized14977
+		if !ripAuthTokOK14977 {
+			slog.Warn("frr: rip authentication-key is not renderable as a single vtysh token; "+
+				"NOT enrolling any interface in RIP rather than rendering unauthenticated RIP (#14977)",
+				"authentication_type", rip.AuthType)
+		}
+		if ripUnrecognized14977 {
+			slog.Warn("frr: unrecognized rip authentication-type; "+
+				"NOT enrolling any interface in RIP rather than silently downgrading to plaintext (#14977)",
+				"authentication_type", rip.AuthType, "accepted", config.AuthTypeSpellings())
+		}
+		if ripFailClosed14977 {
+			// Fail closed on the enclosing capability: no `router rip`
+			// enrollment and no per-interface auth block at all.
+		} else {
+			fmt.Fprintf(&b, "router rip%s\n", vrfSuffix)
 			for _, iface := range rip.Interfaces {
 				fmt.Fprintf(&b, " network %s\n", iface)
 			}
 			for _, iface := range rip.Passive {
 				fmt.Fprintf(&b, " passive-interface %s\n", iface)
 			}
-		}
-		for _, r := range rip.Redistribute {
-			b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
-		}
-		b.WriteString("exit\n!\n")
-		// RIP per-interface authentication
-		if rip.AuthKey != "" {
-			for _, iface := range rip.Interfaces {
-				fmt.Fprintf(&b, "interface %s\n", iface)
-				// #8443: a value the strict gate would now reject can still arrive
-				// on the TOLERANT load path (#1960 — a persisted config must still
-				// boot). Render what we always rendered, but say so: silently
-				// downgrading md5 to plaintext is the defect, and the operator has
-				// no other signal because `show configuration` echoes their value.
-				// #9105: an ABSENT type is not `unrecognized`, so this warning could not
-				// fire for it -- and it renders the key in CLEARTEXT exactly as a
-				// chosen `simple` does. Warn on both: the commit gate stops every NEW
-				// instance, this tells the operator about an existing one arriving
-				// through the tolerant load path.
-				if config.AuthTypeAbsent(rip.AuthType) {
-					slog.Warn("frr: rip authentication-key is set with NO authentication-type; "+
-						"rendering PLAINTEXT -- the key travels in clear in every PDU. Set "+
-						"authentication-type md5 to authenticate with a digest (#9105)",
-						"accepted", config.AuthTypeSpellings())
+			for _, r := range rip.Redistribute {
+				b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
+			}
+			b.WriteString("exit\n!\n")
+			// RIP per-interface authentication
+			if rip.AuthKey != "" {
+				for _, iface := range rip.Interfaces {
+					fmt.Fprintf(&b, "interface %s\n", iface)
+					// #9105: an ABSENT type is not `unrecognized`, so this warning could not
+					// fire for it -- and it renders the key in CLEARTEXT exactly as a
+					// chosen `simple` does. Warn on both: the commit gate stops every NEW
+					// instance, this tells the operator about an existing one arriving
+					// through the tolerant load path. (An unrecognized type no
+					// longer reaches here: #14977 fails it closed above.)
+					if config.AuthTypeAbsent(rip.AuthType) {
+						slog.Warn("frr: rip authentication-key is set with NO authentication-type; "+
+							"rendering PLAINTEXT -- the key travels in clear in every PDU. Set "+
+							"authentication-type md5 to authenticate with a digest (#9105)",
+							"accepted", config.AuthTypeSpellings())
+					}
+					if config.AuthTypeIsMD5(rip.AuthType) {
+						b.WriteString(" ip rip authentication mode md5\n")
+					} else {
+						b.WriteString(" ip rip authentication mode text\n")
+					}
+					fmt.Fprintf(&b, " ip rip authentication string %s\n", ripAuthTok14977)
+					b.WriteString("exit\n!\n")
 				}
-				if config.AuthTypeUnrecognized(rip.AuthType) {
-					slog.Warn("frr: unrecognized rip authentication-type; rendering PLAINTEXT authentication",
-						"interface", iface, "authentication_type", rip.AuthType,
-						"accepted", config.AuthTypeSpellings())
-				}
-				if config.AuthTypeIsMD5(rip.AuthType) {
-					b.WriteString(" ip rip authentication mode md5\n")
-				} else {
-					b.WriteString(" ip rip authentication mode text\n")
-				}
-				if tok, ok := authTokenOrOmit("rip", rip.AuthKey.Reveal()); ok {
-					fmt.Fprintf(&b, " ip rip authentication string %s\n", tok)
-				}
-				b.WriteString("exit\n!\n")
 			}
 		}
 	}
 
 	if isis != nil {
-		fmt.Fprintf(&b, "router isis xpf%s\n", vrfSuffix)
-		// #9493: the NET was rendered verbatim, spaces and all.
-		if isis.NET != "" {
-			if config.ValidISISNET(isis.NET) {
-				fmt.Fprintf(&b, " net %s\n", isis.NET)
-			} else {
-				slog.Warn("frr: omitting a malformed IS-IS NET (#9493)", "net", sanitizeFRRValue(isis.NET))
-			}
-		}
-		// #8446: canonicalize through the SHARED predicate the commit gate
-		// uses (config.CanonicalISISLevel) rather than switching on the raw
-		// stored string. This switch previously had no `default` arm, so a
-		// value outside the three it named emitted NO is-type line and FRR
-		// silently fell back to its own default, level-1-2 — WIDENING the
-		// router's adjacency scope. `level-2-only` (the spelling emitted
-		// three lines below) hit that path, so feeding our own output back
-		// in turned a Level-2-only router into a Level-1-2 one.
-		//
-		// The strict commit gate rejects a non-canonical value, but the
-		// tolerant Load / peer-sync paths only warn (#1960 no-brick), so the
-		// renderer keeps its own belt: an unrecognized value renders the
-		// SAFE default rather than nothing. Narrower than authored is a
-		// recoverable misconfiguration; wider than authored is a silent
-		// security regression. Same shape as the #6686 as-path belt.
-		level, ok := config.CanonicalISISLevel(isis.Level)
-		if !ok {
-			level = config.DefaultISISLevel
-		}
-		switch level {
-		case "level-1":
-			b.WriteString(" is-type level-1\n")
-		case "level-1-2":
-			b.WriteString(" is-type level-1-2\n")
-		default:
-			// level-2 and every unrecognized value: the narrow default.
-			b.WriteString(" is-type level-2-only\n")
-		}
-		for _, export := range isis.Export {
-			// #9666: isisd's grammar, not the OSPF-shaped line.
-			b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "isis")))
-		}
-		if isis.WideMetricsOnly {
-			b.WriteString(" metric-style wide\n")
-		}
-		if isis.Overload {
-			b.WriteString(" set-overload-bit\n")
-		}
-		// #14399: authentication-type with NO key renders UNAUTHENTICATED.
-		// The strict gate rejects new instances; this warns for a config
-		// arriving via tolerant load / peer sync. generateProtocols has no
-		// error return, so this cannot fail the apply closed.
+		// #14977 (D33-05): pre-validate IS-IS authentication BEFORE
+		// emitting the router stanza or any interface activation, the
+		// way #14388 pre-validates OSPF MD5. #14399 only warned when a
+		// type had no key, and the #9050 belt only omitted the password
+		// line when a key was unrenderable — both left `router isis`
+		// and `ip router isis` active with zero passwords: an
+		// unauthenticated adjacency. An unrecognized type carrying a
+		// key silently downgraded to plaintext (#8443's render arm,
+		// superseded here as at the RIP site). Fail closed on the
+		// enclosing capability:
+		//   - global auth unusable -> omit the whole IS-IS stanza
+		//     (router + every interface activation);
+		//   - one interface's auth unusable -> omit only that
+		//     interface; healthy siblings and a healthy global
+		//     password still render byte-identically.
+		// Absent type + key keeps the #9105 plaintext render, and the
+		// no-auth-at-all shape is untouched.
+		isisGlobalAuthBad14977 := false
+		var isisGlobalTok14977 string
 		if isis.AuthKey == "" && !config.AuthTypeAbsent(isis.AuthType) {
-			slog.Warn("frr: isis authentication-type is set with NO authentication-key; "+
-				"rendering UNAUTHENTICATED -- no area/domain password is emitted. Set "+
-				"authentication-key to authenticate (#14399)",
-				"authentication_type", isis.AuthType)
+			isisGlobalAuthBad14977 = true
 		}
 		if isis.AuthKey != "" {
-			// #9105: an ABSENT type is not `unrecognized`, so this warning could not
-			// fire for it -- and it renders the key in CLEARTEXT exactly as a
-			// chosen `simple` does. Warn on both: the commit gate stops every NEW
-			// instance, this tells the operator about an existing one arriving
-			// through the tolerant load path.
-			if config.AuthTypeAbsent(isis.AuthType) {
-				slog.Warn("frr: isis authentication-key is set with NO authentication-type; "+
-					"rendering PLAINTEXT -- the key travels in clear in every PDU. Set "+
-					"authentication-type md5 to authenticate with a digest (#9105)",
-					"accepted", config.AuthTypeSpellings())
-			}
 			if config.AuthTypeUnrecognized(isis.AuthType) {
-				slog.Warn("frr: unrecognized isis authentication-type; rendering PLAINTEXT area/domain password",
-					"authentication_type", isis.AuthType,
-					"accepted", config.AuthTypeSpellings())
-			}
-			if config.AuthTypeIsMD5(isis.AuthType) {
-				if tok, ok := authTokenOrOmit("isis-area-md5", isis.AuthKey.Reveal()); ok {
-					fmt.Fprintf(&b, " area-password md5 %s\n", tok)
-				}
-				if tok, ok := authTokenOrOmit("isis-domain-md5", isis.AuthKey.Reveal()); ok {
-					fmt.Fprintf(&b, " domain-password md5 %s\n", tok)
-				}
+				isisGlobalAuthBad14977 = true
+			} else if tok, ok := authTokenOrOmit("isis-global", isis.AuthKey.Reveal()); ok {
+				isisGlobalTok14977 = tok
 			} else {
-				if tok, ok := authTokenOrOmit("isis-area-clear", isis.AuthKey.Reveal()); ok {
-					fmt.Fprintf(&b, " area-password clear %s\n", tok)
-				}
-				if tok, ok := authTokenOrOmit("isis-domain-clear", isis.AuthKey.Reveal()); ok {
-					fmt.Fprintf(&b, " domain-password clear %s\n", tok)
-				}
+				isisGlobalAuthBad14977 = true
 			}
 		}
-		b.WriteString("exit\n!\n")
+		isisIfaceAuthBad14977 := make(map[string]bool, len(isis.Interfaces))
+		isisIfaceTok14977 := make(map[string]string, len(isis.Interfaces))
 		for _, iface := range isis.Interfaces {
-			fmt.Fprintf(&b, "interface %s\n", iface.Name)
-			fmt.Fprintf(&b, " ip router isis xpf\n")
-			// #8450: enable the IPv6 topology too. Only `ip router isis` was
-			// emitted, so isisd ran IPv4-only on every interface and IS-IS
-			// learned and advertised NO IPv6 routes — on a dual-stack product,
-			// with the compiler happily accepting IS-IS on dual-stack
-			// interfaces and knownRedistProtocols extended for IPv6 IGPs
-			// (#2943). FRR itself enables both address families for a
-			// configured `router isis`, so emitting both matches its defaults;
-			// on an interface with no IPv6 address there is nothing to
-			// advertise and the line is inert.
-			fmt.Fprintf(&b, " ipv6 router isis xpf\n")
-			// #8450: the per-interface circuit type. ISISInterface.Level was
-			// compiled and stored and then never rendered, so an interface an
-			// operator restricted to one level kept forming adjacencies at the
-			// ROUTER-WIDE is-type — dead config that fails OPEN. An empty value
-			// renders no line, which is the correct "inherit the router-wide
-			// is-type" behaviour in both FRR and Junos. An unrecognised value
-			// also renders no line rather than a broken one: the strict commit
-			// gate rejects it, and on the tolerant Load / peer-sync path
-			// (#1960) an omitted circuit-type is the pre-#8450 behaviour, which
-			// is recoverable, where an invalid `isis circuit-type <junk>` line
-			// would fail the WHOLE frr-reload (#1880/#2223).
-			if ct, ok := config.CanonicalISISCircuitType(iface.Level); ok && ct != "" {
-				fmt.Fprintf(&b, " isis circuit-type %s\n", ct)
+			if iface == nil {
+				continue
 			}
-			if iface.Passive {
-				b.WriteString(" isis passive\n")
-			}
-			if iface.Metric < 0 || iface.Metric > config.MaxISISMetric {
-				slog.Warn("frr: omitting invalid IS-IS interface metric (#11823)",
-					"interface", sanitizeFRRValue(iface.Name), "metric", iface.Metric)
-			} else if iface.Metric > 0 {
-				fmt.Fprintf(&b, " isis metric %d\n", iface.Metric)
-			}
-			// #14399: per-interface type with NO key renders UNAUTHENTICATED
-			// (see the area/domain belt above).
+			bad := false
 			if iface.AuthKey == "" && !config.AuthTypeAbsent(iface.AuthType) {
-				slog.Warn("frr: isis interface authentication-type is set with NO authentication-key; "+
-					"rendering UNAUTHENTICATED -- no interface password is emitted. Set "+
-					"authentication-key to authenticate (#14399)",
-					"interface", iface.Name, "authentication_type", iface.AuthType)
+				bad = true
 			}
 			if iface.AuthKey != "" {
+				if config.AuthTypeUnrecognized(iface.AuthType) {
+					bad = true
+				} else if tok, ok := authTokenOrOmit("isis-interface", iface.AuthKey.Reveal()); ok {
+					isisIfaceTok14977[iface.Name] = tok
+				} else {
+					bad = true
+				}
+			}
+			if bad {
+				isisIfaceAuthBad14977[iface.Name] = true
+			}
+		}
+		if isisGlobalAuthBad14977 {
+			slog.Warn("frr: omitting the IS-IS stanza; its authentication cannot be rendered — "+
+				"refusing to activate IS-IS unauthenticated (#14977)",
+				"authentication_type", sanitizeFRRValue(isis.AuthType))
+		}
+		isisRender14977 := !isisGlobalAuthBad14977
+		if isisRender14977 {
+			fmt.Fprintf(&b, "router isis xpf%s\n", vrfSuffix)
+			// #9493: the NET was rendered verbatim, spaces and all.
+			if isis.NET != "" {
+				if config.ValidISISNET(isis.NET) {
+					fmt.Fprintf(&b, " net %s\n", isis.NET)
+				} else {
+					slog.Warn("frr: omitting a malformed IS-IS NET (#9493)", "net", sanitizeFRRValue(isis.NET))
+				}
+			}
+			// #8446: canonicalize through the SHARED predicate the commit gate
+			// uses (config.CanonicalISISLevel) rather than switching on the raw
+			// stored string. This switch previously had no `default` arm, so a
+			// value outside the three it named emitted NO is-type line and FRR
+			// silently fell back to its own default, level-1-2 — WIDENING the
+			// router's adjacency scope. `level-2-only` (the spelling emitted
+			// three lines below) hit that path, so feeding our own output back
+			// in turned a Level-2-only router into a Level-1-2 one.
+			//
+			// The strict commit gate rejects a non-canonical value, but the
+			// tolerant Load / peer-sync paths only warn (#1960 no-brick), so the
+			// renderer keeps its own belt: an unrecognized value renders the
+			// SAFE default rather than nothing. Narrower than authored is a
+			// recoverable misconfiguration; wider than authored is a silent
+			// security regression. Same shape as the #6686 as-path belt.
+			level, ok := config.CanonicalISISLevel(isis.Level)
+			if !ok {
+				level = config.DefaultISISLevel
+			}
+			switch level {
+			case "level-1":
+				b.WriteString(" is-type level-1\n")
+			case "level-1-2":
+				b.WriteString(" is-type level-1-2\n")
+			default:
+				// level-2 and every unrecognized value: the narrow default.
+				b.WriteString(" is-type level-2-only\n")
+			}
+			for _, export := range isis.Export {
+				// #9666: isisd's grammar, not the OSPF-shaped line.
+				b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "isis")))
+			}
+			if isis.WideMetricsOnly {
+				b.WriteString(" metric-style wide\n")
+			}
+			if isis.Overload {
+				b.WriteString(" set-overload-bit\n")
+			}
+			// #14399/#14977: authentication-type with NO key renders
+			// UNAUTHENTICATED. The strict gate rejects new instances; a
+			// config arriving via tolerant load / peer sync now fails
+			// closed above (isisGlobalAuthBad14977) instead of only
+			// warning here. This warning is unreachable for that shape.
+			if isis.AuthKey == "" && !config.AuthTypeAbsent(isis.AuthType) {
+				slog.Warn("frr: isis authentication-type is set with NO authentication-key; "+
+					"rendering UNAUTHENTICATED -- no area/domain password is emitted. Set "+
+					"authentication-key to authenticate (#14399)",
+					"authentication_type", isis.AuthType)
+			}
+			if isis.AuthKey != "" {
 				// #9105: an ABSENT type is not `unrecognized`, so this warning could not
 				// fire for it -- and it renders the key in CLEARTEXT exactly as a
 				// chosen `simple` does. Warn on both: the commit gate stops every NEW
 				// instance, this tells the operator about an existing one arriving
-				// through the tolerant load path.
-				if config.AuthTypeAbsent(iface.AuthType) {
-					slog.Warn("frr: isis interface authentication-key is set with NO authentication-type; "+
+				// through the tolerant load path. An unrecognized type no longer
+				// reaches here (#14977 omits the stanza above).
+				if config.AuthTypeAbsent(isis.AuthType) {
+					slog.Warn("frr: isis authentication-key is set with NO authentication-type; "+
 						"rendering PLAINTEXT -- the key travels in clear in every PDU. Set "+
 						"authentication-type md5 to authenticate with a digest (#9105)",
 						"accepted", config.AuthTypeSpellings())
 				}
-				if config.AuthTypeUnrecognized(iface.AuthType) {
-					slog.Warn("frr: unrecognized isis interface authentication-type; rendering PLAINTEXT password",
-						"interface", iface.Name, "authentication_type", iface.AuthType,
-						"accepted", config.AuthTypeSpellings())
-				}
-				// #9496: the per-interface pair goes through the same #9050 belt as
-				// every other routing-auth site. sanitizeFRRValue maps a TAB into a
-				// splitter and passes a space through, so a whitespace secret arriving
-				// via a tolerant load, peer sync or rollback rendered a splittable line.
-				if config.AuthTypeIsMD5(iface.AuthType) {
-					if tok, ok := authTokenOrOmit("isis-interface-md5", iface.AuthKey.Reveal()); ok {
-						fmt.Fprintf(&b, " isis password md5 %s\n", tok)
-					}
+				if config.AuthTypeIsMD5(isis.AuthType) {
+					fmt.Fprintf(&b, " area-password md5 %s\n", isisGlobalTok14977)
+					fmt.Fprintf(&b, " domain-password md5 %s\n", isisGlobalTok14977)
 				} else {
-					if tok, ok := authTokenOrOmit("isis-interface-clear", iface.AuthKey.Reveal()); ok {
-						fmt.Fprintf(&b, " isis password clear %s\n", tok)
-					}
-				}
-			}
-			// `isis bfd` / `isis bfd profile <name>` are interface-scoped
-			// commands and MUST be emitted INSIDE the interface block,
-			// before `exit`. Emitting them after `exit` lands them at
-			// global config scope, which vtysh rejects — and one rejected
-			// line fails the WHOLE managed-section reload (#1880/#2223),
-			// breaking every IS-IS interface with BFD enabled. This mirrors
-			// the OSPFv3 per-interface BFD ordering above (#2942).
-			if iface.BFD {
-				if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
-					profile := bfdProfileName(iface.BFDInterval, iface.BFDMultiplier)
-					bfd.addProfile(profile, bfdProfile{iface.BFDInterval, iface.BFDMultiplier})
-					fmt.Fprintf(&b, " isis bfd profile %s\n", profile)
-				} else {
-					b.WriteString(" isis bfd\n")
+					fmt.Fprintf(&b, " area-password clear %s\n", isisGlobalTok14977)
+					fmt.Fprintf(&b, " domain-password clear %s\n", isisGlobalTok14977)
 				}
 			}
 			b.WriteString("exit\n!\n")
-		}
+		} // isisRender14977 (global stanza)
+		if isisRender14977 {
+			for _, iface := range isis.Interfaces {
+				if iface == nil {
+					continue
+				}
+				if isisIfaceAuthBad14977[iface.Name] {
+					slog.Warn("frr: omitting IS-IS interface; its authentication cannot be rendered — "+
+						"refusing to activate it unauthenticated (#14977)",
+						"interface", sanitizeFRRValue(iface.Name), "authentication_type", sanitizeFRRValue(iface.AuthType))
+					continue
+				}
+				fmt.Fprintf(&b, "interface %s\n", iface.Name)
+				fmt.Fprintf(&b, " ip router isis xpf\n")
+				// #8450: enable the IPv6 topology too. Only `ip router isis` was
+				// emitted, so isisd ran IPv4-only on every interface and IS-IS
+				// learned and advertised NO IPv6 routes — on a dual-stack product,
+				// with the compiler happily accepting IS-IS on dual-stack
+				// interfaces and knownRedistProtocols extended for IPv6 IGPs
+				// (#2943). FRR itself enables both address families for a
+				// configured `router isis`, so emitting both matches its defaults;
+				// on an interface with no IPv6 address there is nothing to
+				// advertise and the line is inert.
+				fmt.Fprintf(&b, " ipv6 router isis xpf\n")
+				// #8450: the per-interface circuit type. ISISInterface.Level was
+				// compiled and stored and then never rendered, so an interface an
+				// operator restricted to one level kept forming adjacencies at the
+				// ROUTER-WIDE is-type — dead config that fails OPEN. An empty value
+				// renders no line, which is the correct "inherit the router-wide
+				// is-type" behaviour in both FRR and Junos. An unrecognised value
+				// also renders no line rather than a broken one: the strict commit
+				// gate rejects it, and on the tolerant Load / peer-sync path
+				// (#1960) an omitted circuit-type is the pre-#8450 behaviour, which
+				// is recoverable, where an invalid `isis circuit-type <junk>` line
+				// would fail the WHOLE frr-reload (#1880/#2223).
+				if ct, ok := config.CanonicalISISCircuitType(iface.Level); ok && ct != "" {
+					fmt.Fprintf(&b, " isis circuit-type %s\n", ct)
+				}
+				if iface.Passive {
+					b.WriteString(" isis passive\n")
+				}
+				if iface.Metric < 0 || iface.Metric > config.MaxISISMetric {
+					slog.Warn("frr: omitting invalid IS-IS interface metric (#11823)",
+						"interface", sanitizeFRRValue(iface.Name), "metric", iface.Metric)
+				} else if iface.Metric > 0 {
+					fmt.Fprintf(&b, " isis metric %d\n", iface.Metric)
+				}
+				// #14399/#14977: per-interface type with NO key renders
+				// UNAUTHENTICATED (see the area/domain belt above); that
+				// shape is now omitted before this loop (#14977), so this
+				// warning is unreachable for it.
+				if iface.AuthKey == "" && !config.AuthTypeAbsent(iface.AuthType) {
+					slog.Warn("frr: isis interface authentication-type is set with NO authentication-key; "+
+						"rendering UNAUTHENTICATED -- no interface password is emitted. Set "+
+						"authentication-key to authenticate (#14399)",
+						"interface", iface.Name, "authentication_type", iface.AuthType)
+				}
+				if iface.AuthKey != "" {
+					// #9105: an ABSENT type is not `unrecognized`, so this warning could not
+					// fire for it -- and it renders the key in CLEARTEXT exactly as a
+					// chosen `simple` does. Warn on both: the commit gate stops every NEW
+					// instance, this tells the operator about an existing one arriving
+					// through the tolerant load path. An unrecognized type no
+					// longer reaches here (#14977 omits the interface above).
+					if config.AuthTypeAbsent(iface.AuthType) {
+						slog.Warn("frr: isis interface authentication-key is set with NO authentication-type; "+
+							"rendering PLAINTEXT -- the key travels in clear in every PDU. Set "+
+							"authentication-type md5 to authenticate with a digest (#9105)",
+							"accepted", config.AuthTypeSpellings())
+					}
+					// #9496: the per-interface pair goes through the same #9050 belt as
+					// every other routing-auth site. sanitizeFRRValue maps a TAB into a
+					// splitter and passes a space through, so a whitespace secret arriving
+					// via a tolerant load, peer sync or rollback rendered a splittable line.
+					// #14977: emit only the token pre-validated before the loop.
+					if config.AuthTypeIsMD5(iface.AuthType) {
+						fmt.Fprintf(&b, " isis password md5 %s\n", isisIfaceTok14977[iface.Name])
+					} else {
+						fmt.Fprintf(&b, " isis password clear %s\n", isisIfaceTok14977[iface.Name])
+					}
+				}
+				// `isis bfd` / `isis bfd profile <name>` are interface-scoped
+				// commands and MUST be emitted INSIDE the interface block,
+				// before `exit`. Emitting them after `exit` lands them at
+				// global config scope, which vtysh rejects — and one rejected
+				// line fails the WHOLE managed-section reload (#1880/#2223),
+				// breaking every IS-IS interface with BFD enabled. This mirrors
+				// the OSPFv3 per-interface BFD ordering above (#2942).
+				if iface.BFD {
+					if iface.BFDInterval > 0 || iface.BFDMultiplier > 0 {
+						profile := bfdProfileName(iface.BFDInterval, iface.BFDMultiplier)
+						bfd.addProfile(profile, bfdProfile{iface.BFDInterval, iface.BFDMultiplier})
+						fmt.Fprintf(&b, " isis bfd profile %s\n", profile)
+					} else {
+						b.WriteString(" isis bfd\n")
+					}
+				}
+				b.WriteString("exit\n!\n")
+			}
+		} // isisRender14977 (interfaces)
 	}
 
 	// Accumulate BFD peer entries for BGP neighbors with BFD enabled. The

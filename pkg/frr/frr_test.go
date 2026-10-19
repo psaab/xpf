@@ -5159,9 +5159,17 @@ func TestGenerateProtocols_NewlineFreeTextDoesNotInject(t *testing.T) {
 		LocalAS: 65000,
 		Neighbors: []*config.BGPNeighbor{
 			{
-				Address:      "10.0.0.1",
-				PeerAS:       65001,
-				Description:  "peer\nno router bgp 65000",
+				Address:     "10.0.0.1",
+				PeerAS:      65001,
+				Description: "peer\nno router bgp 65000",
+			},
+			{
+				// #14977: this neighbor carries the unrenderable
+				// password, so it is excluded entirely; keep it a
+				// SEPARATE neighbor from the description control
+				// above so both belts stay observable.
+				Address:      "10.0.0.2",
+				PeerAS:       65002,
 				AuthPassword: "pw\nagentx",
 			},
 		},
@@ -5188,8 +5196,15 @@ func TestGenerateProtocols_NewlineFreeTextDoesNotInject(t *testing.T) {
 	// emitting a token FRR would either truncate to `pw` (a silently weakened
 	// secret) or refuse -- and a refused line fails the whole frr-reload, which
 	// takes down every protocol on the box rather than one adjacency.
-	if strings.Contains(got, " neighbor 10.0.0.1 password ") {
+	//
+	// #14977 extends the same logic to the neighbor: a peer that does not
+	// require MD5 would establish an UNAUTHENTICATED session with a
+	// password-less declaration, so the neighbor is excluded entirely.
+	if strings.Contains(got, " neighbor 10.0.0.2 password ") {
 		t.Errorf("a password that is not a single vtysh token was emitted:\n%s", got)
+	}
+	if strings.Contains(got, "10.0.0.2") {
+		t.Errorf("the neighbor with an unrenderable password was still declared (unauthenticated adjacency):\n%s", got)
 	}
 }
 
