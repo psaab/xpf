@@ -221,9 +221,20 @@ pub(crate) struct StaticNatTable {
     /// scanned all `(ip, port)` keys to find the few bearing on its
     /// destination. Values are `(port, index-within-dnat-vec)` pairs rebuilt
     /// wholesale at the end of `from_snapshots` (the only constructor), so
-    /// the index can never drift from `dnat`. `snat` needs no index: its
-    /// only probe already keys by the packet source.
+    /// the index can never drift from `dnat`.
+    ///
+    /// #15790: one external IP can host several port keys (`(ip, Some(80))`,
+    /// `(ip, Some(443))`, `(ip, None)`), so the build must EXTEND the
+    /// per-IP Vec across keys — an `insert` keeps only the last-iterated
+    /// key's entries and hides the rest from every indexed probe (the
+    /// #15534 sibling bug in `DnatTable`, ported here).
     dnat_by_dst: FxHashMap<IpAddr, Vec<(Option<u16>, usize)>>,
+    /// #15790: per-source secondary index over `snat`, same shape and
+    /// construction as `dnat_by_dst`. The outbound leg of
+    /// `flowless_l4_translation_possible` previously scanned every
+    /// `(internal_ip, port)` key to find the packet source's entries; it
+    /// now visits only that source's entries.
+    snat_by_src: FxHashMap<IpAddr, Vec<(Option<u16>, usize)>>,
     /// #3031: block-to-block (subnet) static-NAT rules. A source prefix maps
     /// 1:1 by offset to an equal-length destination prefix. These cannot be
     /// keyed by exact IP, so they are scanned linearly on the session-miss
@@ -575,19 +586,26 @@ impl StaticNatTable {
                 ingress_ifname,
                 ingress_routing_instance,
             ) && source_ok(&entry.source, Some(src_ip))
-        }) || self.snat.iter().any(|((internal_ip, port), entries)| {
-            *internal_ip == src_ip
-                && port.is_some()
-                && entries.iter().any(|entry| {
-                    static_scope_ok(
-                        &entry.from_zone,
-                        &entry.from_interface,
-                        &entry.from_routing_instance,
-                        egress_zone,
-                        egress_ifname,
-                        egress_routing_instance,
-                    ) && source_ok(&entry.source, Some(dst_ip))
-                })
+        }) || self.snat_by_src.get(&src_ip).is_some_and(|indexed| {
+            // #15790: only this source's port-bearing `snat` entries,
+            // via the secondary index (was a whole-`snat`-map scan).
+            indexed.iter().any(|(port, idx)| {
+                port.is_some()
+                    && self
+                        .snat
+                        .get(&(src_ip, *port))
+                        .and_then(|entries| entries.get(*idx))
+                        .is_some_and(|entry| {
+                            static_scope_ok(
+                                &entry.from_zone,
+                                &entry.from_interface,
+                                &entry.from_routing_instance,
+                                egress_zone,
+                                egress_ifname,
+                                egress_routing_instance,
+                            ) && source_ok(&entry.source, Some(dst_ip))
+                        })
+            })
         })
     }
     /// Whether an unavailable-L4 static DNAT mapping could precede an
@@ -677,20 +695,29 @@ impl StaticNatTable {
                 ingress_routing_instance,
             ) && source_ok(source, Some(src_ip))
         };
-        self.dnat.iter().any(|((external_ip, port), entries)| {
-            *external_ip == dst_ip
-                && match port {
+        // #15790: only `dst_ip`'s entries via `dnat_by_dst` (was a
+        // whole-`dnat`-map scan); the port gate and per-entry scope /
+        // source predicates are unchanged, and `any` is order-insensitive.
+        // Blocks stay a linear scan: prefix rules are operator-bounded
+        // and cannot be keyed by exact IP (same posture as #15116).
+        self.dnat_by_dst.get(&dst_ip).is_some_and(|indexed| {
+            indexed.iter().any(|(port, idx)| {
+                (match port {
                     Some(p) => port_ok && *p == dst_port,
                     None => true,
-                }
-                && entries.iter().any(|entry| {
-                    scoped(
-                        &entry.from_zone,
-                        &entry.from_interface,
-                        &entry.from_routing_instance,
-                        &entry.source,
-                    )
-                })
+                }) && self
+                    .dnat
+                    .get(&(dst_ip, *port))
+                    .and_then(|entries| entries.get(*idx))
+                    .is_some_and(|entry| {
+                        scoped(
+                            &entry.from_zone,
+                            &entry.from_interface,
+                            &entry.from_routing_instance,
+                            &entry.source,
+                        )
+                    })
+            })
         }) || self.blocks.iter().any(|blk| {
             blk.external.contains(dst_ip)
                 && scoped(
@@ -869,15 +896,27 @@ impl StaticNatTable {
                 .or_default()
                 .push(entry);
         }
-        // #15116: build the per-destination index once, from the finished
-        // `dnat` map, so it cannot drift from the entries it indexes.
+        // #15116: build the per-destination indexes once, from the finished
+        // maps, so they cannot drift from the entries they index.
+        // #15790: EXTEND across port keys sharing one IP — several
+        // `(ip, port)` keys map to the same index bucket, so an `insert`
+        // would keep only the last-iterated key's entries (the #15534
+        // sibling bug) and hide the rest from every indexed probe.
         for ((ip, port), entries) in &table.dnat {
             let indexed: Vec<(Option<u16>, usize)> = entries
                 .iter()
                 .enumerate()
                 .map(|(i, _)| (*port, i))
                 .collect();
-            table.dnat_by_dst.insert(*ip, indexed);
+            table.dnat_by_dst.entry(*ip).or_default().extend(indexed);
+        }
+        for ((ip, port), entries) in &table.snat {
+            let indexed: Vec<(Option<u16>, usize)> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (*port, i))
+                .collect();
+            table.snat_by_src.entry(*ip).or_default().extend(indexed);
         }
         table
     }
