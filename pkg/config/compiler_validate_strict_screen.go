@@ -137,9 +137,10 @@ func validateScreenNumericStrict(cfg *Config) error {
 // warning. SRX fails commit on an unknown screen option.
 //
 // The supported set is EXACTLY the compileScreen switch cases: icmp
-// {ping-death, fragment, flood}; ip {source-route-option, tear-drop, ip-sweep
-// {threshold}}; tcp {land, winnuke, syn-frag, syn-fin, no-flag, fin-no-ack,
-// syn-flood {alarm/attack/source/destination-threshold, timeout}, port-scan
+// {ping-death, fragment, flood, ip-sweep{threshold}}; ip {source-route-option,
+// tear-drop, ip-sweep {threshold}}; tcp {land, winnuke, syn-frag, syn-fin,
+// no-flag/tcp-no-flag, fin-no-ack, syn-flood
+// {alarm/attack/source/destination-threshold, timeout}, port-scan
 // {threshold}}; udp {flood}; limit-session {source-ip-based,
 // destination-ip-based}. These are the leaves compileScreen ACCEPTS (records a
 // typed field for) — most also map to a field the userspace screen engine
@@ -183,8 +184,8 @@ func validateScreenUnknownStrict(cfg *Config) error {
 				"option (the dataplane does not enforce it, so it would be "+
 				"silently dropped and the protection the operator believes is "+
 				"enabled would be absent); remove it or use a supported option "+
-				"such as icmp ping-death/fragment/flood, ip source-route-option/tear-drop/"+
-				"ip-sweep, tcp land/winnuke/syn-frag/syn-fin/no-flag/fin-no-ack/"+
+				"such as icmp ping-death/fragment/flood/ip-sweep, ip source-route-option/tear-drop/"+
+				"ip-sweep, tcp land/winnuke/syn-frag/syn-fin/no-flag/tcp-no-flag/fin-no-ack/"+
 				"syn-flood/port-scan, udp flood, or limit-session",
 			name, profile.UnknownLeaves[0])
 	}

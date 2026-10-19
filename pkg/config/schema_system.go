@@ -1384,7 +1384,11 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 			validator:     ValidateEnum([]string{"v1", "v2", "all"}),
 			children:      nil,
 		},
-		"categories": {desc: "Trap categories to send to this group", args: 1, multi: true, placeholder: "<category>", children: nil},
+		// #15256 A85-02: Junos trap categories are a closed vocabulary;
+		// a typo (`linkk`) must not commit clean. xpf emits only `link`
+		// today — valid-but-unemitted categories compile with an advisory
+		// from compileSNMP (zero-trap group warning).
+		"categories": {desc: "Trap categories to send to this group", args: 1, multi: true, placeholder: "<category>", valueType: ValueEnumOf, valueDesc: "Trap category (Junos vocabulary)", valueExamples: []string{"link", "authentication", "chassis", "configuration", "routing"}, validator: ValidateEnum([]string{"authentication", "chassis", "chassis-cluster", "configuration", "link", "otn-alarms", "remote-operations", "rmon-alarm", "routing", "services", "sonet-alarms", "startup", "timing-events", "vrrp-events"}), children: nil, allChildKeysAreValues: true},
 	}},
 	"v3": {desc: "SNMPv3", children: map[string]*schemaNode{
 		"usm": {desc: "USM", children: map[string]*schemaNode{

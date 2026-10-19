@@ -500,6 +500,10 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				// trailing `threshold 500`, which is the same silent weakening
 				// these issues are about.
 				"ping-death": {desc: "Drop oversized ICMP (ping of death)", children: nil},
+				// #15256 A85-01: Junos `icmp ip-sweep` alias of `ip ip-sweep`.
+				"ip-sweep": {desc: "IP sweep protection (Junos icmp placement)", children: map[string]*schemaNode{
+					"threshold": {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
+				}},
 				"flood": {desc: "ICMP flood protection", children: map[string]*schemaNode{
 					"threshold": {desc: "Detection threshold", args: 1, placeholder: "<number>", children: nil},
 				}},
@@ -520,6 +524,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"syn-frag":   {desc: "Drop fragmented SYN", children: nil},
 				"syn-fin":    {desc: "Drop SYN+FIN", children: nil},
 				"no-flag":    {desc: "Drop TCP with no flags set", children: nil},
+				"tcp-no-flag": {desc: "Drop TCP with no flags set (Junos spelling)", children: nil},
 				"fin-no-ack": {desc: "Drop FIN without ACK", children: nil},
 			}},
 			"ip": {desc: "IP screening", closedWorldOpaque: true, children: map[string]*schemaNode{

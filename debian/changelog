@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Accept Junos screen spellings `icmp ip-sweep` and
+    `tcp tcp-no-flag` as aliases of `ip ip-sweep` / `tcp no-flag`;
+    close the port-mirroring schema and reject unmodelled
+    port-mirroring statements, family/egress scopes, the
+    instance-less global form, and zero-ingress instances at strict
+    commit (tolerant load warns); validate SNMP trap-group
+    categories against the Junos vocabulary and warn when a group
+    scopes to no category xpf emits; correct feature-gaps,
+    feature-coverage, and userspace FEATURES documentation to match
+    the code (#15256).
   * Preserve pre-existing foreign content at the four managed
     /usr/local/sbin names on first install instead of replacing it
     with the staged symlink: a regular file or directory is moved

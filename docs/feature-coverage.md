@@ -133,8 +133,8 @@ the userspace dataplane admission boundary is in
 
 ## Flow processing
 
-- **TCP MSS clamping** in the userspace AF_XDP dataplane (all-tcp,
-  ipsec-vpn, and GRE gre-in/gre-out).
+- **TCP MSS clamping** in the userspace AF_XDP dataplane (all-tcp
+  and GRE gre-in/gre-out; `ipsec-vpn` is rejected at commit — #2486).
 - **Path MTU Discovery** on the forwarding path: a forwarded frame that
   exceeds the effective egress MTU (the minimum of the nonzero egress
   interface MTU and selected route RTAX_MTU) and is not transparently TCP-segmented
@@ -381,7 +381,7 @@ the userspace dataplane admission boundary is in
   carries a monotonic config generation and applies through a single-consumer
   ordered queue, so a rapid commit pair cannot leave the standby on the older
   config (#3931).
-- **IPsec SA sync**: shared IKE/ESP state across cluster nodes.
+- **IPsec SA sync**: not synchronized — SAs are not shared across cluster nodes; the primary sends active connection names every 30s and a new primary re-initiates each tunnel via `swanctl --initiate`, so failover has a per-tunnel IKE renegotiation window (see feature-gaps.md IPsec SA Synchronization, #9415).
 - **Dual fabric links**: independent fab0/fab1 for redundancy (no
   bonding).
 - **Fabric cross-chassis forwarding**: redirects to peer when FIB fails

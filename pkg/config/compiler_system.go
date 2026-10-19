@@ -2852,6 +2852,31 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 						}
 					}
 				}
+				// #15256 A85-02: validate category tokens against the
+				// Junos vocabulary (compiler gate for direct callers;
+				// SchemaValidate enum is the commit-path twin) and warn
+				// when the group scopes to no category xpf emits (only
+				// `link` today) — a silent zero-trap group otherwise.
+				if len(tg.Categories) > 0 {
+					hasEmitted := false
+					for _, cat := range tg.Categories {
+						lc := strings.ToLower(strings.TrimSpace(cat))
+						if !validTrapCategory15256(lc) {
+							if !lenient {
+								return fmt.Errorf("snmp trap-group %q: invalid trap category %q (valid Junos categories: authentication, chassis, chassis-cluster, configuration, link, otn-alarms, remote-operations, rmon-alarm, routing, services, sonet-alarms, startup, timing-events, vrrp-events)", tgName, cat)
+							}
+							if cfg != nil {
+								cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: invalid trap category %q (downgraded to warning on tolerant path; ignored at runtime)", tgName, cat))
+							}
+						}
+						if lc == "link" {
+							hasEmitted = true
+						}
+					}
+					if !hasEmitted && cfg != nil {
+						cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("snmp trap-group %q: categories %v include no category xpf emits (only \"link\" is emitted today), so this group will receive no traps — add \"link\" or remove the categories scope if traps are expected (#15256)", tgName, tg.Categories))
+					}
+				}
 				// #2990: a trap group with no targets sends nothing. Strict:
 				// reject rather than presenting a configured-but-inert group
 				// (this also catches a bare `set snmp trap-group g1` with no
