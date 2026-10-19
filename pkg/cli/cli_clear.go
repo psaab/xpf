@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/cmdtree"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc/metadata"
@@ -732,8 +733,26 @@ func (c *CLI) handleClearDHCP(args []string) error {
 	}
 
 	if ifName != "" {
-		if err := c.dhcp.ClearDUID(ifName); err != nil {
-			return fmt.Errorf("clear DUID: %w", err)
+		// #15756: resolve the operator spelling (Junos key, ifd.unit,
+		// Linux form, lease key) through the active config to the lease
+		// key(s) the DUID is persisted under, exactly like renew (#15227).
+		// Passing the raw spelling to ClearDUID rejected every slash-named
+		// interface at the filename validator and silently no-opped on
+		// unit-0 / non-matching-VLAN spellings whose key differs. With no
+		// store only a lease-key-shaped name resolves (idempotent clear);
+		// a Junos spelling refuses rather than silently succeeding.
+		var cfg *config.Config
+		if c.store != nil {
+			cfg = c.store.ActiveConfig()
+		}
+		keys, rerr := cfg.ResolveDHCPClientIdentifierTargets(ifName)
+		if rerr != nil {
+			return rerr
+		}
+		for _, key := range keys {
+			if err := c.dhcp.ClearDUID(key); err != nil {
+				return fmt.Errorf("clear DUID: %w", err)
+			}
 		}
 		fmt.Printf("DHCPv6 DUID cleared for %s\n", ifName)
 		return nil

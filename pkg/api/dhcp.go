@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/grpcapi"
 )
@@ -106,9 +107,24 @@ func (s *Server) clearDHCPIdentifiersHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	if req.Interface != "" {
-		if err := s.dhcp.ClearDUID(req.Interface); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+		// #15756: resolve through the active config exactly like the gRPC
+		// surface; the raw spelling rejected slash names and silently
+		// no-opped on unit/VLAN/unknown names. No store refuses (400 via
+		// the resolver diagnostic) rather than silently succeeding.
+		var cfg *config.Config
+		if s.store != nil {
+			cfg = s.store.ActiveConfig()
+		}
+		keys, rerr := cfg.ResolveDHCPClientIdentifierTargets(req.Interface)
+		if rerr != nil {
+			writeError(w, http.StatusBadRequest, rerr.Error())
 			return
+		}
+		for _, key := range keys {
+			if err := s.dhcp.ClearDUID(key); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		writeOK(w, map[string]string{"message": fmt.Sprintf("DHCPv6 DUID cleared for %s", req.Interface)})
 		return

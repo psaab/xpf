@@ -1039,8 +1039,16 @@ var OperationalTree = map[string]*Node{
 			"all": {Desc: "Clear all firewall filter counters"},
 		}},
 		"dhcp": {Desc: "Clear DHCP information", Children: map[string]*Node{
-			// #9064: takes `interface <name>`.
-			"client-identifier": {Desc: "Clear DHCPv6 DUID(s)", AcceptsArgs: true},
+			"client-identifier": {Desc: "Clear DHCPv6 DUID(s)", AcceptsArgs: true, Children: map[string]*Node{
+				// #15756: `interface <name>` completion was missing entirely
+				// (#15227 residual): offer the same resolvable config-key
+				// unit spellings as `request dhcp renew`, never the hidden
+				// Linux lease key. The name slot is mandatory — the handler
+				// rejects a dangling `interface` before any mutation.
+				"interface": {Desc: "Clear DUID for one interface", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
+					return config.DHCPClientIdentifierCompletionNames(cfg)
+				}},
+			}},
 		}},
 	}},
 	"request": {Desc: "Make system-level requests", Children: map[string]*Node{

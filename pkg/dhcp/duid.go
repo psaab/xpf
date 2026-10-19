@@ -54,7 +54,12 @@ func (m *Manager) DUIDs() []DUIDInfo {
 }
 
 // ClearDUID removes the persisted DUID for an interface. The next DHCPv6
-// request will generate a fresh DUID.
+// request will generate a fresh DUID. ifaceName must be the lease key
+// (config.DHCPLeaseIfName), not an operator spelling: operator surfaces
+// resolve Junos/Linux/lease-key spellings through
+// Config.ResolveDHCPClientIdentifierTargets first (#15756). An absent
+// file is idempotent success — callers that must not silently succeed on
+// an unknown name resolve (and refuse) before calling here.
 func (m *Manager) ClearDUID(ifaceName string) error {
 	// Validate BEFORE mutating in-memory state or touching the filesystem so a
 	// crafted interface name is refused without side effects (#4857).

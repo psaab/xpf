@@ -32,10 +32,47 @@ import (
 // so only an already-lease-key-shaped target survives unchanged; the
 // manager then reports its own "no DHCP client running" for it, which
 // is the truthful diagnosis in that build.
+// ResolveDHCPLeaseTarget resolves target for renew; see
+// ResolveDHCPLeaseTargetFor.
 func (c *Config) ResolveDHCPRenewTarget(target string) (string, error) {
+	return c.ResolveDHCPLeaseTargetFor(target, "renew")
+}
+
+// ResolveDHCPLeaseTargetFor maps an operator-supplied DHCP target (renew or
+// DUID-clear) to the lease key the DHCP manager runs its client under
+// (DHCPLeaseIfName), accepting every legitimate operator spelling: the Junos
+// config key with optional unit, its Linux form, and the already-resolved
+// lease key itself (#15756 generalizes the #15227 A43-04 renew resolution to
+// client-identifier clears). verb ("renew"/"clear") only shapes diagnostics.
+// A bare interface resolves to its sole DHCP unit; several DHCP units refuse
+// with the resumable unit list. Unknown/non-DHCP targets refuse — resolution
+// never invents a lease key. Nil/empty config passes the raw target through
+// (renew legacy) except for clear, where the caller must refuse unknown
+// names fail-closed rather than silently succeeding on a non-matching key:
+// callers that need that strictness check the config themselves (see the
+// clear handlers); this helper's nil-config passthrough is renew-only.
+// IsDHCPLeaseKeyName reports whether s is shape-valid as a lease key:
+// a plausible Linux interface name (the same predicate the DUID state
+// file uses, #4857). It carries no config knowledge — it only separates
+// a lease-key-shaped spelling, whose clear is idempotent even when the
+// file is absent, from a name that can never be a lease key.
+func IsDHCPLeaseKeyName(s string) bool {
+	if s == "" || len(s) > 15 || s == "." || s == ".." {
+		return false
+	}
+	for i := range s {
+		switch s[i] {
+		case '/', '\\', 0, ' ', '\t', '\n', '\r':
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Config) ResolveDHCPLeaseTargetFor(target, verb string) (string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
-		return "", fmt.Errorf("dhcp renew requires target interface")
+		return "", fmt.Errorf("dhcp %s requires target interface", verb)
 	}
 	if c == nil || len(c.Interfaces.Interfaces) == 0 {
 		return target, nil
@@ -103,13 +140,45 @@ func dashToSlashAlias(target string) string {
 // interface, so a unit/DHCP refusal must not fall through to the lease-key
 // pass and re-emerge as a confusing "no client" message.
 func (c *Config) resolveRenewOnInterface(form string) (leaseKey string, handled bool, err error) {
+	return c.resolveLeaseOnInterface(form)
+}
+
+// resolveClearOnInterface resolves form for a DUID clear: a bare interface
+// yields every DHCP lease key on it (the caller clears them all — clearing
+// is idempotent DUID deletion, not a lease action, so widening to the named
+// interface's own units is the scoped Junos meaning, #15756); a unit-
+// qualified form yields exactly that unit's key. Errors stay final.
+func (c *Config) resolveClearOnInterface(form string) (leaseKeys []string, handled bool, err error) {
+	split := c.SplitInterfaceUnitRef(form)
+	ifc := c.Interfaces.Interfaces[split.Base]
+	if ifc == nil {
+		return nil, false, nil
+	}
+	if !split.HasUnit || split.UnitTok == "" {
+		keys := c.dhcpLeaseKeysForInterface(split.Base)
+		if len(keys) == 0 {
+			return nil, true, fmt.Errorf("no DHCP client running on interface %s", form)
+		}
+		return keys, true, nil
+	}
+	unitNum, _, uerr := CanonicalLogicalUnit(split.UnitTok)
+	if uerr != nil {
+		return nil, true, fmt.Errorf("no DHCP client running on interface %s", form)
+	}
+	unit := ifc.Units[unitNum]
+	if unit == nil || (!unit.DHCP && !unit.DHCPv6) {
+		return nil, true, fmt.Errorf("no DHCP client running on interface %s", form)
+	}
+	return []string{DHCPLeaseIfName(split.Base, unit)}, true, nil
+}
+
+func (c *Config) resolveLeaseOnInterface(form string) (leaseKey string, handled bool, err error) {
 	split := c.SplitInterfaceUnitRef(form)
 	ifc := c.Interfaces.Interfaces[split.Base]
 	if ifc == nil {
 		return "", false, nil
 	}
 	if !split.HasUnit || split.UnitTok == "" {
-		// Bare interface: renew the unit(s) it actually runs DHCP on.
 		keys := c.dhcpLeaseKeysForInterface(split.Base)
 		switch len(keys) {
 		case 0:
@@ -191,4 +260,92 @@ func DHCPRenewCompletionNames(cfg *Config) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ResolveDHCPClientIdentifierTargets maps an operator-supplied
+// `clear dhcp client-identifier interface <name>` target to the lease
+// key(s) whose persisted DUID must be deleted (#15756). It accepts the
+// same spellings as ResolveDHCPRenewTarget. A bare interface yields every
+// DHCP lease key on that interface (clearing is idempotent deletion, so
+// the scoped Junos meaning is all of the named interface's own units); a
+// unit-qualified name yields exactly that unit's key — resolved through
+// the unit's vlan-id, never its unit number, so `ge-0/0/3.7` clears the
+// `ge-0-0-3.50` file a `.7`-suffixed clear used to miss. Names that can
+// never be lease keys (any Junos slash spelling that matches no declared
+// interface, traversal, whitespace) refuse fail-closed.
+//
+// A lease-key-shaped target that matches no configured unit still
+// resolves to itself: clearing it is idempotent even when the file is
+// absent (the ClearDUID contract, and the behaviour the REST
+// chunked-body fixture pins for config-less builds), which also covers
+// a DUID persisted by a since-removed interface. That is deliberately
+// NOT silent success on a non-matching name — the operator named the
+// exact key whose file is deleted-or-confirmed-absent.
+func (c *Config) ResolveDHCPClientIdentifierTargets(target string) ([]string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, fmt.Errorf("clear dhcp client-identifier requires target interface")
+	}
+	if c == nil || len(c.Interfaces.Interfaces) == 0 {
+		// No config to resolve through: only an already-lease-key-shaped
+		// target survives (its clear is idempotent even when absent, the
+		// contract the REST chunked-body fixture pins); anything else
+		// refuses rather than silently succeeding on a non-matching key.
+		if IsDHCPLeaseKeyName(target) {
+			return []string{target}, nil
+		}
+		return nil, fmt.Errorf("no DHCP client running on interface %s", target)
+	}
+	if key, ok := c.dhcpLeaseKeyByExact(target); ok {
+		return []string{key}, nil
+	}
+	for _, form := range []string{target, dashToSlashAlias(target)} {
+		if form == "" {
+			continue
+		}
+		if keys, handled, err := c.resolveClearOnInterface(form); handled {
+			return keys, err
+		}
+	}
+	// Pass 3: a dotted target whose base names a declared interface (in
+	// either spelling) but whose suffix matched neither a unit number
+	// nor a vlan-id above (`ge-0-0-3.99` on ge-0/0/3 unit 7/vlan 50)
+	// names no configured unit — refuse. Without this the shape fallback
+	// would silently succeed while the intended unit's DUID survives. A
+	// base naming NO declared interface (a since-removed interface's
+	// exact key, an unconfigured `reth0.0`) stays idempotent below.
+	if base, _, hasDot := strings.Cut(target, "."); hasDot {
+		declared := false
+		for ifName := range c.Interfaces.Interfaces {
+			if ifName == base || LinuxIfName(ifName) == base {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			if _, ok := c.Interfaces.Interfaces[dashToSlashAlias(base)]; ok {
+				declared = true
+			}
+		}
+		if declared {
+			return nil, fmt.Errorf("no DHCP client running on interface %s", target)
+		}
+	}
+	// Unresolvable against the config, but lease-key-shaped with no
+	// declared base: an idempotent clear of a possibly-absent DUID
+	// (e.g. an interface removed from the config after its DUID
+	// persisted), matching ClearDUID's absent-file contract. Names that
+	// can never be lease keys (slashes, traversal, whitespace) refuse.
+	if IsDHCPLeaseKeyName(target) {
+		return []string{target}, nil
+	}
+	return nil, fmt.Errorf("no DHCP client running on interface %s", target)
+}
+
+// DHCPClientIdentifierCompletionNames returns the spellings tab completion
+// should offer for `clear dhcp client-identifier interface <name>`
+// (#15756): the same resolvable config-key unit spellings as renew, never
+// the hidden Linux lease key.
+func DHCPClientIdentifierCompletionNames(cfg *Config) []string {
+	return DHCPRenewCompletionNames(cfg)
 }

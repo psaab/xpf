@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dhcp"
 )
 
@@ -94,6 +95,26 @@ func TestHandleClearDHCP_MalformedSelectorGuard_5896(t *testing.T) {
 		},
 	}
 
+	// #15756: the scoped case now resolves through the active config, so
+	// the fixture carries a committed store declaring both interfaces.
+	clearStore15756 := func(t *testing.T) *configstore.Store {
+		t.Helper()
+		st, err := configstore.New(filepath.Join(t.TempDir(), "cfg.db"))
+		if err != nil {
+			t.Fatalf("configstore.New: %v", err)
+		}
+		if err := st.EnterConfigure(); err != nil {
+			t.Fatalf("EnterConfigure: %v", err)
+		}
+		if err := st.LoadMerge("interfaces { ge-0/0/0 { unit 0 { family inet { dhcp; } } } ge-0/0/1 { unit 0 { family inet { dhcp; } } } }"); err != nil {
+			t.Fatalf("LoadMerge: %v", err)
+		}
+		if _, err := st.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		return st
+	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -103,7 +124,7 @@ func TestHandleClearDHCP_MalformedSelectorGuard_5896(t *testing.T) {
 			}
 			seedDUIDs(t, dir, ifA, ifB)
 
-			c := &CLI{dhcp: mgr}
+			c := &CLI{dhcp: mgr, store: clearStore15756(t)}
 			err = c.handleClearDHCP(tc.args)
 
 			if tc.wantErr && err == nil {
@@ -119,6 +140,128 @@ func TestHandleClearDHCP_MalformedSelectorGuard_5896(t *testing.T) {
 				t.Errorf("args %v: DUID %s present=%v, want %v", tc.args, ifB, got, tc.wantB)
 			}
 		})
+	}
+}
+
+// TestHandleClearDHCPResolvesOperatorSpellings15756 is the #15756
+// RED/GREEN cell: a scoped clear must delete the DUID persisted under
+// the lease key for every legitimate operator spelling, and must refuse
+// (deleting nothing) for unknown / non-DHCP names instead of silently
+// succeeding. Pre-fix, `ge-0/0/0` errored at ClearDUID's filename
+// validator (file survives), while `ge-0/0/0.0`-adjacent unit/VLAN/unknown
+// spellings returned success with the actual unit's file intact.
+func TestHandleClearDHCPResolvesOperatorSpellings15756(t *testing.T) {
+	newStore := func(t *testing.T) *configstore.Store {
+		t.Helper()
+		st, err := configstore.New(filepath.Join(t.TempDir(), "cfg.db"))
+		if err != nil {
+			t.Fatalf("configstore.New: %v", err)
+		}
+		if err := st.EnterConfigure(); err != nil {
+			t.Fatalf("EnterConfigure: %v", err)
+		}
+		if err := st.LoadMerge("interfaces { ge-0/0/0 { unit 0 { family inet { dhcp; } } } ge-0/0/3 { vlan-tagging; unit 7 { vlan-id 50; family inet6 { dhcpv6; } } } ge-0/0/1 { unit 0 { family inet { address 192.0.2.1/24; } } } }"); err != nil {
+			t.Fatalf("LoadMerge: %v", err)
+		}
+		if _, err := st.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		return st
+	}
+	clears := []struct{ in, key string }{
+		{"ge-0/0/0", "ge-0-0-0"},
+		{"ge-0/0/0.0", "ge-0-0-0"},
+		{"ge-0-0-0", "ge-0-0-0"},
+		{"ge-0/0/3.7", "ge-0-0-3.50"},
+		{"ge-0-0-3.7", "ge-0-0-3.50"},
+		{"ge-0-0-3.50", "ge-0-0-3.50"},
+		{"ge-0/0/3", "ge-0-0-3.50"},
+	}
+	for _, tc := range clears {
+		t.Run("clear "+tc.in, func(t *testing.T) {
+			dir := t.TempDir()
+			mgr, err := dhcp.New(dir, nil, nil)
+			if err != nil {
+				t.Fatalf("dhcp.New: %v", err)
+			}
+			seedDUIDs(t, dir, "ge-0-0-0", "ge-0-0-3.50")
+			c := &CLI{dhcp: mgr, store: newStore(t)}
+			if err := c.handleClearDHCP([]string{"client-identifier", "interface", tc.in}); err != nil {
+				t.Fatalf("clear %q: %v", tc.in, err)
+			}
+			if duidPresent(t, dir, tc.key) {
+				t.Errorf("clear %q: DUID under lease key %q survived", tc.in, tc.key)
+			}
+			other := "ge-0-0-3.50"
+			if tc.key == other {
+				other = "ge-0-0-0"
+			}
+			if !duidPresent(t, dir, other) {
+				t.Errorf("clear %q: unrelated DUID %q was deleted", tc.in, other)
+			}
+		})
+	}
+	for _, in := range []string{"ge-0/0/9", "ge-0/0/1", "ge-0/0/3.9", "ge-0-0-3.99"} {
+		t.Run("refuse "+in, func(t *testing.T) {
+			dir := t.TempDir()
+			mgr, err := dhcp.New(dir, nil, nil)
+			if err != nil {
+				t.Fatalf("dhcp.New: %v", err)
+			}
+			seedDUIDs(t, dir, "ge-0-0-0", "ge-0-0-3.50")
+			c := &CLI{dhcp: mgr, store: newStore(t)}
+			if err := c.handleClearDHCP([]string{"client-identifier", "interface", in}); err == nil {
+				t.Errorf("clear %q succeeded silently, want refusal", in)
+			}
+			if !duidPresent(t, dir, "ge-0-0-0") || !duidPresent(t, dir, "ge-0-0-3.50") {
+				t.Errorf("clear %q deleted a DUID despite refusing", in)
+			}
+		})
+	}
+	// Lease-key-shaped but unconfigured names clear idempotently on the
+	// exact key named, leaving other units' DUIDs untouched.
+	for _, in := range []string{"reth0.0"} {
+		t.Run("idempotent "+in, func(t *testing.T) {
+			dir := t.TempDir()
+			mgr, err := dhcp.New(dir, nil, nil)
+			if err != nil {
+				t.Fatalf("dhcp.New: %v", err)
+			}
+			seedDUIDs(t, dir, "ge-0-0-0", "ge-0-0-3.50")
+			c := &CLI{dhcp: mgr, store: newStore(t)}
+			if err := c.handleClearDHCP([]string{"client-identifier", "interface", in}); err != nil {
+				t.Errorf("clear %q: %v, want idempotent success", in, err)
+			}
+			if !duidPresent(t, dir, "ge-0-0-0") || !duidPresent(t, dir, "ge-0-0-3.50") {
+				t.Errorf("clear %q deleted a different unit's DUID", in)
+			}
+		})
+	}
+	// No store: a lease-key-shaped name still clears idempotently; a
+	// Junos spelling refuses rather than silently succeeding.
+	dir := t.TempDir()
+	mgr, err := dhcp.New(dir, nil, nil)
+	if err != nil {
+		t.Fatalf("dhcp.New: %v", err)
+	}
+	seedDUIDs(t, dir, "ge-0-0-0")
+	if err := (&CLI{dhcp: mgr}).handleClearDHCP([]string{"client-identifier", "interface", "ge-0-0-0"}); err != nil {
+		t.Errorf("no-store lease-key clear: %v, want idempotent success", err)
+	}
+	if duidPresent(t, dir, "ge-0-0-0") {
+		t.Error("no-store lease-key clear left ge-0-0-0 DUID behind")
+	}
+	dir2 := t.TempDir()
+	mgr2, err := dhcp.New(dir2, nil, nil)
+	if err != nil {
+		t.Fatalf("dhcp.New: %v", err)
+	}
+	seedDUIDs(t, dir2, "ge-0-0-0")
+	if err := (&CLI{dhcp: mgr2}).handleClearDHCP([]string{"client-identifier", "interface", "ge-0/0/0"}); err == nil {
+		t.Error("no-store Junos clear succeeded, want refusal")
+	}
+	if !duidPresent(t, dir2, "ge-0-0-0") {
+		t.Error("no-store Junos clear deleted the DUID despite refusing")
 	}
 }
 

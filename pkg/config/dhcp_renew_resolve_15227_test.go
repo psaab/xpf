@@ -99,3 +99,69 @@ func TestDHCPRenewCompletionNames15227(t *testing.T) {
 		t.Fatalf("nil-config completion = %v, want nil", names)
 	}
 }
+
+// TestResolveDHCPClientIdentifierTargets15756 pins #15756: the clear
+// resolver accepts the same spellings as renew, a bare interface yields
+// every DHCP lease key on it, and unknown/non-DHCP names refuse instead
+// of silently succeeding while deleting nothing.
+func TestResolveDHCPClientIdentifierTargets15756(t *testing.T) {
+	cfg := renewCfg15227()
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"ge-0/0/0", []string{"ge-0-0-0"}},
+		{"ge-0/0/0.0", []string{"ge-0-0-0"}},
+		{"ge-0-0-0", []string{"ge-0-0-0"}},
+		{"ge-0-0-0.0", []string{"ge-0-0-0"}},
+		{"ge-0/0/3.7", []string{"ge-0-0-3.50"}},
+		{"ge-0-0-3.7", []string{"ge-0-0-3.50"}},
+		{"ge-0-0-3.50", []string{"ge-0-0-3.50"}},
+		{"ge-0/0/3", []string{"ge-0-0-3.50"}},
+	}
+	for _, tc := range cases {
+		got, err := cfg.ResolveDHCPClientIdentifierTargets(tc.in)
+		if err != nil {
+			t.Errorf("ResolveDHCPClientIdentifierTargets(%q) err = %v, want %v", tc.in, err, tc.want)
+			continue
+		}
+		if len(got) != len(tc.want) || got[0] != tc.want[0] {
+			t.Errorf("ResolveDHCPClientIdentifierTargets(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	for _, in := range []string{"ge-0/0/1", "ge-0/0/1.0", "ge-0/0/9", "ge-0/0/3.9", "ge-0-0-3.99", "reth0/0", "../escape", ""} {
+		if got, err := cfg.ResolveDHCPClientIdentifierTargets(in); err == nil {
+			t.Errorf("ResolveDHCPClientIdentifierTargets(%q) = %v, want refusal", in, got)
+		}
+	}
+	// Lease-key-shaped but unconfigured names resolve to themselves: the
+	// clear is idempotent on the exact key named (absent file = success),
+	// never a silent no-op on a different unit's DUID.
+	for _, in := range []string{"reth0.0", "ge-0-0-9"} {
+		got, err := cfg.ResolveDHCPClientIdentifierTargets(in)
+		if err != nil || len(got) != 1 || got[0] != in {
+			t.Errorf("ResolveDHCPClientIdentifierTargets(%q) = %v, %v; want [%q]", in, got, err, in)
+		}
+	}
+	var nilCfg *Config
+	if got, err := nilCfg.ResolveDHCPClientIdentifierTargets("ge-0-0-0"); err != nil || len(got) != 1 || got[0] != "ge-0-0-0" {
+		t.Errorf("nil-config lease-key clear resolve = %v, %v; want [ge-0-0-0]", got, err)
+	}
+	if got, err := nilCfg.ResolveDHCPClientIdentifierTargets("ge-0/0/0"); err == nil {
+		t.Errorf("nil-config Junos clear resolve = %v, want refusal (never silent success)", got)
+	}
+	// Bare multi-unit interface clears all of its own units.
+	multi := &Config{Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+		"ge-0/0/4": {Name: "ge-0/0/4", Units: map[int]*InterfaceUnit{
+			0: {Number: 0, DHCP: true},
+			1: {Number: 1, VlanID: 10, DHCPv6: true},
+		}},
+	}}}
+	got, err := multi.ResolveDHCPClientIdentifierTargets("ge-0/0/4")
+	if err != nil || len(got) != 2 || got[0] != "ge-0-0-4" || got[1] != "ge-0-0-4.10" {
+		t.Errorf("bare multi-unit clear = %v, %v; want [ge-0-0-4 ge-0-0-4.10]", got, err)
+	}
+	if names := DHCPClientIdentifierCompletionNames(cfg); len(names) != 2 || names[0] != "ge-0/0/0.0" || names[1] != "ge-0/0/3.7" {
+		t.Errorf("clear completion names = %v, want [ge-0/0/0.0 ge-0/0/3.7]", names)
+	}
+}

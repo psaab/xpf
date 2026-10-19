@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc/status"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -117,22 +118,29 @@ func (s *Server) ClearDHCPClientIdentifier(_ context.Context, req *pb.ClearDHCPC
 	}
 
 	if req.Interface != "" {
-		if err := s.dhcp.ClearDUID(req.Interface); err != nil {
-			// #8629 (K94, the finding this issue was split from). Bare, this
-			// surfaced as codes.Unknown, so a caller could not tell a rejected
-			// interface name from a filesystem fault.
-			//
-			// RESIDUAL, stated rather than guessed at: ClearDUID has two error
-			// paths wanting different codes. `duidPath` refuses a crafted
-			// interface name (#4857) -- caller error, ideally InvalidArgument --
-			// while os.Remove failing is a server fault. Both arrive here as a
-			// plain fmt.Errorf string, so they are not distinguishable at this
-			// boundary without string-matching (fragile) or a typed error from
-			// pkg/dhcp (another package). Replicating the path-traversal
-			// validation here would put a second copy of a security check in a
-			// different package, free to drift. Internal is the honest answer
-			// for what is knowable at this boundary.
-			return nil, status.Errorf(codes.Internal, "clear DUID: %v", err)
+		// #15756: resolve the operator spelling (Junos key, ifd.unit,
+		// Linux form, lease key) through the active config to the lease
+		// key(s) the DUID is persisted under, exactly like dhcp-renew
+		// (#15227). Passing the raw spelling to ClearDUID rejected every
+		// slash-named interface and silently no-opped on unit-0 /
+		// non-matching-VLAN spellings whose key differs. With no store
+		// only a lease-key-shaped name resolves (idempotent clear); a
+		// Junos spelling refuses (NotFound) rather than silently succeeding.
+		var cfg *config.Config
+		if s.store != nil {
+			cfg = s.store.ActiveConfig()
+		}
+		keys, rerr := cfg.ResolveDHCPClientIdentifierTargets(req.Interface)
+		if rerr != nil {
+			return nil, status.Errorf(codes.NotFound, "%v", rerr)
+		}
+		for _, key := range keys {
+			if err := s.dhcp.ClearDUID(key); err != nil {
+				// #8629 residual (see git history): ClearDUID's validation
+				// refusal and os.Remove fault are indistinguishable here
+				// without a typed error, so Internal stays the honest code.
+				return nil, status.Errorf(codes.Internal, "clear DUID: %v", err)
+			}
 		}
 		return &pb.ClearDHCPClientIdentifierResponse{
 			Message: fmt.Sprintf("DHCPv6 DUID cleared for %s", req.Interface),
