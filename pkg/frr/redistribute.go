@@ -182,7 +182,9 @@ func redistProtocols(ps *config.PolicyStatement) []string {
 // (#14380): a term with no `from protocol` that can accept applies to
 // every source (redistPolicyForProtocol), so it adds the whole keyword
 // domain, filtered exactly like an explicit term — self excluded,
-// redistSourceFitsNode(proto, node) required. With no enclosing
+// redistSourceFitsNode(proto, node) required. Explicit tokens are
+// filtered the same way (#15011): a mixed policy must not re-add a
+// self or off-family explicit source via this union. With no enclosing
 // router (self/node both "") the whole domain renders. A no-from
 // reject term adds nothing (#14698): it can only deny.
 func redistProtocolsForNode(ps *config.PolicyStatement, self, node string) []string {
@@ -220,7 +222,26 @@ func redistProtocolsFiltered(ps *config.PolicyStatement, self, node string, expa
 			if !knownRedistProtocol(proto) {
 				continue
 			}
-			seen[normalizedRedistProtocol(proto)] = true
+			proto = normalizedRedistProtocol(proto)
+			// #15011: explicit tokens are filtered exactly like the
+			// no-from expansion below — self excluded and
+			// redistSourceFitsNode required — whenever a render
+			// node is in hand. redistProtocols passes self/node
+			// both "" so the explicit-only set (map definitions
+			// and the collision guard, where no node exists) is
+			// unchanged. Without this, a mixed policy (an explicit
+			// `from protocol bgp` term plus a no-from term) merged
+			// its unfiltered explicit set back in via
+			// redistProtocolsForNode, rendering FRR-invalid
+			// `redistribute bgp` under router bgp / `ospf6`
+			// under IPv4 and failing the whole managed reload.
+			if self != "" && proto == self {
+				continue
+			}
+			if !redistSourceFitsNode(proto, node) {
+				continue
+			}
+			seen[proto] = true
 		}
 	}
 	// Only the enumeration site (redistributeEntriesAt, via
@@ -510,8 +531,10 @@ func redistReferencedNodes14380(fc *FullConfig) map[string][][2]string {
 
 // redistReferencedProtocols14380 returns, per policy-statement, the
 // union of per-source protocols over the nodes that actually
-// reference it: the explicit set plus, for a no-from term, the
-// whole node-fitting domain at each referencing node.
+// reference it: the explicit set (for unreferenced-node map
+// definitions) plus, at each referencing node, the node-filtered
+// set — explicit tokens filtered by self/family (#15011) and, for
+// a no-from term, the whole node-fitting domain.
 func redistReferencedProtocols14380(ps *config.PolicyStatement, nodes [][2]string) []string {
 	seen := make(map[string]bool)
 	for _, proto := range redistProtocols(ps) {
