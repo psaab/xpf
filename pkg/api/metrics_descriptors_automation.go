@@ -69,6 +69,18 @@ func (c *xpfCollector) initAutomationDescriptors() {
 			"xpf_event_actions_dropped_total).",
 		nil, nil,
 	)
+	c.eventActionsSkippedNoChange = prometheus.NewDesc(
+		"xpf_event_actions_skipped_no_change_total",
+		"Total event-options remediation actions whose post-batch "+
+			"candidate was identical to the active config, so the commit "+
+			"was skipped: no rollback-history entry, no global-budget "+
+			"spend, and no commit+apply (#15022). The action still counts "+
+			"as committed and arms the per-policy cooldown. A steadily "+
+			"climbing value means a policy (typically a no-within "+
+			"restore-on-success on ping_test_completed) is re-asserting "+
+			"values that are already active.",
+		nil, nil,
+	)
 	c.eventAttributesInvalid = prometheus.NewDesc(
 		"xpf_event_attributes_match_invalid_total",
 		"Total times a malformed or unknown-field attributes-match line "+
