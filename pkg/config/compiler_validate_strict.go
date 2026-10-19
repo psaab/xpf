@@ -95,6 +95,11 @@ func validateTrailingTokensStrict(cfg *Config) error {
 	if err := checkBook("", cfg.Security.AddressBook); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := checkBook("address-book "+bn+" ", &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+	}
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)

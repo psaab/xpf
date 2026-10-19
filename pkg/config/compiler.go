@@ -1203,9 +1203,9 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err := validatePortMirroringZeroIngress15650(&cfg.ForwardingOptions, opts.lenientPortMirroring15256, &cfg.Warnings); err != nil {
 		return nil, fmt.Errorf("forwarding-options: %w", err)
 	}
-	if opts.lenientAddressBookNameCollision {
-		recordDroppedNamedAddressBookCollisions(tree, cfg)
-	}
+	// #15672: named books are now compiled (compileAddressBook), so the
+	// pre-#15672 dropped-named-book collision quarantine is gone; booked
+	// entries resolve through the attached-zone fold instead.
 	// #11367 rejects an ambiguous choice block; #11821 rejects conflicting
 	// duplicate actions. Both tolerant paths must stay fail-closed after
 	// author-ordered security roots have compiled.

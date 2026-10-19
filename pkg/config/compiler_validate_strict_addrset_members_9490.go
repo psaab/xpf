@@ -54,6 +54,11 @@ func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 	if err := unknownErr("global ", ab); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := unknownErr("address-book "+bn+" ", &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+	}
 	for _, zoneName := range sortedZoneNames(cfg) {
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {

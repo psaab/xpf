@@ -41,6 +41,11 @@ func validateAddressBookCIDRMaskSpellingStrict(cfg *Config) error {
 	if err := check("security global", cfg.Security.AddressBook); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := check(fmt.Sprintf("security address-book %q", bn), &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+	}
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)

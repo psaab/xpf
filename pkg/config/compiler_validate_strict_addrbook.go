@@ -96,6 +96,11 @@ func validateAddressBookNameCollisionStrict(cfg *Config) error {
 	if err := addressBookNameCollision("security address-book global", cfg.Security.AddressBook); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := addressBookNameCollision(fmt.Sprintf("security address-book %q", bn), &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+	}
 	// Walk zones in sorted order so the first-reported error is deterministic
 	// regardless of Go map iteration order.
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
@@ -236,6 +241,11 @@ func recordAddressBookNameCollisions(cfg *Config) {
 		}
 	}
 	record(cfg.Security.AddressBook)
+	for _, nb := range cfg.Security.NamedAddressBooks {
+		if nb != nil {
+			record(&nb.AddressBook)
+		}
+	}
 	for _, zone := range cfg.Security.Zones {
 		if zone != nil {
 			record(zone.AddressBook)
@@ -317,6 +327,11 @@ func validateAddressBookMappedPrefixesStrict(cfg *Config) error {
 	if err := check("security global", cfg.Security.AddressBook); err != nil {
 		return err
 	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := check(fmt.Sprintf("security address-book %q", bn), &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
+	}
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
@@ -387,6 +402,11 @@ func validateAddressBookDuplicatePrefixStrict(cfg *Config) error {
 	}
 	if err := check("", cfg.Security.AddressBook); err != nil {
 		return err
+	}
+	for _, bn := range sortedNamedBookNames15672(cfg.Security.NamedAddressBooks) {
+		if err := check(fmt.Sprintf("address-book %s ", bn), &cfg.Security.NamedAddressBooks[bn].AddressBook); err != nil {
+			return err
+		}
 	}
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
