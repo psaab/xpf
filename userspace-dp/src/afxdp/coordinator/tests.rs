@@ -13554,3 +13554,51 @@ fn v42_b11_01_refused_pptp_push_records_repair_debt_15153() {
     );
     crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
 }
+
+// #15091: publish_runtime_view must leave the policy book table
+// shared — cloning ForwardingState bumps the books Arc instead
+// of deep-cloning every feed-backed range vector.
+#[test]
+fn publish_runtime_view_shares_books_arc_15091() {
+    use crate::protocol::AddressBookSnapshot;
+    let books = [AddressBookSnapshot {
+        id: 7,
+        name: "feed".to_string(),
+        prefixes_v4: Vec::new(),
+        prefixes_v6: (0..5000u128)
+            .map(|i| {
+                let addr = 0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + i * 3;
+                format!("{}/128", std::net::Ipv6Addr::from(addr))
+            })
+            .collect(),
+    }];
+    let zones: rustc_hash::FxHashMap<String, u16> =
+        [("lan".to_string(), 1u16), ("wan".to_string(), 2u16)]
+            .into_iter()
+            .collect();
+    let counter_store = crate::policy::PolicyCounterStore::default();
+    let policy = crate::policy::parse_policy_state_with_counters(
+        "deny",
+        &[],
+        &zones,
+        &books,
+        &counter_store,
+    )
+    .expect("in-budget book must parse");
+    let mut forwarding = ForwardingState::default();
+    forwarding.policy = policy;
+    let mut coord = Coordinator::new();
+    coord.set_forwarding_for_test(forwarding);
+    let first = coord.ha.runtime.load_full();
+    coord.publish_runtime_view();
+    let second = coord.ha.runtime.load_full();
+    assert!(
+        std::sync::Arc::ptr_eq(
+            &first.forwarding().policy.books,
+            &second.forwarding().policy.books
+        ),
+        "publish_runtime_view must leave books Arc::ptr_eq (no deep clone per publish)"
+    );
+    assert_eq!(second.forwarding().policy.books.len(), 1);
+    assert_eq!(second.forwarding().policy.books[0].v6.prefix_count(), 5000);
+}

@@ -41,7 +41,7 @@ ordering.
 | File | What it does |
 |------|--------------|
 | `prefix.rs` | `PrefixV4` / `PrefixV6` — the canonical IP-prefix value type. |
-| `prefix_set.rs` | `PrefixSetV4` / `PrefixSetV6` — adaptive 3-variant enum (#923): `MatchAny`, linear scan, and trie variants. The compiler picks based on the input prefix list. |
+| `prefix_set.rs` | `PrefixSetV4` / `PrefixSetV6` — adaptive 3-variant enum (#923, #15091): `MatchAny`/`MatchNone`, linear scan (<=16), and sorted merged ranges with binary search (>16). The compiler picks based on the input prefix list; merged ranges are budget-capped at `MAX_PREFIX_SET_RANGES` (1<<20). |
 
 ## Wire / transport / state
 

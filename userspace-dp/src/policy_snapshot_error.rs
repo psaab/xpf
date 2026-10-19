@@ -966,11 +966,59 @@ pub(crate) enum SnapshotIntegrityError {
         local_ts: String,
         remote_ts: String,
     },
+    /// #15091: an address-book row (or, via the literal factories,
+    /// a rule side) carried more prefixes than the helper-side
+    /// merged-range budget ([`crate::prefix_set::MAX_PREFIX_SET_RANGES`],
+    /// mirroring the Go feed cap `MaxDynamicAddressFeedPrefixes` =
+    /// 1<<20). Compiling it would materialise an unbounded
+    /// representation in the helper (the pre-fix one-Box-per-bit
+    /// trie cost ~2.9 GB for an in-cap 32 MiB IPv6 feed). Rejecting
+    /// the WHOLE snapshot keeps the previous good state (a fresh
+    /// boot keeps the default-deny `PolicyState`) and is
+    /// action-agnostic, consistent with the
+    /// #2124/#3261/#3367/#3711 fail-closed family. `ranges` is the
+    /// merged disjoint-range count that exceeded `limit`.
+    AddressBookPrefixBudgetExceeded {
+        book_id: u32,
+        book_name: String,
+        family: &'static str,
+        ranges: usize,
+        limit: usize,
+    },
+    /// #15091: a policy rule's literal address side exceeded the
+    /// same merged-range budget. Book rows report
+    /// `AddressBookPrefixBudgetExceeded`; rule literals have no
+    /// book identity, so they report the rule id instead.
+    RulePrefixBudgetExceeded {
+        rule_id: String,
+        ranges: usize,
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for SnapshotIntegrityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::AddressBookPrefixBudgetExceeded {
+                book_id,
+                book_name,
+                family,
+                ranges,
+                limit,
+            } => write!(
+                f,
+                "address book id={} ({:?}) prefixes_{} merges to {} disjoint ranges, exceeding the helper budget of {} ranges — refusing to materialise an unbounded prefix set (which collapses a book-backed deny if dropped)",
+                book_id, book_name, family, ranges, limit
+            ),
+            Self::RulePrefixBudgetExceeded {
+                rule_id,
+                ranges,
+                limit,
+            } => write!(
+                f,
+                "rule {:?} literal address set merges to {} disjoint ranges, exceeding the helper budget of {} ranges — refusing to materialise an unbounded prefix set",
+                rule_id, ranges, limit
+            ),
             Self::AddressBookIdZero => write!(f, "address book has reserved id=0"),
             Self::DuplicateAddressBookId(id) => {
                 write!(f, "duplicate address_books.id={}", id)
