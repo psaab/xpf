@@ -1219,6 +1219,18 @@ func servicesSSLProxyWarnings(node *Node, seen map[string]struct{}) []string {
 // Both AST shapes are handled: hierarchical blocks and flat-set replay.
 // Two set lines for the same (routing-instance, route) merge into one
 // PreferredRoute (next-hop + preferred-metric arrive on separate lines).
+//
+// #15705: repeated `policy <name>` blocks (hierarchical duplicates, or a
+// second `ip-monitoring` root) merge by the same rule. The route map is
+// seeded from the existing policy's PreferredRoutes — keyed by
+// (routing-instance, canonical destination) — before the new block is
+// compiled, so a block carrying only `preferred-metric` refines the
+// route the earlier block created instead of minting a metric-only
+// duplicate that strict validation rejects for its empty next-hop, and
+// a restated attribute (next-hop) overwrites per-field, last writer
+// wins, instead of losing to the first entry downstream. The
+// destination key is canonical (staticRouteMergeKey: masked, family-
+// preserving) so `0.0.0.1/0` and `0.0.0.0/0` are one route.
 func compileIPMonitoring(node *Node, svc *ServicesConfig) error {
 	cfg := svc.IPMonitoring
 	if cfg == nil {
@@ -1232,6 +1244,19 @@ func compileIPMonitoring(node *Node, svc *ServicesConfig) error {
 		pol := &IPMonitoringPolicy{Name: polInst.name}
 		routes := make(map[string]*PreferredRoute)
 		var order []string
+		if existing := cfg.Policies[pol.Name]; existing != nil {
+			for _, pr := range existing.PreferredRoutes {
+				if pr == nil {
+					continue
+				}
+				key := pr.RoutingInstance + "|" + staticRouteMergeKey(pr.Destination)
+				if _, dup := routes[key]; dup {
+					continue // first spelling wins for a legacy duplicate
+				}
+				routes[key] = pr
+				order = append(order, key)
+			}
+		}
 
 		for _, prop := range polInst.node.Children {
 			switch prop.Name() {
@@ -1281,7 +1306,7 @@ func compileIPMonitoring(node *Node, svc *ServicesConfig) error {
 		if pol.HoldDownSecs != 0 {
 			existing.HoldDownSecs = pol.HoldDownSecs
 		}
-		existing.PreferredRoutes = append(existing.PreferredRoutes, pol.PreferredRoutes...)
+		existing.PreferredRoutes = pol.PreferredRoutes
 	}
 	svc.IPMonitoring = cfg
 	return nil
@@ -1290,10 +1315,14 @@ func compileIPMonitoring(node *Node, svc *ServicesConfig) error {
 // compilePreferredRoutes collects `route <cidr> { next-hop X;
 // preferred-metric N; }` children of a preferred-route (or its
 // routing-instance sub-block), merging repeated lines for the same
-// destination.
+// destination. The map key is the canonical destination
+// (staticRouteMergeKey) so a route seeded by an earlier block under a
+// host-bit spelling (`0.0.0.1/0`) is refined by a later block that
+// spells the mask-aligned prefix (`0.0.0.0/0`) instead of duplicated
+// (#15705); the stored Destination keeps its first spelling.
 func compilePreferredRoutes(node *Node, ri, polName string, routes map[string]*PreferredRoute, order *[]string) error {
 	for _, rInst := range namedInstances(node.FindChildren("route")) {
-		key := ri + "|" + rInst.name
+		key := ri + "|" + staticRouteMergeKey(rInst.name)
 		r := routes[key]
 		if r == nil {
 			r = &PreferredRoute{RoutingInstance: ri, Destination: rInst.name}
