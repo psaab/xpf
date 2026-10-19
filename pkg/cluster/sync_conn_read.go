@@ -129,19 +129,34 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 		s.handleMessage(conn, hdr.Type, payload)
 	}
 }
+
+// bulkReceiveProgress reports whether this session record is bulk
+// traffic and, on the 1st/64th counted record, logs progress. #15254
+// (A82-03): key on bulkInProgress, the live receive window, NOT the
+// BulkSyncStartTime/BulkSyncEndTime telemetry pair. The pair is what
+// status renders and lags the window at its edges (an abandoned bulk
+// left End zero until the disconnect stamp; status reads the pair,
+// counting must read the window). Records counted here are exactly the
+// records the install arm below accumulates into bulkRecvV4/V6 under
+// the same flag.
+func (s *SessionSync) bulkReceiveProgress(typ string, conn net.Conn) {
+	s.bulkMu.Lock()
+	inProgress := s.bulkInProgress
+	epoch := s.bulkRecvEpoch
+	s.bulkMu.Unlock()
+	if !inProgress {
+		return
+	}
+	count := s.stats.BulkSyncSessions.Add(1)
+	if count == 1 || count%64 == 0 {
+		slog.Info("cluster sync: bulk receive progress", "epoch", epoch, "sessions", count, "type", typ, "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+	}
+}
 func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte) {
 	switch msgType {
 	case syncMsgSessionV4:
 		s.stats.SessionsReceived.Add(1)
-		if s.stats.BulkSyncStartTime.Load() > 0 && s.stats.BulkSyncEndTime.Load() == 0 {
-			count := s.stats.BulkSyncSessions.Add(1)
-			if count == 1 || count%64 == 0 {
-				s.bulkMu.Lock()
-				epoch := s.bulkRecvEpoch
-				s.bulkMu.Unlock()
-				slog.Info("cluster sync: bulk receive progress", "epoch", epoch, "sessions", count, "type", "v4", "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
-			}
-		}
+		s.bulkReceiveProgress("v4", conn)
 		if s.sessions != nil {
 			key, val, ok := decodeSessionV4Payload(payload)
 			if !ok {
@@ -183,15 +198,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		}
 	case syncMsgSessionV6:
 		s.stats.SessionsReceived.Add(1)
-		if s.stats.BulkSyncStartTime.Load() > 0 && s.stats.BulkSyncEndTime.Load() == 0 {
-			count := s.stats.BulkSyncSessions.Add(1)
-			if count == 1 || count%64 == 0 {
-				s.bulkMu.Lock()
-				epoch := s.bulkRecvEpoch
-				s.bulkMu.Unlock()
-				slog.Info("cluster sync: bulk receive progress", "epoch", epoch, "sessions", count, "type", "v6", "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
-			}
-		}
+		s.bulkReceiveProgress("v6", conn)
 		if s.sessions != nil {
 			key, val, ok := decodeSessionV6Payload(payload)
 			if !ok {
@@ -388,14 +395,17 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// its way to being rejected. `show chassis cluster information` then
 		// read "Bulk sync in progress since ..." indefinitely, because the
 		// BulkEnd that would set an end time belongs to a bulk that was never
-		// accepted; and the session handlers' `StartTime > 0 && EndTime == 0`
-		// test read TRUE, so every subsequent INCREMENTAL install was counted
-		// as bulk traffic.
+		// accepted; and while that pair read open, every subsequent INCREMENTAL
+		// install was counted as bulk traffic (the session handlers now key
+		// that count on bulkInProgress, #15254, but the pair is still what
+		// status renders).
 		//
 		// This is a statement-ORDERING defect, not an epoch-validation one: the
 		// accept itself is correct. The #8966 author moved `resetRecvGen` below
 		// the accept for exactly this reason and left these three where they
-		// were, which is why they now sit beside it.
+		// were, which is why they now sit beside it. The abandoned-accept twin
+		// (#15254: accepted, then every fabric drops) is closed at the other
+		// edge: handleDisconnect stamps an end when it clears a live window.
 		s.stats.BulkSyncStartTime.Store(time.Now().UnixNano())
 		s.stats.BulkSyncEndTime.Store(0)
 		s.stats.BulkSyncSessions.Store(0)

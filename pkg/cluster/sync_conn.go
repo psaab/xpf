@@ -1639,6 +1639,21 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.inventoryActiveGeneration = 0
 		s.bulkMu.Unlock()
 		if hadBulkInProgress {
+			// #15254 (A82-03): an accepted BulkStart stamped
+			// BulkSyncStartTime and zeroed BulkSyncEndTime (#9177 V052 —
+			// the stores sit on the accepted path), and the BulkEnd that
+			// would set an end now belongs to a peer that is gone. Close
+			// the telemetry window the start opened, or status reports
+			// "Bulk sync in progress since ..." for the whole outage and
+			// the session handlers' telemetry-pair test counts early
+			// post-reconnect incrementals as bulk (they also key on
+			// bulkInProgress now; this stamp is what status reads).
+			// This is NOT a completion: BulkSyncs, bulkEverCompleted and
+			// OnBulkSyncReceived belong to BulkEnd alone (#5272), and an
+			// abandoned bulk must not release the failover hold. Gated on
+			// hadBulkInProgress so a later idle disconnect never
+			// re-stamps a genuinely completed bulk's end/duration.
+			s.stats.BulkSyncEndTime.Store(time.Now().UnixNano())
 			slog.Info("cluster sync: reset in-progress bulk receive on disconnect")
 		}
 		slog.Info("cluster sync: peer disconnected (all fabrics down)")
