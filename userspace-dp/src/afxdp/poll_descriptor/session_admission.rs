@@ -72,6 +72,21 @@ pub(super) fn strict_syn_check_drops_new_flow(
     no_syn_check: bool,
     strict_syn_check: bool,
 ) -> bool {
+    strict_syn_check_drops_new_flow_tunnel(protocol, tcp_flags, no_syn_check, strict_syn_check, false, false)
+}
+
+/// #15753: tunnel-aware variant. When `is_tunnel` and
+/// `no_syn_check_in_tunnel`, non-closing tunnel misses are admitted like
+/// `no_syn_check`; strict still overrides both.
+#[inline]
+pub(super) fn strict_syn_check_drops_new_flow_tunnel(
+    protocol: u8,
+    tcp_flags: u8,
+    no_syn_check: bool,
+    strict_syn_check: bool,
+    no_syn_check_in_tunnel: bool,
+    is_tunnel: bool,
+) -> bool {
     if !matches!(protocol, crate::ip_proto::PROTO_TCP) {
         return false;
     }
@@ -81,7 +96,8 @@ pub(super) fn strict_syn_check_drops_new_flow(
     if crate::tcp_flags::has_syn(tcp_flags) {
         return false;
     }
-    !no_syn_check || strict_syn_check
+    let effective_no_syn = no_syn_check || (is_tunnel && no_syn_check_in_tunnel);
+    !effective_no_syn || strict_syn_check
 }
 
 #[cfg(test)]

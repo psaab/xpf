@@ -437,7 +437,12 @@ const (
 	// flowless path fabric-redirects ClusterTerminalHAInactive; a v57
 	// helper drops split-RG ICMP at the flowless HAInactive-only gate
 	// and its FIB dump cannot prove the import mark (the defect).
-	ProtocolVersion = 58
+	// v58 -> v59 (#15753): FlowSnapshot carries tcp_no_syn_check_in_tunnel,
+	// tcp_rst_invalidate_session, tcp_no_sequence_check,
+	// tcp_rst_sequence_check and tcp_maximum_window; a v58 helper ignores
+	// them and keeps dropping tunnel mid-stream TCP, never invalidates on
+	// RST, and never validates RST sequence (the defects).
+	ProtocolVersion = 59
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1149,6 +1154,12 @@ type FlowSnapshot struct {
 	// drop; strict-syn-check takes precedence when both fields are set.
 	TCPNoSynCheck      bool `json:"tcp_no_syn_check,omitempty"`
 	TCPStrictSynCheck  bool `json:"tcp_strict_syn_check,omitempty"`
+	// #15753: tunnel SYN opt-out, RST invalidate, sequence-check controls.
+	TCPNoSynCheckInTunnel bool `json:"tcp_no_syn_check_in_tunnel,omitempty"`
+	TCPRstInvalidate      bool `json:"tcp_rst_invalidate_session,omitempty"`
+	TCPNoSequenceCheck    bool `json:"tcp_no_sequence_check,omitempty"`
+	TCPRstSequenceCheck   bool `json:"tcp_rst_sequence_check,omitempty"`
+	TCPMaximumWindow      int  `json:"tcp_maximum_window,omitempty"`
 	UDPSessionTimeout  int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
 	ICMPSessionTimeout int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
 	// GREAcceleration carries `security flow gre-performance-acceleration`

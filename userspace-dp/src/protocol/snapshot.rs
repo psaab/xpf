@@ -400,6 +400,21 @@ pub(crate) struct FlowSnapshot {
     /// session admission, even if no-syn-check is also configured.
     #[serde(rename = "tcp_strict_syn_check", default)]
     pub tcp_strict_syn_check: bool,
+    /// #15753: `no-syn-check-in-tunnel` — admit tunnel mid-stream TCP.
+    #[serde(rename = "tcp_no_syn_check_in_tunnel", default)]
+    pub tcp_no_syn_check_in_tunnel: bool,
+    /// #15753: `rst-invalidate-session` — immediate teardown on RST.
+    #[serde(rename = "tcp_rst_invalidate_session", default)]
+    pub tcp_rst_invalidate_session: bool,
+    /// #15753: `no-sequence-check` disables RST/FIN sequence validation.
+    #[serde(rename = "tcp_no_sequence_check", default)]
+    pub tcp_no_sequence_check: bool,
+    /// #15753: `rst-sequence-check` explicit enable (validation is default-on).
+    #[serde(rename = "tcp_rst_sequence_check", default)]
+    pub tcp_rst_sequence_check: bool,
+    /// #15753: `maximum-window` cap in bytes; 0 = 65535 default.
+    #[serde(rename = "tcp_maximum_window", default)]
+    pub tcp_maximum_window: u32,
     #[serde(rename = "udp_session_timeout", default)]
     pub udp_session_timeout: u64,
     #[serde(rename = "icmp_session_timeout", default)]

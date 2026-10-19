@@ -717,6 +717,9 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 			case "no-sequence-check":
 				sec.Flow.TCPSession.NoSequenceCheck = true
 				continue
+			case "rst-sequence-check":
+				sec.Flow.TCPSession.RstSequenceCheck = true
+				continue
 			case "strict-syn-check":
 				// #10703: the selector is carried to the dataplane's
 				// session-MISS admission gate.
@@ -739,6 +742,26 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 				sec.Flow.TCPSession.ClosingTimeout = val
 			case "time-wait-timeout":
 				sec.Flow.TCPSession.TimeWaitTimeout = val
+			case "maximum-window":
+				sec.Flow.TCPSession.MaximumWindow = val
+			}
+		}
+		// #15753: nested time-wait-state hierarchy (not flattened by
+		// expandFlatRun when written as braces).
+		for _, twNode := range tcpNode.FindChildren("time-wait-state") {
+			for _, twOpt := range twNode.Children {
+				switch twOpt.Name() {
+				case "session-ageout":
+					sec.Flow.TCPSession.TimeWaitStateSessionAgeout = true
+				case "apply-to-half-closed-state":
+					sec.Flow.TCPSession.TimeWaitStateApplyToHalfClosed = true
+				case "session-timeout":
+					if len(twOpt.Keys) >= 2 {
+						if v, err := strconv.Atoi(twOpt.Keys[1]); err == nil {
+							sec.Flow.TCPSession.TimeWaitStateSessionTimeout = v
+						}
+					}
+				}
 			}
 		}
 	}

@@ -516,6 +516,31 @@ mod tcp_syn_check_tests {
     }
 
     #[test]
+    fn tunnel_no_syn_check_admits_only_tunnel_midstream_15753() {
+        // Tunnel ACK admitted only when is_tunnel && knob set.
+        assert!(!strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, true, true));
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, true, false), "non-tunnel must still drop");
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, true), "tunnel without knob drops");
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, true, true, true), "strict overrides tunnel opt-out");
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_RST, false, false, true, true), "closing tunnel still drops");
+    }
+
+    #[test]
+    fn rst_seq_validation_in_window_vs_blind_15753() {
+        use crate::session::SeqVerdict;
+        let mut table = SessionTable::new();
+        let key = tcp_key(40500);
+        assert!(table.install_with_protocol_with_origin(key.clone(), fwd_decision(), fwd_meta(), SessionOrigin::ForwardFlow, 1_000_000_000, PROTO_TCP, TCP_SYN));
+        // SYN seq=1000, window 4096 -> rcv_nxt=1001
+        table.note_tcp_seq(&key, 1000, 0, 4096, 0, TCP_SYN, 0);
+        // data seq 1001 len 100 -> nxt 1101
+        table.note_tcp_seq(&key, 1001, 0, 4096, 100, TCP_ACK, 0);
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 1050), SeqVerdict::Valid, "in-window RST seq must be valid");
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 0), SeqVerdict::Invalid, "blind seq=0 RST must be invalid");
+        assert_eq!(table.tcp_closing_seq_verdict(&key, 99999), SeqVerdict::Invalid);
+    }
+
+    #[test]
     fn bare_rst_fin_on_miss_installs_no_session() {
         let mut table = SessionTable::new();
         // RED on revert: without the guard each of these seeds an immediately-

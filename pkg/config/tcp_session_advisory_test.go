@@ -31,56 +31,28 @@ func findTCPSessionAdvisory(cfg *Config) string {
 // pass even if the knob were silently dropped). Driven through the production
 // ParseSetCommand + SetPath + CompileConfig path (compileSetLines).
 func TestTCPSessionAdvisory_PerKnob(t *testing.T) {
-	cases := []struct {
-		setLine string
-		token   string // the exact knob name that must appear in the advisory
-	}{
-		{"set security flow tcp-session no-syn-check-in-tunnel", "no-syn-check-in-tunnel"},
-		{"set security flow tcp-session rst-invalidate-session", "rst-invalidate-session"},
-		{"set security flow tcp-session no-sequence-check", "no-sequence-check"},
+	// #15753: all three are now enforced, so none emits the advisory.
+	cases := []string{
+		"set security flow tcp-session no-syn-check-in-tunnel",
+		"set security flow tcp-session rst-invalidate-session",
+		"set security flow tcp-session no-sequence-check",
 	}
-	for _, tc := range cases {
-		t.Run(tc.token, func(t *testing.T) {
-			cfg := compileSetLines(t, []string{tc.setLine})
-			adv := findTCPSessionAdvisory(cfg)
-			if adv == "" {
-				t.Fatalf("%q did not emit the #2078 tcp-session advisory; warnings=%v",
-					tc.setLine, cfg.Warnings)
-			}
-			if !strings.Contains(adv, tc.token) {
-				t.Fatalf("advisory does not name knob %q: %q", tc.token, adv)
-			}
-		})
+	for _, line := range cases {
+		cfg := compileSetLines(t, []string{line})
+		if adv := findTCPSessionAdvisory(cfg); adv != "" {
+			t.Fatalf("%q still emits accepted-only advisory after #15753: %q", line, adv)
+		}
 	}
 }
 
-// All three remaining accepted-only flags fold into one advisory.
 func TestTCPSessionAdvisory_FoldsRemainingFlags(t *testing.T) {
 	cfg := compileSetLines(t, []string{
 		"set security flow tcp-session no-syn-check-in-tunnel",
 		"set security flow tcp-session rst-invalidate-session",
 		"set security flow tcp-session no-sequence-check",
 	})
-
-	count := 0
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "security flow tcp-session") &&
-			strings.Contains(w, "accepted-only") {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("expected exactly one folded tcp-session advisory, got %d; warnings=%v",
-			count, cfg.Warnings)
-	}
-
-	adv := findTCPSessionAdvisory(cfg)
-	for _, token := range []string{
-		"no-syn-check-in-tunnel", "rst-invalidate-session", "no-sequence-check",
-	} {
-		if !strings.Contains(adv, token) {
-			t.Fatalf("folded advisory missing knob %q: %q", token, adv)
-		}
+	if adv := findTCPSessionAdvisory(cfg); adv != "" {
+		t.Fatalf("enforced knobs still advised as inert: %q", adv)
 	}
 }
 

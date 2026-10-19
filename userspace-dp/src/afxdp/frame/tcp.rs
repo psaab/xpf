@@ -156,6 +156,19 @@ pub(in crate::afxdp) fn extract_tcp_flags_and_window(frame: &[u8]) -> Option<(u8
     Some((flags, window))
 }
 
+/// #15753: extract (seq, ack, window); None if not TCP/truncated.
+#[inline]
+pub(in crate::afxdp) fn extract_tcp_seq_ack_window(frame: &[u8]) -> Option<(u32, u32, u16)> {
+    let l3 = frame_l3_offset(frame)?;
+    let ip = frame.get(l3..)?;
+    let addr_family = match ip.first()? >> 4 { 4 => libc::AF_INET as u8, 6 => libc::AF_INET6 as u8, _ => return None };
+    let (l4_offset, protocol) = packet_rel_l4_offset_and_protocol(ip, addr_family)?;
+    if protocol != PROTO_TCP { return None; }
+    let tcp = ip.get(l4_offset..)?;
+    if tcp.len() < 16 { return None; }
+    Some((u32::from_be_bytes([tcp[4],tcp[5],tcp[6],tcp[7]]), u32::from_be_bytes([tcp[8],tcp[9],tcp[10],tcp[11]]), u16::from_be_bytes([tcp[14],tcp[15]])))
+}
+
 /// Offset into `frame` of the first TCP PAYLOAD byte (#7699).
 ///
 /// `None` unless the frame really is TCP and its declared data offset fits

@@ -215,10 +215,9 @@ bumps no epoch, because there is no worker to name. Those are the
 remainder, measured at 0 across 30,786 refusals.
 
 `teardown_tcp_rst_flow` still uses the non-repairing
-`replicate_session_delete`. It is currently unreachable —
-`should_teardown_tcp_rst` returns `false` unconditionally — so wiring the
-repair through it would be untestable code on a dead path; its drops are
-counted.
+`replicate_session_delete`. #15753: it is reachable only when
+`rst-invalidate-session` is configured (`should_teardown_tcp_rst_with`);
+default remains off per the HA stray-RST rationale. Its drops are counted.
 
 ## Terminal-filtered session teardown (`delete_terminal_filtered_session`, #5622)
 

@@ -98,7 +98,7 @@ use host_inbound_policy::{
 use nat64_icmp_error::try_translate_nat64_icmp_error;
 use noroute_adjudication::{noroute_policy_adjudication, noroute_policy_protocol};
 use rx_telemetry::record_rx_descriptor_telemetry;
-use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow};
+use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow, strict_syn_check_drops_new_flow_tunnel};
 use session_hit_authority::{
     ForeignHitVerdict, HitAuthority, HitPolicyDeny, OwnerHitIcmpVerdict, foreign_hit_verdict,
     owner_hit_icmp_verdict, session_hit_authority,
@@ -2051,6 +2051,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // (original L477 binding's NLL lifetime ended before
                 // the helper call above).
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
+                // #15753: TCP sequence tracking / blind RST/FIN rejection.
+                // On session hit (flow present), validate closing seq and
+                // note seq for non-closing. Invalid blind RST/FIN is dropped
+                // before resolve mutates close state.
+                if meta.protocol == crate::ip_proto::PROTO_TCP {
+                    if let (Some(fl), Some((seq, ack, win))) = (flow.as_ref(), crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame)) {
+                        if crate::tcp_flags::is_closing(meta.tcp_flags) && !worker_ctx.forwarding.tcp_no_sequence_check {
+                            if sessions.tcp_closing_seq_verdict(&fl.forward_key, seq) == crate::session::SeqVerdict::Invalid {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                        }
+                        sessions.note_tcp_seq(&fl.forward_key, seq, ack, win, tcp_payload_len(packet_frame, meta), meta.tcp_flags, worker_ctx.forwarding.tcp_maximum_window);
+                    }
+                }
                 // ── End flow cache fast path ─────────────────────────
                 let mut debug = flow
                     .as_ref()
@@ -4783,11 +4798,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             decision.resolution.disposition,
                             ForwardingDisposition::ForwardCandidate
                                 | ForwardingDisposition::MissingNeighbor
-                        ) && strict_syn_check_drops_new_flow(
+                        ) && strict_syn_check_drops_new_flow_tunnel(
                             syn_protocol,
                             meta.tcp_flags,
                             worker_ctx.forwarding.tcp_no_syn_check,
                             worker_ctx.forwarding.tcp_strict_syn_check,
+                            worker_ctx.forwarding.tcp_no_syn_check_in_tunnel,
+                            meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0,
                         ) {
                             // #11304: Junos `tcp-rst` applies at this transit
                             // session-miss drop, never at a policy-deny site.
@@ -9084,7 +9101,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             }
                         }
                     }
-                    if should_teardown_tcp_rst(meta, flow.as_ref())
+                    if should_teardown_tcp_rst_with(meta, worker_ctx.forwarding.tcp_rst_invalidate_session)
                         && let Some(flow) = flow.as_ref()
                     {
                         binding
