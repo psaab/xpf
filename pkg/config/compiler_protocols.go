@@ -815,7 +815,14 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		proto.OSPFv3 = &OSPFv3Config{}
 
 		ospf3Schema := ospf3Schema13531()
-		ospf3Children := expandFlatRun(flattenChainedChildren(ospf3Node.Children, ospf3Schema), ospf3Schema)
+		// #15017: read the PACKED top body too. `ospf3 router-id 1.1.1.1
+		// export connected { area ... }` packs router-id/export onto ospf3Node.Keys
+		// beside the braced area, so a Children-only reader dropped both
+		// while the area survived. packedTopChildren mirrors the OSPF
+		// (#14427) / IS-IS (#14426) tail-only expansion; the plain packed
+		// line with no braced body is already folded by the #8662
+		// normalizer, and this reader also covers the tolerant path.
+		ospf3Children := expandFlatRun(flattenChainedChildren(packedTopChildren(ospf3Node, ospf3Schema), ospf3Schema), ospf3Schema)
 		ospf3Expanded := &Node{Keys: ospf3Node.Keys, Children: ospf3Children}
 		for _, child := range ospf3Children {
 			switch child.Name() {
@@ -961,10 +968,33 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		// `ip rip authentication mode text` and puts the operator's key on the
 		// wire in CLEARTEXT -- and AuthTypeUnrecognized("") is ALSO false, so
 		// #8443's downgrade warning does not fire either.
-		for _, child := range expandFlatRun(ripNode.Children, ripLeafSchema8939()) {
+		//
+		// #15017 (A12-05): read the PACKED top body too. `rip
+		// authentication-key K authentication-type md5 { neighbor ...; }`
+		// packs the auth pair onto ripNode.Keys beside the braced body, so
+		// a Children-only loop dropped both and RIP ran unauthenticated
+		// while the braced neighbor survived. packedTopChildren mirrors
+		// the OSPF (#14427) / IS-IS (#14426) tail-only expansion; the
+		// plain packed line with no braced body is already folded by the
+		// #8662 normalizer (`rip authentication-key` is in scope), and
+		// this reader also covers the tolerant path where it is not.
+		ripSchema := ripLeafSchema8939()
+		for _, child := range expandFlatRun(packedTopChildren(ripNode, ripSchema), ripSchema) {
 			switch child.Name() {
 			case "group":
-				for _, gc := range child.Children {
+				// #15017: a packed tail ending in the group container
+				// (`rip authentication-key K ... group g1 neighbor I;`)
+				// expands through packedBodyChildren into a group node
+				// carrying neighbor/export as CHILDREN (the braced
+				// shape). A fully packed group line (`rip group g1
+				// neighbor I;`) instead packs neighbor/export onto the
+				// group's own Keys; read that tail too, filtered to the
+				// two multi leaves the group reader knows.
+				groupBody := child.Children
+				if len(child.Keys) > 2 {
+					groupBody = packedBodyChildren(child, resolveSchemaChild(ripSchema, "group"))
+				}
+				for _, gc := range groupBody {
 					// Multi-value leaves (#3904): a bracket list collapses onto
 					// Keys[1:] (opaque group) or child nodes; read EVERY value
 					// via firewallMatchValues. The pre-#3904 Keys[1]-only read
