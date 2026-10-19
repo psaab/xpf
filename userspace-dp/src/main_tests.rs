@@ -4099,7 +4099,17 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
         //  this test exists to make expensive. `pkt_len` is stored at the call
         //  site instead, so both coordinates still travel as bare u32s.
         ("binding_index.rs",     3,               4,               3),
-        ("lib.rs",               33,              3,               20),
+        // #15645: 33 -> 38, deliberately. The trace recorder was
+        // outlined behind a packed 5-argument subprogram (the fresh
+        // pinned build verifier-rejected at the 1M cap without it);
+        // the five new mentions are the pack expression in the
+        // retained `record_trace` wrapper (one), the callee's struct
+        // field write (one) and three in the wrapper comment/codegen
+        // path — all inside the trace recorder, none on the binding
+        // index path, and the callee's locals are trace_* so the
+        // single-`let` bound above is unmoved. This row tracks code,
+        // not wording, so the delta is stated here rather than hidden.
+        ("lib.rs",               38,              3,               20),
     ];
 
     // ---- …and `ctx` may not be rebound AT ALL. ---------------------------
