@@ -852,10 +852,17 @@ pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(
 ///
 /// The three conditions, and what each is for:
 ///
-///  * **`FabricRedirect`** — the flow is leaving across the fabric
-///    unadjudicated, which is the only case that needs a seed. A
-///    `ForwardCandidate` is already evaluated and installed by the
-///    session-miss block, and every other disposition is a drop.
+///  * **`FabricRedirect | ClusterTerminalHAInactive`** — the flow is
+///    leaving across the fabric unadjudicated, which is the only case
+///    that needs a seed. #15742: in split-RG placement the LAN node's
+///    FIB holds no forwarding default, so the flow-backed miss reaches
+///    this arm still carrying the pre-redirect
+///    `ClusterTerminalHAInactive` demotion (the redirect itself is
+///    applied later, at the safety net / TX build); treating only the
+///    post-redirect spelling as seedable starved every split-RG flow
+///    of its return authorisation. A `ForwardCandidate` is already
+///    evaluated and installed by the session-miss block, and every
+///    other disposition is a drop.
 ///  * **`!fabric_ingress`** — the packet arrived on one of THIS node's own
 ///    interfaces. This is what makes the seed unforgeable: nothing arriving on
 ///    the shared fabric segment can mint the record that authorises a return,
@@ -872,8 +879,10 @@ pub(in crate::afxdp) fn should_seed_fabric_punt(
     fabric_ingress: bool,
     nat: NatDecision,
 ) -> bool {
-    disposition == ForwardingDisposition::FabricRedirect
-        && !fabric_ingress
+    matches!(
+        disposition,
+        ForwardingDisposition::FabricRedirect | ForwardingDisposition::ClusterTerminalHAInactive
+    ) && !fabric_ingress
         && nat == NatDecision::default()
 }
 

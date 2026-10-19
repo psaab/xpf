@@ -2244,6 +2244,28 @@ fn should_seed_fabric_punt_binds_each_condition_7770() {
         "the qualifying shape — a locally ingressed, untranslated flow leaving \
          across the fabric — must seed, or every row below is vacuous"
     );
+    // #15742: in split-RG placement the LAN node has no forwarding
+    // default, so the flow-backed miss reaches the seed arm still
+    // carrying the pre-redirect cluster-terminal demotion. It must
+    // seed too, or the peer's reply (arriving ~1-3 ms later, long
+    // before HA sync) hits wan->lan default-deny on this node.
+    assert!(
+        should_seed_fabric_punt(
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            false,
+            nat_free
+        ),
+        "a locally ingressed cluster-terminal demotion leaving across the \
+         fabric must seed (#15742 split-RG shape)"
+    );
+    assert!(
+        !should_seed_fabric_punt(
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            true,
+            nat_free
+        ),
+        "a FABRIC-ingress cluster-terminal packet must never mint a punt seed (#15742/#7770)"
+    );
     assert!(
         !should_seed_fabric_punt(ForwardingDisposition::FabricRedirect, true, nat_free),
         "a FABRIC-ingress packet must never mint a punt seed. This is the \
@@ -2273,6 +2295,83 @@ fn should_seed_fabric_punt_binds_each_condition_7770() {
              anything else is a session for a flow that was already installed \
              (ForwardCandidate) or dropped (#7770)"
         );
+    }
+}
+
+/// #15742 fail-on-revert: split-RG LAN node (RG2 local / RG1 peer) has
+/// NO forwarding default — only the marked cluster discard. A locally
+/// ingressed ICMP echo to a WAN target inside the peer-owned connected
+/// prefix must leave across the fabric as FabricRedirect (not terminate
+/// on the cluster discard). Pre-fix the flow-backed miss carried
+/// ClusterTerminalHAInactive into the tail, the HAInactive redirect
+/// arm and the safety net both ignored that spelling, and egress_rg
+/// was unattributable (zeroed egress) — live: target saw all 3 echos,
+/// host saw 0 replies. The NAT-free seed eligibility for this
+/// disposition is pinned separately in
+/// `should_seed_fabric_punt_binds_each_condition_7770`.
+#[test]
+fn split_rg_cluster_terminal_punt_redirects_15742() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot
+        .routes
+        .retain(|r| r.destination != "0.0.0.0/0" && r.destination != "::/0");
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Split: LAN RG2 local, WAN RG1 peer-owned.
+    let ha_state = BTreeMap::from([(1, inactive_rg(now_secs)), (2, active_rg(now_secs))]);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(172, 16, 80, 200),
+        64,
+        [0x02, 0xbf, 0x72, 0x01, 0x00, 0x01],
+    );
+    let mut meta = txn_meta_v4(24, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-1");
+    let mut sessions = SessionTable::new();
+    let (_batch, _dbg) =
+        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "split-RG cluster-terminal flow must leave across the fabric"
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards[0]
+            .decision
+            .resolution
+            .disposition,
+        ForwardingDisposition::FabricRedirect,
+        "split-RG cluster-terminal flow must fabric-redirect, not terminate"
+    );
+}
+
+fn inactive_rg(now_secs: u64) -> HAGroupRuntime {
+    HAGroupRuntime {
+        active: false,
+        watchdog_timestamp: now_secs,
+        lease: HAForwardingLease::Inactive,
     }
 }
 
