@@ -451,17 +451,23 @@ doesn't own, the dataplane installs nftables rules to suppress them.
 
 `install_kernel_rst_suppression()` (`afxdp.rs:6499`) creates an
 `inet xpf_dp_rst` table with an output chain that drops outgoing TCP RSTs
-from all interface-NAT (SNAT) addresses:
+from all interface-NAT (SNAT) addresses, scoped to conntrack-less
+packets only (#14949):
 
 ```
 table inet xpf_dp_rst {
   chain output {
     type filter hook output priority 0; policy accept;
-    ip saddr <snat_v4_addr> tcp flags & rst == rst counter drop
-    ip6 saddr <snat_v6_addr> tcp flags & rst == rst counter drop
+    ip saddr <snat_v4_addr> ct state & (invalid|established|related|new|untracked) == 0 tcp flags & rst == rst counter drop
+    ip6 saddr <snat_v6_addr> ct state & (invalid|established|related|new|untracked) == 0 tcp flags & rst == rst counter drop
   }
 }
 ```
+
+The `ct state == 0` scope is load-bearing: the spurious RSTs are for
+userspace-owned flows the kernel never tracked, while legitimate RSTs
+from the same addresses (`reject with tcp reset`, local socket RSTs)
+are conntrack-tracked and must survive.
 
 The rules are:
 - Auto-installed when forwarding state is rebuilt from the config snapshot.

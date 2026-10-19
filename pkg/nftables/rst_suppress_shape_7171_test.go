@@ -57,42 +57,50 @@ func TestRSTDropExprsShape(t *testing.T) {
 				t.Fatalf("expr[3] = %#v, want Cmp{Eq, %v}", exprs[3], tc.wantBytes)
 			}
 
-			// meta l4proto tcp
-			if m, ok := exprs[4].(*expr.Meta); !ok || m.Key != expr.MetaKeyL4PROTO {
-				t.Fatalf("expr[4] = %#v, want Meta{L4PROTO}", exprs[4])
+			// ct state predicate at [4..6] is pinned separately by
+			// TestRSTDropExprsScopedToConntrackless14949 (#14949); here
+			// we only require it to be present so the indices below stay
+			// honest about the rule's full shape.
+			if ct, ok := exprs[4].(*expr.Ct); !ok || ct.Key != expr.CtKeySTATE {
+				t.Fatalf("expr[4] = %#v, want Ct{STATE} (#14949 conntrack-less scoping)", exprs[4])
 			}
-			if c, ok := exprs[5].(*expr.Cmp); !ok || !bytes.Equal(c.Data, []byte{unix.IPPROTO_TCP}) {
-				t.Fatalf("expr[5] = %#v, want Cmp{Eq, IPPROTO_TCP}", exprs[5])
+
+			// meta l4proto tcp
+			if m, ok := exprs[7].(*expr.Meta); !ok || m.Key != expr.MetaKeyL4PROTO {
+				t.Fatalf("expr[7] = %#v, want Meta{L4PROTO}", exprs[7])
+			}
+			if c, ok := exprs[8].(*expr.Cmp); !ok || !bytes.Equal(c.Data, []byte{unix.IPPROTO_TCP}) {
+				t.Fatalf("expr[8] = %#v, want Cmp{Eq, IPPROTO_TCP}", exprs[8])
 			}
 
 			// tcp flags & RST != 0. Offset 13 is the TCP flags byte and the
 			// mask is RST (0x04) -- 0x02 would match SYN, 0x01 FIN, and any
 			// of those installs cleanly while suppressing the wrong packet.
-			fp, ok := exprs[6].(*expr.Payload)
+			fp, ok := exprs[9].(*expr.Payload)
 			if !ok || fp.Base != expr.PayloadBaseTransportHeader {
-				t.Fatalf("expr[6] = %#v, want Payload{TransportHeader}", exprs[6])
+				t.Fatalf("expr[9] = %#v, want Payload{TransportHeader}", exprs[9])
 			}
 			if fp.Offset != 13 || fp.Len != 1 {
 				t.Errorf("tcp flags payload = offset %d len %d, want offset 13 len 1", fp.Offset, fp.Len)
 			}
-			b, ok := exprs[7].(*expr.Bitwise)
+			b, ok := exprs[10].(*expr.Bitwise)
 			if !ok || !bytes.Equal(b.Mask, []byte{0x04}) || !bytes.Equal(b.Xor, []byte{0x00}) {
-				t.Fatalf("expr[7] = %#v, want Bitwise{mask 0x04, xor 0x00}", exprs[7])
+				t.Fatalf("expr[10] = %#v, want Bitwise{mask 0x04, xor 0x00}", exprs[10])
 			}
-			if c, ok := exprs[8].(*expr.Cmp); !ok || c.Op != expr.CmpOpNeq || !bytes.Equal(c.Data, []byte{0x00}) {
-				t.Fatalf("expr[8] = %#v, want Cmp{Neq, 0x00}", exprs[8])
+			if c, ok := exprs[11].(*expr.Cmp); !ok || c.Op != expr.CmpOpNeq || !bytes.Equal(c.Data, []byte{0x00}) {
+				t.Fatalf("expr[11] = %#v, want Cmp{Neq, 0x00}", exprs[11])
 			}
 
 			// counter then drop -- a rule that matches but does not drop is
 			// the same silent failure as one that never matches.
-			if _, ok := exprs[9].(*expr.Counter); !ok {
-				t.Fatalf("expr[9] = %#v, want Counter", exprs[9])
+			if _, ok := exprs[12].(*expr.Counter); !ok {
+				t.Fatalf("expr[12] = %#v, want Counter", exprs[12])
 			}
-			if v, ok := exprs[10].(*expr.Verdict); !ok || v.Kind != expr.VerdictDrop {
-				t.Fatalf("expr[10] = %#v, want Verdict{Drop}", exprs[10])
+			if v, ok := exprs[13].(*expr.Verdict); !ok || v.Kind != expr.VerdictDrop {
+				t.Fatalf("expr[13] = %#v, want Verdict{Drop}", exprs[13])
 			}
-			if len(exprs) != 11 {
-				t.Errorf("len(exprs) = %d, want 11", len(exprs))
+			if len(exprs) != 14 {
+				t.Errorf("len(exprs) = %d, want 14", len(exprs))
 			}
 		})
 	}

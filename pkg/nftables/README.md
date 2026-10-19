@@ -10,8 +10,10 @@ the counter READERS the observability surface scrapes.
 ### RST suppression (`rst_suppress.go`)
 - `InstallRSTSuppression()` — atomic delete-then-create within a single
   netlink batch, so there is no window where the old table is gone but
-  the new one isn't installed.
-- `RemoveRSTSuppression()`.
+  the new one isn't installed. Each drop rule is scoped to
+  conntrack-less packets (`ct state == 0`, #14949): only the kernel's
+  spurious no-socket RSTs for userspace-owned flows are dropped, while
+  tracked RSTs (`reject with tcp reset`, local socket RSTs) survive.
 
 ### Host-inbound / lo0 / fence installer (#6387 PR-2 additive, PR-3 CUTOVER)
 The `Installer` interface (`netlink_installer.go`) is the concrete
