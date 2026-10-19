@@ -12,6 +12,7 @@ package frr
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 )
@@ -34,7 +35,10 @@ type bfdPeer struct {
 	// ebgp-multihop session as multihop in bfdd (port 4784, local-address
 	// = update-source). A plain single-hop peer stanza for such a
 	// neighbor is an orphan bfdd never matches to bgpd's dynamic session,
-	// so the configured timers never apply.
+	// so the configured timers never apply. #15135: a multihop peer is
+	// renderable only WITH a valid localAddress — bfdd rejects the bare
+	// `peer X multihop` line — so render() omits the peer entirely when
+	// localAddress is empty/invalid (the bound profile still applies).
 	multihop     bool
 	localAddress string
 }
@@ -90,14 +94,29 @@ func (s *bfdSection) render() string {
 		// VRF-bound neighbor; otherwise the session stays DOWN and
 		// sub-second failover never works (#2489).
 		// #14587: a multihop BGP neighbor (iBGP over loopbacks, or
-		// ebgp-multihop) must be keyed `multihop [local-address L]` so
+		// ebgp-multihop) must be keyed `multihop local-address L` so
 		// bfdd matches the static stanza to the dynamic session bgpd
 		// creates (multihop port, update-source as local address). A
 		// plain peer line is an orphan single-hop session at the
 		// configured timers while bgpd's session runs FRR defaults.
-		// local-address goes through the same single-token belt as the
-		// BGP update-source render (#9493): a spaced value is omitted
-		// (multihop alone) rather than splitting the peer line.
+		// #15135 (A89-03): a multihop peer WITHOUT a valid local-address
+		// would render the bare line `peer X multihop`, which bfdd
+		// 10.7.1 rejects (a multihop peer requires a local address to
+		// bind) — frr-reload.py exits 1 and every commit fails to
+		// converge. Emit NO static peer for such a neighbor: the
+		// `neighbor X bfd profile <p>` binding still carries the
+		// configured timers to bgpd's own dynamic multihop session, and
+		// the `bfd` block survives on the profile alone. (A single-hop
+		// fallback stanza would be the proven #14587 orphan, so it is
+		// NOT emitted.) The validity test is the same single-token belt
+		// as the BGP update-source render (#9493): an empty or
+		// whitespace-bearing local-address has no renderable
+		// local-address clause, hence no renderable multihop peer.
+		if p.multihop && (p.localAddress == "" || !frrOperandOrOmit("bfd peer local-address", p.localAddress)) {
+			slog.Warn("frr: omitting multihop BFD peer without a valid local-address; bound profile still carries timers (#15135)",
+				"peer", sanitizeFRRValue(p.address))
+			continue
+		}
 		suffix := ""
 		if p.vrfName != "" {
 			// Render belt (#5557): sanitize the routing-instance name like the
@@ -107,10 +126,7 @@ func (s *bfdSection) render() string {
 			suffix += " vrf " + sanitizeFRRValue(p.vrfName)
 		}
 		if p.multihop {
-			suffix += " multihop"
-			if p.localAddress != "" && frrOperandOrOmit("bfd peer local-address", p.localAddress) {
-				suffix += " local-address " + sanitizeFRRValue(p.localAddress)
-			}
+			suffix += " multihop local-address " + sanitizeFRRValue(p.localAddress)
 		}
 		fmt.Fprintf(&b, " peer %s%s\n", p.address, suffix)
 		multiplier := p.multiplier
