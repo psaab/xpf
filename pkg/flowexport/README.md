@@ -697,15 +697,15 @@ only), so `set forwarding-options sampling instance s1 family inet output
 flow-server 10.0.0.2` with no `port` commits cleanly. This was an
 operator typo silently disabling flow export, not a drift-only state.
 
-Two nearby behaviours are deliberately NOT changed:
+Nearby behaviour notes:
 
-- **`reconcileFlowExporter` still returns on the first constructor
-  error.** That is the #3742 availability design for a TRANSIENT failure
-  (a pinned source-address bind before the source interface is up,
-  collector DNS): keeping the old exporters running beats swapping in a
-  degraded set. The collectors excluded above are decidable from config
-  and can never succeed later, which is what makes dropping them safe and
-  a dial-time tolerance unsafe.
+- **`reconcileFlowExporter` no longer returns on the first constructor
+  error (#15230).** It builds each group independently, publishes the
+  groups that build, and marks only the failing group failed/retried;
+  a failing group keeps its previously running exporter (the #3742
+  availability property, now per-group). The collectors excluded above
+  are decidable from config and can never succeed later, which is what
+  makes dropping them safe and a dial-time tolerance unsafe.
 - **`dialCollectors` still fails the group on a dial error.** A
   well-formed collector that is merely unreachable must stay fatal at
   construction; per-collector unreachability is handled afterwards by the
@@ -761,6 +761,31 @@ the process SIGKILLed before the HA takeover fence runs.
 Not changed: the `d.flowHashSet = false` on the failure path. The finding
 narrated that as the defect; it is the FIX — without it the next commit
 would be hash-gated into a permanently dead family.
+
+**#15230 — per-group build isolation and per-interface sampling.**
+The #3742/#8163 text above described reconcile returning on the first
+constructor error as deliberate for transient faults. That froze the
+whole family: one collector whose warn-only source-address was not yet
+local (the HA-VIP-on-secondary shape) stopped every collector of every
+instance and kept the previously running config. Reconcile now builds
+each template group independently: groups that build are published with
+the new config, only the failing group is marked failed
+(`FlowExportFailedGroups`, family `BuildFailed` stays set, hash not
+recorded so the 30s retry / next commit retries it), and a failing
+group with a previously running exporter keeps that exporter.
+Generations are tracked per build (`flowGens`/`ipfixGens`) so a partial
+swap never closes a retained group; teardown joins every generation
+through `joinWithBudget`.
+
+Interface sampling is likewise no longer zone-OR-ed: `BuildSamplingZones`
+also records `IfacesV4`/`IfacesV6` keyed by authored unit ref, and the
+daemon callbacks gate on `ShouldExportIface(..., rec.IngressIface,
+rec.EgressIface)` — the record's own interfaces (from
+Ingress/EgressIfindex via the ifindex->name table). An unsampled
+interface in a sampled zone is denied before the 1-in-N counter and
+counts as zone-filtered; an unknown interface fails closed under a
+per-interface restriction. Hand-built configs without per-interface
+data keep the prior zone semantics via `ShouldExport`.
 
 The `if fs.Port > 0` guard before `net.JoinHostPort` is kept even though
 the exclusion makes `Port >= 1` on every path that reaches it. It is the

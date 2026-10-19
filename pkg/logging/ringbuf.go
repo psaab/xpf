@@ -750,6 +750,7 @@ func (er *EventReader) logEvent(data []byte) {
 		rec.TCPControlBits = data[rawEventTCPBitOffset]
 		rec.EgressIfindex = binary.LittleEndian.Uint32(
 			data[rawEventEgressOffset : rawEventEgressOffset+4])
+		rec.EgressIface = er.resolveIfName(rec.EgressIfindex)
 	}
 
 	// Resolve policy name (skip for screen drops which repurpose policy_id).

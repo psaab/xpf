@@ -614,7 +614,16 @@ type Daemon struct {
 	ipfixCBOnce         sync.Once
 	ipfixReconMu        sync.Mutex
 	ipfixExportErr      error
-	dhcpRelay           *dhcprelay.Manager
+	// #15230: per-group build state. Failed groups (key family\x00instance)
+	// that the last reconcile could not build; healthy groups of the same
+	// family were published anyway. Retained old exporters for a failed
+	// group keep their own generation so a partial swap never closes a
+	// failed group's still-running exporter.
+	flowFailedGroups  map[string]bool
+	ipfixFailedGroups map[string]bool
+	flowGens          []v9Gen
+	ipfixGens         []ipfixGen
+	dhcpRelay         *dhcprelay.Manager
 	// mgmt owns the HTTP/HTTPS management-listener lifecycle (#5866): it starts
 	// the listener at boot and, on every day-2 commit, reconciles the live
 	// listener + authentication snapshot against the committed web-management
