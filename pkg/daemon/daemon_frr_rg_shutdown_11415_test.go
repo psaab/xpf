@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -199,6 +200,10 @@ func (*frrHAEventExecutor11415) Vtysh(context.Context, string) (string, error) {
 func (e *frrHAEventExecutor11415) FrrReloadPy(context.Context, string) error {
 	e.reloaded <- struct{}{}
 	return nil
+}
+
+func (*frrHAEventExecutor11415) FrrReloadPyTest(context.Context, string) error {
+	return errors.New("frr-reload.py --test: diff remains")
 }
 
 func (*frrHAEventExecutor11415) VtyshLoad(context.Context, string) ([]byte, error) {

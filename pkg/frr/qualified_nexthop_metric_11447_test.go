@@ -479,7 +479,7 @@ func TestQNHMetricManagerFallbackRetryAndClear11447(t *testing.T) {
 	if err := m.ApplyFull(fc); !errors.Is(err, ErrFRRReloadDegraded) {
 		t.Fatalf("fallback apply error = %v, want ErrFRRReloadDegraded", err)
 	}
-	if got, want := strings.Join(fake.callOrder, ","), "reload,global-load,global-load,daemon-load:ospfd"; got != want {
+	if got, want := strings.Join(fake.callOrder, ","), "reload,reload-test,global-load,global-load,daemon-load:ospfd"; got != want {
 		t.Fatalf("fallback operation order = %q, want %q", got, want)
 	}
 	if len(fake.globalLoads) != 2 || !strings.Contains(fake.globalLoads[1], "no set metric\n") {

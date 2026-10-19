@@ -1572,8 +1572,25 @@ func (m *Manager) reloadLocked() error {
 		}
 		return nil
 	}
+	// #15203 (A12-06): a failed --reload is not always a non-convergence.
+	// Removing IS-IS from an interface makes frr-reload.py delete
+	// `ip router isis` before the per-interface `no isis circuit-type`;
+	// isisd rejects the dependent removal (YANG area-tag missing) and the
+	// script exits non-zero even though the running end state already
+	// matches frr.conf. Re-check with `frr-reload.py --test`: an empty
+	// diff proves the failure benign — certify convergence instead of
+	// reporting a degraded reload for a correct end state. Any doubt
+	// (pythontools missing, a remaining diff, a failed re-check) falls
+	// through to the additive fallback below: fail closed, never certify
+	// on an unproven re-check.
 	if isFrrReloadPyMissing(perr) {
 		m.warnPytoolsOnce(perr)
+	} else if m.reloadTestConverged15203() {
+		slog.Info("FRR reload converged on re-check: primary frr-reload.py failed but frr-reload.py --test shows no diff (#15203)", "primary_err", perr)
+		if err := m.reconcileQNHMetricOverlaysLocked(m.lifetimeCtx()); err != nil {
+			return fmt.Errorf("reconcile QNH metric overlays after benign FRR reload: %w (primary frr-reload.py failed: %w)", err, perr)
+		}
+		return nil
 	} else {
 		slog.Warn("frr-reload.py reload failed; falling back to additive vtysh -f", "err", perr)
 	}
@@ -1601,6 +1618,23 @@ func (m *Manager) reloadLocked() error {
 		return fmt.Errorf("reconcile QNH metric overlays after additive reload: %w (primary frr-reload.py failed: %w)", err, perr)
 	}
 	return fmt.Errorf("%w: %w", ErrFRRReloadDegraded, perr)
+}
+
+// reloadTestConverged15203 reports whether `frr-reload.py --test` against
+// the on-disk frr.conf finds no diff to the live running config (#15203).
+// A non-nil executor result — a remaining diff or a failed re-check —
+// reports false: the caller must fall back, never certify. Executors that
+// predate the re-check seam report false via the interface assertion.
+func (m *Manager) reloadTestConverged15203() bool {
+	tester, ok := m.executor().(interface {
+		FrrReloadPyTest(ctx context.Context, conf string) error
+	})
+	if !ok {
+		return false
+	}
+	tctx, tcancel := context.WithTimeout(m.lifetimeCtx(), reloadTimeout)
+	defer tcancel()
+	return tester.FrrReloadPyTest(tctx, m.frrConf) == nil
 }
 
 // isFrrReloadPyMissing classifies a primary-reload error as

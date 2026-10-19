@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,9 @@ func (vtyshEscapeExecutor6468) Vtysh(_ context.Context, cmd string) (string, err
 }
 
 func (vtyshEscapeExecutor6468) FrrReloadPy(context.Context, string) error { return nil }
+func (vtyshEscapeExecutor6468) FrrReloadPyTest(context.Context, string) error {
+	return errors.New("frr-reload.py --test: diff remains")
+}
 
 func (vtyshEscapeExecutor6468) VtyshLoad(context.Context, string) ([]byte, error) {
 	return nil, nil

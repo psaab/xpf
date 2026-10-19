@@ -33,8 +33,10 @@ type fakeExecutor struct {
 	// set, runs inside the call (under the manager's reloadMu) and its
 	// return value wins — used by the stale-success and
 	// converge-after-N tests.
-	frrReloadPyErr  error
-	frrReloadPyHook func(call int) error
+	frrReloadPyErr     error
+	frrReloadTestErr   error
+	frrReloadTestCalls int
+	frrReloadPyHook    func(call int) error
 
 	// vtyshLoadResp / vtyshLoadErr are returned by VtyshLoad.
 	vtyshLoadResp []byte
@@ -103,6 +105,21 @@ func (f *fakeExecutor) FrrReloadPy(ctx context.Context, conf string) error {
 		return hook(call)
 	}
 	return err
+}
+
+func (f *fakeExecutor) FrrReloadPyTest(ctx context.Context, conf string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.frrReloadTestCalls++
+	f.lastFrrReloadPyCtx = ctx
+	f.lastFrrReloadConf = conf
+	f.callOrder = append(f.callOrder, "reload-test")
+	if f.frrReloadTestErr != nil {
+		return f.frrReloadTestErr
+	}
+	// Default: a diff remains, so existing degraded/hard-failure cells
+	// keep their pre-#15203 behaviour unless they opt into convergence.
+	return errors.New("frr-reload.py --test: diff remains")
 }
 
 func (f *fakeExecutor) VtyshStream(_ context.Context, command string) (io.ReadCloser, func() error, error) {

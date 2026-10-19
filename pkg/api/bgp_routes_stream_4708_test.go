@@ -35,8 +35,11 @@ type fakeBGPExecutor struct {
 	vtyshOut string
 }
 
-func (f fakeBGPExecutor) Vtysh(context.Context, string) (string, error)     { return f.vtyshOut, nil }
-func (f fakeBGPExecutor) FrrReloadPy(context.Context, string) error         { return nil }
+func (f fakeBGPExecutor) Vtysh(context.Context, string) (string, error) { return f.vtyshOut, nil }
+func (f fakeBGPExecutor) FrrReloadPy(context.Context, string) error     { return nil }
+func (f fakeBGPExecutor) FrrReloadPyTest(context.Context, string) error {
+	return fmt.Errorf("frr-reload.py --test: diff remains")
+}
 func (f fakeBGPExecutor) VtyshLoad(context.Context, string) ([]byte, error) { return nil, nil }
 
 // VtyshStream serves the canned table as an incremental reader so the streaming

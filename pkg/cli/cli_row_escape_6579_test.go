@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,9 @@ func (rowEscapeExecutor6579) Vtysh(_ context.Context, cmd string) (string, error
 }
 
 func (rowEscapeExecutor6579) FrrReloadPy(context.Context, string) error { return nil }
+func (rowEscapeExecutor6579) FrrReloadPyTest(context.Context, string) error {
+	return errors.New("frr-reload.py --test: diff remains")
+}
 
 func (rowEscapeExecutor6579) VtyshLoad(context.Context, string) ([]byte, error) { return nil, nil }
 

@@ -108,6 +108,10 @@ func (e *qnhFailedReloadExecutor15183) FrrReloadPy(_ context.Context, conf strin
 	return nil
 }
 
+func (e *qnhFailedReloadExecutor15183) FrrReloadPyTest(context.Context, string) error {
+	return errors.New("frr-reload.py --test: diff remains")
+}
+
 func (e *qnhFailedReloadExecutor15183) VtyshLoad(_ context.Context, conf string) ([]byte, error) {
 	if e.vtyshLoadErr != nil {
 		return nil, e.vtyshLoadErr
