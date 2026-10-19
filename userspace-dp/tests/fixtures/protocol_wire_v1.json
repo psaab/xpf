@@ -876,8 +876,10 @@
   },
   "mirror_config_snapshot": {
     "ingress_ifindex": 0,
+    "ingress_vlan_id": 0,
     "output_ifindex": 0,
-    "rate": 0
+    "rate": 0,
+    "unit_scoped": false
   },
   "nat64_rule_snapshot": {
     "deterministic_block_size": 0,
@@ -1195,10 +1197,14 @@
     "session_replication_queue_depth_sum": 0,
     "session_replication_upserts_total": 0,
     "session_table_entries": 0,
+    "shared_nat_ambiguity_keys": 0,
+    "shared_nat_ambiguity_saturated": 0,
     "shared_session_poison_recoveries": 0,
     "shared_session_publish_lock_acquisitions_total": 0,
     "shared_session_publish_lock_contended_total": 0,
     "shared_session_publishes_total": 0,
+    "shared_wire_ambiguity_keys": 0,
+    "shared_wire_ambiguity_saturated": 0,
     "slow_path": {
       "active": false,
       "degraded": false,
@@ -1505,10 +1511,14 @@
     "session_replication_queue_depth_sum": 0,
     "session_replication_upserts_total": 0,
     "session_table_entries": 0,
+    "shared_nat_ambiguity_keys": 0,
+    "shared_nat_ambiguity_saturated": 0,
     "shared_session_poison_recoveries": 0,
     "shared_session_publish_lock_acquisitions_total": 0,
     "shared_session_publish_lock_contended_total": 0,
     "shared_session_publishes_total": 0,
+    "shared_wire_ambiguity_keys": 0,
+    "shared_wire_ambiguity_saturated": 0,
     "slow_path": {
       "active": false,
       "degraded": false,
@@ -1823,10 +1833,14 @@
     "session_replication_queue_depth_sum": 0,
     "session_replication_upserts_total": 0,
     "session_table_entries": 0,
+    "shared_nat_ambiguity_keys": 0,
+    "shared_nat_ambiguity_saturated": 0,
     "shared_session_poison_recoveries": 0,
     "shared_session_publish_lock_acquisitions_total": 0,
     "shared_session_publish_lock_contended_total": 0,
     "shared_session_publishes_total": 0,
+    "shared_wire_ambiguity_keys": 0,
+    "shared_wire_ambiguity_saturated": 0,
     "slow_path": {
       "active": false,
       "degraded": false,

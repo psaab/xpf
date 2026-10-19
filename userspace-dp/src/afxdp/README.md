@@ -953,6 +953,17 @@ sync.
   only when the candidate's egress domain equals the reply domain. Ambiguous or
   saturated ownership fails closed. The existing tuple-only embedded-ICMP quote
   admission is unchanged.
+- **#15104 — the ambiguity bound is a LIVE bound, not a lifetime latch.**
+  `SharedNatAmbiguityIndex` computes saturation from its live size and
+  maintains a per-alias owner multiset: `remove_shared_session_if` calls
+  `forget_owner` for the removed forward entry's wire and canonical
+  aliases, dropping the record only when no surviving forward entry maps
+  to it (a sole survivor of a displaced alias is restored to unique).
+  A live population at 16,384 keys still fails closed, and recovers once
+  removals drop it below the bound — no helper restart. Live size and
+  saturation for both indexes ride `ProcessStatus` as
+  `shared_{nat,wire}_ambiguity_{keys,saturated}` /
+  `xpf_userspace_shared_{nat,wire}_ambiguity_{keys,saturated}`.
 - `frame/` — packet parsing (L2 / L3 / L4), checksum helpers, TCP MSS
   clamp. `tests.rs` was relocated out of `mod.rs` in #1046 Phase 1.
   `headers.rs` holds the consolidated outer-header serializers (#1440).

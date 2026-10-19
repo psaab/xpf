@@ -53,22 +53,29 @@ pub(super) type WireOwnerRoster = smallvec::SmallVec<[SessionKey; 2]>;
 /// Wire/catalogue-side key -> live owner roster (#15106).
 pub(super) type WireOwnerMultiset = FastMap<SessionKey, WireOwnerRoster>;
 
-/// Bounded history of reverse aliases. Domain-neutral owners let an unstamped
-/// fabric reply reject a tuple that exists in multiple routing instances.
-/// Once the bound is reached, every such exception fails closed.
+/// Bounded live history of reverse aliases. Domain-neutral owners let an
+/// unstamped fabric reply reject a tuple that exists in multiple routing
+/// instances. Once the live bound is reached, every such exception fails
+/// closed until removals bring the live population back below the bound
+/// (#15104: saturation is computed from the live size, never latched).
 pub(super) struct SharedNatAmbiguityIndex {
     aliases: FastMap<SessionKey, Option<SessionKey>>,
     /// #15106: per-wire-key live-owner multiset. Its LOCK is shared with
     /// `aliases` (the same mutex), so observe/remove and ambiguity state move
     /// together. Soft-capped at the wire-key level: above the ingest cap the
-    /// roster saturates fail-closed via `wire_saturated`, mirroring
-    /// `saturated` for alias keys.
+    /// roster saturates fail-closed via `wire_saturated`.
     wire_owners: WireOwnerMultiset,
-    saturated: bool,
     /// #15106: set when `wire_owners` reaches its wire-key capacity. While
     /// set, wire survivor resolution declines (fail-closed ambiguity
     /// semantics) rather than trusting a partial roster.
     wire_saturated: bool,
+    // #15104: per-alias owner multiset. `aliases` alone cannot tell a
+    // removal whether another live forward entry still maps to the same
+    // alias, so publish/remove maintain this count and `forget_owner`
+    // drops the alias record only when its last owner leaves. Owners are
+    // counted per (alias, owner) pair: re-publishing the same owner for
+    // the same alias does not inflate the count.
+    owners: FastMap<SessionKey, FastMap<SessionKey, u32>>,
 }
 
 impl Default for SharedNatAmbiguityIndex {
@@ -76,8 +83,8 @@ impl Default for SharedNatAmbiguityIndex {
         Self {
             aliases: FastMap::default(),
             wire_owners: WireOwnerMultiset::default(),
-            saturated: false,
             wire_saturated: false,
+            owners: FastMap::default(),
         }
     }
 }
@@ -85,8 +92,19 @@ impl Default for SharedNatAmbiguityIndex {
 impl SharedNatAmbiguityIndex {
     const MAX_KEYS: usize = 16_384;
 
+    /// #15104: saturation is a function of the LIVE population. A live
+    /// population at or above `MAX_KEYS` fails closed; once removals drop
+    /// it below the bound the index recovers without a helper restart.
+    pub(super) fn saturated(&self) -> bool {
+        self.aliases.len() >= Self::MAX_KEYS
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.aliases.len()
+    }
+
     fn remember(&mut self, key: SessionKey, owner: Option<SessionKey>) {
-        if self.saturated {
+        if self.saturated() {
             return;
         }
         if let Some(existing) = self.aliases.get(&key) {
@@ -95,11 +113,7 @@ impl SharedNatAmbiguityIndex {
             }
             return;
         }
-        if self.aliases.len() == Self::MAX_KEYS {
-            self.saturated = true;
-        } else {
-            self.aliases.insert(key, owner);
-        }
+        self.aliases.insert(key, owner);
     }
 
     pub(super) fn mark(&mut self, key: SessionKey) {
@@ -107,15 +121,58 @@ impl SharedNatAmbiguityIndex {
     }
 
     pub(super) fn observe(&mut self, key: SessionKey, owner: SessionKey) {
+        self.owners
+            .entry(key.clone())
+            .or_default()
+            .entry(owner.clone())
+            .or_insert(0);
         self.remember(key, Some(owner));
     }
 
+    /// #15104: record that `owner` claimed `key` without changing the
+    /// unique/ambiguous verdict. Used for aliases (such as the canonical
+    /// reverse alias) whose ambiguity is driven by displacement marks
+    /// rather than by the observe that seeds the wire alias.
+    pub(super) fn track_owner(&mut self, key: SessionKey, owner: SessionKey) {
+        self.owners
+            .entry(key)
+            .or_default()
+            .entry(owner)
+            .or_insert(0);
+    }
+
+    /// #15104: drop `owner`'s claim on `key`. When no owner remains, the
+    /// alias record is forgotten entirely, so the live population (and
+    /// therefore saturation) shrinks. When exactly one owner remains and
+    /// its only record is an ambiguity mark left by a displaced publish,
+    /// the record is restored to that owner so the shared lookup can
+    /// resolve again.
+    pub(super) fn forget_owner(&mut self, key: &SessionKey, owner: &SessionKey) {
+        let mut bucket_empty = false;
+        let mut sole_owner: Option<SessionKey> = None;
+        if let Some(bucket) = self.owners.get_mut(key) {
+            bucket.remove(owner);
+            bucket_empty = bucket.is_empty();
+            if bucket.len() == 1 {
+                sole_owner = bucket.keys().next().cloned();
+            }
+        }
+        if bucket_empty {
+            self.owners.remove(key);
+            self.aliases.remove(key);
+        } else if let Some(sole) = sole_owner
+            && matches!(self.aliases.get(key), Some(None))
+        {
+            self.aliases.insert(key.clone(), Some(sole));
+        }
+    }
+
     pub(super) fn contains(&self, key: &SessionKey) -> bool {
-        self.saturated || matches!(self.aliases.get(key), Some(None))
+        self.saturated() || matches!(self.aliases.get(key), Some(None))
     }
 
     pub(super) fn is_unique_for(&self, key: &SessionKey, owner: &SessionKey) -> bool {
-        !self.saturated
+        !self.saturated()
             && matches!(self.aliases.get(key), Some(Some(candidate)) if candidate == owner)
     }
 
@@ -125,17 +182,17 @@ impl SharedNatAmbiguityIndex {
     /// map. `observe`/`mark` cannot do this: `remember` keeps a `None`
     /// (ambiguous) record sticky forever.
     pub(super) fn reset_to_owner(&mut self, key: SessionKey, owner: SessionKey) {
-        if self.saturated {
+        if self.saturated() && !self.aliases.contains_key(&key) {
             return;
         }
+        self.owners
+            .insert(key.clone(), FastMap::from_iter([(owner.clone(), 0u32)]));
         match self.aliases.get(&key) {
             Some(existing) if existing.as_ref() == Some(&owner) => {}
             Some(_) => {
                 self.aliases.insert(key, Some(owner));
             }
-            None if self.aliases.len() == Self::MAX_KEYS => {
-                self.saturated = true;
-            }
+            None if self.aliases.len() == Self::MAX_KEYS => {}
             None => {
                 self.aliases.insert(key, Some(owner));
             }
@@ -146,10 +203,11 @@ impl SharedNatAmbiguityIndex {
     /// leaves no surviving owner for the alias.
     pub(super) fn forget(&mut self, key: &SessionKey) {
         self.aliases.remove(key);
+        self.owners.remove(key);
     }
 
     pub(super) fn unique_owner(&self, key: &SessionKey) -> Option<&SessionKey> {
-        if self.saturated {
+        if self.saturated() {
             return None;
         }
         self.aliases.get(key).and_then(Option::as_ref)
@@ -158,8 +216,8 @@ impl SharedNatAmbiguityIndex {
     pub(super) fn clear(&mut self) {
         self.aliases.clear();
         self.wire_owners.clear();
-        self.saturated = false;
         self.wire_saturated = false;
+        self.owners.clear();
     }
 
     // ---- #15106: per-wire-key live-owner multiset -------------------------
@@ -175,7 +233,7 @@ impl SharedNatAmbiguityIndex {
         if self.wire_saturated {
             return;
         }
-        if self.saturated {
+        if self.saturated() {
             self.wire_saturated = true;
             return;
         }
@@ -218,7 +276,7 @@ impl SharedNatAmbiguityIndex {
     /// Whether a wire survivor answer from `wire_owners` can be trusted:
     /// false once either saturation latch is set (fail-closed).
     pub(super) fn wire_owners_trusted(&self) -> bool {
-        !self.wire_saturated && !self.saturated
+        !self.wire_saturated && !self.saturated()
     }
 
     /// The first (published-first) live owner recorded for `wire_key`, used
@@ -396,7 +454,6 @@ impl Default for SharedSessionOwnerRgIndexes {
         }
     }
 }
-
 
 impl SharedSessionOwnerRgIndexes {
     /// #6653: RECOVERING locks, for the same reason as the session maps this

@@ -685,6 +685,10 @@ type xpfCollector struct {
 	userspaceIoUringWriteRefusedBytes         *prometheus.Desc
 	userspaceRouteChangeUnrejudgedSessions    *prometheus.Desc
 	userspaceOwnerRGFilingsDeclined           *prometheus.Desc
+	userspaceSharedNatAmbiguityKeys           *prometheus.Desc
+	userspaceSharedNatAmbiguitySaturated      *prometheus.Desc
+	userspaceSharedWireAmbiguityKeys          *prometheus.Desc
+	userspaceSharedWireAmbiguitySaturated     *prometheus.Desc
 	userspaceHATransitionDropped              *prometheus.Desc
 	userspaceHATransitionStaleSkipped         *prometheus.Desc
 	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
@@ -1465,6 +1469,10 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceIoUringWriteRefusedBytes
 	ch <- c.userspaceRouteChangeUnrejudgedSessions
 	ch <- c.userspaceOwnerRGFilingsDeclined
+	ch <- c.userspaceSharedNatAmbiguityKeys
+	ch <- c.userspaceSharedNatAmbiguitySaturated
+	ch <- c.userspaceSharedWireAmbiguityKeys
+	ch <- c.userspaceSharedWireAmbiguitySaturated
 	ch <- c.userspaceHATransitionDropped
 	ch <- c.userspaceHATransitionStaleSkipped
 	ch <- c.userspaceSessionDeleteRefusedIdentity

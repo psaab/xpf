@@ -322,6 +322,46 @@ impl super::Coordinator {
         crate::afxdp::shared_ops::OWNER_RG_FILINGS_DECLINED.load(Ordering::Relaxed)
     }
 
+    /// #15104: live size and saturation of the two shared ambiguity
+    /// indexes (`nat_ambiguities` / `wire_ambiguities`). Saturation is
+    /// computed from the live population, so these gauges fall again once
+    /// removals drop the population below `MAX_KEYS` (16,384). A saturated
+    /// index fails every shared reverse/wire uniqueness proof closed
+    /// until then — the operator-visible sign that the bound is doing
+    /// anything. Surfaced as `xpf_userspace_shared_nat_ambiguity_*` and
+    /// `xpf_userspace_shared_wire_ambiguity_*`.
+    pub fn shared_nat_ambiguity_keys(&self) -> u64 {
+        crate::afxdp::shared_ops::lock_shared_recover(
+            &self.sessions.owner_rg_indexes.nat_ambiguities,
+        )
+        .len() as u64
+    }
+
+    pub fn shared_nat_ambiguity_saturated(&self) -> u64 {
+        u64::from(
+            crate::afxdp::shared_ops::lock_shared_recover(
+                &self.sessions.owner_rg_indexes.nat_ambiguities,
+            )
+            .saturated(),
+        )
+    }
+
+    pub fn shared_wire_ambiguity_keys(&self) -> u64 {
+        crate::afxdp::shared_ops::lock_shared_recover(
+            &self.sessions.owner_rg_indexes.wire_ambiguities,
+        )
+        .len() as u64
+    }
+
+    pub fn shared_wire_ambiguity_saturated(&self) -> u64 {
+        u64::from(
+            crate::afxdp::shared_ops::lock_shared_recover(
+                &self.sessions.owner_rg_indexes.wire_ambiguities,
+            )
+            .saturated(),
+        )
+    }
+
     pub fn session_replication_upserts_total(&self) -> u64 {
         crate::afxdp::session_glue::SESSION_REPLICATION_UPSERTS.load(Ordering::Relaxed)
     }

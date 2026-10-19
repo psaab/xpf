@@ -426,6 +426,10 @@ type ProcessStatus struct {
 	// with older helpers; JSON tags MUST match the Rust serde rename(...)
 	// exactly (protocol/control.rs).
 	SharedSessionPublishesTotal               uint64 `json:"shared_session_publishes_total,omitempty"`
+	SharedNatAmbiguityKeys                    uint64 `json:"shared_nat_ambiguity_keys,omitempty"`
+	SharedNatAmbiguitySaturated               uint64 `json:"shared_nat_ambiguity_saturated,omitempty"`
+	SharedWireAmbiguityKeys                   uint64 `json:"shared_wire_ambiguity_keys,omitempty"`
+	SharedWireAmbiguitySaturated              uint64 `json:"shared_wire_ambiguity_saturated,omitempty"`
 	SharedSessionPublishLockAcquisitionsTotal uint64 `json:"shared_session_publish_lock_acquisitions_total,omitempty"`
 	SharedSessionPublishLockContendedTotal    uint64 `json:"shared_session_publish_lock_contended_total,omitempty"`
 	SessionReplicationUpsertsTotal            uint64 `json:"session_replication_upserts_total,omitempty"`

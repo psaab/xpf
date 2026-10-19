@@ -902,3 +902,195 @@ fn replication_contention_denominator_counts_only_attempted_acquisitions() {
         "exactly one replication call"
     );
 }
+
+// #15104 (A71-01): the shared NAT ambiguity index never forgot aliases and
+// latched `saturated` after 16,384 lifetime flows, so every later shared
+// reverse-NAT lookup failed closed until a helper restart. The probes
+// below drive the REAL publish/remove path (`publish_shared_session` /
+// `remove_shared_session`) over the REAL 16,384 bound.
+//
+// RED on pre-fix: the lifetime test's recovery assertions fail (the index
+// stays saturated / the alias record survives removal); the live-bound
+// test's post-removal recovery fails; the survivor test's sole-survivor /
+// last-owner assertions fail where removal never touched the index.
+
+fn nat_entry_15104(src_port: u16, translated_port: u16) -> SyncedSessionEntry {
+    let mut e = entry(src_port);
+    e.decision.nat.rewrite_src = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+    e.decision.nat.rewrite_src_port = Some(translated_port);
+    e
+}
+
+fn ambiguity_probe(e: &SyncedSessionEntry) -> SessionKey {
+    let wire = crate::session::reverse_session_key(&e.key, e.decision.nat);
+    crate::session::reverse_match_key(&wire)
+}
+
+#[test]
+fn shared_nat_ambiguity_recovers_after_lifetime_churn_15104() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    // 16,385 sequential flows, each removed before the next is published:
+    // the LIVE population never exceeds 2, but the LIFETIME count crosses
+    // the 16,384 bound. Pre-fix the latched flag fails every later lookup.
+    for i in 0..16_385u32 {
+        let e = nat_entry_15104(20_000 + (i % 500) as u16, 30_000 + (i % 500) as u16);
+        // Vary the forward key per iteration via dst_port so each publish
+        // is a distinct owner; reuse a small port span is fine because
+        // each entry is removed before the next publish.
+        let mut e = e;
+        e.key.dst_port = 5201 + (i % 500) as u16;
+        e.key.src_port = 10_000 + (i % 1000) as u16;
+        maps.publish(&e);
+        maps.remove(&e.key);
+    }
+    let survivor = nat_entry_15104(41001, 31001);
+    maps.publish(&survivor);
+    let probe = ambiguity_probe(&survivor);
+    let ambiguities = maps
+        .indexes
+        .nat_ambiguities
+        .lock()
+        .expect("ambiguity index");
+    assert!(
+        !ambiguities.saturated(),
+        "live population is 1; saturation must not latch after 16k lifetime flows"
+    );
+    assert!(
+        ambiguities.is_unique_for(&probe, &survivor.key),
+        "surviving flow must resolve uniquely after lifetime churn"
+    );
+    assert_eq!(
+        ambiguities.unique_owner(&probe),
+        Some(&survivor.key),
+        "unique_owner must return the surviving owner after churn"
+    );
+    drop(ambiguities);
+    // Removal of the last owner forgets the alias entirely.
+    maps.remove(&survivor.key);
+    let ambiguities = maps
+        .indexes
+        .nat_ambiguities
+        .lock()
+        .expect("ambiguity index");
+    assert_eq!(ambiguities.len(), 0, "last removal must forget the alias");
+    assert!(!ambiguities.contains(&probe));
+    assert_eq!(ambiguities.unique_owner(&probe), None);
+}
+
+#[test]
+fn shared_nat_ambiguity_live_bound_fails_closed_and_recovers_15104() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    // Fill the LIVE population to the bound with distinct reverse aliases
+    // (distinct translated ports give distinct wire aliases).
+    let mut entries = Vec::new();
+    for i in 0..16_384u32 {
+        let mut e = nat_entry_15104(41001, 1024 + (i % 60_000) as u16);
+        e.key.src_port = 10_000 + (i % 1000) as u16;
+        e.key.dst_port = 5201 + (i % 500) as u16;
+        // Ensure distinct owners: encode i in src/dst ip low bits via port
+        // span is not enough, so vary dst ip last octet by block.
+        e.key.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, (i / 256) as u8, (i % 256) as u8));
+        entries.push(e);
+    }
+    for e in &entries {
+        maps.publish(e);
+    }
+    {
+        let ambiguities = maps
+            .indexes
+            .nat_ambiguities
+            .lock()
+            .expect("ambiguity index");
+        assert!(
+            ambiguities.len() >= 16_384 || ambiguities.saturated(),
+            "live population at the bound must report saturation; len={}",
+            ambiguities.len()
+        );
+        assert!(
+            ambiguities.saturated(),
+            "at-bound live population must fail closed"
+        );
+        let probe = ambiguity_probe(&entries[0]);
+        assert!(
+            !ambiguities.is_unique_for(&probe, &entries[0].key),
+            "saturated index must fail closed for a live owner"
+        );
+        assert_eq!(ambiguities.unique_owner(&probe), None);
+    }
+    // Removing one entry drops the live population below the bound.
+    maps.remove(&entries[0].key);
+    let ambiguities = maps
+        .indexes
+        .nat_ambiguities
+        .lock()
+        .expect("ambiguity index");
+    assert!(
+        !ambiguities.saturated(),
+        "dropping below the live bound must clear saturation without restart"
+    );
+    let probe = ambiguity_probe(&entries[1]);
+    assert!(
+        ambiguities.is_unique_for(&probe, &entries[1].key),
+        "a surviving unique owner must resolve again below the bound"
+    );
+}
+
+#[test]
+fn shared_nat_ambiguity_survivor_controls_15104() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    // Two distinct owners DNAT to the same backend: same canonical alias,
+    // distinct wire aliases (distinct translated ports are NOT used here;
+    // both share the canonical tuple). Publish both, then remove them one
+    // at a time.
+    let translated = Ipv4Addr::new(203, 0, 113, 7);
+    let first = nat_entry(1, translated);
+    let second = nat_entry(2, translated);
+    maps.publish(&first);
+    maps.publish(&second);
+    let canonical = crate::session::reverse_canonical_key(&second.key, second.decision.nat);
+    let probe = crate::session::reverse_match_key(&canonical);
+    {
+        let ambiguities = maps
+            .indexes
+            .nat_ambiguities
+            .lock()
+            .expect("ambiguity index");
+        assert!(
+            ambiguities.contains(&probe),
+            "displaced canonical alias must stay ambiguous while both owners live"
+        );
+        assert!(!ambiguities.is_unique_for(&probe, &first.key));
+        assert!(!ambiguities.is_unique_for(&probe, &second.key));
+    }
+    // Remove the second owner: the first becomes the sole survivor and
+    // must resolve uniquely again; its map alias is still present.
+    maps.remove(&second.key);
+    {
+        let ambiguities = maps
+            .indexes
+            .nat_ambiguities
+            .lock()
+            .expect("ambiguity index");
+        assert!(
+            ambiguities.is_unique_for(&probe, &first.key),
+            "sole surviving owner must be restored to unique after twin removal"
+        );
+        assert_eq!(ambiguities.unique_owner(&probe), Some(&first.key));
+    }
+    // Remove the last owner: the alias is forgotten.
+    maps.remove(&first.key);
+    let ambiguities = maps
+        .indexes
+        .nat_ambiguities
+        .lock()
+        .expect("ambiguity index");
+    assert!(!ambiguities.contains(&probe));
+    assert_eq!(ambiguities.unique_owner(&probe), None);
+    assert!(
+        !ambiguities.is_unique_for(&probe, &first.key),
+        "forgotten alias must not resolve for a removed owner"
+    );
+}

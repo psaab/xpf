@@ -28,6 +28,26 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"Owner redundancy-group index filings declined because the peer-supplied group id was out of range.",
 		nil, nil,
 	)
+	c.userspaceSharedNatAmbiguityKeys = prometheus.NewDesc(
+		"xpf_userspace_shared_nat_ambiguity_keys",
+		"Live keys in the shared NAT ambiguity index (#15104).",
+		nil, nil,
+	)
+	c.userspaceSharedNatAmbiguitySaturated = prometheus.NewDesc(
+		"xpf_userspace_shared_nat_ambiguity_saturated",
+		"1 when the shared NAT ambiguity index is at its live bound and failing closed (#15104).",
+		nil, nil,
+	)
+	c.userspaceSharedWireAmbiguityKeys = prometheus.NewDesc(
+		"xpf_userspace_shared_wire_ambiguity_keys",
+		"Live keys in the shared forward-wire ambiguity index (#15104).",
+		nil, nil,
+	)
+	c.userspaceSharedWireAmbiguitySaturated = prometheus.NewDesc(
+		"xpf_userspace_shared_wire_ambiguity_saturated",
+		"1 when the shared forward-wire ambiguity index is at its live bound and failing closed (#15104).",
+		nil, nil,
+	)
 	c.userspaceHATransitionDropped = prometheus.NewDesc(
 		"xpf_userspace_ha_transition_dropped_total",
 		"HA redundancy-group transition commands dropped at worker queue capacity.",

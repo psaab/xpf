@@ -19,6 +19,14 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 		prometheus.CounterValue, float64(status.RouteChangeUnrejudgedSessionsTotal))
 	c.emitConstMetric(ch, c.userspaceOwnerRGFilingsDeclined,
 		prometheus.CounterValue, float64(status.OwnerRGFilingsDeclinedTotal))
+	c.emitConstMetric(ch, c.userspaceSharedNatAmbiguityKeys,
+		prometheus.GaugeValue, float64(status.SharedNatAmbiguityKeys))
+	c.emitConstMetric(ch, c.userspaceSharedNatAmbiguitySaturated,
+		prometheus.GaugeValue, float64(status.SharedNatAmbiguitySaturated))
+	c.emitConstMetric(ch, c.userspaceSharedWireAmbiguityKeys,
+		prometheus.GaugeValue, float64(status.SharedWireAmbiguityKeys))
+	c.emitConstMetric(ch, c.userspaceSharedWireAmbiguitySaturated,
+		prometheus.GaugeValue, float64(status.SharedWireAmbiguitySaturated))
 	c.emitConstMetric(ch, c.userspaceSessionDeleteRefusedIdentity,
 		prometheus.CounterValue, float64(status.SessionDeleteRefusedIdentity))
 	c.emitConstMetric(ch, c.userspaceSessionDeleteDroppedReleased,

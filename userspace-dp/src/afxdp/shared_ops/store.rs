@@ -743,6 +743,16 @@ pub(in crate::afxdp) fn publish_shared_session(
             crate::session::reverse_match_key(&reverse_wire),
             entry.key.clone(),
         );
+        // #15104: the canonical alias is a distinct ambiguity key when it
+        // differs from the wire alias. Track its owner so removal can
+        // forget it once no live forward entry maps to it; its ambiguous
+        // verdict remains driven by the displacement mark below.
+        if reverse_canonical != reverse_wire {
+            ambiguities.track_owner(
+                crate::session::reverse_match_key(&reverse_canonical),
+                entry.key.clone(),
+            );
+        }
         let mut sessions = lock_shared_publish(shared_nat_sessions);
         let displaced = sessions.insert(reverse_wire.clone(), entry.clone());
         record_shared_nat_displacement(displaced.as_ref(), entry);
@@ -1036,6 +1046,27 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     removed.metadata.owner_rg_id,
                     &reverse_canonical,
                 );
+            }
+            drop(nat_sessions);
+            // #15104: forget this entry's NAT ambiguity claims. The owner
+            // multiset drops the alias record only when no surviving
+            // forward entry maps to it, so a displaced survivor keeps its
+            // (ambiguous) record and a sole survivor is restored to
+            // unique. This runs for every forward removal, NAT'd or not:
+            // publish observes the reverse alias unconditionally.
+            {
+                let mut ambiguities =
+                    lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities);
+                ambiguities.forget_owner(
+                    &crate::session::reverse_match_key(&reverse_wire),
+                    &entry.key,
+                );
+                if reverse_canonical != reverse_wire {
+                    ambiguities.forget_owner(
+                        &crate::session::reverse_match_key(&reverse_canonical),
+                        &entry.key,
+                    );
+                }
             }
             {
                 let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
