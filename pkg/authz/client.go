@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 )
 
 // client.go is the client half of #14581: before a local management
@@ -45,12 +44,24 @@ import (
 // loopback target, an unattributable server is REFUSED, not assumed
 // genuine: "we could not tell who that is" is exactly the squatter's
 // best case, so it fails closed.
+//
+// Only uid 0 is trusted on loopback (#14982). xpfd runs as uid 0
+// (its unit has no User=), so a genuine management server is always
+// uid 0. Trusting "our own uid" as well (#14581's original shape)
+// also trusted any squatter running as the CALLER's uid: the
+// operator's own shell uid is exactly the uid an unprivileged local
+// process that binds 127.0.0.1:50051 before xpfd starts (or while
+// it is down) would present, and it would then receive the
+// operator's management RPCs and secrets. Same-uid is therefore
+// refused like any other non-root uid. (This changes nothing when
+// the caller itself is root: same-uid and uid 0 coincide there.)
 
 // VerifyLoopbackServerConn reports whether the server end of conn — a
-// just-dialed TCP connection — is a privileged local process (uid 0 or
-// our own uid, what xpfd runs as) when the server address is loopback.
+// just-dialed TCP connection — is running as uid 0 (what xpfd runs
+// as) when the server address is loopback.
 // A non-loopback server returns nil (out of scope, see file comment).
-// A loopback server that is non-privileged or unattributable returns
+// A loopback server that is not uid 0 (including one sharing the
+// caller's own non-root uid, #14982) or is unattributable returns
 // an error naming what was found; the caller must not use the conn.
 func VerifyLoopbackServerConn(conn net.Conn) error {
 	if conn == nil {
@@ -72,10 +83,10 @@ func VerifyLoopbackServerConn(conn net.Conn) error {
 		return fmt.Errorf("refusing to talk to the server at %s: its owner could not be attributed (%s) — "+
 			"not sending management RPCs to an unverified local server (#14581)", remote, detail)
 	}
-	if id.UID != 0 && id.UID != uint32(os.Getuid()) {
+	if id.UID != 0 {
 		return fmt.Errorf("refusing to talk to the server at %s: it is owned by uid %d, not uid 0 — "+
 			"this is not xpfd; a non-root process is squatting on the management port and would "+
-			"receive your commands and any secrets in them (#14581)", remote, id.UID)
+			"receive your commands and any secrets in them (#14581, #14982)", remote, id.UID)
 	}
 	return nil
 }
