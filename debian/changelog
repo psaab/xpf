@@ -25,6 +25,16 @@ xpf (0.0.0) unstable; urgency=medium
     set), and emit each kernel interface's Prometheus counters once
     when both the base and unit-0 spellings are configured (#15228).
 
+  * Bound the userspace generated-reply (ICMP PTB/Time-Exceeded and
+    policy reject) per-source tier to each source's fair share of its
+    zone aggregate — aggregate divided by the 64 source slots plus the
+    sourceless overflow bucket (15/s + burst 15 at the 1000/s zone
+    aggregate) — and key IPv6 sources on their /64 so one host rotating
+    interface identifiers can no longer mint a fresh 100/s slot per
+    address, drain the zone aggregate, and starve every other source's
+    generated errors. Distinct /64s and IPv4 hosts keep independent
+    budgets; the zone aggregate cap and denial counters are unchanged
+    (#15248).
   * Reject a single-rate firewall policer missing either
     if-exceeding bandwidth-limit or burst-size-limit at strict
     commit, and close the policer/if-exceeding schema so typos such

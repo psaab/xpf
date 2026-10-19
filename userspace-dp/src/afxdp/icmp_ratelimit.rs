@@ -64,16 +64,30 @@
 //
 // #9901 (F-074): each per-zone bucket above is now a per-source-fair
 // HIERARCHICAL limiter (`ZoneLimiter`): a per-source tier (64 fixed slots,
-// 100/s + burst 100 each) in front of the zone aggregate (1000/1000). Before,
-// one source flooding a zone drained that zone's whole budget and starved
-// every OTHER source in the same zone — the same starvation shape #3618/#5856
-// removed between zones, one level down. The source tier is keyed by the
-// trigger's source address (META addrs, never frame bytes); a source-denied
-// reply consumes NOTHING shared (source-FIRST gate order, the #5567
-// build-before-consume principle applied to the tier order), so a flooder
-// spends only its own slot. Slot collisions share the slot's sustained rate
-// (tag is hint-only, no bucket reset on takeover); cardinality stays
-// config-bounded (~1.5KB per zone limiter, no attacker-growable map).
+// fair share of the aggregate each) in front of the zone aggregate
+// (1000/1000). Before, one source flooding a zone drained that zone's whole
+// budget and starved every OTHER source in the same zone — the same
+// starvation shape #3618/#5856 removed between zones, one level down. The
+// source tier is keyed by the trigger's source address (META addrs, never
+// frame bytes); a source-denied reply consumes NOTHING shared (source-FIRST
+// gate order, the #5567 build-before-consume principle applied to the tier
+// order), so a flooder spends only its own slot. Slot collisions share the
+// slot's sustained rate (tag is hint-only, no bucket reset on takeover);
+// cardinality stays config-bounded (~1.5KB per zone limiter, no
+// attacker-growable map).
+//
+// #15248 (A67-01): the #9901 tier gave EVERY slot a flat 100/s + burst 100,
+// so the 64 slots (plus overflow) could admit up to 6500/s into a 1000/s
+// zone aggregate: ten or more distinct sources — trivially, one IPv6 host
+// rotating IIDs in its own /64, each IID folding to a DIFFERENT /128 slot —
+// drained the aggregate and starved PTB / Time-Exceeded / reject replies
+// for every other source in the zone. Two changes close it: the per-source
+// budget is now the aggregate's FAIR SHARE (aggregate rate/burst divided
+// by the 64 slots + overflow, so the sum of slot entitlements can never
+// exceed the aggregate), and IPv6 sources key on their /64 (the WireGuard
+// #14639 aggregation), so IID rotation stays ONE source. The aggregate
+// still caps the zone as a whole; what changes is that a saturated source
+// tier can no longer consume the whole aggregate on the zone's behalf.
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -225,14 +239,31 @@ impl TokenBucket {
 /// collisions rare for the handful of concurrent error sources a zone sees.
 const SRC_SLOT_COUNT: usize = 64;
 
-/// #9901 (F-074): the per-source sustained rate (tokens/sec) and burst depth
-/// EVERY per-source slot and the `None`-source overflow bucket enforce. Fixed
-/// constants, not gate parameters: a legitimate source emits generated errors
-/// at a trickle (traceroute / PMTUD are a handful per flow), so 100/s + burst
-/// 100 is far above any benign source rate while bounding one flooder to a
-/// tenth of the zone aggregate.
-const SRC_RATE_PER_SEC: u64 = 100;
-const SRC_BURST: u64 = 100;
+/// #15248 (A67-01): the per-source FAIR-SHARE divisor. Every one of the
+/// `SRC_SLOT_COUNT` source slots plus the `None`-source overflow bucket
+/// enforces `aggregate / SRC_FAIR_SHARE_DIVISOR` (rate and burst alike,
+/// each clamped to at least 1), so the sum of all per-source entitlements
+/// is at most the zone aggregate itself: no coalition of sources — and no
+/// single host rotating IPv6 IIDs inside its /64 — can make the source
+/// tier admit more than the aggregate would. At the production aggregate
+/// (1000/s + burst 1000) each slot gets 1000/65 = 15/s + burst 15: still
+/// far above any benign source's trickle (traceroute / PMTUD are a
+/// handful per flow), while one flooder now spends at most ~1.5% of the
+/// zone budget instead of a tenth. Fixed divisor, not a gate parameter —
+/// the tier always tracks whatever aggregate rate/burst the gate carries.
+const SRC_FAIR_SHARE_DIVISOR: u64 = SRC_SLOT_COUNT as u64 + 1;
+
+/// #15248 (A67-01): the per-source budget for an aggregate of
+/// `rate_per_sec`/`burst`: the fair share of the aggregate across all
+/// slots + overflow, never below 1 (a zero budget would fail-close every
+/// source under a degenerate gate burst, inverting the opt-out shape of
+/// `TokenBucket`).
+fn src_budget(rate_per_sec: u64, burst: u64) -> (u64, u64) {
+    (
+        (rate_per_sec / SRC_FAIR_SHARE_DIVISOR).max(1),
+        (burst / SRC_FAIR_SHARE_DIVISOR).max(1),
+    )
+}
 
 /// #9901 (F-074): the NEVER-claimed `src_tags` sentinel. Tags are claimed
 /// with `| 1`, so no live tag is ever 0; a zero-initialized slot reads EMPTY
@@ -244,10 +275,11 @@ const TAG_EMPTY: u64 = 0;
 ///
 /// Structure: one zone `aggregate` bucket (the #3618/#5856 budget, still
 /// parameterized by the gate's rate/burst) fronted by a per-source tier: 64
-/// fixed `src_slots` (each 100/s + burst 100) selected by
-/// `diffuse64(seed ^ addr_fold) % 64`, plus one `overflow` bucket (same
-/// for a `None` source. Gate order is source-FIRST then aggregate: a
-/// source-deny consumes NOTHING shared (the #5567 build-before-consume
+/// fixed `src_slots` (each the aggregate's fair share, #15248 A67-01 —
+/// aggregate/(64+1); 15/s + burst 15 at the production 1000/1000) selected
+/// by `diffuse64(seed ^ addr_fold) % 64`, plus one `overflow` bucket (same
+/// fair-share budget) for a `None` source. Gate order is source-FIRST then
+/// aggregate: a source-deny consumes NOTHING shared (the #5567
 /// principle applied to the tier order), so one flooder cannot starve another
 /// source in the same zone — only the zone aggregate can still deny, exactly
 /// as before.
@@ -272,9 +304,11 @@ pub(in crate::afxdp) struct ZoneLimiter {
     aggregate: TokenBucket,
     /// Current-claimant hint per source slot (`TAG_EMPTY` = never claimed).
     src_tags: [AtomicU64; SRC_SLOT_COUNT],
-    /// Fixed per-source buckets, 100/s + burst 100 each.
+    /// Fixed per-source buckets, each enforcing the aggregate's fair share
+    /// (#15248 A67-01: aggregate/(slots+overflow) = 15/s + burst 15 at the
+    /// production 1000/1000 aggregate).
     src_slots: [TokenBucket; SRC_SLOT_COUNT],
-    /// The `None`-source budget (100/s + burst 100), shared by all sourceless
+    /// The `None`-source budget (same fair share), shared by all sourceless
     /// errors. A real bucket, never a fail-open skip.
     overflow: TokenBucket,
 }
@@ -282,12 +316,23 @@ pub(in crate::afxdp) struct ZoneLimiter {
 /// Fold a source address to 64 bits. No diffusion here — `diffuse64` runs
 /// over `seed ^ fold` at the call site, so every output bit depends on every
 /// address bit AND every seed bit.
+///
+/// #15248 (A67-01): an IPv6 source folds its /64 ONLY (host bits dropped
+/// before the fold), so every IID one host rotates inside its own /64 keys
+/// the SAME source slot with the SAME budget — the WireGuard #14639
+/// aggregation ("ratelimit the whole /64"). Distinct /64s still fold from
+/// distinct high halves and keep independent budgets. IPv4 folds the full
+/// /32 host address, unchanged.
 fn addr_fold(addr: &IpAddr) -> u64 {
     match addr {
         IpAddr::V4(v4) => u32::from(*v4) as u64,
         IpAddr::V6(v6) => {
             let x = u128::from(*v6);
-            (x as u64) ^ ((x >> 64) as u64)
+            // /64 aggregation: only the routing prefix identifies the
+            // source. The 0xA67 tag (the issue's A67-01 marker) keeps an
+            // aggregate-folded v6 source from aliasing a v4 fold of the
+            // same numeric value.
+            ((x >> 64) as u64) ^ 0xA67
         }
     }
 }
@@ -332,7 +377,10 @@ impl ZoneLimiter {
     /// reason's aggregate `*_RATE_LIMITED_TOTAL` (the observable metric)
     /// WITHOUT touching the aggregate bucket; an aggregate-deny is accounted
     /// by the shared `take_and_account` site. `rate_per_sec == 0` disables
-    /// the limiter (both tiers), preserving the `TokenBucket` opt-out.
+    /// the limiter (both tiers), preserving the `TokenBucket` opt-out. The
+    /// source tier enforces the aggregate's fair share (#15248 A67-01:
+    /// `src_budget(rate_per_sec, burst)`), so the source tier as a whole
+    /// can never out-admit the aggregate it fronts.
     fn allow(
         &self,
         reason: GeneratedErrorReason,
@@ -346,8 +394,7 @@ impl ZoneLimiter {
         }
         let src_bucket = match src {
             Some(addr) => {
-                let (slot, tag) =
-                    slot_and_tag(crate::hot_hash_seed::hot_path_hash_seed(), &addr);
+                let (slot, tag) = slot_and_tag(crate::hot_hash_seed::hot_path_hash_seed(), &addr);
                 let observed = self.src_tags[slot].load(Ordering::Relaxed);
                 if observed != tag {
                     // Best-effort claim; the result is ignored — on a race
@@ -364,7 +411,8 @@ impl ZoneLimiter {
             }
             None => &self.overflow,
         };
-        if !src_bucket.try_take(now_ns, SRC_RATE_PER_SEC, SRC_BURST) {
+        let (src_rate, src_burst) = src_budget(rate_per_sec, burst);
+        if !src_bucket.try_take(now_ns, src_rate, src_burst) {
             src_bucket.rate_limited.fetch_add(1, Ordering::Relaxed);
             rate_limited_total(reason).fetch_add(1, Ordering::Relaxed);
             return false;
@@ -542,8 +590,9 @@ pub(in crate::afxdp) fn allow_generated_error_zoned(
 
 /// Testable core of [`allow_generated_error_zoned`] with an injected clock +
 /// rate / burst (which parameterize the zone AGGREGATE tier; the per-source
-/// tier is fixed 100/s + burst 100), so the unit tests can drive a
-/// deterministic per-zone burst-then-drain sequence without sleeping.
+/// tier takes the aggregate's fair share, #15248 A67-01), so the unit tests
+/// can drive a deterministic per-zone burst-then-drain sequence without
+/// sleeping.
 pub(in crate::afxdp) fn allow_generated_error_zoned_at(
     forwarding: &ForwardingState,
     reason: GeneratedErrorReason,
