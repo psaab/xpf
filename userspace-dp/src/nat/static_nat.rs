@@ -629,6 +629,62 @@ impl StaticNatTable {
                 })
         })
     }
+    /// #15118: could a static-NAT rule translate this packet inbound? Static
+    /// NAT has no protocol axis; the claim is gated on the destination port
+    /// (whole-address rules claim every port, port-mapped rules only theirs),
+    /// the source-address constraint, and the from-zone/interface/routing-
+    /// instance scope — exactly the gates `match_dnat_with_counter_scoped`
+    /// applies. A non-L4 protocol never claims a port-mapped rule.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn nat_local_match_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> bool {
+        let port_ok = crate::ip_proto::has_l4_ports(protocol);
+        let scoped = |from_zone: &str,
+                      from_interface: &str,
+                      from_routing_instance: &str,
+                      source: &SourceConstraint| {
+            static_scope_ok(
+                from_zone,
+                from_interface,
+                from_routing_instance,
+                ingress_zone,
+                ingress_ifname,
+                ingress_routing_instance,
+            ) && source_ok(source, Some(src_ip))
+        };
+        self.dnat.iter().any(|((external_ip, port), entries)| {
+            *external_ip == dst_ip
+                && match port {
+                    Some(p) => port_ok && *p == dst_port,
+                    None => true,
+                }
+                && entries.iter().any(|entry| {
+                    scoped(
+                        &entry.from_zone,
+                        &entry.from_interface,
+                        &entry.from_routing_instance,
+                        &entry.source,
+                    )
+                })
+        }) || self.blocks.iter().any(|blk| {
+            blk.external.contains(dst_ip)
+                && scoped(
+                    &blk.from_zone,
+                    &blk.from_interface,
+                    &blk.from_routing_instance,
+                    &blk.source,
+                )
+        })
+    }
+
 
     pub(crate) fn from_snapshots(
         snaps: &[StaticNATRuleSnapshot],

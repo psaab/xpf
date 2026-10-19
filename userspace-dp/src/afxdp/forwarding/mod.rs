@@ -612,3 +612,7 @@ mod tests_ri_native_10312;
 #[cfg(test)]
 #[path = "tests_pkt_type_10691.rs"]
 mod tests_pkt_type_10691;
+// #15118: scoped NAT local-delivery regression cells.
+#[cfg(test)]
+#[path = "tests_nat_scope_15118.rs"]
+mod tests_nat_scope_15118;

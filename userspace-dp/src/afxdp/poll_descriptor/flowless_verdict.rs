@@ -282,8 +282,25 @@ pub(super) fn flowless_base_resolution(
     // so a peer-owned RG's local/interface-NAT address delivered on the
     // inactive node. `enforce_ha_resolution_snapshot` already handles
     // LocalDelivery (including the empty-ha_state standalone contract).
+    let untranslated_nat_local = nat.rewrite_dst.is_none()
+        && match dst {
+            IpAddr::V4(v4) => forwarding.local_nat_to_self_v4.contains_key(&v4),
+            IpAddr::V6(v6) => forwarding.local_nat_to_self_v6.contains_key(&v6),
+        };
     let resolution = match flowless_local_resolution(forwarding, meta, dst, route_override) {
         Some(local) => enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local),
+        None if untranslated_nat_local => enforce_ha_resolution_snapshot(
+            forwarding,
+            ha_state,
+            now_secs,
+            lookup_forwarding_resolution_without_nat_local(
+                forwarding,
+                Some(dynamic_neighbors),
+                dst,
+                route_override,
+            )
+            .resolution,
+        ),
         None => enforce_ha_resolution_snapshot(
             forwarding,
             ha_state,
