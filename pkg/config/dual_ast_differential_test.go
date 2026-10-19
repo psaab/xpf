@@ -94,6 +94,27 @@ var dualASTCases = []dualASTCase{
 	{
 		name: "interfaces-vrrp-group",
 		hier: `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
@@ -165,6 +186,27 @@ var dualASTCases = []dualASTCase{
 		// compile identically from both AST shapes.
 		name: "interfaces-vrrp-group-track-interface-nested",
 		hier: `interfaces {
+    ge-0/0/1 {
+        unit 0 {
+            family inet {
+                address 10.0.1.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        unit 0 {
+            family inet {
+                address 10.0.2.1/24;
+            }
+        }
+    }
+    ge-0/0/3 {
+        unit 0 {
+            family inet {
+                address 10.0.3.1/24;
+            }
+        }
+    }
     reth1 {
         unit 0 {
             family inet {
