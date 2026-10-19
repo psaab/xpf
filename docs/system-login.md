@@ -455,6 +455,21 @@ For example, committing `deny-commands "show log"` closes either feed on the
 next re-authorization check; opening the stream does not preserve an obsolete
 command-policy verdict.
 
+**Session plumbing is not a command (#15077).** The remote `cli` calls
+`GetStatus` before every dispatched command (its reachability probe) and
+polls `GetConfigModeStatus` at every config-mode prompt; REST serves the
+same facts as `GET /api/v1/status` and `GET /api/v1/config/status`. Those
+probes return daemon liveness, cluster role, and dirty flags — not the
+`show version` banner — so they carry no operational-command charge on
+either surface and are governed by the coarse permission bits alone.
+A class with `deny-commands "show version"` (or an `allow-commands` list
+that names anything else) therefore still logs in and runs e.g. `show
+interfaces`, while `show version` itself — served over gRPC as
+`ShowText` topic `version` and over REST as
+`GET /api/v1/show-text?topic=version` — stays denied. A startup probe
+that is refused for a coarse-permission reason is reported by the `cli`
+as an authorization denial, not as "cannot reach xpfd".
+
 > **This sentence was an overclaim a SECOND time, and #9952 closed the second
 > half.** After #9154 the REST surface enforced the coarse permission bits and
 > the `*-configuration` pair — and *nothing else*. The operational pair had no

@@ -14,11 +14,12 @@ import (
 //
 // PermView is the correct tier, from the survey the issue demanded:
 //
-//   - This file's own command table maps the RPC to `show version`
-//     (methodCanonicalCommand), and config-mode mutations are explicitly
-//     exempted from that table in methodsWithoutCanonicalCommand —
-//     GetConfigModeStatus is not among them. The codebase's own taxonomy
-//     calls it an operational show-equivalent.
+//   - The RPC returns three store facts, not a command rendering; #15077
+//     later removed its `show version` charge entirely (it is session
+//     plumbing in methodsWithoutCanonicalCommand). At the time of the
+//     #10019 survey it was charged there, and config-mode mutations were
+//     explicitly exempted — the taxonomy called it an operational
+//     show-equivalent, never a config-mode mutation.
 //   - pkg/cli prices `show` at PermView, and authz_methods.go's header
 //     invariant says every entry mirrors the CLI price of the command
 //     reaching the RPC. PermConfig violated the file's own invariant.

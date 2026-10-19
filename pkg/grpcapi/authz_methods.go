@@ -94,6 +94,9 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	"ListHistory":  config.PermView,
 
 	// --- Operational show RPCs: the `show` family. -------------------------
+	// GetStatus / GetConfigModeStatus are session plumbing probes priced
+	// at PermView and exempt from the deny/allow-commands regex gate
+	// (#15077); they are not the `show version` command.
 	"GetConfigModeStatus": config.PermView,
 	"GetStatus":           config.PermView,
 	"GetGlobalStats":      config.PermView,

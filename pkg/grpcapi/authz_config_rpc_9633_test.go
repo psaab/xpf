@@ -56,9 +56,10 @@ var reviewedConfigModeMethods9633 = map[string]bool{
 	"ConfirmCommit": true, "Rollback": true, "Complete": true,
 }
 
-// TestUnresolvedOperationalMethodsStayDenied9633: the exemption is the
-// config-mode set only. Every other method without a canonical command is still
-// refused for a class with operational regexes.
+// TestUnresolvedOperationalMethodsStayDenied9633: the exemptions are the
+// config-mode set and the two session-plumbing probes (#15077) only. Every
+// other method without a canonical command is still refused for a class
+// with operational regexes.
 func TestUnresolvedOperationalMethodsStayDenied9633(t *testing.T) {
 	cfg := loginCfg9633(&config.LoginClass{
 		Name: "ops", DenyCommands: "request system zeroize", DenyLeavesPresent: []string{"deny-commands"},
@@ -69,7 +70,10 @@ func TestUnresolvedOperationalMethodsStayDenied9633(t *testing.T) {
 		// Skip by the REVIEWED literal, never by configModeMethods9633: a cell
 		// that reads the set it guards cannot see a method wrongly added to it
 		// (the matrix's A2 mutant exempted GetOSPFStatus and this cell skipped it).
-		if reviewedConfigModeMethods9633[method] || method == "ShowText" || method == "SystemAction" {
+		// The plumbing probes are exempt by a different, reviewed decision
+		// (#15077) and are pinned in authz_probe_15077_test.go.
+		if reviewedConfigModeMethods9633[method] || method == "ShowText" || method == "SystemAction" ||
+			method == "GetStatus" || method == "GetConfigModeStatus" {
 			continue
 		}
 		checked++

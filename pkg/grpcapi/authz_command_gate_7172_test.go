@@ -252,7 +252,7 @@ func TestTopicCommandAndPermissionResolveTheSameKey7172(t *testing.T) {
 // reaching here means a config arrived by a path that did not validate.
 func TestInvalidRegexDenies7172(t *testing.T) {
 	cfg := gateCfg7172(t, "show (unclosed", true)
-	if err := gateDecide7172(t, cfg, "GetStatus", &pb.GetStatusRequest{}); err == nil {
+	if err := gateDecide7172(t, cfg, "GetInterfaces", &pb.GetInterfacesRequest{}); err == nil {
 		t.Error("a class whose deny regex does not compile must be refused, not evaluated")
 	}
 }
@@ -260,10 +260,12 @@ func TestInvalidRegexDenies7172(t *testing.T) {
 // An EMPTY deny pattern denies EVERYTHING — an empty POSIX regex matches every
 // string. FIRES IF: someone adds the "defensive" empty-pattern guard that
 // pkg/config's ValidASPathRegex has, which would turn the most restrictive
-// thing an operator can write into the least.
+// thing an operator can write into the least. GetInterfaces stands for the
+// command surface generally; the plumbing probes are exempt from this
+// gate (#15077, pinned in authz_probe_15077_test.go).
 func TestEmptyDenyPatternDeniesEverything7172(t *testing.T) {
 	cfg := gateCfg7172(t, "", true)
-	if err := gateDecide7172(t, cfg, "GetStatus", &pb.GetStatusRequest{}); err == nil {
+	if err := gateDecide7172(t, cfg, "GetInterfaces", &pb.GetInterfacesRequest{}); err == nil {
 		t.Error("`deny-commands \"\"` is an empty POSIX regex, which matches every command — " +
 			"it must deny, not be treated as no restriction")
 	}
@@ -390,13 +392,14 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 		t.Errorf("GetZones is not covered by the summary-only deny and must remain admitted: %v", err)
 	}
 
-	// ADMITTED: existing non-session control on the reboot-only fixture. The
-	// command regex does not cover `show version`; without this arm, the reboot
-	// denial could be consistent with the gate refusing every command here.
+	// ADMITTED: GetStatus is a session-plumbing probe (#15077), exempt
+	// from the command gate; the class holds `permissions all`. Without
+	// this arm the reboot denial could be consistent with the gate
+	// refusing every RPC here.
 	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly),
 		"/"+pb.BpfrxService_ServiceDesc.ServiceName+"/GetStatus",
 		&pb.GetStatusRequest{}); err != nil {
-		t.Errorf("GetStatus maps to `show version`, which the pattern does not match, and "+
-			"the class holds `permissions all` — it must be admitted: %v", err)
+		t.Errorf("GetStatus is a session-plumbing probe (#15077), exempt from the command gate, "+
+			"and the class holds `permissions all` — it must be admitted: %v", err)
 	}
 }

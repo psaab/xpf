@@ -56,8 +56,10 @@ package grpcapi
 //     GetNATRuleStats have their own selector-to-command mappings in
 //     rpcCanonicalCommand because all variants retain the same view permission.
 var methodCanonicalCommand = map[string]string{
-	// Operational reads.
-	"GetStatus":                "show version",
+	// Operational reads. GetStatus and GetConfigModeStatus are NOT here:
+	// they are session plumbing (the cli's startup/config-mode probe), not
+	// the `show version` command — see methodsWithoutCanonicalCommand
+	// (#15077).
 	"GetGlobalStats":           "show security flow statistics",
 	"GetZones":                 "show security zones",
 	"GetPolicies":              "show security policies",
@@ -77,7 +79,6 @@ var methodCanonicalCommand = map[string]string{
 	"GetNATPoolStats":          "show security nat source pool",
 	"GetNATDeterministic":      "show security nat source deterministic-nat",
 	"MatchPolicies":            "show security match-policies",
-	"GetConfigModeStatus":      "show version",
 	"ShowConfig":               "show configuration",
 	"ShowCompare":              "show configuration",
 	"ShowRollback":             "show configuration",
@@ -121,6 +122,27 @@ var methodsWithoutCanonicalCommand = map[string]string{
 	"Rollback":        "acts on the candidate as a whole; n>0 refused for a class with configuration regexes (#9633)",
 	"Complete":        "tab completion; returns candidates and executes nothing",
 
+	// SESSION PLUMBING, NOT COMMANDS (#15077). GetStatus and
+	// GetConfigModeStatus return daemon liveness / config-mode facts
+	// (uptime, cluster role, dirty flag); neither renders the `show
+	// version` banner. They only LOOKED like `show version` because that
+	// was the nearest show-shaped label, and charging them to it priced
+	// the cli's own session plumbing as an operator command: cmd/cli
+	// calls GetStatus before EVERY dispatched command (its reachability
+	// probe) and GetConfigModeStatus at every config-mode prompt, so a
+	// class with deny-commands "show version" (or an allow-commands
+	// allowlist naming anything else) was locked out of the cli
+	// entirely with a misleading "cannot reach xpfd" — while `show
+	// version` itself travels as ShowText{topic:version} and stays
+	// denied. They are exempt from the operational regex gate and are
+	// governed by the coarse PermView price in methodPermissions alone,
+	// exactly like Complete and the config-mode RPCs are exempt from
+	// this gate and governed by their own prices. The REST twins
+	// (GET /api/v1/status, GET /api/v1/config/status) are likewise
+	// plumbing under the coarse REST authorization (see
+	// authorizeRESTCommand, #15077).
+	"GetStatus":           "session plumbing probe (daemon liveness/cluster facts); not an operator command — coarse PermView only (#15077)",
+	"GetConfigModeStatus": "session plumbing probe (config-mode/dirty facts polled per prompt); not an operator command — coarse PermView only (#15077)",
 	// NO OPERATIONAL COMMAND EXISTS IN cmdtree FOR THESE. The routing-protocol
 	// status RPCs are served to the remote client, but `show ospf`, `show isis`,
 	// `show rip` and `show vrrp` are not nodes in the operational tree — so
