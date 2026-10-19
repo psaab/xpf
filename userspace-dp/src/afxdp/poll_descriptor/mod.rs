@@ -4338,6 +4338,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // is local only for a flow a rule could match
                                 // (or a to-self target); otherwise suppress
                                 // the NAT local shortcut and follow the FIB.
+                                // #15768: resolve in the caller's
+                                // PBR/native-VRF table with the packet's ICMP
+                                // context, and stamp installing-table
+                                // provenance (`true`) — this arm performs the
+                                // same in-table FIB lookup as the else arm.
                                 (
                                     enforce_ha_resolution_snapshot(
                                         worker_ctx.forwarding,
@@ -4350,9 +4355,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             ingress_zone_name,
                                             ingress_ifname_dnat,
                                             ingress_ri_dnat,
-                                        ),
+                                            route_table_override.as_deref(),
+                                            dnat_packet_icmp,
+                                        )
+                                        .resolution,
                                     ),
-                                    false,
+                                    true,
                                 )
                             } else {
                                 (

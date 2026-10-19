@@ -170,6 +170,14 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
     `local_v*` is unchanged (proxy-ARP/ND and ownership consumers keep the
     full set); translated packets resolve their translated target as before,
     and DNAT-to-self still delivers via the interface-local translated address.
+    **Table provenance (#15768):** the helper takes the caller's
+    PBR/native-VRF `route_table_override` and the packet's ICMP type/code,
+    resolves both arms in that table with the per-flow 5-tuple ECMP hash,
+    and returns the resolving table's `selected_route` identity; the poll
+    loop stamps installing-table provenance (`resolved_in_table = true`)
+    for the arm. Suppression is a marker threaded into the per-table
+    local-ownership predicates — no `ForwardingState` clone — and an
+    address that is also a configured interface address stays local.
   - **Interface-NAT ownership is table-scoped (#12086).** Interface
     addresses excluded from local delivery by interface-SNAT enter
     `interface_nat_v[46]` and `interface_nat_tables_v[46]`, keyed by

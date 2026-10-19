@@ -15,6 +15,15 @@ xpf (0.0.0) unstable; urgency=medium
     routing-instance table and fails closed (`TableUnavailable`) when
     no domain-scoped table exists; default-domain flows are unchanged
     (#15771).
+  * Resolve untranslated session-miss flows in their PBR/native-VRF
+    table: the #15118 scoped-NAT FIB lookup ignored
+    `route_table_override`, resolved in the default table, cleared
+    installing-table provenance, and deep-cloned ForwardingState on
+    the unclaimed-NAT branch. It now threads the caller's table and
+    ICMP context, keeps 5-tuple ECMP hashing on both arms, returns
+    the resolving table's identity, and suppresses the NAT-local
+    shortcut via a marker in the ownership predicates with no clone
+    (#15768).
   * Reject the packed flat-set spelling of the Junos `sample`
     binding under unconsumed interface families as well: the braced
     spelling was rejected by #15654 but `family ethernet-switching
