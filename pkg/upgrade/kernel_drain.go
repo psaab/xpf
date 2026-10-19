@@ -34,6 +34,28 @@ func DrainAndConfirm(cl RollingCluster, deadline time.Duration, allowMixedHA boo
 	if !alive {
 		return fmt.Errorf("peer is not alive — refusing to drain (no node to take over)")
 	}
+	// #14953 (D18-02): the rolling paths (runRollingWith /
+	// runRollingRollbackWith) gate demotion on SyncEstablished; this path
+	// never did. PeerAlive + wire-version compatibility do not imply the
+	// session-sync LINK is up: parseSyncEstablished fails on "unsynced" /
+	// Status: Down even with a healthy heartbeat. Demoting into such a peer
+	// hands it every RG before it has this node's sessions — DrainComplete
+	// would eventually time out and fail back, but only after the node was
+	// already demoted, churning stateful sessions for the drain window
+	// instead of refusing before any demotion. Fail closed, and surface a
+	// transport error rather than treating an unreadable link as synced.
+	// NOT gated behind allowMixedHA: that flag relaxes only the
+	// exact-equality HA check below, and the rolling sync gate is
+	// unconditional.
+	synced, err := cl.SyncEstablished()
+	if err != nil {
+		return fmt.Errorf("session-sync check: %w", err)
+	}
+	if !synced {
+		return fmt.Errorf("session sync not established — refusing to drain " +
+			"(draining now would hand the RGs to a peer that has not received " +
+			"this node's sessions and blackhole established flows)")
+	}
 	// HAProtocolCompatible is EXACT-equality (local==peer). For the LANE-1
 	// kernel roll the cluster is single-version, so equality is correct. For the
 	// LANE-2 image-roll the mixed-base gate has ALREADY validated window-compat
