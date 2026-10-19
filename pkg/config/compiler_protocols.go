@@ -1409,10 +1409,32 @@ func compileRouterAdvertisement(node *Node, proto *ProtocolsConfig) error {
 			case "prefix":
 				pfxName := nodeVal(prop)
 				if pfxName != "" {
-					pfx := &RAPrefix{
-						Prefix:     pfxName,
-						OnLink:     true, // defaults
-						Autonomous: true,
+					// #15696: find-or-create on ra.Prefixes by CIDR,
+					// matching the outer ra find-or-create above.
+					// The hierarchical parser and sibling interface
+					// blocks can deliver the same prefix twice
+					// (e.g. `prefix P { valid-lifetime 100; }`
+					// plus `prefix P { no-autonomous; }`); appending
+					// both emitted duplicate conflicting PIOs on
+					// the wire (one PIO per RAPrefix in pkg/ra).
+					// Update the existing entry in place: fields
+					// present in this occurrence overwrite, absent
+					// fields keep their prior value (defaults only
+					// on first creation).
+					var pfx *RAPrefix
+					for _, existing := range ra.Prefixes {
+						if existing != nil && existing.Prefix == pfxName {
+							pfx = existing
+							break
+						}
+					}
+					appendPfx := pfx == nil
+					if appendPfx {
+						pfx = &RAPrefix{
+							Prefix:     pfxName,
+							OnLink:     true, // defaults
+							Autonomous: true,
+						}
 					}
 					// #14428 (DR16-H7): the brace-elided spelling
 					// `prefix 2001:db8::/64 no-autonomous no-onlink
@@ -1486,7 +1508,9 @@ func compileRouterAdvertisement(node *Node, proto *ProtocolsConfig) error {
 							}
 						}
 					}
-					ra.Prefixes = append(ra.Prefixes, pfx)
+					if appendPfx {
+						ra.Prefixes = append(ra.Prefixes, pfx)
+					}
 				}
 			}
 		}
