@@ -118,14 +118,9 @@ func TestBGPPerNeighborCrossFamily12185StrictAccepts(t *testing.T) {
 				"set protocols bgp group dual neighbor 2001:db8::2",
 			},
 		},
-		{
-			name: "non-literal address inherits past the gate like #2454",
-			sets: []string{
-				"set protocols bgp local-as 65001",
-				"set protocols bgp group external peer-as 65002",
-				"set protocols bgp group external neighbor peer-template family inet unicast",
-			},
-		},
+		// #15184: the former "non-literal address inherits past the gate"
+		// strict case (neighbor peer-template) is now rejected by the
+		// bare-IP gate; its lenient behaviour is pinned separately below.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := CompileConfig(buildTree(t, tc.sets))
@@ -138,6 +133,26 @@ func TestBGPPerNeighborCrossFamily12185StrictAccepts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #15184 successor for the former strict non-literal case: on the lenient
+// path a peer-template neighbor still compiles (warned by the bare-IP gate)
+// and preserves its explicit family inet behaviour for #12185.
+func TestBGPPerNeighborCrossFamily12185LenientNonLiteral(t *testing.T) {
+	cfg, err := CompileConfigLenient(buildTree(t, []string{
+		"set protocols bgp local-as 65001",
+		"set protocols bgp group external peer-as 65002",
+		"set protocols bgp group external neighbor peer-template family inet unicast",
+	}))
+	if err != nil {
+		t.Fatalf("lenient compilation rejected non-literal neighbor: %v", err)
+	}
+	if cfg.Protocols.BGP == nil || len(cfg.Protocols.BGP.Neighbors) != 1 {
+		t.Fatalf("compiled BGP neighbor missing: %+v", cfg.Protocols.BGP)
+	}
+	if !cfg.Protocols.BGP.Neighbors[0].FamilyInet {
+		t.Fatalf("non-literal neighbor lost explicit family inet: %+v", cfg.Protocols.BGP.Neighbors[0])
 	}
 }
 

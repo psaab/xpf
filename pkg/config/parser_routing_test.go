@@ -4023,10 +4023,13 @@ func TestBGPGroupFamilyV4OnlyNoOverGate(t *testing.T) {
 }
 
 // TestBGPGroupFamilyUnparseableAddressInheritsBoth documents the edge-case
-// choice from #2454: a neighbor whose address is not a literal IP (a hostname
-// or peer-group template) cannot be classified by version, so it preserves the
-// pre-#2454 behavior of inheriting BOTH group family flags rather than silently
-// dropping a family. The compiler must NOT crash on the unparseable address.
+// choice from #2454 at the compiler-family-classification level: a neighbor
+// whose address is not a literal IP cannot be classified by version, so it
+// preserves the pre-#2454 behavior of inheriting BOTH group family flags
+// rather than silently dropping a family. The compiler must NOT crash.
+// #15184: such a neighbor is now REJECTED by the strict gate / SchemaValidate
+// and omitted at render; this test therefore uses the lenient path, which
+// warns instead of failing (#1960) and still exercises the family logic.
 func TestBGPGroupFamilyUnparseableAddressInheritsBoth(t *testing.T) {
 	tree := &ConfigTree{}
 	setCommands := []string{
@@ -4045,9 +4048,9 @@ func TestBGPGroupFamilyUnparseableAddressInheritsBoth(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
 	}
 	if cfg.Protocols.BGP == nil || len(cfg.Protocols.BGP.Neighbors) != 1 {
 		t.Fatalf("expected 1 BGP neighbor, got %+v", cfg.Protocols.BGP)

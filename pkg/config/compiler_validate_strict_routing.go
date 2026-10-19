@@ -646,38 +646,31 @@ func validateFRRAuthValuesStrict(cfg *Config) error {
 }
 
 // validateBGPNeighborAddressStrict hard-rejects a BGP neighbor identity that
-// does not occupy exactly ONE FRR token (#6796).
+// is not a bare IP address (#6796 multi-token injection + #15184 non-address
+// single token).
 //
-// The address is rendered RAW into frr.conf at 24 sites — unlike every operand
-// around it (update-source, description, password are all sanitized) — so a
-// value carrying whitespace SPANS MULTIPLE FRR TOKENS. FRR's command lexer has
-// no quoted-string and no rest-of-line token: it splits on whitespace. An
-// address of `1.1.1.1 remote-as 65000\n neighbor 2.2.2.2` therefore renders a
-// valid first statement followed by an attacker-chosen second one — arbitrary
-// FRR configuration injected through a config value, including peerings and
-// route-maps the operator never wrote.
+// #6796: the address is rendered RAW into frr.conf at 24 sites, so a value
+// carrying whitespace SPANS MULTIPLE FRR TOKENS and injects configuration.
+// #15184: even a single token that is not an IP (10.0.0.256, 192.0.2.0/24,
+// peer-a, a hostname, fe80::1%ge-0-0-1) renders verbatim and bgpd refuses
+// it ("Create the peer-group or interface first"), so frr-reload exits 1
+// on every reload and the box stays permanently unconverged.
+//
+// The predicate is netip.ParseAddr with no zone and no prefix, mirrored in
+// frr.validBGPNeighborAddress so the lenient load/HA-sync path omits the
+// neighbor instead of breaking the reload. A scoped link-local gets an
+// explicit "unsupported" message via ValidateBGPNeighborAddress.
 //
 // Strict on commit / commit-check (hard reject naming the neighbor, and the
 // group when there is one); lenient on load / peer-sync so an already-persisted
 // or peer-synced config still BOOTS (#1960) — the render path skips a neighbor
-// whose address is not a bare IP, so an invalid one never reaches frr.conf and
-// a leniently-loaded bad address is inert. Same doctrine as
-// validateBGPNeighborPeerASStrict, whose exclusion set the renderer shares.
-//
-// The test is token COUNT, deliberately not address form. FRR's grammar is
-// `neighbor <A.B.C.D|X:X::X:X|WORD>` and this tree already commits configs
-// whose neighbor is a hostname, so requiring an IP literal would reject configs
-// that work today — over-rejection in routing config is an outage. Empty is not
-// accepted: an unnamed neighbor cannot be rendered at all, and letting it
-// through would emit `neighbor  remote-as N` with a doubled space.
+// whose address is not a bare IP, so an invalid one never reaches frr.conf.
+// Hostname / peer-group neighbors previously accepted are now rejected at
+// commit; on the tolerant path they are warned and omitted at render.
 
 // isSingleFRRToken reports whether s is one unbroken FRR token: non-empty, and
-// free of every byte FRR's lexer treats as a separator (space, tab, CR, LF,
-// form feed, vertical tab) as well as the remaining control bytes and DEL,
-// which would corrupt the rendered line. It is the commit-side twin of
-// frr.validBGPNeighborAddress; the two must agree, and
-// TestNeighborTokenGateAgreesWithTheRenderBelt6796 asserts that rather than
-// pinning either to a literal.
+// free of every byte FRR's lexer treats as a separator. Retained for other
+// callers; the BGP neighbor gate now additionally requires a bare IP (#15184).
 func isSingleFRRToken(s string) bool {
 	if s == "" {
 		return false
@@ -706,19 +699,22 @@ func validateBGPNeighborAddressStrict(cfg *Config) error {
 			if n == nil {
 				continue
 			}
-			if isSingleFRRToken(n.Address) {
-				continue
+			if err := ValidateBGPNeighborAddress(n.Address, nil); err != nil {
+				detail := fmt.Sprintf("%sprotocols bgp neighbor %q", scope, n.Address)
+				if n.GroupName != "" {
+					detail = fmt.Sprintf("%sprotocols bgp group %s neighbor %q", scope, n.GroupName, n.Address)
+				}
+				// Preserve the #6796 multi-token diagnostic.
+				if !isSingleFRRToken(n.Address) {
+					return fmt.Errorf("%s: not a single token — FRR's command lexer "+
+						"splits on whitespace and has no quoted-string token, so a "+
+						"neighbor identity carrying spaces or newlines renders as "+
+						"MULTIPLE frr.conf statements and injects configuration the "+
+						"operator did not write; use one unbroken address",
+						detail)
+				}
+				return fmt.Errorf("%s: %v", detail, err)
 			}
-			detail := fmt.Sprintf("%sprotocols bgp neighbor %q", scope, n.Address)
-			if n.GroupName != "" {
-				detail = fmt.Sprintf("%sprotocols bgp group %s neighbor %q", scope, n.GroupName, n.Address)
-			}
-			return fmt.Errorf("%s: not a single token — FRR's command lexer "+
-				"splits on whitespace and has no quoted-string token, so a "+
-				"neighbor identity carrying spaces or newlines renders as "+
-				"MULTIPLE frr.conf statements and injects configuration the "+
-				"operator did not write; use one unbroken address or peer name",
-				detail)
 		}
 		return nil
 	}

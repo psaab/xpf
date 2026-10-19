@@ -311,22 +311,21 @@ declared, or carrying a `bfd` peer without a declaration) makes vtysh reject the
 **whole** managed section. It also covers the "reused raw by BGP and BFD" half of
 the issue for free.
 
-**The test is token COUNT, not address form.** FRR's grammar is
-`neighbor <A.B.C.D|X:X::X:X|WORD>`, and this tree already commits configs whose
-neighbor is a hostname — the first version of this fix required a bare IP and was
-caught by a pre-existing parser test peering with `peer.example.com`.
-Over-rejection in routing config is an outage.
+**The test is now bare-IP form (#15184), not just token count.** A single
+token that is not an IP (`10.0.0.256`, `192.0.2.0/24`, `peer-a`, a hostname,
+`fe80::1%ge-0-0-1`) renders verbatim and bgpd refuses it, failing every
+frr-reload. Both predicates now require `netip.ParseAddr` with no zone
+and no prefix; a scoped link-local is explicitly unsupported. Hostname /
+peer-group neighbors previously accepted are rejected at commit and
+omitted on the tolerant render path until changed to an IP.
 
 Commit / commit-check stay strict (`validateBGPNeighborAddressStrict`,
 `pkg/config`), with `lenientBGPNeighborAddress` registered per #1960 so a
-tolerantly-loaded or peer-synced config still boots. The two predicates must
-accept exactly the same set: a stricter commit gate tells operators a working
-config is invalid, a stricter belt silently drops a committed peering, and
-neither divergence produces an error anywhere.
-`TestNeighborTokenGateAgreesWithTheRenderBelt6796` asserts the agreement by
-reading both function bodies rather than pinning either to a literal — the first
-version had BOTH wrong in the same direction, so trusting either side would have
-encoded the mistake.
+tolerantly-loaded or peer-synced config still boots. The two predicates
+must accept exactly the same bare-IP set.
+`TestNeighborTokenGateAgreesWithTheRenderBelt6796` (updated for #15184)
+asserts the belt still uses `netip.ParseAddr` and the config validator
+accepts exactly that set.
 
 | File | Owns |
 |---|---|
