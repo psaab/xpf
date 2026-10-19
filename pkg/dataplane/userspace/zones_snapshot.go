@@ -89,6 +89,7 @@ func buildZoneSnapshots(cfg *config.Config) []ZoneSnapshot {
 		if zone := cfg.Security.Zones[name]; zone != nil && zone.HostInboundTraffic != nil {
 			zs.HostInboundSystemServices = lowerTokens(zone.HostInboundTraffic.SystemServices)
 			zs.HostInboundProtocols = lowerTokens(zone.HostInboundTraffic.Protocols)
+			zs.HostInboundProtocolsExcept = lowerTokens(zone.HostInboundTraffic.ProtocolsExceptTokens())
 		}
 		// #3071: carry the per-zone `tcp-rst` knob to the dataplane so a
 		// non-SYN TCP transit packet dropped for a session miss whose ingress

@@ -102,7 +102,7 @@ func TestHostInboundNftRenderGoldenByteIdentical(t *testing.T) {
 	proto := map[string][2][]string{
 		"all": {
 			{"udp dport { 3784, 3785, 4784 }", "tcp dport 179", "meta l4proto 2", "meta l4proto 2", "tcp dport 646", "udp dport 646", "tcp dport 639", "meta l4proto 54", "meta l4proto 89", "meta l4proto 113", "meta l4proto 103", "udp dport 520", "icmp type { 9, 10 }", "meta l4proto 46", "udp dport 9875", "meta l4proto 112"},
-			{"udp dport { 3784, 3785, 4784 }", "tcp dport 179", "tcp dport 646", "udp dport 646", "tcp dport 639", "meta l4proto 54", "meta l4proto 89", "meta l4proto 113", "meta l4proto 103", "udp dport 521", "meta l4proto 46", "udp dport 9875", "meta l4proto 112"},
+			{"udp dport { 3784, 3785, 4784 }", "tcp dport 179", "tcp dport 646", "udp dport 646", "tcp dport 639", "icmpv6 type { 133, 134, 135, 136 }", "meta l4proto 54", "meta l4proto 89", "meta l4proto 113", "meta l4proto 103", "udp dport 521", "meta l4proto 46", "udp dport 9875", "meta l4proto 112"},
 		},
 		"bfd":              {{"udp dport { 3784, 3785, 4784 }"}, {"udp dport { 3784, 3785, 4784 }"}},
 		"bgp":              {{"tcp dport 179"}, {"tcp dport 179"}},
@@ -111,6 +111,7 @@ func TestHostInboundNftRenderGoldenByteIdentical(t *testing.T) {
 		"isis":             {nil, nil},
 		"ldp":              {{"tcp dport 646", "udp dport 646"}, {"tcp dport 646", "udp dport 646"}},
 		"msdp":             {{"tcp dport 639"}, {"tcp dport 639"}},
+		"ndp":              {nil, {"icmpv6 type { 133, 134, 135, 136 }"}},
 		"nhrp":             {{"meta l4proto 54"}, {"meta l4proto 54"}},
 		"ospf":             {{"meta l4proto 89"}, nil},
 		"ospf3":            {nil, {"meta l4proto 89"}},

@@ -38,6 +38,9 @@ type ZoneHostInboundView struct {
 	Interfaces     []string
 	SystemServices []string
 	Protocols      []string
+	// ProtocolsExcept (#15671): raw `protocols X except` tokens of
+	// the effective set, for Rust ND-withdrawal parity.
+	ProtocolsExcept []string
 	// MulticastRules is the expanded family/group dimension of Protocols.
 	MulticastRules []config.HostInboundMulticastRule
 	V4Addrs        []string // bare host IPv4 addresses (no prefix)
@@ -378,13 +381,14 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		zone   string
 		svc    []string
 		proto  []string
+		except []string
 		v4, v6 []string
 		seen4  map[string]bool
 		seen6  map[string]bool
 		ifaces map[string]bool
 	}
 	groups := make(map[string]*group)
-	getGroup := func(zone string, svc, proto []string, iface string) *group {
+	getGroup := func(zone string, svc, proto []string, iface string, except ...[]string) *group {
 		// #3721: group by a CANONICAL (sorted, deduped) token signature so two
 		// interfaces whose EFFECTIVE admission sets are semantically identical but
 		// authored in a different order ([ssh ping] vs [ping ssh]) fall into ONE
@@ -400,8 +404,12 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		sig := zone + "\x00" + config.CanonicalHostInboundTokenSig(svc, proto)
 		g := groups[sig]
 		if g == nil {
+			var exc []string
+			if len(except) > 0 {
+				exc = except[0]
+			}
 			g = &group{
-				zone: zone, svc: svc, proto: proto,
+				zone: zone, svc: svc, proto: proto, except: exc,
 				seen4: map[string]bool{}, seen6: map[string]bool{},
 				ifaces: map[string]bool{},
 			}
@@ -471,7 +479,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			continue
 		}
 		svc, proto := effectiveHostInboundTokens(zone, "", nil)
-		getGroup(name, svc, proto, "")
+		getGroup(name, svc, proto, "", effectiveHostInboundExcept(zone, nil))
 	}
 
 	// #11011: use the same StableZoneID exclusion set as snapshot quarantine.
@@ -569,6 +577,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			continue
 		}
 		svc, proto := effectiveHostInboundTokens(zone, policyIface, overrideByIface[policyIface])
+		except := effectiveHostInboundExcept(zone, overrideByIface[policyIface])
 		// #9637: unit netdevs are ingress identities. A physical row is not
 		// normally an identity: its frames arrive on tagged subunit devices,
 		// or a collapsing unit 0 claims the same device. A verified native-VLAN
@@ -578,7 +587,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		if snap.IsUnit || nativeUnit.name != "" {
 			claimNetdev(snap.LinuxName, viewZone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
 		}
-		g := getGroup(viewZone, svc, proto, policyIface)
+		g := getGroup(viewZone, svc, proto, policyIface, except)
 		for _, a := range snap.Addresses {
 			if excludeScopeLink && hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
@@ -644,6 +653,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 				continue
 			}
 			svc, proto := effectiveHostInboundTokens(zone, unitName, overrideByIface[unitName])
+			except := effectiveHostInboundExcept(zone, overrideByIface[unitName])
 			vgKeys := make([]string, 0, len(unit.VRRPGroups))
 			for k := range unit.VRRPGroups {
 				vgKeys = append(vgKeys, k)
@@ -656,7 +666,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 				}
 				for _, vip := range vg.VirtualAddresses {
 					if host := hostIPFromCIDR(vip); host != "" {
-						addAddr(getGroup(zoneName, svc, proto, unitName), host)
+						addAddr(getGroup(zoneName, svc, proto, unitName, except), host)
 					}
 				}
 			}
@@ -685,7 +695,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			continue
 		}
 		svc, proto := effectiveHostInboundTokens(zone, target.iface, overrideByIface[target.iface])
-		addAddr(getGroup(zoneName, svc, proto, target.iface), target.addr)
+		addAddr(getGroup(zoneName, svc, proto, target.iface, effectiveHostInboundExcept(zone, overrideByIface[target.iface])), target.addr)
 	}
 
 	// Emit groups deterministically: the signature begins with the zone name,
@@ -728,6 +738,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			Interfaces:           ifaces,
 			SystemServices:       g.svc,
 			Protocols:            g.proto,
+			ProtocolsExcept:      g.except,
 			MulticastRules:       config.HostInboundMulticastRules(g.proto),
 			V4Addrs:              v4,
 			V6Addrs:              v6,

@@ -1433,10 +1433,11 @@ host_inbound_flag(struct pkt_meta *meta)
 		if (proto == PROTO_ICMP &&
 		    (meta->icmp_type == 9 || meta->icmp_type == 10))
 			return HOST_INBOUND_ROUTER_DISCOVERY;
-		/* ICMPv6 NDP: RS(133), RA(134), NS(135), NA(136) */
+		/* ICMPv6 ND (#15671): RS(133), RA(134), NS(135), NA(136) —
+		 * gated on the per-zone ndp token, not router-discovery. */
 		if (proto == PROTO_ICMPV6 &&
 		    meta->icmp_type >= 133 && meta->icmp_type <= 136)
-			return HOST_INBOUND_ROUTER_DISCOVERY;
+			return HOST_INBOUND_NDP;
 		/* Other ICMP (errors, redirects) — always allow through
 		 * any allowlist.  HOST_INBOUND_ALL matches all non-zero
 		 * zone flags. */

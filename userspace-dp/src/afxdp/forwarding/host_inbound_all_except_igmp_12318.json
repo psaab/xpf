@@ -3,6 +3,7 @@
   "bgp",
   "ldp",
   "msdp",
+  "ndp",
   "nhrp",
   "ospf",
   "ospf3",

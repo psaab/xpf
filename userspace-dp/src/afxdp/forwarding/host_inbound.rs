@@ -57,9 +57,10 @@ const ICMP6_ECHO_REQUEST: u8 = 128;
 /// id used as the key MUST be the same validated id `populate_zones` accepted
 /// (caller passes it), so the two maps stay aligned.
 pub(in crate::afxdp) fn zone_host_inbound_from_snapshot(zone: &ZoneSnapshot) -> ZoneHostInbound {
-    zone_host_inbound_from_tokens(
+    zone_host_inbound_from_tokens_except(
         &zone.host_inbound_system_services,
         &zone.host_inbound_protocols,
+        &zone.host_inbound_protocols_except,
     )
 }
 
@@ -73,6 +74,17 @@ pub(in crate::afxdp) fn zone_host_inbound_from_tokens(
     services: &[String],
     protocols: &[String],
 ) -> ZoneHostInbound {
+    zone_host_inbound_from_tokens_except(services, protocols, &[])
+}
+
+/// #15671: as zone_host_inbound_from_tokens, plus the raw
+/// protocols-except tokens: `ndp except` sets ndp_excluded, which
+/// withdraws the ND default in the admit entry points.
+pub(in crate::afxdp) fn zone_host_inbound_from_tokens_except(
+    services: &[String],
+    protocols: &[String],
+    protocols_except: &[String],
+) -> ZoneHostInbound {
     let mut hi = ZoneHostInbound::default();
     for svc in services {
         classify_system_service(svc.trim().to_ascii_lowercase().as_str(), &mut hi);
@@ -80,6 +92,9 @@ pub(in crate::afxdp) fn zone_host_inbound_from_tokens(
     for proto in protocols {
         classify_protocol(proto.trim().to_ascii_lowercase().as_str(), &mut hi);
     }
+    hi.ndp_excluded = protocols_except
+        .iter()
+        .any(|t| t.trim().eq_ignore_ascii_case("ndp"));
     hi
 }
 
@@ -461,6 +476,7 @@ const KNOWN_ROUTING_PROTOCOL_TOKENS: &[&str] = &[
     "ldp",
     "msdp",
     "nhrp",
+    "ndp",
     "router-discovery",
     // #3341: additional Junos/vSRX routing-control protocols. All ride IP, so
     // each contributes a concrete IP admit in classify_protocol: rsvp (proto 46,
@@ -622,6 +638,16 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         // globally by `is_icmp_host_inbound_global_accept`, so router-discovery
         // contributes nothing per-zone on v6 — exactly as the nft chain returns
         // nil for v6 router-discovery and relies on the global ND accept.
+        // #15671: ndp admits ICMPv6 ND types 133-136 on v6. The
+        // token is the per-zone positive admission; the global
+        // default (is_icmp_host_inbound_global_accept) also admits
+        // ND unless the zone excluded ndp, which the compiled set
+        // reflects by ndp's absence after `all` expansion.
+        "ndp" => {
+            for t in [133u8, 134, 135, 136] {
+                hi.icmp_types_v6.insert(t);
+            }
+        }
         "router-discovery" => {
             hi.icmp_types_v4.insert(ICMP4_ROUTER_ADVERTISEMENT);
             hi.icmp_types_v4.insert(ICMP4_ROUTER_SOLICITATION);
@@ -701,11 +727,17 @@ fn is_icmp_host_inbound_global_accept(protocol: u8, is_v6: bool, icmp_type: u8) 
         // "fragmentation needed" as code 4), time-exceeded (11),
         // parameter-problem (12).
         (1, false) => matches!(icmp_type, 3 | 11 | 12),
-        // IPv6 errors 1-4 and Neighbor Discovery 133-136; Redirect 137 is
-        // deliberately excluded: accepting it can change firewall routing.
-        (58, true) => matches!(icmp_type, 1 | 2 | 3 | 4 | 133 | 134 | 135 | 136),
+        // IPv6 errors 1-4 only (#15671: ND 133-136 is per-zone via
+        // the ndp token; Redirect 137 is deliberately excluded:
+        // accepting it can change firewall routing).
+        (58, true) => matches!(icmp_type, 1 | 2 | 3 | 4),
         _ => false,
     }
+}
+
+/// #15671: true for IPv6 ND types 133-136 (never Redirect 137).
+fn is_ndp_type(protocol: u8, is_v6: bool, icmp_type: u8) -> bool {
+    protocol == 58 && is_v6 && (133..=136).contains(&icmp_type)
 }
 
 /// Per-packet host-inbound admit check for a host-bound (local-delivery)
@@ -734,6 +766,13 @@ pub(in crate::afxdp) fn host_inbound_admits(
     // stay gated on the `ping` / `router-discovery` tokens below.
     if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
         return true;
+    }
+    // #15671: ND default — admitted unless the zone excluded ndp.
+    if is_ndp_type(protocol, is_v6, icmp_type) {
+        return match state.zone_host_inbound.get(&ingress_zone_id) {
+            None => true,
+            Some(hi) => !hi.ndp_excluded,
+        };
     }
     match state.zone_host_inbound.get(&ingress_zone_id) {
         // #3405: every configured security zone is in the table (the Go control
@@ -826,9 +865,16 @@ pub(in crate::afxdp) fn host_inbound_admits_for_destination(
     icmp_type: u8,
     dst_ip: IpAddr,
 ) -> bool {
-    // Preserve the global ND and error/PMTUD exceptions before the zone gate.
     if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
         return true;
+    }
+    // #15671: ND default unless the zone excluded ndp.
+    if is_ndp_type(protocol, is_v6, icmp_type) {
+        return match state.zone_host_inbound.get(&ingress_zone_id) {
+            None if is_host_inbound_multicast_group(dst_ip) => false,
+            None => true,
+            Some(hi) => !hi.ndp_excluded,
+        };
     }
 
     match state.zone_host_inbound.get(&ingress_zone_id) {
@@ -856,6 +902,10 @@ pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
         return true;
     }
     if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
+        // #15671: ND default withdrawn on an ndp-excluding override.
+        if is_ndp_type(protocol, is_v6, icmp_type) && hi.ndp_excluded {
+            return false;
+        }
         return hi.admits_destination(protocol, dst_port, is_v6, icmp_type, dst_ip);
     }
     host_inbound_admits_for_destination(
@@ -892,6 +942,13 @@ pub(in crate::afxdp) fn host_inbound_admits_iface(
     if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
         if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
             return true;
+        }
+        // #15671: ND default withdrawn on an ndp-excluding override;
+        // otherwise the per-interface ndp token (or zone fallback via
+        // host_inbound_admits when no override exists) governs. An
+        // override WITHOUT ndp still gets the default unless excluded.
+        if is_ndp_type(protocol, is_v6, icmp_type) && hi.ndp_excluded {
+            return false;
         }
         return hi.admits(protocol, dst_port, is_v6, icmp_type);
     }

@@ -734,6 +734,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			out[i].HostInboundConfigured = true
 			out[i].HostInboundSystemServices = svc
 			out[i].HostInboundProtocols = proto
+			out[i].HostInboundProtocolsExcept = effectiveHostInboundExcept(zone, ovr)
 		}
 	}
 	return out

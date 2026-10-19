@@ -1132,6 +1132,7 @@ const (
 	HostInboundVRRP            = 1 << 18
 	HostInboundESP             = 1 << 19
 	HostInboundRouterDiscovery = 1 << 20
+	HostInboundNDP             = 1 << 22
 	HostInboundGRE             = 1 << 21
 	HostInboundAll             = 0xFFFFFFFF
 )
@@ -1164,6 +1165,7 @@ var HostInboundProtocolFlags = map[string]uint32{
 	"ospf":             HostInboundOSPF,
 	"bgp":              HostInboundBGP,
 	"router-discovery": HostInboundRouterDiscovery,
+	"ndp":              HostInboundNDP,
 	"vrrp":             HostInboundVRRP,
 	"all":              HostInboundAll,
 }

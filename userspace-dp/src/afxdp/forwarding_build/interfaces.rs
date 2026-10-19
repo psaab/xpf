@@ -824,9 +824,10 @@ pub(super) fn populate_interfaces(
             empty_zone_host_inbound_sentinels.remove(&iface.ifindex);
             state.ifindex_host_inbound.insert(
                 iface.ifindex,
-                crate::afxdp::forwarding::zone_host_inbound_from_tokens(
+                crate::afxdp::forwarding::zone_host_inbound_from_tokens_except(
                     &iface.host_inbound_system_services,
                     &iface.host_inbound_protocols,
+                    &iface.host_inbound_protocols_except,
                 ),
             );
         }

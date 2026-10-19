@@ -31,7 +31,7 @@ pub(in crate::afxdp) use fabric::*;
 pub(in crate::afxdp) use host_inbound::{
     host_inbound_admits, host_inbound_admits_for_destination, host_inbound_admits_iface,
     host_inbound_admits_iface_for_destination, zone_host_inbound_from_snapshot,
-    zone_host_inbound_from_tokens,
+    zone_host_inbound_from_tokens, zone_host_inbound_from_tokens_except,
 };
 
 #[cfg_attr(not(test), allow(dead_code))]

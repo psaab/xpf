@@ -24,8 +24,9 @@ import (
 // config.HostInboundProtocolMatch, #3627 B1a) and mirrors the global pre-accepts
 // the nft chain applies at the top of `chain input`
 // (buildHostInboundFilterPayload) and the Rust is_icmp_host_inbound_global_accept
-// (#3171): ESP/AH raw data plane, ICMP error/PMTUD, and IPv6 Neighbor Discovery
-// types 133-136 (not Redirect 137).
+// (#3171): ESP/AH raw data plane and ICMP error/PMTUD. IPv6 Neighbor
+// Discovery types 133-136 ride the #15671 ndp default exemption, not
+// this unconditional accept (Redirect 137 is never admitted).
 //
 // Faithful to the enforcement paths (plan §5): a zone can carry MULTIPLE
 // per-interface effective views (#3362). A zone-scoped query (no ingress
@@ -290,7 +291,7 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	// `p` and missed. Undotted refs are byte-identical (step-4 Literal ≡
 	// legacy canon).
 	svc, prot := effectiveHostInboundTokens(zone, split.Literal, buildInterfaceHostInboundMap(cfg)[split.Literal])
-	v := ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}, SystemServices: svc, Protocols: prot}
+	v := ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}, SystemServices: svc, Protocols: prot, ProtocolsExcept: effectiveHostInboundExcept(zone, buildInterfaceHostInboundMap(cfg)[split.Literal])}
 	return classifyOneView(v, proto, hasProto, dstPort, icmpType, family)
 }
 
@@ -310,9 +311,25 @@ func classifyOneView(v ZoneHostInboundView, proto uint8, hasProto bool, dstPort 
 		}
 	}
 
-	// Global pre-accepts (ICMP error/PMTUD, IPv6 ND, ESP/AH), mirroring the
-	// top-of-chain nft accepts (#3171). Needs the protocol.
+	// Global pre-accepts (ICMP error/PMTUD, ESP/AH), mirroring the
+	// top-of-chain nft accepts (#3171). Needs the protocol. IPv6 ND is
+	// NOT unconditional (#15671): it rides the default exemption below.
 	if hasProto && hostInboundGlobalAccept(proto, icmpType, family) {
+		return HostInboundAdmission{Status: HostInboundGlobalAccept}
+	}
+
+	// #15671: IPv6 ND (133-136) default exemption — admitted unless a
+	// view in the zone excluded ndp (`protocols all` + `ndp except`
+	// removes it from the expanded set). Needs the protocol + type.
+	if hasProto && icmpType != nil && hostInboundIsNDP(proto, *icmpType, family) &&
+		!ndpExcluded(v.ProtocolsExcept) {
+		// An explicit ndp token is reported as the admitting token;
+		// the default exemption is the global-accept otherwise.
+		for _, tok := range v.Protocols {
+			if tok == "ndp" || tok == "all" {
+				return HostInboundAdmission{Status: HostInboundTokenAdmit, Token: "ndp", Kind: "protocols"}
+			}
+		}
 		return HostInboundAdmission{Status: HostInboundGlobalAccept}
 	}
 
@@ -507,6 +524,25 @@ func l4MatchAdmits(m config.L4Match, proto uint8, dstPort int, icmpType *uint8) 
 // can install routes for traffic originated by the firewall. Echo-request
 // (v4 8 / v6 128) and IPv4 router-advert/solicit (9/10) are NOT global — they
 // stay gated on the `ping` / `router-discovery` tokens.
+// ndpExcluded reports whether the raw except tokens name ndp (#15671).
+func ndpExcluded(except []string) bool {
+	for _, tok := range except {
+		if tok == "ndp" {
+			return true
+		}
+	}
+	return false
+}
+
+// hostInboundIsNDP reports whether the tuple is IPv6 Neighbor
+// Discovery (ICMPv6 133-136, #15671). Redirect 137 is excluded.
+func hostInboundIsNDP(proto uint8, icmpType uint8, family string) bool {
+	if proto != config.HostInboundProtoICMPv6 || family == "ip" {
+		return false
+	}
+	return icmpType >= 133 && icmpType <= 136
+}
+
 func hostInboundGlobalAccept(proto uint8, icmpType *uint8, family string) bool {
 	if proto == 50 || proto == 51 {
 		return true
@@ -526,7 +562,7 @@ func hostInboundGlobalAccept(proto uint8, icmpType *uint8, family string) bool {
 		return t == 3 || t == 11 || t == 12
 	case config.HostInboundProtoICMPv6:
 		switch t {
-		case 1, 2, 3, 4, 133, 134, 135, 136:
+		case 1, 2, 3, 4: // #15671: ND 133-136 moved to the ndp-default exemption
 			return true
 		}
 	}

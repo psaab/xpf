@@ -2658,9 +2658,12 @@ fn empty_zone_addressed_interface_denies_host_inbound() {
         host_inbound_admits_iface(&state, UNZONED_IFINDEX, 0, PROTO_ICMP, 0, false, 3),
         "ICMPv4 destination-unreachable stays globally admitted on the unzoned interface"
     );
+    // #15671: ND is no longer global — the empty sentinel has no ndp
+    // token, so NS is denied on the unzoned interface (kernel ND is
+    // served before AF_XDP; this path only sees local-delivery).
     assert!(
-        host_inbound_admits_iface(&state, UNZONED_IFINDEX, 0, PROTO_ICMP6, 0, true, 135),
-        "IPv6 Neighbor Solicitation stays globally admitted on the unzoned interface"
+        !host_inbound_admits_iface(&state, UNZONED_IFINDEX, 0, PROTO_ICMP6, 0, true, 135),
+        "IPv6 Neighbor Solicitation denied on unzoned interface without ndp (#15671)"
     );
 
     // Scope guard 1: the genuinely-global zone_id 0 path (no ifindex override)

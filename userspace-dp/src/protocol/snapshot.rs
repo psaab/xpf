@@ -255,6 +255,9 @@ pub(crate) struct InterfaceSnapshot {
     pub host_inbound_system_services: Vec<String>,
     #[serde(rename = "host_inbound_protocols", default)]
     pub host_inbound_protocols: Vec<String>,
+    /// #15671: raw protocols-except tokens for ND withdrawal.
+    #[serde(rename = "host_inbound_protocols_except", default)]
+    pub host_inbound_protocols_except: Vec<String>,
     /// #9821: the STRUCTURAL row identity — `Some(true)` for a logical-unit
     /// row, `Some(false)` for an interface (base) row. Name shape cannot
     /// answer this: a declared interface may itself contain a dot
@@ -1001,6 +1004,9 @@ pub(crate) struct ZoneSnapshot {
     /// Junos names: ospf, bgp, router-discovery, ...).
     #[serde(rename = "host_inbound_protocols", default)]
     pub host_inbound_protocols: Vec<String>,
+    /// #15671: raw protocols-except tokens for ND withdrawal.
+    #[serde(rename = "host_inbound_protocols_except", default)]
+    pub host_inbound_protocols_except: Vec<String>,
     /// #3071: Junos `security zones security-zone <z> tcp-rst`. When true,
     /// a non-SYN TCP transit packet dropped for a session miss may receive a
     /// TCP RST toward its source when this is its INGRESS (from) zone. Policy

@@ -150,7 +150,8 @@ follow-up; until it lands, surface 3 stays a hand-mirror held by the set-level
 | `sap` | udp 9875 | udp 9875 | dual | #3341. |
 | `dvmrp` | meta l4proto 2 | ip proto 2 | **ip** | #3341. Carried inside IGMP; IPv4-only, like `igmp`. |
 | `isis` | (none) | (none) | **L2/none** | Recognized but no IP match on either surface (L2/OSI-CLNP). Kernel hands IS-IS PDUs to FRR's isisd via an LLC socket, outside the IP host-inbound filter. Excluded from `protocols all` (#3311). |
-| `router-discovery` | v4: `icmp type { 9, 10 }`; **v6: (none)** | v4 ICMP types 9, 10 | v4 per-zone; **v6 global** | **L02:** on IPv6, RS/RA (133/134) ride the always-accepted ND global set, so this token carries NOTHING on v6 — correct kernel parity, but a CLI/doc trap. |
+| `ndp` | `icmpv6 type { 133, 134, 135, 136 }` | ICMPv6 types 133-136 | **ip6** | #15671: IPv6 Neighbor Discovery. Also admitted by the ND default unless `ndp except` withdraws it. Redirect 137 never admitted. |
+| `router-discovery` | v4: `icmp type { 9, 10 }`; **v6: (none)** | v4 ICMP types 9, 10 | v4 per-zone; **v6 via ndp** | **L02:** on IPv6, RS/RA (133/134) ride the ND default / `ndp` token (#15671), so this token carries NOTHING on v6. |
 
 ## `system-services all` is the named-service union (#3226)
 
@@ -535,7 +536,8 @@ operation or session return traffic. nft: `buildHostInboundFilterPayload`; Rust:
 | Established/related | `ct state established,related accept` | conntrack fast path | Return / ongoing host traffic. **On a tightening the kernel entry is reconciled — see "Stale kernel authorization on a tightening (#5566)" below.** |
 | Raw IPsec ESP/AH | `meta l4proto { 50, 51 } accept` | `stage_ipsec_passthrough_check` (before `host_inbound_admits`) | Kernel XFRM decrypts host-terminated IPsec; makes `ike`/`ipsec` a working superset. |
 | ICMPv4 errors/PMTUD | `icmp type { destination-unreachable, time-exceeded, parameter-problem }` | proto 1 **on IPv4** types 3, 11, 12 | PMTUD / unreachable / traceroute-to-self signalling. Echo-request is NOT here (gated on `ping`). |
-| ICMPv6 errors + ND | `icmpv6 type { 1, 2, 3, 4, 133, 134, 135, 136, 137 }` | proto 58 **on IPv6** types 1-4, 133-137 | v6 error/PMTUD (1-4) + Neighbor Discovery (133-137). Echo-request (128) is NOT here (gated on `ping`). |
+| ICMPv6 errors | `icmpv6 type { 1, 2, 3, 4 }` | proto 58 **on IPv6** types 1-4 | v6 error/PMTUD. Echo-request (128) is NOT here (gated on `ping`). |
+| IPv6 ND default (#15671) | `icmpv6 type { 133, 134, 135, 136 }` (omitted when any view carries `ndp except`) | per-zone `ndp` types 133-136; default admitted unless excluded | ND is required for IPv6 link operation, so it stays default-on; `protocols all` + `protocols ndp except` withdraws it. Redirect 137 never admitted. |
 
 ### The protocol number is paired with the IP FAMILY (#7520)
 
