@@ -52,6 +52,8 @@ func TestLearnedSameGatewayECMPPreservesEachInterface11389(t *testing.T) {
 	}
 }
 
+// Control (#14950): distinct gateways each carrying an explicit LinkIndex
+// now keep that binding, exactly as the same-gateway legs above do.
 func TestLearnedDistinctGatewayECMPStaysInferable11389(t *testing.T) {
 	withLinkNames11389(t, map[int]string{11: "wan-a", 12: "wan-b"})
 	got := importLearnedV4Routes11389(t, netlink.Route{
@@ -63,12 +65,16 @@ func TestLearnedDistinctGatewayECMPStaysInferable11389(t *testing.T) {
 			{Gw: net.ParseIP("192.0.2.2"), LinkIndex: 12},
 		},
 	})
-	want := []string{"192.0.2.1", "192.0.2.2"}
+	want := []string{"192.0.2.1@wan-a", "192.0.2.2@wan-b"}
 	if len(got) != 1 || !reflect.DeepEqual(got[0].NextHops, want) {
 		t.Fatalf("distinct gateways = %+v, want %v", got, want)
 	}
 }
 
+// #14950 changed the unresolvable-binding rule for NON-link-local gateways:
+// the leg falls back to the bare gateway instead of dropping the route (a
+// scope-less link-local leg still refuses whole — see the 9512 cells).
+// The resolvable leg keeps its binding; the unresolvable one goes bare.
 func TestLearnedAmbiguousECMPWithoutNamedInterfaceIsDropped11389(t *testing.T) {
 	withLinkNames11389(t, map[int]string{11: "wan-a"})
 	got := importLearnedV4Routes11389(t, netlink.Route{
@@ -80,7 +86,8 @@ func TestLearnedAmbiguousECMPWithoutNamedInterfaceIsDropped11389(t *testing.T) {
 			{Gw: net.ParseIP("192.0.2.254"), LinkIndex: 12},
 		},
 	})
-	if len(got) != 0 {
-		t.Fatalf("ambiguous ECMP without both interface names must be dropped whole, got %+v", got)
+	want := []string{"192.0.2.254@wan-a", "192.0.2.254"}
+	if len(got) != 1 || !reflect.DeepEqual(got[0].NextHops, want) {
+		t.Fatalf("ambiguous ECMP with one unnamed interface = %+v, want %v (bare fallback, #14950)", got, want)
 	}
 }

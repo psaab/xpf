@@ -90,22 +90,34 @@ func TestLinkLocalScopeIsOrderIndependent9512(t *testing.T) {
 	}
 }
 
-// Negative control: a scope-less GLOBAL gateway, and an IPv4 gateway, stay
-// scope-less. The helper's connected-prefix inference is correct for them and
-// the fix must not tighten it.
+// Controls (#14950): a GLOBAL or IPv4 gateway with NO explicit LinkIndex
+// stays scope-less (the helper's connected-prefix inference applies), while
+// the same gateways WITH an explicit LinkIndex keep that binding.
 func TestGlobalAndIPv4GatewaysStayScopeLess9512(t *testing.T) {
 	withLinkNames9512(t, map[int]string{102: "ge-0-0-2"})
-	got := importV6Main9512(t, v6Route9512(t, "2001:db8:beef::/48", "2001:db8:2::254", 102))
+	got := importV6Main9512(t, v6Route9512(t, "2001:db8:beef::/48", "2001:db8:2::254", 0))
 	if want := []string{"2001:db8:2::254"}; !reflect.DeepEqual(got["2001:db8:beef::/48"], want) {
-		t.Errorf("global gateway = %v, want %v", got["2001:db8:beef::/48"], want)
+		t.Errorf("global gateway without LinkIndex = %v, want %v", got["2001:db8:beef::/48"], want)
+	}
+	got = importV6Main9512(t, v6Route9512(t, "2001:db8:beef::/48", "2001:db8:2::254", 102))
+	if want := []string{"2001:db8:2::254@ge-0-0-2"}; !reflect.DeepEqual(got["2001:db8:beef::/48"], want) {
+		t.Errorf("global gateway with LinkIndex = %v, want %v", got["2001:db8:beef::/48"], want)
+	}
+	withRouteLister(t, staticLister(v4Main(netlink.Route{
+		Dst: mustCIDR(t, "10.20.0.0/16"), Gw: net.ParseIP("192.0.2.1"), LinkIndex: 0,
+		Type: unix.RTN_UNICAST, Protocol: netlink.RouteProtocol(unix.RTPROT_BGP),
+	})))
+	v4, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil || len(v4) != 1 || !reflect.DeepEqual(v4[0].NextHops, []string{"192.0.2.1"}) {
+		t.Errorf("IPv4 gateway without LinkIndex = %+v (err %v), want next hops [192.0.2.1]", v4, err)
 	}
 	withRouteLister(t, staticLister(v4Main(netlink.Route{
 		Dst: mustCIDR(t, "10.20.0.0/16"), Gw: net.ParseIP("192.0.2.1"), LinkIndex: 102,
 		Type: unix.RTN_UNICAST, Protocol: netlink.RouteProtocol(unix.RTPROT_BGP),
 	})))
-	v4, err := ImportLearnedRoutes([]int{mainTableID})
-	if err != nil || len(v4) != 1 || !reflect.DeepEqual(v4[0].NextHops, []string{"192.0.2.1"}) {
-		t.Errorf("IPv4 gateway = %+v (err %v), want next hops [192.0.2.1]", v4, err)
+	v4, err = ImportLearnedRoutes([]int{mainTableID})
+	if err != nil || len(v4) != 1 || !reflect.DeepEqual(v4[0].NextHops, []string{"192.0.2.1@ge-0-0-2"}) {
+		t.Errorf("IPv4 gateway with LinkIndex = %+v (err %v), want next hops [192.0.2.1@ge-0-0-2]", v4, err)
 	}
 }
 
