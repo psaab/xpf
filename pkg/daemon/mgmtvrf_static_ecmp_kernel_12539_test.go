@@ -110,8 +110,8 @@ func TestMgmtStaticECMPLifecycleInKernel12539(t *testing.T) {
 			lines: append(mgmtStaticSetLines12539("", "198.51.100.0/24", 0, v4a),
 				mgmtStaticSetLines12539("inet6.0", "2001:db8:70::/48", 0, v6a)...),
 			want: []string{
-				"198.51.100.0/24 prio=5 proto=4 realm=0x585046 via=192.0.2.1",
-				"2001:db8:70::/48 prio=5 proto=4 realm=0x0 via=2001:db8:ffff::1",
+				"198.51.100.0/24 prio=5 proto=88 realm=0x585046 via=192.0.2.1",
+				"2001:db8:70::/48 prio=5 proto=88 realm=0x0 via=2001:db8:ffff::1",
 			},
 		},
 		{
@@ -155,8 +155,8 @@ func TestMgmtStaticECMPLifecycleInKernel12539(t *testing.T) {
 			lines: append(mgmtStaticSetLines12539("", "198.51.0.0/16", 7, v4a),
 				mgmtStaticSetLines12539("inet6.0", "2001:db8::/40", 7, v6a)...),
 			want: []string{
-				"198.51.0.0/16 prio=7 proto=4 realm=0x585046 via=192.0.2.1",
-				"2001:db8::/40 prio=7 proto=4 realm=0x0 via=2001:db8:ffff::1",
+				"198.51.0.0/16 prio=7 proto=88 realm=0x585046 via=192.0.2.1",
+				"2001:db8::/40 prio=7 proto=88 realm=0x0 via=2001:db8:ffff::1",
 			},
 		},
 		{
@@ -168,6 +168,16 @@ func TestMgmtStaticECMPLifecycleInKernel12539(t *testing.T) {
 				"2001:db8::/40 prio=7 proto=88 realm=0x0 via=2001:db8:ffff::1,2001:db8:ffff::3",
 			},
 		},
+		{
+			name: "single-path statics removed (#14972 IPv6 reap)",
+			lines: append(mgmtStaticSetLines12539("", "198.51.0.0/16", 7, v4a),
+				mgmtStaticSetLines12539("inet6.0", "2001:db8::/40", 7, v6a)...),
+			want: []string{
+				"198.51.0.0/16 prio=7 proto=88 realm=0x585046 via=192.0.2.1",
+				"2001:db8::/40 prio=7 proto=88 realm=0x0 via=2001:db8:ffff::1",
+			},
+		},
+		{name: "single-path statics removed (empty config)"},
 		{name: "ECMP statics removed"},
 	}
 	base := []string{

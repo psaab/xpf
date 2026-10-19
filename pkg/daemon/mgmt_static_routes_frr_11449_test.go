@@ -4,6 +4,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -56,7 +57,7 @@ func TestFRRExcludesStaticResolvedByLiveMgmtConnectedRoute11449(t *testing.T) {
 	}
 	var reconciled bool
 	for _, route := range fake.routes {
-		if route.Table == mgmtVRFTableID && route.Protocol == unix.RTPROT_STATIC &&
+		if route.Table == mgmtVRFTableID && route.Protocol == config.ManagementVRFMultipathStaticProtocol &&
 			route.Gw.Equal(net.ParseIP("192.0.2.1")) &&
 			routeDst11449(route, netlink.FAMILY_V4) == "198.51.100.0/24" {
 			reconciled = true

@@ -5,6 +5,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -25,7 +26,7 @@ import (
 func backupRouterLink12583(fake *mgmtStaticRouteFake11449) (int, bool) {
 	for _, route := range fake.routes {
 		if route.Table == mgmtVRFTableID && route.Priority == 250 &&
-			route.Protocol == unix.RTPROT_STATIC && route.Realm == mgmtStaticRouteRealm11449 &&
+			route.Protocol == config.ManagementVRFMultipathStaticProtocol && route.Realm == mgmtStaticRouteRealm11449 &&
 			route.Gw.Equal(net.ParseIP("192.0.2.1")) &&
 			routeDst11449(route, netlink.FAMILY_V4) == "0.0.0.0/0" {
 			return route.LinkIndex, true

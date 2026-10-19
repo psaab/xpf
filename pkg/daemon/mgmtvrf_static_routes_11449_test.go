@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -170,7 +171,7 @@ func TestMgmtStaticRoutesInstallInTable999WithoutDHCP11449(t *testing.T) {
 			continue
 		}
 		dst := routeDst11449(route, netlink.FAMILY_V4)
-		if route.Protocol == unix.RTPROT_STATIC && route.Realm == mgmtStaticRouteRealm11449 {
+		if route.Protocol == config.ManagementVRFMultipathStaticProtocol && route.Realm == mgmtStaticRouteRealm11449 {
 			if dst == "0.0.0.0/0" && route.Gw.Equal(net.ParseIP("192.0.2.1")) &&
 				route.Priority == 250 && route.Type == unix.RTN_UNICAST {
 				backup = true
@@ -243,7 +244,7 @@ func TestBackupRouterIPv6DefaultUsesTable99911449(t *testing.T) {
 		t.Fatalf("applyMgmtVRFRoutesTo without DHCP: %v", err)
 	}
 	for _, route := range fake.routes {
-		if route.Table == mgmtVRFTableID && route.Protocol == unix.RTPROT_STATIC &&
+		if route.Table == mgmtVRFTableID && route.Protocol == config.ManagementVRFMultipathStaticProtocol &&
 			route.Realm == mgmtStaticRouteRealm11449 && route.Gw.Equal(net.ParseIP("2001:db8:10::1")) {
 			if route.Dst == nil || routeDst11449(route, netlink.FAMILY_V6) != "::/0" ||
 				route.Priority != 250 || route.Type != unix.RTN_UNICAST {
