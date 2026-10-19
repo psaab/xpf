@@ -63,12 +63,11 @@ pub(super) fn poll_binding(
     // `&MmapArea` borrowed out of `binding.umem` (an `Rc<WorkerUmemInner>`
     // allocation). The pointee outlives the whole poll call — nothing on
     // the poll path drops or replaces `binding.umem`, and the only
-    // `&mut WorkerUmemInner` escape hatch (`WorkerUmem::umem_mut` via
-    // `Rc::get_mut`) is exercised solely at bind time (bind.rs), never
-    // while a worker is polling — so the shared reborrows can never alias
-    // a mutable reference. The raw pointer exists only to decouple the
-    // immutable UMEM-area borrow from the `&mut BindingWorker` borrows
-    // taken by the same calls.
+    // `&mut Umem` escape hatch (`WorkerUmem::umem_mut`, a `RefCell` borrow
+    // — #15730) is exercised solely at bind time (bind.rs), never while a
+    // worker is polling — so the shared reborrows can never alias it.
+    // The raw pointer exists only to decouple the immutable UMEM-area
+    // borrow from the `&mut BindingWorker` borrows taken by the same calls.
     let area = binding.umem.area() as *const MmapArea;
     maybe_touch_heartbeat(binding, now_ns);
     let tx_work = drain_pending_tx(
