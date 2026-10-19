@@ -555,8 +555,8 @@ COMPARED	protocols router-advertisement interface <*> retransmit-timer
 COMPARED	routing-instances <*> description
 COMPARED	routing-instances <*> instance-type
 COMPARED	routing-instances <*> interface
-unreachable (leaf changed nothing)	routing-instances <*> interface-routes rib-group inet
-unreachable (leaf changed nothing)	routing-instances <*> interface-routes rib-group inet6
+COMPARED	routing-instances <*> interface-routes rib-group inet
+COMPARED	routing-instances <*> interface-routes rib-group inet6
 COMPARED	routing-instances <*> protocols bgp cluster-id
 COMPARED	routing-instances <*> protocols bgp damping half-life
 COMPARED	routing-instances <*> protocols bgp damping max-suppress
