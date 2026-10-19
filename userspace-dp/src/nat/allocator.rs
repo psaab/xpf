@@ -148,14 +148,83 @@ pub(super) struct PersistentSourceKey {
 pub(super) const PERSISTENT_NAT_EGRESS_UNSCOPED: u32 = 0;
 const EGRESS_SCOPE_OFFSET_BASIS: u32 = 0x811c_9dc5;
 const EGRESS_SCOPE_PRIME: u32 = 0x0100_0193;
-/// Deterministically folds the admitting rule's zone pair. Never returns 0.
+const EGRESS_SCOPE_TAG_V1: u32 = 1;
+/// Deterministically folds (from, to). Never returns 0.
 pub(super) fn persistent_egress_scope(from_zone: &str, to_zone: &str) -> u32 {
     let mut hash = EGRESS_SCOPE_OFFSET_BASIS;
-    for byte in from_zone.bytes().chain(std::iter::once(0)).chain(to_zone.bytes()) {
+    for byte in std::iter::once(0u8)
+        .chain(from_zone.bytes())
+        .chain(std::iter::once(0))
+        .chain(to_zone.bytes())
+    {
         hash ^= u32::from(byte);
         hash = hash.wrapping_mul(EGRESS_SCOPE_PRIME);
     }
     hash.wrapping_add(1)
+}
+
+/// #15133 v2: folds the six authored scope fields followed by the packet
+/// (from, to). Empty authored zones are replaced by the packet zone BEFORE
+/// folding, so an interface-, routing-instance- or global-scoped rule-set
+/// (empty from_zone) is never collapsed into the unscoped sentinel, while a
+/// zone-scoped rule keys by its authored zones under any caller spelling.
+/// The `1` tag domain-separates v2 from v1 so a persisted v1 hash cannot
+/// alias a v2 hash (the offset-basis fold is not injective across the tag
+/// boundary). `0` never folds to a bucket: callers substitute the rule's
+/// normalized key, and the literal `0` stays reserved for NAT64 BIBs,
+/// legacy/imported records and direct allocator calls whose grants share
+/// one bucket by design. Never returns 0.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn persistent_egress_scope_v2(
+    from_zone: &str,
+    to_zone: &str,
+    from_interface: &str,
+    to_interface: &str,
+    from_routing_instance: &str,
+    to_routing_instance: &str,
+    packet_from_zone: &str,
+    packet_to_zone: &str,
+) -> u32 {
+    let eff_from = if from_zone.is_empty() { packet_from_zone } else { from_zone };
+    let eff_to = if to_zone.is_empty() { packet_to_zone } else { to_zone };
+    let fields: [&str; 8] = [
+        eff_from,
+        eff_to,
+        from_interface,
+        to_interface,
+        from_routing_instance,
+        to_routing_instance,
+        packet_from_zone,
+        packet_to_zone,
+    ];
+    let mut hash = EGRESS_SCOPE_OFFSET_BASIS;
+    let mut feed = |byte: u8, hash: &mut u32| {
+        *hash ^= u32::from(byte);
+        *hash = hash.wrapping_mul(EGRESS_SCOPE_PRIME);
+    };
+    feed(EGRESS_SCOPE_TAG_V1 as u8, &mut hash);
+    for field in fields {
+        for byte in field.bytes() {
+            feed(byte, &mut hash);
+        }
+        feed(0, &mut hash);
+    }
+    if hash == PERSISTENT_NAT_EGRESS_UNSCOPED {
+        hash = hash.wrapping_add(1);
+    }
+    hash
+}
+
+/// Narrow on-wire translation between the v1 (six-field) and v2
+/// (eight-field) `IdleLeaseWire.egress_scope` encodings. The v1..v2
+/// boundary folds differently for the same rule, so a v1-encoded record
+/// must never be compared against a v2-folded lookup. `None` until the
+/// control-plane helper that owns the lease-control version knows which
+/// encoding the peer used. FOLLOWUP(#15133): the coordinator-side
+/// re-encode site, once the lease-control version negotiation carries it.
+#[allow(dead_code)]
+pub(super) fn persistent_egress_scope_reencode_for_peer(_scope: u32) -> Option<u32> {
+    None
 }
 
 /// One egress zone's inbound grants for a lease.
@@ -198,6 +267,14 @@ impl PersistentPermissions {
             return self.scope(egress_scope).is_some_and(granted);
         }
         self.scopes.values().any(granted)
+    }
+    /// #15133: does this lease hold ANY grant under `egress_scope`? A rule
+    /// whose bucket is absent never minted on this lease, so its lookup
+    /// must answer Miss (not Denied) and let a sibling rule that DID mint
+    /// decide. Without this, the first sibling in snapshot order vetoes
+    /// every inbound packet on a shared lease.
+    pub(super) fn has_scope(&self, egress_scope: u32) -> bool {
+        egress_scope == PERSISTENT_NAT_EGRESS_UNSCOPED || self.scopes.contains_key(&egress_scope)
     }
     #[cfg(test)]
     pub(super) fn any_remote(&self) -> bool { self.scopes.values().any(|s| s.any_remote) }
@@ -2343,9 +2420,15 @@ impl PortAllocator {
             .fetch_add(1, Ordering::Relaxed);
         self.shared.live.lock().unwrap_or_else(|e| e.into_inner())
     }
-    /// Resolve an unsolicited packet addressed to a persistent NAT tuple.
-    /// A leased tuple with no matching remote permission is terminally denied.
-    pub(crate) fn persistent_inbound_lookup(
+    /// #15133: inbound lookup keyed by the ADMITTING RULE's normalized
+    /// effective scope (see `SourceNatRule::persistent_rule_scope`). This is
+    /// the production entry point: an interface-, routing-instance- or
+    /// global-scoped rule-set has empty `from_zone`, and the legacy
+    /// zone-pair lookup below collapsed that to UNSCOPED (any grant bucket
+    /// admits), widening a strict sibling's `target-host-port` binding to
+    /// `any-remote-host` when the two share one pool.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn persistent_inbound_lookup_for_rule(
         &self,
         protocol: u8,
         translated_ip: IpAddr,
@@ -2353,14 +2436,39 @@ impl PortAllocator {
         remote_ip: IpAddr,
         remote_port: u16,
         now_ns: u64,
-        from_zone: &str,
+        rule: &super::source::SourceNatRule,
         ingress_zone: &str,
+        packet_from_zone: &str,
+        packet_to_zone: &str,
+        scope: &super::NatScopeCtx<'_>,
     ) -> PersistentInbound {
-        let arrival_scope = if from_zone.is_empty() || ingress_zone.is_empty() {
-            PERSISTENT_NAT_EGRESS_UNSCOPED
-        } else {
-            persistent_egress_scope(from_zone, ingress_zone)
-        };
+        let arrival_scope = rule.persistent_rule_scope(
+            packet_from_zone,
+            packet_to_zone,
+            ingress_zone,
+            scope,
+        );
+        self.persistent_inbound_lookup_scoped(
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+        )
+    }
+
+    fn persistent_inbound_lookup_scoped(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        arrival_scope: u32,
+    ) -> PersistentInbound {
         let reverse = ReverseIdentityBaseKey {
             protocol,
             translated_ip,
@@ -2379,10 +2487,16 @@ impl PortAllocator {
             if lease.revoked || (lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
                 continue;
             }
+            // #15133: a lease this rule never minted on (no bucket for its
+            // scope) is not this rule's to deny — skip it as a miss so a
+            // sibling that DID mint can still admit. Only a lease holding
+            // this rule's bucket can terminally Deny.
+            let permissions = live.persistent_permissions.get(key);
+            if !permissions.is_some_and(|p| p.has_scope(arrival_scope)) {
+                continue;
+            }
             saw_lease = true;
-            let permitted = live
-                .persistent_permissions
-                .get(key)
+            let permitted = permissions
                 .is_some_and(|permissions| permissions.permits(arrival_scope, remote_ip, remote_port));
             if !permitted {
                 continue;
@@ -2402,6 +2516,41 @@ impl PortAllocator {
             None if saw_lease => PersistentInbound::Denied,
             None => PersistentInbound::Miss,
         }
+    }
+
+    /// Resolve an unsolicited packet addressed to a persistent NAT tuple.
+    /// A leased tuple with no matching remote permission is terminally denied.
+    ///
+    /// Legacy zone-pair entry point, retained for direct allocator calls and
+    /// NAT64 BIBs whose grants share the unscoped bucket by design. An empty
+    /// `from_zone` or `ingress_zone` still selects UNSCOPED here — never
+    /// route a source-NAT rule through this spelling; production rule
+    /// lookups go through `persistent_inbound_lookup_for_rule` (#15133).
+    pub(crate) fn persistent_inbound_lookup(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        from_zone: &str,
+        ingress_zone: &str,
+    ) -> PersistentInbound {
+        let arrival_scope = if from_zone.is_empty() || ingress_zone.is_empty() {
+            PERSISTENT_NAT_EGRESS_UNSCOPED
+        } else {
+            persistent_egress_scope(from_zone, ingress_zone)
+        };
+        self.persistent_inbound_lookup_scoped(
+            protocol,
+            translated_ip,
+            translated_port,
+            remote_ip,
+            remote_port,
+            now_ns,
+            arrival_scope,
+        )
     }
 
     pub(super) fn record_synced_persistent_permission(

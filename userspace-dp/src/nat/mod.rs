@@ -207,6 +207,9 @@ mod tests_persistent_scope_10018;
 #[cfg(test)]
 #[path = "tests_persistent_zone_14322.rs"]
 mod tests_persistent_zone_14322;
+#[cfg(test)]
+#[path = "tests_persistent_nonzone_15133.rs"]
+mod tests_persistent_nonzone_15133;
 // #9874: authored-but-empty source-NAT match poison (fail-closed drop).
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]

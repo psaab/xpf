@@ -432,8 +432,13 @@ fn match_source_nat_result_for_tuple_inner(
         if rule_match == L4Match::NoMatch {
             continue;
         }
-        // #14322: scope only this rule's permission grants; lease/flow keys stay unscoped.
-        let flow_egress_scope = persistent_egress_scope(from_zone, to_zone);
+        // #14322/#15133: scope only this rule's permission grants by the
+        // rule's normalized effective scope (authored scope fields with
+        // empty zones replaced by the packet's resolved zones); lease/flow
+        // keys stay unscoped. Keying by the raw packet (from, to) pair
+        // merged interface-/RI-/global-scoped siblings that share a pool
+        // into one grant bucket.
+        let flow_egress_scope = rule.persistent_rule_scope(from_zone, to_zone, to_zone, scope);
         // #9874: a rule whose authored `match` constrains nothing claims the
         // flow and FAILS CLOSED (drop + count) — never a translation, never
         // an exemption, never fall-through to a later rule. Placed AFTER

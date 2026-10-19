@@ -427,7 +427,29 @@ fn destination_nat_translation_still_valid(
                 )
                 .map(|(decision, _)| decision)
         })
-        .or_else(|| persistent_nat_destination(forwarding, forward_key, now_ns, scope.zone_name));
+        .or_else(|| {
+            // #15133: revalidation knows both of the session's zone ids.
+            // The packet pair for the rule fold is (internal zone,
+            // arrival zone). This packet arrived on the metadata's
+            // ingress side (== scope.zone_name); the internal side of the
+            // original outbound flow is the metadata's egress zone for an
+            // inbound (reverse) session. An unresolvable id yields "",
+            // which the fold tolerates (authored zones win).
+            let internal_zone = forwarding
+                .zone_id_to_name
+                .get(&metadata.egress_zone)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            persistent_nat_destination(
+                forwarding,
+                forward_key,
+                now_ns,
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+                internal_zone,
+            )
+        });
     expected.is_some_and(|current| {
         current.rewrite_dst == Some(translated_dst)
             && current.rewrite_dst_port == nat.rewrite_dst_port
@@ -442,18 +464,22 @@ fn destination_nat_translation_still_valid(
 /// conflicting candidates yield `None` (fail closed); a permitted binding
 /// yields the same `NatDecision` shape admission installed.
 ///
-/// #14802/#14322: thread the same zone pair admission passes — the rule's
-/// own `from_zone` and the packet's ingress zone (`scope.zone_name`, resolved
-/// above exactly as admission resolves it). Passing empty strings would make
-/// the allocator treat the lookup as UNSCOPED (any grant bucket admits) and
-/// re-open the cross-zone grant leak #14322 closed on this mirror path; empty
-/// values arise only when a zone is genuinely unknown, which is the
-/// allocator's documented unscoped case.
+/// #14802/#14322/#15133: thread the same normalized rule scope admission
+/// passes — the admitting rule's own scope fields plus the packet's
+/// resolved arrival identity (`scope.zone_name` / `ifname` /
+/// `routing_instance`, resolved above exactly as admission resolves it).
+/// Passing `rule.from_zone` alone would collapse an interface-,
+/// routing-instance- or global-scoped rule-set (empty `from_zone`) to
+/// UNSCOPED — any grant bucket admits — and re-open the cross-egress
+/// grant merge #14322 closed and #15133 extends to non-zone rule-sets.
 fn persistent_nat_destination(
     forwarding: &ForwardingState,
     forward_key: &SessionKey,
     now_ns: u64,
     ingress_zone: &str,
+    ingress_ifname: &str,
+    ingress_routing_instance: &str,
+    internal_zone: &str,
 ) -> Option<NatDecision> {
     let mut persistent_dnat = None;
     for rule in &forwarding.source_nat_rules {
@@ -467,15 +493,34 @@ fn persistent_nat_destination(
         if !pool_contains_target {
             continue;
         }
-        match rule.pool_allocator.persistent_inbound_lookup(
+        let arrival_scope = crate::nat::NatScopeCtx {
+            ingress_ifname,
+            ingress_routing_instance,
+            ..crate::nat::NatScopeCtx::default()
+        };
+        // Packet pair = (internal zone of the original flow, arrival
+        // zone). The caller resolves the internal zone from the session
+        // metadata; fall back to the rule's authored from_zone when it
+        // is unknown ("").
+        let packet_from_zone: &str = if !internal_zone.is_empty() {
+            internal_zone
+        } else if rule.from_zone.is_empty() {
+            ingress_zone
+        } else {
+            &rule.from_zone
+        };
+        match rule.pool_allocator.persistent_inbound_lookup_for_rule(
             forward_key.protocol,
             forward_key.dst_ip,
             forward_key.dst_port,
             forward_key.src_ip,
             forward_key.src_port,
             now_ns,
-            &rule.from_zone,
+            rule,
             ingress_zone,
+            packet_from_zone,
+            ingress_zone,
+            &arrival_scope,
         ) {
             crate::nat::PersistentInbound::Miss => {}
             crate::nat::PersistentInbound::Denied => return None,

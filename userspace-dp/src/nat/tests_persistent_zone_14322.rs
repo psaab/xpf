@@ -104,15 +104,23 @@ fn inbound(
     remote_port: u16,
     now_ns: u64,
 ) -> PersistentInbound {
-    rule.pool_allocator.persistent_inbound_lookup(
+    // #15133: production admission keys the lookup by the admitting rule's
+    // normalized scope. The packet pair is the ORIGINAL flow's
+    // (internal ingress zone, arrival zone on the egress fabric): the
+    // internal side is the rule's `from_zone` for a zone-authored rule,
+    // the external side is where this unsolicited packet arrived.
+    rule.pool_allocator.persistent_inbound_lookup_for_rule(
         PROTO_TCP,
         translated.ip,
         translated.port,
         remote_ip,
         remote_port,
         now_ns,
-        "trust",
+        rule,
         ingress_zone,
+        &rule.from_zone,
+        ingress_zone,
+        &NatScopeCtx::default(),
     )
 }
 

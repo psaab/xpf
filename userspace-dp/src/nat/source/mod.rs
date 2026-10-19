@@ -45,7 +45,7 @@ pub(crate) use lease_note_7560::{dropped_persistent_lease_note, report_dropped_l
 use super::allocator::{
     DeterministicV4, DeterministicV6, InterfaceDomainReserve, NS_PER_SEC, NatHolder,
     PersistentSourceKey, PoolAddressFamily, PortAllocator, TranslatedTuple,
-    deterministic_indices_v4, persistent_egress_scope,
+    deterministic_indices_v4, persistent_egress_scope, persistent_egress_scope_v2,
 };
 use super::iface_registry::InterfaceNatAllocators;
 use super::{NatCounterStore, NatDecision, NatRuleCounter, NatScopeCtx};
@@ -1114,6 +1114,50 @@ impl SourceNatRule {
             return false;
         }
         true
+    }
+
+    /// #15133: the rule's normalized persistent-NAT scope key — the single
+    /// key every mint and every inbound lookup for this rule must use, so
+    /// the two can never disagree about which grant bucket a lease's
+    /// permissions live in.
+    ///
+    /// The first four fields are the rule's AUTHORED scope (what Go
+    /// stamped on the snapshot; two rules that differ on any of them are
+    /// different grant scopes, even when both have empty zones). Authored
+    /// empty zones are replaced by the packet's resolved zone — an
+    /// interface-scoped rule inside `trust` must agree with a zone-scoped
+    /// `trust` rule's bucket on the same (pool, source), so the
+    /// normalized tuple, not the raw authored one, is the key. The
+    /// packet pair is folded last so the same rule admitting two egress
+    /// paths (global rule, multiple fabrics) keeps one bucket per path,
+    /// exactly as the pre-#15133 (from, to) fold keyed zone-scoped rules.
+    ///
+    /// `ingress_zone` is the DATAPLANE-resolved arrival zone (the packet
+    /// arrived on the egress side of the original flow); it is not part
+    /// of the mint key — the mint's `packet_to_zone` plays that role —
+    /// and is accepted here only so both call sites spell the lookup the
+    /// same way. The `scope` context carries the packet's resolved
+    /// interface / routing-instance identity for callers that resolved
+    /// it; the key itself is rule-scoped, so it is deliberately not
+    /// folded (two arrivals on different interfaces of the SAME rule
+    /// must find the grants that rule minted).
+    pub(crate) fn persistent_rule_scope(
+        &self,
+        packet_from_zone: &str,
+        packet_to_zone: &str,
+        _ingress_zone: &str,
+        _scope: &NatScopeCtx<'_>,
+    ) -> u32 {
+        persistent_egress_scope_v2(
+            &self.from_zone,
+            &self.to_zone,
+            &self.from_interface,
+            &self.to_interface,
+            &self.from_routing_instance,
+            &self.to_routing_instance,
+            packet_from_zone,
+            packet_to_zone,
+        )
     }
 
     /// Whether a flowless packet could match this rule with known protocol,
