@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Close the `vrrp-inet6-group` validator bypass: the Junos IPv6 alias
+    now goes through the VRRP authentication reject/drop, misplaced-auth
+    collector, and single-track-interface gates exactly like
+    `vrrp-group`, instead of committing authentication and duplicate
+    track statements that were silently ignored (#15762).
   * Reject the packed flat-set spelling of the Junos `sample`
     binding under unconsumed interface families as well: the braced
     spelling was rejected by #15654 but `family ethernet-switching
