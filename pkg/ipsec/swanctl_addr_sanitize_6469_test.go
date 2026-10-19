@@ -103,9 +103,10 @@ func TestSwanctlAddrInjectionNeutralized_6469(t *testing.T) {
 			// collapses the newline to a space, so the address renders inert
 			// on one line rather than the field being dropped or the VPN
 			// skipped.
-			conn := doc.at(t, "connections", "tun")
+			// #15024: tun renders under gateway gw.
+			conn := doc.at(t, "connections", "gw")
 			if v := conn.setting(t, c.addrKey); !strings.HasPrefix(v, c.addrPrefix) {
-				t.Fatalf("connections.tun.%s = %q, want it to still start with %q",
+				t.Fatalf("connections.gw.%s = %q, want it to still start with %q",
 					c.addrKey, v, c.addrPrefix)
 			}
 		})
@@ -145,7 +146,7 @@ func TestSwanctlAddrLegitPreserved_6469(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 			parseSwanctlDoc(t, m.generateConfig(buildAddrCfg(c.gwAddr, "", "", ""))).
-				at(t, "connections", "tun").
+				at(t, "connections", "gw").
 				requireSetting(t, "remote_addrs", c.want)
 		})
 	}
@@ -159,7 +160,7 @@ func TestSwanctlAddrLegitPreserved_6469(t *testing.T) {
 		cfg.Gateways["gw"].RemoteIDValue = "peer.example.com"
 		m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 		parseSwanctlDoc(t, m.generateConfig(cfg)).
-			at(t, "connections", "tun").
+			at(t, "connections", "gw").
 			requireSetting(t, "remote_addrs", "%any")
 	})
 }
@@ -210,7 +211,8 @@ func TestSwanctlProposalsInjectionNeutralized_6469(t *testing.T) {
 			if err != nil {
 				t.Fatalf("render returned error instead of tolerant skip: %v", err)
 			}
-			if rendered["tun"] {
+			// #15024: rendered is gateway-keyed.
+			if rendered["gw"] {
 				t.Fatal("unsafe proposal VPN must be omitted from rendered connection set")
 			}
 			for _, directive := range []string{"reauth_time", "updown"} {
@@ -263,6 +265,6 @@ func TestSwanctlProposalsLegitPreserved_6469(t *testing.T) {
 	// such -- the assertions now survive a change to the renderer's indent and
 	// still reject a value with anything appended.
 	const wantList = "aes256-sha256-modp2048,aes128-sha256-modp2048"
-	parseSwanctlDoc(t, got).at(t, "connections", "tun").requireSetting(t, "proposals", wantList)
-	childSA_3904(t, got, "tun").requireSetting(t, "esp_proposals", wantList)
+	parseSwanctlDoc(t, got).at(t, "connections", "gw").requireSetting(t, "proposals", wantList)
+	childSA_3904(t, got, "gw").requireSetting(t, "esp_proposals", wantList)
 }

@@ -82,7 +82,8 @@ func TestPolicyAddr13125RethDottedAndVRRP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderConfig: %v", err)
 	}
-	if !rendered["vpn-reth"] {
+	// #15024: rendered is keyed by gateway gw-reth.
+	if !rendered["gw-reth"] {
 		t.Error("renderConfig skipped vpn-reth despite its resolved VRRP VIP local address")
 	}
 

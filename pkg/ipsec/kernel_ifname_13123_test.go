@@ -94,7 +94,8 @@ func TestUnit0ExternalInterfaceResolvesKernelAddress13123(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderConfig: %v", err)
 	}
-	if !rendered["vpn"] {
+	// #15024: rendered is keyed by gateway gw, not VPN vpn.
+	if !rendered["gw"] {
 		t.Fatalf("VPN on external-interface %q was skipped fail-closed despite a live kernel address", host+".0")
 	}
 }

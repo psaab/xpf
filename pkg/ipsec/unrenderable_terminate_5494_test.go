@@ -81,8 +81,9 @@ func applyBaselineTwoVPN(t *testing.T, m *Manager, rec *swanctlRecorder) {
 	if rec.sawListSAs() {
 		t.Fatalf("baseline Apply must not query SAs (nothing departed the render)")
 	}
-	// Both connections are now up with live child SAs.
-	rec.listSAs = liveSA("target", "sibling")
+	// Both connections are now up with live child SAs. #15024: the IKE
+	// SAs are gateway-named (gw-target/gw-sibling); children keep VPN names.
+	rec.listSAs = liveSA("gw-target", "gw-sibling")
 }
 
 // assertTargetTornSiblingKept drives Apply(broken) — which must SUCCEED (the
@@ -95,15 +96,16 @@ func assertTargetTornSiblingKept(t *testing.T, m *Manager, rec *swanctlRecorder,
 		t.Fatalf("Apply with an unrenderable VPN must still succeed "+
 			"(skip, not hard error): %v", err)
 	}
+	// #15024: terminate/tracking are connection-keyed (gateway names).
 	got := rec.terminateCalls()
-	if len(got) != 1 || got[0] != "target" {
+	if len(got) != 1 || got[0] != "gw-target" {
 		t.Fatalf("the unrenderable target's stale SA must be torn down "+
 			"exactly once, got %v", got)
 	}
-	if m.tracks("target") {
-		t.Fatal("target must not remain tracked after it dropped out of the render")
+	if m.tracks("gw-target") {
+		t.Fatal("gw-target must not remain tracked after it dropped out of the render")
 	}
-	if !m.tracks("sibling") {
+	if !m.tracks("gw-sibling") {
 		t.Fatal("the still-renderable sibling must remain tracked (not torn)")
 	}
 }
@@ -207,7 +209,7 @@ func TestGenuineRemovalStillTerminates_5494(t *testing.T) {
 		t.Fatalf("delete Apply: %v", err)
 	}
 	got := rec.terminateCalls()
-	if len(got) != 1 || got[0] != "target" {
+	if len(got) != 1 || got[0] != "gw-target" {
 		t.Fatalf("a genuinely deleted VPN must still be terminated, got %v", got)
 	}
 }
@@ -231,7 +233,7 @@ func TestUnrenderableWithFailedReloadDoesNotTerminate_5494(t *testing.T) {
 	if err := m.Apply(renderableTwoVPN()); err != nil {
 		t.Fatalf("baseline Apply: %v", err)
 	}
-	rec.listSAs = liveSA("target", "sibling")
+	rec.listSAs = liveSA("gw-target", "gw-sibling")
 
 	// target becomes unrenderable, but the reload fails.
 	rec.failLoadAll = true
@@ -248,7 +250,7 @@ func TestUnrenderableWithFailedReloadDoesNotTerminate_5494(t *testing.T) {
 		t.Fatalf("a failed reload must not terminate any connection "+
 			"(target is still the loaded, effective config), got %v", got)
 	}
-	if !m.tracks("target") || !m.tracks("sibling") {
+	if !m.tracks("gw-target") || !m.tracks("gw-sibling") {
 		t.Fatal("prevConnNames must still track both connections after a failed reload " +
 			"so a later successful apply retries the teardown")
 	}
@@ -258,7 +260,7 @@ func TestUnrenderableWithFailedReloadDoesNotTerminate_5494(t *testing.T) {
 	if err := m.Apply(broken); err != nil {
 		t.Fatalf("recovered Apply: %v", err)
 	}
-	if got := rec.terminated(); len(got) != 1 || got[0] != "target" {
+	if got := rec.terminated(); len(got) != 1 || got[0] != "gw-target" {
 		t.Fatalf("the recovered apply must terminate the now-unrenderable target, got %v", got)
 	}
 }

@@ -38,7 +38,11 @@ func applyChange14140(t *testing.T, rec *swanctlRecorder, m *Manager, oldCfg, ne
 	if err := m.Apply(oldCfg); err != nil {
 		t.Fatalf("initial Apply: %v", err)
 	}
-	rec.listSAs = liveSA("site-a")
+	// #15024: the live IKE SA is named by connection. Defined-gateway
+	// fixtures report the gateway name; inline fixtures keep the VPN name.
+	// liveSA also emits a child row named by its argument, so a gateway-named
+	// call would misname the child — use the explicit two-name form below.
+	rec.listSAs = liveSAForVPN("site-a", eagerConnName(oldCfg, "site-a"))
 	return m.Apply(newCfg)
 }
 
@@ -56,7 +60,8 @@ func TestChangedResponderOnlyVPNIsNotReinitiated14140(t *testing.T) {
 			if err := applyChange14140(t, rec, m, mk("old-secret"), mk("rotated-secret")); err != nil {
 				t.Fatalf("changed responder-only Apply must succeed, got %v (calls %v)", err, rec.calls)
 			}
-			if got := rec.terminateCalls(); len(got) != 1 || got[0] != "site-a" {
+			// #15024: terminate targets the gateway connection dial-in.
+			if got := rec.terminateCalls(); len(got) != 1 || got[0] != "dial-in" {
 				t.Fatalf("stale SA must still be terminated, got %v", got)
 			}
 			if got := rec.initiateCalls(); len(got) != 0 {
@@ -84,7 +89,7 @@ func TestChangedNonEagerModesAreNotReinitiated14140(t *testing.T) {
 			if err := applyChange14140(t, rec, m, mk("old-secret"), mk("rotated-secret")); err != nil {
 				t.Fatalf("changed %q Apply must succeed, got %v", mode, err)
 			}
-			if got := rec.terminateCalls(); len(got) != 1 || got[0] != "site-a" {
+			if got := rec.terminateCalls(); len(got) != 1 || got[0] != "gw" {
 				t.Fatalf("stale SA must still be terminated, got %v", got)
 			}
 			if got := rec.initiateCalls(); len(got) != 0 {
@@ -168,7 +173,7 @@ func TestChangedModeTransitionToNonEagerIsNotReinitiated14140(t *testing.T) {
 	if err := applyChange14140(t, rec, m, mk("old-secret", "immediately"), mk("old-secret", "on-traffic")); err != nil {
 		t.Fatalf("mode-transition Apply must succeed, got %v", err)
 	}
-	if got := rec.terminateCalls(); len(got) != 1 || got[0] != "site-a" {
+	if got := rec.terminateCalls(); len(got) != 1 || got[0] != "gw" {
 		t.Fatalf("mode change must terminate the stale SA, got %v", got)
 	}
 	if got := rec.initiateCalls(); len(got) != 0 {

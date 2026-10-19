@@ -432,7 +432,8 @@ func TestGenerateConfig_IdentityWithCommaQuoted(t *testing.T) {
 	// #6824: `id` is emitted in BOTH the local{} and remote{} auth rounds, so
 	// containment could not say which round carried which identity -- the two
 	// old needles would both have passed with the values swapped.
-	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
+	// #15024: tun renders under gateway gw.
+	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 	conn.at(t, "local").requireSetting(t, "id", `"CN=fw, O=acme"`)
 	conn.at(t, "remote").requireSetting(t, "id", `"peer\"name"`)
 }
@@ -509,36 +510,37 @@ func TestGenerateConfig_PSKIDSelectors_TwoVPNs(t *testing.T) {
 	}
 	blocks := parseSecretBlocks(t, m.generateConfig(cfg))
 
-	a, ok := blocks["ike-vpn-a"]
+	// #15024: secrets are per gateway connection (ike-gw-a / ike-gw-b).
+	a, ok := blocks["ike-gw-a"]
 	if !ok {
-		t.Fatalf("missing ike-vpn-a secret block")
+		t.Fatalf("missing ike-gw-a secret block")
 	}
-	b, ok := blocks["ike-vpn-b"]
+	b, ok := blocks["ike-gw-b"]
 	if !ok {
-		t.Fatalf("missing ike-vpn-b secret block")
+		t.Fatalf("missing ike-gw-b secret block")
 	}
 	if a.secret != "psk-alpha" || b.secret != "psk-bravo" {
 		t.Fatalf("wrong PSKs: a=%q b=%q", a.secret, b.secret)
 	}
 	// Each secret carries an id selector for ITS own peer address.
 	if len(a.ids) == 0 {
-		t.Errorf("ike-vpn-a has no id selector (PSK matches any peer — #3952)")
+		t.Errorf("ike-gw-a has no id selector (PSK matches any peer — #3952)")
 	}
 	if len(b.ids) == 0 {
-		t.Errorf("ike-vpn-b has no id selector (PSK matches any peer — #3952)")
+		t.Errorf("ike-gw-b has no id selector (PSK matches any peer — #3952)")
 	}
 	if !containsStr(a.ids, "203.0.113.1") {
-		t.Errorf("ike-vpn-a id selectors %v missing its peer 203.0.113.1", a.ids)
+		t.Errorf("ike-gw-a id selectors %v missing its peer 203.0.113.1", a.ids)
 	}
 	if !containsStr(b.ids, "203.0.113.2") {
-		t.Errorf("ike-vpn-b id selectors %v missing its peer 203.0.113.2", b.ids)
+		t.Errorf("ike-gw-b id selectors %v missing its peer 203.0.113.2", b.ids)
 	}
 	// Scoping: neither secret claims the OTHER peer's identity.
 	if containsStr(a.ids, "203.0.113.2") {
-		t.Errorf("ike-vpn-a id selectors %v wrongly claim vpn-b's peer", a.ids)
+		t.Errorf("ike-gw-a id selectors %v wrongly claim vpn-b's peer", a.ids)
 	}
 	if containsStr(b.ids, "203.0.113.1") {
-		t.Errorf("ike-vpn-b id selectors %v wrongly claim vpn-a's peer", b.ids)
+		t.Errorf("ike-gw-b id selectors %v wrongly claim vpn-a's peer", b.ids)
 	}
 }
 
@@ -566,9 +568,9 @@ func TestGenerateConfig_PSKIDSelectors_ExplicitIDs(t *testing.T) {
 		},
 	}
 	blocks := parseSecretBlocks(t, m.generateConfig(cfg))
-	blk, ok := blocks["ike-vpn"]
+	blk, ok := blocks["ike-gw"]
 	if !ok {
-		t.Fatalf("missing ike-vpn secret block")
+		t.Fatalf("missing ike-gw secret block")
 	}
 	// Remote-id (formatted @fqdn) must be present as the peer selector.
 	if !containsStr(blk.ids, "@peer.example.com") {
@@ -631,9 +633,10 @@ func TestGenerateConfig_PSKIDSelectors_ResponderWithIDAndCert(t *testing.T) {
 	got := m.generateConfig(cfg)
 	blocks := parseSecretBlocks(t, got)
 
-	rw, ok := blocks["ike-roadwarrior"]
+	// #15024: roadwarrior renders under gateway gw-dyn.
+	rw, ok := blocks["ike-gw-dyn"]
 	if !ok {
-		t.Fatalf("missing ike-roadwarrior secret block")
+		t.Fatalf("missing ike-gw-dyn secret block")
 	}
 	if !containsStr(rw.ids, "@rw.example.com") {
 		t.Errorf("responder-only peer id selectors %v missing its configured identity @rw.example.com", rw.ids)
@@ -642,7 +645,7 @@ func TestGenerateConfig_PSKIDSelectors_ResponderWithIDAndCert(t *testing.T) {
 	if containsStr(rw.ids, "%any") {
 		t.Errorf("emitted a literal %%any id selector")
 	}
-	if _, ok := blocks["ike-cert-vpn"]; ok {
+	if _, ok := blocks["ike-gw-cert"]; ok {
 		t.Errorf("cert VPN with no PSK must not emit a secret block")
 	}
 }

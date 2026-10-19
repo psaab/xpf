@@ -56,24 +56,27 @@ func TestRenderSkipsIKEProposalNoDHGroup14588(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderConfig must skip the DH-less VPN, not abort the whole render: %v", err)
 	}
-	if rendered["bad"] {
+	// #15024: rendered/connections/secrets are gateway-keyed (gw-bad/gw-good).
+	if rendered["gw-bad"] {
 		t.Errorf("DH-less VPN rendered; charon would discard the whole file")
 	}
-	if !rendered["good"] {
+	if !rendered["gw-good"] {
 		t.Errorf("healthy sibling VPN did not render; rendered=%v", rendered)
 	}
 	doc := parseSwanctlDoc(t, text)
 	conns := doc.at(t, "connections")
 	// The DH-less connection must not exist at all (structural, per
 	// #6824 — no containment needles).
+	conns.hasNoChild(t, "gw-bad")
 	conns.hasNoChild(t, "bad")
 	// The healthy connection renders with its DH term.
-	good := conns.at(t, "good")
+	good := conns.at(t, "gw-good")
 	good.requireSetting(t, "proposals", "aes256-sha256-modp2048")
+	good.at(t, "children", "good")
 	// No orphan secret for the skipped VPN.
 	secrets := doc.at(t, "secrets")
-	secrets.hasNoChild(t, "ike-bad")
-	secrets.at(t, "ike-good")
+	secrets.hasNoChild(t, "ike-gw-bad")
+	secrets.at(t, "ike-gw-good")
 }
 
 // TestResolveIKESettingsNoDHGroupSentinel14588 pins the resolver-level

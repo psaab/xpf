@@ -125,6 +125,34 @@ func liveSA(conns ...string) string {
 	return b.String()
 }
 
+// liveSAForVPN renders a live SA whose IKE (connection) name is conn and
+// whose child SA name is child. Since #15024 the two differ for a VPN on a
+// defined gateway (connection = gateway, child = VPN/selector name), and
+// terminate matches the IKE name while initiate matches the child.
+func liveSAForVPN(child, conn string) string {
+	var b strings.Builder
+	b.WriteString(conn)
+	b.WriteString(": #1, ESTABLISHED, IKEv2, 8f7c1c8e3a2b1234_i* 4d3c2b1a09876543_r\n")
+	b.WriteString("  local  '10.0.1.1' @ 10.0.1.1[500]\n")
+	b.WriteString("  remote '10.0.2.1' @ 10.0.2.1[500]\n")
+	b.WriteString("  " + child + ": #1, reqid 1, INSTALLED, TUNNEL, ESP:AES_CBC-256/HMAC_SHA2_256_128\n")
+	b.WriteString("    installed 42s ago, rekeying in 3358s, expires in 3918s\n")
+	return b.String()
+}
+
+// eagerConnName returns the connection name cfg renders for vpnName:
+// the defined gateway name, else the VPN name (#15024).
+func eagerConnName(cfg *config.IPsecConfig, vpnName string) string {
+	vpn := cfg.VPNs[vpnName]
+	if vpn == nil {
+		return vpnName
+	}
+	if _, ok := cfg.Gateways[vpn.Gateway]; ok && vpn.Gateway != "" {
+		return vpn.Gateway
+	}
+	return vpnName
+}
+
 // TestDeleteVPNTerminatesLiveSA is the RED-on-revert core: deleting a VPN
 // that has an active SA issues `swanctl --terminate --ike <conn>` for the
 // removed connection. Reverting the fix (drop the terminateRemovedConns call)

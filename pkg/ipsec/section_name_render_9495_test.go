@@ -32,13 +32,19 @@ func vpnCfg9495(names ...string) *config.IPsecConfig {
 // secret. Without the belt strongSwan discards EVERY tunnel in the file. Assertions go through
 // the parsed document, not substrings of the render (#6824).
 func TestSectionBreakingNameIsSkippedAndTheFileStillLoads9495(t *testing.T) {
+	// #15024: both VPNs share gateway gw, so the surviving plain VPN renders
+	// as child plain under the single gateway connection gw / ike-gw secret;
+	// the hostile member is skipped, so gw carries exactly that one child.
 	for _, hostile := range []string{"evil } # {", "a.b", `a"b`, "a:b", "x { children { p { mode = transport } } } y"} {
 		doc := parseSwanctlDoc(t, New().generateConfig(vpnCfg9495("plain", hostile)))
-		if got := doc.at(t, "connections").childNames(); !reflect.DeepEqual(got, []string{"plain"}) {
-			t.Errorf("hostile name %q: connections = %v, want only [plain]", hostile, got)
+		if got := doc.at(t, "connections").childNames(); !reflect.DeepEqual(got, []string{"gw"}) {
+			t.Errorf("hostile name %q: connections = %v, want only [gw]", hostile, got)
 		}
-		if got := doc.at(t, "secrets").childNames(); !reflect.DeepEqual(got, []string{"ike-plain"}) {
-			t.Errorf("hostile name %q: secrets = %v, want only [ike-plain]", hostile, got)
+		if got := doc.at(t, "connections", "gw", "children").childNames(); !reflect.DeepEqual(got, []string{"plain"}) {
+			t.Errorf("hostile name %q: gw children = %v, want only [plain]", hostile, got)
+		}
+		if got := doc.at(t, "secrets").childNames(); !reflect.DeepEqual(got, []string{"ike-gw"}) {
+			t.Errorf("hostile name %q: secrets = %v, want only [ike-gw]", hostile, got)
 		}
 		doc.hasNoValueSubstringAnywhere(t, "transport")
 	}
@@ -48,7 +54,8 @@ func TestSectionBreakingNameIsSkippedAndTheFileStillLoads9495(t *testing.T) {
 // loaded verbatim in the measurement ('/' here) is refused at commit, but still renders when
 // persisted, so an upgrade does not take down a working tunnel.
 func TestLoadsTodayNameStillRenders9495(t *testing.T) {
+	// #15024: a/b is a child of the gateway connection gw, not a connection.
 	doc := parseSwanctlDoc(t, New().generateConfig(vpnCfg9495("a/b")))
-	doc.at(t, "connections", "a/b")
-	doc.at(t, "secrets", "ike-a/b")
+	doc.at(t, "connections", "gw", "children", "a/b")
+	doc.at(t, "secrets", "ike-gw")
 }

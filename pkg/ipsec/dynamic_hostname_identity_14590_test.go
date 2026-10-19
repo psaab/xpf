@@ -45,7 +45,8 @@ func TestGenerateConfig_DynamicHostnameIdentity14590(t *testing.T) {
 			}
 			got := m.generateConfig(cfg)
 			doc := parseSwanctlDoc(t, got)
-			conn := doc.at(t, "connections", "tun1")
+			// #15024: connection is the gateway dyn-gw; child keeps the VPN name.
+			conn := doc.at(t, "connections", "dyn-gw")
 			conn.requireSetting(t, "remote_addrs", "%any")
 			if v := conn.setting(t, "remote_addrs"); v == "branch.example.net" {
 				t.Fatalf("dynamic hostname must not be rendered as a dial address:\n%s", got)
@@ -57,9 +58,9 @@ func TestGenerateConfig_DynamicHostnameIdentity14590(t *testing.T) {
 			child.requireSetting(t, "dpd_action", "clear")
 
 			blocks := parseSecretBlocks(t, got)
-			blk, ok := blocks["ike-tun1"]
+			blk, ok := blocks["ike-dyn-gw"]
 			if !ok {
-				t.Fatalf("missing ike-tun1 secret block:\n%s", got)
+				t.Fatalf("missing ike-dyn-gw secret block:\n%s", got)
 			}
 			if !containsStr(blk.ids, "@branch.example.net") {
 				t.Errorf("PSK must be scoped by the dynamic identity @branch.example.net, got %v", blk.ids)
@@ -94,7 +95,7 @@ func TestGenerateConfig_DynamicHostnameExplicitRemoteIDWins14590(t *testing.T) {
 		},
 	}
 	got := m.generateConfig(cfg)
-	conn := parseSwanctlDoc(t, got).at(t, "connections", "tun1")
+	conn := parseSwanctlDoc(t, got).at(t, "connections", "dyn-gw")
 	conn.requireSetting(t, "remote_addrs", "%any")
 	conn.at(t, "remote").requireSetting(t, "id", `"@other.example.net"`)
 }
@@ -110,7 +111,7 @@ func TestGenerateConfig_AddressGatewayStillDials14590(t *testing.T) {
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs:      map[string]*config.IPsecVPN{"tun": {Gateway: "gw", PSK: "key"}},
 	}
-	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
+	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 	conn.requireSetting(t, "remote_addrs", "203.0.113.1")
 	conn.at(t, "remote").hasNoSetting(t, "id")
 }

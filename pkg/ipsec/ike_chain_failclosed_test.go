@@ -132,16 +132,19 @@ func TestRenderConfig_BrokenChainSkipsVPN_HealthyTunnelSurvives(t *testing.T) {
 	// INDENTATION standing in for one about nesting. Reading the setting at
 	// connections.tun-good states it directly, and the child section's
 	// esp_proposals cannot satisfy it at any indentation.
-	good := doc.at(t, "connections", "tun-good")
+	// #15024: connections are gateway-named (gw-good/gw-bad), children keep VPN names.
+	good := doc.at(t, "connections", "gw-good")
 	if p := good.setting(t, "proposals"); !strings.HasPrefix(p, "aes256") {
-		t.Errorf("connections.tun-good.proposals = %q, want it to carry aes256", p)
+		t.Errorf("connections.gw-good.proposals = %q, want it to carry aes256", p)
 	}
+	good.at(t, "children", "tun-good")
 
 	// Broken tunnel: connection section must NOT be emitted (no proposal-less
 	// connection that would negotiate with strongSwan defaults).
+	doc.at(t, "connections").hasNoChild(t, "gw-bad")
 	doc.at(t, "connections").hasNoChild(t, "tun-bad")
 	// And its secret must not be orphaned in the secrets block.
-	doc.at(t, "secrets").hasNoChild(t, "ike-tun-bad")
+	doc.at(t, "secrets").hasNoChild(t, "ike-gw-bad")
 }
 
 // A no-policy gateway renders a normal connection WITHOUT a proposals line
@@ -157,7 +160,7 @@ func TestRenderConfig_NoPolicyGatewayRendersWithoutProposalsLine(t *testing.T) {
 	}
 	m := New()
 	out := m.generateConfig(cfg)
-	conn := parseSwanctlDoc(t, out).at(t, "connections", "tun1")
+	conn := parseSwanctlDoc(t, out).at(t, "connections", "gw1")
 	// The IKE-level (Phase 1) proposals line is intentionally absent.
 	//
 	// #6824: the guard used to be spelled as the four-space-indented

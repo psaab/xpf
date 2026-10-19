@@ -40,8 +40,9 @@ func TestGenerateConfigClampsExtremeRekeyTime10882(t *testing.T) {
 	// the effectively immortal value or discarding the rekey_time setting.
 	out := m.generateConfig(cfg)
 	doc := parseSwanctlDoc(t, out)
-	doc.at(t, "connections", "tun").requireSetting(t, "rekey_time", "86400s")
-	childSA_3904(t, out, "tun").requireSetting(t, "rekey_time", "86400s")
+	// #15024: tun renders under gateway gw.
+	doc.at(t, "connections", "gw").requireSetting(t, "rekey_time", "86400s")
+	childSA_3904(t, out, "gw").requireSetting(t, "rekey_time", "86400s")
 }
 
 func TestGenerateConfigTolerantDPDClampsBeforeTimeout10882(t *testing.T) {
@@ -90,7 +91,7 @@ func TestGenerateConfigTolerantDPDClampsBeforeTimeout10882(t *testing.T) {
 	}
 
 	out := (&Manager{configDir: t.TempDir(), configPath: t.TempDir() + "/xpf.conf"}).generateConfig(&compiled.Security.IPsec)
-	conn := parseSwanctlDoc(t, out).at(t, "connections", "tun1")
+	conn := parseSwanctlDoc(t, out).at(t, "connections", "gw1")
 	conn.requireSetting(t, "dpd_delay", "3600s")
 	conn.requireSetting(t, "dpd_timeout", "360000s")
 }

@@ -14,7 +14,8 @@ func TestRenderSkipsUnsupportedIPsecAlgorithms_10880(t *testing.T) {
 				if err != nil {
 					t.Fatalf("render returned error instead of tolerant skip: %v", err)
 				}
-				if rendered["tun"] {
+				// #15024: rendered is gateway-keyed (gw).
+				if rendered["gw"] {
 					t.Fatalf("proposal with unsupported %q was reported rendered", value)
 				}
 				if strings.Contains(text, "null") || strings.Contains(text, "aes512") {
@@ -32,7 +33,7 @@ func TestRenderSkipsNonAEADIKEWithoutIntegrity_10880(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render returned error instead of tolerant skip: %v", err)
 	}
-	if rendered["tun"] {
+	if rendered["gw"] {
 		t.Fatal("integrity-less non-AEAD IKE connection was reported rendered")
 	}
 	doc := parseSwanctlDoc(t, text)
@@ -48,7 +49,7 @@ func TestRenderCanonicalizesUppercaseGCM_10880(t *testing.T) {
 			if err != nil {
 				t.Fatalf("render uppercase GCM: %v", err)
 			}
-			if !rendered["tun"] {
+			if !rendered["gw"] {
 				t.Fatalf("uppercase GCM proposal was not rendered:\n%s", text)
 			}
 			if strings.Contains(text, "AES-256-GCM") || !strings.Contains(text, "aes256gcm16") {
@@ -71,8 +72,8 @@ func TestRenderSkipsUnsupportedIPsecIntegrity_10880(t *testing.T) {
 			if err != nil {
 				t.Fatalf("render returned error instead of tolerant skip: %v", err)
 			}
-			if rendered["tun"] || strings.Contains(text, "sha777") {
-				t.Fatalf("unsupported integrity proposal reached swanctl output (rendered=%v):\n%s", rendered["tun"], text)
+			if rendered["gw"] || strings.Contains(text, "sha777") {
+				t.Fatalf("unsupported integrity proposal reached swanctl output (rendered=%v):\n%s", rendered["gw"], text)
 			}
 		})
 	}

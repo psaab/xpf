@@ -43,40 +43,41 @@ func TestResponderOnlyPSKScoping14591(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		if !rendered["site-a"] || !rendered["rw"] {
+		// #15024: rendered/connections are gateway-keyed (gw-site/gw-rw).
+		if !rendered["gw-site"] || !rendered["gw-rw"] {
 			t.Fatalf("both VPNs must render, rendered=%v:\n%s", rendered, text)
 		}
 		// The rw connection pins the remote identity it will accept.
-		conn := parseSwanctlDoc(t, text).at(t, "connections", "rw")
+		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw-rw")
 		conn.requireSetting(t, "remote_addrs", "%any")
 		conn.at(t, "remote").requireSetting(t, "id", `"@rw.example.com"`)
 
 		blocks := parseSecretBlocks(t, text)
-		rw, ok := blocks["ike-rw"]
+		rw, ok := blocks["ike-gw-rw"]
 		if !ok {
-			t.Fatalf("missing ike-rw secret block:\n%s", text)
+			t.Fatalf("missing ike-gw-rw secret block:\n%s", text)
 		}
 		if rw.secret != "rw-secret" {
-			t.Errorf("ike-rw secret = %q, want rw-secret", rw.secret)
+			t.Errorf("ike-gw-rw secret = %q, want rw-secret", rw.secret)
 		}
 		if !containsStr(rw.ids, "@rw.example.com") {
-			t.Errorf("ike-rw id selectors %v missing its configured identity @rw.example.com", rw.ids)
+			t.Errorf("ike-gw-rw id selectors %v missing its configured identity @rw.example.com", rw.ids)
 		}
 		// Credential isolation: the rw secret must never claim the site
 		// peer's identity, and the site secret must never claim the rw
 		// identity — otherwise claimed-IDi key selection crosses VPNs.
 		if containsStr(rw.ids, "203.0.113.1") {
-			t.Errorf("ike-rw id selectors %v wrongly claim site-a's peer", rw.ids)
+			t.Errorf("ike-gw-rw id selectors %v wrongly claim site-a's peer", rw.ids)
 		}
-		site, ok := blocks["ike-site-a"]
+		site, ok := blocks["ike-gw-site"]
 		if !ok {
-			t.Fatalf("missing ike-site-a secret block:\n%s", text)
+			t.Fatalf("missing ike-gw-site secret block:\n%s", text)
 		}
 		if !containsStr(site.ids, "203.0.113.1") {
-			t.Errorf("ike-site-a id selectors %v missing its peer 203.0.113.1", site.ids)
+			t.Errorf("ike-gw-site id selectors %v missing its peer 203.0.113.1", site.ids)
 		}
 		if containsStr(site.ids, "@rw.example.com") {
-			t.Errorf("ike-site-a id selectors %v wrongly claim the rw identity", site.ids)
+			t.Errorf("ike-gw-site id selectors %v wrongly claim the rw identity", site.ids)
 		}
 	})
 
@@ -86,15 +87,17 @@ func TestResponderOnlyPSKScoping14591(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		if rendered["rw"] {
+		if rendered["gw-rw"] {
 			t.Errorf("responder-only PSK VPN with no remote-identity was rendered; want skip-by-name:\n%s", text)
 		}
-		if !rendered["site-a"] {
+		if !rendered["gw-site"] {
 			t.Errorf("healthy site-a VPN must still render, rendered=%v:\n%s", rendered, text)
 		}
 		doc := parseSwanctlDoc(t, text)
+		doc.at(t, "connections").hasNoChild(t, "gw-rw")
 		doc.at(t, "connections").hasNoChild(t, "rw")
-		if _, ok := parseSecretBlocks(t, text)["ike-rw"]; ok {
+		doc.at(t, "connections", "gw-site", "children", "site-a")
+		if _, ok := parseSecretBlocks(t, text)["ike-gw-rw"]; ok {
 			t.Errorf("skipped rw VPN emitted an orphan secret block:\n%s", text)
 		}
 	})
@@ -116,7 +119,7 @@ func TestResponderOnlyPSKScoping14591(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		if rendered["rw"] {
+		if rendered["gw-rw"] {
 			t.Errorf("single responder-only PSK VPN with no remote-identity was rendered; want skip:\n%s", text)
 		}
 	})
