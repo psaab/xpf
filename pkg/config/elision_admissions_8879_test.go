@@ -277,6 +277,10 @@ var admittedElisionCases8879 = []struct {
 		`security { nat { proxy-arp { interface ge-0/0/0.0 { address 10.9.0.9/32; } } } }`,
 		`security { nat proxy-arp { interface ge-0/0/0.0 { address 10.9.0.9/32; } } }`,
 		func(c *Config) string { return fmt.Sprintf("parp=%d", len(c.Security.NAT.ProxyARP)) }},
+	{"nat proxy-ndp",
+		`security { nat { proxy-ndp { interface ge-0/0/0.0 { address 2001:db8::9/128; } } } }`,
+		`security { nat proxy-ndp { interface ge-0/0/0.0 { address 2001:db8::9/128; } } }`,
+		func(c *Config) string { return fmt.Sprintf("parp=%d", len(c.Security.NAT.ProxyARP)) }},
 	// #8929 — a DEPTH-2 pair. `braced` is the fully braced spelling and
 	// `elided` is the DOUBLY elided one: `security nat { ... }` folds because
 	// (security, nat) is admitted, but whether `nat source { ... }` folds is a

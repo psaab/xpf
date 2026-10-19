@@ -921,6 +921,7 @@ COMPARED	security nat nat64 rule-set <*> prefix
 COMPARED	security nat nat64 rule-set <*> source-pool
 flag (read, but value-less)	security nat natv6v4 no-v6-frag-header
 COMPARED	security nat proxy-arp interface <*> address
+COMPARED	security nat proxy-ndp interface <*> address
 flag (read, but value-less)	security nat source address-persistent
 unreachable (leaf changed nothing)	security nat source interface port-overloading
 COMPARED	security nat source pool <*> address

@@ -1486,6 +1486,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"nat nat64",
 		"nat natv6v4",
 		"nat proxy-arp",
+		"nat proxy-ndp",
 		"nat static",
 		"nat source",
 		// #8925. These four are NOT from #8879's population -- the sweep that
@@ -1686,6 +1687,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"proposal lifetime-seconds",
 		"proposal protocol",
 		"proxy-arp interface",
+		"proxy-ndp interface",
 		"rule-set prefix",
 		"rule-set rule",
 		"rule-set source-pool",

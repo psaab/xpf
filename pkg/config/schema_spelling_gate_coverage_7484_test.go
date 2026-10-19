@@ -416,7 +416,7 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // table export`/`generate route policy`/`rib-groups import-rib` compare; the
 // `generate route discard` flag and `rib-groups import-policy` advisory/blind
 // rows are recorded in testdata/spelling_gate_members_7484.txt).
-const gateCoverageFloor = 803 // #15659: +2 compared leaves from the direct per-instance interface-routes rib-group fix (was 801 #15199)
+const gateCoverageFloor = 804 // #15677: +1 compared leaf `security nat proxy-ndp interface <*> address` (was 803 #15659)
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
