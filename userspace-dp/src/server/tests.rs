@@ -3034,12 +3034,12 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
 /// LEG PROOF: two observables pin this to the full-apply leg, not same-plan.
 /// (1) `same_binding_plan(prior, next)` is asserted FALSE up front — the
 /// handler's `same_plan` gate reads exactly that key, so a false key forces
-/// the else branch. (2) The full-apply leg is the ONLY leg that runs
-/// `replan_queues`, which rewrites `status.bindings` to the NEW snapshot's
-/// interface; the WorkerSpawn arm deliberately does NOT restore
-/// `existing_bindings`, so after the failure the surviving binding carries
-/// `ge-0-0-2`/ifindex 12 (the new plan), which the same-plan leg — never
-/// calling `replan_queues` — could not produce.
+/// the else branch. (2) #14959: the full-apply WorkerSpawn arm now RESTORES
+/// `existing_bindings` with the snapshot rollback, so after the failure the
+/// surviving bindings describe the PRIOR plan, consistent with the restored
+/// `guard.snapshot` (see
+/// `full_apply_post_teardown_rollback_restores_prior_bindings_14959`); the
+/// pre-#14959 "new plan survives" observable was the D26-03 desync itself.
 ///
 /// Fail-on-revert: neutralize the full-apply WorkerSpawn arm (drop the
 /// ok=false + no-persist + baseline-rollback so it falls through to
@@ -3186,19 +3186,20 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
             .to_string()
             .starts_with("spawn_worker_failed:")
     );
-    // LEG PROOF (2): only the full-apply leg runs replan_queues, which
-    // rewrites status.bindings to the NEW snapshot's interface. The
-    // WorkerSpawn arm does NOT restore existing_bindings, so the surviving
-    // binding carries the new plan (ge-0-0-2 / ifindex 12) — an outcome the
-    // same-plan leg (never calling replan_queues) cannot produce.
-    assert_eq!(guard.status.bindings.len(), 1, "one worker was planned");
+    // #14959 LEG PROOF (2) updated: the WorkerSpawn arm now restores
+    // existing_bindings with the snapshot rollback, so the surviving
+    // bindings describe the PRIOR plan (ge-0-0-1/ifindex 11 as installed
+    // by the handler's initial state — this fixture starts with no
+    // bindings, so the restored set is empty). Assert the restored
+    // snapshot/bindings consistency rather than the pre-#14959 desync.
     assert_eq!(
-        guard.status.bindings[0].interface, "ge-0-0-2",
-        "the full-apply leg must have replanned onto the NEW snapshot's interface"
+        guard.snapshot.as_ref().map(|s| s.interfaces[0].linux_name.as_str()),
+        Some("ge-0-0-1"),
+        "the prior snapshot must be restored"
     );
-    assert_eq!(
-        guard.status.bindings[0].ifindex, 12,
-        "the replanned binding must carry the new interface's ifindex"
+    assert!(
+        guard.status.bindings.iter().all(|b| b.ifindex != 12),
+        "#14959: no binding from the rejected new plan (ifindex 12) may survive the rollback"
     );
 
     let _ = std::fs::remove_file(&state_file);
@@ -3350,6 +3351,253 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
             .starts_with("worker_bind_incomplete:")
     );
 
+    let _ = std::fs::remove_file(&state_file);
+}
+
+// --- #14959 (D26-03): post-teardown rollback must keep snapshot/bindings in sync ---
+
+/// #14959 (D26-03) FULL-APPLY leg: a post-teardown worker-spawn failure rolls
+/// guard.snapshot back to the prior snapshot. Pre-fix the handler deliberately
+/// did NOT restore existing_bindings ("report the real post-teardown state"),
+/// so guard.snapshot (prior plan: ge-0/0/1) and guard.status.bindings (new
+/// plan: ge-0/0/2, zero-worker refreshed) described DIFFERENT plans, and the
+/// documented "retry / forwarding toggle then reconciles last-good" recovery
+/// could not fire: same_plan_apply_needs_binding_reconcile reads
+/// guard.status.bindings, and after the teardown refresh every slot is
+/// zeroed (runnable==0), so a retry of the restored baseline takes the
+/// refresh-only leg and never spawns workers — the permanent zero-worker
+/// outage. After the fix the rollback restores the PRIOR bindings + worker
+/// count, so snapshot and bindings describe the SAME prior plan and the
+/// next same-plan apply recomputes needs-reconcile from a live-runnable set.
+///
+/// This cell mirrors full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140
+/// (same prior/next fixtures, same forced spawn failure) and asserts the
+/// #14959 delta: surviving bindings are the PRIOR plan (ge-0-0-1/ifindex 11),
+/// NOT the new plan. The #6140 cell's leg-proof (2) asserted the opposite
+/// (new plan survives) and was updated to this contract.
+///
+/// RED-on-base: on origin/master the post-teardown arm leaves replanned
+/// (ge-0-0-2) bindings in place, so the ge-0-0-1 assertions fail.
+#[test]
+fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX};
+
+    let prior = ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        defer_workers: false,
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
+        zones: vec![trust_zone_6140()],
+        ..ConfigSnapshot::default()
+    };
+    let next = ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 2,
+        fib_generation: 2,
+        generated_at: chrono::Utc::now(),
+        defer_workers: false,
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        interfaces: vec![data_iface_6140("ge-0/0/2", "ge-0-0-2", 12)],
+        zones: vec![trust_zone_6140()],
+        ..ConfigSnapshot::default()
+    };
+    assert!(
+        !super::helpers::same_binding_plan(&prior, &next),
+        "plan keys must differ so the handler takes the full-apply leg"
+    );
+
+    // Prior bindings as the previous successful apply left them: one
+    // registered, bound, ready slot for ge-0/0/1.
+    let prior_bindings = vec![BindingStatus {
+        slot: 0,
+        interface: "ge-0/0/1".to_string(),
+        ifindex: 11,
+        registered: true,
+        bound: true,
+        ready: true,
+        xsk_registered: true,
+        ..BindingStatus::default()
+    }];
+    let status = ProcessStatus {
+        forwarding_armed: true,
+        capabilities: forwarding_caps(),
+        last_snapshot_generation: 1,
+        last_fib_generation: 1,
+        workers: 1,
+        bindings: prior_bindings,
+        ..ProcessStatus::default()
+    };
+    let state = Arc::new(Mutex::new(ServerState {
+        status,
+        snapshot: Some(prior),
+        afxdp: afxdp::Coordinator::new(),
+        state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
+    }));
+    {
+        let mut guard = state.lock().expect("state");
+        guard.afxdp.force_ipsec_sa_ready = true;
+        guard.afxdp.force_worker_spawn_fail = 1;
+    }
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(next);
+    let state_file = unique_state_file("full_apply_rollback_bindings_14959");
+    let response = run_request_on_file(state.clone(), request, &state_file);
+    assert!(!response.ok, "post-teardown spawn failure must fail closed");
+    assert!(
+        response.error.starts_with(SNAPSHOT_POST_TEARDOWN_PREFIX),
+        "unexpected error: {}",
+        response.error
+    );
+    assert!(
+        !std::path::Path::new(&state_file).exists(),
+        "must not persist the broken snapshot"
+    );
+    let guard = state.lock().expect("state");
+    assert_eq!(
+        guard.snapshot.as_ref().map(|s| s.generation),
+        Some(1),
+        "prior snapshot must be restored"
+    );
+    // THE #14959 DELTA: bindings describe the SAME prior plan as the
+    // restored snapshot, not the rejected new plan.
+    assert_eq!(guard.status.bindings.len(), 1);
+    assert_eq!(
+        guard.status.bindings[0].interface, "ge-0/0/1",
+        "rollback must restore the PRIOR bindings so snapshot and bindings stay in sync (D26-03)"
+    );
+    assert_eq!(guard.status.bindings[0].ifindex, 11);
+    assert_eq!(guard.status.workers, 1, "prior worker count restored");
+    let _ = std::fs::remove_file(&state_file);
+}
+
+/// #14959 (D26-03) SAME-PLAN needs-reconcile leg: a post-teardown spawn
+/// failure rolls guard.snapshot back to the prior (deferred) snapshot.
+/// Pre-fix the leg restored snapshot+status generations but NOT bindings,
+/// leaving the zero-worker refreshed binding set; the next same-plan apply
+/// then computed runnable_bindings==0 and took the refresh-only leg —
+/// never spawning workers again. After the fix the prior bindings (with
+/// their pre-teardown bound/ready truth) are restored, so the restored
+/// snapshot and bindings describe the same prior plan.
+///
+/// Mirrors post_teardown_spawn_failure_fails_closed_no_persist_4952
+/// (tunnel-only same-plan fixtures) and asserts the #14959 delta on
+/// guard.status.bindings after the failure: the rollback hands back the
+/// PRIOR binding identity (ifindex 10, len 1, registered), so the
+/// restored snapshot and bindings describe the same prior plan.
+///
+/// RED-on-base: on origin/master bindings stay at the post-teardown
+/// refreshed state, so the prior-identity assertions fail. Note the cell
+/// deliberately does not assert bound/ready (see the in-body vacuity
+/// guard): the handler returns before refresh_status, so those bits are
+/// the failed bring-up's refreshed truth, not the restored plan.
+#[test]
+fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX};
+
+    let prior = ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        defer_workers: true,
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
+        ..ConfigSnapshot::default()
+    };
+    let status = ProcessStatus {
+        forwarding_armed: true,
+        capabilities: forwarding_caps(),
+        last_snapshot_generation: 1,
+        last_fib_generation: 1,
+        bindings: vec![BindingStatus {
+            slot: 0,
+            registered: true,
+            ifindex: 10,
+            bound: true,
+            ready: true,
+            xsk_registered: true,
+            ..BindingStatus::default()
+        }],
+        ..ProcessStatus::default()
+    };
+    let state = Arc::new(Mutex::new(ServerState {
+        status,
+        snapshot: Some(prior),
+        afxdp: afxdp::Coordinator::new(),
+        state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
+    }));
+    {
+        let mut guard = state.lock().expect("state");
+        guard.afxdp.force_ipsec_sa_ready = true;
+        guard.afxdp.force_worker_spawn_fail = 1;
+    }
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 2,
+        fib_generation: 2,
+        generated_at: chrono::Utc::now(),
+        defer_workers: false,
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
+        ..ConfigSnapshot::default()
+    });
+    let state_file = unique_state_file("same_plan_rollback_bindings_14959");
+    let response = run_request_on_file(state.clone(), request, &state_file);
+    assert!(!response.ok, "post-teardown spawn failure must fail closed");
+    assert!(
+        response.error.starts_with(SNAPSHOT_POST_TEARDOWN_PREFIX),
+        "unexpected error: {}",
+        response.error
+    );
+    let guard = state.lock().expect("state");
+    assert_eq!(
+        guard.snapshot.as_ref().map(|s| s.generation),
+        Some(1),
+        "prior snapshot must be restored"
+    );
+    assert!(
+        guard.snapshot.as_ref().is_some_and(|s| s.defer_workers),
+        "prior deferred snapshot restored intact"
+    );
+    // THE #14959 DELTA: the prior binding survives the rollback intact,
+    // so snapshot and bindings describe the same prior plan and
+    // same_plan_apply_needs_binding_reconcile can fire again on retry.
+    assert_eq!(guard.status.bindings.len(), 1);
+    assert!(
+        guard.status.bindings[0].registered && guard.status.bindings[0].ifindex > 0,
+        "restored binding must stay runnable so the recovery predicate can fire"
+    );
+    // Plan-identity preservation: the slot/ifindex/interface the prior
+    // apply left in status must be what the rollback hands back. A
+    // regression that restored the NEW plan's binding set (or an empty
+    // one) would change ifindex away from 10 (the prior plan) — assert
+    // the prior value exactly, not merely >0.
+    assert_eq!(
+        guard.status.bindings[0].ifindex, 10,
+        "rollback must restore the PRIOR binding identity (ifindex 10), not the rejected plan"
+    );
+    // Vacuity guard: bound/ready are NOT asserted. The handler returns
+    // without refresh_status, so the vector in guard.status.bindings at
+    // assert time is whatever the reconcile path left there — its
+    // bound/ready bits describe the failed bring-up's refreshed truth,
+    // not the restored plan, and would flip with unrelated refresh
+    // changes while the D26-03 plan-identity contract still holds.
+    // The retry-recovery half of the mechanism (a second same-plan apply
+    // re-entering the reconcile leg and actually spawning workers) is
+    // the live proof and is covered by
+    // same_plan_apply_needs_binding_reconcile's own unit cells plus the
+    // coordinator-level retry cells (14130); re-driving it here would
+    // need healthy-stub workers the handler harness cannot spawn.
     let _ = std::fs::remove_file(&state_file);
 }
 

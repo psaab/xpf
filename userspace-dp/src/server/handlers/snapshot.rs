@@ -195,6 +195,10 @@ pub(super) fn apply(
     let prev_capabilities =
         std::mem::replace(&mut guard.status.capabilities, snapshot.capabilities.clone());
     let existing_bindings = guard.status.bindings.clone();
+    // #14959: prior worker count, restored with existing_bindings on the
+    // full-apply post-teardown rollback so the binding/worker plan status
+    // carries stays consistent with the restored prior snapshot.
+    let prev_worker_count = guard.status.workers;
     let previous_defer_workers = guard
         .snapshot
         .as_ref()
@@ -238,6 +242,41 @@ pub(super) fn apply(
             // status fields, report ok=false, and do NOT persist — a
             // rejected snapshot must never become the boot baseline nor be
             // acked ok=true.
+            // #14959 (D26-03): the needs-reconcile leg recurses through the
+            // FULL reconcile (pre-teardown build -> teardown -> spawn). A
+            // POST-teardown failure (WorkerSpawn / WorkerBindIncomplete /
+            // IpsecSaNotReady) has already stopped the old workers, so
+            // rolling guard.snapshot back to the PRIOR snapshot while
+            // leaving guard.status.bindings at reflexively-refresh'd
+            // zero-worker truth desynchronizes the two: the restored
+            // baseline's plan no longer matches the binding set status
+            // carries, and same_plan_apply_needs_binding_reconcile reads
+            // guard.status.bindings (runnable_bindings==0 after the
+            // teardown refresh zeroes every slot), so the next same-plan
+            // apply takes the refresh leg (which never spawns workers)
+            // instead of this reconcile leg — the permanent zero-worker
+            // outage. Capture the prior bindings + worker count BEFORE
+            // the reconcile, and on post-teardown failure restore them
+            // (with their pre-teardown bound/ready truth) so the restored
+            // guard.snapshot and guard.status.bindings describe the
+            // SAME prior plan: the next same-plan apply recomputes
+            // needs-reconcile from a live-runnable binding set, and the
+            // handlers' retry/forwarding-toggle hint in the comment below
+            // ("a retry / forwarding toggle then reconciles last-good")
+            // becomes true instead of performing a refresh-only no-op.
+            // The coordinator workers themselves cannot be un-stopped —
+            // refresh_status still reports their real zero-worker state
+            // on the very next status poll (refresh_bindings zeroes
+            // workerless slots); what this restores is the CONTROL-PLANE
+            // plan truth, which is exactly what the recovery predicate
+            // gates on. INTEGRITY/MapSetup arms keep their existing
+            // restore-less behaviour: there the reconcile aborted BEFORE
+            // teardown, so the live bindings/workers were never torn
+            // down and the surviving guard.status.bindings (refreshed
+            // only by refresh_bindings inside reconcile) still matches
+            // the restored snapshot.
+            let prev_bindings = guard.status.bindings.clone();
+            let prev_workers = guard.status.workers;
             let prev_snapshot = std::mem::replace(&mut guard.snapshot, Some(snapshot));
             if let Err(err) =
                 reconcile_status_bindings_with_policy_state(guard, policy_state.take())
@@ -252,6 +291,13 @@ pub(super) fn apply(
                 | crate::afxdp::ReconcileError::WorkerBindIncomplete(stage)
                 | crate::afxdp::ReconcileError::IpsecSaNotReady(stage) = &err
                 {
+                    // #14959: restore the prior bindings/workers on the
+                    // POST-teardown arm only, so the restored snapshot and
+                    // the binding plan status carries stay consistent and
+                    // the next same-plan apply re-enters this reconcile leg
+                    // instead of the refresh-only leg (see capture above).
+                    guard.status.bindings = prev_bindings;
+                    guard.status.workers = prev_workers;
                     // Distinct verb per post-teardown failure class; all
                     // leave the dataplane down and must not persist.
                     let verb = match &err {
@@ -461,10 +507,34 @@ pub(super) fn apply(
                 // broken snapshot is NOT persisted as the boot baseline. Roll
                 // the in-memory baseline back to the prior good snapshot +
                 // status generation (a retry / forwarding toggle then
-                // reconciles last-good), but DO NOT restore existing_bindings —
-                // refresh_status must report the REAL post-teardown per-binding
-                // state, not the pre-teardown workers that no longer exist.
+                // reconciles last-good).
+                //
+                // #14959 (D26-03): the pre-#14959 form deliberately did NOT
+                // restore existing_bindings here ("refresh_status must report
+                // the REAL post-teardown per-binding state, not the
+                // pre-teardown workers that no longer exist"). That
+                // desynchronized guard.snapshot (rolled back to prior) from
+                // guard.status.bindings (the NEW plan, zero-worker refreshed):
+                // the restored prior snapshot and the surviving binding set
+                // describe DIFFERENT plans, and same_plan_apply_needs_
+                // binding_reconcile reads guard.status.bindings
+                // (runnable_bindings==0 after the teardown refresh zeroes
+                // every slot), so the documented "retry / forwarding toggle
+                // then reconciles last-good" recovery took the refresh-only
+                // leg (rebind/forwarding) or the same-plan refresh leg,
+                // neither of which can spawn workers for the restored
+                // baseline — the permanent zero-worker outage. Restore the
+                // PRIOR bindings + worker count with the rollback, so
+                // guard.snapshot and guard.status.bindings describe the SAME
+                // prior plan and the recovery predicate gates on a
+                // live-runnable binding set again. refresh_status still
+                // reports the real zero-worker state on the next status poll
+                // (refresh_bindings zeroes workerless slots); what this
+                // restores is the CONTROL-PLANE plan truth the recovery
+                // predicate reads, not a claim that torn-down workers live.
                 guard.snapshot = prev_snapshot;
+                guard.status.bindings = existing_bindings;
+                guard.status.workers = prev_worker_count;
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
