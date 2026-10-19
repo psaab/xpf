@@ -30,7 +30,7 @@ func (c *CLI) showServicesDynamicDNS(detail bool) error {
 				if backend == "" {
 					backend = "rfc2136"
 				}
-				fmt.Printf("    %s: backend=%s update-server=%s", n, backend, p.UpdateServer)
+				fmt.Printf("    %s: backend=%s update-server=%s", n, backend, config.RedactURL(p.UpdateServer))
 				if p.TSIGKeyName != "" {
 					fmt.Printf(" tsig-key=%s (secret redacted)", p.TSIGKeyName)
 				}
@@ -140,7 +140,11 @@ func (c *CLI) showDHCPDynamicDNS(detail bool) error {
 		fmt.Printf("  Domain:          %s\n", ddns.Domain)
 	}
 	if ddns.UpdateServer != "" {
-		fmt.Printf("  Update server:   %s\n", ddns.UpdateServer)
+		// #15174: RedactURL, like the gRPC twin / show configuration /
+		// String / MarshalJSON (#9497). This PermView surface would
+		// otherwise disclose a userinfo-bearing value to view-class
+		// console/SSH logins and captured command output.
+		fmt.Printf("  Update server:   %s\n", config.RedactURL(ddns.UpdateServer))
 	}
 	if ddns.ConflictPolicy != "" {
 		fmt.Printf("  Conflict policy: %s\n", ddns.ConflictPolicy)
