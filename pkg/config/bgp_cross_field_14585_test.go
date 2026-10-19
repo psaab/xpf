@@ -355,3 +355,156 @@ func TestBGPCrossField14585LenientWarns(t *testing.T) {
 		})
 	}
 }
+
+// #15663: iBGP classification must use the effective local AS
+// (neighbor local-as > group local-as, already folded into LocalAS by
+// the compiler, > router AS), not the router AS alone.
+func TestBGPCrossField15663EffectiveLocalAS(t *testing.T) {
+	// Unit-level classification, including peer-as 0 and router-AS 0.
+	for _, tc := range []struct {
+		name     string
+		routerAS uint32
+		n        *BGPNeighbor
+		want     bool
+	}{
+		{"router AS iBGP", 65000, &BGPNeighbor{PeerAS: 65000}, true},
+		{"router AS eBGP", 65000, &BGPNeighbor{PeerAS: 65002}, false},
+		{"neighbor local-as iBGP", 65000, &BGPNeighbor{PeerAS: 65001, LocalAS: 65001}, true},
+		{"neighbor local-as overrides router match", 65000, &BGPNeighbor{PeerAS: 65000, LocalAS: 65001}, false},
+		{"neighbor local-as eBGP", 65000, &BGPNeighbor{PeerAS: 65002, LocalAS: 65001}, false},
+		{"peer-as zero never iBGP", 65000, &BGPNeighbor{PeerAS: 0, LocalAS: 65001}, false},
+		{"router zero with local-as", 0, &BGPNeighbor{PeerAS: 65001, LocalAS: 65001}, true},
+		{"all zero", 0, &BGPNeighbor{}, false},
+		{"nil neighbor", 65000, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := BGPNeighborIsIBGP14585(tc.routerAS, tc.n); got != tc.want {
+				t.Fatalf("BGPNeighborIsIBGP14585(%d, %+v) = %v, want %v", tc.routerAS, tc.n, got, tc.want)
+			}
+		})
+	}
+	if got := BGPNeighborEffectiveLocalAS15663(65000, &BGPNeighbor{LocalAS: 65001}); got != 65001 {
+		t.Fatalf("effective = %d, want 65001", got)
+	}
+	if got := BGPNeighborEffectiveLocalAS15663(65000, &BGPNeighbor{}); got != 65000 {
+		t.Fatalf("effective fallback = %d, want 65000", got)
+	}
+	if got := BGPNeighborEffectiveLocalAS15663(65000, nil); got != 65000 {
+		t.Fatalf("effective nil = %d, want 65000", got)
+	}
+
+	// Strict-compile acceptance: valid iBGP under local-as.
+	for _, tc := range []struct {
+		name string
+		sets []string
+	}{
+		{
+			name: "group local-as iBGP route-reflector-client",
+			sets: []string{
+				"set protocols bgp local-as 65000",
+				"set protocols bgp group int peer-as 65001 local-as 65001",
+				"set protocols bgp group int neighbor 192.0.2.2 route-reflector-client",
+			},
+		},
+		{
+			name: "neighbor local-as overrides group eBGP to iBGP",
+			sets: []string{
+				"set protocols bgp local-as 65000",
+				"set protocols bgp group int peer-as 65001",
+				"set protocols bgp group int neighbor 192.0.2.2 local-as 65001 route-reflector-client",
+			},
+		},
+		{
+			name: "neighbor local-as iBGP in routing-instance",
+			sets: []string{
+				"set routing-instances VRF-A instance-type virtual-router",
+				"set routing-instances VRF-A protocols bgp local-as 65000",
+				"set routing-instances VRF-A protocols bgp group int peer-as 65001 local-as 65001",
+				"set routing-instances VRF-A protocols bgp group int neighbor 192.0.2.2 route-reflector-client",
+			},
+		},
+		{
+			name: "local-as eBGP remove-private still valid",
+			sets: []string{
+				"set protocols bgp local-as 65000",
+				"set protocols bgp group ext peer-as 65002 local-as 65001",
+				"set protocols bgp group ext neighbor 192.0.2.3 remove-private",
+			},
+		},
+	} {
+		t.Run("accept/"+tc.name, func(t *testing.T) {
+			if _, err := CompileConfig(buildTree(t, tc.sets)); err != nil {
+				t.Fatalf("valid local-as fixture rejected: %v", err)
+			}
+		})
+	}
+
+	// Strict-compile rejection: still eBGP/iBGP under effective AS, and
+	// diagnostics must name the effective (65001), not router (65000), AS.
+	for _, tc := range []struct {
+		name string
+		sets []string
+		want []string
+	}{
+		{
+			name: "group local-as true eBGP route-reflector-client rejected",
+			sets: []string{
+				"set protocols bgp local-as 65000",
+				"set protocols bgp group ext peer-as 65002 local-as 65001",
+				"set protocols bgp group ext neighbor 192.0.2.2 route-reflector-client",
+			},
+			want: []string{"192.0.2.2", "route-reflector-client", "peer-as 65002 != local-as 65001"},
+		},
+		{
+			name: "group local-as iBGP remove-private rejected",
+			sets: []string{
+				"set protocols bgp local-as 65000",
+				"set protocols bgp group int peer-as 65001 local-as 65001 remove-private",
+				"set protocols bgp group int neighbor 192.0.2.3",
+			},
+			want: []string{"192.0.2.3", "remove-private", "peer-as 65001 == local-as 65001"},
+		},
+		{
+			name: "router-AS peer under local-as override is eBGP for RRC",
+			sets: []string{
+				"set protocols bgp local-as 65000",
+				"set protocols bgp group ext peer-as 65000 local-as 65001",
+				"set protocols bgp group ext neighbor 192.0.2.2 route-reflector-client",
+			},
+			want: []string{"route-reflector-client", "peer-as 65000 != local-as 65001"},
+		},
+		{
+			name: "router-AS peer under local-as override remove-private valid so RRC case only",
+			sets: []string{
+				"set protocols bgp local-as 65000",
+				"set protocols bgp group int peer-as 65001",
+				"set protocols bgp group int neighbor 192.0.2.3 local-as 65002 remove-private",
+			},
+			want: nil, // accepted: effective 65002 != peer 65001 => eBGP
+		},
+	} {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, tc.sets))
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("expected acceptance, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("strict compilation accepted %s; want rejection (#15663)", tc.name)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Fatalf("diagnostic %q does not name %q", err.Error(), w)
+				}
+			}
+			if strings.Contains(err.Error(), "65000") && !strings.Contains(tc.name, "router-AS peer") {
+				// Effective-AS diagnostics must not cite the router AS as local-as.
+				if strings.Contains(err.Error(), "local-as 65000") {
+					t.Fatalf("diagnostic cites router AS as local-as: %q", err.Error())
+				}
+			}
+		})
+	}
+}
