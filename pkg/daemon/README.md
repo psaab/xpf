@@ -3288,6 +3288,21 @@ never lock an operator out of a remote box it manages.
     in-lock drift check keep those owners from issuing duplicate binds.
     Session-sync and fabric-gRPC VRF binding use the primary fabric only, so
     missing or outside-VRF `fab1` cannot veto healthy `fab0` sockets.
+  - **Desired VRF device re-creation (#15223, A38-02).** Deleting a desired
+    VRF device itself out of band (`ip link del vrf-mgmt` / `ip link del
+    vrf-<tenant>`) previously had no owner: every loop above skipped when
+    the device lookup failed, so members fell into the default VRF until
+    the next apply. The same 30s owners now re-create ONLY a device that
+    is still desired and then bind in the same tick: `mgmtVRFReassertLoop`
+    when the published management set is non-empty, the fabric bind pass
+    for a published `fab*` overlay, and `riMemberVRFReassertLoop` for a
+    configured non-forwarding routing instance (device re-created once
+    per instance). Re-creation uses the single-VRF `CreateVRF`, never a
+    full `ReconcileVRFs`, so no other VRF is reaped; a same-name foreign
+    (non-VRF) link is refused, never adopted or deleted (#12062), and a
+    failed re-create is logged and retried on the next tick. Tests:
+    `vrf_device_reassert_15223_test.go`.
+
     `mgmt_vrf_reassert_11448_test.go` covers drift, healthy-path silence, route
     debt, cancellation, periodic convergence, and an out-of-band kernel unbind
     in a private netns (skipped without `CAP_NET_ADMIN`); #12168 adds sticky

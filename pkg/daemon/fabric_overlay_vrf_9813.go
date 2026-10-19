@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/routing"
+	"github.com/vishvananda/netlink"
 )
 
 // #9813: a fabric overlay (fab0/fab1) carries the session-sync address, and it
@@ -23,9 +25,10 @@ const mgmtVRFDeviceName = "vrf-" + config.ManagementVRFInstanceName
 
 // fabricOverlayOutsideMgmtVRF reports whether overlay name belongs to the
 // management VRF and is not in it. It is false when name is not in the
-// published management-VRF set (the last apply did not manage vrf-mgmt), when
-// the overlay or the VRF device is absent, and when the overlay's master is
-// already the VRF.
+// published management-VRF set (the last apply did not manage vrf-mgmt),
+// when the overlay is absent, and when the overlay's master is already
+// the VRF. A missing VRF device counts as outside (#15223): every present
+// published overlay then needs the device re-created and a bind.
 func (d *Daemon) fabricOverlayOutsideMgmtVRF(name string) bool {
 	if !d.mgmtVRFIfaceSet()[name] {
 		return false
@@ -36,17 +39,28 @@ func (d *Daemon) fabricOverlayOutsideMgmtVRF(name string) bool {
 	}
 	vrf, err := d.fabricLinkByName(mgmtVRFDeviceName)
 	if err != nil || vrf == nil || vrf.Attrs() == nil {
-		return false
+		return true // #15223: desired device absent — needs re-create + bind
+	}
+	if _, ok := vrf.(*netlink.Vrf); !ok {
+		return false // foreign occupant: never bind into a non-VRF
 	}
 	return link.Attrs().MasterIndex != vrf.Attrs().Index
 }
 
 // bindFabricOverlayToMgmtVRF binds overlay name to the management VRF when
 // fabricOverlayOutsideMgmtVRF says it belongs there and is not. It reports
-// whether it attempted a bind.
+// whether it attempted a bind. A missing vrf-mgmt is re-created first
+// (#15223); a foreign occupant or failed re-create skips the bind.
 func (d *Daemon) bindFabricOverlayToMgmtVRF(name string) (bool, error) {
 	if d.routing == nil || !d.fabricOverlayOutsideMgmtVRF(name) {
 		return false, nil
+	}
+	if d.vrfDeviceMissing(mgmtVRFDeviceName) {
+		if !d.ensureVRFDeviceForReassert(routing.VRFSpec{
+			Name: config.ManagementVRFInstanceName, TableID: config.ManagementVRFTableID,
+		}) {
+			return false, nil
+		}
 	}
 	return true, d.routing.BindInterfaceToVRF(name, config.ManagementVRFInstanceName)
 }
