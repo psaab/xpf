@@ -263,7 +263,6 @@
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial
-class-of-service schedulers xpfarg surplus-sharing	empty
 event-options policy xpfarg plant-class	empty
 firewall family any filter xpfarg interface-specific	empty
 firewall family inet filter xpfarg interface-specific	empty

@@ -947,6 +947,49 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 		inlineProps := dynamicAddressShrinkGuardCompactProps(node.Keys[consume:])
 		walkChildren = append(inlineProps, walkChildren...)
 	}
+	// #15064: a container that opts into packedTail (the CoS named-instance
+	// containers) HAS a compiler reading its packed tail, so validate the
+	// same expansion the compiler descends. The tail lives on THIS peeled
+	// instance node (`[be priority bogus]`), one level below where the
+	// flat-shape packedTail branch in walkSchemaNode looks, so without
+	// this the packed spelling validated nothing while compiling the
+	// value (#6821's bidirectional contract). Re-anchor the tail behind
+	// a synthetic container node in this node's own shape — keyword when
+	// the name rode at Keys[1] (flat), name-only otherwise (hierarchical
+	// peel) — and let packedBodyChildren divide it by the same schema.
+	// It declines (returns the authored children) outside the modelled
+	// grammar, so a non-CoS packedTail container keeps its prior walk.
+	if containerSchema.packedTail && len(node.Keys) > consume {
+		wrapper := node
+		if len(node.Keys) >= 2 && consume >= 1 {
+			// Hierarchical peel: Keys[0] is the name itself, so the
+			// wrapper must carry ONLY the name as identity; the tail
+			// follows it. Synthesize that shape so consumeNodeKeys
+			// (keyword + args) divides the tail correctly: use a
+			// one-key identity node whose schema is the container
+			// viewed through a zero-arg lens is NOT the container —
+			// instead expand directly: the tail tokens are the body.
+			// Build [name tail...] and expand with a schema whose
+			// identity is exactly the name slot. packedBodyChildren
+			// consumes 1+args from the FRONT, so prepend nothing:
+			// Keys[0]=name acts as the keyword slot and the first
+			// tail token must not be eaten as an arg. The container
+			// declares args for its KEYWORD form; in peel form the
+			// name already filled that slot, so a shallow schema copy
+			// with args=0 (same children) divides the tail as body
+			// statements.
+			shallow := *containerSchema
+			shallow.args = 0
+			wrapper = &Node{
+				Keys:          append([]string(nil), node.Keys...),
+				Children:      node.Children,
+				InheritedFrom: node.InheritedFrom,
+			}
+			if expanded := packedBodyChildren(wrapper, &shallow); len(expanded) != len(node.Children) || len(expanded) == 0 || (len(expanded) > 0 && len(node.Children) > 0 && &expanded[0] != &node.Children[0]) {
+				walkChildren = expanded
+			}
+		}
+	}
 	return walkSchemaChildren(walkChildren, containerSchema, newPath, vc, closed)
 }
 
