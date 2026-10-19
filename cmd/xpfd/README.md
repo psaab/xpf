@@ -73,7 +73,9 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   stdout, a missing/empty active config DB, or an invalid output path.
 - `xpfd transit-barrier close` — installs the inet and bridge forward-hook DROP
   barrier without loading configuration or taking the daemon lock. The early
-  boot unit runs it before `systemd-networkd.service`.
+  boot unit runs it before `systemd-networkd.service`. It deliberately stays
+  config-free (#15147): xpfd releases the barrier at bring-up on hosts it
+  does not own (see `removeUnownedBootTransitBarrier15147`).
 - `xpfd transit-barrier remove` — removes both transit-barrier tables so package
   removal can release the boot/shutdown fence.
 - `xpfd input-barrier close` — installs the config-free host-input DROP barrier

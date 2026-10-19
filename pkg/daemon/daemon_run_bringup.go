@@ -240,6 +240,10 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		d.startKernelSelfRecovery(d.daemonCtx)
 	}
 
+	// #15147: the pre-networkd boot unit installed the transit barrier
+	// unconditionally; on a host xpf does not own, release it before the
+	// transit policy runs (the policy itself never actuates there).
+	d.removeUnownedBootTransitBarrier15147()
 	// Enable IP forwarding — required for the firewall to route packets —
 	// or, in the two states that never arm, explicitly CLOSE it (#1922
 	// suppression + the #5275 gate). See applyBootTransitPolicy.
