@@ -490,6 +490,10 @@ func (m *Manager) HATakeoverReadiness() HATakeoverReadiness {
 			s.Blockers = append(s.Blockers, "pending_ha_replay")
 		case strings.Contains(reason, "event stream listener not bound"):
 			s.Blockers = append(s.Blockers, "event_stream_unbound")
+		case strings.Contains(reason, "fabric state not converged"):
+			s.Blockers = append(s.Blockers, "fabric_not_converged")
+		case strings.Contains(reason, "fabric peer unresolved"):
+			s.Blockers = append(s.Blockers, "fabric_peer_unresolved")
 		default:
 			s.Blockers = append(s.Blockers, "forwarding_unsupported")
 		}
@@ -602,6 +606,45 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 	}
 	if m.pendingHAStateReplay {
 		reasons = append(reasons, "userspace HA state replay pending")
+	}
+	// #15918: a fabric the daemon marked populated is not takeover-ready
+	// unless the helper can actually install it. The predicate mirrors the
+	// Go-checkable half of Rust build_fabric_link_or_skip: parseable peer
+	// address, valid local + peer MACs, positive parent ifindex. The
+	// remaining Rust fallback (local MAC from an interface row by parent
+	// ifindex) only ADDS installs Go cannot see, so requiring LocalMAC is
+	// conservative, never false-ready. An unconverged update_fabrics
+	// (partialFabrics debt) must not be outstanding. This closes the fab1
+	// link-local false-ready: daemon fabric1Populated=true with PeerMAC=""
+	// / UnresolvedPeerMac in Rust no longer passes.
+	// Configured-but-unbuildable: if the applied config names a fabric but
+	// the builder emitted no row (missing interface stanza is only a
+	// config warning), the gate still applies — the explicit no-fabric
+	// exemption is only for configs naming no fabric at all.
+	if m.clusterHA && m.lastSnapshot != nil {
+		configured := len(m.lastSnapshot.Fabrics) > 0
+		if !configured && m.lastSnapshot.Config != nil && m.lastSnapshot.Config.Chassis.Cluster != nil {
+			cc := m.lastSnapshot.Config.Chassis.Cluster
+			configured = cc.FabricInterface != "" || cc.Fabric1Interface != ""
+		}
+		if configured {
+			if m.partialSectionUnknownLocked(partialFabrics) {
+				reasons = append(reasons, "userspace fabric state not converged (update_fabrics outcome unknown)")
+			} else {
+				installable := false
+				for _, f := range m.lastSnapshot.Fabrics {
+					if f.ParentIfindex > 0 && f.PeerMAC != "" && f.LocalMAC != "" &&
+						parseMACOrNil(f.PeerMAC) != nil && parseMACOrNil(f.LocalMAC) != nil &&
+						f.PeerAddress != "" && fabricPeerKeyValid(f.PeerAddress) {
+						installable = true
+						break
+					}
+				}
+				if !installable {
+					reasons = append(reasons, "userspace fabric peer unresolved (no installable fabric link)")
+				}
+			}
+		}
 	}
 	return len(reasons) == 0, reasons
 }

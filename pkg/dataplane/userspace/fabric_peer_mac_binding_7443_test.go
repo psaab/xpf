@@ -111,7 +111,7 @@ func TestBuildFabricPeerMACRejectsStaleNeighbour_7443(t *testing.T) {
 			stubFabricNeighList(t, map[int][]netlink.Neigh{
 				overlayIfindex7443: tc.overlay,
 			}, nil)
-			got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443)
+			got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443, nil, nil)
 			if got != tc.want {
 				t.Errorf("buildFabricPeerMAC = %q, want %q", got, tc.want)
 			}
@@ -134,7 +134,7 @@ func TestBuildFabricPeerMACOverlayThenParent_7443(t *testing.T) {
 			overlayIfindex7443: {{IP: ip, HardwareAddr: stale, State: netlink.NUD_FAILED}},
 			parentIfindex7443:  {{IP: ip, HardwareAddr: live, State: netlink.NUD_STALE}},
 		}, nil)
-		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443); got != liveFabricMAC7443 {
+		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443, nil, nil); got != liveFabricMAC7443 {
 			t.Errorf("buildFabricPeerMAC = %q, want the parent's %q", got, liveFabricMAC7443)
 		}
 		if len(*queried) != 2 {
@@ -147,7 +147,7 @@ func TestBuildFabricPeerMACOverlayThenParent_7443(t *testing.T) {
 			overlayIfindex7443: {{IP: ip, HardwareAddr: live, State: netlink.NUD_REACHABLE}},
 			parentIfindex7443:  {{IP: ip, HardwareAddr: other, State: netlink.NUD_REACHABLE}},
 		}, nil)
-		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443); got != liveFabricMAC7443 {
+		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443, nil, nil); got != liveFabricMAC7443 {
 			t.Errorf("buildFabricPeerMAC = %q, want the overlay's %q", got, liveFabricMAC7443)
 		}
 		if len(*queried) != 1 || (*queried)[0] != overlayIfindex7443 {
@@ -159,7 +159,7 @@ func TestBuildFabricPeerMACOverlayThenParent_7443(t *testing.T) {
 		stubFabricNeighList(t, map[int][]netlink.Neigh{
 			parentIfindex7443: {{IP: ip, HardwareAddr: live, State: netlink.NUD_REACHABLE}},
 		}, map[int]bool{overlayIfindex7443: true})
-		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443); got != liveFabricMAC7443 {
+		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443, nil, nil); got != liveFabricMAC7443 {
 			t.Errorf("buildFabricPeerMAC = %q, want the parent's %q", got, liveFabricMAC7443)
 		}
 	})
@@ -169,7 +169,7 @@ func TestBuildFabricPeerMACOverlayThenParent_7443(t *testing.T) {
 			overlayIfindex7443: {{IP: ip, HardwareAddr: stale, State: netlink.NUD_FAILED}},
 			parentIfindex7443:  {{IP: ip, HardwareAddr: stale, State: netlink.NUD_INCOMPLETE}},
 		}, nil)
-		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443); got != "" {
+		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV4_7443, nil, nil); got != "" {
 			t.Errorf("buildFabricPeerMAC = %q, want \"\" — no usable entry exists", got)
 		}
 	})
@@ -178,7 +178,7 @@ func TestBuildFabricPeerMACOverlayThenParent_7443(t *testing.T) {
 		queried := stubFabricNeighList(t, map[int][]netlink.Neigh{
 			parentIfindex7443: {{IP: ip, HardwareAddr: live, State: netlink.NUD_REACHABLE}},
 		}, nil)
-		if got := buildFabricPeerMAC(0, parentIfindex7443, peerV4_7443); got != liveFabricMAC7443 {
+		if got := buildFabricPeerMAC(0, parentIfindex7443, peerV4_7443, nil, nil); got != liveFabricMAC7443 {
 			t.Errorf("buildFabricPeerMAC = %q, want the parent's %q", got, liveFabricMAC7443)
 		}
 		if len(*queried) != 1 || (*queried)[0] != parentIfindex7443 {
@@ -203,7 +203,7 @@ func TestBuildFabricPeerMACIPv6_7443(t *testing.T) {
 			families = append(families, family)
 			return []netlink.Neigh{{IP: ip, HardwareAddr: live, State: netlink.NUD_REACHABLE}}, nil
 		}
-		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV6_7443); got != liveFabricMAC7443 {
+		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV6_7443, nil, nil); got != liveFabricMAC7443 {
 			t.Errorf("buildFabricPeerMAC = %q, want %q", got, liveFabricMAC7443)
 		}
 		if len(families) == 0 || families[0] != netlink.FAMILY_V6 {
@@ -215,14 +215,14 @@ func TestBuildFabricPeerMACIPv6_7443(t *testing.T) {
 		stubFabricNeighList(t, map[int][]netlink.Neigh{
 			overlayIfindex7443: {{IP: ip, HardwareAddr: stale, State: netlink.NUD_FAILED}},
 		}, nil)
-		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV6_7443); got != "" {
+		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, peerV6_7443, nil, nil); got != "" {
 			t.Errorf("buildFabricPeerMAC = %q, want \"\"", got)
 		}
 	})
 
 	t.Run("an unparseable peer address resolves to nothing without touching netlink", func(t *testing.T) {
 		queried := stubFabricNeighList(t, nil, nil)
-		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, "not-an-address"); got != "" {
+		if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, "not-an-address", nil, nil); got != "" {
 			t.Errorf("buildFabricPeerMAC = %q, want \"\"", got)
 		}
 		if len(*queried) != 0 {

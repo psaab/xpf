@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -213,15 +212,15 @@ func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerA
 	d.fabricMu.Lock()
 	d.fabricIface = fabIface
 	d.fabricOverlay = overlay
-	// A re-pointed fabric is a DIFFERENT peer chassis, so the cached
-	// address-matched MAC no longer identifies it. Drop it rather than let the
-	// NDP fallback keep pinning the old peer's MAC (#6554) — the same
-	// same-parent peer-REPLACEMENT hazard the Rust link merge guards (#5686).
-	if !d.fabricPeerIP.Equal(peerIP) {
+	peerChanged := !d.fabricPeerIP.Equal(peerIP)
+	if peerChanged {
 		d.fabricPeerMAC = nil
 	}
 	d.fabricPeerIP = peerIP
 	d.fabricMu.Unlock()
+	if peerChanged {
+		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
+	}
 
 	// Fast initial population: attempt immediately, then 500ms retries.
 	for i := 0; i < 10; i++ {
@@ -460,112 +459,37 @@ func (d *Daemon) rememberFabricPeerMAC(slot int, mac net.HardwareAddr) {
 	stored := make(net.HardwareAddr, 6)
 	copy(stored, mac)
 	d.fabricMu.Lock()
-	defer d.fabricMu.Unlock()
+	var peerIP net.IP
 	if slot == 1 {
 		d.fabricPeerMAC1 = stored
-		return
+		peerIP = d.fabricPeerIP1
+	} else {
+		d.fabricPeerMAC = stored
+		peerIP = d.fabricPeerIP
 	}
-	d.fabricPeerMAC = stored
+	d.fabricMu.Unlock()
+	// #15918: publish the identity to the live userspace resolver so its
+	// link-local fallback is constrained identically even on snapshot builds
+	// that never pass through a daemon refresh.
+	if peerIP != nil {
+		dpuserspace.RegisterFabricPeerMACConstraint(peerIP.String(), stored)
+	}
 }
 
-// selectFabricPeerLinkLocalMAC picks the fabric peer's MAC out of the fabric
-// PARENT's IPv6 neighbour table when the peer's configured fabric address
-// itself failed to resolve (#6554).
-//
-// This is the last-resort leg of peer-MAC resolution: probeFabricNeighbor
-// deliberately seeds the parent's NDP table by pinging ff02::1 (all-nodes
-// link-local multicast), so EVERY IPv6-speaking host on the fabric segment
-// answers and lands in that table. The pre-#6554 code then took the first
-// non-self link-local entry it saw. On a correctly-cabled back-to-back fabric
-// the only other host is the peer chassis, but the fabric is not always a
-// private point-to-point link, and picking a stranger's MAC is silent: the
-// refresh reports success, latches fabricPopulated (which feeds the RG
-// takeover-readiness gate), and logs a peer MAC that belongs to an unrelated
-// adjacent host.
-//
-// The selection is therefore constrained to the peer's identity, strongest
-// constraint first:
-//
-//   - expected != nil — an address-matched resolution has been seen before, so
-//     the MAC that answered for the configured peer address is known. Accept
-//     ONLY that MAC. A decoy cannot match it.
-//   - expected == nil — nothing address-matched has ever been observed (cold
-//     start / crash recovery, the case this fallback exists for). Fall back to
-//     the point-to-point fabric assumption, but CHECK it instead of assuming
-//     it: accept the sole eligible neighbour, and REFUSE when the segment
-//     presents more than one. An ambiguous segment is exactly the topology the
-//     permissive form mis-resolved on.
-//
-// Refusal is fail-closed by design: it returns no MAC, which leaves the caller
-// on the existing "peer neighbour missing" path (retain a previously-good
-// entry, else clear). That is the same state the node already occupies whenever
-// the peer genuinely does not resolve, and it does NOT blackhole cross-chassis
-// traffic — the userspace dataplane's redirect takes its destination MAC from
-// FabricSnapshot.peer_mac, which is resolved independently and strictly by
-// peer address in pkg/dataplane/userspace/fabric.go (buildFabricPeerMAC).
-// Silently keeping the permissive behaviour would leave the defect reachable
-// exactly on the shared segment where it matters.
-//
-// Candidates are deduplicated by MAC so a peer that owns several link-local
-// addresses on the same NIC (EUI-64 plus a stable-privacy or manually
-// configured address) still counts as one host and does not trip the
-// ambiguity refusal.
-//
-// reason is empty on success and carries an operator-facing explanation on
-// refusal. peerLL is the accepted neighbour's link-local address, for logging.
+// selectFabricPeerLinkLocalMAC is retained as a thin delegate to the single
+// authoritative implementation in pkg/dataplane/userspace (#15918). Before
+// #15918 the daemon had its own copy while the live userspace resolver
+// (buildFabricPeerMAC) had no link-local leg at all, so the fallback latched
+// fabricPopulated/readiness while FabricSnapshot.PeerMAC stayed empty and
+// Rust skipped the fabric. Delegating guarantees the MAC the daemon accepts
+// is exactly the MAC the helper publishes. The selection contract (identity-
+// constrained, fail-closed on ambiguity) is documented on
+// dpuserspace.SelectFabricPeerLinkLocalMAC.
 func selectFabricPeerLinkLocalMAC(
 	neighs []netlink.Neigh,
 	localMAC, expected net.HardwareAddr,
 ) (mac net.HardwareAddr, peerLL net.IP, candidates int, reason string) {
-	type candidate struct {
-		mac net.HardwareAddr
-		ip  net.IP
-	}
-	var eligible []candidate
-	seen := make(map[string]struct{}, len(neighs))
-	for _, n := range neighs {
-		if !dpuserspace.FabricNeighUsable(n) {
-			continue
-		}
-		if !n.IP.IsLinkLocalUnicast() {
-			continue
-		}
-		// A group-bit MAC is a multicast/broadcast destination, never a
-		// unicast peer NIC — it can only be a mis-parsed or synthetic entry.
-		if n.HardwareAddr[0]&0x01 != 0 {
-			continue
-		}
-		if bytes.Equal(n.HardwareAddr, localMAC) {
-			continue
-		}
-		key := n.HardwareAddr.String()
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		eligible = append(eligible, candidate{mac: n.HardwareAddr, ip: n.IP})
-	}
-
-	if len(expected) == 6 {
-		for _, c := range eligible {
-			if bytes.Equal(c.mac, expected) {
-				return c.mac, c.ip, len(eligible), ""
-			}
-		}
-		return nil, nil, len(eligible),
-			"no link-local neighbour carries the known fabric peer MAC"
-	}
-
-	switch len(eligible) {
-	case 0:
-		return nil, nil, 0, "no eligible link-local neighbour on the fabric parent"
-	case 1:
-		return eligible[0].mac, eligible[0].ip, 1, ""
-	default:
-		return nil, nil, len(eligible),
-			"ambiguous fabric segment: multiple link-local neighbours and no " +
-				"address-matched peer MAC to identify the peer chassis"
-	}
+	return dpuserspace.SelectFabricPeerLinkLocalMAC(neighs, localMAC, expected)
 }
 
 func (d *Daemon) retainFabricFwdOnNeighborMiss(slot int, peerIP net.IP, overlay string, logWaiting bool) bool {
@@ -811,12 +735,15 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 	d.fabricMu.Lock()
 	d.fabricIface1 = fabIface
 	d.fabricOverlay1 = overlay
-	// Peer replacement invalidates the cached identity — see populateFabricFwd.
-	if !d.fabricPeerIP1.Equal(peerIP) {
+	peer1Changed := !d.fabricPeerIP1.Equal(peerIP)
+	if peer1Changed {
 		d.fabricPeerMAC1 = nil
 	}
 	d.fabricPeerIP1 = peerIP
 	d.fabricMu.Unlock()
+	if peer1Changed {
+		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
+	}
 
 	// Fast initial population: attempt immediately, then 500ms retries.
 	for i := 0; i < 10; i++ {
@@ -1014,6 +941,15 @@ func (d *Daemon) refreshFabricFwd1(ctx context.Context, fabIface, overlay string
 		"interface", fabIface, "ifindex", info.Ifindex,
 		"fib_ifindex", info.FIBIfindex,
 		"local_mac", localMAC, "peer_mac", peerMAC)
+
+	// #15918: mirror refreshFabricFwd — push the freshly resolved fabric
+	// state to the userspace helper. Without this, a fab1-only resolution
+	// (especially the link-local fallback) latched fabric1Populated and
+	// passed the takeover gate while the helper never received a resolved
+	// PeerMAC for fab1. SetFabricForwarding above already triggers a sync
+	// through the userspace controller; this explicit call preserves the
+	// same contract on the legacy controller path, matching fab0.
+	rt.HA().SyncFabricState(ctx)
 	return true
 }
 

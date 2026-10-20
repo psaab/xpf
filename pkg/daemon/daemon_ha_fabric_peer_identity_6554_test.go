@@ -201,13 +201,8 @@ func TestFabricPeerNDPFallbackRejectsDecoyWithKnownPeerMAC(t *testing.T) {
 		t.Fatalf("expected exactly one programmed fabric entry, got %d (%v)", len(got), got)
 	}
 	if got[0] == fabPeerTestDecoyMAC {
-		// Scope note: the MAC this path programs goes into the retired-eBPF
-		// `fabric_fwd` map (pkg/dataplane/maps_fabric.go). The LIVE Rust
-		// redirect re-derives FabricSnapshot.PeerMAC with its own
-		// address-matched neighbour lookup (buildFabricPeerMAC,
-		// pkg/dataplane/userspace/fabric.go), so a decoy accepted here never
-		// becomes an L2 destination. The damage is false readiness, not
-		// misdelivery — assert on that, not on a forwarding claim.
+		// #15918 update: the live resolver now shares this selection, so a
+		// decoy accepted here WOULD become the helper's PeerMAC as well.
 		t.Fatalf("DECOY MAC %s was programmed as the fabric peer — the node would "+
 			"latch fabricPopulated, end the fast-retry probe loop early, and log an "+
 			"unrelated host's MAC as the fabric peer during an HA incident (#6554)",
@@ -761,5 +756,43 @@ func TestReconcileRGStateFabricReadyWithFab1Only(t *testing.T) {
 	d.fabricMu.Unlock()
 	if ready, reasons := rgReadiness(t, d); !ready {
 		t.Fatalf("fab0-only must remain takeover-ready: %v", reasons)
+	}
+}
+
+// TestRefreshFabricFwd1LinkLocalSyncsHelper15918 is the #15918 consumer gate:
+// the fab1 link-local fallback must not only latch fabric1Populated and
+// program the BPF map, it must also push SyncFabricState so the userspace
+// helper receives the resolved fabric (its buildFabricPeerMAC now resolves
+// the same sole link-local neighbour). Pre-fix refreshFabricFwd1 never
+// called SyncFabricState on its success path (fab0 did).
+func TestRefreshFabricFwd1LinkLocalSyncsHelper15918(t *testing.T) {
+	const parentIdx = 21
+	peerIP := net.ParseIP("10.99.14.2")
+	d, rec := fab1PeerTestDaemon(t, map[[2]int][]netlink.Neigh{
+		{parentIdx, netlink.FAMILY_V6}: {
+			fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
+		},
+	})
+	if !d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
+		t.Fatal("refreshFabricFwd1 returned false on sole link-local peer")
+	}
+	rec.mu.Lock()
+	syncs := rec.syncs
+	rec.mu.Unlock()
+	if syncs == 0 {
+		t.Fatal("refreshFabricFwd1 link-local success did not call SyncFabricState — helper never learns fab1 PeerMAC (#15918)")
+	}
+	// fab0 sole-peer path already syncs; assert it stays (control).
+	d0, rec0 := fabPeerTestDaemon(t, []netlink.Neigh{
+		fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
+	})
+	if !fabPeerRefresh(t, d0) {
+		t.Fatal("refreshFabricFwd returned false on sole link-local peer")
+	}
+	rec0.mu.Lock()
+	s0 := rec0.syncs
+	rec0.mu.Unlock()
+	if s0 == 0 {
+		t.Fatal("refreshFabricFwd lost its SyncFabricState call")
 	}
 }

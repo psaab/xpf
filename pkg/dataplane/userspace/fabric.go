@@ -1,8 +1,11 @@
 package userspace
 
 import (
+	"bytes"
 	"net"
+	"net/netip"
 	"sort"
+	"sync"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
@@ -113,7 +116,7 @@ func buildFabricSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) []Fa
 		if parentLinux != "" {
 			rxQueues = userspaceRXQueueCount(parentLinux)
 		}
-		peerMAC := buildFabricPeerMAC(overlayIfindex, parentIfindex, in.peer)
+		peerMAC := buildFabricPeerMAC(overlayIfindex, parentIfindex, in.peer, parseMACOrNil(parentMAC), fabricPeerMACConstraint(in.peer))
 		out = append(out, FabricSnapshot{
 			Name:             in.name,
 			ParentInterface:  parentName,
@@ -352,6 +355,17 @@ func FabricNeighUsable(n netlink.Neigh) bool {
 	return len(n.HardwareAddr) == 6 && n.State&FabricNeighValidStates != 0
 }
 
+func parseMACOrNil(s string) net.HardwareAddr {
+	if s == "" {
+		return nil
+	}
+	mac, err := net.ParseMAC(s)
+	if err != nil || len(mac) != 6 {
+		return nil
+	}
+	return mac
+}
+
 // selectFabricPeerMAC returns the link-layer address of the first entry in
 // neighs that both answers for ip and is usable for forwarding, or nil.
 //
@@ -371,28 +385,173 @@ func selectFabricPeerMAC(neighs []netlink.Neigh, ip net.IP) net.HardwareAddr {
 	return nil
 }
 
+// SelectFabricPeerLinkLocalMAC picks the fabric peer's MAC out of the fabric
+// PARENT's IPv6 neighbour table when the peer's configured fabric address
+// itself failed to resolve (#6554, #15918).
+//
+// This is the SINGLE authoritative implementation of the identity-constrained
+// link-local fallback. pkg/daemon's refreshFabricFwd/refreshFabricFwd1 and the
+// live userspace resolver buildFabricPeerMAC both call it, so a MAC the daemon
+// accepts (and latches fabricPopulated on) is exactly the MAC the helper
+// publishes in FabricSnapshot.PeerMAC. Before #15918 the daemon had its own
+// copy and the live resolver had none: the fallback populated the retired BPF
+// map and the readiness flag while PeerMAC stayed empty and Rust skipped the
+// fabric as UnresolvedPeerMac.
+//
+// Selection, strongest constraint first:
+//   - expected != nil (6 bytes): an address-matched resolution has been seen
+//     before, so only a neighbour bearing that MAC is accepted.
+//   - expected == nil: accept the sole eligible neighbour (deduped by MAC);
+//     refuse when the segment presents more than one distinct MAC.
+//
+// Eligible: usable NUD state, link-local unicast IP, 6-byte non-multicast MAC,
+// not the local fabric parent MAC. Refusal returns nil with a reason.
+// peerLL is the accepted neighbour's link-local address, for logging.
+func SelectFabricPeerLinkLocalMAC(
+	neighs []netlink.Neigh,
+	localMAC, expected net.HardwareAddr,
+) (mac net.HardwareAddr, peerLL net.IP, candidates int, reason string) {
+	type candidate struct {
+		mac net.HardwareAddr
+		ip  net.IP
+	}
+	var eligible []candidate
+	seen := make(map[string]struct{}, len(neighs))
+	for _, n := range neighs {
+		if !FabricNeighUsable(n) {
+			continue
+		}
+		if n.IP == nil || !n.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		if n.HardwareAddr[0]&0x01 != 0 {
+			continue
+		}
+		if len(localMAC) == 6 && bytes.Equal(n.HardwareAddr, localMAC) {
+			continue
+		}
+		key := n.HardwareAddr.String()
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		eligible = append(eligible, candidate{mac: n.HardwareAddr, ip: n.IP})
+	}
+	if len(expected) == 6 {
+		for _, c := range eligible {
+			if bytes.Equal(c.mac, expected) {
+				return c.mac, c.ip, len(eligible), ""
+			}
+		}
+		return nil, nil, len(eligible),
+			"no link-local neighbour carries the known fabric peer MAC"
+	}
+	switch len(eligible) {
+	case 0:
+		return nil, nil, 0, "no eligible link-local neighbour on the fabric parent"
+	case 1:
+		return eligible[0].mac, eligible[0].ip, 1, ""
+	default:
+		return nil, nil, len(eligible),
+			"ambiguous fabric segment: multiple link-local neighbours and no " +
+				"address-matched peer MAC to identify the peer chassis"
+	}
+}
+
+// fabricPeerMACOverrides holds daemon-supplied identity constraints for the
+// link-local fallback, keyed by CANONICAL configured peer address (#15918,
+// review fold). The daemon owns the address-matched identity hint (it
+// observes ARP/NDP for the configured peer and clears it on peer
+// replacement); it registers the hint here so buildFabricSnapshots — also
+// called from full snapshot builds without a daemon round-trip — constrains
+// its fallback identically. All register/lookup/clear paths go through
+// fabricPeerKey so equivalent spellings (e.g. expanded vs compressed IPv6)
+// cannot miss: registration used peerIP.String() (canonical) while lookup
+// used raw config text, which dropped the known-peer constraint and let a
+// sole decoy link-local neighbour be accepted. Guarded by
+// fabricPeerMACOverridesMu.
+var (
+	fabricPeerMACOverridesMu sync.RWMutex
+	fabricPeerMACOverrides   = map[string]net.HardwareAddr{}
+)
+
+// fabricPeerKey is the single canonical key for a configured fabric peer
+// address. Parseable addresses canonicalize via netip with Unmap, so every
+// spelling of one address — expanded/compressed IPv6, and IPv4-mapped
+// ::ffff:a.b.c.d vs dotted a.b.c.d — collapses to one key. Unmap matters
+// because the daemon registers via net.IP.String(), which renders a
+// mapped address dotted, while netip.Addr.String() retains the mapped
+// form; without it that spelling lost the constraint again (#15923
+// re-review). Zone is preserved by String on the unmapped address.
+// Unparseable text keys verbatim so register/clear/lookup still agree.
+func fabricPeerKey(peer string) string {
+	if addr, err := netip.ParseAddr(peer); err == nil {
+		return addr.Unmap().String()
+	}
+	return peer
+}
+
+// fabricPeerKeyValid reports whether peer parses as an IP address (the
+// Rust build_fabric_link_or_skip peer-address admission, Go side).
+func fabricPeerKeyValid(peer string) bool {
+	_, err := netip.ParseAddr(peer)
+	return err == nil
+}
+
+// RegisterFabricPeerMACConstraint records (or, with a nil/short MAC, clears)
+// the known peer MAC for a configured fabric peer address (#15918). A clear
+// prunes the entry (peer replacement / removal), so no stale identity can
+// bind a later fabric that reuses the slot.
+func RegisterFabricPeerMACConstraint(peer string, mac net.HardwareAddr) {
+	if peer == "" {
+		return
+	}
+	key := fabricPeerKey(peer)
+	fabricPeerMACOverridesMu.Lock()
+	defer fabricPeerMACOverridesMu.Unlock()
+	if len(mac) != 6 {
+		delete(fabricPeerMACOverrides, key)
+		return
+	}
+	stored := make(net.HardwareAddr, 6)
+	copy(stored, mac)
+	fabricPeerMACOverrides[key] = stored
+}
+
+func fabricPeerMACConstraint(peer string) net.HardwareAddr {
+	key := fabricPeerKey(peer)
+	fabricPeerMACOverridesMu.RLock()
+	defer fabricPeerMACOverridesMu.RUnlock()
+	mac, ok := fabricPeerMACOverrides[key]
+	if !ok || len(mac) != 6 {
+		return nil
+	}
+	out := make(net.HardwareAddr, 6)
+	copy(out, mac)
+	return out
+}
+
 // buildFabricPeerMAC resolves the MAC that currently answers for the fabric
 // peer address, or "" if none does.
 //
 // This is the LIVE resolver: its result becomes FabricSnapshot.PeerMAC and
 // reaches the dataplane as the cross-chassis redirect destination.
 //
-// It used to accept the first address-matched entry with any non-nil
-// HardwareAddr, checking neither the NUD state nor the address length, which
-// made it laxer than refreshFabricFwd -- the path whose result is NOT consulted
-// (#6598). An entry that has gone NUD_FAILED while retaining the peer's old
-// lladdr is exactly what the RETH virtual-MAC reprogramming sequence produces
-// (programRethMAC does link DOWN -> set MAC -> link UP), so the stale entry it
-// would accept is the realistic case, not the exotic one.
+// Resolution order mirrors pkg/daemon's refreshFabricFwd (#6554/#15683/#15918):
+//  1. address-matched neighbour for the configured peer IP on overlay, then
+//     parent (existing #6598/#7443 behaviour, NUD/length-gated);
+//  2. if that fails, the identity-constrained parent IPv6 link-local fallback
+//     (SelectFabricPeerLinkLocalMAC) — the sole/known-peer neighbour the
+//     ff02::1 probe seeds. This makes the daemon's link-local acceptance
+//     usable by the helper instead of readiness-only.
 //
-// Returning "" is a deliberate degrade, not a gap. The dataplane treats an
-// empty peer_mac as UNRESOLVED and falls back to its own neighbour table, which
-// is NUD-allowlisted at insert (#3771 M12) -- so the fallback is STRICTER than
-// the stale entry removed here, not laxer. If that table cannot answer either,
-// the link is skipped as FabricSkipReason::UnresolvedPeerMac, which is counted
-// and recorded by name. Both outcomes beat forwarding to a MAC the peer no
-// longer owns, which is silent and looks like a working fabric.
-func buildFabricPeerMAC(overlayIfindex, parentIfindex int, peer string) string {
+// localMAC is the fabric parent's own MAC (excluded from fallback
+// candidates); expected is the last address-matched peer MAC, or nil.
+//
+// Returning "" is a deliberate degrade: Rust treats empty peer_mac as
+// UNRESOLVED (FabricSkipReason::UnresolvedPeerMac) rather than forwarding
+// to a MAC the peer may not own.
+func buildFabricPeerMAC(overlayIfindex, parentIfindex int, peer string, localMAC, expected net.HardwareAddr) string {
 	ip := net.ParseIP(peer)
 	if ip == nil {
 		return ""
@@ -411,6 +570,13 @@ func buildFabricPeerMAC(overlayIfindex, parentIfindex int, peer string) string {
 		}
 		if mac := selectFabricPeerMAC(neighs, ip); mac != nil {
 			return mac.String()
+		}
+	}
+	if parentIfindex > 0 && !ip.IsLinkLocalUnicast() {
+		if v6Neighs, err := fabricNeighListFn(parentIfindex, netlink.FAMILY_V6); err == nil {
+			if mac, _, _, _ := SelectFabricPeerLinkLocalMAC(v6Neighs, localMAC, expected); mac != nil {
+				return mac.String()
+			}
 		}
 	}
 	return ""
