@@ -168,11 +168,12 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 		// match-any shortcut applies only when NO name poisoned: an
 		// authored-but-unusable name must stay fail-closed (never-match)
 		// rather than be silently dropped beside a wildcard it was
-		// unioned with — poison wins over wildcard. A name that
-		// resolves empty without poisoning (present-empty fail-mode-drop
-		// feed, zero-answer DNS entry) keeps the never-match sentinel
-		// via appendNATAddressNamesPoisoned, so it also matches nothing
-		// unless a real wildcard token was authored.
+		// unioned with — poison wins over wildcard. Poisoning includes
+		// a dns-name whose resolution yielded zero answers (empty
+		// UsableValues poisons the closure), so `any` beside such a
+		// name stays never-match. The only empty-without-poison shape
+		// is a present-empty fail-mode-drop feed, which keeps the
+		// never-match sentinel via appendNATAddressNamesPoisoned.
 		authoredConstrained := len(rs.SourceAddresses) > 0 || len(rs.SourceAddressNames) > 0
 		wildcardAuthored := false
 		sourceAddrs := make([]string, 0, len(rs.SourceAddresses))
