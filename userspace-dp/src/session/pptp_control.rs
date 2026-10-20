@@ -111,6 +111,8 @@ struct InboxInner {
     /// PPTP installs refused by full worker queues.
     pending_call_installs: Vec<PendingCallInstall>,
     last_call_install_retry_ns: u64,
+    /// #15966r: true once the current disabled period has purged.
+    disabled_purged: bool,
 }
 
 /// A control close still waiting for a bounded worker queue or local table.
@@ -215,20 +217,32 @@ impl PptpControlInbox {
         }
     }
 
-    /// Whether a disabled-ALG purge is due (at most once per drain interval,
-    /// so the worker loop does not lock this inbox on every poll).
-    pub(crate) fn purge_due(&self, now_ns: u64) -> bool {
+    /// #15966r: purge exactly once per disabled period. The first disabled
+    /// poll purges regardless of drain-interval timing (a rapid
+    /// disable/re-enable must not resurrect pre-disable segments); later
+    /// disabled polls are a single flag check under the same lock, and
+    /// re-enable rearms it. Returns true when this call purged.
+    pub(crate) fn purge_once_per_disable(&self) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if inner.last_drain_ns != 0
-            && now_ns.saturating_sub(inner.last_drain_ns) < CONTROL_DRAIN_INTERVAL_NS
-        {
+        if inner.disabled_purged {
             return false;
         }
-        inner.last_drain_ns = now_ns;
+        inner.disabled_purged = true;
+        inner.pending.clear();
+        inner.pending_call_installs.clear();
         true
+    }
+
+    /// Rearm the disabled purge on re-enable.
+    pub(crate) fn note_enabled(&self) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.disabled_purged = false;
     }
 
     /// #15950: drop every buffered segment (ALG disabled). Returns count.

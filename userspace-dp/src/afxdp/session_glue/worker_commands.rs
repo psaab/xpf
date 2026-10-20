@@ -615,17 +615,13 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let mut deferred = Vec::new();
                         for (index, item) in items.iter().enumerate() {
-                            // #15966: a worker that does not own the TCP/1723
-                            // session still holds broadcast PPTP associations
-                            // for its channel; forget them even when the
-                            // policy item does not apply locally.
-                            if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(&item.key) {
-                                sessions.pptp_mut().forget_control_channel(ch);
-                                if !deleted_pptp_control_channels.contains(&ch) {
-                                    deleted_pptp_control_channels.push(ch);
-                                }
-                            }
-                            if commands::handle_remove_policy_item(
+                            // #15966r: forget broadcast PPTP associations only
+                            // AFTER the identity-conditional policy delete
+                            // applies. A stale captured session-id (or a
+                            // companion refusal) returns false and must leave
+                            // a replacement channel's calls and buffered
+                            // segments untouched.
+                            let applied = commands::handle_remove_policy_item(
                                 sessions,
                                 session_map,
                                 forwarding,
@@ -638,8 +634,15 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                                 &mut deleted_synced_keys,
                                 worker_id,
                                 &mut deferred,
-                            ) {
+                            );
+                            if applied {
                                 applied_slot[index] = true;
+                                if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(&item.key) {
+                                    sessions.pptp_mut().forget_control_channel(ch);
+                                    if !deleted_pptp_control_channels.contains(&ch) {
+                                        deleted_pptp_control_channels.push(ch);
+                                    }
+                                }
                             }
                         }
                         intents
