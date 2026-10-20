@@ -14225,3 +14225,27 @@ fn stop_preserving_retires_holders_on_preserved_allocator_15966r() {
     assert!(!alloc.debug_is_port_occupied(0, 20000), "holder retirement through preserving stop must free the preserved allocator's port");
     assert!(coordinator.workers.records().is_empty());
 }
+
+#[test]
+fn coordinator_recovery_publish_advances_pptp_epoch_15966r7() {
+    use crate::session::pptp_control::PendingControlSegment;
+    let mut coord = Coordinator::new();
+    // Candidate publish (enabled by default): seeds epoch.
+    coord.publish_runtime_view();
+    let candidate_epoch = coord.forwarding.pptp_epoch;
+    let view_epoch = coord.ha.runtime.load().forwarding().pptp_epoch;
+    assert_eq!(view_epoch, candidate_epoch, "published view must carry the stamped epoch");
+    // Failed bring-up teardown + recovery publish must advance the stamp.
+    coord.stop_inner(false);
+    coord.publish_runtime_view();
+    let recovery_epoch = coord.forwarding.pptp_epoch;
+    assert!(recovery_epoch > candidate_epoch, "stop_inner must advance pptp epoch: candidate {candidate_epoch}, recovery {recovery_epoch}");
+    assert_eq!(coord.ha.runtime.load().forwarding().pptp_epoch, recovery_epoch);
+    // Fresh reply captured under the recovery view installs at drain.
+    let inbox = crate::session::pptp_control::PptpControlInbox::default();
+    assert!(inbox.push(PendingControlSegment { epoch: recovery_epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 1, payload: vec![1] }));
+    assert_eq!(inbox.take_pending_in_domain(1_000_000_000, recovery_epoch).len(), 1, "fresh reply under recovery epoch must survive (RED if stop_inner epoch ops removed)");
+    // Candidate-epoch entry still drops under recovery.
+    assert!(inbox.push(PendingControlSegment { epoch: candidate_epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 2, payload: vec![2] }));
+    assert_eq!(inbox.take_pending_in_domain(2_000_000_000, recovery_epoch).len(), 0);
+}
