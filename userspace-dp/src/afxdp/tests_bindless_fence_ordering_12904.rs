@@ -8,11 +8,11 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
-use crate::SourceNATRuleSnapshot;
 use crate::protocol::IpsecBindlessSelectorSnapshot;
+use crate::SourceNATRuleSnapshot;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// #12904 publication fixture: lan (reth1.0/ifindex 24) → wan
 /// (reth0.80/ifindex 12, default route over a reachable neighbor),
@@ -165,6 +165,11 @@ fn fenced_miss_publishes_no_session_and_holds_no_pool_identity_12904() {
             case.label,
         );
         assert_eq!(
+            batch.transit_ipsec_fence_drops, 1,
+            "{}: #15941 fence site must increment the named counter",
+            case.label,
+        );
+        assert_eq!(
             sessions.len(),
             0,
             "{}: a fenced miss must not install the forward/reverse session pair \
@@ -244,6 +249,10 @@ fn fenced_noroute_frame_is_never_delegated_to_kernel_slow_path_12904() {
     assert_eq!(
         dbg.policy_deny, 1,
         "the selector-fence refusal of the NoRoute delegation must be accounted",
+    );
+    assert_eq!(
+        batch.transit_ipsec_fence_drops, 1,
+        "#15941 NoRoute fence site must increment the named counter",
     );
     assert_eq!(
         binding.live.slow_path_drops.load(Ordering::Relaxed),

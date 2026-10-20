@@ -8176,6 +8176,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 telemetry.counters.touched = true;
                                 continue;
                             }
+                            EmbeddedIcmpReversal::OutputFilterDropped => {
+                                telemetry.counters.record_transit_output_filter_drop();
+                                record_exception(
+                                    worker_ctx.recent_exceptions,
+                                    worker_ctx.ident,
+                                    "transit_output_filter_drop",
+                                    desc.len,
+                                    Some(meta),
+                                    None,
+                                    worker_ctx.forwarding,
+                                );
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                             EmbeddedIcmpReversal::Dropped => {
                                 telemetry.counters.touched = true;
                                 binding.scratch.scratch_recycle.push(desc.addr);
@@ -8292,6 +8306,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     continue;
                                 }
                                 telemetry.counters.touched = true;
+                                continue;
+                            }
+                            EmbeddedIcmpReversal::OutputFilterDropped => {
+                                telemetry.counters.record_transit_output_filter_drop();
+                                record_exception(
+                                    worker_ctx.recent_exceptions,
+                                    worker_ctx.ident,
+                                    "transit_output_filter_drop",
+                                    desc.len,
+                                    Some(meta),
+                                    None,
+                                    worker_ctx.forwarding,
+                                );
+                                binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
                             EmbeddedIcmpReversal::Dropped => {

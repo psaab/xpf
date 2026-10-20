@@ -220,6 +220,10 @@ fn non_host_l2_group_unicast_ip_drops_on_cached_hit_10691() {
         "the group ACK must reach the established-flow cache hit path"
     );
     assert_eq!(
+        group_batch.transit_l2_group_drops, 1,
+        "#15941 cached-hit L2 site must increment the named counter"
+    );
+    assert_eq!(
         group_dbg.tx, 0,
         "flow-cache hit must not forward non-PACKET_HOST"
     );
@@ -266,6 +270,10 @@ fn non_host_l2_group_unicast_ip_drops_on_session_hit_10691() {
     );
     assert_eq!(group_batch.validated_packets, 1);
     assert_eq!(group_batch.dst_mac_dropped, 0);
+    assert_eq!(
+        group_batch.transit_l2_group_drops, 1,
+        "#15941 session-hit L2 site must increment the named counter"
+    );
     assert_eq!(
         group_dbg.tx, 0,
         "session hit must not forward non-PACKET_HOST"

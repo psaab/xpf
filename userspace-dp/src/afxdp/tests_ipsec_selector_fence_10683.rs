@@ -46,20 +46,23 @@ fn selector_meta_10683(src: Ipv4Addr, dst: Ipv4Addr, frame_len: usize) -> Usersp
 fn poll_drops_bindless_selector_with_no_sa_and_preserves_precision_10683() {
     let dst = Ipv4Addr::new(172, 16, 80, 200);
     for (label, src, want_forward, want_deny) in [
-        ("matching-selector-no-sa", Ipv4Addr::new(10, 0, 61, 101), 0, 1),
-        ("outside-local-selector", Ipv4Addr::new(10, 0, 62, 101), 1, 0),
+        (
+            "matching-selector-no-sa",
+            Ipv4Addr::new(10, 0, 61, 101),
+            0,
+            1,
+        ),
+        (
+            "outside-local-selector",
+            Ipv4Addr::new(10, 0, 62, 101),
+            1,
+            0,
+        ),
     ] {
         let forwarding = bindless_selector_forwarding_10683();
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
         binding.interface = Arc::<str>::from("reth1.0");
-        let frame = build_txn_tcp_syn_frame_v4(
-            src,
-            dst,
-            33333,
-            443,
-            TCP_FLAG_SYN,
-            TEST_LAN_MAC,
-        );
+        let frame = build_txn_tcp_syn_frame_v4(src, dst, 33333, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
         let meta = selector_meta_10683(src, dst, frame.len());
         let mut sessions = SessionTable::new();
         let ha_state = BTreeMap::new();
@@ -76,6 +79,13 @@ fn poll_drops_bindless_selector_with_no_sa_and_preserves_precision_10683() {
         assert_eq!(dbg.rx, 1, "{label}: descriptor must reach poll");
         assert_eq!(batch.validated_packets, 1, "{label}: packet must validate");
         assert_eq!(dbg.forward, want_forward, "{label}: forward count");
-        assert_eq!(dbg.policy_deny, want_deny, "{label}: selector-fence drop count");
+        assert_eq!(
+            dbg.policy_deny, want_deny,
+            "{label}: selector-fence drop count"
+        );
+        assert_eq!(
+            batch.transit_ipsec_fence_drops, want_deny as u64,
+            "{label}: #15941 fence counter must track the drop"
+        );
     }
 }

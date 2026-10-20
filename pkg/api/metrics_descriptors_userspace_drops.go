@@ -320,8 +320,9 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 		"xpf_userspace_transit_output_filter_drops_total",
 		"Transit forwards dropped by an egress output firewall filter "+
 			"terminal discard/reject or three-color policer (cos.drop at "+
-			"the forward-request build, flow-cache fallback, or deferred "+
-			"neighbor retry). Mirrors the generated-reply "+
+			"the forward-request build, cached-descriptor drop, reversed "+
+			"embedded-ICMP egress classification, or deferred neighbor "+
+			"retry). Mirrors the generated-reply "+
 			"*_output_filter_drops family for transit. Summed across "+
 			"bindings and emitted unconditionally (#15941).",
 		nil, nil,

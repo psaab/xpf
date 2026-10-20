@@ -59,6 +59,11 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// descriptor and stop processing it (fail-closed: never generate an ICMP
     /// error in response to an ICMP error).
     Dropped,
+    /// #15941: like `Dropped`, but the terminal verdict was specifically
+    /// the egress output-filter/policer `cos.drop`, so the caller counts
+    /// it as a transit output-filter drop (plus ring attribution) instead
+    /// of folding it into the silent `Dropped` recycle.
+    OutputFilterDropped,
     /// No matching session / unbuildable reversed frame. The caller falls
     /// through to normal flowless enforcement, unchanged.
     NotHandled,
@@ -411,7 +416,7 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
         // #10667: refund the pre-policy charge — a CoS-dropped error is
         // never delivered.
         sessions.refund_icmp_error_not_delivered(budget_key, now_ns);
-        return EmbeddedIcmpReversal::Dropped;
+        return EmbeddedIcmpReversal::OutputFilterDropped;
     }
     let target_binding_index = worker_ctx.binding_lookup.target_index(
         binding_index,

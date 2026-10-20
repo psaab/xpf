@@ -1090,8 +1090,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             // local enqueue fails — drop it fail-closed AND count it on
             // `fabric_redirect_unsendable_drops`, the same observability
             // invariant as the desc-frame no-binding / build-failure
-            // paths. (Non-FabricRedirect Prebuilt drops keep their prior
-            // silent recycle+continue.)
+            // paths. (Non-FabricRedirect Prebuilt no-binding drops count as
+            // missing-egress-binding below.)
             let prebuilt_is_fabric_redirect =
                 request.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
             let Some(target_binding) = resolve_pending_forward_target_binding(
@@ -1112,6 +1112,17 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                         recent_exceptions,
                         ingress_ident,
                         "fabric_redirect_no_binding",
+                        request.desc.len,
+                        Some(request.meta.into()),
+                        None,
+                        forwarding,
+                    );
+                } else {
+                    counters.record_no_egress_binding_drop();
+                    record_exception(
+                        recent_exceptions,
+                        ingress_ident,
+                        "missing_egress_binding",
                         request.desc.len,
                         Some(request.meta.into()),
                         None,
@@ -1218,6 +1229,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 {
                     frame
                 } else {
+                    counters.record_forward_build_failure();
+                    record_exception(
+                        recent_exceptions,
+                        ingress_ident,
+                        "forward_live_slice_failed",
+                        request.desc.len,
+                        Some(request.meta.into()),
+                        None,
+                        forwarding,
+                    );
                     recycle_ingress_frame(ingress_binding, source_offset, now_ns);
                     continue;
                 }

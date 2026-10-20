@@ -505,7 +505,16 @@ pub(super) fn retry_pending_neigh(
                 )
             })
         {
-            counters.touched = true;
+            counters.record_transit_source_martian_drop();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "transit_source_martian",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
@@ -665,7 +674,16 @@ pub(super) fn retry_pending_neigh(
                 )
             })
         {
-            counters.touched = true;
+            counters.record_transit_ipsec_fence_drop();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "transit_ipsec_selector_fence",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
@@ -909,6 +927,16 @@ pub(super) fn retry_pending_neigh(
             ingress_queue,
             target_ifindex,
         ) else {
+            counters.record_no_egress_binding_drop();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "missing_egress_binding",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };

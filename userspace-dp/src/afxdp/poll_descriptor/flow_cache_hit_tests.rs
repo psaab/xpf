@@ -5289,3 +5289,41 @@ fn transit_cross_binding_foreign_umem_keeps_pending_forward_14945() {
     );
     assert_eq!(run.target_tx_counters.pending_in_place_tx_packets, 0);
 }
+
+/// #15941 revert-guard: the cached-descriptor output-filter drop
+/// (`flow_cache_hit.rs` cached drop arm) must increment
+/// `transit_output_filter_drops`. A pure `then discard` (reject=false)
+/// keeps it off the reject-reply path so the counter is the only trace.
+#[test]
+fn cached_output_filter_discard_counts_transit_drop_15941() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_udp_v4_frame();
+    let meta = udp_test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.key = udp_test_key();
+    entry.descriptor.tx_selection.drop = true;
+    entry.descriptor.tx_selection.reject = false;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            flow: Some(SessionFlow {
+                src_ip: udp_test_key().src_ip,
+                dst_ip: udp_test_key().dst_ip,
+                forward_key: udp_test_key(),
+            }),
+            ..StageSeed::default()
+        },
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1, "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(
+        run.counters.transit_output_filter_drops, 1,
+        "#15941 cached drop site must increment the named counter"
+    );
+    assert!(run.scratch.scratch_forwards.is_empty());
+    assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
+}

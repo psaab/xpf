@@ -17,30 +17,35 @@
 use super::*;
 use crate::afxdp::event_emit::RT_FLOW_ACTION_REJECT;
 use crate::afxdp::test_fixtures::*;
-use crate::{FirewallFilterSnapshot, FirewallTermSnapshot};
 use crate::event_stream::codec::DataplaneEventKind;
 use crate::session::SessionKey;
 use crate::session::TunnelDiscriminator;
+use crate::{FirewallFilterSnapshot, FirewallTermSnapshot};
 
 const EGRESS_IFINDEX: i32 = 80;
 const NEXT_HOP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 9));
 
 /// The buffered packet's decision: unresolved next hop, egress 80.
 fn deferred_decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: EGRESS_IFINDEX,
-        tx_ifindex: 22,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(NEXT_HOP),
-        neighbor_mac: None,
-        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: EGRESS_IFINDEX,
+            tx_ifindex: 22,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(NEXT_HOP),
+            neighbor_mac: None,
+            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// A ForwardingState whose EGRESS interface (ifindex 80) carries an output
@@ -85,9 +90,11 @@ fn flush_one(
     forwarding: &ForwardingState,
     with_flow_key: bool,
 ) -> (
-    usize,                                   // reject replies enqueued
-    u64,                                     // counters.filter_reject_sent
+    usize, // reject replies enqueued
+    u64,   // counters.filter_reject_sent
     std::sync::mpsc::Receiver<crate::event_stream::EventFrame>,
+    u64,         // #15941 counters.transit_output_filter_drops
+    Vec<String>, // #15941 exception-ring reasons
 ) {
     let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0)];
     // A minimal but VALID Ethernet/IPv4/TCP SYN. The RST builder reflects real
@@ -261,7 +268,19 @@ fn flush_one(
     );
 
     let replies = binding.tx_pipeline.pending_tx_local.len();
-    (replies, counters.filter_reject_sent, rx)
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    (
+        replies,
+        counters.filter_reject_sent,
+        rx,
+        counters.transit_output_filter_drops,
+        reasons,
+    )
 }
 /// A 1500-byte IPv4/TCP datagram with DF set, parked before its next hop
 /// resolves. The output filter and target binding are optional so the same
@@ -544,7 +563,6 @@ fn deferred_neighbor_missing_egress_binding_skips_ptb_11410() {
     );
 }
 
-
 /// An output-filter `then reject` matched at flush time must synthesize the
 /// active reply, exactly as the immediate forward path does.
 ///
@@ -554,7 +572,7 @@ fn deferred_neighbor_missing_egress_binding_skips_ptb_11410() {
 #[test]
 fn deferred_flush_reject_sends_reply_7176() {
     let forwarding = forwarding_with_output_filter("reject", false);
-    let (replies, reject_sent, _rx) = flush_one(&forwarding, true);
+    let (replies, reject_sent, _rx, _drops, _reasons) = flush_one(&forwarding, true);
     assert_eq!(
         replies, 1,
         "a deferred `then reject` must enqueue its active reply; \
@@ -564,6 +582,12 @@ fn deferred_flush_reject_sends_reply_7176() {
         reject_sent, 1,
         "the synthesized reply must be metered as a FILTER reject"
     );
+    // #15941 revert-guard: deferred output-filter drop counts + rings here.
+    assert_eq!(
+        _drops, 1,
+        "#15941 deferred retry must count the output-filter drop"
+    );
+    assert_eq!(_reasons, vec!["transit_output_filter_drop".to_string()]);
 }
 
 /// The reject must be isolated to `then reject`: a `then discard` term drops
@@ -572,7 +596,7 @@ fn deferred_flush_reject_sends_reply_7176() {
 #[test]
 fn deferred_flush_discard_stays_silent_7176() {
     let forwarding = forwarding_with_output_filter("discard", false);
-    let (replies, reject_sent, _rx) = flush_one(&forwarding, true);
+    let (replies, reject_sent, _rx, _drops, _reasons) = flush_one(&forwarding, true);
     assert_eq!(
         replies, 0,
         "a deferred `then discard` must stay silent — only `then reject` replies"
@@ -588,7 +612,7 @@ fn deferred_flush_discard_stays_silent_7176() {
 #[test]
 fn deferred_flush_emits_filter_log_event_7176() {
     let forwarding = forwarding_with_output_filter("reject", true);
-    let (_replies, _reject_sent, rx) = flush_one(&forwarding, true);
+    let (_replies, _reject_sent, rx, _drops, _reasons) = flush_one(&forwarding, true);
     let event = rx
         .try_recv()
         .expect(
@@ -612,14 +636,13 @@ fn deferred_flush_emits_filter_log_event_7176() {
 #[test]
 fn deferred_flush_flowless_reject_stays_silent_7176() {
     let forwarding = forwarding_with_output_filter("reject", false);
-    let (replies, reject_sent, _rx) = flush_one(&forwarding, false);
+    let (replies, reject_sent, _rx, _drops, _reasons) = flush_one(&forwarding, false);
     assert_eq!(
         replies, 0,
         "a flowless deferred packet must not synthesize a reject reply"
     );
     assert_eq!(reject_sent, 0, "no reply means no reject metered");
 }
-
 
 /// A packet buffered before a connected directed-broadcast address becomes
 /// classified as a transit martian must be dropped when its neighbor resolves.
@@ -659,8 +682,8 @@ fn deferred_neighbor_retry_rechecks_transit_source_martian_11074() {
     frame.extend_from_slice(&12345u16.to_be_bytes());
     frame.extend_from_slice(&443u16.to_be_bytes());
     frame.extend_from_slice(&[
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x02, 0xfa, 0xf0, 0x00, 0x00,
-        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x02, 0xfa, 0xf0, 0x00, 0x00, 0x00,
+        0x00,
     ]);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -795,7 +818,10 @@ fn deferred_neighbor_retry_rechecks_transit_source_martian_11074() {
         &mut dbg,
     );
 
-    assert!(bindings[0].pending_neigh.is_empty(), "resolved pending packet is consumed");
+    assert!(
+        bindings[0].pending_neigh.is_empty(),
+        "resolved pending packet is consumed"
+    );
     assert!(
         bindings[1].tx_pipeline.pending_tx_prepared.is_empty()
             && bindings[1].tx_pipeline.pending_tx_local.is_empty(),
@@ -806,4 +832,14 @@ fn deferred_neighbor_retry_rechecks_transit_source_martian_11074() {
         Some(&0),
         "the rejected buffered frame must be recycled"
     );
+    // #15941 revert-guard: the deferred retry source-martian recheck must
+    // count + ring, not merely touch/recycle.
+    assert_eq!(counters.transit_source_martian_drops, 1);
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    assert_eq!(reasons, vec!["transit_source_martian"]);
 }

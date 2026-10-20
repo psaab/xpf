@@ -5,7 +5,7 @@
 // verbatim; shared test-support helpers live in afxdp/tests_support.rs.
 #![allow(unused_imports)]
 
-use super::poll_descriptor::{EmbeddedIcmpReversal, try_reverse_embedded_icmp_error};
+use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
@@ -1643,7 +1643,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
-            nat_scope_ifindex: None,
+                nat_scope_ifindex: None,
             },
             crate::session::SessionOrigin::ReverseFlow,
             123_000_000_000,
@@ -3910,6 +3910,12 @@ fn n14122_attach_wan_output_filter(snapshot: &mut ConfigSnapshot, term: Firewall
 /// egress output filter on the WAN unit. Returns (forwards, recycles).
 /// Zone policy permits LAN->WAN so only the output filter can drop.
 fn n14122_run_v6_to_v4(term: Option<FirewallTermSnapshot>) -> (usize, usize) {
+    n14122_run_v6_to_v4_counted(term).0
+}
+
+fn n14122_run_v6_to_v4_counted(
+    term: Option<FirewallTermSnapshot>,
+) -> ((usize, usize), crate::afxdp::BatchCounters) {
     let lan_router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
     let frame = build_icmpv6_te_frame_with_mac(
         lan_router,
@@ -3945,7 +3951,7 @@ fn n14122_run_v6_to_v4(term: Option<FirewallTermSnapshot>) -> (usize, usize) {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    let _ = txn_run_descriptor_checked(
+    let (batch, _dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -3955,8 +3961,11 @@ fn n14122_run_v6_to_v4(term: Option<FirewallTermSnapshot>) -> (usize, usize) {
         true,
     );
     (
-        binding.scratch.scratch_forwards.len(),
-        binding.scratch.scratch_recycle.len(),
+        (
+            binding.scratch.scratch_forwards.len(),
+            binding.scratch.scratch_recycle.len(),
+        ),
+        batch,
     )
 }
 
@@ -5293,7 +5302,7 @@ fn poll_descriptor_snat_outbound_icmp_error_fabric_redirect_judges_pre_snat_src_
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
-            nat_scope_ifindex: None,
+                nat_scope_ifindex: None,
             },
             crate::session::SessionOrigin::ReverseFlow,
             123_000_000_000,
@@ -6954,8 +6963,8 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
             family: "inet".to_string(),
             address: "172.16.50.8/24".to_string(),
             scope: 0,
-        ..Default::default()
-    }],
+            ..Default::default()
+        }],
         ..Default::default()
     });
     snapshot.neighbors = vec![NeighborSnapshot {
@@ -7626,8 +7635,8 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
         family: "inet".to_string(),
         address: "10.0.61.1/24".to_string(),
         scope: 0,
-    ..Default::default()
-}];
+        ..Default::default()
+    }];
     snapshot.flow.lo0_filter_input_v4 = "protect-re".to_string();
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "protect-re".to_string(),
@@ -7821,8 +7830,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         family: "inet".to_string(),
         address: "10.0.61.1/24".to_string(),
         scope: 0,
-    ..Default::default()
-}];
+        ..Default::default()
+    }];
     snapshot.flow.lo0_filter_input_v4 = "protect-re".to_string();
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "protect-re".to_string(),
@@ -8060,12 +8069,10 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
     assert_eq!(sessions.len(), 0);
     assert!(shared_sessions.lock().expect("shared sessions").is_empty());
     assert!(shared_nat_sessions.lock().expect("shared nat").is_empty());
-    assert!(
-        shared_forward_wire_sessions
-            .lock()
-            .expect("shared forward wire")
-            .is_empty()
-    );
+    assert!(shared_forward_wire_sessions
+        .lock()
+        .expect("shared forward wire")
+        .is_empty());
     let deltas = sessions.drain_deltas(16);
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
@@ -8866,8 +8873,8 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
             family: "inet".to_string(),
             address: "10.255.0.1/30".to_string(),
             scope: 0,
-        ..Default::default()
-    }],
+            ..Default::default()
+        }],
         ..Default::default()
     });
     snapshot.tunnel_endpoints = vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
@@ -9194,8 +9201,8 @@ fn gre_decapped_nat64_icmp_error_reads_the_inner_frame_8271() {
             family: "inet".to_string(),
             address: "10.255.0.1/30".to_string(),
             scope: 0,
-        ..Default::default()
-    }],
+            ..Default::default()
+        }],
         ..Default::default()
     });
     snapshot.tunnel_endpoints = vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
@@ -14245,7 +14252,7 @@ fn n14628_install_snat_session_both_halves(
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
-            nat_scope_ifindex: None,
+                nat_scope_ifindex: None,
             },
             123_000_000_000,
             PROTO_TCP,
@@ -14291,7 +14298,7 @@ fn n14628_install_snat_session_both_halves(
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
-            nat_scope_ifindex: None,
+                nat_scope_ifindex: None,
             },
             crate::session::SessionOrigin::ReverseFlow,
             123_000_000_000,
@@ -14712,4 +14719,37 @@ fn poll_descriptor_nptv6_outbound_icmp_error_renat_with_reverse_half_14628() {
         "NPTv6 has no port rewrite: embedded dst port stays the original"
     );
     assert!(fwd.flow_key.is_none());
+}
+
+/// #15941 revert-guard: the reversed embedded-ICMP egress output-filter
+/// drop must increment `transit_output_filter_drops` (previously the
+/// caller folded it into the silent `Dropped` recycle).
+#[test]
+fn nat64_embedded_error_output_drop_counts_transit_15941() {
+    let matching = FirewallTermSnapshot {
+        name: "drop-translated-te".to_string(),
+        action: "discard".to_string(),
+        protocols: vec!["icmp".to_string()],
+        source_addresses: vec!["172.16.80.50/32".to_string()],
+        destination_addresses: vec!["8.8.8.8/32".to_string()],
+        icmp_types: vec![11],
+        icmp_codes: vec![0],
+        ..Default::default()
+    };
+    let ((forwards, recycles), batch) = n14122_run_v6_to_v4_counted(Some(matching));
+    assert_eq!(
+        (forwards, recycles),
+        (0, 1),
+        "fixture must drop at egress classification"
+    );
+    assert_eq!(
+        batch.transit_output_filter_drops, 1,
+        "#15941 embedded output-filter drop must increment the named counter"
+    );
+    let ((forwards, _), batch) = n14122_run_v6_to_v4_counted(None);
+    assert_eq!(forwards, 1, "control must queue without the filter");
+    assert_eq!(
+        batch.transit_output_filter_drops, 0,
+        "control must not count"
+    );
 }

@@ -1007,12 +1007,6 @@ pub(super) fn stage_flow_cache_hit(
                     telemetry.dbg.tx += 1;
                     scratch.scratch_forwards.push(request);
                     recycle_now = false;
-                } else {
-                    // #15941: the fallback builder returned None only on a
-                    // cos.drop verdict (its sole None return); the cached
-                    // descriptor was non-dropping, so this is a re-resolved
-                    // output-filter/policer drop.
-                    telemetry.counters.record_transit_output_filter_drop();
                 }
             }
         }

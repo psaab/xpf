@@ -17,10 +17,10 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
-use crate::NeighborSnapshot;
 use crate::protocol::IpsecBindlessSelectorSnapshot;
 use crate::session::{SessionMetadata, SessionOrigin};
 use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
+use crate::NeighborSnapshot;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 const TCP_FLAG_ACK: u8 = crate::tcp_flags::TCP_ACK;
@@ -354,6 +354,10 @@ fn session_hit_martian_source_drops_before_side_effects_13638() {
         "pre-session guard runs before hit accounting"
     );
     assert_eq!(dbg.tx, 0, "martian session hit must not transmit");
+    assert_eq!(
+        batch.transit_source_martian_drops, 1,
+        "#15941 session-hit source site must increment the named counter"
+    );
     assert_eq!(dbg.forward, 0);
     assert!(binding.scratch.scratch_forwards.is_empty());
     assert_eq!(sessions.len(), 1, "drop must not remove the session");
@@ -469,6 +473,10 @@ fn session_hit_bindless_selector_fence_drops_before_side_effects_13638() {
         "selector-fence drop must be charged as policy deny"
     );
     assert_eq!(dbg.tx, 0, "fenced session hit must not transmit");
+    assert_eq!(
+        batch.transit_ipsec_fence_drops, 1,
+        "#15941 session-hit fence site must increment the named counter"
+    );
     assert_eq!(dbg.forward, 0);
     assert!(binding.scratch.scratch_forwards.is_empty());
     assert_eq!(sessions.len(), 1, "fence drop must not remove the session");

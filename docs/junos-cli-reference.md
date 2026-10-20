@@ -630,8 +630,9 @@ From zone: guest, To zone: lan
         from ordinary route misses and correlate them with filter-`accept` logs.
     - **Transit terminal drops** (#15941): `transit_output_filter_drops`
       counts transit forwards dropped by an egress output filter/policer
-      (`cos.drop` at the forward-request build, flow-cache fallback, or
-      deferred neighbor retry) — the transit mirror of the generated-reply
+      (`cos.drop` at the forward-request build, the cached-descriptor
+      drop, a reversed embedded-ICMP egress classification, or deferred
+      neighbor retry) — the transit mirror of the generated-reply
       `*_output_filter_drops` family. `transit_source_martian_drops` counts
       #11074 source-class refusals, split from the destination
       `martian_dropped`; `transit_ipsec_fence_drops` counts #10683 bindless

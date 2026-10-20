@@ -22,8 +22,8 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
-use crate::SourceNATRuleSnapshot;
 use crate::protocol::IpsecBindlessSelectorSnapshot;
+use crate::SourceNATRuleSnapshot;
 use std::net::Ipv6Addr;
 use std::sync::atomic::Ordering;
 
@@ -312,6 +312,10 @@ fn fenced_and_permitted_missing_neighbor_probe_gate_14661() {
         "fenced fixture must take the MissingNeighbor arm"
     );
     assert_eq!(dbg.policy_deny, 1, "final fence drop must be accounted");
+    assert_eq!(
+        _b.transit_ipsec_fence_drops, 1,
+        "#15941 missing-neighbor fence site must increment the named counter"
+    );
     assert_eq!(
         probes, 0,
         "#14661: a fence-covered packet must not emit a kernel probe"

@@ -3205,3 +3205,77 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
          true the mechanism above changes and this cell must be re-derived"
     );
 }
+
+/// #15941 revert-guard: a slow-path (descriptor poll) forward whose egress
+/// output filter discards it must increment BOTH named counters and ring
+/// `transit_output_filter_drop`. This drives the full poll descriptor, so
+/// deleting the poll build-None counter/ring site turns this RED (the
+/// direct builder cell alone cannot).
+#[test]
+fn poll_output_filter_build_none_counts_and_rings_15941() {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules.clear();
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 12 {
+            iface.filter_output_v4 = "wan-drop-15941".to_string();
+        }
+    }
+    snapshot.filters.push(crate::FirewallFilterSnapshot {
+        name: "wan-drop-15941".to_string(),
+        family: "inet".to_string(),
+        terms: vec![crate::FirewallTermSnapshot {
+            name: "drop-web".to_string(),
+            protocols: vec!["tcp".to_string()],
+            destination_ports: vec!["443".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let src = Ipv4Addr::new(10, 0, 61, 100);
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    let frame = build_txn_tcp_syn_frame_v4(src, dst, 40000, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
+    let mut meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    meta.flow_src_addr[..4].copy_from_slice(&src.octets());
+    meta.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+    meta.flow_src_port = 40000;
+    meta.flow_dst_port = 443;
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "packet must reach the poll forward build"
+    );
+    assert_eq!(dbg.tx, 0, "output-discarded forward must not transmit");
+    assert_eq!(
+        batch.transit_output_filter_drops, 1,
+        "#15941 poll build-None must count the output-filter drop"
+    );
+    assert_eq!(
+        batch.forward_build_failures, 1,
+        "#15941 poll build-None must count the build failure"
+    );
+}
