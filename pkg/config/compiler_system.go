@@ -32,37 +32,146 @@ func systemAAARefusal10831(leaf string) string {
 		leaf)
 }
 
-func systemAAAWarningsOrError10831(systemNode *Node, lenient bool) ([]string, error) {
+// systemAAARefusals15711 collects every unimplemented AAA leaf (#10831)
+// authored as a DIRECT `system` statement, in deterministic source order,
+// across every AST shape the parsers produce (#15711):
+//
+//   - braced child: `system { radius-server 192.0.2.10 { ... } }`
+//   - brace-elided on the system node: `system radius-server 192.0.2.10 ...;`
+//   - packed behind a modelled sibling on the system line:
+//     `system host-name fw1 authentication-order [ tacplus password ];`
+//     (one node, Keys=[system host-name fw1 authentication-order ...])
+//   - packed behind a modelled sibling inside the block:
+//     `system { no-redirects tacplus-server 192.0.2.20; }`
+//     (one child, Keys=[no-redirects tacplus-server 192.0.2.20])
+//   - nested flat-set runs: `set system host-name fw1 authentication-order
+//     tacplus` nests the AAA leaf under the preceding leaf's node, and
+//     `set system no-redirects tacplus-server 192.0.2.20` likewise.
+//
+// The scan is schema-driven for modelled siblings: a token is judged as a
+// statement head only at a statement position, reached by consuming each
+// preceding modelled `system` leaf with its declared arity (multi leaves
+// absorb until the next modelled sibling). A VALUE that happens to spell
+// an AAA keyword — `host-name radius-server`, a `domain-search` entry,
+// `login class radius-server` / `login user radius-server` (deeper than
+// the direct `system` level) — is therefore never misread as a statement.
+// Quoted tokens are values, never keywords. A token the `system` schema
+// does not model stops the packed scan (do-not-guess, the packedBodyChildren
+// posture): the schema gate / open-world handling owns unmodelled tokens,
+// and a packed AAA leaf behind an unmodelled token cannot be located
+// without guessing its arity. The nested-run leg descends only through a
+// modelled leaf that declares no children (a flat-set chain link); a
+// modelled CONTAINER's children are its body, never judged here.
+func systemAAARefusals15711(systemNode *Node) []string {
 	if systemNode == nil {
+		return nil
+	}
+	schema := systemSchema9792()
+	var leaves []string
+	seen := map[string]bool{}
+	report := func(tok string) {
+		if _, unsupported := unimplementedSystemAAALeaves10831[tok]; !unsupported || seen[tok] {
+			return
+		}
+		seen[tok] = true
+		leaves = append(leaves, tok)
+	}
+	// Packed statements carried on a node's own Keys, starting at index
+	// `start` (1 for the `system` node itself, 0 for a direct child whose
+	// head is Keys[0]). Consumes modelled `system` statements in order.
+	scanPacked := func(n *Node, start int) {
+		keys := n.Keys
+		for i := start; i < len(keys); {
+			tok := keys[i]
+			if n.KeyQuoted(i) || isApplyStatementKeyword(tok) {
+				return
+			}
+			if _, unsupported := unimplementedSystemAAALeaves10831[tok]; unsupported {
+				report(tok)
+				return
+			}
+			leaf := resolveSchemaChild(schema, tok)
+			if leaf == nil {
+				return
+			}
+			i++
+			if leaf.multi {
+				// A multi leaf owns its value run: it ends only at the
+				// next modelled sibling.
+				for i < len(keys) && !n.KeyQuoted(i) && resolveSchemaChild(schema, keys[i]) == nil && !isApplyStatementKeyword(keys[i]) {
+					i++
+				}
+				continue
+			}
+			// A container packs its body's first keyword next, which
+			// is not a `system` statement — stop rather than judge it.
+			if len(leaf.children) > 0 || leaf.wildcard != nil {
+				return
+			}
+			i += leaf.args
+		}
+	}
+	// Nested flat-set chain: a chain link nests under the preceding
+	// modelled leaf. Descend only through modelled leaves that declare
+	// no children; a container's body is never a chain link.
+	var scanNested func(n *Node)
+	scanNested = func(n *Node) {
+		for _, c := range n.Children {
+			if c == nil || len(c.Keys) == 0 {
+				continue
+			}
+			tok := c.Name()
+			if c.KeyQuoted(0) || isApplyStatementKeyword(tok) {
+				continue
+			}
+			if _, unsupported := unimplementedSystemAAALeaves10831[tok]; unsupported {
+				report(tok)
+				continue
+			}
+			leaf := resolveSchemaChild(schema, tok)
+			if leaf == nil || len(leaf.children) > 0 || leaf.wildcard != nil {
+				continue
+			}
+			scanNested(c)
+		}
+	}
+	scanPacked(systemNode, 1)
+	for _, child := range systemNode.Children {
+		if child == nil || len(child.Keys) == 0 {
+			continue
+		}
+		tok := child.Name()
+		if child.KeyQuoted(0) || isApplyStatementKeyword(tok) {
+			continue
+		}
+		if _, unsupported := unimplementedSystemAAALeaves10831[tok]; unsupported {
+			report(tok)
+			continue
+		}
+		// Packed run on this child's Keys (e.g. `no-redirects
+		// tacplus-server ...` inside the block), then any chain nested
+		// under it.
+		scanPacked(child, 0)
+		leaf := resolveSchemaChild(schema, tok)
+		if leaf != nil && len(leaf.children) == 0 && leaf.wildcard == nil {
+			scanNested(child)
+		}
+	}
+	return leaves
+}
+
+func systemAAAWarningsOrError10831(systemNode *Node, lenient bool) ([]string, error) {
+	leaves := systemAAARefusals15711(systemNode)
+	if len(leaves) == 0 {
 		return nil, nil
 	}
-	// A `system` statement packed onto the system node's own Keys
-	// (`system accounting order radius;`, the #2419 brace-elided shape) has
-	// no child node for the walk below to see, so judge Keys[1] directly.
-	if len(systemNode.Keys) >= 2 {
-		if _, unsupported := unimplementedSystemAAALeaves10831[systemNode.Keys[1]]; unsupported {
-			message := systemAAARefusal10831(systemNode.Keys[1])
-			if !lenient {
-				return nil, fmt.Errorf("%s", message)
-			}
-			return []string{message + " (strict commit would reject this)"}, nil
-		}
+	if !lenient {
+		return nil, fmt.Errorf("%s", systemAAARefusal10831(leaves[0]))
 	}
-	var warnings []string
-	for _, child := range systemNode.Children {
-		if child == nil {
-			continue
-		}
-		leaf := child.Name()
-		if _, unsupported := unimplementedSystemAAALeaves10831[leaf]; !unsupported {
-			continue
-		}
-		message := systemAAARefusal10831(leaf)
-		if !lenient {
-			return nil, fmt.Errorf("%s", message)
-		}
+	warnings := make([]string, 0, len(leaves))
+	for _, leaf := range leaves {
 		warnings = append(warnings,
-			message+" (strict commit would reject this)")
+			systemAAARefusal10831(leaf)+" (strict commit would reject this)")
 	}
 	return warnings, nil
 }
