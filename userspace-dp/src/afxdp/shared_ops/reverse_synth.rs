@@ -470,13 +470,52 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
     // from the ingress (LAN) zone the reply must reach. The reply
     // target zone is the session ingress zone; if the resolved egress
     // zone is not it, the route does not reach the LAN owner.
-    if fabric_ingress
-        && resolved.disposition == ForwardingDisposition::ForwardCandidate
-        && forwarding.egress_zone_id(resolved.egress_ifindex) != ingress_zone
-        && let Some(redirect) =
-            super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
-    {
-        return redirect;
+    // Destination-owner test (M2): the LAN (ingress_zone) RG is the
+    // owner of the connected destination prefix; it is peer-owned
+    // here iff it is known and not forwarding-active. The existing
+    // owner-inactive arm below covers the case where the FIB did
+    // resolve via the LAN RG; this arm covers the suppressed-prefix
+    // gateway shape, where the resolved owner is the WAN RG.
+    let destination_owner_active = {
+        // The destination zone's RG: read it off the egress row that
+        // would serve the destination zone. Zone->interface mapping
+        // is not indexed, so use the companion-owner signal the FIB
+        // already encodes: a connected route to the target in the
+        // destination zone would carry that zone's RG. Probe with a
+        // resolution toward the target restricted to interfaces in
+        // `ingress_zone` is not available; instead, the HA state for
+        // the RG recorded on any egress row in the destination zone
+        // decides. Fall back to "not active" only when a destination-
+        // zone egress row exists and none of its RGs is active.
+        let mut saw_destination_row = false;
+        let mut any_active = false;
+        for (ifindex, _) in forwarding.egress.iter() {
+            if forwarding.egress_zone_id(*ifindex) == ingress_zone {
+                saw_destination_row = true;
+                let rg = owner_rg_for_flow(forwarding, *ifindex);
+                if rg > 0
+                    && matches!(
+                        ha_state.get(&rg),
+                        Some(group) if group.is_forwarding_active(now_secs)
+                    )
+                {
+                    any_active = true;
+                }
+            }
+        }
+        saw_destination_row && any_active
+    };
+    if fabric_ingress && !destination_owner_active {
+        let redirected = super::fabric_redirect_for_zone_egress_15958b(
+            forwarding,
+            resolved,
+            ingress_zone,
+            false,
+            destination_owner_active,
+        );
+        if redirected.disposition == ForwardingDisposition::FabricRedirect {
+            return redirected;
+        }
     }
     if fabric_ingress
         && owner_rg_id > 0

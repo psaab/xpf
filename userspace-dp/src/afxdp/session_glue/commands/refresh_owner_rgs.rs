@@ -120,7 +120,7 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
 /// `force_live_redirect_for_worker_synced_entry(decision, metadata,
 /// origin, allow_replace_local)`, and this is the single site that
 /// computes that argument for the activation refresh path.
-pub(in crate::afxdp::session_glue) fn collect_refresh_owner_rgs_items(
+pub(in crate::afxdp) fn collect_refresh_owner_rgs_items(
     sessions: &SessionTable,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -167,13 +167,52 @@ pub(in crate::afxdp::session_glue) fn collect_refresh_owner_rgs_items(
         );
         let enforced_resolution =
             enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up_resolution);
-        let refreshed_decision = SessionDecision {
-            resolution: redirect_session_via_fabric_if_needed(
+        // #15958b (fold): HA refresh must not launder a stored
+        // FabricRedirect companion back onto the WAN gateway route.
+        // Apply the shared zone-egress rule; command context is never
+        // fabric-link ingress, so the anti-loop arm passes false and
+        // the destination-owner (peer-owned LAN RG) test decides.
+        let resolution = if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+            let destination_owner_active = forwarding
+                .egress
+                .iter()
+                .filter(|(ifindex, _)| {
+                    forwarding.egress_zone_id(**ifindex) == metadata.egress_zone
+                })
+                .any(|(ifindex, _)| {
+                    let rg = owner_rg_for_flow(forwarding, *ifindex);
+                    rg > 0
+                        && ha_state
+                            .get(&rg)
+                            .is_some_and(|group| group.is_forwarding_active(now_secs))
+                });
+            let redirected = super::super::fabric_redirect_for_zone_egress_15958b(
+                forwarding,
+                enforced_resolution,
+                metadata.egress_zone,
+                false,
+                destination_owner_active,
+            );
+            if redirected.disposition == ForwardingDisposition::ForwardCandidate {
+                redirect_session_via_fabric_if_needed(
+                    forwarding,
+                    enforced_resolution,
+                    metadata.fabric_ingress,
+                    metadata.ingress_zone,
+                )
+            } else {
+                redirected
+            }
+        } else {
+            redirect_session_via_fabric_if_needed(
                 forwarding,
                 enforced_resolution,
                 metadata.fabric_ingress,
                 metadata.ingress_zone,
-            ),
+            )
+        };
+        let refreshed_decision = SessionDecision {
+            resolution,
             ..decision
         };
         let mut refreshed_metadata = metadata.clone();
