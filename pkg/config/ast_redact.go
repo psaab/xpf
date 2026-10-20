@@ -255,11 +255,16 @@ func (t *ConfigTree) FormatPathInheritanceRedactedForNode(path []string, nodeID 
 		return "", nil
 	}
 	clones := cloneNodes(matches)
-	// Mask with the node's own flattened key path as context, not the
-	// consumed width: an expanded node's Keys can carry identity tokens
-	// beyond the path width the caller supplied.
-	_ = width
-	redactMatches15942(clones, nil)
+	// Mask with the true ancestor prefix the matches sit under, exactly
+	// as redactedScopedMatches does: context-gated predicates
+	// (snmp>community, authentication/md5>key, archive-sites>password,
+	// gated URL leaves) test ancestors at/above the matched node, so a
+	// nil base silently unmasked them (#15979). Tokens beyond the
+	// consumed width live in the clones' Keys, not in base, and
+	// redactMatches15942 only masks idx >= len(base), so the caller's
+	// navigation spelling is preserved.
+	parentPrefix := append([]string(nil), path[:len(path)-width]...)
+	redactMatches15942(clones, parentPrefix)
 	var b strings.Builder
 	for _, n := range clones {
 		if n.Annotation != "" {
