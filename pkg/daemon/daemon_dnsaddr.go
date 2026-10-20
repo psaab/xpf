@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -15,96 +14,6 @@ import (
 // commits, so the daemon re-resolves on this ticker and republishes through
 // the normal apply path when an answer changes.
 var dnsAddressRefreshInterval = 5 * time.Minute
-
-// dnsRefreshLease pins one owed dns-name refresh (#15933, fold #15962).
-// While it is held, applyDataplaneAndHACore defers the apply path's DNS
-// re-resolution to the refresh owner (the periodic tick, whose clone is
-// the one config an apply that consumes the lease applies); optimistic
-// applies that race lease acquisition instead return without applying and
-// let the owner drive. Leases are per-config-pointer and single-use.
-type dnsRefreshLease struct {
-	cfg  *config.Config
-	done chan struct{}
-	once sync.Once
-}
-
-func (l *dnsRefreshLease) finish() {
-	// Idempotent: publication consumes the lease under applySem, then the
-	// tick's deferred drop fires again. sync.Once makes the pair safe;
-	// a bare close(done) here panicked on double close (#15962 fold,
-	// reproduced by TestDNSRefreshDetectsGlobalChangeShadowedByZoneLocal).
-	if l != nil {
-		l.once.Do(func() { close(l.done) })
-	}
-}
-
-// acquireDNSRefreshLease tries to become the refresh owner for cfg. It
-// fails when another refresh is already owed for cfg.
-func (d *Daemon) acquireDNSRefreshLease(cfg *config.Config) (*dnsRefreshLease, bool) {
-	d.dnsRefreshMu.Lock()
-	defer d.dnsRefreshMu.Unlock()
-	if d.dnsRefreshLease != nil {
-		if d.dnsRefreshLease.cfg == cfg {
-			return nil, false
-		}
-		// A refresh owed for an older generation must not block this one:
-		// the old owner's generation check will discard its result.
-		d.dnsRefreshLease = nil
-	}
-	l := &dnsRefreshLease{cfg: cfg, done: make(chan struct{})}
-	d.dnsRefreshLease = l
-	return l, true
-}
-
-// dnsWaitForRefresh blocks (outside applySem) until any owed refresh for
-// cfg is dropped or consumed, so a deferring background applier can retry.
-func (d *Daemon) dnsWaitForRefresh(cfg *config.Config) {
-	for {
-		l := d.peekDNSRefreshLease(cfg)
-		if l == nil {
-			return
-		}
-		<-l.done
-	}
-}
-
-func (d *Daemon) dropDNSRefreshLease(l *dnsRefreshLease) {
-	l.finish()
-	d.dnsRefreshMu.Lock()
-	if d.dnsRefreshLease == l {
-		d.dnsRefreshLease = nil
-	}
-	d.dnsRefreshMu.Unlock()
-}
-
-// takeDNSRefreshLease consumes and returns the lease owed for cfg (the
-// publishing apply may then run under applySem), or nil.
-func (d *Daemon) takeDNSRefreshLease(cfg *config.Config) *dnsRefreshLease {
-	d.dnsRefreshMu.Lock()
-	defer d.dnsRefreshMu.Unlock()
-	l := d.dnsRefreshLease
-	if l == nil || l.cfg != cfg {
-		return nil
-	}
-	d.dnsRefreshLease = nil
-	return l
-}
-
-// peekDNSRefreshLease returns the lease owed for cfg without consuming it.
-func (d *Daemon) peekDNSRefreshLease(cfg *config.Config) *dnsRefreshLease {
-	d.dnsRefreshMu.Lock()
-	defer d.dnsRefreshMu.Unlock()
-	if d.dnsRefreshLease != nil && d.dnsRefreshLease.cfg == cfg {
-		return d.dnsRefreshLease
-	}
-	return nil
-}
-
-// dnsRefreshOwedFor reports whether the refresh owner owes publication for
-// cfg (used by applyConfigLocked to defer instead of racing).
-func (d *Daemon) dnsRefreshOwedFor(cfg *config.Config) bool {
-	return d.peekDNSRefreshLease(cfg) != nil
-}
 
 // dnsBookHasNames reports whether cfg carries any dns-name entry.
 func dnsBookHasNames(cfg *config.Config) bool {
@@ -205,20 +114,22 @@ func cloneDNSAnswers(in map[string][]string) map[string][]string {
 	return out
 }
 
-// refreshDNSOnce performs one periodic dns-name refresh tick (#15933,
-// fold #15962 B1/B2).
+// refreshDNSOnce performs one periodic dns-name refresh tick (#15933).
 //
-// Protocol: the tick acquires a per-generation lease plus a coherent
-// snapshot of the published generation's DNS state (DNS-field reads and
-// the clone) UNDER applySem — the only place the apply path may write
-// those fields — then releases the semaphore before any network
-// resolution. While the lease is held, applyDataplaneAndHACore defers
-// DNS re-resolution to this owner and optimistic background applies of
-// the same generation defer to it, so published DNS state cannot move
-// mid-tick. Resolution runs outside the lock into the private clone;
-// publication re-checks (under applySem) that the base generation is
-// still active and reads what was actually applied back into the
-// baseline.
+// Protocol (deliberately simple — #15962 round-2 removed the lease
+// design): the tick takes a coherent snapshot of the published
+// generation's DNS state (DNS-field reads and CloneForDNSRefresh) UNDER
+// applySem — the only place the apply path may write those fields, and
+// short, with no I/O — then releases the semaphore before any network
+// resolution. Resolution runs outside the lock into the private clone.
+// Publication re-acquires applySem and applies ONLY if the base
+// generation is still active, else discards; the apply path's own
+// in-place re-resolution under the same semaphore may move the
+// published answers between snapshot and publish, which is harmless:
+// the generation check, not answer stability, decides publication.
+// Baseline = actually-applied answers read back under applySem at
+// applyConfigLocked exit (B2), so a background re-apply of the same
+// generation reconciles it and a flap-back is detected next tick.
 func (d *Daemon) refreshDNSOnce() {
 	if d.store == nil || d.applySem == nil {
 		return
@@ -227,22 +138,15 @@ func (d *Daemon) refreshDNSOnce() {
 	if cfg == nil {
 		return
 	}
-	lease, ok := d.acquireDNSRefreshLease(cfg)
-	if !ok {
-		return
-	}
 	if !d.beginBackgroundApply(context.Background(), "dnsAddressRefreshSnapshot") {
-		d.dropDNSRefreshLease(lease)
 		return
 	}
 	if d.store.ActiveConfig() != cfg {
 		d.applySem.Release(1)
-		d.dropDNSRefreshLease(lease)
 		return
 	}
 	if !dnsBookHasNames(cfg) {
 		d.applySem.Release(1)
-		d.dropDNSRefreshLease(lease)
 		return
 	}
 	before := snapshotDNSAnswers(cfg)
@@ -252,13 +156,12 @@ func (d *Daemon) refreshDNSOnce() {
 	refreshed := cfg.CloneForDNSRefresh()
 	d.applySem.Release(1)
 
-	defer d.dropDNSRefreshLease(lease)
 	config.RefreshDNSAddressBooks(refreshed)
 	if dnsAnswersEqual(before, snapshotDNSAnswers(refreshed)) {
 		return
 	}
 	slog.Info("dns-name address-book answer changed, recompiling dataplane")
-	applied, err := d.applyDNSRefreshedConfig(cfg, refreshed, lease)
+	applied, err := d.applyDNSRefreshedConfig(cfg, refreshed)
 	if err != nil {
 		slog.Warn("dns-name refresh re-apply failed", "err", err)
 		return
@@ -325,8 +228,7 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 // under the apply semaphore. It returns (true, nil) only when the copy
 // was actually applied, (false, nil) when the publish was refused or the
 // generation moved on (a newer generation's own apply re-resolves DNS).
-func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config, lease *dnsRefreshLease) (bool, error) {
-	_ = lease // consumption is via takeDNSRefreshLease under applySem
+func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
 	if !d.beginBackgroundApply(context.Background(), "dnsAddressRefresh") {
 		return false, nil
 	}
@@ -334,13 +236,6 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config, lease *
 	if d.store == nil || d.store.ActiveConfig() != base {
 		return false, nil
 	}
-	l := d.takeDNSRefreshLease(base)
-	if l == nil {
-		return false, nil
-	}
-	defer func() {
-		l.finish()
-	}()
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(refreshed)
 		d.policyInvalidationPublishLanded = true

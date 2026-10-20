@@ -255,7 +255,7 @@ func TestDNSRefreshStaleGenerationNotPublished15933(t *testing.T) {
 	if s.ActiveConfig() == base {
 		t.Fatal("premise: active generation did not move")
 	}
-	if _, err := d.applyDNSRefreshedConfig(base, refreshed, nil); err != nil {
+	if _, err := d.applyDNSRefreshedConfig(base, refreshed); err != nil {
 		t.Fatalf("stale publish returned error: %v", err)
 	}
 	if len(applied) != 0 {
@@ -286,86 +286,91 @@ func dnsRealDaemon15962(t *testing.T) (*Daemon, *runtimeOnlyApplyTestDP, *config
 	return d, dp, s
 }
 
-// B1 (#15962): the tick's snapshot/clone is taken under applySem while the
-// production apply path is mid-flight writing DNS through the real
-// pipeline. Run with -race: snapshot reads outside the semaphore race the
-// apply-time RefreshDNSAddressBooks writer and go RED pre-fix.
+// B1 (#15962, simplified round-2): ticks take snapshot+clone under
+// applySem while the production apply writer runs concurrently. Writer
+// progress is bounded and asserted: the writer MUST land its applies
+// while ticks run (no lease starvation by construction). Run with
+// -race. FAIL-ON-REVERT: moving the tick snapshot/clone outside
+// applySem makes the writer's in-place RefreshDNSAddressBooks race the
+// tick reads (DATA RACE) and turns this RED.
 func TestDNSRefreshTickSnapshotRacesRealApplyWriter15962(t *testing.T) {
 	stubDNS15933(t, map[string][]string{
 		"global.example.com": {"10.0.0.1"},
 		"local.example.com":  {"10.0.0.2"},
 	})
-	d, dp, s := dnsRealDaemon15962(t)
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
+	d, dp, _ := dnsRealDaemon15962(t)
+	writerDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
+		defer close(writerDone)
+		// Production writer shape: full ActiveConfig applies (the C5
+		// production collision), not a test-only reader.
+		for range 3 {
+			if err := d.applyActiveConfigResult(); err != nil {
+				t.Errorf("writer apply: %v", err)
 				return
-			default:
 			}
-			// Production writer shape: full ActiveConfig apply (the
-			// C5 production collision), not a test-only reader.
-			_ = d.applyActiveConfigResult()
 		}
 	}()
-	for i := 0; i < 40; i++ {
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		select {
+		case <-writerDone:
+			goto writerLanded
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("writer starved: no apply landed while ticks ran")
+		}
 		d.refreshDNSOnce()
 	}
-	close(stop)
-	wg.Wait()
-	if dp.applyCalls == 0 {
-		t.Fatal("production writer never applied; race cell exercised nothing")
+writerLanded:
+	if dp.applyCalls < 3 {
+		t.Fatalf("writer landed %d applies, want >=3 (bounded writer progress)", dp.applyCalls)
 	}
-	_ = s
+	for range 10 {
+		d.refreshDNSOnce()
+	}
 }
 
-// B2 (#15962): a non-refresh re-apply of the same generation with
-// different answers must reconcile the refresher baseline, so a DNS
-// flap-back to the last refresher-published value is detected again.
+// B2 (#15962, simplified round-2): a non-refresh re-apply of the same
+// generation via the REAL applyConfigLocked exit must reconcile the
+// refresher baseline, so a DNS flap-back is detected again. Driven
+// through production applyActiveConfigResult — not hand-called helpers
+// (round-2 F3: hand-calling recordAppliedDNSBaseline was test-only-green
+// for the apply-exit wiring). FAIL-ON-REVERT: removing the
+// applyConfigLocked-exit reconcile makes this cell go RED.
 func TestDNSRefreshBaselineReconciledAfterBackgroundReapply15962(t *testing.T) {
 	set := stubDNS15933(t, map[string][]string{
 		"global.example.com": {"10.0.0.1"},
 		"local.example.com":  {"10.0.0.2"},
 	})
-	d, s := dnsDaemon15933(t)
-	var applied []*config.Config
-	d.applyBodyForTest = func(cfg *config.Config) { applied = append(applied, cfg) }
+	d, dp, _ := dnsRealDaemon15962(t)
 
-	// Tick publishes B.
+	// DNS moves to B; a real background apply lands B and (via the
+	// apply-exit reconcile) becomes the baseline.
 	set(map[string][]string{"global.example.com": {"10.9.9.9"}, "local.example.com": {"10.0.0.2"}})
-	d.refreshDNSOnce()
-	if len(applied) != 1 {
-		t.Fatalf("first tick applied %d, want 1", len(applied))
+	if err := d.applyActiveConfigResult(); err != nil {
+		t.Fatalf("background apply B: %v", err)
 	}
-
-	// A background re-apply of the SAME generation resolves different
-	// answers (production writer shape under applySem).
-	set(map[string][]string{"global.example.com": {"10.7.7.7"}, "local.example.com": {"10.0.0.2"}})
-	published := s.ActiveConfig()
-	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
-		t.Fatal(err)
+	if dp.applyCalls != 1 {
+		t.Fatalf("background apply calls = %d, want 1", dp.applyCalls)
 	}
-	config.RefreshDNSAddressBooks(published)
-	d.recordAppliedDNSBaseline(published, nil)
-	d.applySem.Release(1)
-
-	// DNS flaps back to exactly the refresher's last published value.
-	set(map[string][]string{"global.example.com": {"10.9.9.9"}, "local.example.com": {"10.0.0.2"}})
+	// Tick with DNS still at B: no republish owed.
 	d.refreshDNSOnce()
-	// The re-applied generation now matches DNS, so no republish is owed;
-	// but the baseline must have moved off the stale value: change DNS
-	// once more and require detection against the NEW baseline.
+	if dp.applyCalls != 1 {
+		t.Fatalf("tick at applied B republished: calls = %d", dp.applyCalls)
+	}
+	// DNS flaps to C: tick must detect against the actually-applied B
+	// baseline and republish.
 	set(map[string][]string{"global.example.com": {"10.5.5.5"}, "local.example.com": {"10.0.0.2"}})
 	d.refreshDNSOnce()
-	if len(applied) != 2 {
-		t.Fatalf("after background re-apply, tick applied %d total, want 2 (baseline desync after flap-back)", len(applied))
+	if dp.applyCalls != 2 {
+		t.Fatalf("flap tick applied %d total, want 2 (baseline desync after background re-apply)", dp.applyCalls)
 	}
-	if got := globalSvc15933(t, applied[1]); !reflect.DeepEqual(got, []string{"10.5.5.5/32"}) {
-		t.Fatalf("second tick published %v, want [10.5.5.5/32]", got)
+	// Steady state.
+	d.refreshDNSOnce()
+	if dp.applyCalls != 2 {
+		t.Fatalf("steady-state tick republished: calls = %d", dp.applyCalls)
 	}
 }
 
@@ -435,46 +440,47 @@ security {
 	}
 }
 
-// Codex gate 3 (#15962): the baseline records what the real apply
-// actually resolved (re-resolved under applySem), not the pre-apply
-// proposal — a transient apply-time failure must not suppress recovery.
+// Codex gate 3 (#15962, round-2 F4): the baseline records what the real
+// apply actually resolved, not the tick's pre-apply proposal. The
+// resolver therefore succeeds on the TICK's lookup and fails on the
+// APPLY's re-lookup (call-indexed), so the applied state is fail-closed
+// empty while the proposal was B; the next healthy tick must recover B.
+// FAIL-ON-REVERT: caching the proposal makes recovery compare equal and
+// this cell goes RED.
 func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
-	var failApply atomic.Bool
-	var mu sync.Mutex
-	calls := map[string]int{}
+	var callIdx atomic.Int64
 	restore := config.SetLookupAddressDNSNameForTest(func(fqdn string) ([]string, error) {
-		mu.Lock()
-		calls[fqdn]++
-		n := calls[fqdn]
-		mu.Unlock()
-		if fqdn == "global.example.com" {
-			if failApply.Load() {
-				return nil, context.DeadlineExceeded
-			}
-			_ = n
+		if fqdn != "global.example.com" {
+			return []string{"10.0.0.2"}, nil
+		}
+		n := callIdx.Add(1)
+		// Call 1: compile-time (inside dnsRealDaemon15962) — answer A.
+		// Call 2: tick lookup — answer B (success).
+		// Call 3: apply-time re-lookup — fail (fail-closed empty applied).
+		// Later: healthy B.
+		switch n {
+		case 1:
+			return []string{"10.0.0.1"}, nil
+		case 3:
+			return nil, context.DeadlineExceeded
+		default:
 			return []string{"10.9.9.9"}, nil
 		}
-		return []string{"10.0.0.2"}, nil
 	})
 	t.Cleanup(restore)
 
-	d, dp, s := dnsRealDaemon15962(t)
-	// Seed the store answers as the pre-change state by direct snapshot
-	// is unnecessary: the tick resolves global -> 10.9.9.9.
-	_ = s
-	// First tick: tick resolves B; the real apply re-resolves and FAILS
-	// (fail-closed empty applied).
-	failApply.Store(true)
+	d, dp, _ := dnsRealDaemon15962(t)
+	// First tick: proposal B, apply-time lookup fails, empty applied.
 	d.refreshDNSOnce()
-	if dp.applyCalls == 0 {
-		t.Fatal("first tick never reached the real apply")
+	if dp.applyCalls != 1 {
+		t.Fatalf("first tick applies = %d, want 1 (real apply)", dp.applyCalls)
 	}
-	// DNS healthy again: the same B must now be published (recovery),
-	// proving the baseline was not advanced to the unapplied proposal.
-	failApply.Store(false)
+	// Healthy DNS: the same B must now be published (recovery) — only
+	// possible if the baseline stayed at the actually-applied empty/A
+	// state instead of the unapplied proposal B.
 	d.refreshDNSOnce()
 	if dp.applyCalls != 2 {
-		t.Fatalf("recovery tick applies = %d, want 2 (baseline suppressed recovery)", dp.applyCalls)
+		t.Fatalf("recovery tick applies = %d, want 2 (baseline suppressed recovery — proposal was cached)", dp.applyCalls)
 	}
 	// Steady state: no further republish.
 	d.refreshDNSOnce()

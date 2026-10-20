@@ -1073,18 +1073,14 @@ type Daemon struct {
 	// exercise the semaphore contract through the real applyConfig
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
-	// dnsRefreshLease pins an owed dns-name refresh: while the refresher
-	// holds the lease, a normal apply defers its DNS
-	// re-resolution to the refresher's private clone (see refreshDNSOnce
-	// and daemon_apply_dataplane.go). dnsRefreshMu guards the leases and
-	// the per-generation published-answer baseline (under applySem).
-	dnsRefreshMu       sync.Mutex
-	dnsRefreshLease    *dnsRefreshLease
-	lastDNSRefreshBase *config.Config
+	// dnsRefreshMu guards the per-generation published-answer baseline.
 	// lastDNSRefreshAnswers holds the DNS answers last actually APPLIED
 	// for lastDNSRefreshBase (read back after the apply-time re-resolution
 	// under applySem, never the pre-apply proposal, #15933/#15962). Any
 	// other successful apply of that base replaces it with what it read
+	// back; a failed apply invalidates it.
+	dnsRefreshMu          sync.Mutex
+	lastDNSRefreshBase    *config.Config
 	lastDNSRefreshAnswers map[string][]string
 	// buildRuntimeDataPlaneForTest replaces dataplane construction in the
 	// startup fixture. It is nil in production and exists so the setup path
