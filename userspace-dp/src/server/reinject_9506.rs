@@ -58,7 +58,7 @@ enum FrameRead {
 impl FrameReader {
     fn new() -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: Vec::new().into(),
             expected_body: None,
         }
     }

@@ -2021,7 +2021,7 @@ pub(super) fn clone_prepared_request_for_cos(
     req: &mut PreparedTxRequest,
 ) -> Option<TxRequest> {
     let frame = area.slice(req.offset as usize, req.len as usize)?.to_vec();
-    Some(req.into_local_request(frame))
+    Some(req.into_local_request(frame.into()))
 }
 
 pub(super) fn resolve_cos_queue_idx(

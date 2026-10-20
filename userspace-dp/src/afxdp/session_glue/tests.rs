@@ -8943,7 +8943,7 @@ fn apply_worker_commands_dispatch_order_pin_with_demote_dedup() {
 
     // Build a minimal TxRequest for the EnqueueShapedLocal step.
     let shaped_req = TxRequest {
-        bytes: Vec::new(),
+        bytes: Vec::new().into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

@@ -340,7 +340,7 @@ pub(super) fn build_nat64_forwarded_frame(
     nat64_reverse: Option<&Nat64ReverseInfo>,
     no_v6_frag_header: bool,
     forwarding: &ForwardingState,
-) -> Option<Vec<u8>> {
+) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
     build_nat64_forwarded_frame_with_dynamic(
         frame,
         meta,
@@ -360,7 +360,7 @@ pub(super) fn build_nat64_forwarded_frame_with_dynamic(
     no_v6_frag_header: bool,
     forwarding: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<Vec<u8>> {
+) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
     let mut frames = build_nat64_forwarded_frames_with_dynamic(
         frame,
         meta,
@@ -386,7 +386,7 @@ pub(super) fn build_nat64_forwarded_frames(
     forwarding: &ForwardingState,
     v4_egress_mtu: usize,
     v6_egress_mtu: usize,
-) -> Option<SmallVec<[Vec<u8>; 1]>> {
+) -> Option<SmallVec<[crate::afxdp::cos::redirect_pool::PooledBuffer; 1]>> {
     build_nat64_forwarded_frames_with_dynamic(
         frame,
         meta,
@@ -410,7 +410,7 @@ pub(super) fn build_nat64_forwarded_frames_with_dynamic(
     v4_egress_mtu: usize,
     v6_egress_mtu: usize,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<SmallVec<[Vec<u8>; 1]>> {
+) -> Option<SmallVec<[crate::afxdp::cos::redirect_pool::PooledBuffer; 1]>> {
     build_nat64_forwarded_frames_with_commit_and_dynamic(
         frame,
         meta,
@@ -434,7 +434,7 @@ pub(super) fn build_nat64_forwarded_frames_with_commit(
     forwarding: &ForwardingState,
     v4_egress_mtu: usize,
     v6_egress_mtu: usize,
-) -> Option<SmallVec<[(Vec<u8>, Option<wg::WgEncapCommit>); 1]>> {
+) -> Option<SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]>> {
     build_nat64_forwarded_frames_with_commit_and_dynamic(
         frame,
         meta,
@@ -458,7 +458,7 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     v4_egress_mtu: usize,
     v6_egress_mtu: usize,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<SmallVec<[(Vec<u8>, Option<wg::WgEncapCommit>); 1]>> {
+) -> Option<SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]>> {
     let meta = meta.into();
     let inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
     let inner_frames = if meta.addr_family as i32 == libc::AF_INET6 {
@@ -472,7 +472,7 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     let inner_meta = nat64_translated_meta(meta, decision)?;
     let kind = forwarding.tunnel_endpoints.get(&decision.resolution.tunnel_endpoint_id)
         .map(|e| tunnel_mode_kind(&e.mode));
-    let mut frames = SmallVec::new();
+    let mut frames: SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]> = SmallVec::new();
     for inner in inner_frames {
         let encapsulated = match kind {
             Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
@@ -482,10 +482,10 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
                 forwarding,
                 dynamic_neighbors,
             )
-            .map(|(frame, commit)| (frame, Some(commit))),
+            .map(|(frame, commit)| (frame.into(), Some(commit))),
             Some(TunnelKind::Gre) =>
                 encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)
-                    .map(|frame| (frame, None)),
+                    .map(|frame| (frame.into(), None)),
             Some(TunnelKind::Unknown) | None => None,
         };
         crate::afxdp::cos::redirect_pool::recycle(inner);
@@ -498,7 +498,8 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
 /// translator emits a fixed 20-byte IPv4 header; preserving its Identification
 /// and adding offsets to an existing fragment's offset permits correct
 /// re-fragmentation of IPv6 fragments as well as ordinary datagrams.
-fn fragment_nat64_ipv4_frame(frame: Vec<u8>, mtu: usize) -> Option<SmallVec<[Vec<u8>; 1]>> {
+fn fragment_nat64_ipv4_frame(
+    frame: crate::afxdp::cos::redirect_pool::PooledBuffer, mtu: usize) -> Option<SmallVec<[crate::afxdp::cos::redirect_pool::PooledBuffer; 1]>> {
     let l3 = frame_l3_offset(&frame)?;
     let ip = frame.get(l3..)?;
     if ip.len() < 20 || ip[0] != 0x45 {
@@ -546,7 +547,7 @@ fn fragment_nat64_ipv4_frame(frame: Vec<u8>, mtu: usize) -> Option<SmallVec<[Vec
         let checksum = checksum16(&fragment[ip_start..ip_start + 20]);
         fragment[ip_start + 10..ip_start + 12].copy_from_slice(&checksum.to_be_bytes());
         debug_assert_eq!(&fragment[ip_start + 4..ip_start + 6], identification);
-        frames.push(fragment);
+        frames.push(fragment.into());
         offset += payload_len;
     }
     crate::afxdp::cos::redirect_pool::recycle(frame);
@@ -556,9 +557,9 @@ fn fragment_nat64_ipv4_frame(frame: Vec<u8>, mtu: usize) -> Option<SmallVec<[Vec
 /// RFC 7915 §4: fragment translated IPv6 datagrams at the translator, where
 /// the original IPv4 DF bit is still available. IPv6 routers cannot fragment.
 fn fragment_nat64_ipv6_frame(
-    frame: Vec<u8>,
+    frame: crate::afxdp::cos::redirect_pool::PooledBuffer,
     mtu: usize,
-) -> Option<SmallVec<[Vec<u8>; 1]>> {
+) -> Option<SmallVec<[crate::afxdp::cos::redirect_pool::PooledBuffer; 1]>> {
     let l3 = frame_l3_offset(&frame)?;
     let ip = frame.get(l3..)?;
     if ip.len() < 40 || ip[0] >> 4 != 6 {
@@ -625,7 +626,7 @@ fn fragment_nat64_ipv6_frame(
         fragment.extend_from_slice(&data[offset..offset + len]);
         fragment[l3 + 4..l3 + 6].copy_from_slice(&((8 + len) as u16).to_be_bytes());
         fragment[l3 + 6] = 44;
-        frames.push(fragment);
+        frames.push(fragment.into());
         offset += len;
     }
     crate::afxdp::cos::redirect_pool::recycle(frame);
@@ -777,7 +778,7 @@ fn build_nat64_inner_frame(
     decision: &SessionDecision,
     nat64_reverse: Option<&Nat64ReverseInfo>,
     no_v6_frag_header: bool,
-) -> Option<Vec<u8>> {
+) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
     let dst_mac = decision.resolution.neighbor_mac?;
     let src_mac = decision.resolution.src_mac?;
     let vlan_id = decision.resolution.tx_vlan_id;
@@ -987,7 +988,7 @@ pub(super) fn build_forwarded_frame_from_frame(
     forwarding: &ForwardingState,
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
-) -> Option<Vec<u8>> {
+) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
     build_forwarded_frame_from_frame_with_commit(
         frame,
         meta,
@@ -1007,7 +1008,7 @@ pub(super) fn build_forwarded_frame_from_frame_with_dynamic(
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<Vec<u8>> {
+) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
     build_forwarded_frame_from_frame_with_commit_and_dynamic(
         frame,
         meta,
@@ -1027,7 +1028,7 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit(
     forwarding: &ForwardingState,
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
-) -> Option<(Vec<u8>, Option<wg::WgEncapCommit>)> {
+) -> Option<(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>)> {
     build_forwarded_frame_from_frame_with_commit_and_dynamic(
         frame,
         meta,
@@ -1047,7 +1048,7 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit_and_dynamic(
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<(Vec<u8>, Option<wg::WgEncapCommit>)> {
+) -> Option<(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>)> {
     let meta = meta.into();
     let mut out = vec![0u8; frame.len().saturating_add(4)];
     let written = build_forwarded_frame_into_from_frame(
@@ -1084,14 +1085,14 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit_and_dynamic(
                 forwarding,
                 dynamic_neighbors,
             )
-            .map(|(frame, commit)| (frame, Some(commit))),
+            .map(|(frame, commit)| (frame.into(), Some(commit))),
             Some(TunnelKind::Gre) => encapsulate_native_gre_frame(&out, meta, decision, forwarding)
-                .map(|frame| (frame, None)),
+                .map(|frame| (frame.into(), None)),
             // Unknown mode or missing endpoint row: fail closed.
             Some(TunnelKind::Unknown) | None => None,
         };
     }
-    Some((out, None))
+    Some((out.into(), None))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1105,6 +1106,7 @@ pub(super) fn build_forwarded_frame(
 ) -> Option<Vec<u8>> {
     let frame = area.slice(desc.addr as usize, desc.len as usize)?;
     build_forwarded_frame_from_frame(frame, meta, decision, forwarding, false, expected_ports)
+        .map(|w| w.buf)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

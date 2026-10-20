@@ -68,7 +68,7 @@ fn make_flow_fair_queue() -> CoSQueueRuntime {
 /// `(src_port, len)` and we keep len distinct per logical packet.
 fn flow_item(src_port: u16, len: usize) -> CoSPendingTxItem {
     CoSPendingTxItem::Local(TxRequest {
-        bytes: vec![0u8; len],
+        bytes: vec![0u8; len].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

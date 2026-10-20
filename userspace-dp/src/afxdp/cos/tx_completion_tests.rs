@@ -565,7 +565,7 @@ fn apply_cos_send_result_nonempty_retry_readds_restored_bytes() {
     // Drain a 3000-byte batch, then retry one 1500-byte item back.
     let batch_bytes = 3000u64;
     let retry = std::collections::VecDeque::from([TxRequest {
-        bytes: vec![0u8; 1500],
+        bytes: vec![0u8; 1500].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

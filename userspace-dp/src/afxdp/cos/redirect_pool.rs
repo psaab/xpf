@@ -41,43 +41,126 @@
 // to allocating on the depleted side and caps the buffer count on the
 // other — bounded and self-healing, never incorrect.
 
-use std::cell::RefCell;
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 
 /// Upper bound on pooled buffers per worker thread. At ~MTU each this
 /// caps the pool at a couple of MB per worker; excess buffers are
 /// dropped (freed) rather than retained.
 const MAX_POOLED_BUFFERS: usize = 1024;
 
+/// #15956: a pooled byte buffer carrying its initialized extent IN
+/// the wrapper, so the extent migrates with ownership by construction
+/// — including the cross-worker hand-off where a buffer is checked
+/// out on a source thread, travels inside a `TxRequest` through the
+/// owner worker's inbox, and is recycled on the OWNER thread. (The
+/// previous design kept extents in thread-local side state keyed by
+/// allocation pointer; that state stayed behind on the source thread
+/// and a recycled address could alias a stale extent — an ABA hole
+/// the fold to this wrapper closes.)
+///
+/// `initialized` is the length of the allocation prefix known to
+/// have been written (by the checkout delta zero-fill, the builder,
+/// or a copy). Bytes past it may be uninitialized. `recycle` restores
+/// `max(initialized, published_len)`; only a wrapper that publishes
+/// (build/copy) raises it.
+#[derive(Debug)]
+pub(in crate::afxdp) struct PooledBuffer {
+    pub(in crate::afxdp) buf: Vec<u8>,
+    initialized: usize,
+}
+
+impl PooledBuffer {
+    #[inline]
+    pub(in crate::afxdp) fn new(buf: Vec<u8>, initialized: usize) -> Self {
+        let initialized = initialized.min(buf.capacity());
+        Self { buf, initialized }
+    }
+    #[inline]
+    pub(in crate::afxdp) fn initialized(&self) -> usize {
+        self.initialized
+    }
+}
+
+impl PartialEq for PooledBuffer {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.buf == other.buf
+    }
+}
+impl Eq for PooledBuffer {}
+impl PartialEq<Vec<u8>> for PooledBuffer {
+    #[inline]
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        &self.buf == other
+    }
+}
+impl PartialEq<[u8]> for PooledBuffer {
+    #[inline]
+    fn eq(&self, other: &[u8]) -> bool {
+        self.buf.as_slice() == other
+    }
+}
+impl<const N: usize> PartialEq<[u8; N]> for PooledBuffer {
+    #[inline]
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.buf.as_slice() == other.as_slice()
+    }
+}
+
+impl PooledBuffer {
+    /// Clone-equivalent for `TxRequest::clone`: the clone is a FRESH
+    /// allocation whose first `len` bytes were just copied (initialized)
+    /// and whose spare capacity was never written.
+    #[inline]
+    pub(in crate::afxdp) fn fork(&self) -> Self {
+        Self {
+            initialized: self.buf.len(),
+            buf: self.buf.clone(),
+        }
+    }
+}
+
+impl Default for PooledBuffer {
+    #[inline]
+    fn default() -> Self {
+        Self::from(Vec::new())
+    }
+}
+
+impl Deref for PooledBuffer {
+    type Target = Vec<u8>;
+    #[inline]
+    fn deref(&self) -> &Vec<u8> {
+        &self.buf
+    }
+}
+impl DerefMut for PooledBuffer {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+}
+impl From<Vec<u8>> for PooledBuffer {
+    /// Foreign buffer recycled without checkout (tests, one-off
+    /// constructions): exactly its published bytes are initialized.
+    #[inline]
+    fn from(buf: Vec<u8>) -> Self {
+        let initialized = buf.len();
+        Self { buf, initialized }
+    }
+}
+impl From<PooledBuffer> for Vec<u8> {
+    #[inline]
+    fn from(w: PooledBuffer) -> Vec<u8> {
+        w.buf
+    }
+}
+
 thread_local! {
-    static POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
-    /// #15956: per-buffer initialized extent as a parallel stack to
-    /// `POOL` (same push/pop discipline, same thread): restored by
-    /// `recycle` as `max(flight window, published length)`, whose
-    /// bytes are known written. Spare
-    /// capacity beyond it may hold arbitrary prior contents or be
-    /// genuinely uninitialized on a cold/grown allocation;
-    /// `checkout_with_capacity` zero-fills only that delta, never the
-    /// already-initialized window the builder is about to overwrite.
-    static POOL_INITIALIZED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static POOL: RefCell<Vec<PooledBuffer>> = const { RefCell::new(Vec::new()) };
     static POOL_GROWTH_ZEROFILLS: Cell<u64> = const { Cell::new(0) };
-    /// #15956: extent made initialized by the checkout currently in
-    /// flight, keyed by the buffer's allocation pointer. The paired
-    /// stack alone loses it: `checkout_with_capacity` pops the prior
-    /// extent, delta-fills to the requested window, and the buffer
-    /// then travels (TxRequest queues, settle) before `recycle` — the
-    /// window must travel with it, and the pointer is the only
-    /// identity that does. Inserted at checkout (after any realloc,
-    /// so the pointer is the live allocation), consumed and removed
-    /// by `recycle`; an entry leaked by a drop-without-recycle is
-    /// overwritten by the next checkout of any buffer that reuses
-    /// the address before it can be consumed, because consumption
-    /// only happens in `recycle` and every recycled buffer was first
-    /// checked out (which inserts its own entry). Foreign buffers
-    /// recycled without checkout (tests) find no entry and record
-    /// exactly their published length.
-    static POOL_FLIGHT_EXTENTS: RefCell<rustc_hash::FxHashMap<usize, usize>> =
-        const { RefCell::new(rustc_hash::FxHashMap::with_hasher(rustc_hash::FxBuildHasher)) };
 }
 
 /// Check out a buffer holding a fresh copy of `src`. Reuses a pooled
@@ -85,7 +168,7 @@ thread_local! {
 /// otherwise allocates. The result is byte-for-byte and length-identical
 /// to `src.to_vec()` and never aliases `src`.
 #[inline]
-pub(in crate::afxdp) fn checkout(src: &[u8]) -> Vec<u8> {
+pub(in crate::afxdp) fn checkout(src: &[u8]) -> PooledBuffer {
     let mut buf = checkout_with_capacity(src.len());
     buf.extend_from_slice(src);
     buf
@@ -94,22 +177,19 @@ pub(in crate::afxdp) fn checkout(src: &[u8]) -> Vec<u8> {
 /// Check out a reusable empty buffer with at least `capacity` bytes available.
 /// It is intended for builders that write directly into owned queued storage.
 #[inline]
-pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
+pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> PooledBuffer {
     POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        let (mut buf, init_len) = match pool.pop() {
-            Some(buf) => {
-                let init_len = POOL_INITIALIZED.with(|i| i.borrow_mut().pop().unwrap_or(0));
-                (buf, init_len)
-            }
-            None => (Vec::new(), 0),
-        };
-        buf.clear();
-        if buf.capacity() < capacity {
+        let mut w = pool
+            .borrow_mut()
+            .pop()
+            .unwrap_or_else(|| PooledBuffer::new(Vec::new(), 0));
+        let init_len = w.initialized;
+        w.buf.clear();
+        if w.buf.capacity() < capacity {
             // Realloc preserves the previously published prefix, so the
             // recorded extent (<= old length <= old capacity) stays
             // valid; only bytes past it are the never-written delta.
-            buf.reserve_exact(capacity);
+            w.buf.reserve_exact(capacity);
         }
         // #15956: zero only the never-initialized delta past this
         // buffer's recorded extent, once, here at checkout — so spare
@@ -117,25 +197,19 @@ pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
         // always initialized, cold and warm alike. Cost is paid only
         // when the requested window exceeds the extent this buffer
         // carries back from its last flight (`recycle` restores
-        // `max(extent, published_len)`, so a successful build's whole
-        // filled window survives its truncate to `written`): at a
+        // `max(initialized, published_len)`, so a successful build's
+        // whole filled window survives its truncate to `written` —
+        // the extent travels in this wrapper across threads): at a
         // steady size the delta is empty, never per-packet.
         if capacity > init_len {
             POOL_GROWTH_ZEROFILLS.with(|c| c.set(c.get() + 1));
-            let spare = buf.spare_capacity_mut();
+            let spare = w.buf.spare_capacity_mut();
             for slot in &mut spare[init_len..capacity] {
                 slot.write(0);
             }
+            w.initialized = capacity;
         }
-        // The whole requested window is now initialized (prior extent
-        // plus the delta just filled; the realloc above preserved the
-        // prior prefix). Record it as this buffer's flight extent so
-        // `recycle` can restore `max(extent, published_len)` instead
-        // of forgetting the filled window at truncate.
-        POOL_FLIGHT_EXTENTS.with(|m| {
-            m.borrow_mut().insert(buf.as_ptr() as usize, capacity);
-        });
-        buf
+        w
     })
 }
 
@@ -157,11 +231,11 @@ pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
 /// Vec (whose next checkout `clear()`s it) without publishing anything.
 ///
 /// Soundness is TWO-part. (1) No uninitialized byte is ever exposed:
-/// `checkout_with_capacity` zero-fills the delta past each buffer's
-/// recorded initialized extent (tracked alongside the pool as the
-/// length it last published), once per growth — so a cold
-/// (fresh-allocation) or grown checkout never publishes spare
-/// capacity that was never written, and this helper only ever
+/// `checkout_with_capacity` zero-fills the delta past the wrapper's
+/// recorded initialized extent (carried in [`PooledBuffer`] itself,
+/// so it survives the cross-thread hand-off), once per growth — so
+/// a cold (fresh-allocation) or grown checkout never publishes
+/// spare capacity that was never written, and this helper only ever
 /// exposes initialized bytes.
 /// (2) Within the already-initialized window the builder contract
 /// above holds, pinned by the fail-on-revert corpus in
@@ -173,7 +247,7 @@ pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
 /// `buf` must come from [`checkout_with_capacity`] with the same
 /// `capacity` (length 0, capacity >= `capacity`).
 #[inline]
-pub(in crate::afxdp) fn extend_pooled_for_build(buf: &mut Vec<u8>, capacity: usize) {
+pub(in crate::afxdp) fn extend_pooled_for_build(buf: &mut PooledBuffer, capacity: usize) {
     debug_assert_eq!(buf.len(), 0, "build checkout must start empty");
     debug_assert!(buf.capacity() >= capacity, "checkout under capacity");
     let spare_len = buf.spare_capacity_mut().len();
@@ -182,16 +256,15 @@ pub(in crate::afxdp) fn extend_pooled_for_build(buf: &mut Vec<u8>, capacity: usi
         "pooled checkout spare capacity below build capacity"
     );
     // SAFETY: `buf` came from `checkout_with_capacity(capacity)`,
-    // which zero-filled every spare byte in `init_len..capacity` past
-    // the buffer's recorded initialized extent; bytes in
-    // `0..init_len` were written when that extent was published.
-    // Every byte in `0..capacity` is therefore initialized. The
-    // consuming builder additionally overwrites every byte in
-    // `0..written` before the caller truncates to `written` and
-    // publishes the Vec; bytes beyond `written` are never read, and
-    // the failure path recycles without publishing.
+    // which zero-filled every spare byte past the wrapper's recorded
+    // initialized extent and raised it to `capacity`; every byte in
+    // `0..capacity` is therefore initialized. The consuming builder
+    // additionally overwrites every byte in `0..written` before the
+    // caller truncates to `written` and publishes the buffer; bytes
+    // beyond `written` are never read, and the failure path recycles
+    // without publishing.
     unsafe {
-        buf.set_len(capacity);
+        buf.buf.set_len(capacity);
     }
 }
 
@@ -200,34 +273,35 @@ pub(in crate::afxdp) fn extend_pooled_for_build(buf: &mut Vec<u8>, capacity: usi
 /// UMEM TX frame — so the buffer is dead. Drops the buffer if the pool
 /// is at its cap.
 #[inline]
-pub(in crate::afxdp) fn recycle(buf: Vec<u8>) {
+pub(in crate::afxdp) fn recycle(mut w: PooledBuffer) {
+    // Successful publish: the checkout filled the whole window and
+    // the builder overwrote `0..written`, so the buffer returns
+    // initialized up to `max(initialized, len)` even though it was
+    // truncated to `written` — same-size reuse then pays no re-fill.
+    // The extent lives in the wrapper, so this is exact even when
+    // the buffer was checked out on a different (source) thread and
+    // is recycled here on the owner thread. A wrapper that never
+    // published a build window keeps exactly its published length.
+    w.initialized = w.initialized.max(w.buf.len()).min(w.buf.capacity());
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        let flight = POOL_FLIGHT_EXTENTS.with(|m| m.borrow_mut().remove(&(buf.as_ptr() as usize)));
         if pool.len() < MAX_POOLED_BUFFERS {
-            // Successful publish: the checkout filled the whole window
-            // and the builder overwrote `0..written`, so the buffer
-            // returns initialized up to `max(flight_window, len)` even
-            // though it was truncated to `written` — same-size reuse
-            // then pays no re-fill. A recycle with no flight entry
-            // (foreign buffer, or a checkout that never published a
-            // build window) keeps exactly its published length: bytes
-            // past `len` may be stale, never capacity.
-            let init_len = flight
-                .map(|w| w.max(buf.len()))
-                .unwrap_or(buf.len())
-                .min(buf.capacity());
-            POOL_INITIALIZED.with(|i| i.borrow_mut().push(init_len));
-            pool.push(buf);
+            pool.push(w);
         }
     });
+}
+
+/// #15956: recycle a plain `Vec<u8>` that never traveled as a
+/// [`PooledBuffer`] (foreign one-off buffers, test fixtures). Exactly
+/// its published bytes count as initialized.
+#[inline]
+pub(in crate::afxdp) fn recycle_vec(buf: Vec<u8>) {
+    recycle(PooledBuffer::from(buf));
 }
 
 #[cfg(test)]
 pub(in crate::afxdp) fn clear_for_test() {
     POOL.with(|pool| pool.borrow_mut().clear());
-    POOL_INITIALIZED.with(|i| i.borrow_mut().clear());
-    POOL_FLIGHT_EXTENTS.with(|m| m.borrow_mut().clear());
     POOL_GROWTH_ZEROFILLS.with(|c| c.set(0));
 }
 

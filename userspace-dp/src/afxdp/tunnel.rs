@@ -838,7 +838,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     Ok(LocalTunnelTxPlan {
         tx_ifindex: decision.resolution.tx_ifindex,
         tx_request: TxRequest {
-            bytes,
+            bytes: bytes.into(),
             expected_ports: None,
             expected_addr_family: meta.addr_family,
             expected_protocol: meta.protocol,

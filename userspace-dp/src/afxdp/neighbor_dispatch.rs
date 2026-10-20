@@ -996,7 +996,7 @@ pub(super) fn retry_pending_neigh(
                         None
                     };
                     target.tx_pipeline.pending_tx_local.push_back(TxRequest {
-                        bytes,
+                        bytes: bytes.into(),
                         expected_ports: None,
                         expected_addr_family: pkt.meta.addr_family,
                         expected_protocol: pkt.meta.protocol,
@@ -1172,7 +1172,7 @@ pub(super) fn retry_pending_neigh(
                 area.slice(rewrite_result.offset as usize, rewrite_result.len as usize)
             {
                 target.tx_pipeline.pending_tx_local.push_back(TxRequest {
-                    bytes: bytes.to_vec(),
+                    bytes: bytes.to_vec().into(),
                     expected_ports: req.expected_ports,
                     expected_addr_family: req.expected_addr_family,
                     expected_protocol: req.expected_protocol,

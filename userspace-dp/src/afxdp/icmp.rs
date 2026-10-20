@@ -439,7 +439,7 @@ pub(super) fn build_local_time_exceeded_request(
         target_binding_index: None,
         ingress_queue_id: ingress_ident.queue_id,
         desc,
-        frame: PendingForwardFrame::Prebuilt(prebuilt_frame),
+        frame: PendingForwardFrame::Prebuilt(prebuilt_frame.into()),
         meta: meta.into(),
         decision: SessionDecision { resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,

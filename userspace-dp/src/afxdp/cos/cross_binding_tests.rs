@@ -47,7 +47,7 @@ fn redirect_local_cos_request_to_owner_pushes_worker_command() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -88,7 +88,7 @@ fn redirect_local_cos_request_to_owner_uses_interface_default_queue_owner_when_u
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -122,7 +122,7 @@ fn redirect_local_cos_request_to_owner_rejects_explicit_queue_miss() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -168,7 +168,7 @@ fn redirect_local_cos_request_to_owner_keeps_exact_queue_on_eligible_worker() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -383,7 +383,7 @@ fn redirect_local_cos_request_to_owner_binding_pushes_owner_live_queue() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -477,7 +477,7 @@ fn redirect_local_cos_request_to_owner_uses_owner_live_queue_when_available() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -527,7 +527,7 @@ fn redirect_local_cos_request_to_owner_redirects_low_rate_exact_queue() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -580,7 +580,7 @@ fn redirect_local_exact_cos_request_to_owner_binding_pushes_owner_live_queue() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![1, 2, 3],
+        bytes: vec![1, 2, 3].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -912,7 +912,7 @@ fn redirect_local_cos_request_to_owner_refused_at_capacity_returns_err_10310() {
         None,
     );
     let req = TxRequest {
-        bytes: vec![9, 9, 9],
+        bytes: vec![9, 9, 9].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -1013,7 +1013,7 @@ fn redirect_prepared_cos_request_to_owner_binding_err_recycles_pool_buffer_13072
     let mut admitted = 0usize;
     while owner_live
         .try_enqueue_tx_owned(TxRequest {
-            bytes: Vec::new(),
+            bytes: Vec::new().into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,

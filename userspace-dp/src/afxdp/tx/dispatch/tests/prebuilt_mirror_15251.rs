@@ -39,7 +39,7 @@ fn run_prebuilt_dispatch(
     let mut frame = frame;
     frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]);
-    request.frame = PendingForwardFrame::Prebuilt(frame.clone());
+    request.frame = PendingForwardFrame::Prebuilt(frame.clone().into());
     request.desc.len = frame.len() as u32;
     if is_v6 {
         request.meta.addr_family = libc::AF_INET6 as u8;

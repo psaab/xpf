@@ -289,7 +289,7 @@ impl super::Coordinator {
                         }
                         let flow_key = cos_flow.map(|flow| flow.forward_key);
                         target_live.enqueue_tx(TxRequest {
-                            bytes: frame,
+                            bytes: frame.into(),
                             expected_ports: None,
                             expected_addr_family: tx_meta.addr_family,
                             expected_protocol: tx_meta.protocol,

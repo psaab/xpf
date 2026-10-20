@@ -281,7 +281,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         sessions,
         &icmp_match.budget_key,
         icmp_resolution,
-        rewritten_frame,
+        rewritten_frame.into(),
         #[cfg(feature = "debug-log")]
         icmpv6_trace,
     );
@@ -319,7 +319,7 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     sessions: &mut SessionTable,
     budget_key: &SessionKey,
     icmp_resolution: ForwardingResolution,
-    rewritten_frame: Vec<u8>,
+    rewritten_frame: crate::afxdp::cos::redirect_pool::PooledBuffer,
     #[cfg(feature = "debug-log")] icmpv6_trace: bool,
 ) -> EmbeddedIcmpReversal {
     // #14122: classify CoS / the egress output filter on the frame that

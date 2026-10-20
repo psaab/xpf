@@ -34,7 +34,7 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
     // the pre-refactor head-peek as HIGH severity — this is
     // the regression pin.
     let non_cos = |payload: u8| TxRequest {
-        bytes: vec![payload; 64],
+        bytes: vec![payload; 64].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -47,7 +47,7 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
         enqueue_ns: 0,
     };
     let cos_bound = |payload: u8| TxRequest {
-        bytes: vec![payload; 64],
+        bytes: vec![payload; 64].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -88,7 +88,7 @@ fn partition_cos_bound_local_scans_mixed_head_deque() {
 #[test]
 fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
     let non_cos = TxRequest {
-        bytes: vec![0xAA; 64],
+        bytes: vec![0xAA; 64].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -101,7 +101,7 @@ fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
         enqueue_ns: 0,
     };
     let cos_bound = TxRequest {
-        bytes: vec![0xBB; 64],
+        bytes: vec![0xBB; 64].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -132,7 +132,7 @@ fn partition_cos_bound_local_rescues_when_try_rescue_ok() {
 fn partition_cos_bound_local_treats_default_queue_on_cos_interface_as_bound() {
     let mut pending: VecDeque<TxRequest> = VecDeque::from([
         TxRequest {
-            bytes: vec![0x11; 64],
+            bytes: vec![0x11; 64].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -145,7 +145,7 @@ fn partition_cos_bound_local_treats_default_queue_on_cos_interface_as_bound() {
             enqueue_ns: 0,
         },
         TxRequest {
-            bytes: vec![0x22; 64],
+            bytes: vec![0x22; 64].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -247,7 +247,7 @@ fn park_drained_deques_keeps_both_allocations_7204() {
     let pending2: VecDeque<TxRequest> = VecDeque::with_capacity(64);
     let mut retry2: VecDeque<TxRequest> = VecDeque::with_capacity(32);
     retry2.push_back(TxRequest {
-        bytes: Vec::new(),
+        bytes: Vec::new().into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,
@@ -310,7 +310,7 @@ fn ingest_cos_pending_tx_step1_refusal_falls_through_to_step2_10310() {
     let root = test_cos_runtime_with_exact(false);
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 2, 80, root, fast_path);
     binding.tx_pipeline.pending_tx_local.push_back(TxRequest {
-        bytes: vec![7, 7, 7],
+        bytes: vec![7, 7, 7].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

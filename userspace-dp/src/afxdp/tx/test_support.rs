@@ -167,7 +167,7 @@ pub(in crate::afxdp) fn test_cos_runtime_with_queues(
 
 pub(in crate::afxdp) fn test_cos_item(len: usize) -> CoSPendingTxItem {
     CoSPendingTxItem::Local(TxRequest {
-        bytes: vec![0; len],
+        bytes: vec![0; len].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -183,7 +183,7 @@ pub(in crate::afxdp) fn test_cos_item(len: usize) -> CoSPendingTxItem {
 
 pub(in crate::afxdp) fn test_flow_cos_item(src_port: u16, len: usize) -> CoSPendingTxItem {
     CoSPendingTxItem::Local(TxRequest {
-        bytes: vec![0; len],
+        bytes: vec![0; len].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -440,7 +440,7 @@ pub(in crate::afxdp) fn ipv6_tclass(pkt: &[u8]) -> u8 {
 /// into queue 0 of `test_cos_runtime_with_exact`.
 pub(in crate::afxdp) fn test_local_ipv4_item(tos: u8) -> CoSPendingTxItem {
     CoSPendingTxItem::Local(TxRequest {
-        bytes: build_ipv4_test_packet(tos),
+        bytes: build_ipv4_test_packet(tos).into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

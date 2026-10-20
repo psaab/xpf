@@ -38,7 +38,7 @@ fn frame_15149(id: u64, flow_tag: u64) -> SubmitFrame {
         flow_tag,
         flags: 0,
         origin: CaptureOrigin::inet_forward(42, "owner", "stn"),
-        bytes: vec![0x45u8; 64],
+        bytes: vec![0x45u8; 64].into(),
         snapshot_generation: 1,
         config_generation: 2,
         fib_generation: 3,

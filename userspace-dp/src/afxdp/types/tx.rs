@@ -9,7 +9,7 @@
 use super::*;
 #[derive(Debug)]
 pub(in crate::afxdp) struct TxRequest {
-    pub(in crate::afxdp) bytes: Vec<u8>,
+    pub(in crate::afxdp) bytes: crate::afxdp::cos::redirect_pool::PooledBuffer,
     #[allow(dead_code)]
     pub(in crate::afxdp) expected_ports: Option<(u16, u16)>,
     #[allow(dead_code)]
@@ -43,7 +43,7 @@ impl Clone for TxRequest {
             "admission-bearing TX requests must move, not clone"
         );
         Self {
-            bytes: self.bytes.clone(),
+            bytes: self.bytes.fork(),
             expected_ports: self.expected_ports,
             expected_addr_family: self.expected_addr_family,
             expected_protocol: self.expected_protocol,
@@ -85,7 +85,7 @@ impl TxRequest {
 pub(in crate::afxdp) enum PendingForwardFrame {
     Live,
     Owned(Vec<u8>),
-    Prebuilt(Vec<u8>),
+    Prebuilt(crate::afxdp::cos::redirect_pool::PooledBuffer),
 }
 
 impl Default for PendingForwardFrame {
@@ -158,7 +158,7 @@ pub(in crate::afxdp) struct PreparedTxRequest {
 
 impl PreparedTxRequest {
     #[inline]
-    pub(in crate::afxdp) fn into_local_request(&mut self, bytes: Vec<u8>) -> TxRequest {
+    pub(in crate::afxdp) fn into_local_request(&mut self, bytes: crate::afxdp::cos::redirect_pool::PooledBuffer) -> TxRequest {
         TxRequest {
             bytes,
             expected_ports: self.expected_ports,

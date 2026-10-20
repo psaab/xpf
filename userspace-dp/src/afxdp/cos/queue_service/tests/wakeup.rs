@@ -7,7 +7,7 @@ use super::*;
 fn assign_local_dscp_rewrite_preserves_existing_filter_rewrite() {
     let mut items = VecDeque::from([
         TxRequest {
-            bytes: vec![0; 64],
+            bytes: vec![0; 64].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -20,7 +20,7 @@ fn assign_local_dscp_rewrite_preserves_existing_filter_rewrite() {
             enqueue_ns: 0,
         },
         TxRequest {
-            bytes: vec![0; 64],
+            bytes: vec![0; 64].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -133,7 +133,7 @@ fn restore_cos_local_items_marks_queue_runnable_after_retry() {
         queue_lease_v8: None,
     };
     let mut retry = VecDeque::from([TxRequest {
-        bytes: vec![0; 1500],
+        bytes: vec![0; 1500].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

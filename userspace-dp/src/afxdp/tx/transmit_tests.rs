@@ -151,7 +151,7 @@ fn transmit_batch_oversized_unwind_preserves_pending_order() {
     use crate::afxdp::types::TxRequest;
 
     let mk = |len: usize, id: u64| TxRequest {
-        bytes: vec![0u8; len],
+        bytes: vec![0u8; len].into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,
@@ -310,7 +310,7 @@ fn tx_retry_outcome_codes_4971() {
     // Force the NoFreeTxFrame retry: no free frames, one pending req.
     binding.tx_pipeline.free_tx_frames.clear();
     let mut pending = VecDeque::from([TxRequest {
-        bytes: vec![0u8; 128],
+        bytes: vec![0u8; 128].into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,

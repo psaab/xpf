@@ -660,7 +660,7 @@ impl LiveCallSiteFixture {
             assert!(
                 target_live
                     .try_enqueue_tx_owned(TxRequest {
-                        bytes: Vec::new(),
+                        bytes: Vec::new().into(),
                         expected_ports: None,
                         expected_addr_family: 0,
                         expected_protocol: 0,
@@ -2062,7 +2062,7 @@ fn live_flow_cache_callsite_leaves_no_admission_stranded_on_target_6304() {
 /// A stand-in for another worker pushing to the same mirror target.
 fn probe_tx_request() -> TxRequest {
     TxRequest {
-        bytes: vec![0x5a; 64],
+        bytes: vec![0x5a; 64].into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,

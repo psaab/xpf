@@ -2656,7 +2656,7 @@ fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
     // fragmentable size, so they legitimately differ between two builds;
     // mask them exactly like the existing differential test does.
     let capacity = frame.len() + 4;
-    redirect_pool::recycle(vec![0xEEu8; capacity]);
+    redirect_pool::recycle_vec(vec![0xEEu8; capacity]);
     let mut got = build_nat64_forwarded_frame(
         &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
     )
@@ -2678,7 +2678,7 @@ fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
         &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
     )
     .expect("zero-filled reverse build");
-    redirect_pool::recycle(vec![0xEEu8; reply.len() + 44]);
+    redirect_pool::recycle_vec(vec![0xEEu8; reply.len() + 44]);
     let got_rev = build_nat64_forwarded_frame(
         &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
     )
@@ -2876,7 +2876,7 @@ fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
     // and the build must equal the cold build past the frag-ID header.
     redirect_pool::clear_for_test();
     let dirty = vec![0xEEu8; 10];
-    redirect_pool::recycle(dirty);
+    redirect_pool::recycle_vec(dirty);
     let grown = build_nat64_forwarded_frame(
         &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
     )
@@ -2970,3 +2970,38 @@ fn nat64_15956_reverse_udp_checksum_read_bounded_by_written() {
     );
 }
 
+
+// #15956 fold (Opus3/Codex3): cross-thread extent migration. The extent
+// now lives IN the PooledBuffer wrapper, so checkout -> move to another
+// thread -> recycle there must preserve it (the owner thread's pool
+// gains the buffer with its full filled window, and its next same-size
+// checkout pays no delta fill). With the deleted ptr-keyed TLS map this
+// cell failed: the extent stayed on the source thread.
+#[test]
+fn nat64_15956_extent_migrates_with_buffer_across_threads() {
+    use crate::afxdp::cos::redirect_pool;
+    redirect_pool::clear_for_test();
+    // Build into a checked-out wrapper on THIS thread, publish at
+    // capacity via extend, truncate to a shorter written length.
+    let cap = 128usize;
+    let mut w = redirect_pool::checkout_with_capacity(cap);
+    redirect_pool::extend_pooled_for_build(&mut w, cap);
+    w.buf[..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    w.buf.truncate(8);
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "cold fill once");
+    // Move the WRAPPER to another thread and recycle it there.
+    let handle = std::thread::spawn(move || {
+        redirect_pool::recycle(w);
+        // The owner thread's pool now holds the buffer WITH extent=cap:
+        // its same-size checkout pays no new delta fill.
+        let mut w2 = redirect_pool::checkout_with_capacity(cap);
+        let fills_after = redirect_pool::growth_zerofills_for_test();
+        redirect_pool::extend_pooled_for_build(&mut w2, cap);
+        (fills_after, w2.initialized(), w2.len())
+    });
+    let (fills, init, len) = handle.join().expect("owner thread");
+    assert_eq!(fills, 0, "owner-thread pool started empty: no counter on that thread");
+    assert_eq!(init, cap, "extent migrated with the wrapper across threads");
+    assert_eq!(len, cap, "extended on owner thread without re-fill");
+    let _ = fills;
+}
