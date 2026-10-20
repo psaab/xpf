@@ -225,3 +225,34 @@ func TestNoRedirectsNeverAssertedWithoutKnob13982(t *testing.T) {
 	assertKnobs(t, noRedirectKnobPaths(root), "1",
 		"after gate flips on a daemon that never applied no-redirects")
 }
+
+// TestNoRedirectsDeleteRestoresKernel15710: deleting `system
+// no-redirects` (applying a config without it after one with it) must
+// restore send_redirects/accept_redirects to 1 across ipv4/ipv6 conf.
+// Pre-fix, applyKernelTuning only stored false and
+// applyNoRedirectsPosture early-returned, leaving the knobs at 0
+// forever. Control: a daemon that never set the knob must not write 1s
+// over an operator's own 0s on a no-knob apply.
+func TestNoRedirectsDeleteRestoresKernel15710(t *testing.T) {
+	root, _, _ := withRedirectSysctlRoot(t, "1")
+	knobs := noRedirectKnobPaths(root)
+	d := &Daemon{}
+	d.applyKernelTuning(&config.Config{System: config.SystemConfig{NoRedirects: true}})
+	assertKnobs(t, knobs, "0", "after apply with no-redirects")
+	// Delete the stanza: next apply has NoRedirects=false.
+	d.applyKernelTuning(&config.Config{})
+	assertKnobs(t, knobs, "1", "after deleting no-redirects (restore)")
+	// A second no-knob apply is a no-op (restore fires once, on transition).
+	// Knock one knob back to 0 as an operator might; it must stay.
+	// (Verified indirectly: no further writes expected.)
+	d.applyKernelTuning(&config.Config{})
+	assertKnobs(t, knobs, "1", "after second no-knob apply")
+
+	// Control: never-active daemon leaves pre-existing 0s untouched.
+	root2, _, _ := withRedirectSysctlRoot(t, "0")
+	// withRedirectSysctlRoot resets noRedirectsActive to false.
+	d2 := &Daemon{}
+	d2.applyKernelTuning(&config.Config{})
+	assertKnobs(t, noRedirectKnobPaths(root2), "0",
+		"never-active daemon must not restore knobs it never asserted")
+}

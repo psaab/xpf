@@ -312,7 +312,6 @@ services rpm probe xpfarg test xpfarg probe-type	empty
 services rpm probe xpfarg test xpfarg routing-instance	empty
 services rpm probe xpfarg test xpfarg source-address	empty
 services rpm probe xpfarg test xpfarg test-interval	empty
-system archival configuration transfer-on-commit	empty
 system internet-options no-ipv6-reject-zero-hop-limit	empty
 system login class	partial
 system login class xpfarg allow-commands	empty
@@ -328,6 +327,5 @@ system login user xpfarg authentication ssh-ed25519	empty
 system login user xpfarg authentication ssh-rsa	empty
 system login user xpfarg class	empty
 system login user xpfarg uid	empty
-system no-redirects	empty
 system services web-management api-auth class	empty
 system services web-management api-auth expires	empty
