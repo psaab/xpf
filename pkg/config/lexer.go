@@ -103,6 +103,10 @@ type Lexer struct {
 	// peekBracketDepth is the depth after the last token and its leading gap
 	// were scanned by Peek, before Peek restores the lexer's position.
 	peekBracketDepth int
+	// pendingComment is the normalized text of the block comments most
+	// recently skipped in a gap, in source order (#15718).
+	pendingComment string
+	hasComment     bool
 }
 
 // InBracket reports whether the token most recently returned by Next was
@@ -135,6 +139,10 @@ func (l *Lexer) LastGapClosed() bool { return l.gapClosed }
 // distinguish balanced key spans from a list that remains open at `;` or EOF.
 func (l *Lexer) PeekBracketDepth() int { return l.peekBracketDepth }
 
+// LastGapComment returns the normalized block-comment text skipped in
+// the most recently scanned gap (#15718); like LastGapLoss it survives Peek.
+func (l *Lexer) LastGapComment() (string, bool) { return l.pendingComment, l.hasComment }
+
 // Position returns the lexer's current byte offset into the input
 // (#15759). Callers that consumed a known number of tokens can slice
 // the original text at this offset to recover the unconsumed tail
@@ -157,6 +165,8 @@ func (l *Lexer) Next() Token {
 	// the moment a new scan starts.
 	l.gapLoss = false
 	l.gapClosed = false
+	l.pendingComment = ""
+	l.hasComment = false
 	// sawOpenAtZero remembers a `[` consumed at depth zero during THIS
 	// call's gap. If the gap later closes back to zero, the pair was
 	// tokenless — no Next returned between the delimiters, so no token
@@ -372,11 +382,14 @@ func (l *Lexer) skipWhitespaceAndComments() {
 		// Block comment: /* ... */
 		if ch == '/' && l.pos+1 < len(l.input) && l.input[l.pos+1] == '*' {
 			startLine, startCol := l.line, l.column
+			contentStart := l.pos + 2
 			l.advance() // /
 			l.advance() // *
 			terminated := false
+			contentEnd := l.pos
 			for l.pos+1 < len(l.input) {
 				if l.input[l.pos] == '*' && l.input[l.pos+1] == '/' {
+					contentEnd = l.pos
 					l.advance() // *
 					l.advance() // /
 					terminated = true
@@ -398,6 +411,14 @@ func (l *Lexer) skipWhitespaceAndComments() {
 					Column: startCol,
 				}
 				return
+			}
+			if text := strings.Join(strings.Fields(l.input[contentStart:contentEnd]), " "); text != "" {
+				if l.hasComment {
+					l.pendingComment += " " + text
+				} else {
+					l.pendingComment = text
+					l.hasComment = true
+				}
 			}
 			continue
 		}

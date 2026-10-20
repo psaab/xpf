@@ -863,11 +863,11 @@ func unionChildren(nodes []*Node) []*Node {
 // resolve returns a clear error naming the path and mutates nothing.
 func (t *ConfigTree) AnnotatePath(path []string, comment string) error {
 	if len(path) == 0 {
-		return fmt.Errorf("path not found: (empty path)")
+		return fmt.Errorf("%w: (empty path)", ErrPathNotFound)
 	}
 	matches := navigatePath(t.Children, path)
 	if len(matches) == 0 {
-		return fmt.Errorf("path not found: %s", strings.Join(path, " "))
+		return fmt.Errorf("%w: %s", ErrPathNotFound, strings.Join(path, " "))
 	}
 	matches[0].Annotation = comment
 	return nil

@@ -459,6 +459,7 @@ var parserMarkers = []string{inactiveMarker}
 // and key matching, schema walks, and group merge keep working unmodified.
 func (p *Parser) parseStatement() *Node {
 	statementStart := p.lexer.Peek()
+	annotation, hasAnnotation := p.lexer.LastGapComment()
 	keys, kinds, bracketed, bracketedClosed := p.parseKeys()
 	if len(keys) == 0 {
 		// Recovery: skip unexpected token
@@ -571,6 +572,9 @@ func (p *Parser) parseStatement() *Node {
 			Line:            line,
 			Column:          col,
 		}
+		if hasAnnotation {
+			n.Annotation = annotation
+		}
 		n.setKeysQuoted(quoted)
 		n.setKeysBracketed(brackets)
 		return n
@@ -585,6 +589,9 @@ func (p *Parser) parseStatement() *Node {
 			BracketedClosed: bracketedClosed,
 			Line:            line,
 			Column:          col,
+		}
+		if hasAnnotation {
+			n.Annotation = annotation
 		}
 		n.setKeysQuoted(quoted)
 		n.setKeysBracketed(brackets)
@@ -606,6 +613,9 @@ func (p *Parser) parseStatement() *Node {
 			BracketedClosed: bracketedClosed,
 			Line:            line,
 			Column:          col,
+		}
+		if hasAnnotation {
+			n.Annotation = annotation
 		}
 		n.setKeysQuoted(quoted)
 		n.setKeysBracketed(brackets)
