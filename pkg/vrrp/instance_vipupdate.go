@@ -311,6 +311,12 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	// inherent exposure (one stale advert/GARP at most, superseded by the
 	// demotion's own resignation).
 	if announce && vi.getState() == StateMaster {
+		// Announce only — deliberately NO noteTimerApplied: this path
+		// does not reset advertTimer, so baselining the pending record
+		// here would claim the timer was armed under this cfg when it
+		// is still on its previous arm (#15922 round-2 review). The
+		// queued config token remains for stepMaster to advertise and
+		// re-arm at final cfg.
 		vi.sendAdvert(vi.getPriority())
 		if len(announcementVIPs) > 0 && !vi.suppressGARP.Load() {
 			// Carry only still-current VIPs whose prior synchronous first

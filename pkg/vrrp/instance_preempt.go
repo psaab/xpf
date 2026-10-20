@@ -300,11 +300,36 @@ func (vi *vrrpInstance) heldMasterIsStale() bool {
 // this watchdog: a stale held master triggers immediate takeover, a still-live
 // one re-arms the watchdog and defers to the natural hold expiry.
 func (vi *vrrpInstance) armPreemptHold(masterDownTimer, preemptHoldTimer *time.Timer, hold time.Duration) {
+	// `hold` is the caller's cfg snapshot (preemptHoldDuration); the
+	// arm and the pending-record baseline must use THAT value, never a
+	// re-read: a manager commit between the snapshot and this call has
+	// already advanced pending newHoldSec past snapSec, and baselining
+	// to the newer cfg would record a 60s arm over a timer actually
+	// armed at the 1s snapshot, letting the config consumer preserve
+	// the stale 1s hold (Codex2). So: snapshot+Reset+note under ONE
+	// vi.mu hold, and note ONLY when the pending record's newest hold
+	// still equals the snapshot (no commit interleaved); otherwise the
+	// record already encodes the mismatch and the consumer disarms.
+	snapSec := int(hold / time.Second)
 	stopAndDrainTimer(preemptHoldTimer)
-	preemptHoldTimer.Reset(hold)
 	stopAndDrainTimer(masterDownTimer)
-	masterDownTimer.Reset(vi.masterDownInterval())
 	vi.mu.Lock()
+	preemptHoldTimer.Reset(hold)
+	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
+	p := vi.cfg.Priority
+	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
+		p -= vi.cfg.TrackPriorityCost
+		if p < 1 {
+			p = 1
+		} else if p > 254 {
+			p = 254
+		}
+	}
+	masterDownTimer.Reset(3*advert + time.Duration(256-p)*advert/256)
+	if vi.pendingConfigChange.valid && vi.pendingConfigChange.newHoldSec == snapSec {
+		vi.noteHoldBaselineLocked()
+		vi.noteAdvertBaselineLocked()
+	}
 	vi.preemptHoldArmed = true
 	vi.preemptHoldArmedAt = time.Now()
 	vi.mu.Unlock()
@@ -312,7 +337,9 @@ func (vi *vrrpInstance) armPreemptHold(masterDownTimer, preemptHoldTimer *time.T
 
 // disarmPreemptHold stops a (possibly) armed preempt hold-time countdown and
 // clears the armed flag (#2900). Safe on an already-stopped timer. Called only
-// from the run-loop goroutine.
+// from the run-loop goroutine. Deliberately no pending-record note: with no
+// countdown armed, the config consumer takes its not-armed branch, where the
+// hold fields play no role.
 func (vi *vrrpInstance) disarmPreemptHold(preemptHoldTimer *time.Timer) {
 	stopAndDrainTimer(preemptHoldTimer)
 	vi.mu.Lock()

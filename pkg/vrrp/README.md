@@ -78,7 +78,23 @@ default RETH ownership/failover path.
   into a later BACKUP tenure); StateBackup re-arms `masterDownTimer` when
   the no-learned-master fallback horizon shrank or preemption newly became
   warranted, and preserves an armed preempt-hold countdown unless the
-  hold-time changed or the preempt premise was lost. The next failover's
+  hold-time changed or the preempt premise was lost. Because
+  `configUpdatedCh` has capacity one, several commits can coalesce into a
+  single consumption; since #15920 the pending record then accumulates —
+  the oldest unconsumed baseline per timer-relevant field (advertise
+  interval, effective priority, preempt hold-time) with the newest desired
+  value — so an interval/hold change followed by an unrelated edit before
+  the run loop wakes still re-arms/disarms on time, while a
+  change-then-revert nets to no change. The baseline is the cfg the live
+  timers were last armed under, not merely the pre-first-update cfg:
+  every run-loop arm from cfg snapshots, resets, and re-baselines under
+  one lock hold (`armAdvertTimer`/`armMasterDownTimer`/
+  `armMasterDownSafetyTimer`/`armPreemptHold` — including the
+  forced-resign safety net, whose 3x extension is deliberate but whose
+  input is cfg-derived),
+  while paths that only send (VIP-set announce) never re-baseline — so a
+  revert after an intermediate arm still reads as a change and is
+  corrected. The next failover's
   `sendGARP` re-reads `cfg.GARPCount`. Before #5087 the stale value
   persisted until an unrelated restart.
   **Ifindex drift (#2294):** before the no-change / in-place branch, a

@@ -154,17 +154,32 @@ type vrrpInstance struct {
 	// preemptHoldTimer.C remains the safety net.
 	preemptHoldArmedAt time.Time
 
-	// pendingConfigChange is the before/after snapshot of the most recent
-	// updateConfigHeld that signalled configUpdatedCh and has not yet been
-	// consumed by the run loop (#15689). Set under mu by updateConfigHeld
-	// BEFORE the channel send, consumed (taken) under mu by the run loop's
-	// configUpdatedCh handlers. It lets StateMaster decide whether an
-	// immediate advert is warranted (AdvertiseInterval or effective
-	// priority changed) and lets stepBackup distinguish an invalidating
-	// hold edit (PreemptHoldTime changed / premise lost) from an
-	// unrelated edit that must preserve the armed countdown. A coalesced
-	// second update overwrites it — the handlers re-read current cfg for
-	// the interval/priority decisions, exactly as the channel coalesces.
+	// pendingConfigChange is the accumulated before/after snapshot of the
+	// updateConfigHeld calls that signalled configUpdatedCh and have not
+	// yet been consumed by the run loop (#15689, #15920). Set under mu by
+	// updateConfigHeld BEFORE the channel send, consumed (taken) under mu
+	// by the run loop's configUpdatedCh handlers. It lets StateMaster
+	// decide whether an immediate advert is warranted (AdvertiseInterval
+	// or effective priority changed) and lets stepBackup distinguish an
+	// invalidating hold edit (PreemptHoldTime changed / premise lost) from
+	// an unrelated edit that must preserve the armed countdown. Because
+	// configUpdatedCh has capacity one, several updates can coalesce into
+	// a single consumption: the pending record keeps the OLDEST
+	// unconsumed baseline for every field and the NEWEST desired value,
+	// so a first update that changed a timer-relevant field followed by
+	// an unrelated second update (e.g. GARPCount) still reads as a change
+	// against the configuration under which the running timer was armed,
+	// while a change-then-revert sequence nets to no change.
+	//
+	// A timer can also be (re)armed from an intermediate cfg before the
+	// token is consumed (advertTimer.C, masterDownTimer.C arming a
+	// preempt hold, handleBackupRx, transitions). The arm helpers
+	// (armAdvertTimer/armMasterDownTimer/armMasterDownSafetyTimer/
+	// armPreemptHold) re-baseline
+	// the pending record's old* fields to the cfg they armed under,
+	// atomically with the arm, so a later revert that nets old==new
+	// can only suppress the config handler's correction when the live
+	// timers genuinely are armed under the final cfg.
 	pendingConfigChange configChange15689
 
 	trackDown bool // tracked interface (cfg.TrackInterface) is down (#1814); guarded by mu
@@ -499,6 +514,138 @@ func (vi *vrrpInstance) takePendingConfigChange() configChange15689 {
 	return c
 }
 
+// Pending-record re-baselining (#15920 reviews, rounds 1-2). Several
+// config updates can coalesce ahead of the capacity-one
+// configUpdatedCh token, and a timer/RX/transition event serviced in
+// between arms timers from whatever cfg is current at that moment —
+// e.g. MASTER's advertTimer.C re-arms at an intermediate
+// AdvertiseInterval, or BACKUP's masterDownTimer.C arms a preempt
+// hold at an intermediate PreemptHoldTime. If a later update then
+// reverts the field to its pre-first-update value, the accumulated
+// record would read old==new and the config handler would suppress
+// its correction, even though the live timer is armed at the
+// intermediate value. Re-baselining old* := armed cfg at every such
+// arm keeps old* meaning "the values the live timers were last armed
+// under": a genuine no-op sequence stays a no-op (timers untouched),
+// while a revert after an intermediate arm reads as a real change
+// against the intermediate arm and the handler re-arms/disarms
+// accordingly.
+//
+// The recorded values must be the ones the arm actually used, never a
+// later re-read: a manager commit can land between an unlocked cfg
+// snapshot (advertInterval/masterDownInterval/preemptHoldDuration)
+// and a separate note, which would baseline old* to a cfg the timer
+// was never armed under. Hence the single invariant for every
+// cfg-derived arm in the run loop: snapshot cfg -> Reset timer ->
+// note baseline, all under ONE vi.mu hold, from ONE cfg read
+// (armAdvertTimer, armMasterDownTimer, armPreemptHold). Paths that
+// send a packet without arming (updateVIPs announce) must NOT note.
+// Sending the packet itself stays outside the lock (wire I/O); its
+// encoding is independently snapshotted under vi.mu in sendAdvert.
+
+// noteAdvertBaselineLocked records oldAdvertiseMS/oldEffectivePrio
+// from the cfg snapshot an advert/master-down arm just used. Caller
+// MUST hold vi.mu (the arm helpers above do); a no-op unless a config
+// change is pending.
+func (vi *vrrpInstance) noteAdvertBaselineLocked() {
+	if !vi.pendingConfigChange.valid {
+		return
+	}
+	vi.pendingConfigChange.oldAdvertiseMS = vi.cfg.AdvertiseInterval
+	vi.pendingConfigChange.oldEffectivePrio = vi.effectivePriorityLocked()
+}
+
+// noteHoldBaselineLocked is noteAdvertBaselineLocked for
+// PreemptHoldTime: oldHoldSec := the cfg value whose duration an
+// arm/disarm decision just used.
+func (vi *vrrpInstance) noteHoldBaselineLocked() {
+	if !vi.pendingConfigChange.valid {
+		return
+	}
+	vi.pendingConfigChange.oldHoldSec = vi.cfg.PreemptHoldTime
+}
+
+// armAdvertTimer resets advertTimer at the current cfg interval and
+// atomically re-baselines the pending record to that same cfg
+// (snapshot + Reset + note under ONE vi.mu hold), so a manager commit
+// cannot interleave between the cfg the arm used and the baseline
+// recorded for it. Holding vi.mu across Timer.Reset is safe: Reset
+// never calls back into the instance, and several existing paths
+// already Stop/Reset timers in the same critical-section style
+// (becomeBackup, config handlers); a manager commit blocked on the
+// lock simply takes effect — and is recorded — after this arm.
+func (vi *vrrpInstance) armAdvertTimer(advertTimer *time.Timer) {
+	vi.mu.Lock()
+	d := advertIntervalFromMS(vi.cfg.AdvertiseInterval)
+	advertTimer.Reset(d)
+	vi.noteAdvertBaselineLocked()
+	vi.mu.Unlock()
+}
+
+// armMasterDownTimer resets masterDownTimer at masterDownInterval()
+// and atomically re-baselines the pending record's advert fields to
+// the cfg snapshot the duration was derived from (same lock discipline
+// as armAdvertTimer). The computation replicates masterDownInterval()
+// under the already-held lock — getPriority() takes RLock, so it
+// cannot be called here; the skew priority is computed exactly as
+// prioritySnapshot does (0/255 pass through; track-down subtracts
+// TrackPriorityCost clamped to [1,254]). getPriority()'s
+// pending-resignation detour returns that same effective priority
+// from the cfg fields read here, so the durations agree. With a
+// learned master interval the duration is the peer's cadence, not
+// local cfg; baselining then is vacuous for the config consumer (it
+// never re-arms a learned-master timer on local interval changes) but
+// harmless.
+func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
+	vi.mu.Lock()
+	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
+	p := vi.cfg.Priority
+	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
+		p -= vi.cfg.TrackPriorityCost
+		if p < 1 {
+			p = 1
+		} else if p > 254 {
+			p = 254
+		}
+	}
+	skew := time.Duration(256-p) * advert / 256
+	masterDownTimer.Reset(3*advert + skew)
+	vi.noteAdvertBaselineLocked()
+	vi.mu.Unlock()
+}
+
+// armMasterDownSafetyTimer arms the forced-resignation safety net:
+// 3x masterDownInterval() with a 500ms floor. That IS a deliberate
+// extension beyond the plain master-down arm (a just-resigned node at
+// short intervals must not re-elect itself before the peer starts
+// advertising), but the 3x input is still cfg-derived, so the arm
+// follows the same snapshot -> Reset -> note invariant under ONE
+// vi.mu hold (Codex3): a manager commit landing during the
+// priority-0 sends is the cfg this arm uses and the baseline it
+// records, so a later revert reads as a change and the BACKUP config
+// consumer re-arms instead of retaining an intermediate horizon.
+func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
+	vi.mu.Lock()
+	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
+	p := vi.cfg.Priority
+	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
+		p -= vi.cfg.TrackPriorityCost
+		if p < 1 {
+			p = 1
+		} else if p > 254 {
+			p = 254
+		}
+	}
+	masterDown := 3*advert + time.Duration(256-p)*advert/256
+	safety := 3 * masterDown
+	if safety < 500*time.Millisecond {
+		safety = 500 * time.Millisecond
+	}
+	masterDownTimer.Reset(safety)
+	vi.noteAdvertBaselineLocked()
+	vi.mu.Unlock()
+}
+
 // updateConfig updates priority, preempt, interface-tracking,
 // advertise-interval, and gratuitous-ARP-count config in-place without
 // restarting.
@@ -551,23 +698,38 @@ func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 	// to advertise/re-arm (MASTER) or disarm vs preserve an armed hold
 	// (BACKUP). Effective priority is computed after the mutation so a
 	// track-cost change is reflected in newEffectivePrio.
-	vi.pendingConfigChange = configChange15689{
-		valid:            true,
-		oldAdvertiseMS:   oldAdvertiseMS,
-		newAdvertiseMS:   vi.cfg.AdvertiseInterval,
-		oldEffectivePrio: oldEffective,
-		newEffectivePrio: vi.effectivePriorityLocked(),
-		oldHoldSec:       oldHoldSec,
-		newHoldSec:       vi.cfg.PreemptHoldTime,
+	//
+	// Accumulate across coalesced updates (#15920): when a previous
+	// update is still unconsumed, keep its per-field baseline (the
+	// values the running timers were armed under) and refresh only the
+	// desired values, instead of overwriting the whole record with the
+	// latest adjacent delta — 60000->100 followed by a GARP-only edit
+	// recorded 100->100 and the MASTER handler, seeing no change,
+	// never re-armed the still-running 60s advert timer.
+	if vi.pendingConfigChange.valid {
+		vi.pendingConfigChange.newAdvertiseMS = vi.cfg.AdvertiseInterval
+		vi.pendingConfigChange.newEffectivePrio = vi.effectivePriorityLocked()
+		vi.pendingConfigChange.newHoldSec = vi.cfg.PreemptHoldTime
+	} else {
+		vi.pendingConfigChange = configChange15689{
+			valid:            true,
+			oldAdvertiseMS:   oldAdvertiseMS,
+			newAdvertiseMS:   vi.cfg.AdvertiseInterval,
+			oldEffectivePrio: oldEffective,
+			newEffectivePrio: vi.effectivePriorityLocked(),
+			oldHoldSec:       oldHoldSec,
+			newHoldSec:       vi.cfg.PreemptHoldTime,
+		}
 	}
 	vi.mu.Unlock()
 
 	// Wake the run-loop select (MASTER and BACKUP both consume
 	// configUpdatedCh since #15689) so timers and an armed preempt hold
-	// can be re-validated against the new config. Non-blocking: a
-	// coalesced pending signal is fine (the pending snapshot above is
-	// overwritten with the latest change and interval/priority decisions
-	// re-read current cfg).
+	// can be re-validated against the new config. Non-blocking: when
+	// the signal coalesces into an already-pending token, the pending
+	// snapshot above has accumulated the oldest baseline with the
+	// newest desired values (#15920), so no timer-relevant change is
+	// lost.
 	select {
 	case vi.configUpdatedCh <- struct{}{}:
 	default:
@@ -642,7 +804,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 					"key", vi.key())
 				vi.disarmPreemptHold(preemptHoldTimer)
 				if vi.becomeMaster() {
-					advertTimer.Reset(vi.advertInterval())
+					vi.armAdvertTimer(advertTimer)
 				} else {
 					vi.rearmForRetry(masterDownTimer)
 				}
@@ -651,7 +813,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 				// refreshing lastMasterSeen). Preserve the preempt-hold intent:
 				// re-arm the watchdog and let the hold run to its natural expiry.
 				stopAndDrainTimer(masterDownTimer)
-				masterDownTimer.Reset(vi.masterDownInterval())
+				vi.armMasterDownTimer(masterDownTimer)
 			}
 			return false
 		}
@@ -672,7 +834,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 			return false
 		}
 		if vi.becomeMaster() {
-			advertTimer.Reset(vi.advertInterval())
+			vi.armAdvertTimer(advertTimer)
 		} else {
 			vi.rearmForRetry(masterDownTimer)
 		}
@@ -700,7 +862,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 			slog.Info("vrrp: preempt hold-time elapsed, taking over",
 				"key", vi.key())
 			if vi.becomeMaster() {
-				advertTimer.Reset(vi.advertInterval())
+				vi.armAdvertTimer(advertTimer)
 				masterDownTimer.Stop()
 			} else {
 				vi.rearmForRetry(masterDownTimer)
@@ -714,7 +876,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 			slog.Info("vrrp: preempt hold-time elapsed but preemption no longer valid, staying BACKUP",
 				"key", vi.key())
 			stopAndDrainTimer(masterDownTimer)
-			masterDownTimer.Reset(vi.masterDownInterval())
+			vi.armMasterDownTimer(masterDownTimer)
 		}
 	case <-vi.resignCh:
 		// #6177 item 1: a forced resignation arrived while this instance is
@@ -761,13 +923,13 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 					"key", vi.key())
 				vi.disarmPreemptHold(preemptHoldTimer)
 				stopAndDrainTimer(masterDownTimer)
-				masterDownTimer.Reset(vi.masterDownInterval())
+				vi.armMasterDownTimer(masterDownTimer)
 			}
 			// else: premise intact and hold-time unchanged — preserve
 			// the running countdown untouched (#15689).
 		} else if vi.backupConfigUpdateNeedsMasterDownReset(change, hasLearned) {
 			stopAndDrainTimer(masterDownTimer)
-			masterDownTimer.Reset(vi.masterDownInterval())
+			vi.armMasterDownTimer(masterDownTimer)
 		}
 	case <-vi.preemptNowCh:
 		// Coordinated preemption from ReleaseSyncHold or forced transition
@@ -786,7 +948,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 		vi.mu.Unlock()
 		if force || vi.shouldPreemptObservedMaster() {
 			if vi.becomeMaster() {
-				advertTimer.Reset(vi.advertInterval())
+				vi.armAdvertTimer(advertTimer)
 				masterDownTimer.Stop()
 				// A coordinated/forced promotion supersedes any pending
 				// preempt hold-time countdown (#2850).
@@ -930,7 +1092,7 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 		vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
 	case <-advertTimer.C:
 		vi.sendAdvert(vi.getPriority())
-		advertTimer.Reset(vi.advertInterval())
+		vi.armAdvertTimer(advertTimer)
 	case <-vi.configUpdatedCh:
 		// Day-2 in-place update while MASTER (#15689). Consuming the
 		// token here is what stops it leaking into a future BACKUP
@@ -945,7 +1107,7 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 		if !change.valid || change.oldAdvertiseMS != change.newAdvertiseMS || change.oldEffectivePrio != change.newEffectivePrio {
 			vi.sendAdvert(vi.getPriority())
 			stopAndDrainTimer(advertTimer)
-			advertTimer.Reset(vi.advertInterval())
+			vi.armAdvertTimer(advertTimer)
 		}
 	case <-vi.resignCh:
 		// Forced resignation removes and publishes BACKUP before telling
@@ -960,12 +1122,11 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 		// Use an extended safety-net timer instead of stopping entirely.
 		// With short RETH intervals (30ms), the normal masterDown timer
 		// at priority 0 is only ~120ms, which can re-elect us before the
-		// peer starts advertising.
-		safetyTimeout := 3 * vi.masterDownInterval()
-		if safetyTimeout < 500*time.Millisecond {
-			safetyTimeout = 500 * time.Millisecond
-		}
-		masterDownTimer.Reset(safetyTimeout)
+		// peer starts advertising. The 3x extension is deliberate, but
+		// its input is cfg-derived: arm+note atomically (arm-helper
+		// invariant) so a commit during the sends above is what the
+		// baseline records.
+		vi.armMasterDownSafetyTimer(masterDownTimer)
 	}
 	return false
 }
