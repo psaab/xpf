@@ -890,7 +890,6 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						}
 						var toks []string
 						complete := false
-						var trailingMods []string
 						for _, sib := range children[i+1:] {
 							if sib.Name() == "range" {
 								break
@@ -916,38 +915,21 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 								complete = true
 							}
 							if sib.Name() == "no-translation" || sib.Name() == "deterministic" || sib.Name() == "random-allocation" || sib.Name() == "no-random-allocation" {
-								// #15935: the children loop already applied
-								// this modifier, but the deferred range
-								// flush above may have undone its effect
-								// (setPortRange clears PortNoTranslation).
-								// Remember EVERY trailing modifier so the
-								// tail can re-apply them all, in authored
-								// order — modifiers coexist (random does
-								// not supersede no-translation).
-								trailingMods = append(trailingMods, sib.Name())
-								continue
-							}
-							toks = append(toks, sib.Keys...)
-							for _, gc := range sib.Children {
-								toks = append(toks, gc.Keys...)
-							}
-						}
-						// #15935: a trailing modifier flushed a COMPLETE
-						// range above (toks reset, complete=true); applying
-						// setPortRange(nil) here would fabricate an
-						// "<empty>" invalid spec, zero the valid range, and
-						// clear PortNoTranslation. Only an incomplete or
-						// absent tail is a genuinely empty range. When
-						// modifiers flushed the range, re-apply ALL of
-						// them in authored order: no-translation clears
-						// the range (as in the children loop), the
-						// random flags toggle independently, and
-						// deterministic re-stamps its accumulated fields.
-						if toks != nil || !complete {
-							setPortRange(toks)
-						} else {
-							for _, mod := range trailingMods {
-								switch mod {
+								// #15935 (positional model): apply the
+								// modifier AT ITS AUTHORED POSITION,
+								// immediately after the range flush
+								// above. Collect-and-replay-at-end
+								// was wrong: a modifier before a LATER
+								// range must be superseded by that
+								// range (#13212 later-wins), and only
+								// modifiers after the final range
+								// override it. Modifiers coexist —
+								// applying one never undoes another
+								// (random does not supersede
+								// no-translation, and vice versa a
+								// later range clears no-translation
+								// via setPortRange).
+								switch sib.Name() {
 								case "no-translation":
 									pool.PortNoTranslation = true
 									pool.PortLow = 0
@@ -960,13 +942,30 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 									pool.PortRandomAllocation = false
 									pool.PortNoRandomAllocationAuthored = true
 								case "deterministic":
-									for _, sib := range children[i+1:] {
-										if sib.Name() == "deterministic" {
-											applyDeterministicChildren(ensureDet(), sib)
-										}
-									}
+									applyDeterministicChildren(ensureDet(), sib)
 								}
+								continue
 							}
+							toks = append(toks, sib.Keys...)
+							for _, gc := range sib.Children {
+								toks = append(toks, gc.Keys...)
+							}
+						}
+						// Tail: pending endpoint tokens flush as the
+						// final range (superseding any modifier applied
+						// before them). If a complete range already
+						// flushed and only positionally-applied
+						// modifiers followed, there is nothing to
+						// stamp — setPortRange(nil) here would
+						// fabricate "<empty>", zero the valid range,
+						// clear PortNoTranslation, and erase an
+						// invalid later range's strict-reject marker.
+						// Only a segment with no endpoints at all is
+						// the genuinely empty range.
+						if toks != nil {
+							setPortRange(toks)
+						} else if !complete {
+							setPortRange(nil)
 						}
 					}
 				}

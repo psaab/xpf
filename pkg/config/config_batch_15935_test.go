@@ -152,6 +152,77 @@ func TestGroupedRangeThreeTrailingModifiers15935(t *testing.T) {
 	}
 }
 
+// Positional semantics across MULTIPLE grouped ranges (#13212
+// later-wins): a modifier applies at its authored position. A later
+// range supersedes an earlier no-translation; a modifier after the
+// final range applies to that range; an invalid later range keeps
+// its strict-reject / tolerant-refusal marker even with a trailing
+// flag.
+func TestGroupedRangeInterleavedModifiers15935(t *testing.T) {
+	poolOf := func(t *testing.T, strict bool, cmds ...string) (*NATPool, *Config, error) {
+		t.Helper()
+		tree := snatPoolTree(t, append([]string{"set security nat source pool p1 address 203.0.113.5/32"}, cmds...)...)
+		var cfg *Config
+		var err error
+		if strict {
+			cfg, err = CompileConfig(tree)
+		} else {
+			cfg, err = CompileConfigLenient(tree)
+		}
+		if cfg == nil {
+			return nil, cfg, err
+		}
+		return cfg.Security.NAT.SourcePools["p1"], cfg, err
+	}
+	for _, strict := range []bool{true, false} {
+		pool, _, err := poolOf(t, strict,
+			"set security nat source pool p1 port no-translation",
+			"set security nat source pool p1 port range 5000 to 6000")
+		if err != nil {
+			t.Fatalf("nt->range strict=%v: %v", strict, err)
+		}
+		if pool.PortNoTranslation || pool.PortLow != 5000 || pool.PortHigh != 6000 {
+			t.Fatalf("nt->range strict=%v: notrans=%v %d-%d, want range wins", strict, pool.PortNoTranslation, pool.PortLow, pool.PortHigh)
+		}
+	}
+	for _, tail := range []string{"random-allocation", "no-random-allocation"} {
+		for _, strict := range []bool{true, false} {
+			pool, _, err := poolOf(t, strict,
+				"set security nat source pool p1 port range 5000 to 6000",
+				"set security nat source pool p1 port no-translation",
+				"set security nat source pool p1 port range 7000 to 8000",
+				"set security nat source pool p1 port "+tail)
+			if err != nil {
+				t.Fatalf("interleaved %s strict=%v: %v", tail, strict, err)
+			}
+			if pool.PortNoTranslation || pool.PortLow != 7000 || pool.PortHigh != 8000 || pool.PortRangeInvalidSpec != "" {
+				t.Fatalf("interleaved %s strict=%v: notrans=%v %d-%d invalid=%q, want range2 7000-8000 wins", tail, strict, pool.PortNoTranslation, pool.PortLow, pool.PortHigh, pool.PortRangeInvalidSpec)
+			}
+			if pool.PortRandomAllocation != (tail == "random-allocation") {
+				t.Fatalf("interleaved %s strict=%v: random=%v", tail, strict, pool.PortRandomAllocation)
+			}
+		}
+	}
+	if _, _, err := poolOf(t, true,
+		"set security nat source pool p1 port range 5000 to 6000",
+		"set security nat source pool p1 port no-translation",
+		"set security nat source pool p1 port range 8000 to 7000",
+		"set security nat source pool p1 port random-allocation"); err == nil {
+		t.Fatalf("invalid later range with trailing flag must reject strict")
+	}
+	pool, _, err := poolOf(t, false,
+		"set security nat source pool p1 port range 5000 to 6000",
+		"set security nat source pool p1 port no-translation",
+		"set security nat source pool p1 port range 8000 to 7000",
+		"set security nat source pool p1 port random-allocation")
+	if err != nil {
+		t.Fatalf("lenient invalid later range: %v", err)
+	}
+	if pool.PortRangeInvalidSpec != "8000 to 7000" || pool.PortNoTranslation {
+		t.Fatalf("lenient invalid later range: invalid=%q notrans=%v, want marker kept and nt superseded", pool.PortRangeInvalidSpec, pool.PortNoTranslation)
+	}
+}
+
 // (2) Annotation change on one block must not suppress a changed
 // sibling block in FormatCompare.
 func TestAnnotationCompareKeepsSiblingChange15935(t *testing.T) {
