@@ -3203,10 +3203,9 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 // conjunction, and the Junos single-kind rule forbids it), an undefined
 // from-zone / routing-instance, an unparsable or non-IPv6
 // source-address, and an undefined source-address-name. Multiple values
-// of the SAME kind are a legitimate list: compileNAT64 expands them
-// into one rule-set per value, and every expanded value is checked here
-// (a hand-built rule-set may instead carry the list in FromZones, which
-// is checked the same way). Lenient: warn per defect (#1960); the
+// of the SAME kind are a legitimate list: compileNAT64 unions them into
+// FromZones on the single authored rule-set, and every member is checked
+// here. Lenient: warn per defect (#1960); the
 // dataplane still fails closed — an unknown zone/RI name never equals
 // a packet's resolved scope, and an all-unparseable source list
 // matches nothing.
@@ -3230,8 +3229,8 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 		if rs == nil {
 			continue
 		}
-		// #15932: every authored zone is an owner after expansion; check
-		// them all, not just the surviving singular field.
+		// #15932: check every authored zone in the union, not just the
+		// surviving singular FromZone field.
 		effectiveZones := rs.FromZones
 		if len(effectiveZones) == 0 && rs.FromZone != "" {
 			effectiveZones = []string{rs.FromZone}
@@ -5199,17 +5198,16 @@ func natPoolOverlapOwners(cfg *Config) []natAllocOwner {
 		if pool == nil {
 			continue
 		}
-		// #15678/#15932: key by (prefix, name, zone-set, RI, pool). The
-		// dataplane keys a NAT64 allocator by (prefix, pool), so members
-		// of one expanded zone list (same name+prefix+pool, differing
-		// only in their single FromZone) are ONE owner and dedupe here;
-		// two DIFFERENT rule-sets sharing a pool stay distinct owners
-		// and the overlap gate rejects them.
-		prefixKey, ok := nat64AllocatorKey(rs)
+		// #15678: key by (prefix, from-zone, routing-instance, pool) so
+		// two same-prefix rule-sets in different scopes sharing one pool
+		// are distinct owners; the overlap gate then still rejects them
+		// (they share one pool's external tuples) — scoping does not mint
+		// a separate allocator per scope in the dataplane's pool identity.
+		prefixKey, ok := nat64PrefixOwnerKeyScoped(rs)
 		if !ok {
 			continue
 		}
-		key := prefixKey
+		key := prefixKey + "\x00" + rs.SourcePool
 		if nat64Seen[key] {
 			continue
 		}
@@ -5291,7 +5289,9 @@ func nat64PrefixOwnerKey(prefix string) (string, bool) {
 // matches every scope, so it must collide with any scoped sibling — the
 // caller therefore keys unscoped rule-sets by the bare prefix key and
 // scoped ones by prefix+scope, and treats an unscoped owner as covering
-// every scope (see nat64ShadowedRuleSets).
+// every scope (see nat64ShadowedRuleSets). #15932: the zone component is
+// the sorted effective zone SET (FromZones ∪ {FromZone}), so an authored
+// zone list keys as its union, never as separate per-zone owners.
 // nat64EffectiveZones (#15932) is the zone set a NAT64 rule-set admits:
 // the authored FromZones list when present, else the singular FromZone.
 func nat64EffectiveZones(rs *NAT64RuleSet) []string {
@@ -5322,22 +5322,6 @@ func nat64PrefixOwnerKeyScoped(rs *NAT64RuleSet) (string, bool) {
 	zones := append([]string(nil), nat64EffectiveZones(rs)...)
 	sort.Strings(zones)
 	return prefixKey + "\x00" + strings.Join(zones, ",") + "\x00" + rs.FromRoutingInstance, true
-}
-
-// nat64AllocatorKey (#15932) is the #5144 owner-enumeration key: the
-// dataplane keys a NAT64 allocator by (prefix_bytes, pool_v4), so all
-// expanded members of one authored rule-set (same name+prefix+pool,
-// differing only in their single FromZone) share ONE allocator and
-// must dedupe to one owner. Different rule-set names stay distinct.
-func nat64AllocatorKey(rs *NAT64RuleSet) (string, bool) {
-	if rs == nil {
-		return "", false
-	}
-	prefixKey, ok := nat64PrefixOwnerKey(rs.Prefix)
-	if !ok {
-		return "", false
-	}
-	return prefixKey + "\x00" + rs.Name + "\x00" + rs.SourcePool, true
 }
 
 // nat64ShadowedRuleSets maps every NAT64 rule-set the dataplane can NEVER select
@@ -5381,11 +5365,10 @@ func nat64ShadowedRuleSets(cfg *Config) map[*NAT64RuleSet]*NAT64RuleSet {
 			continue
 		}
 		scopedKey, _ := nat64PrefixOwnerKeyScoped(rs)
-		// #15932: a member of an expanded zone list is shadowed only by
-		// an earlier member of the SAME authored rule-set (same logical
-		// owner) or by a genuinely identical scope from another owner.
-		// Zone-union siblings (same name+pool, different single zone)
-		// each own their zone and must NOT shadow each other.
+		// #15932: shadowing compares the effective zone SET: a rule-set
+		// whose zone set is identical to an earlier one's (or covered by
+		// an unscoped earlier rule-set) can never be selected; a disjoint
+		// or merely overlapping zone set still owns its other zones.
 		isUnscoped := len(nat64EffectiveZones(rs)) == 0 && rs.FromRoutingInstance == ""
 		if earlier, seen := first[scopedKey]; seen {
 			shadowed[rs] = earlier

@@ -1067,14 +1067,13 @@ type NAT64RuleSet struct {
 	Name       string
 	Prefix     string // well-known prefix, e.g. "64:ff9b::/96"
 	SourcePool string // IPv4 source pool name for translated packets
-	// FromZone scopes the rule-set to traffic ingressing this security zone.
-	// "" = unscoped. #15678. Expanded rule-sets carry exactly one zone; a
-	// bracket/repeated `from zone` list becomes one rule-set per zone.
+	// FromZone is the FIRST authored zone (back-compat singular); the
+	// full authored set is FromZones. "" = unscoped. #15678/#15932.
 	FromZone string
-	// FromZones is the authored zone list before compileNAT64 expansion.
-	// Expanded rule-sets leave it empty (their FromZone is authoritative);
-	// validators fall back to it so direct/hand-built rule-sets carrying
-	// only the list are still scope-checked. #15932.
+	// FromZones is the full authored `from zone` list (bracket or
+	// repeated), unioned by the dataplane matcher. compileNAT64 keeps
+	// exactly one rule-set per authored name and stamps the whole list
+	// here; validators check every member. #15932.
 	FromZones []string
 	// FromRoutingInstance scopes the rule-set to traffic in this routing
 	// instance / VRF. "" = the default instance / unscoped. #15678.

@@ -440,8 +440,6 @@ pub(crate) struct Nat64ReverseInfo {
     pub(crate) orig_dst_v6: Ipv6Addr,
 }
 
-
-
 /// Tri-state result of a NAT64 destination lookup (#2291).
 ///
 /// The pre-fix lookup collapsed "prefix matched but no source could be
@@ -1394,7 +1392,14 @@ impl Nat64State {
                 translated_src,
                 port,
             ),
-            None => (NAT64_PORT_LOW..=NAT64_PORT_HIGH).contains(&port),
+            // #15932 (Codex): honour the pool's live effective range
+            // (#15283), not the global default — a pool narrowed to
+            // e.g. 500..=600 must not validate a tuple at port 4000,
+            // and a tuple inside the narrowed range must not be kept
+            // alive after the range is edited away from it.
+            None => {
+                (prefix.port_allocator.port_low..=prefix.port_allocator.port_high).contains(&port)
+            }
         }
     }
 
@@ -1439,6 +1444,13 @@ impl Nat64State {
                 from_zone,
                 routing_instance,
             );
+        }
+        // Legacy leg: keep when there is no destination owner to judge
+        // against (mirrors the #15178 positive-mismatch exemption the
+        // production caller applies); otherwise judge the tuple against
+        // the destination-selected prefix.
+        if self.match_ipv6_dest(dst_v6).is_none() {
+            return true;
         }
         self.nat64_source_translation_still_valid(src_v6, dst_v6, translated_src, translated_port)
     }
@@ -1490,67 +1502,15 @@ impl Nat64State {
                 translated_src,
                 port,
             ),
-            None => (NAT64_PORT_LOW..=NAT64_PORT_HIGH).contains(&port),
+            // #15932 (Codex): honour the pool's live effective range
+            // (#15283), not the global default — a pool narrowed to
+            // e.g. 500..=600 must not validate a tuple at port 4000,
+            // and a tuple inside the narrowed range must not be kept
+            // alive after the range is edited away from it.
+            None => {
+                (prefix.port_allocator.port_low..=prefix.port_allocator.port_high).contains(&port)
+            }
         }
-    }
-
-    /// #15932: scoped sibling of
-    /// [`Self::nat64_deterministic_translation_mismatch`]. Same positive-
-    /// mismatch contract, but the live prefix is the one the session's
-    /// recorded scope+source selects — never the first destination-only
-    /// /96 owned by another zone. With `scope_known == false` it falls
-    /// back to the destination-only predicate (legacy rows keep the
-    /// pre-#15932 exemption instead of being judged against an empty
-    /// scope).
-    pub(crate) fn nat64_deterministic_translation_mismatch_scoped(
-        &self,
-        src_v6: Ipv6Addr,
-        dst_v6: Ipv6Addr,
-        translated_src: Ipv4Addr,
-        translated_port: Option<u16>,
-        from_zone: &str,
-        routing_instance: &str,
-        scope_known: bool,
-    ) -> bool {
-        if !scope_known {
-            return self.nat64_deterministic_translation_mismatch(
-                src_v6,
-                dst_v6,
-                translated_src,
-                translated_port,
-            );
-        }
-        let Some(port) = translated_port else {
-            return false;
-        };
-        let Some((prefix_idx, _)) =
-            self.match_ipv6_dest_scoped(src_v6, dst_v6, from_zone, routing_instance)
-        else {
-            // No scoped owner any more. For a deterministic owner this is
-            // a positive withdrawal (U1); for round-robin owners the
-            // scope check in `nat64_revalidation_still_valid` is the
-            // revoking predicate, so keep this predicate narrow: only
-            // report mismatch when SOME same-/96 prefix exists (i.e. the
-            // rule was tightened away, not merely never present).
-            return self.match_ipv6_dest(dst_v6).is_some();
-        };
-        let Some(prefix) = self.prefixes.get(prefix_idx) else {
-            return false;
-        };
-        let Some(params) = prefix.deterministic_v6 else {
-            return false;
-        };
-        let Some(&addr_index) = prefix.pool_index_v4.get(&translated_src) else {
-            return true;
-        };
-        !prefix.port_allocator.deterministic_v6_tuple_matches(
-            params,
-            src_v6,
-            &prefix.pool_v4,
-            addr_index,
-            translated_src,
-            port,
-        )
     }
 
     /// #15178: positive-mismatch form for session-hit revalidation.
