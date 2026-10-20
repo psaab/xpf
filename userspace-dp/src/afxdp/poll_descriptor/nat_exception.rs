@@ -301,11 +301,14 @@ pub(super) fn candidate_source_nats_for_challenge(
         egress_ifindex,
         flow.forward_key.routing_domain,
     );
+    // Codex9: match the static rule's source-address gate against the
+    // EFFECTIVE (post-DNAT) destination — the same `nat_match_flow`
+    // tuple the allocating path computes — not the raw wire dst.
     if let Some((decision, _)) = forwarding.static_nat.match_snat_with_counter_scoped(
-        flow.src_ip,
-        flow.forward_key.src_port,
-        Some(flow.forward_key.protocol),
-        Some(flow.forward_key.dst_ip),
+        nat_match_flow.src_ip,
+        nat_match_flow.forward_key.src_port,
+        Some(nat_match_flow.forward_key.protocol),
+        Some(nat_match_flow.forward_key.dst_ip),
         to_zone,
         scope.egress_ifname,
         scope.egress_routing_instance,

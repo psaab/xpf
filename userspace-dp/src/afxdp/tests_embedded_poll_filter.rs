@@ -14025,7 +14025,9 @@ fn unfenced_challenge_does_not_retain_snat_allocation_15947() {
     assert_eq!(sessions.len(), 2, "challenged SYN C installs no session");
     let after_c = pool_snapshot(&forwarding);
     assert_eq!(after_c.used_ports, after_a.used_ports, "C retained no pool port either");
-    assert_eq!(after_c.allocations_total, after_a.allocations_total);
+    assert_eq!(after_c.live_flows, after_a.live_flows, "C retained no live flow either");
+    assert_eq!(after_c.persistent_leases, after_a.persistent_leases, "C retained no lease either");
+    assert_eq!(after_c.allocations_total, after_a.allocations_total, "C minted no allocation either");
 }
 
 #[test]
