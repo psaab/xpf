@@ -5730,3 +5730,61 @@ fn selector_less_reverse_still_revokes_nptv6_nat64_15934() {
     );
     assert!(valid_old, "minting NAT64 geometry must survive selector-less (#15934)");
 }
+
+/// #15934 round-5: selector-optional matching covers ARBITRARY types
+/// and simultaneous typed rules by geometry, not candidate
+/// enumeration. Type-13 (Timestamp) DNAT survives selector-less;
+/// type-8 -> A plus type-0 -> B: stored A survives, stored B
+/// survives, stored C (no rule) revokes.
+#[test]
+fn selector_optional_matching_covers_arbitrary_types_15934() {
+    fn state_with(rules: Vec<crate::protocol::DestinationNATRuleSnapshot>) -> crate::afxdp::ForwardingState {
+        let mut f = imported_snat_forwarding(false);
+        f.dnat_table = crate::nat::DnatTable::from_snapshots(&rules, &crate::nat::NatCounterStore::default());
+        f
+    }
+    fn rule(name: &str, ty: u8, pool: &str) -> crate::protocol::DestinationNATRuleSnapshot {
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: name.to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            pool_address: pool.to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(ty),
+            match_icmp_code: Some(0),
+            ..Default::default()
+        }
+    }
+    let key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    let metadata = meta_14315(2, 1);
+    let valid = |f: &crate::afxdp::ForwardingState, stored: &str| {
+        let decision = decision_14315(NatDecision {
+            rewrite_dst: Some(stored.parse().expect("stored")),
+            source_nat_icmp: None,
+            ..NatDecision::default()
+        });
+        destination_nat_translation_still_valid(
+            f, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        )
+    };
+    // Type-13 Timestamp rule: no enumerated candidate would find it.
+    let ts = state_with(vec![rule("ts", 13, "10.0.0.13")]);
+    assert!(valid(&ts, "10.0.0.13"), "type-13 DNAT must survive selector-less (#15934)");
+    assert!(!valid(&ts, "10.0.0.99"), "unknown geometry must revoke selector-less (#15934)");
+    // Simultaneous typed rules to different targets: geometry decides.
+    let multi = state_with(vec![rule("echo", 8, "10.0.0.8"), rule("reply", 0, "10.0.0.9")]);
+    assert!(valid(&multi, "10.0.0.8"), "stored=A (type-8 target) must survive (#15934)");
+    assert!(valid(&multi, "10.0.0.9"), "stored=B (type-0 target) must survive (#15934)");
+    assert!(!valid(&multi, "10.0.0.10"), "stored=C (no rule) must revoke (#15934)");
+    // Strict mode (waiver off) still fails these selector-less shapes.
+    let decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.8".parse().expect("stored")),
+        source_nat_icmp: None,
+        ..NatDecision::default()
+    });
+    assert!(
+        !destination_nat_translation_still_valid(
+            &multi, &decision, &metadata, &key, NOW_14315, Some((0, 0)), false
+        ),
+        "without the waiver the replied selector must not validate type-8 (#15934)"
+    );
+}

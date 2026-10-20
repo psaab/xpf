@@ -374,11 +374,12 @@ fn arrival_carries_translated_source(nat: NatDecision, flow: &SessionFlow) -> bo
 ///   discards — never increments a rule hit counter.
 /// #15934: DNAT geometry verdict. `ignore_icmp_selector` splits the
 /// verdict into its selector-dependent and selector-independent parts:
-/// when true, an entry whose ONLY mismatch is its ICMP type/code
-/// constraint still counts (the selector sub-check is treated as a
-/// wildcard / non-revoking), while rule existence, scope, source,
-/// ports, and the translated destination geometry are all still
-/// judged. It is set only for a reverse ICMP hit with no stored
+/// when true, the DNAT lookup falls back to the selector-optional
+/// matching mode (`lookup_all_ignoring_icmp_selector_scoped`): rules
+/// match ignoring ICMP type/code, every distinct translation is
+/// collected, and only one reproducing the stored geometry counts.
+/// Rule existence, scope, source, ports, and geometry are all still
+/// judged; only the type/code sub-check is non-revoking. It is set only for a reverse ICMP hit with no stored
 /// forward selector (DNAT-only provenance gap): such a hit must not
 /// be revoked for the selector, but withdrawal, replacement
 /// geometry, NPTv6, and NAT64 grounds all still apply.
@@ -456,8 +457,9 @@ fn destination_nat_translation_still_valid(
             )
         })
         .or_else(|| {
-            let lookup = |selector: Option<(u8, u8)>| {
-                forwarding.dnat_table.lookup_with_counter_scoped(
+            forwarding
+                .dnat_table
+                .lookup_with_counter_scoped(
                     forward_key.protocol,
                     forward_key.src_ip,
                     forward_key.dst_ip,
@@ -466,25 +468,33 @@ fn destination_nat_translation_still_valid(
                     scope.zone_name,
                     scope.ifname,
                     scope.routing_instance,
-                    selector,
+                    packet_icmp,
                 )
-            };
-            match lookup(packet_icmp) {
-                Some(found) => Some(found),
-                // #15934: selector-wildcard retry — candidate ICMP
-                // type/code values that could satisfy a constrained
-                // entry. Only the candidate that reproduces the STORED
-                // translation counts (see the geometry equality below),
-                // so a replacement rule of a different type with a
-                // different rewrite still fails, and a withdrawn rule
-                // (no candidate matches anything) still fails.
-                None if ignore_icmp_selector => [Some((8u8, 0u8)), Some((0u8, 0u8)), Some((128u8, 0u8)), Some((129u8, 0u8))]
-                    .into_iter()
-                    .find_map(|candidate| lookup(candidate)),
-                None => None,
-            }
-            .map(|(decision, _)| decision)
+                .map(|(decision, _)| decision)
         });
+    // #15934: with the selector waived, validity is GEOMETRY existence:
+    // any collected selector-optional translation reproducing the
+    // stored one counts (typed rules may coexist; the composed first
+    // lookup above may have matched a different type's rule).
+    if ignore_icmp_selector {
+        return forwarding
+            .dnat_table
+            .lookup_all_ignoring_icmp_selector_scoped(
+                forward_key.protocol,
+                forward_key.src_ip,
+                forward_key.dst_ip,
+                forward_key.src_port,
+                forward_key.dst_port,
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+            )
+            .iter()
+            .any(|current| {
+                current.rewrite_dst == Some(translated_dst)
+                    && current.rewrite_dst_port == nat.rewrite_dst_port
+            });
+    }
     expected.is_some_and(|current| {
         current.rewrite_dst == Some(translated_dst)
             && current.rewrite_dst_port == nat.rewrite_dst_port

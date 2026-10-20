@@ -203,11 +203,29 @@ impl DnatEntry {
         dst_port: u16,
         packet_icmp: Option<(u8, u8)>,
     ) -> bool {
+        self.l4_extra_matches_mode(src_port, dst_port, packet_icmp, false)
+    }
+
+    /// #15934: as `l4_extra_matches`, with `ignore_icmp_selector` waiving
+    /// ONLY the ICMP type/code constraint (ports still apply). Used by
+    /// revalidation for reverse hits with no stored forward selector,
+    /// where no packet can supply the original request's type: matching
+    /// then decides on destination geometry, never on a guessed type.
+    fn l4_extra_matches_mode(
+        &self,
+        src_port: u16,
+        dst_port: u16,
+        packet_icmp: Option<(u8, u8)>,
+        ignore_icmp_selector: bool,
+    ) -> bool {
         if !self.match_dst_ports.is_empty() && !port_in_ranges(dst_port, &self.match_dst_ports) {
             return false;
         }
         if !self.match_src_ports.is_empty() && !port_in_ranges(src_port, &self.match_src_ports) {
             return false;
+        }
+        if ignore_icmp_selector {
+            return true;
         }
         if let Some(want_type) = self.match_icmp_type {
             match packet_icmp {
@@ -1199,6 +1217,91 @@ impl DnatTable {
             hit_counter,
         ))
     }
+
+    /// #15934: selector-optional variant of `lookup_with_counter_scoped`
+    /// for session revalidation. Matches destination rules IGNORING
+    /// their ICMP type/code constraints and returns EVERY distinct
+    /// translated destination (deduped, tier order preserved), so the
+    /// caller can require rewrite_dst/port equality with the stored
+    /// translation — geometry decides among simultaneously-typed rules
+    /// (e.g. type-8 -> A and type-0 -> B) instead of an enumerated
+    /// candidate stopping at the first type match. Never used on the
+    /// admission path; produces no counters side effects beyond the
+    /// same read-only outcome mapping as the ordinary lookup.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn lookup_all_ignoring_icmp_selector_scoped(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> Vec<NatDecision> {
+        let protocol_has_l4_ports = crate::ip_proto::has_l4_ports(protocol);
+        let protocol_key = u16::from(protocol);
+        // Collect across ALL tiers (no or_else short-circuit): typed
+        // rules for one destination may live in different tiers. Every
+        // ELIGIBLE entry contributes (not just each tier's winner):
+        // with the selector waived, two typed rules in one tier differ
+        // only in geometry, and geometry must decide.
+        let mut outcomes: Vec<DnatOutcome> = Vec::new();
+        for entries in [
+            self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port }),
+            self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port: 0 }),
+            self.entries.get(&DnatKey { protocol: PROTO_ANY, dst_ip, dst_port: 0 }),
+        ] {
+            if let Some(entries) = entries {
+                for entry in entries {
+                    if (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != ingress_zone)
+                        || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                        || !entry.source_matches(src_ip)
+                        || !entry.l4_extra_matches_mode(src_port, dst_port, None, true)
+                    {
+                        continue;
+                    }
+                    outcomes.push(entry.to_outcome());
+                }
+            }
+        }
+        // Prefix-LPM tiers contribute their selector-optional winners.
+        for outcome in [
+            self.match_prefix_lpm_mode(
+                protocol_key, src_ip, dst_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
+            ),
+        ] {
+            if let Some(outcome) = outcome {
+                outcomes.push(outcome);
+            }
+        }
+        let mut decisions: Vec<NatDecision> = Vec::new();
+        for outcome in outcomes {
+            let DnatOutcome::Translate(value, _) = outcome else {
+                continue;
+            };
+            let rewrite_dst_port =
+                if protocol_has_l4_ports && value.new_dst_port != 0 && value.new_dst_port != dst_port {
+                    Some(value.new_dst_port)
+                } else {
+                    None
+                };
+            let decision = NatDecision {
+                rewrite_src: None,
+                rewrite_dst: Some(value.new_dst_ip),
+                rewrite_src_port: None,
+                rewrite_dst_port,
+                source_nat_icmp: None,
+                nat64: false,
+                nptv6: false,
+            };
+            if !decisions.contains(&decision) {
+                decisions.push(decision);
+            }
+        }
+        decisions
+    }
     /// #15534: single-pass outcome over the same tier chain
     /// `lookup_with_counter_scoped` probes (exact -> wildcard-port ->
     /// PROTO_ANY -> prefix LPM). That wrapper collapses `Exempt`/`Poisoned`
@@ -1677,6 +1780,22 @@ impl DnatTable {
         ingress_routing_instance: &str,
         packet_icmp: Option<(u8, u8)>,
     ) -> Option<DnatOutcome> {
+        self.match_entries_mode(entries, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn match_entries_mode(
+        &self,
+        entries: Option<&Vec<DnatEntry>>,
+        src_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+        ignore_icmp_selector: bool,
+    ) -> Option<DnatOutcome> {
         let entries = entries?;
         // #2394: an entry only fires when its zone, source-address, AND #3096
         // interface/routing-instance scope all match. #3437: the application's
@@ -1698,7 +1817,7 @@ impl DnatTable {
             if (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != ingress_zone)
                 || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
                 || !entry.source_matches(src_ip)
-                || !entry.l4_extra_matches(src_port, dst_port, packet_icmp)
+                || !entry.l4_extra_matches_mode(src_port, dst_port, packet_icmp, ignore_icmp_selector)
             {
                 continue;
             }
@@ -1732,7 +1851,24 @@ impl DnatTable {
         ingress_routing_instance: &str,
         packet_icmp: Option<(u8, u8)>,
     ) -> Option<DnatOutcome> {
-        self.match_prefix_slots(
+        self.match_prefix_lpm_mode(protocol, src_ip, dst_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn match_prefix_lpm_mode(
+        &self,
+        protocol: u16,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+        ignore_icmp_selector: bool,
+    ) -> Option<DnatOutcome> {
+        self.match_prefix_slots_mode(
             self.prefix_entries
                 .get(&DnatProtoPortKey { protocol, dst_port }),
             dst_ip,
@@ -1743,9 +1879,10 @@ impl DnatTable {
             ingress_ifname,
             ingress_routing_instance,
             packet_icmp,
+            ignore_icmp_selector,
         )
         .or_else(|| {
-            self.match_prefix_slots(
+            self.match_prefix_slots_mode(
                 self.prefix_entries.get(&DnatProtoPortKey {
                     protocol,
                     dst_port: 0,
@@ -1758,10 +1895,11 @@ impl DnatTable {
                 ingress_ifname,
                 ingress_routing_instance,
                 packet_icmp,
+                ignore_icmp_selector,
             )
         })
         .or_else(|| {
-            self.match_prefix_slots(
+            self.match_prefix_slots_mode(
                 self.prefix_entries.get(&DnatProtoPortKey {
                     protocol: PROTO_ANY,
                     dst_port: 0,
@@ -1774,6 +1912,7 @@ impl DnatTable {
                 ingress_ifname,
                 ingress_routing_instance,
                 packet_icmp,
+                ignore_icmp_selector,
             )
         })
     }
@@ -1795,6 +1934,23 @@ impl DnatTable {
         ingress_routing_instance: &str,
         packet_icmp: Option<(u8, u8)>,
     ) -> Option<DnatOutcome> {
+        self.match_prefix_slots_mode(slots, dst_ip, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn match_prefix_slots_mode(
+        &self,
+        slots: Option<&Vec<DnatPrefixSlot>>,
+        dst_ip: IpAddr,
+        src_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
+        ignore_icmp_selector: bool,
+    ) -> Option<DnatOutcome> {
         let slots = slots?;
 
         let mut best: Option<&DnatPrefixSlot> = None;
@@ -1806,7 +1962,7 @@ impl DnatTable {
                     .scope_ok(ingress_ifname, ingress_routing_instance)
                 || !slot.contains(dst_ip)
                 || !slot.entry.source_matches(src_ip)
-                || !slot.entry.l4_extra_matches(src_port, dst_port, packet_icmp)
+                || !slot.entry.l4_extra_matches_mode(src_port, dst_port, packet_icmp, ignore_icmp_selector)
             {
                 continue;
             }
