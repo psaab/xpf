@@ -154,17 +154,22 @@ type vrrpInstance struct {
 	// preemptHoldTimer.C remains the safety net.
 	preemptHoldArmedAt time.Time
 
-	// pendingConfigChange is the before/after snapshot of the most recent
-	// updateConfigHeld that signalled configUpdatedCh and has not yet been
-	// consumed by the run loop (#15689). Set under mu by updateConfigHeld
-	// BEFORE the channel send, consumed (taken) under mu by the run loop's
-	// configUpdatedCh handlers. It lets StateMaster decide whether an
-	// immediate advert is warranted (AdvertiseInterval or effective
-	// priority changed) and lets stepBackup distinguish an invalidating
-	// hold edit (PreemptHoldTime changed / premise lost) from an
-	// unrelated edit that must preserve the armed countdown. A coalesced
-	// second update overwrites it — the handlers re-read current cfg for
-	// the interval/priority decisions, exactly as the channel coalesces.
+	// pendingConfigChange is the accumulated before/after snapshot of the
+	// updateConfigHeld calls that signalled configUpdatedCh and have not
+	// yet been consumed by the run loop (#15689, #15920). Set under mu by
+	// updateConfigHeld BEFORE the channel send, consumed (taken) under mu
+	// by the run loop's configUpdatedCh handlers. It lets StateMaster
+	// decide whether an immediate advert is warranted (AdvertiseInterval
+	// or effective priority changed) and lets stepBackup distinguish an
+	// invalidating hold edit (PreemptHoldTime changed / premise lost) from
+	// an unrelated edit that must preserve the armed countdown. Because
+	// configUpdatedCh has capacity one, several updates can coalesce into
+	// a single consumption: the pending record keeps the OLDEST
+	// unconsumed baseline for every field and the NEWEST desired value,
+	// so a first update that changed a timer-relevant field followed by
+	// an unrelated second update (e.g. GARPCount) still reads as a change
+	// against the configuration under which the running timer was armed,
+	// while a change-then-revert sequence nets to no change.
 	pendingConfigChange configChange15689
 
 	trackDown bool // tracked interface (cfg.TrackInterface) is down (#1814); guarded by mu
@@ -551,23 +556,38 @@ func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 	// to advertise/re-arm (MASTER) or disarm vs preserve an armed hold
 	// (BACKUP). Effective priority is computed after the mutation so a
 	// track-cost change is reflected in newEffectivePrio.
-	vi.pendingConfigChange = configChange15689{
-		valid:            true,
-		oldAdvertiseMS:   oldAdvertiseMS,
-		newAdvertiseMS:   vi.cfg.AdvertiseInterval,
-		oldEffectivePrio: oldEffective,
-		newEffectivePrio: vi.effectivePriorityLocked(),
-		oldHoldSec:       oldHoldSec,
-		newHoldSec:       vi.cfg.PreemptHoldTime,
+	//
+	// Accumulate across coalesced updates (#15920): when a previous
+	// update is still unconsumed, keep its per-field baseline (the
+	// values the running timers were armed under) and refresh only the
+	// desired values, instead of overwriting the whole record with the
+	// latest adjacent delta — 60000->100 followed by a GARP-only edit
+	// recorded 100->100 and the MASTER handler, seeing no change,
+	// never re-armed the still-running 60s advert timer.
+	if vi.pendingConfigChange.valid {
+		vi.pendingConfigChange.newAdvertiseMS = vi.cfg.AdvertiseInterval
+		vi.pendingConfigChange.newEffectivePrio = vi.effectivePriorityLocked()
+		vi.pendingConfigChange.newHoldSec = vi.cfg.PreemptHoldTime
+	} else {
+		vi.pendingConfigChange = configChange15689{
+			valid:            true,
+			oldAdvertiseMS:   oldAdvertiseMS,
+			newAdvertiseMS:   vi.cfg.AdvertiseInterval,
+			oldEffectivePrio: oldEffective,
+			newEffectivePrio: vi.effectivePriorityLocked(),
+			oldHoldSec:       oldHoldSec,
+			newHoldSec:       vi.cfg.PreemptHoldTime,
+		}
 	}
 	vi.mu.Unlock()
 
 	// Wake the run-loop select (MASTER and BACKUP both consume
 	// configUpdatedCh since #15689) so timers and an armed preempt hold
-	// can be re-validated against the new config. Non-blocking: a
-	// coalesced pending signal is fine (the pending snapshot above is
-	// overwritten with the latest change and interval/priority decisions
-	// re-read current cfg).
+	// can be re-validated against the new config. Non-blocking: when
+	// the signal coalesces into an already-pending token, the pending
+	// snapshot above has accumulated the oldest baseline with the
+	// newest desired values (#15920), so no timer-relevant change is
+	// lost.
 	select {
 	case vi.configUpdatedCh <- struct{}{}:
 	default:
