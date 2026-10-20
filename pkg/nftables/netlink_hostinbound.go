@@ -275,18 +275,136 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	}
 }
 
-// hostInboundNDPDefaultNetlink reports whether ANY view retains the
-// ND default (#15671); the global accept is unscoped, so one
-// ndp-excluding view withdraws it chain-wide.
-func hostInboundNDPDefaultNetlink(views []HostInboundZoneView) bool {
-	for _, v := range views {
-		for _, tok := range v.ProtocolsExcept {
-			if tok == "ndp" {
-				return false
-			}
+// hostInboundViewNDPDefault reports whether this view retains the ND
+// default (#15931): no `ndp except` in its effective except set.
+func hostInboundViewNDPDefault(v HostInboundZoneView) bool {
+	for _, tok := range v.ProtocolsExcept {
+		if tok == "ndp" {
+			return false
 		}
 	}
 	return true
+}
+
+// hostInboundAnyNDPDefault reports whether any view retains the ND
+// default. Since #15931 the ND accept is scoped per ingress, so this is
+// only the "is scoped emission needed at all" gate: with no retaining
+// view no ND accept is emitted; with no views at all (early barrier /
+// no config) the mandatory admit is preserved.
+func hostInboundAnyNDPDefault(views []HostInboundZoneView) bool {
+	if len(views) == 0 {
+		return true
+	}
+	for _, v := range views {
+		if hostInboundViewNDPDefault(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostInboundNDPDefaultNetlink is retained for the fence: the fence has
+// no per-service accepts, so its ND admit is the same scoped emission
+// (see emitHostInboundNDPAcceptsNetlink). It reports whether the scoped
+// ND admits should be emitted for this view set.
+func hostInboundNDPDefaultNetlink(views []HostInboundZoneView) bool {
+	return hostInboundAnyNDPDefault(views)
+}
+
+// emitHostInboundNDPAcceptsNetlink emits the ND (133-136) accepts
+// scoped to each retaining view's ingress (#15931), mirroring
+// emitHostInboundNDPAcceptsText rule-for-rule. Per retaining view:
+// (a) an ingress-scoped admit covering BOTH the zone unicast
+// destination union and link-scope multicast (ff02::/16); (b) a
+// destination fallback for views with no ingress scope, even when a
+// sibling has ingress. Any-service retaining views are skipped (the
+// bare full admit already covers ND; #6618 lock). Excluding views
+// emit nothing. The unscoped accept is emitted ONLY when no view
+// carries any scope at all OR no view excludes ndp (Codex F1).
+// counted attaches the aggregate ND counter (steady state); fence
+// callers pass counted=false (no counter objects in fences, #5719).
+func emitHostInboundNDPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
+	emitHostInboundNDPAcceptsCountedNetlink(p, views, true)
+}
+
+func emitHostInboundNDPAcceptsCountedNetlink(p *nlPlan, views []HostInboundZoneView, counted bool) {
+	if !hostInboundAnyNDPDefault(views) {
+		return
+	}
+	counter := func(a *ruleAsm) {
+		if counted {
+			a.counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6ND))
+		}
+		a.emit(verdictAccept()...)
+	}
+	anyExcludes := false
+	for _, v := range views {
+		if !hostInboundViewNDPDefault(v) {
+			anyExcludes = true
+			break
+		}
+	}
+	_, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
+	anyScope := false
+	for _, v := range views {
+		if !hostInboundViewNDPDefault(v) || (hostInboundAllowsAll(v) && counted) {
+			continue
+		}
+		direct := hostInboundDirectIngressNetdevs(v)
+		scoped := false
+		emitIngress := func(mk func() *ruleAsm) {
+			scoped = true
+			if len(zoneIngressV6) > 0 {
+				a := mk()
+				a.daddr(famV6, zoneIngressV6, false)
+				a.icmpType(famV6, []uint8{133, 134, 135, 136})
+				counter(a)
+			}
+			a := mk()
+			a.daddr(famV6, []string{"ff02::/16"}, false)
+			a.icmpType(famV6, []uint8{133, 134, 135, 136})
+			counter(a)
+		}
+		if len(direct) > 0 {
+			d := direct
+			emitIngress(func() *ruleAsm { return p.rule().iifname(d) })
+		}
+		for _, scope := range v.IngressVRFScopes {
+			if scope.Master == "" || len(scope.Slaves) == 0 {
+				continue
+			}
+			sc := scope
+			emitIngress(func() *ruleAsm {
+				return p.rule().iifname([]string{sc.Master}).sdifname(sc.Slaves)
+			})
+		}
+		if scoped {
+			anyScope = true
+			continue
+		}
+		var addrs []string
+		seen := map[string]bool{}
+		for _, a := range append(append([]string{}, v.V6Addrs...), v.IngressDenyV6...) {
+			if !seen[a] {
+				seen[a] = true
+				addrs = append(addrs, a)
+			}
+		}
+		if len(addrs) > 0 {
+			anyScope = true
+			a := p.rule().daddr(famV6, addrs, false)
+			a.icmpType(famV6, []uint8{133, 134, 135, 136})
+			counter(a)
+		}
+	}
+	if anyScope {
+		return
+	}
+	if anyExcludes {
+		return
+	}
+	a := p.rule().icmpType(famV6, []uint8{133, 134, 135, 136})
+	counter(a)
 }
 
 // emitHostInboundICMPAcceptsNetlink mirrors emitHostInboundICMPAccepts: the
@@ -296,10 +414,7 @@ func hostInboundNDPDefaultNetlink(views []HostInboundZoneView) bool {
 func emitHostInboundICMPAcceptsNetlink(p *nlPlan, views []HostInboundZoneView) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6Error)).emit(verdictAccept()...)
-	if hostInboundNDPDefaultNetlink(views) {
-		p.rule().icmpType(famV6, []uint8{133, 134, 135, 136}).
-			counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6ND)).emit(verdictAccept()...)
-	}
+	emitHostInboundNDPAcceptsNetlink(p, views)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP4Error)).emit(verdictAccept()...)
 }
@@ -413,6 +528,13 @@ func emitHostInboundNonUnicastIngressGuardsNetlink(p *nlPlan, views []HostInboun
 }
 
 func emitHostInboundNonUnicastScopeNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, scoped func() *ruleAsm) {
+	// #15931: ND default judged by the scoped ND admits ahead of this
+	// guard; a retaining (or explicit-ndp) view keeps its multicast ND.
+	if f == famV6 && hostInboundNDPMulticastAdmitsNetlink(v) {
+		a := scoped()
+		a.icmpType(famV6, []uint8{133, 134, 135, 136})
+		a.counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6ND)).emit(verdictAccept()...)
+	}
 	if hostInboundAllowsAll(v) {
 		scoped().emit(verdictAccept()...)
 		return
@@ -483,11 +605,22 @@ func emitHostInboundNonUnicastFenceDropsNetlink(p *nlPlan, views []HostInboundZo
 		}
 		for _, v := range views {
 			direct := hostInboundDirectIngressNetdevs(v)
+			ndExempt := class.family == famV6 && hostInboundNDPMulticastAdmitsNetlink(v)
 			if len(direct) > 0 {
+				if ndExempt {
+					a := p.rule().iifname(direct).daddr(famV6, class.addrs, false)
+					a.icmpType(famV6, []uint8{133, 134, 135, 136})
+					a.emit(verdictAccept()...)
+				}
 				p.rule().iifname(direct).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
 			}
 			for _, scope := range v.IngressVRFScopes {
 				if scope.Master != "" && len(scope.Slaves) > 0 {
+					if ndExempt {
+						a := p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).daddr(famV6, class.addrs, false)
+						a.icmpType(famV6, []uint8{133, 134, 135, 136})
+						a.emit(verdictAccept()...)
+					}
 					p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
 						daddr(class.family, class.addrs, false).emit(verdictDrop()...)
 				}
@@ -1078,4 +1211,22 @@ func addHostInboundScreenFloodSet(p *nlPlan, rule HostInboundScreenFloodRule, so
 		Operation: uint32(unix.NFT_DYNSET_OP_UPDATE),
 		Exprs:     []expr.Any{screenFloodLimit(rate)},
 	}
+}
+
+// hostInboundNDPPositiveNetlink reports whether the view's positives
+// admit ND (explicit ndp, or protocols all which expands to it).
+func hostInboundNDPPositiveNetlink(v HostInboundZoneView) bool {
+	for _, tok := range v.Protocols {
+		if tok == "ndp" || tok == "all" {
+			return true
+		}
+	}
+	return false
+}
+
+// hostInboundNDPMulticastAdmitsNetlink mirrors the text form: every
+// default-retaining view keeps multicast ND (empty-token included);
+// only an `ndp except` view loses it. The accept is counted.
+func hostInboundNDPMulticastAdmitsNetlink(v HostInboundZoneView) bool {
+	return hostInboundViewNDPDefault(v)
 }

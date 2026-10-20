@@ -523,16 +523,8 @@ func l4MatchAdmits(m config.L4Match, proto uint8, dstPort int, icmpType *uint8) 
 // host-inbound-traffic set. Redirect 137 is deliberately excluded because it
 // can install routes for traffic originated by the firewall. Echo-request
 // (v4 8 / v6 128) and IPv4 router-advert/solicit (9/10) are NOT global — they
-// stay gated on the `ping` / `router-discovery` tokens.
-// ndpExcluded reports whether the raw except tokens name ndp (#15671).
-func ndpExcluded(except []string) bool {
-	for _, tok := range except {
-		if tok == "ndp" {
-			return true
-		}
-	}
-	return false
-}
+// stay gated on the `ping` / `router-discovery` tokens. ndpExcluded is
+// defined in zones_override.go (#15931 shared scoped predicate).
 
 // hostInboundIsNDP reports whether the tuple is IPv6 Neighbor
 // Discovery (ICMPv6 133-136, #15671). Redirect 137 is excluded.

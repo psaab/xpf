@@ -19,25 +19,24 @@ func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan) {
 }
 
 // hostInboundFenceMandatoryAdmitsNetlinkViews is the views-aware form
-// (#15671): ND is mandatory unless a view excluded ndp. Nil views
-// (early barrier, no config) keep the mandatory ND admit.
+// (#15931): ND admits are scoped per retaining view. Nil views (early
+// barrier, no config) keep the mandatory unscoped ND admit.
 func hostInboundFenceMandatoryAdmitsNetlinkViews(p *nlPlan, views []HostInboundZoneView) {
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 	emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p, views)
 }
 
 func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan, views []HostInboundZoneView) {
-	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	emitHostInboundFenceL3AdmitsNetlink(p, views)
+	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 }
 
 func emitHostInboundFenceL3AdmitsNetlink(p *nlPlan, views []HostInboundZoneView) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).emit(verdictAccept()...)
-	// #15671: the fence has no config at cold boot, so ND stays a
-	// mandatory admit EXCEPT when a view excluded ndp.
-	if hostInboundNDPDefaultNetlink(views) {
-		p.rule().icmpType(famV6, []uint8{133, 134, 135, 136}).emit(verdictAccept()...)
-	}
+	// #15931: scoped ND admits, one per retaining view's ingress (the
+	// fence has no per-service accepts; a default-retaining view's ND
+	// must survive the fence while an excluding view's stays denied).
+	emitHostInboundNDPAcceptsCountedNetlink(p, views, false)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
 }
 

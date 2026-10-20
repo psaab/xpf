@@ -1624,12 +1624,13 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 	if guardStaleReplies {
 		rules = append(rules, mandatory[0])
 		emitHostInboundMulticastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
-		rules = append(rules, mandatory[2:]...)
+		rules = append(rules, mandatory[1:]...)
 		rules = append(rules, "    ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return")
 		emitHostInboundNonUnicastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
-		rules = append(rules, mandatory[1])
+		rules = append(rules, "    ct state established,related accept")
 	} else {
 		rules = append(rules, mandatory...)
+		rules = append(rules, "    ct state established,related accept")
 	}
 	emitHostInboundFenceWGAdmits(&rules, views, wgZonePorts)
 	emitDHCPBackstopAdmits(&rules, vrfBackstop)
@@ -1657,14 +1658,25 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 // return traffic and core L3 control, NOT a service exposure. Shared by the
 // whole-table cold-boot and additive gap fences so their mandatory posture
 // cannot drift apart.
-// hostInboundNDPDefaultText mirrors xnft's netlink helper (#15671).
-func hostInboundNDPDefaultText(views []dpuserspace.ZoneHostInboundView) bool {
+// hostInboundViewNDPDefaultText reports whether this view retains the
+// ND default (#15931): no `ndp except` in its effective except set.
+// Mirrors xnft's per-view helper.
+func hostInboundViewNDPDefaultText(v dpuserspace.ZoneHostInboundView) bool {
+	return !ndpTextExcluded(v.ProtocolsExcept)
+}
+
+// hostInboundAnyNDPDefaultText reports whether any view retains the ND
+// default. With no views at all (no config) the mandatory admit holds.
+func hostInboundAnyNDPDefaultText(views []dpuserspace.ZoneHostInboundView) bool {
+	if len(views) == 0 {
+		return true
+	}
 	for _, v := range views {
-		if ndpTextExcluded(v.ProtocolsExcept) {
-			return false
+		if hostInboundViewNDPDefaultText(v) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func ndpTextExcluded(except []string) bool {
@@ -1676,25 +1688,133 @@ func ndpTextExcluded(except []string) bool {
 	return false
 }
 
-func hostInboundFenceMandatoryAdmits() []string {
-	return hostInboundFenceMandatoryAdmitsViews(nil)
+// emitHostInboundNDPAcceptsText appends the ND (133-136) accepts scoped
+// to each retaining view's ingress (#15931), in the same shape the
+// netlink builder emits (emitHostInboundNDPAcceptsNetlink) so T1 parity
+// holds. Per retaining view: (a) an ingress-scoped admit covering BOTH
+// the zone unicast destination union and link-scope multicast
+// (ff02::/16 — solicited-node NS, RS to ff02::2, RA to ff02::1), so
+// multicast ND is admitted for every retaining view (empty-token
+// included) exactly as unicast; (b) a destination fallback for views
+// with no ingress scope, even when a sibling view has ingress.
+// A retaining view with any-service is skipped in the steady chain:
+// its bare full admit already covers ND (no duplicate rule, #6618
+// lock). In fence mode (counted=false) there is no full-service
+// admit, so any-service retaining views DO get scoped ND admits. Excluding views
+// emit nothing: their ingress/destination catch-alls deny ND. Unzoned
+// and ambiguous ingress emit nothing (fail-closed).
+// The unscoped accept is emitted ONLY when no view carries any scope
+// at all (no views / no retaining ingress or address anywhere; e.g.
+// the config-less fence) OR no view excludes ndp. When at least one
+// sibling excludes, an empty/scopeless retaining view must NOT
+// reinstate an unscoped accept: its ND arrives on sibling ingresses,
+// whose excluding catch-alls deny it (Codex F1).
+// counted attaches the aggregate counter name
+// "xpfhia_icmp6_nd" to every emitted ND accept (steady state; fence
+// callers pass false — fence tables declare no counter objects, #5719).
+func emitHostInboundNDPAcceptsText(rules *[]string, views []dpuserspace.ZoneHostInboundView, counted bool) {
+	fenceMode := !counted
+	if !hostInboundAnyNDPDefaultText(views) {
+		return
+	}
+	_, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
+	anyExcludes := false
+	for _, v := range views {
+		if !hostInboundViewNDPDefaultText(v) {
+			anyExcludes = true
+			break
+		}
+	}
+	ndRule := "icmpv6 type { 133, 134, 135, 136 }"
+	if counted {
+		ndRule += " counter name \"" + xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND) + "\""
+	}
+	ndRule += " accept"
+	anyScope := false
+	for _, v := range views {
+		if !hostInboundViewNDPDefaultText(v) || (hostInboundAllowsAll(v) && !fenceMode) {
+			continue
+		}
+		direct := hostInboundDirectIngressNetdevs(v)
+		scoped := false
+		emitIngress := func(prefix string) {
+			scoped = true
+			// Unicast union dests plus link-scope multicast, two rules
+			// (multicast dests are not in the unicast union).
+			if len(zoneIngressV6) > 0 {
+				*rules = append(*rules, "    "+prefix+"ip6 daddr "+nftAddrSet(zoneIngressV6)+" "+ndRule)
+			}
+			*rules = append(*rules, "    "+prefix+"ip6 daddr ff02::/16 "+ndRule)
+		}
+		if len(direct) > 0 {
+			emitIngress("iifname " + nftIifnameSet(direct) + " ")
+		}
+		for _, scope := range v.IngressVRFScopes {
+			if scope.Master == "" || len(scope.Slaves) == 0 {
+				continue
+			}
+			emitIngress(hostInboundVRFIngressPrefix(scope.Master, scope.Slaves))
+		}
+		if scoped {
+			anyScope = true
+			continue
+		}
+		// Destination fallback (per view, even if a sibling has ingress).
+		var addrs []string
+		seen := map[string]bool{}
+		for _, a := range append(append([]string{}, v.V6Addrs...), v.IngressDenyV6...) {
+			if !seen[a] {
+				seen[a] = true
+				addrs = append(addrs, a)
+			}
+		}
+		if len(addrs) > 0 {
+			anyScope = true
+			*rules = append(*rules, "    ip6 daddr "+nftAddrSet(addrs)+" "+ndRule)
+		}
+	}
+	if anyScope {
+		return
+	}
+	if anyExcludes {
+		// No retaining scope exists, but a sibling exclusion does: an
+		// unscoped accept would re-admit ND on the excluding view's
+		// ingress/addresses. Emit nothing (fail-closed).
+		return
+	}
+	*rules = append(*rules, "    "+ndRule)
 }
 
-// hostInboundFenceMandatoryAdmitsViews: ND is mandatory unless a view
-// excluded ndp (#15671). Nil views (no config) keep ND.
+// hostInboundFenceMandatoryAdmits returns the scope-independent
+// (non-ND) mandatory admits plus the established accept, for tests
+// comparing fence postures. ND is no longer scope-independent
+// (#15931): it is emitted per retaining view by
+// emitHostInboundNDPAcceptsText, so it is not listed here.
+func hostInboundFenceMandatoryAdmits() []string {
+	return []string{
+		"    meta l4proto { 50, 51 } accept",
+		"    icmpv6 type { 1, 2, 3, 4 } accept",
+		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
+		"    ct state established,related accept",
+	}
+}
+
+// hostInboundFenceMandatoryAdmitsViews: the fence's mandatory admits.
+// ND admits are scoped per retaining view (#15931); nil views (no
+// config) keep the unscoped mandatory ND admit. The established accept
+// is NOT in this list: fence builders place it after their drops
+// (cold-boot) or immediately after these admits (gap).
 func hostInboundFenceMandatoryAdmitsViews(views []dpuserspace.ZoneHostInboundView) []string {
 	out := []string{
 		// Raw ESP (50) / AH (51) remains globally admitted before the
-		// catalog-group drops; established/related follows those guards.
+		// catalog-group drops.
 		"    meta l4proto { 50, 51 } accept",
-		"    ct state established,related accept",
 		"    icmpv6 type { 1, 2, 3, 4 } accept",
 	}
-	if hostInboundNDPDefaultText(views) {
-		out = append(out, "    icmpv6 type { 133, 134, 135, 136 } accept")
-	}
-	return append(out,
+	emitHostInboundNDPAcceptsText(&out, views, false)
+	out = append(out,
 		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept")
+	return out
 }
 
 // emitHostInboundFenceWGAdmits scopes the whole-table cold-boot/lo0 fence's
@@ -1998,6 +2118,7 @@ func buildHostInboundGapFencePayloadForTable(tableName string, priority int, vie
 		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
 	)...)
 	rules = append(rules, hostInboundFenceMandatoryAdmitsViews(views)...)
+	rules = append(rules, "    ct state established,related accept")
 	emitHostInboundGapFenceWGAdmits(&rules, views, uncoveredV4, uncoveredV6, wgZonePorts)
 	emitDHCPBackstopAdmits(&rules, vrfBackstop)
 	// #10751 M1/Opus9: admit shared values on lifeline ingress ahead of
@@ -2613,10 +2734,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 // or AFTER the fine junos-host DROP (coarse-then-fine order).
 func emitHostInboundICMPAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView) {
 	*rules = append(*rules, "    icmpv6 type { 1, 2, 3, 4 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6Error)+"\" accept")
-	// #15671: ND default accept — only when no view excluded ndp.
-	if hostInboundNDPDefaultText(views) {
-		*rules = append(*rules, "    icmpv6 type { 133, 134, 135, 136 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
-	}
+	// #15931: ND default accept, scoped to each retaining view's ingress.
+	emitHostInboundNDPAcceptsText(rules, views, true)
 	*rules = append(*rules, "    icmp type { destination-unreachable, time-exceeded, parameter-problem } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP4Error)+"\" accept")
 }
 
@@ -2723,6 +2842,13 @@ func emitHostInboundNonUnicastIngressGuards(rules *[]string, views []dpuserspace
 }
 
 func emitHostInboundNonUnicastScope(rules *[]string, v dpuserspace.ZoneHostInboundView, prefix, family string, addrs []string) {
+	// #15931: the ND default is judged once, by the scoped ND admits
+	// ahead of this guard. A default-retaining view (or an explicit ndp
+	// token) must not have its multicast NS/NA dropped here merely
+	// because its positive set is not any-service.
+	if family == "ip6" && hostInboundNDPMulticastAdmitsText(v) {
+		*rules = append(*rules, "    "+prefix+"ip6 daddr "+nftAddrSet(addrs)+" icmpv6 type { 133, 134, 135, 136 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
+	}
 	scope := prefix + family + " daddr " + nftAddrSet(addrs)
 	if hostInboundAllowsAll(v) {
 		*rules = append(*rules, "    "+scope+" accept")
@@ -2732,6 +2858,17 @@ func emitHostInboundNonUnicastScope(rules *[]string, v dpuserspace.ZoneHostInbou
 		*rules = append(*rules, "    "+scope+" "+match.match+" "+match.action)
 	}
 	*rules = append(*rules, "    "+scope+" drop")
+}
+
+// ndpPositive reports whether the view's positives admit ND (explicit
+// ndp, or protocols all which expands to it).
+func ndpPositive(v dpuserspace.ZoneHostInboundView) bool {
+	for _, tok := range v.Protocols {
+		if tok == "ndp" || tok == "all" {
+			return true
+		}
+	}
+	return false
 }
 
 // emitHostInboundMulticastFenceDrops keeps the cold-boot fence fail-closed for
@@ -2789,12 +2926,19 @@ func emitHostInboundNonUnicastFenceDrops(rules *[]string, views []dpuserspace.Zo
 		}
 		for _, v := range views {
 			direct := hostInboundDirectIngressNetdevs(v)
+			ndExempt := family == "ip6" && hostInboundNDPMulticastAdmitsText(v)
 			if len(direct) > 0 {
+				if ndExempt {
+					*rules = append(*rules, "    iifname "+nftIifnameSet(direct)+" ip6 daddr "+nftAddrSet(addrs)+" icmpv6 type { 133, 134, 135, 136 } accept")
+				}
 				*rules = append(*rules, "    iifname "+nftIifnameSet(direct)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
 			}
 			for _, vrf := range v.IngressVRFScopes {
 				if vrf.Master != "" && len(vrf.Slaves) > 0 {
 					scope := hostInboundVRFIngressPrefix(vrf.Master, vrf.Slaves)
+					if ndExempt {
+						*rules = append(*rules, "    "+scope+"ip6 daddr "+nftAddrSet(addrs)+" icmpv6 type { 133, 134, 135, 136 } accept")
+					}
 					*rules = append(*rules, "    "+scope+family+" daddr "+nftAddrSet(addrs)+" drop")
 				}
 			}
@@ -3968,4 +4112,13 @@ func nftFlexMatchExpr(fm config.FlexMatchConfig) string {
 		base = "@th"
 	}
 	return fmt.Sprintf("%s,%d,%d & 0x%x == 0x%x", base, int(fm.ByteOffset)*8, n*8, mask, value)
+}
+
+// hostInboundNDPMulticastAdmitsText: multicast ND (ff02::/16) in the
+// non-unicast guard. Every default-retaining view keeps multicast ND
+// (solicited-node NS, RS, RA), including empty-token (no-stanza)
+// views — matching Rust and the parent unscoped admit. Only an
+// `ndp except` view loses it. The accept carries the ND counter.
+func hostInboundNDPMulticastAdmitsText(v dpuserspace.ZoneHostInboundView) bool {
+	return hostInboundViewNDPDefaultText(v)
 }

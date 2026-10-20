@@ -1081,7 +1081,7 @@ pub(super) fn populate_interfaces(
                 state.ifindex_host_inbound.entry(iface.ifindex)
             {
                 empty_zone_host_inbound_sentinels.insert(iface.ifindex);
-                slot.insert(Default::default());
+                slot.insert(crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
             }
         }
     }
@@ -1136,7 +1136,7 @@ pub(super) fn populate_interfaces(
             state.ifindex_host_inbound.entry(*ifindex)
         {
             contested_host_inbound_sentinels.insert(*ifindex);
-            slot.insert(Default::default());
+            slot.insert(crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
         }
     }
 
@@ -1173,7 +1173,7 @@ pub(super) fn populate_interfaces(
             }
         }
         empty_zone_host_inbound_sentinels.insert(*ifindex);
-        state.ifindex_host_inbound.entry(*ifindex).or_default();
+        state.ifindex_host_inbound.entry(*ifindex).or_insert_with(|| crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
     }
 
     // #10644: unzoned trunk-unit host-inbound fail-closed backstop — SYMMETRY
@@ -1234,7 +1234,7 @@ pub(super) fn populate_interfaces(
             }
         }
         empty_zone_host_inbound_sentinels.insert(*ifindex);
-        state.ifindex_host_inbound.entry(*ifindex).or_default();
+        state.ifindex_host_inbound.entry(*ifindex).or_insert_with(|| crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
     }
     for ifindex in &unzoned_child_unit_ifindexes {
         if state.ifindex_to_zone_id.contains_key(ifindex) {
@@ -1257,7 +1257,7 @@ pub(super) fn populate_interfaces(
             }
         }
         empty_zone_host_inbound_sentinels.insert(*ifindex);
-        state.ifindex_host_inbound.entry(*ifindex).or_default();
+        state.ifindex_host_inbound.entry(*ifindex).or_insert_with(|| crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
     }
 
     // #6722: flush the Go builder's egress answer, admitting an ifindex only

@@ -644,6 +644,7 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         // ND unless the zone excluded ndp, which the compiled set
         // reflects by ndp's absence after `all` expansion.
         "ndp" => {
+            hi.ndp_positive = true;
             for t in [133u8, 134, 135, 136] {
                 hi.icmp_types_v6.insert(t);
             }
@@ -902,9 +903,18 @@ pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
         return true;
     }
     if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
-        // #15671: ND default withdrawn on an ndp-excluding override.
-        if is_ndp_type(protocol, is_v6, icmp_type) && hi.ndp_excluded {
-            return false;
+        // #15931: ND default applies to an interface override exactly as
+        // to its zone: withdrawn only on `ndp except`; an explicit ndp
+        // token admits via admits_destination; otherwise the default
+        // admits even though the positive set has no ND token.
+        if is_ndp_type(protocol, is_v6, icmp_type) {
+            if hi.ndp_excluded {
+                return false;
+            }
+            if is_host_inbound_multicast_group(dst_ip) {
+                return hi.ndp_admits_multicast();
+            }
+            return true;
         }
         return hi.admits_destination(protocol, dst_port, is_v6, icmp_type, dst_ip);
     }
@@ -943,12 +953,13 @@ pub(in crate::afxdp) fn host_inbound_admits_iface(
         if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
             return true;
         }
-        // #15671: ND default withdrawn on an ndp-excluding override;
-        // otherwise the per-interface ndp token (or zone fallback via
-        // host_inbound_admits when no override exists) governs. An
-        // override WITHOUT ndp still gets the default unless excluded.
-        if is_ndp_type(protocol, is_v6, icmp_type) && hi.ndp_excluded {
-            return false;
+        // #15931: ND default applies to an interface override exactly
+        // as to its zone: withdrawn only on `ndp except`; otherwise
+        // admitted (an explicit ndp token also admits, via the default
+        // arm). An override WITHOUT ndp still gets the default unless
+        // excluded — the positive set need not name ND.
+        if is_ndp_type(protocol, is_v6, icmp_type) {
+            return !hi.ndp_excluded;
         }
         return hi.admits(protocol, dst_port, is_v6, icmp_type);
     }

@@ -792,6 +792,10 @@ pub(in crate::afxdp) struct ZoneHostInbound {
     pub(in crate::afxdp) mcast_router_discovery: bool,
     /// #15671: `protocols ndp except` authored — ND default withdrawn.
     pub(in crate::afxdp) ndp_excluded: bool,
+    /// #15931: explicit `protocols ndp` (or `protocols all`, which
+    /// expands to it) — ND admitted to catalog multicast groups as a
+    /// positive token, distinct from the non-catalog default.
+    pub(in crate::afxdp) ndp_positive: bool,
 }
 
 impl ZoneHostInbound {
@@ -848,6 +852,15 @@ impl ZoneHostInbound {
             }
         }
     }
+    /// #15931: ND admission to a catalog multicast destination. The
+    /// non-catalog ND default does not extend here (mirrors the kernel
+    /// catalog-group guards); only an explicit ndp positive, or a full
+    /// any-service admit, opens it. `ndp except` has already withdrawn
+    /// the default at the caller.
+    pub(in crate::afxdp) fn ndp_admits_multicast(&self) -> bool {
+        self.all_services || self.ndp_positive
+    }
+
     /// Admission predicate for a packet with its actual destination IP.
     ///
     /// The ordinary service/protocol sets above intentionally remain the

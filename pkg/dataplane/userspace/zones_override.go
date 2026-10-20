@@ -117,3 +117,15 @@ func mergeHostInboundTraffic(a, b *config.HostInboundTraffic) *config.HostInboun
 func buildInterfaceHostInboundMap(cfg *config.Config) map[string]*config.HostInboundTraffic {
 	return config.ResolveInterfaceHostInbound(cfg)
 }
+
+// ndpExcluded reports whether the effective except tokens withdraw the ND
+// default (#15931: scoped form of the #15671 predicate, shared by the view
+// builder's grouping and the classifiers).
+func ndpExcluded(except []string) bool {
+	for _, tok := range except {
+		if tok == "ndp" {
+			return true
+		}
+	}
+	return false
+}
