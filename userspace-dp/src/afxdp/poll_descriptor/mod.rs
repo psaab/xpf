@@ -5252,33 +5252,52 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // is the single reply decision point; no earlier
                         // stage has emitted a challenge reply.
                         if let Some(challenge) = deferred_syn_cookie_challenge.take() {
-                            // Confirmation fold (Codex5): the ordinary
-                            // miss path drops Permit packets at three
-                            // unconditional gates AFTER this point —
-                            // L2 group-unicast, bindless IPsec selector
-                            // fence (pre-SNAT), and the post-allocation
-                            // fence recheck. A challenged SYN must not
-                            // earn a SYN-ACK the miss path would silently
-                            // drop, so all three are evaluated here on
-                            // the composed decision (the third uses the
-                            // same predicate; allocation has not run for
-                            // a SYN-only challenge, so the composed NAT
-                            // is the pre-routing decision).
+                            // Predicate-only rework (#15947 Codex7/Opus7):
+                            // decide the challenge HERE, before any NAT
+                            // allocation, from a candidate NAT decision.
+                            // The candidate mirrors the allocating path's
+                            // composition (pre-routing DNAT/NPTv6-inbound in
+                            // `decision.nat`, then NAT64/NPTv6-outbound/
+                            // static/pool/interface source translation)
+                            // without minting pool/interface/persistent
+                            // state, so an emitted SYN-ACK never retains an
+                            // allocation and a fenced tuple is suppressed
+                            // before any resource is consumed. A candidate
+                            // allocation-failure shape yields no candidate
+                            // and suppresses the reply (the real path drops
+                            // there). L2 group-unicast stays a hard gate.
+                            let candidate_nat =
+                                nat_exception::candidate_source_nat_for_challenge(
+                                    worker_ctx.forwarding,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    ingress_nat_scope_ifindex,
+                                    from_zone,
+                                    to_zone,
+                                    decision.resolution.egress_ifindex,
+                                    flow,
+                                    effective_resolution_target,
+                                    policy_dst_port,
+                                    decision.nat,
+                                    nat64_match,
+                                    policy_packet_icmp(packet_frame, meta),
+                                );
                             let fence_dropped = (l2_group_unicast_ip
                                 && owned_packet_frame.is_none())
-                                || ForwardPacketMeta::from(meta)
-                                    .l3_addrs_unfiltered()
-                                    .is_some_and(|(source, destination)| {
-                                        worker_ctx
-                                            .forwarding
-                                            .bindless_ipsec_selector_fence
-                                            .matches_with_nat(
-                                                source,
-                                                destination,
-                                                decision.nat,
-                                            )
-                                    });
-                            let admitted = !fence_dropped
+                                || candidate_nat.is_some_and(|candidate| {
+                                    ForwardPacketMeta::from(meta)
+                                        .l3_addrs_unfiltered()
+                                        .is_some_and(|(source, destination)| {
+                                            worker_ctx
+                                                .forwarding
+                                                .bindless_ipsec_selector_fence
+                                                .matches_with_nat(
+                                                    source, destination, candidate,
+                                                )
+                                        })
+                                });
+                            let admitted = candidate_nat.is_some()
+                                && !fence_dropped
                                 && if decision.resolution.disposition
                                     == ForwardingDisposition::LocalDelivery
                                 {
@@ -5308,14 +5327,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     )
                                 };
                             if admitted {
-                                // Defer emission until SNAT allocation and
-                                // the post-SNAT fence recheck have run;
-                                // restore the challenge for that site.
-                                deferred_syn_cookie_challenge = Some(challenge);
-                            } else {
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
+                                enqueue_syn_cookie_reply(
+                                    &mut binding.tx_pipeline,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    binding.ifindex,
+                                    packet_frame,
+                                    meta,
+                                    Some(flow),
+                                    SynCookieReply::SynAck(challenge),
+                                    telemetry.counters,
+                                );
                             }
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
                         }
                         // because its host gates run on the normal path.
                         if validated_syn_cookie_ack {
@@ -6541,61 +6566,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     telemetry.dbg.policy_deny += 1;
                                     telemetry.counters.record_transit_ipsec_fence_drop();
-                                    binding.scratch.scratch_recycle.push(desc.addr);
-                                    continue;
-                                }
-                                // Confirmation fold (Opus6/post-SNAT): if a
-                                // cookie challenge is pending, this is its
-                                // first moment with the POST-allocation NAT
-                                // decision. Reaching here means the post-SNAT
-                                // fence did NOT drop (it continues above);
-                                // now decide the reply and consume the
-                                // descriptor before session installation.
-                                if let Some(challenge) =
-                                    deferred_syn_cookie_challenge.take()
-                                {
-                                    let admitted = if decision.resolution.disposition
-                                        == ForwardingDisposition::LocalDelivery
-                                    {
-                                        syn_cookie_host_admission(
-                                            worker_ctx.forwarding,
-                                            flow,
-                                            packet_frame,
-                                            meta,
-                                            ingress_zone_override,
-                                            effective_resolution_target,
-                                            policy_dst_port,
-                                            now_ns,
-                                        )
-                                    } else {
-                                        syn_cookie_final_admission_with_fence(
-                                            worker_ctx.forwarding,
-                                            worker_ctx.ha_state,
-                                            flow,
-                                            meta,
-                                            ingress_zone_override,
-                                            decision.resolution,
-                                            effective_resolution_target,
-                                            policy_dst_port,
-                                            l2_group_unicast_ip
-                                                && owned_packet_frame.is_none(),
-                                            now_ns,
-                                            now_secs,
-                                        )
-                                    };
-                                    if admitted {
-                                        enqueue_syn_cookie_reply(
-                                            &mut binding.tx_pipeline,
-                                            worker_ctx.forwarding,
-                                            worker_ctx.event_stream,
-                                            binding.ifindex,
-                                            packet_frame,
-                                            meta,
-                                            Some(flow),
-                                            SynCookieReply::SynAck(challenge),
-                                            telemetry.counters,
-                                        );
-                                    }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }

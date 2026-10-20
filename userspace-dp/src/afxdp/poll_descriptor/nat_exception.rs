@@ -234,6 +234,92 @@ pub(super) fn source_nat_would_translate_flowless(
     }
 }
 
+/// Predicate-only source-NAT candidate for the SYN-cookie challenge path
+/// (#15947 predicate-only rework). Mirrors the allocating miss path's
+/// composition order without minting state: NAT64 (address candidate from
+/// the matched prefix's pool; no port), else NPTv6 outbound, else static
+/// SNAT, else the first matching source-NAT rule. The base decision carries
+/// any pre-routing DNAT/NPTv6-inbound destination rewrite. A candidate
+/// allocation-failure shape returns `None` (the real path drops there, so
+/// no challenge may be emitted on a guessed tuple).
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn candidate_source_nat_for_challenge(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress_scope_ifindex: Option<i32>,
+    from_zone: &str,
+    to_zone: &str,
+    egress_ifindex: i32,
+    flow: &SessionFlow,
+    effective_dst: IpAddr,
+    effective_dst_port: u16,
+    base_nat: NatDecision,
+    nat64_match: Option<(usize, Ipv4Addr, std::net::Ipv6Addr)>,
+    packet_icmp: Option<(u8, u8)>,
+) -> Option<NatDecision> {
+    if let Some((prefix_idx, dst_v4, _)) = nat64_match {
+        let prefix = forwarding.nat64.prefixes.get(prefix_idx)?;
+        let snat_v4 = *prefix.pool_v4.first()?;
+        return Some(crate::nat64::Nat64State::forward_decision(snat_v4, dst_v4, 0));
+    }
+    let nat_match_flow = flow.with_destination(effective_dst, effective_dst_port);
+    if let IpAddr::V6(mut src_v6) = nat_match_flow.src_ip {
+        match forwarding.nptv6.translate_outbound_result(&mut src_v6, to_zone) {
+            crate::nptv6::Nptv6Translation::Translated => {
+                return Some(base_nat.merge(NatDecision {
+                    rewrite_src: Some(IpAddr::V6(src_v6)),
+                    rewrite_dst: None,
+                    nat64: false,
+                    nptv6: true,
+                    ..NatDecision::default()
+                }));
+            }
+            crate::nptv6::Nptv6Translation::Untranslatable => return None,
+            crate::nptv6::Nptv6Translation::NoMatch => {}
+        }
+    }
+    let scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
+        forwarding,
+        ingress_ifindex,
+        ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
+        egress_ifindex,
+        flow.forward_key.routing_domain,
+    );
+    if let Some((decision, _)) = forwarding.static_nat.match_snat_with_counter_scoped(
+        flow.src_ip,
+        flow.forward_key.src_port,
+        Some(flow.forward_key.protocol),
+        Some(flow.forward_key.dst_ip),
+        to_zone,
+        scope.egress_ifname,
+        scope.egress_routing_instance,
+    ) {
+        return Some(base_nat.merge(decision));
+    }
+    let egress = forwarding.egress.get(&egress_ifindex);
+    match crate::nat::candidate_source_nat_translation(
+        &forwarding.source_nat_rules,
+        &scope,
+        from_zone,
+        to_zone,
+        nat_match_flow.src_ip,
+        nat_match_flow.dst_ip,
+        nat_match_flow.forward_key.protocol,
+        nat_match_flow.forward_key.src_port,
+        nat_match_flow.forward_key.dst_port,
+        packet_icmp,
+        egress.and_then(|e| e.primary_v4),
+        egress.and_then(|e| e.primary_v6),
+    ) {
+        Ok(decision) => Some(base_nat.merge(decision)),
+        Err(_) => None,
+    }
+}
+
 #[cold]
 #[inline(never)]
 pub(super) fn record_source_nat_failure(

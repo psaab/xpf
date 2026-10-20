@@ -13855,6 +13855,9 @@ fn post_snat_fence_suppresses_cookie_challenge_15947() {
             m
         };
         let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, meta, &mut screen);
+        if idx == 1 {
+            assert_eq!(batch.syn_cookie_challenges, 1, "threshold-crossing fresh tuple must trigger a challenge (non-vacuous fence oracle)");
+        }
         assert_eq!(
             batch.syn_cookie_syn_ack_sent, 0,
             "post-SNAT fence SYN {idx} must not receive a SYN-ACK",
@@ -13893,6 +13896,61 @@ fn pbr_discard_is_applied_before_screen_sketches_11332() {
 }
 
 #[test]
+fn unfenced_challenge_does_not_retain_snat_allocation_15947() {
+    // Codex7: predicate-only emission must not consume the SNAT pool.
+    // Two-port pool: A installs (port 1), B challenged (SYN-ACK, no
+    // session), C must still reply. Pre-rework B retained its port.
+    let (forwarding, mut screen) = {
+        let forwarding = build_forwarding_state(&{
+            let mut snapshot = nat_snapshot();
+            snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+                name: "two-port-pool".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_addresses: vec!["203.0.113.10".to_string()],
+                port_low: 5000,
+                port_high: 5001,
+                ..Default::default()
+            }];
+            snapshot
+        });
+        let mut profiles = FxHashMap::default();
+        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        let mut screen = ScreenState::new();
+        screen.update_profiles(profiles);
+        screen.update_syn_cookie_master_key(Some([0x42; 16]));
+        (forwarding, screen)
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let src = Ipv4Addr::new(10, 0, 61, 103);
+    let dst = Ipv4Addr::new(9, 9, 9, 9);
+    let send = |binding: &mut BindingWorker, sessions: &mut SessionTable, screen: &mut ScreenState, port: u16| -> BatchCounters {
+        let frame = build_txn_tcp_syn_frame_v4(src, dst, port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
+        m.flow_src_addr[..4].copy_from_slice(&src.octets());
+        m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+        m.flow_src_port = port;
+        txn_run_descriptor_with_screen_state(binding, sessions, &forwarding, &txn_ha_state(), &frame, m, screen).0
+    };
+    let a = send(&mut binding, &mut sessions, &mut screen, 49170);
+    assert_eq!(a.syn_cookie_challenges, 0);
+    assert_eq!(sessions.len(), 2, "normal SYN A installs forward+reverse");
+    binding.tx_pipeline.pending_tx_local.clear();
+    let b = send(&mut binding, &mut sessions, &mut screen, 49171);
+    assert_eq!(b.syn_cookie_challenges, 1);
+    assert_eq!(b.syn_cookie_syn_ack_sent, 1, "unfenced challenged SYN B gets its SYN-ACK");
+    assert_eq!(sessions.len(), 2, "challenged SYN B installs no session");
+    binding.tx_pipeline.pending_tx_local.clear();
+    let c = send(&mut binding, &mut sessions, &mut screen, 49172);
+    assert_eq!(c.syn_cookie_challenges, 1);
+    assert_eq!(c.syn_cookie_syn_ack_sent, 1, "challenged SYN C must still reply: B retained no pool identity");
+    assert_eq!(sessions.len(), 2, "challenged SYN C installs no session");
+}
+
+#[test]
 fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
     let denied_source = Ipv4Addr::new(203, 0, 113, 12);
     let server = Ipv4Addr::new(198, 51, 100, 20);
@@ -13901,21 +13959,26 @@ fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut syn_sessions = SessionTable::new();
 
-    // Establish a real cookie for this tuple before installing the deny, as
-    // can happen when an operator changes the input filter mid-handshake.
-    let _ = g11332_send_syn(
+    // Opus7: generate the cookie on a FRESH tuple. Two same-tuple SYNs
+    // would hit the live-session prescreen, which deliberately
+    // suppresses a second cookie for an Opening retransmit (see
+    // challenge_suppressed_for_opening_retransmit_15947). Prime the
+    // screen sketch with one tuple, then challenge on a distinct one.
+    let _ = g11332_send_syn_with_port(
         &mut binding,
         &mut syn_sessions,
         &open_forwarding,
         &mut screen,
         denied_source,
+        49152,
     );
-    let challenged = g11332_send_syn(
+    let challenged = g11332_send_syn_with_port(
         &mut binding,
         &mut syn_sessions,
         &open_forwarding,
         &mut screen,
         denied_source,
+        49153,
     );
     assert_eq!(challenged.syn_cookie_challenges, 1);
     let challenge = binding
@@ -13936,7 +13999,7 @@ fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
     let mut ack_frame = build_txn_tcp_syn_frame_v4(
         denied_source,
         server,
-        49152,
+        49153,
         443,
         0x10,
         crate::afxdp::tests_support::TEST_LAN_MAC,

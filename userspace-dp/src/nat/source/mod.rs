@@ -1416,6 +1416,124 @@ pub(crate) fn source_nat_tuple_translation_possible(
     false
 }
 
+/// Predicate-only source-NAT candidate for the SYN-cookie challenge fence
+/// check (#15947 predicate-only rework). Returns the SOURCE translation the
+/// first matching translating rule would apply, without minting any pool,
+/// interface, or persistent state and without advancing round-robin or
+/// sticky selection. The returned `rewrite_src_port` is always `None`:
+/// PAT/deterministic ports are allocation-dependent, and the selector fence
+/// consumes only address rewrites. A matched `off` rule wins (no
+/// translation); a poisoned rule fails closed as a translation candidate.
+/// `Err` mirrors an allocation-failure shape the real path would drop on
+/// (for example pool-mode on a non-first fragment, or interface SNAT with
+/// no same-family egress address).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn candidate_source_nat_translation(
+    rules: &[SourceNatRule],
+    scope: &NatScopeCtx<'_>,
+    from_zone: &str,
+    to_zone: &str,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    egress_v4: Option<Ipv4Addr>,
+    egress_v6: Option<Ipv6Addr>,
+) -> Result<NatDecision, SourceNatFailure> {
+    for rule in rules {
+        if rule.matches(
+            scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, src_port, dst_port,
+            false, packet_icmp,
+        ) == L4Match::NoMatch
+        {
+            continue;
+        }
+        if rule.lenient_match_dropped {
+            return Err(SourceNatFailure::for_rule(
+                rule,
+                SourceNatFailureReason::AuthoredMatchEmpty,
+            ));
+        }
+        if rule.off {
+            return Ok(NatDecision::default());
+        }
+        if rule.interface_mode {
+            let rewrite_src = match src_ip {
+                IpAddr::V4(_) => egress_v4.map(IpAddr::V4),
+                IpAddr::V6(_) => egress_v6.map(IpAddr::V6),
+            };
+            return match rewrite_src {
+                Some(rewrite_src) => Ok(NatDecision {
+                    rewrite_src: Some(rewrite_src),
+                    ..NatDecision::default()
+                }),
+                None => Err(SourceNatFailure::for_rule(
+                    rule,
+                    SourceNatFailureReason::InterfaceNoEgressAddress,
+                )),
+            };
+        }
+        if rule.pool_mode {
+            if let Some(reason) = rule.pool_failure {
+                return Err(SourceNatFailure::for_rule(rule, reason));
+            }
+            let rewrite_src = match src_ip {
+                IpAddr::V4(src_v4) => {
+                    if rule.pool_addresses_v4.is_empty() {
+                        return Err(SourceNatFailure::for_rule(
+                            rule,
+                            SourceNatFailureReason::WrongAddressFamily,
+                        ));
+                    }
+                    if let Some(det) = rule.deterministic_v4 {
+                        let Some((ip_idx, _)) =
+                            crate::nat::deterministic_indices_v4(&det, src_v4)
+                        else {
+                            return Err(SourceNatFailure::for_rule(
+                                rule,
+                                SourceNatFailureReason::DeterministicSubscriberOutOfRange,
+                            ));
+                        };
+                        let Some(addr) = rule.pool_addresses_v4.get(ip_idx) else {
+                            return Err(SourceNatFailure::for_rule(
+                                rule,
+                                SourceNatFailureReason::AllocatorExhausted,
+                            ));
+                        };
+                        IpAddr::V4(*addr)
+                    } else if rule.address_persistent {
+                        let idx = crate::nat::sticky_pool_index(src_ip, rule.pool_addresses_v4.len());
+                        IpAddr::V4(rule.pool_addresses_v4[idx])
+                    } else {
+                        IpAddr::V4(rule.pool_addresses_v4[0])
+                    }
+                }
+                IpAddr::V6(_) => {
+                    if rule.pool_addresses_v6.is_empty() {
+                        return Err(SourceNatFailure::for_rule(
+                            rule,
+                            SourceNatFailureReason::WrongAddressFamily,
+                        ));
+                    }
+                    if rule.address_persistent {
+                        let idx = crate::nat::sticky_pool_index(src_ip, rule.pool_addresses_v6.len());
+                        IpAddr::V6(rule.pool_addresses_v6[idx])
+                    } else {
+                        IpAddr::V6(rule.pool_addresses_v6[0])
+                    }
+                }
+            };
+            return Ok(NatDecision {
+                rewrite_src: Some(rewrite_src),
+                ..NatDecision::default()
+            });
+        }
+    }
+    Ok(NatDecision::default())
+}
+
 /// Whether the translation already carried by an established flow remains
 /// expressible by the first live source-NAT rule for its original tuple.
 ///
