@@ -11752,3 +11752,18 @@ fn helper_fabric_punt_seed_stays_out_of_shared_15950() {
     assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::FabricPuntSeed, 1_000_000, PROTO_TCP, 0x10, false));
     assert!(shared_sessions.lock().unwrap().get(&key).is_none(), "FabricPuntSeed must never become shared authority");
 }
+
+#[test]
+fn nat_only_vip_in_connected_subnet_keeps_ifindex0_15966r() {
+    // NAT-only external inside a configured interface's /24 must NOT acquire
+    // that interface's ifindex (configured_iface gate discriminator).
+    let mut snapshot = nat_snapshot();
+    snapshot.static_nat_rules = vec![crate::StaticNATRuleSnapshot { name: "web-in-subnet".to_string(), from_routing_instance: String::new(), external_ip: "172.16.80.99".to_string(), internal_ip: "10.0.61.99".to_string(), ..Default::default() }];
+    let state = build_forwarding_state(&snapshot);
+    assert!(state.local_v4.contains(&Ipv4Addr::new(172,16,80,99)));
+    assert!(!state.configured_iface_v4.contains(&Ipv4Addr::new(172,16,80,99)));
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let r = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, IpAddr::V4(Ipv4Addr::new(172,16,80,99)), Some("inet.0")).resolution;
+    assert_eq!(r.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(r.local_ifindex, 0, "NAT-only VIP in a connected subnet must keep ifindex 0");
+}

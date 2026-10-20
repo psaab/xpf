@@ -5316,12 +5316,13 @@ fn wg14675_hostname_peer_added_restarts_control_thread() {
     );
 }
 
-/// #14675 regression (pure same-Arc cell): changing ONLY an existing
+/// #14675 as amended by #15950 (H37-01): changing ONLY an existing
 /// peer's endpoint from one hostname to another — same pubkey, same
 /// allowed-ips, endpoint None in the engine table on both sides —
-/// reuses the engine Arc verbatim (`wg_peers_eq` does not compare
-/// `endpoint_host`). Without the peer_config_changed prune the
-/// resolver would keep resolving the old name forever.
+/// REBUILDS the engine, because `wg_peers_eq` now compares
+/// `endpoint_host` (a rename must not carry the old name's live
+/// endpoint). The control thread must still restart and recapture
+/// endpoint_hosts; Arc reuse remains only for unchanged identity.
 #[test]
 fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
     let mut coordinator = Coordinator::new();
@@ -5359,9 +5360,9 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
         .refresh_runtime_snapshot(&snap2)
         .expect("second apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_eq!(
+    assert_ne!(
         entry.engine_ptr, engine_ptr_before,
-        "hostname-only change must reuse the engine Arc — the same-engine path"
+        "hostname-only change must REBUILD the engine (#15950 H37-01)"
     );
     assert_eq!(
         entry.spawned_peer_config[0].endpoint_host.as_deref(),
@@ -14208,3 +14209,19 @@ fn bringup_failure_preserves_forwarding_15950() {
     let _ = gen_before;
 }
 
+
+#[test]
+fn stop_preserving_retires_holders_on_preserved_allocator_15966r() {
+    use crate::nat::NatHolder;
+    let mut coordinator = Coordinator::new();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    coordinator.workers.register(3, rec, None);
+    let egress: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+    let alloc = coordinator.forwarding.iface_nat_allocators.allocator_for(egress).expect("allocator");
+    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.0.5".parse().unwrap(), dst_ip: "198.51.100.9".parse().unwrap(), src_port: 4000, dst_port: 80, routing_scope: 0 };
+    assert!(alloc.reserve_flow(flow, crate::nat::TranslatedTuple { ip: egress, port: 20000 }, 0, false, 1_000, NatHolder::Worker(3)));
+    assert!(alloc.debug_is_port_occupied(0, 20000));
+    coordinator.stop_preserving_forwarding();
+    assert!(!alloc.debug_is_port_occupied(0, 20000), "holder retirement through preserving stop must free the preserved allocator's port");
+    assert!(coordinator.workers.records().is_empty());
+}

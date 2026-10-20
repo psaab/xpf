@@ -1376,7 +1376,7 @@ fn worker_queue_7201_did_work_consumes_the_backlog_signal() {
     // pins the carry the new field feeds).
     assert!(
         code.contains(
-            "commands_backlogged,\n            transition_debt_pending: transition_debt_pending_now,\n            session_import_repair_pending: session_import_repair_pending_now,\n        } = command_results;"
+            "commands_backlogged,\n            transition_debt_pending: transition_debt_pending_now,\n            session_import_repair_pending: session_import_repair_pending_now,\n            deleted_pptp_control_channels,\n        } = command_results;"
         ),
         "`commands_backlogged` and both repair-pending carries must be \
          destructured out of WorkerCommandResults at the call site"

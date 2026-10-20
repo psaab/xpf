@@ -236,12 +236,17 @@ impl PptpControlInbox {
         true
     }
 
-    /// Rearm the disabled purge on re-enable.
+    /// On the enable transition, drop every segment buffered before the
+    /// enable (they arrived while disabled or during a generation the
+    /// worker never observed as disabled) and rearm the disabled purge.
+    /// Called before any enabled drain processes buffered segments.
     pub(crate) fn note_enabled(&self) {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        inner.pending.clear();
+        inner.pending_call_installs.clear();
         inner.disabled_purged = false;
     }
 
@@ -1189,5 +1194,27 @@ mod tests_15950_parse {
         assert_eq!(parse_control_segment(&msg(16,4,&reply)), ControlParse::StopControl);
         reply[0]=2;
         assert_eq!(parse_control_segment(&msg(16,4,&reply)), ControlParse::Ignored, "failed Stop reply must not tear down");
+    }
+}
+
+#[cfg(test)]
+mod tests_15966r_toggle {
+    use super::*;
+    #[test]
+    fn enable_transition_drops_pre_enable_segments_15966r() {
+        let inbox = PptpControlInbox::default();
+        let seg = PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 1, payload: vec![1,2,3] };
+        assert!(inbox.push(seg));
+        // Worker never observed disabled generation; enable transition must drop it.
+        inbox.note_enabled();
+        assert_eq!(inbox.pending_len(), 0, "pre-enable buffered segments must be dropped on enable");
+        // Disabled purge fires once, rearmed by enable.
+        assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 2, payload: vec![4] }));
+        assert!(inbox.purge_once_per_disable());
+        assert_eq!(inbox.pending_len(), 0);
+        assert!(!inbox.purge_once_per_disable(), "second disabled poll must not re-purge (flag)");
+        inbox.note_enabled();
+        assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 3, payload: vec![5] }));
+        assert!(inbox.purge_once_per_disable(), "enable must rearm disabled purge");
     }
 }

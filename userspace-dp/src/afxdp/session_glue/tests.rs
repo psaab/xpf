@@ -22594,3 +22594,134 @@ fn first_learn_collision_backlog_learns_replacement_on_both_workers_15251() {
     );
     assert_eq!(pending, 0, "#15251: install retry must clear after both workers learn");
 }
+
+#[test]
+fn policy_batch_pptp_forget_fences_incarnation_15966r() {
+    // Genuine delete on a worker WITHOUT the TCP/1723 session still purges
+    // broadcast associations; a stale batch on a replacement does not.
+    let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+    let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+    let ctl_key = crate::session::SessionKey { addr_family: libc::AF_INET as u8, protocol: PROTO_TCP, src_ip: pns, dst_ip: pac, src_port: 49152, dst_port: 1723, discriminator: Default::default(), routing_domain: 0 };
+    let call = crate::session::pptp::PptpCall::new(pac, 0xAAAA, pns, 0xBBBB);
+    let ctl = crate::session::pptp::ControlChannelId::new(pns, 49152, pac, 1723);
+    let run_batch = |sessions: &mut SessionTable, captured_id: u64| -> (bool, crate::afxdp::session_glue::WorkerCommandResults) {
+        let applied = Arc::new(Mutex::new(vec![false]));
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let report = Arc::new(Mutex::new(crate::afxdp::PolicyDeleteBatchReport { cancelled: false, partial: vec![false], refused: vec![false] }));
+        let intents = Arc::new(Mutex::new(Vec::new()));
+        let commands = Arc::new(Mutex::new(VecDeque::new()));
+        commands.lock().unwrap().push_back(crate::afxdp::WorkerCommand::DeletePolicyBatch { items: vec![crate::afxdp::PolicyDeleteItem { key: ctl_key.clone(), session_id: captured_id, forward_only: true, companion_session_id: 0, captured_companion: None }], applied: Arc::clone(&applied), pending, report, intents });
+        let forwarding = test_forwarding_state();
+        let ha_state = BTreeMap::new();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let results = apply_worker_commands(&commands, sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &ha_state, &dynamic_neighbors, 0, &mut VecDeque::new());
+        (applied.lock().unwrap()[0], results)
+    };
+    // Worker without session, genuine captured id (nonzero, no local row): purge happens.
+    let mut remote = SessionTable::new();
+    remote.pptp_mut().install(call, ctl, 100).unwrap();
+    let (applied, results) = run_batch(&mut remote, 999);
+    assert!(!applied);
+    assert_eq!(remote.pptp().resolve(pac, 0xAAAA), None, "genuine delete must purge broadcast associations on non-owning workers");
+    assert!(results.deleted_pptp_control_channels.contains(&ctl));
+    // Replacement incarnation protected from stale batch.
+    let mut owner = SessionTable::new();
+    assert!(owner.install_with_protocol_with_origin(ctl_key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, 1_000_000_000, PROTO_TCP, TCP_FLAG_ACK));
+    let stale_id = owner.session_id_for(&ctl_key);
+    assert!(owner.install_with_protocol_with_origin(ctl_key.clone(), test_decision(), test_metadata(), SessionOrigin::ForwardFlow, 1_000_000_000, PROTO_TCP, TCP_FLAG_ACK));
+    let live_id = owner.session_id_for(&ctl_key);
+    assert_ne!(stale_id, live_id);
+    owner.pptp_mut().install(call, ctl, 200).unwrap();
+    let (applied2, results2) = run_batch(&mut owner, stale_id);
+    assert!(!applied2);
+    assert!(owner.pptp().resolve(pac, 0xAAAA).is_some(), "stale batch must not erase replacement channel calls");
+    assert!(results2.deleted_pptp_control_channels.is_empty());
+    // Positive: matching id applies and purges.
+    let (applied3, _) = run_batch(&mut owner, live_id);
+    assert!(applied3);
+    assert!(owner.pptp().resolve(pac, 0xAAAA).is_none());
+}
+
+#[test]
+fn prewarm_sharedpromote_nat_reservation_survives_15966r() {
+    // Real pool reservation: WorkerLocalImport holds port, SharedPromote
+    // prewarm apply must keep it occupied (reserving_origin accounting).
+    let mut forwarding = ForwardingState::default();
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+        name: "pool-snat".to_string(), from_zone: "lan".to_string(), to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()], pool_name: "p".to_string(),
+        pool_addresses: vec!["203.0.113.1/32".to_string()], port_low: 1024, port_high: 65535,
+        ..crate::SourceNATRuleSnapshot::default()
+    }]);
+    let orig_key = test_key();
+    let nat = NatDecision { rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))), rewrite_src_port: Some(40000), ..NatDecision::default() };
+    let wire_key = forward_wire_key(&orig_key, nat);
+    let decision = SessionDecision { resolution: test_local_delivery_decision().resolution, nat, install_table_domain: 0, install_table_check: 0 };
+    let metadata = test_metadata();
+    let mk = |origin: SessionOrigin| SyncedSessionEntry { key: wire_key.clone(), decision, metadata: metadata.clone(), leak_incarnation: 0, origin, protocol: PROTO_TCP, tcp_flags: 0x10, generation: 0, session_id: 4242, tcp_close_class: 0, tcp_handshake_state: 0, pptp_call_ids: 0, source_nat_static: None };
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    crate::afxdp::session_glue::commands::handle_upsert_synced(&mut sessions, SteeringMap::unshared_for_test(-1), &forwarding, &ha_state, &dynamic_neighbors, mk(SessionOrigin::WorkerLocalImport), 1_000_000, 1, 7);
+    assert_eq!(crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports, 1, "WorkerLocalImport must reserve");
+    crate::afxdp::session_glue::commands::handle_upsert_synced(&mut sessions, SteeringMap::unshared_for_test(-1), &forwarding, &ha_state, &dynamic_neighbors, mk(SessionOrigin::SharedPromote), 2_000_000, 2, 7);
+    assert_eq!(crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports, 1, "SharedPromote prewarm must not free the live reservation");
+    let (_, origin) = sessions.probe_with_origin(&wire_key).expect("session survives");
+    assert_eq!(origin, SessionOrigin::SharedPromote);
+}
+
+#[test]
+fn install_pptp_call_blocked_when_disabled_15966r() {
+    use crate::session::pptp::PptpCall;
+    let (a, b): (std::net::IpAddr, std::net::IpAddr) = ("198.51.100.7".parse().unwrap(), "203.0.113.9".parse().unwrap());
+    let call = PptpCall::new(a, 0x1111, b, 0x2222);
+    let mut forwarding = test_forwarding_state();
+    forwarding.alg_disable_flags = 0x10;
+    assert!(!forwarding.pptp_enabled());
+    let mut sessions = SessionTable::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    commands.lock().unwrap().push_back(WorkerCommand::InstallPptpCall { call, control: crate::session::pptp::ControlChannelId::new(a, 49152, b, 1723), learned_ns: 0 });
+    apply_worker_commands(&commands, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &BTreeMap::new(), &Arc::new(ShardedNeighborMap::new()), 0, &mut VecDeque::new());
+    assert_eq!(sessions.pptp().resolve(b, 0x2222), None, "queued InstallPptpCall must not install while disabled");
+    // control: enabled installs
+    forwarding.alg_disable_flags = 0;
+    let commands2 = Arc::new(Mutex::new(VecDeque::new()));
+    commands2.lock().unwrap().push_back(WorkerCommand::InstallPptpCall { call, control: crate::session::pptp::ControlChannelId::new(a, 49152, b, 1723), learned_ns: 0 });
+    apply_worker_commands(&commands2, &mut sessions, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &BTreeMap::new(), &Arc::new(ShardedNeighborMap::new()), 0, &mut VecDeque::new());
+    assert!(sessions.pptp().resolve(b, 0x2222).is_some());
+}
+
+#[test]
+fn stop_control_refusal_recorded_and_retried_15966r() {
+    use crate::session::pptp::{ControlChannelId, PptpCall};
+    use crate::session::pptp_control::{PendingControlSegment, PptpControlInbox, fixtures_7699::outgoing_call_reply};
+    let (pac, pns): (IpAddr, IpAddr) = ("198.51.100.7".parse().unwrap(), "203.0.113.9".parse().unwrap());
+    let control = ControlChannelId::new(pac, 1723, pns, 49152);
+    let queues: Vec<_> = (0..1).map(|_| Arc::new(Mutex::new(VecDeque::new()))).collect();
+    let inbox = PptpControlInbox::default();
+    let mut local = SessionTable::new();
+    let mut remote = SessionTable::new();
+    let call = PptpCall::new(pac, 0xAAAA, pns, 0xBBBB);
+    local.pptp_mut().install(call, control, 10).unwrap();
+    remote.pptp_mut().install(call, control, 10).unwrap();
+    // Fill peer queue so Stop-Control forget is refused and must be recorded.
+    {
+        let mut q = queues[0].lock().unwrap();
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS { assert!(crate::afxdp::worker_queue::push_bounded(&mut q, WorkerCommand::ForgetPptpCall(0xDEAD))); }
+    }
+    // Stop-Control Request (type 3, len 16)
+    let mut stop = Vec::new(); stop.extend_from_slice(&16u16.to_be_bytes()); stop.extend_from_slice(&1u16.to_be_bytes()); stop.extend_from_slice(&0x1A2B3C4Du32.to_be_bytes()); stop.extend_from_slice(&3u16.to_be_bytes()); stop.extend_from_slice(&0u16.to_be_bytes()); stop.extend_from_slice(&[0,0,0,0]);
+    assert!(inbox.push(PendingControlSegment { src: pac, dst: pns, src_port: 1723, dst_port: 49152, captured_ns: 20, payload: stop }));
+    crate::afxdp::worker_queue::drain_pptp_control_inbox(&inbox, &mut local, &queues, 1_000_000_000);
+    assert_eq!(local.pptp().resolve(pac, 0xAAAA), None, "local must forget on Stop");
+    assert!(remote.pptp().resolve(pac, 0xAAAA).is_some(), "refused remote still holds before retry");
+    // Drain queue, retry via next drain (empty pending, retry head runs)
+    queues[0].lock().unwrap().clear();
+    assert!(inbox.push(PendingControlSegment { src: pac, dst: pns, src_port: 1723, dst_port: 49152, captured_ns: 30, payload: outgoing_call_reply(0xEEEE, 0xFFFF, 1) }));
+    crate::afxdp::worker_queue::drain_pptp_control_inbox(&inbox, &mut local, &queues, 2_000_000_000);
+    // Apply queued forget to remote
+    let forwarding = test_forwarding_state();
+    apply_worker_commands(&queues[0], &mut remote, SteeringMap::unshared_for_test(-1), -1, -1, &forwarding, &BTreeMap::new(), &Arc::new(ShardedNeighborMap::new()), 0, &mut VecDeque::new());
+    assert_eq!(remote.pptp().resolve(pac, 0xAAAA), None, "recorded refusal must be retried and land");
+    let _ = control;
+}

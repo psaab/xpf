@@ -621,6 +621,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                             // companion refusal) returns false and must leave
                             // a replacement channel's calls and buffered
                             // segments untouched.
+                            let local_id_before = sessions.session_id_for(&item.key);
                             let applied = commands::handle_remove_policy_item(
                                 sessions,
                                 session_map,
@@ -635,8 +636,16 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                                 worker_id,
                                 &mut deferred,
                             );
+                            // Genuine delete = applied here, or this worker
+                            // never held the incarnation (absent): broadcast
+                            // associations must still be purged. A present
+                            // session with a different id is a replacement
+                            // incarnation and is protected.
+                            let genuine = applied || local_id_before == 0;
                             if applied {
                                 applied_slot[index] = true;
+                            }
+                            if genuine {
                                 if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(&item.key) {
                                     sessions.pptp_mut().forget_control_channel(ch);
                                     if !deleted_pptp_control_channels.contains(&ch) {
