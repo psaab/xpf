@@ -95,24 +95,25 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
             // #15958b (fold): same shared zone-egress rule as refresh.
             let resolution = if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
                 let dest_rg = super::super::connected_owner_rg_for_target(forwarding, resolution_target);
-                let destination_owner_active = dest_rg > 0
+                // Unknown owner (dest_rg==0) is NOT peer-ownership: keep the candidate (no redirect).
+            let destination_owner_active = dest_rg == 0 || (dest_rg > 0
                     && ha_state
                         .get(&dest_rg)
-                        .is_some_and(|group| group.is_forwarding_active(now_secs));
+                        .is_some_and(|group| group.is_forwarding_active(now_secs)));
                 let enforced_resolution = redirect_session_via_fabric_if_needed(
                     forwarding,
                     enforced_resolution,
                     metadata.fabric_ingress,
                     metadata.ingress_zone,
                 );
-                let redirected = super::super::fabric_redirect_for_zone_egress_15958b(
-                    forwarding,
-                    enforced_resolution,
-                    metadata.egress_zone,
-                    false,
-                    destination_owner_active,
-                );
-                super::super::retain_stored_fabric_redirect_15958b(decision.resolution, redirected)
+                let resolution2 = super::super::rehome_or_retain_fabric_redirect_15958b(
+                forwarding,
+                decision.resolution,
+                enforced_resolution,
+                metadata.egress_zone,
+                destination_owner_active,
+            );
+            resolution2
             } else {
                 redirect_session_via_fabric_if_needed(
                     forwarding,
