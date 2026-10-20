@@ -52,6 +52,18 @@ func (d *Daemon) applyConfig(cfg *config.Config) {
 		return
 	}
 	defer d.applySem.Release(1)
+	// #15962 B1: an explicit-config apply that races an owed DNS refresh
+	// for the same generation must not block behind the tick's resolver
+	// while holding applySem — defer like the other background appliers.
+	// (Commit/sync paths call applyConfigLocked directly and are exempt:
+	// they must apply the config they were handed.)
+	for d.dnsRefreshOwedFor(cfg) {
+		d.applySem.Release(1)
+		d.dnsWaitForRefresh(cfg)
+		if !d.beginBackgroundApply(context.Background(), "applyConfig") {
+			return
+		}
+	}
 	d.applyConfigUnderSem(cfg)
 }
 
@@ -184,6 +196,12 @@ func (d *Daemon) applyActiveConfig() {
 	if cfg == nil {
 		return
 	}
+	if d.dnsRefreshOwedFor(cfg) {
+		// #15962 B1: the periodic tick owns DNS publication for this
+		// generation right now; the tick's apply re-checks generation
+		// identity, so deferring loses nothing.
+		return
+	}
 	d.applyConfigUnderSem(cfg)
 }
 
@@ -218,6 +236,13 @@ func (d *Daemon) applyActiveConfigResult() error {
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
+		return nil
+	}
+	if d.dnsRefreshOwedFor(cfg) {
+		// #15962 B1: the periodic tick owns DNS publication for this
+		// generation right now; return vacuous success (as the fenced
+		// path does) so feed publication does not record false debt —
+		// the tick's own apply lands the same generation.
 		return nil
 	}
 	err := d.applyConfigLocked(context.Background(), cfg)
@@ -334,6 +359,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// abort, the factory-reset refusal, the test seam — is covered without anyone
 	// having to remember. A per-caller clear would be four sites today and a fifth
 	// silently missing tomorrow.
+	defer func() { d.recordAppliedDNSBaseline(cfg, retErr) }()
 	defer func() {
 		if retErr != nil {
 			if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg &&
