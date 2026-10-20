@@ -1,5 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fix split-RG punt-origin fabric return: on the WAN owner (fw0) the
+    HA-suppressed connected LAN prefix makes the FIB answer the LAN
+    return target with the WAN gateway default route, so the reverse
+    companion was stored and re-resolved as a WAN ForwardCandidate
+    instead of a FabricRedirect to the LAN owner (fw1) and the reply
+    transmitted on the WAN egress. Reverse synthesis and the session
+    hit re-resolve now retain/resolve the fabric redirect when the
+    candidate egresses outside the return's destination zone
+    (#15958, #15742).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Fix split-RG fabric return blackhole: a companion-less fabric/
     synced reverse row was revoked as StaleSourceNat on its first
     fabric-arriving packet because reverse synthesis and HA sync carry
