@@ -101,6 +101,9 @@ func (t *ConfigTree) FormatPathInheritanceForNode(path []string, nodeID int) (st
 	}
 	var b strings.Builder
 	for _, n := range matches {
+		if n.Annotation != "" {
+			fmt.Fprintf(&b, "/* %s */\n", n.Annotation)
+		}
 		if n.IsLeaf {
 			fmt.Fprintf(&b, "%s%s;\n", inactivePrefix(n), n.QuotedKeyPath())
 		} else {
@@ -217,6 +220,9 @@ func (t *ConfigTree) FormatPath(path []string) string {
 	}
 	var b strings.Builder
 	for _, n := range matches {
+		if n.Annotation != "" {
+			fmt.Fprintf(&b, "/* %s */\n", n.Annotation)
+		}
 		if n.IsLeaf {
 			fmt.Fprintf(&b, "%s%s;\n", inactivePrefix(n), n.QuotedKeyPath())
 		} else {
@@ -303,7 +309,13 @@ func (t *ConfigTree) FormatPathSet(path []string) string {
 		if n.IsLeaf {
 			fmt.Fprintf(&b, "set %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup))
 		} else {
+			if len(n.Children) == 0 {
+				fmt.Fprintf(&b, "set %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup))
+			}
 			formatSetNodes(&b, n.Children, prefix, prefixQuote, prefixGroup)
+		}
+		if n.Annotation != "" {
+			fmt.Fprintf(&b, "annotate %s %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup), EscapedAnnotation(n.Annotation))
 		}
 		if n.Inactive {
 			fmt.Fprintf(&b, "deactivate %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup))
@@ -363,6 +375,9 @@ func formatSetNodesMode(b *strings.Builder, nodes []*Node, prefix []string, pref
 			fmt.Fprintf(b, "set %s\n", pathText)
 		default:
 			formatSetNodesMode(b, n.Children, path, pathQuote, pathGroup, preserveLeafBrackets)
+		}
+		if n.Annotation != "" {
+			fmt.Fprintf(b, "annotate %s %s\n", pathText, EscapedAnnotation(n.Annotation))
 		}
 		if n.Inactive {
 			// A one-key routing-policy term has no authored name. Flattening
@@ -809,6 +824,10 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 				allRecursable = false
 				break
 			}
+			if e.oldNode.Annotation != e.newNode.Annotation {
+				allRecursable = false
+				break
+			}
 		}
 		if allRecursable {
 			for _, e := range entries {
@@ -875,15 +894,20 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 			switch {
 			case nodesEqual(o, n):
 				addOwn(func(sb *strings.Builder) {
+					if o.Annotation != "" {
+						fmt.Fprintf(sb, " %s/* %s */\n", indent, o.Annotation)
+					}
 					if o.IsLeaf {
 						fmt.Fprintf(sb, " %s%s%s;\n", indent, inactivePrefix(o), o.QuotedKeyPath())
 					} else {
 						fmt.Fprintf(sb, " %s%s%s { ... }\n", indent, inactivePrefix(o), o.QuotedKeyPath())
 					}
 				})
-			case !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
+			case o.Annotation != n.Annotation && !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
+				addOwn(func(sb *strings.Builder) { formatAnnotationChange(sb, indent, o, n) })
 				childPath := append(append([]string{}, editPath...), strings.Fields(o.KeyPath())...)
 				sections = append(sections, section{oldNode: o, newNode: n, childPath: childPath})
+			case !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
 			default:
 				addOwn(func(sb *strings.Builder) {
 					formatPrefixed(sb, "-", indent, o)
@@ -937,6 +961,9 @@ func nodesEqual(a, b *Node) bool {
 	if a.Inactive != b.Inactive {
 		return false
 	}
+	if a.Annotation != b.Annotation {
+		return false
+	}
 	if a.IsLeaf {
 		return true
 	}
@@ -955,6 +982,9 @@ func nodesEqual(a, b *Node) bool {
 
 // formatPrefixed writes a node with +/- prefix at the given indent.
 func formatPrefixed(b *strings.Builder, prefix, indent string, n *Node) {
+	if n.Annotation != "" {
+		fmt.Fprintf(b, "%s%s/* %s */\n", prefix, indent, n.Annotation)
+	}
 	if n.IsLeaf {
 		fmt.Fprintf(b, "%s%s%s%s;\n", prefix, indent, inactivePrefix(n), n.QuotedKeyPath())
 	} else {
@@ -962,6 +992,21 @@ func formatPrefixed(b *strings.Builder, prefix, indent string, n *Node) {
 		formatPrefixedChildren(b, prefix, indent+"    ", n.Children)
 		fmt.Fprintf(b, "%s%s}\n", prefix, indent)
 	}
+}
+
+// formatAnnotationChange renders an annotation-only delta (#15718).
+func formatAnnotationChange(b *strings.Builder, indent string, o, n *Node) {
+	if o.Annotation != "" {
+		fmt.Fprintf(b, "-%s/* %s */\n", indent, o.Annotation)
+	}
+	if n.Annotation != "" {
+		fmt.Fprintf(b, "+%s/* %s */\n", indent, n.Annotation)
+	}
+}
+
+// EscapedAnnotation renders annotation text as a quoted flat-load token (#15718).
+func EscapedAnnotation(s string) string {
+	return `"` + keyEscaper.Replace(s) + `"`
 }
 
 // formatPrefixedChildren writes all children with the same +/- prefix.

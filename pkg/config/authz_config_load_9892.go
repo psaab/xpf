@@ -56,6 +56,16 @@ func IsFlatLoadLine(line string) bool {
 	switch fields[0] {
 	case "set", "delete", "deactivate", "activate":
 		return true
+	case "annotate":
+		// #15718: annotate is replayable via ParseAnnotateCommand, but a
+		// line terminated by ';' is the hierarchical transcript spelling
+		// (the #10305 trigger) and must NOT flip a hierarchical body to
+		// flat — the store's hierarchical branch handles it there.
+		if strings.HasSuffix(strings.TrimSpace(line), ";") {
+			return false
+		}
+		_, _, ok := ParseAnnotateCommand(line)
+		return ok
 	default:
 		return false
 	}
@@ -249,7 +259,7 @@ func LoadMutationLines(content string) ([]string, error) {
 		}
 		return lines, nil
 	}
-	tree, _ := NewParser(uncommented).Parse()
+	tree, _ := NewParser(content).Parse()
 	if tree == nil {
 		return nil, nil
 	}

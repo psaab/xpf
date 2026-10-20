@@ -1073,9 +1073,9 @@ func TestLoadFlatVerbGate(t *testing.T) {
 	}
 
 	// Interactive-only structural-edit verbs and free-text garbage are NOT
-	// replayable on the flat path and must be rejected.
+	// replayable on the flat path and must be rejected. (annotate IS
+	// replayable since #15718, so it left this list.)
 	for _, bad := range []string{
-		"annotate system \"a comment\"",
 		"copy system to other",
 		"insert system before other",
 		"rename system to other",

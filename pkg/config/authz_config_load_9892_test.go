@@ -224,6 +224,8 @@ func TestStoreFlatLoadVerbsAreTakenVerbatim9892(t *testing.T) {
 	// These are interactive structural-edit verbs, not commands accepted by
 	// the store's flat replay branch. Their presence must NOT classify a body
 	// as flat; this is the exact half of #10305 that previously diverged.
+	// annotate without a trailing quoted comment stays in this class
+	// (#15718 requires the quoted comment to classify as flat).
 	for _, verb := range []string{"copy", "rename", "insert", "annotate"} {
 		line := verb + " system root-authentication"
 		if IsFlatLoadLine(line) {

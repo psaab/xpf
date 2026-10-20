@@ -597,14 +597,12 @@ func parseOverrideContent(content string) (*config.ConfigTree, error) {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
 	if !isSetFormat {
-		// #14572: parse the classifier's uncommented text — the exact
-		// representation the authorization gate adjudicated (flatContent
-		// is LoadMerge's name for the same value) — not the raw body.
-		// The real lexer reaches the same statements either way only if
-		// the classifier's comment model mirrors it; parsing the shared
-		// text makes gate⊆store hold by construction even where the
-		// two models might disagree.
-		tree, errs := config.NewParser(flatContent).Parse()
+		// #15718: parse the RAW body so /* ... */ comments attach as
+		// Node.Annotation; the classifier's uncommented text would erase
+		// them. Gate⊆store still holds: LoadMutationLines now renders
+		// annotate lines for annotated leaves, and comments cannot hide
+		// tokens from the real lexer either.
+		tree, errs := config.NewParser(content).Parse()
 		if len(errs) > 0 {
 			return nil, fmt.Errorf("parse error: %v", errs[0])
 		}
@@ -625,7 +623,7 @@ func parseOverrideContent(content string) (*config.ConfigTree, error) {
 		// Otherwise ParseSetVerb treats free text as a bare `set` path and
 		// materializes a junk node — which is the #7527 defect one layer down.
 		if !hasFlatVerb(trimmed) {
-			return nil, fmt.Errorf("line %d: is not a set/delete/deactivate/activate command", i+1)
+			return nil, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
 		if err := applyEditLine(tree, trimmed); err != nil {
 			return nil, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
@@ -696,19 +694,16 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 				continue
 			}
 			if !hasFlatVerb(trimmed) {
-				return fmt.Errorf("line %d: is not a set/delete/deactivate/activate command", i+1)
+				return fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 			}
 			if err := applyEditLine(working, trimmed); err != nil {
 				return fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
 			}
 		}
 	} else {
-		// Parse the classifier's uncommented text, the exact
-		// representation the authorization gate adjudicated (#14572),
-		// not the raw body. `lines` already holds that text (computed
-		// above for line splitting); rejoining preserves the original
-		// newline positions for parse diagnostics.
-		tree, errs := config.NewParser(strings.Join(lines, "\n")).Parse()
+		// #15718: parse the RAW body so /* ... */ comments attach as
+		// Node.Annotation (see parseOverrideContent).
+		tree, errs := config.NewParser(content).Parse()
 		if len(errs) > 0 {
 			return fmt.Errorf("parse error: %v", errs[0])
 		}
@@ -770,6 +765,27 @@ func hasFlatVerb(line string) bool {
 }
 
 func applyEditLine(tree *config.ConfigTree, line string) error {
+	// #15718: annotate lines carry a quoted comment ParseSetVerb would
+	// fold into the path; split them with the canonical annotate parser.
+	// A single trailing ';' (the hierarchical transcript spelling) is
+	// stripped first. A ';' anywhere else makes the line malformed here:
+	// the lenient annotate lexer would silently drop the tail, applying
+	// only the gated prefix (#15167 class).
+	annLine := strings.TrimSpace(line)
+	annTrim := strings.TrimSuffix(annLine, ";")
+	if strings.HasPrefix(annLine, "annotate ") || annLine == "annotate" {
+		if strings.Contains(annTrim, ";") {
+			return fmt.Errorf("invalid annotate command")
+		}
+		path, comment, ok := config.ParseAnnotateCommand(annTrim)
+		if !ok {
+			return fmt.Errorf("invalid annotate command")
+		}
+		if err := config.ValidateAnnotationText(comment); err != nil {
+			return err
+		}
+		return tree.AnnotatePath(path, comment)
+	}
 	verb, path, quoted, grouped, closed, err := config.ParseSetVerbGroupedClosed(line)
 	if err != nil {
 		return err
@@ -782,8 +798,6 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 	case "activate":
 		return tree.ActivatePathGrouped(path, grouped)
 	default: // "set" (or a bare, unprefixed path)
-		// Quote and bracket-close provenance preserve routing-policy semantics
-		// across the FormatSet replay performed for hierarchical load merges.
 		return tree.SetPathQuotedGrouped(path, quoted, grouped, closed)
 	}
 }
@@ -806,7 +820,7 @@ func scrubLoadLineError(err error) error {
 	if errors.Is(err, config.ErrPathNotFound) {
 		return loadLineError{cause: "path not found"}
 	}
-	return loadLineError{cause: "invalid set/delete/deactivate/activate command"}
+	return loadLineError{cause: "invalid set/delete/deactivate/activate/annotate command"}
 }
 
 // LoadSet applies multiple flat command lines to the candidate config.
@@ -873,7 +887,7 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 		// dropping the intended command — the operator could commit a config
 		// missing it. Fail with a line-numbered error instead.
 		if !hasFlatVerb(line) {
-			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate command", i+1)
+			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
 		if err := applyEditLine(working, line); err != nil {
 			return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
