@@ -937,25 +937,40 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                     {
                         return None;
                     }
-                    // #15958 fold: a companion-less fabric/synced reverse
-                    // row carries no forward VLAN provenance by construction:
-                    // reverse synthesis zeroes the companion ingress identity,
-                    // and HA sync never carries `forward_ingress_vlan_id`.
-                    // That absence is structural, not staleness evidence.
-                    // Decline this provenance-only revocation for a plain
-                    // dynamic source-NAT row in exactly that shape (fabric
-                    // row, zeroed ingress identity, no forward VLAN), for
-                    // both the scope-less companion and the scoped V2
-                    // companion. Rows with an observed identity or recorded
-                    // forward VLAN keep the fail-close below; static rows
-                    // keep their own validity arm. NAT64/NPTv6 are excluded:
-                    // their #13910 missing-provenance fail-close is their
-                    // only stale-translation guard and must not be bypassed.
+                    // #15958 fold round 2: a companion-less fabric/synced
+                    // reverse row carries no forward VLAN provenance by
+                    // construction: reverse synthesis zeroes the companion
+                    // ingress identity, and HA sync never carries
+                    // `forward_ingress_vlan_id`. That absence is structural,
+                    // not staleness evidence — but ONLY for a row positively
+                    // proven to be plain dynamic source NAT. Positive proof
+                    // is the dynamic provenance marker (`Some(false)`): it
+                    // is minted solely by the pool/interface SNAT branch
+                    // (`nat_exception.rs`), rides the HA wire
+                    // (`source_nat_provenance`), and is stamped at import.
+                    // Every other translation class presents differently:
+                    // static SNAT is `Some(true)`; NAT64 and NPTv6 mint NO
+                    // provenance (`None`) at admission, and NPTv6's type
+                    // bit additionally does not survive the HA wire at all
+                    // (no BPF flag is stamped for it, the Go V6 sync
+                    // request has no field for it, and the import rebuild
+                    // leaves `nptv6: false`), so an HA-imported NPTv6 row
+                    // is indistinguishable from plain SNAT by its type bit
+                    // alone. Unknown/legacy provenance (`None`) therefore
+                    // keeps the #13910/#13771 fail-close below, as do rows
+                    // carrying a destination rewrite (composed DNAT+SNAT:
+                    // destination validity is judged only inside
+                    // `source_nat_translation_still_valid`, which an early
+                    // decline would skip), rows with an observed identity
+                    // or recorded forward VLAN, and — defense in depth for
+                    // in-process rows that do carry them — rows with the
+                    // NAT64/NPTv6 bits set.
                     if metadata.fabric_ingress
                         && metadata.ingress_ifindex == 0
                         && metadata.forward_ingress_vlan_id.is_none()
                         && forward_decision.nat.rewrite_src.is_some()
-                        && source_nat_static != Some(true)
+                        && forward_decision.nat.rewrite_dst.is_none()
+                        && source_nat_static == Some(false)
                         && !(forward_decision.nat.nat64 || forward_decision.nat.nptv6)
                     {
                         return None;

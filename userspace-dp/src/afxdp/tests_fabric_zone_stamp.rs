@@ -5192,7 +5192,13 @@ fn split_fw1_forwarding_15958() -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
+fn ha_synced_reverse_sessions_scoped_15958(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+    ha_synced_reverse_sessions_impl_15958(forwarding, now_ns, Some(11))
+}
 fn ha_synced_reverse_sessions_15958(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+    ha_synced_reverse_sessions_impl_15958(forwarding, now_ns, None)
+}
+fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u64, nat_scope_ifindex: Option<i32>) -> SessionTable {
     let lan_host = Ipv4Addr::new(10, 0, 61, 102);
     let wan_host = Ipv4Addr::new(172, 16, 80, 200);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
@@ -5203,10 +5209,12 @@ fn ha_synced_reverse_sessions_15958(forwarding: &ForwardingState, now_ns: u64) -
     // build the fw0-admitted FORWARD entry, synthesize its reverse, and
     // install only the reverse rows (fw1 holds no forward half).
     //
-    // Interface SNAT is process-local allocator state, not a stable
-    // translation, so a synced row carries `source_nat_static = None`
-    // (#13771). The reverse hit therefore takes the companion-less
-    // sessionless revalidation arm — the #15958 sink before the fix.
+    // The fw0 forward was admitted by the interface-SNAT branch, which
+    // mints dynamic provenance (`Some(false)`) at install; that marker
+    // rides the HA wire (`source_nat_provenance`) and is stamped at
+    // import, so the locally installed reverse companion carries it
+    // into the companion-less sessionless revalidation arm — the
+    // #15958 sink before the fix.
     let forward_resolution = ForwardingResolution {
         disposition: ForwardingDisposition::ForwardCandidate,
         local_ifindex: 0,
@@ -5271,9 +5279,9 @@ fn ha_synced_reverse_sessions_15958(forwarding: &ForwardingState, now_ns: u64) -
                 inactivity_timeout_ns: None,
                 policy_counter_idx: 0,
                 policy_counter: None,
-                nat_scope_ifindex: None,
+                nat_scope_ifindex,
             },
-            source_nat_static: None,
+            source_nat_static: Some(false),
             leak_incarnation: 0,
             origin: SessionOrigin::ForwardFlow,
             protocol,
@@ -5431,5 +5439,57 @@ fn split_rg_fabric_return_tcp_ack_egresses_lan_15958() {
         &egress[30..34],
         &[10, 0, 61, 102],
         "LAN egress dst IP must be the LAN host"
+    );
+}
+
+/// #15958 round 2 (V2 packet egress): the scoped synced companion —
+/// `nat_scope_ifindex: Some`, `forward_ingress_vlan_id: None` by
+/// construction — must egress the LAN binding at packet level, not only
+/// decline at the validator. Same live snapshot, same multi-binding
+/// poll -> enqueue -> drain driver as the scope-`None` cells.
+#[test]
+fn split_rg_fabric_return_scoped_tcp_egresses_lan_15958() {
+    let forwarding = split_fw1_forwarding_15958();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, inactive_rg(now_secs)), (2, active_rg(now_secs))]);
+    let mut sessions = ha_synced_reverse_sessions_scoped_15958(&forwarding, now_ns);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443,
+        12345,
+        TCP_FLAG_ACK,
+        [0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60],
+    );
+    stamped_wan_frame_15958(&mut frame);
+    let mut meta = txn_meta_v4(4, TCP_FLAG_ACK, frame.len() as u16);
+    meta.protocol = PROTO_TCP;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let mut bindings = fabric_lan_bindings_15958();
+    let (batch, dbg, egress) = txn_run_multi_binding_15958(
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(dbg.policy_deny, 0, "scoped TCP return must not be policy-denied");
+    let _ = &batch;
+    let egress = egress.expect("scoped V2 TCP ACK must be emitted on the LAN binding");
+    assert_eq!(
+        &egress[0..6],
+        &LAN_HOST_MAC_15958,
+        "scoped LAN egress dst MAC must be the LAN host"
+    );
+    assert_eq!(
+        &egress[30..34],
+        &[10, 0, 61, 102],
+        "scoped LAN egress dst IP must be the LAN host"
     );
 }

@@ -3379,7 +3379,6 @@ fn reverse_without_companion_nptv6_rederived_14315() {
 /// with NO source rewrite and no NAT64/NPTv6 translation is deliberately
 /// permitted through to the ordinary policy gate despite missing forward
 /// VLAN provenance.
-#[test]
 /// #15958 fold (1): the fabric decline must NOT bypass the #13910
 /// missing-provenance fail-close for NAT64/NPTv6 rows. Same shape as
 /// `reverse_without_companion_nat64_nptv6_missing_provenance_fails_closed_13910`
@@ -3400,6 +3399,11 @@ fn fabric_nat64_nptv6_missing_provenance_still_fails_closed_15958() {
         case.5.forward_ingress_vlan_id = None;
         case.5.fabric_ingress = true;
         case.5.nat_scope_ifindex = None;
+        // Round 2: NAT64/NPTv6 mint no dynamic provenance at admission
+        // (`source_nat_static` stays `None`), so the production row
+        // presents unknown provenance — that, not the type bit alone,
+        // must already keep it out of the decline.
+        case.7 = None;
         assert!(
             case.5.forward_ingress_vlan_id.is_none() && case.5.fabric_ingress,
             "{shape}: fixture must be fabric with missing VLAN provenance"
@@ -3452,6 +3456,167 @@ fn fabric_scoped_synced_companion_without_vlan_provenance_survives_15958() {
         reverse_snat_hit_fabric_15958(&forwarding, &mut sessions, &case).is_none(),
         "fabric scoped synced companion without VLAN provenance must survive (#15958 V2)"
     );
+}
+
+/// #15958 round 2 (Codex wire loss): a REAL HA-imported NPTv6 reverse row
+/// does NOT carry the `nptv6` bit — admission mints no provenance for
+/// NPTv6 (`source_nat_static` stays `None`), no BPF flag is stamped for
+/// the bit, the Go V6 sync request has no field for it, and the Rust
+/// import rebuild hardcodes `nptv6: false` (session_sync.rs:438-441).
+/// This cell drives that exact production import path: a
+/// `SessionSyncRequest` whose JSON has NO nptv6 datum (there is none to
+/// send) → `build_synced_session_entry` → production reverse synthesis →
+/// the revocation gate. The imported row must present
+/// `nptv6 == false` + unknown provenance, and must still fail closed:
+/// only the positive dynamic-provenance requirement keeps it out of the
+/// decline. (Reverting the decline to `!= Some(true)` reds this cell.)
+#[test]
+fn ha_imported_nptv6_wire_shape_still_fails_closed_15958() {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let mut req = imported_snat_request(0, true);
+    // The V6 HA wire shape: an NPTv6 translation's addresses ride the
+    // generic nat fields; there is no type bit anywhere on the request.
+    req.addr_family = libc::AF_INET6 as u8;
+    req.src_ip = "2001:db8::1".to_string();
+    req.dst_ip = "2001:db8:1::1".to_string();
+    req.nat_src_ip = "2001:db8:2::1".to_string();
+    req.nat_src_port = 45000;
+    let synced = crate::server::helpers::build_synced_session_entry(&req, &zones, 0)
+        .expect("HA-imported NPTv6-shaped session must import");
+    assert!(
+        !synced.decision.nat.nptv6 && !synced.decision.nat.nat64,
+        "import rebuild must leave both type bits false (the wire loss): {:?}",
+        synced.decision.nat
+    );
+    assert_eq!(
+        synced.source_nat_static, None,
+        "wire provenance 0 must import as unknown, not dynamic"
+    );
+    assert!(
+        synced.metadata.fabric_ingress && synced.metadata.forward_ingress_vlan_id.is_none(),
+        "imported row must be the fabric provenance-less shape: {:?}",
+        synced.metadata
+    );
+    // Production reverse synthesis, exactly as HA prewarm does.
+    let ha_state = BTreeMap::new();
+    let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+        &imported_snat_forwarding(false),
+        &ha_state,
+        &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
+        &synced,
+        0,
+    )
+    .expect("synced forward must synthesize a reverse companion");
+    assert!(
+        !reverse.decision.nat.nptv6 && reverse.source_nat_static.is_none(),
+        "synthesized companion must keep the wire-lost shape: nat={:?} provenance={:?}",
+        reverse.decision.nat,
+        reverse.source_nat_static
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse.key.clone(),
+        reverse.decision,
+        reverse.metadata.clone(),
+        reverse.origin,
+        1_000_000,
+        reverse.key.protocol,
+        0x10,
+    ));
+    sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
+    let flow = SessionFlow {
+        src_ip: reverse.key.src_ip,
+        dst_ip: reverse.key.dst_ip,
+        forward_key: reverse.key.clone(),
+    };
+    let revocation = source_nat_revocation_on_session_hit_with_ingress(
+        &imported_snat_forwarding(false),
+        &mut sessions,
+        &reverse.key,
+        &reverse.metadata.clone_without_policy_counter(),
+        4,
+        0,
+        reverse.decision,
+        &flow,
+        reverse.origin,
+        reverse.source_nat_static,
+        None,
+        1_000_000_000,
+        None,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "HA-imported NPTv6 (type bit lost on the wire, provenance unknown) \
+             must still fail closed, not decline as plain dynamic SNAT"
+        )
+    });
+    assert!(revocation.canonical_key.is_none());
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// #15958 round 2 (Codex composed SNAT+DNAT): a companion-less fabric
+/// row whose reconstructed forward decision carries BOTH rewrites must
+/// NOT decline on source grounds alone — destination validity is judged
+/// only inside `source_nat_translation_still_valid`, so declining here
+/// would keep a withdrawn DNAT alive. The row must reach that validator
+/// (here: no DNAT rule configured, so it revokes).
+#[test]
+fn fabric_composed_snat_dnat_without_vlan_provenance_fails_closed_15958() {
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut case = reverse_snat_case_from_production_13771(&forwarding);
+    case.5.forward_ingress_vlan_id = None;
+    case.5.fabric_ingress = true;
+    case.5.nat_scope_ifindex = None;
+    case.7 = Some(false);
+    // Composed forward: dynamic SNAT source + DNAT destination. The
+    // reverse row carries the mirrored pair (its `rewrite_src` is the
+    // DNAT half, its `rewrite_dst` the SNAT half the production
+    // synthesis already stamped); reconstruction restores both.
+    case.4.nat.rewrite_src = Some("10.0.0.10".parse().expect("DNAT destination"));
+    case.4.nat.rewrite_src_port = Some(8443);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    let revocation = reverse_snat_hit_fabric_15958(&forwarding, &mut sessions, &case)
+        .unwrap_or_else(|| {
+            panic!(
+                "composed DNAT+SNAT fabric row without VLAN provenance must not \
+                 decline before destination validation"
+            )
+        });
+    assert!(revocation.canonical_key.is_none());
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// #15958 round 2 (Codex unknown provenance): a fabric row with a
+/// `rewrite_src` but UNKNOWN (`None`) provenance — the legacy/static
+/// shape — must keep the fail-close. Only positive dynamic provenance
+/// (`Some(false)`) may decline.
+#[test]
+fn fabric_unknown_provenance_without_vlan_fails_closed_15958() {
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut case = reverse_snat_case_from_production_13771(&forwarding);
+    case.5.forward_ingress_vlan_id = None;
+    case.5.fabric_ingress = true;
+    case.5.nat_scope_ifindex = None;
+    case.7 = None;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    let revocation = reverse_snat_hit_fabric_15958(&forwarding, &mut sessions, &case)
+        .unwrap_or_else(|| {
+            panic!("unknown-provenance fabric row must fail closed, not decline")
+        });
+    assert!(revocation.canonical_key.is_none());
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
 }
 
 #[test]
