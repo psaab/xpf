@@ -527,7 +527,8 @@ fn deferred_neighbor_replay_emits_ptb_for_1500_df_on_1400_egress_11410() {
 
 #[test]
 fn deferred_neighbor_output_discard_preempts_ptb_11410() {
-    let (bindings, reasons, _no_egress, _build_fail) = flush_oversized_pending_tcp(Some("discard"), true);
+    let (bindings, reasons, _no_egress, _build_fail) =
+        flush_oversized_pending_tcp(Some("discard"), true);
     assert!(
         bindings[0].tx_pipeline.pending_tx_local.is_empty(),
         "an output-filter discard must not be answered with a PTB"
@@ -558,9 +559,14 @@ fn deferred_neighbor_missing_egress_binding_skips_ptb_11410() {
         "an oversized frame with no target binding must not emit a PTB or TX original"
     );
     // #15941 revert-guard: retry no-target must count + ring.
-    assert_eq!(no_egress, 1, "#15941 retry no-binding site must increment the named counter");
+    assert_eq!(
+        no_egress, 1,
+        "#15941 retry no-binding site must increment the named counter"
+    );
     assert!(
-        reasons.iter().any(|reason| reason == "missing_egress_binding"),
+        reasons
+            .iter()
+            .any(|reason| reason == "missing_egress_binding"),
         "retry no-binding must ring missing_egress_binding: {reasons:?}"
     );
     assert!(
@@ -853,4 +859,297 @@ fn deferred_neighbor_retry_rechecks_transit_source_martian_11074() {
         .map(|entry| entry.reason().to_string())
         .collect();
     assert_eq!(reasons, vec!["transit_source_martian"]);
+}
+
+// ---------------------------------------------------------------------------
+// #15954: revert-guard cells for the five newest #15941 counter sites.
+// Each cell drives `retry_pending_neigh` (or the dispatch loop) to exactly
+// one site and asserts its named counter == 1 and its ring reason; removing
+// that site's `record_*` increment (or its ring) turns the cell RED.
+// ---------------------------------------------------------------------------
+
+/// Outcome of one parametrized deferred flush (`flush_guard_15954`).
+struct GuardFlush15954 {
+    bindings: Vec<BindingWorker>,
+    counters: BatchCounters,
+    reasons: Vec<String>,
+}
+
+/// Park one small IPv4/TCP frame pending neighbor resolution and flush it.
+///
+/// Knobs select exactly one #15954 site:
+/// - `ttl`: IPv4 TTL byte (1 => in-place rewrite declines).
+/// - `desc_addr`: descriptor address (`1<<40` => held-descriptor slice fails).
+/// - `second_binding`: include the egress binding (ifindex 22).
+/// - `stale_target`: after building the lookup, insert an extra mapping for
+///   ifindex 22 so `target_index` resolves to a non-existent index 9 while
+///   only bindings 0/1 exist (target vanished between lookup and use).
+fn flush_guard_15954(
+    ttl: u8,
+    desc_addr: u64,
+    second_binding: bool,
+    stale_target: bool,
+) -> GuardFlush15954 {
+    let src_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let dst_ip = Ipv4Addr::new(10, 0, 0, 2);
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[
+        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x08, 0x00,
+    ]);
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x12, 0x34, 0x40, 0x00, ttl, PROTO_TCP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&src_ip.octets());
+    frame.extend_from_slice(&dst_ip.octets());
+    frame.extend_from_slice(&12345u16.to_be_bytes());
+    frame.extend_from_slice(&443u16.to_be_bytes());
+    frame.extend_from_slice(&[
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x02, 0xfa, 0xf0, 0x00, 0x00, 0x00,
+        0x00,
+    ]);
+    let csum = crate::afxdp::tx::test_support::compute_ipv4_header_checksum(&frame[14..34]);
+    frame[24..26].copy_from_slice(&csum.to_be_bytes());
+    let frame_addr: u64 = 0;
+    let addr = if desc_addr != 0 {
+        desc_addr
+    } else {
+        frame_addr
+    };
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: 22,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0, 1],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    forwarding.neighbors.insert(
+        (EGRESS_IFINDEX, NEXT_HOP),
+        NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+    let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0)];
+    if second_binding {
+        bindings.push(BindingWorker::new_for_mirror_test(1, 0, 22, 0));
+    }
+    {
+        let area_mut = bindings[0].umem.area() as *const MmapArea as *mut MmapArea;
+        unsafe {
+            (*area_mut)
+                .slice_mut(frame_addr as usize, frame.len())
+                .expect("umem slice for guard frame")
+                .copy_from_slice(&frame);
+        }
+    }
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 11,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 54,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        flow_src_addr: [
+            src_ip.octets()[0],
+            src_ip.octets()[1],
+            src_ip.octets()[2],
+            src_ip.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        flow_dst_addr: [
+            dst_ip.octets()[0],
+            dst_ip.octets()[1],
+            dst_ip.octets()[2],
+            dst_ip.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        ..UserspaceDpMeta::default()
+    };
+    let flow_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(src_ip),
+        dst_ip: IpAddr::V4(dst_ip),
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: TunnelDiscriminator::default(),
+        routing_domain: 0,
+    };
+    let pkt = PendingNeighPacket {
+        addr,
+        desc: XdpDesc {
+            addr,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        fabric_ingress_zone: None,
+        decision: deferred_decision(),
+        flow_key: Some(flow_key),
+        queued_ns: 0,
+        probe_attempts: 0,
+    };
+    bindings[0]
+        .pending_neigh
+        .insert((EGRESS_IFINDEX, NEXT_HOP), pkt);
+    let mut lookup = WorkerBindingLookup::from_bindings(&bindings);
+    if stale_target {
+        lookup.by_if_queue.insert((22, 0), 9);
+        lookup.first_by_if.insert(22, 9);
+    }
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut shared_recycles = Vec::new();
+    let mut counters = BatchCounters::default();
+    let area = bindings[0].umem.area() as *const MmapArea;
+    let (left, rest) = bindings.split_at_mut(0);
+    let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut dbg = crate::afxdp::DebugPollCounters::default();
+    retry_pending_neigh(
+        binding,
+        left,
+        0,
+        right,
+        &lookup,
+        &mirror_targets,
+        &forwarding,
+        &dynamic_neighbors,
+        None,
+        1,
+        unsafe { &*area },
+        &mut shared_recycles,
+        None,
+        &mut counters,
+        &recent_exceptions,
+        &mut dbg,
+    );
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    GuardFlush15954 {
+        bindings,
+        counters,
+        reasons,
+    }
+}
+
+/// #15954 site 1 (held-descriptor slice): the parked descriptor is no
+/// longer addressable in UMEM, so the retry must count a forward build
+/// failure and ring `forward_live_slice_failed` instead of recycling
+/// silently. Removing the site increment at neighbor_dispatch.rs
+/// (`record_forward_build_failure` in the `area.slice` else arm) turns
+/// this RED (counter stays 0).
+#[test]
+fn deferred_held_slice_failure_counts_15954() {
+    let out = flush_guard_15954(64, 1 << 40, true, false);
+    assert_eq!(
+        out.counters.forward_build_failures, 1,
+        "#15954 held-slice site must increment forward_build_failures"
+    );
+    assert_eq!(out.reasons, vec!["forward_live_slice_failed".to_string()]);
+    assert_eq!(
+        out.bindings[0].tx_pipeline.pending_fill_frames.len(),
+        1,
+        "the unaddressable held frame must be recycled exactly once"
+    );
+}
+
+/// #15954 site 2 (rewrite-decline): a parked TTL=1 probe's in-place
+/// rewrite declines (TTL expired); the retry must count a forward build
+/// failure and ring `forward_build_failed`. Removing that site's
+/// increment turns this RED.
+#[test]
+fn deferred_rewrite_decline_counts_15954() {
+    let out = flush_guard_15954(1, 0, true, false);
+    assert_eq!(
+        out.counters.forward_build_failures, 1,
+        "#15954 rewrite-decline site must increment forward_build_failures"
+    );
+    assert_eq!(out.reasons, vec!["forward_build_failed".to_string()]);
+    assert!(
+        out.bindings[1].tx_pipeline.pending_tx_prepared.is_empty()
+            && out.bindings[1].tx_pipeline.pending_tx_local.is_empty(),
+        "a declined rewrite must not transmit"
+    );
+    assert_eq!(
+        out.bindings[0].tx_pipeline.pending_fill_frames.len(),
+        1,
+        "the declined frame must be recycled exactly once"
+    );
+}
+
+/// #15954 site 3 (rewritten-extent slice, neighbor_dispatch.rs extent
+/// arm): NO revert-guard cell is written for this site, deliberately.
+/// The arm slices `area[rewrite_result.offset .. +len]` where
+/// `rewrite_result` comes from `rewrite_forwarded_frame_in_place` on the
+/// SAME `area` and SAME descriptor whose held slice already succeeded
+/// earlier in the same iteration. For every L2 classification the
+/// rewritten extent is contained whenever the held descriptor slice is
+/// contained (SameLength: identical range; VlanPop: strict subset;
+/// VlanPushDescriptor: shifted start compensates the +4 length exactly;
+/// memmove arms: the rewrite's own commit already slices the full
+/// extent and would decline -> rewrite-decline arm, not this one). The
+/// extent slice therefore cannot fail after the held slice and a
+/// successful rewrite on a single-area call, so any cell claiming to
+/// guard it would be test-only-green (it would actually guard the held
+/// or rewrite-decline site). The site stays counted+ringed in
+/// production; its counter family is guarded by sites 1/2 above.
+///
+/// #15954 site 4 (vanished-target): the lookup resolves an index that no
+/// longer exists in the binding slices; the retry must count a
+/// no-egress-binding drop and ring `missing_egress_binding`. Removing
+/// that site's increment turns this RED. Distinct from the no-target
+/// guard (`deferred_neighbor_missing_egress_binding_skips_ptb_11410`),
+/// which never resolves an index at all.
+#[test]
+fn deferred_vanished_target_counts_15954() {
+    let out = flush_guard_15954(64, 0, true, true);
+    assert_eq!(
+        out.counters.no_egress_binding_drops, 1,
+        "#15954 vanished-target site must increment no_egress_binding_drops"
+    );
+    assert_eq!(out.reasons, vec!["missing_egress_binding".to_string()]);
+    assert_eq!(
+        out.bindings[0].tx_pipeline.pending_fill_frames.len(),
+        1,
+        "the vanished-target frame must be recycled exactly once"
+    );
 }

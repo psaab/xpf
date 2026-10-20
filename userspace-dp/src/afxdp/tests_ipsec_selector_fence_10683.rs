@@ -89,3 +89,62 @@ fn poll_drops_bindless_selector_with_no_sa_and_preserves_precision_10683() {
         );
     }
 }
+
+/// #15954 site 6 (common-tail selector fence): a flowless non-first
+/// fragment has no session flow, so it never passes the install-time
+/// fence gates (pre-NAT, post-NAT, NoRoute, MissingNeighbor seed); the
+/// ONLY fence that can refuse it is the common tail at
+/// poll_descriptor/mod.rs (`bindless_selector_match`). A permitted
+/// flowless fragment whose tuple matches the bindless selector must be
+/// dropped there with `transit_ipsec_fence_drops == 1` and no session.
+/// Removing the tail increment turns this RED (counter stays 0 while
+/// the drop still happens via `dbg.policy_deny`).
+#[test]
+fn poll_tail_selector_fence_counts_flowless_fragment_15954() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies = vec![crate::PolicyRuleSnapshot {
+        name: "permit-lan-wan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    snapshot.bindless_selector_fence_enabled = true;
+    // frag_v4_transit_frame: src 10.0.61.100 -> dst 172.16.80.200.
+    snapshot.bindless_selector_rows = vec![IpsecBindlessSelectorSnapshot {
+        local_ts: "10.0.61.0/24".to_string(),
+        remote_ts: "172.16.80.0/24".to_string(),
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let frame = frag_v4_transit_frame(TEST_LAN_MAC);
+    let (batch, dbg, reasons) = txn_run_descriptor_capturing_exceptions(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        frag_v4_transit_meta(),
+    );
+    assert_eq!(batch.validated_packets, 1, "fragment must reach validation");
+    assert_eq!(dbg.rx, 1, "descriptor must reach poll");
+    assert_eq!(dbg.forward, 0, "tail-fenced fragment must not forward");
+    assert_eq!(
+        batch.transit_ipsec_fence_drops, 1,
+        "#15954 common-tail fence site must increment transit_ipsec_fence_drops"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "tail-fenced fragment must install no session"
+    );
+    let _ = reasons;
+}
