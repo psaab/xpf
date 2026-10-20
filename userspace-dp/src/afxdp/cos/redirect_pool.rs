@@ -42,6 +42,7 @@
 // other — bounded and self-healing, never incorrect.
 
 use std::cell::RefCell;
+use std::cell::Cell;
 
 /// Upper bound on pooled buffers per worker thread. At ~MTU each this
 /// caps the pool at a couple of MB per worker; excess buffers are
@@ -50,6 +51,15 @@ const MAX_POOLED_BUFFERS: usize = 1024;
 
 thread_local! {
     static POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    /// #15956: per-buffer initialized extent as a parallel stack to
+    /// `POOL` (same push/pop discipline, same thread): the length the
+    /// buffer last published, whose bytes are known written. Spare
+    /// capacity beyond it may hold arbitrary prior contents or be
+    /// genuinely uninitialized on a cold/grown allocation;
+    /// `checkout_with_capacity` zero-fills only that delta, never the
+    /// already-initialized window the builder is about to overwrite.
+    static POOL_INITIALIZED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static POOL_GROWTH_ZEROFILLS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Check out a buffer holding a fresh copy of `src`. Reuses a pooled
@@ -68,10 +78,35 @@ pub(in crate::afxdp) fn checkout(src: &[u8]) -> Vec<u8> {
 #[inline]
 pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
     POOL.with(|pool| {
-        let mut buf = pool.borrow_mut().pop().unwrap_or_default();
+        let mut pool = pool.borrow_mut();
+        let (mut buf, init_len) = match pool.pop() {
+            Some(buf) => {
+                let init_len = POOL_INITIALIZED.with(|i| i.borrow_mut().pop().unwrap_or(0));
+                (buf, init_len)
+            }
+            None => (Vec::new(), 0),
+        };
         buf.clear();
         if buf.capacity() < capacity {
+            // Realloc preserves the previously published prefix, so the
+            // recorded extent (<= old length <= old capacity) stays
+            // valid; only bytes past it are the never-written delta.
             buf.reserve_exact(capacity);
+        }
+        // #15956: zero only the never-initialized delta past this
+        // buffer's recorded extent, once, here at checkout — so spare
+        // capacity a later `extend_pooled_for_build` publishes is
+        // always initialized, cold and warm alike. Cost is paid only
+        // when the requested window exceeds every length this buffer
+        // has previously published (growth), never per packet at a
+        // steady size: `recycle` returns the buffer with extent =
+        // its published length, and a same-size rebuild covers it.
+        if capacity > init_len {
+            POOL_GROWTH_ZEROFILLS.with(|c| c.set(c.get() + 1));
+            let spare = buf.spare_capacity_mut();
+            for slot in &mut spare[init_len..capacity] {
+                slot.write(0);
+            }
         }
         buf
     })
@@ -94,11 +129,19 @@ pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
 /// are never read as Vec elements, and on `None` the caller recycles the
 /// Vec (whose next checkout `clear()`s it) without publishing anything.
 ///
-/// Soundness rests on that contract, pinned by the fail-on-revert corpus
-/// in `tests_nat_rewrite.rs`: forward / reverse / non-first / ICMP-error
-/// NAT64 builds over a `0xEE`-poisoned tail must stay byte-identical to
-/// the zero-filled build. If a future translator ever read an unwritten
-/// byte of `dst`, that corpus — not this comment — is what catches it.
+/// Soundness is TWO-part. (1) No uninitialized byte is ever exposed:
+/// `checkout_with_capacity` zero-fills the delta past each buffer's
+/// recorded initialized extent (tracked alongside the pool as the
+/// length it last published), once per growth — so a cold
+/// (fresh-allocation) or grown checkout never publishes spare
+/// capacity that was never written, and this helper only ever
+/// exposes initialized bytes.
+/// (2) Within the already-initialized window the builder contract
+/// above holds, pinned by the fail-on-revert corpus in
+/// `tests_nat_rewrite.rs` (forward / reverse / non-first / ICMP-error
+/// builds over a `0xEE`-poisoned tail, plus cold/growth checkout
+/// cells). If a future translator ever read a byte outside its written
+/// prefix, that corpus — not this comment — is what catches it.
 ///
 /// `buf` must come from [`checkout_with_capacity`] with the same
 /// `capacity` (length 0, capacity >= `capacity`).
@@ -111,11 +154,15 @@ pub(in crate::afxdp) fn extend_pooled_for_build(buf: &mut Vec<u8>, capacity: usi
         spare_len >= capacity,
         "pooled checkout spare capacity below build capacity"
     );
-    // SAFETY: `spare_capacity_mut()[..capacity]` is owned, writable spare
-    // capacity of `buf`. Per the contract above the consuming builder
-    // initializes every byte in `0..written` before the caller truncates
-    // to `written` and publishes the Vec; bytes beyond `written` are
-    // never read, and the failure path recycles without publishing.
+    // SAFETY: `buf` came from `checkout_with_capacity(capacity)`,
+    // which zero-filled every spare byte in `init_len..capacity` past
+    // the buffer's recorded initialized extent; bytes in
+    // `0..init_len` were written when that extent was published.
+    // Every byte in `0..capacity` is therefore initialized. The
+    // consuming builder additionally overwrites every byte in
+    // `0..written` before the caller truncates to `written` and
+    // publishes the Vec; bytes beyond `written` are never read, and
+    // the failure path recycles without publishing.
     unsafe {
         buf.set_len(capacity);
     }
@@ -130,6 +177,13 @@ pub(in crate::afxdp) fn recycle(buf: Vec<u8>) {
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
         if pool.len() < MAX_POOLED_BUFFERS {
+            // The buffer's published length is exactly the extent known
+            // initialized: build buffers were truncated to `written`
+            // (every published byte builder-written), copy buffers were
+            // filled by `extend_from_slice`. Bytes past `len` may be
+            // stale, so the paired extent is `len`, never capacity.
+            let init_len = buf.len().min(buf.capacity());
+            POOL_INITIALIZED.with(|i| i.borrow_mut().push(init_len));
             pool.push(buf);
         }
     });
@@ -138,6 +192,14 @@ pub(in crate::afxdp) fn recycle(buf: Vec<u8>) {
 #[cfg(test)]
 pub(in crate::afxdp) fn clear_for_test() {
     POOL.with(|pool| pool.borrow_mut().clear());
+    POOL_INITIALIZED.with(|i| i.borrow_mut().clear());
+    POOL_GROWTH_ZEROFILLS.with(|c| c.set(0));
+}
+
+/// #15956 test seam: number of grow/cold delta zero-fills performed.
+#[cfg(test)]
+pub(in crate::afxdp) fn growth_zerofills_for_test() -> u64 {
+    POOL_GROWTH_ZEROFILLS.with(|c| c.get())
 }
 
 #[cfg(test)]

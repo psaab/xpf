@@ -2825,3 +2825,135 @@ fn nat64_15956_resize_ab_bench() {
         );
     }
 }
+
+// #15956 fix (triple review): cold + growth checkout cells. A cold
+// checkout's spare capacity was never written by anyone; publishing it
+// with set_len without the checkout-time delta zero-fill would expose
+// uninitialized bytes. These cells pin: (a) cold build (empty pool)
+// produces correct output; (b) a pre-sized DIRTY pooled buffer (0xEE,
+// simulating allocator memory that happens to contain a pattern) is
+// treated as initialized extent = its published length only — the delta
+// past it is zero-filled at checkout, proven by the growth counter and
+// by output equality; (c) a second, larger build on the same buffer
+// pays exactly one more delta zero-fill, and a same-size rebuild pays
+// none (amortized, not per-packet whole-window).
+#[test]
+fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
+    use crate::afxdp::cos::redirect_pool;
+    redirect_pool::clear_for_test();
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 0);
+
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool_ip = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let frame = build_ipv6_tcp_syn_with_mss(client, synthetic, 5000, 443, 1460);
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool_ip, server, 40001));
+
+    // (a) Cold: empty pool -> fresh allocation. Exactly one delta
+    // zero-fill (the whole window), correct output.
+    let cold = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("cold build");
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "cold checkout pays one full delta");
+    redirect_pool::recycle(cold.clone());
+
+    // Warm same-size rebuild: extent covers the published length, so
+    // the only fill is the small window delta (capacity vs written).
+    let warm = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("warm build");
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 2, "warm rebuild zero-fills only the capacity-minus-written delta (~eth shrink, never whole window)");
+    assert_eq!(warm[34..], cold[34..], "cold and warm builds agree past the frag-ID header");
+    redirect_pool::recycle(warm);
+
+    // (b) Growth with a dirty pre-sized buffer: recycle a 0xEE buffer
+    // whose published length (10) is far below the build capacity. The
+    // delta past 10 must be zero-filled at checkout (counter -> 2),
+    // and the build must equal the cold build past the frag-ID header.
+    redirect_pool::clear_for_test();
+    let dirty = vec![0xEEu8; 10];
+    redirect_pool::recycle(dirty);
+    let grown = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("growth build over dirty buffer");
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "growth checkout pays one delta");
+    assert!(!grown.contains(&0xEE), "growth build leaked dirty spare bytes");
+    assert_eq!(grown[34..], cold[34..], "growth build matches cold build past frag-ID header");
+}
+
+// #15956 fix (triple review): reverse-UDP failure-path read cell.
+// The v4->v6 translator's checksum phase reads the UDP checksum field
+// at `dst[l4_off+6..l4_off+8]`. That field is INSIDE the written prefix
+// (verbatim L4 copy at 3598 precedes it), so the read is bounded by
+// `written` — this cell proves it stays so under a poisoned dst: a
+// truncated reverse UDP packet (L4 shorter than 8 bytes) must fail
+// closed (None) rather than consult poison past the copied bytes, and
+// a well-formed zero-checksum reverse UDP datagram must generate a
+// valid checksum identical to the zero-filled build.
+#[test]
+fn nat64_15956_reverse_udp_checksum_read_bounded_by_written() {
+    let snat = Ipv4Addr::new(198, 51, 100, 1);
+    let dst4 = Ipv4Addr::new(198, 51, 100, 50);
+    let src6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    let dst6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+
+    let build_v4_udp = |udp_payload: &[u8], csum_zero: bool| -> Vec<u8> {
+        let udp_len = 8 + udp_payload.len();
+        let total = 20 + udp_len;
+        let mut pkt = vec![0u8; total];
+        pkt[0] = 0x45;
+        pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        pkt[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+        pkt[8] = 64;
+        pkt[9] = PROTO_UDP;
+        pkt[12..16].copy_from_slice(&dst4.octets());
+        pkt[16..20].copy_from_slice(&snat.octets());
+        let s = checksum16(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&s.to_be_bytes());
+        pkt[20..22].copy_from_slice(&53u16.to_be_bytes());
+        pkt[22..24].copy_from_slice(&12345u16.to_be_bytes());
+        pkt[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        pkt[28..28 + udp_payload.len()].copy_from_slice(udp_payload);
+        if !csum_zero {
+            let sum = checksum16_ipv4(dst4, snat, PROTO_UDP, &pkt[20..]);
+            pkt[26..28].copy_from_slice(&sum.to_be_bytes());
+        }
+        let mut frame = vec![0xaau8; 12];
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        frame.extend_from_slice(&pkt);
+        frame
+    };
+
+    // Well-formed zero-checksum UDP: translator must generate a valid
+    // v6 checksum; poisoned dst must match the allocating reference.
+    let frame = build_v4_udp(b"dns-answer", true);
+    let want = crate::nat64::build_nat64_v4_to_v6_frame(&frame, src6, dst6, [0x11; 6], [0x22; 6], 0)
+        .expect("ref zero-csum udp");
+    assert_ne!(&want[14 + 40 + 6..14 + 40 + 8], &[0, 0], "generated UDP checksum must be non-zero");
+    let mut dst = vec![0xEEu8; frame.len() + 44];
+    let n = crate::nat64::build_nat64_v4_to_v6_frame_into(&mut dst, &frame, src6, dst6, [0x11; 6], [0x22; 6], 0)
+        .expect("into zero-csum udp");
+    assert_eq!(&dst[..n], &want[..], "zero-csum reverse UDP diverged under poison");
+    let s6 = Ipv6Addr::from(<[u8; 16]>::try_from(&dst[14 + 8..14 + 24]).unwrap());
+    let d6 = Ipv6Addr::from(<[u8; 16]>::try_from(&dst[14 + 24..14 + 40]).unwrap());
+    assert_eq!(checksum16_ipv6(s6, d6, PROTO_UDP, &dst[14 + 40..n]), 0, "generated checksum verifies");
+
+    // Truncated UDP (total_len claims only 4 L4 bytes): the checksum
+    // field at l4_off+6 is beyond the copied prefix. Must fail closed,
+    // never read the poison as a checksum baseline.
+    let mut short = build_v4_udp(b"", false);
+    // Shrink the IPv4 total length to 20+4 (ports only, no csum field).
+    short[14 + 2..14 + 4].copy_from_slice(&24u16.to_be_bytes());
+    short.truncate(14 + 24);
+    let s = checksum16(&short[14..34]);
+    short[14 + 10..14 + 12].copy_from_slice(&s.to_be_bytes());
+    let mut dst = vec![0xEEu8; short.len() + 44];
+    assert!(
+        crate::nat64::build_nat64_v4_to_v6_frame_into(&mut dst, &short, src6, dst6, [0x11; 6], [0x22; 6], 0).is_none(),
+        "truncated reverse UDP must fail closed, not read past written"
+    );
+}
