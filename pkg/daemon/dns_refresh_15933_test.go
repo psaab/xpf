@@ -380,29 +380,107 @@ func TestDNSRefreshBaselineReconciledAfterBackgroundReapply15962(t *testing.T) {
 	}
 }
 
-// Round-3 lost-update: a tick's baseline record for generation G with
-// digest X must not overwrite a newer same-generation record with
-// digest Y (the post-release overwrite schedule). Driven through the
-// CAS directly with a forced interleave, plus the fail-on-revert guard
-// cell (guard off -> overwrite happens -> assertion RED there by
-// construction; here we assert the guarded behavior).
-func TestDNSBaselineCASRejectsStaleSameGenWrite15962(t *testing.T) {
-	d, _, s := dnsRealDaemon15962(t)
+// B1 (#15962 round-4): a tick snapshots baseline B, releases applySem and
+// parks in outside-sem resolution; a same-generation apply lands W; the
+// tick publish then applies T2 (apply-time re-resolution) LAST. The
+// baseline must become T2 — inside the single publish hold that read-back
+// IS the newest applied state — so a flap back to W is detected and
+// republished. FAIL-ON-REVERT: restoring the round-4 digest CAS (drop
+// the record when a same-generation apply landed different answers
+// first) leaves baseline=W, the flap-back tick compares equal at W, and
+// applyCalls stays 3 — the dataplane is stuck at T2.
+func TestDNSRefreshInterleavedSameGenApplyFlapBack15962(t *testing.T) {
+	var phase atomic.Int64
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	restore := config.SetLookupAddressDNSNameForTest(func(fqdn string) ([]string, error) {
+		if fqdn != "global.example.com" {
+			return []string{"10.0.0.2"}, nil
+		}
+		switch phase.Load() {
+		case 0: // seed: baseline B everywhere
+			return []string{"10.9.9.9"}, nil
+		case 1: // tick clone resolve: park, then proposal P (distinct)
+			once.Do(func() { close(entered) })
+			<-release
+			return []string{"10.8.8.8"}, nil
+		case 2: // same-generation background apply lands W
+			return []string{"10.7.7.7"}, nil
+		case 3: // tick publish apply-time re-resolution lands T2
+			return []string{"10.6.6.6"}, nil
+		default: // flap back to W
+			return []string{"10.7.7.7"}, nil
+		}
+	})
+	t.Cleanup(restore)
+	phase.Store(99) // compile-time inside dnsRealDaemon15962: default arm (W)
+	d, dp, s := dnsRealDaemon15962(t)
 	cfg := s.ActiveConfig()
-	gen := d.activeGen(cfg)
-	answersB := map[string][]string{"k": {"10.9.9.9/32"}}
-	answersC := map[string][]string{"k": {"10.7.7.7/32"}}
-	// Newer writer (real apply exit) records C first.
-	d.recordDNSBaselineForce(cfg, answersC)
-	// Late tick writer tries to record older B for same generation.
-	d.recordDNSBaselineCAS(gen, cfg, answersB)
-	if got := d.dnsBaselineFor(cfg); !reflect.DeepEqual(got, answersC) {
-		t.Fatalf("baseline = %v, want newer C preserved (stale tick overwrite)", got)
+
+	// Seed baseline B via a real tick publish.
+	phase.Store(0)
+	d.refreshDNSOnce()
+	if dp.applyCalls != 1 {
+		t.Fatalf("seed tick applies = %d, want 1", dp.applyCalls)
 	}
-	// Idempotent same-digest re-record is allowed.
-	d.recordDNSBaselineCAS(gen, cfg, answersC)
-	if got := d.dnsBaselineFor(cfg); !reflect.DeepEqual(got, answersC) {
-		t.Fatalf("baseline after idempotent record = %v, want C", got)
+	if got := d.dnsBaselineFor(cfg); got == nil {
+		t.Fatal("no baseline after seed tick")
+	}
+
+	// Tick B: snapshot under applySem, clone, resolve parks outside.
+	phase.Store(1)
+	tickDone := make(chan struct{})
+	go func() { defer close(tickDone); d.refreshDNSOnce() }()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("tick resolve never entered")
+	}
+
+	// Same-generation apply lands W inside the resolve window.
+	phase.Store(2)
+	if err := d.applyActiveConfigResult(); err != nil {
+		t.Fatalf("same-generation apply: %v", err)
+	}
+	if dp.applyCalls != 2 {
+		t.Fatalf("same-generation applies = %d, want 2", dp.applyCalls)
+	}
+
+	// Tick publish: apply-time re-resolution lands T2 last.
+	phase.Store(3)
+	close(release)
+	<-tickDone
+	if dp.applyCalls != 3 {
+		t.Fatalf("tick publish applies = %d, want 3", dp.applyCalls)
+	}
+	// Baseline must be the actually-applied T2, not the surviving W:
+	// assert the global identity directly (identity keys are scoped).
+	base := d.dnsBaselineFor(cfg)
+	foundT2 := false
+	for _, vs := range base {
+		for _, v := range vs {
+			if v == "10.6.6.6/32" {
+				foundT2 = true
+			}
+			if v == "10.7.7.7/32" {
+				t.Fatalf("baseline still holds W after tick applied T2 last: baseline=%v", base)
+			}
+		}
+	}
+	if !foundT2 {
+		t.Fatalf("baseline = %v, want T2 10.6.6.6/32 (newest applied record dropped)", base)
+	}
+
+	// Flap back to W: the tick MUST republish (apply 4), then quiesce.
+	phase.Store(4)
+	d.refreshDNSOnce()
+	if dp.applyCalls != 4 {
+		t.Fatalf("flap-back stuck: applies = %d, want 4 (dataplane T2 vs baseline W suppressed) baseline=%v", dp.applyCalls, d.dnsBaselineFor(cfg))
+	}
+	d.refreshDNSOnce()
+	if dp.applyCalls != 4 {
+		t.Fatalf("steady-state tick republished: applies = %d, want 4", dp.applyCalls)
 	}
 }
 

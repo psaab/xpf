@@ -150,9 +150,10 @@ func RefreshDNSAddressBooks(cfg *Config) {
 //
 // The address maps themselves are copied (not aliased) wherever a cloned
 // entry is installed, so a writer cannot add/remove entries in the
-// original's maps through the clone. Non-DNS entries are shared — nothing
-// in the refresh path mutates them — so the clone is O(dns entries), not a
-// deep copy of the whole config.
+// original's maps through the clone. Non-DNS entries are shared —
+// nothing in the refresh path mutates them. Cost is O(zones + named
+// books + all address-book entries), not a deep copy of the whole
+// config.
 func (cfg *Config) CloneForDNSRefresh() *Config {
 	if cfg == nil {
 		return nil

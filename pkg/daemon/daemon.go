@@ -1073,20 +1073,17 @@ type Daemon struct {
 	// exercise the semaphore contract through the real applyConfig
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
-	// dnsRefreshMu guards the per-generation published-answer baseline.
+	// dnsRefreshMu guards the published-answer baseline.
 	// lastDNSRefreshAnswers holds the DNS answers last actually APPLIED
-	// for the baseline identity (store generation + config pointer, read
-	// back after the apply-time re-resolution under applySem, never the
-	// pre-apply proposal, #15933/#15962). Writes are a CAS: a writer may
-	// record only a newer generation, or the same generation with the
-	// same answers digest (round-3 lost-update fix); failed applies
-	// invalidate at the same generation.
-	dnsRefreshMu            sync.Mutex
-	lastDNSRefreshGen       uint64
-	lastDNSRefreshBase      *config.Config
-	lastDNSRefreshDigest    uint64
-	lastDNSRefreshAnswers   map[string][]string
-	dnsBaselineTickGuardOff bool // test-only: disables the CAS (fail-on-revert)
+	// for lastDNSRefreshBase (store generation + config pointer identity,
+	// read back after apply-time re-resolution under applySem, never a
+	// pre-apply proposal). Every writer holds applySem and records
+	// unconditionally — inside the hold it IS the newest applied state;
+	// failed applies invalidate. (Round-4: digest CAS removed, it only
+	// ever dropped the newest record.)
+	dnsRefreshMu          sync.Mutex
+	lastDNSRefreshBase    *config.Config
+	lastDNSRefreshAnswers map[string][]string
 	// buildRuntimeDataPlaneForTest replaces dataplane construction in the
 	// startup fixture. It is nil in production and exists so the setup path
 	// can be exercised without arming a host dataplane.
