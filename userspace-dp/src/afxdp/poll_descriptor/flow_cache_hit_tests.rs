@@ -5364,3 +5364,46 @@ fn cached_selector_fence_counts_transit_fence_drop_15941() {
     assert_eq!(run.dbg_tx, 0, "fenced hit must not transmit");
     assert!(run.scratch.scratch_forwards.is_empty());
 }
+/// #15958 (F1) revert-guard: a cached `drop: true` verdict on the
+/// EARLY cached-drop arm (`cached_descriptor.tx_selection.drop` before
+/// any inline/fallback TX) must record `forward_build_failures` AND a
+/// `transit_output_filter_drop` ring entry, mirroring the slow-path
+/// twin — previously this exit recycled silently after only the
+/// `transit_output_filter_drops` count. This exercises the arm the fix
+/// actually lives on: the cache-fallback builder's `None` exit is
+/// unreachable for a dropping selection (the cached drop returns
+/// first), so no counter is claimed for it.
+#[test]
+fn cached_drop_counts_forward_build_failure_15958() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.descriptor.tx_selection.drop = true;
+    entry.descriptor.tx_selection.reject = false;
+    let run = run_stage_seeded(&fixture, &frame, meta, entry, 0, StageSeed::default());
+    assert_eq!(run.flow_cache_tallies.0, 1, "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(
+        run.counters.transit_output_filter_drops, 1,
+        "early cached drop must keep its named transit counter"
+    );
+    assert_eq!(
+        run.counters.forward_build_failures, 1,
+        "F1: early cached drop must count as a forward build failure"
+    );
+    let reasons: Vec<String> = fixture
+        .recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["transit_output_filter_drop"],
+        "F1: early cached drop must ring transit_output_filter_drop"
+    );
+    assert!(run.scratch.scratch_forwards.is_empty());
+    assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
+}

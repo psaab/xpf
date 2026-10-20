@@ -3802,6 +3802,229 @@ pub(super) fn build_icmpv6_te_frame_pptp(
     frame
 }
 
+/// #15958 multi-binding poll driver for a worker with fabric + LAN
+/// bindings on separate UMEMs. Pushes one frame onto `bindings[ingress_index]`
+/// (its UMEM/RX ring), drives the production
+/// `poll_binding_process_descriptor_with_injection` with the sliced
+/// left/ingress/right bindings and a `WorkerBindingLookup` built over ALL
+/// bindings (never `slice::from_ref`), then runs
+/// `enqueue_pending_forwards_with_dynamic` on the queued forwards and
+/// `drain_pending_tx` on the ingress and every sibling binding.
+///
+/// Returns `(poll_batch, poll_dbg, egress_frame)`: the bytes of the first
+/// frame queued for TX on a non-ingress binding (its prepared UMEM frame
+/// or its owned local bytes), or `None` when no sibling queued anything.
+/// The single-binding `txn_run_descriptor*` family cannot express this:
+/// their lookup sees only the ingress binding, so a cross-binding (and
+/// cross-UMEM) LAN egress is unresolvable there.
+pub(super) fn txn_run_multi_binding_15958(
+    bindings: &mut Vec<BindingWorker>,
+    ingress_index: usize,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128usize;
+    let meta_offset = frame_offset - meta_len;
+    let meta_bytes = unsafe {
+        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    };
+    {
+        let ingress = &mut bindings[ingress_index];
+        unsafe {
+            ingress
+                .umem
+                .area()
+                .slice_mut_unchecked(meta_offset, meta_len)
+                .expect("meta slice")
+                .copy_from_slice(meta_bytes);
+            ingress
+                .umem
+                .area()
+                .slice_mut_unchecked(frame_offset, frame.len())
+                .expect("frame slice")
+                .copy_from_slice(frame);
+        }
+        ingress.xsk.rx.push_for_test(XdpDesc {
+            addr: frame_offset as u64,
+            len: frame.len() as u32,
+            options: 0,
+        });
+    }
+
+    let binding_lookup = WorkerBindingLookup::from_bindings(bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
+    let pptp_control = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
+        Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let (left, rest) = bindings.split_at_mut(ingress_index);
+    let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let ident = binding.identity();
+    let worker_ctx = WorkerContext {
+        pptp_control: &pptp_control,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding,
+        ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: None,
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext {
+        dbg: &mut dbg,
+        counters: &mut batch,
+    };
+    let area_ptr = binding.umem.area() as *const MmapArea;
+    let ingress_ident = binding.identity();
+    let ingress_live_ptr = &*binding.live as *const BindingLiveState;
+    super::poll_descriptor::poll_binding_process_descriptor_with_injection(
+        binding,
+        ingress_index,
+        left,
+        right,
+        area_ptr,
+        1,
+        None,
+        sessions,
+        &mut screen,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        monotonic_nanos(),
+        monotonic_nanos() / 1_000_000_000,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+    assert_descriptor_arrived_10646(&batch, &dbg);
+
+    let mut pending_forwards = core::mem::take(&mut binding.scratch.scratch_forwards);
+    let mut post_recycles = core::mem::take(&mut binding.scratch.scratch_post_recycles);
+    let mut enqueue_dbg = DebugPollCounters::default();
+    let mut enqueue_counters = BatchCounters::default();
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = BTreeMap::new();
+    super::tx::dispatch::enqueue_pending_forwards_with_dynamic(
+        left,
+        ingress_index,
+        binding,
+        right,
+        &binding_lookup,
+        &mirror_targets,
+        &mut pending_forwards,
+        &mut post_recycles,
+        123_000_000_000,
+        forwarding,
+        None,
+        &ingress_ident,
+        unsafe { &*ingress_live_ptr },
+        None,
+        &local_tunnel_deliveries,
+        &recent_exceptions,
+        &mut enqueue_dbg,
+        &mut enqueue_counters,
+        0,
+        &worker_commands_by_id,
+        Some(&dynamic_neighbors),
+    );
+    batch.touched |= enqueue_counters.touched;
+    batch.forward_build_failures += enqueue_counters.forward_build_failures;
+    batch.no_egress_binding_drops += enqueue_counters.no_egress_binding_drops;
+    dbg.build_fail += enqueue_dbg.build_fail;
+
+    // Pre-drain capture (see egress_frame below): drain consumes queues.
+    let mut pre_drain_egress: Option<Vec<u8>> = None;
+    for sibling in left.iter().chain(right.iter()) {
+        if let Some(req) = sibling.tx_pipeline.pending_tx_prepared.front() {
+            pre_drain_egress = sibling
+                .umem
+                .area()
+                .slice(req.offset as usize, req.len as usize)
+                .map(|bytes| bytes.to_vec());
+            break;
+        }
+        if let Some(req) = sibling.tx_pipeline.pending_tx_local.front() {
+            pre_drain_egress = Some(req.bytes.clone());
+            break;
+        }
+    }
+
+    let mut shared_recycles: Vec<(u32, u64)> = Vec::new();
+    super::tx::drain::drain_pending_tx(
+        binding,
+        123_000_000_000,
+        &mut shared_recycles,
+        forwarding,
+        0,
+        &worker_commands_by_id,
+    );
+    for sibling in left.iter_mut().chain(right.iter_mut()) {
+        super::tx::drain::drain_pending_tx(
+            sibling,
+            123_000_000_000,
+            &mut shared_recycles,
+            forwarding,
+            0,
+            &worker_commands_by_id,
+        );
+    }
+
+    let mut egress_frame = pre_drain_egress;
+    if egress_frame.is_none() {
+        for sibling in left.iter().chain(right.iter()) {
+            if let Some(req) = sibling.tx_pipeline.pending_tx_prepared.front() {
+                egress_frame = sibling
+                    .umem
+                    .area()
+                    .slice(req.offset as usize, req.len as usize)
+                    .map(|bytes| bytes.to_vec());
+                break;
+            }
+            if let Some(req) = sibling.tx_pipeline.pending_tx_local.front() {
+                egress_frame = Some(req.bytes.clone());
+                break;
+            }
+        }
+    }
+    (batch, dbg, egress_frame)
+}
+
 /// #10646: the N1 non-arrival mutant detector, pinned. A descriptor whose
 /// metadata cannot parse (corrupt magic here; bad version/generation behave
 /// the same) recycles with sessions==0 — exactly the outcomes a deny cell
