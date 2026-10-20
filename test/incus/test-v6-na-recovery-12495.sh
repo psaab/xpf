@@ -98,11 +98,23 @@ incus exec "$CLUSTER_LAN_HOST" -- sh -c "command -v tcpdump" >/dev/null 2>&1 ||
 # rg_primary <from-node> — prints "node0" or "node1" for V6_NA_RG's primary,
 # or nothing when the status output cannot be parsed (fail-closed: callers
 # VOID rather than guess; the request text is never ownership proof, #6440).
+# #15959: parse by RG BLOCK, never a fixed grep window. The real block is
+# 6 lines — header, local row, Takeover/Transfer/Forwarding sub-lines, peer
+# row — with the queried host's own row FIRST, so in split state the peer's
+# primary row sits 5 lines below the header and `grep -A2` returned empty
+# on $FW0, silently skipping the failback. House style (deploy-lib.sh
+# deploy_node_rg_role, dhcp-lease-failover.sh): scope by the exact
+# `Redundancy group: N` header ($3 == rg) and read $3 == "primary" on a
+# node row ($1) inside that block only; sub-lines never parse as rows
+# ($1 is "Takeover:"/"Transfer:"/"Forwarding:", and their free text can
+# contain the word "primary" — docs/log/6962.md).
 rg_primary() {
 	local out
 	out="$(incus exec "$1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)"
-	printf '%s\n' "$out" | grep -A2 "Redundancy group: ${V6_NA_RG} " |
-		sed -n 's/.*\(node[01]\).*primary.*/\1/p' | head -1
+	printf '%s\n' "$out" | awk -v rg="${V6_NA_RG}" '
+		/^Redundancy group:[[:space:]]/ { inb = ($3 == rg); next }
+		inb && ($1 == "node0" || $1 == "node1") && $3 == "primary" { print $1; exit }
+	'
 }
 
 wait_primary() { # <want-node0-or-node1> <deadline-s>
@@ -256,12 +268,29 @@ python3 "${_CELL_DIR}/v6-na-parse-12495.py" "$T/cap.pcap" >"$T/events.txt" ||
 WANT_AFTER="$PRIMARY_BEFORE"
 WANT_NODE_NUM="${WANT_AFTER#node}"
 FAILBACK_RC=0
+reset_out="" reset_rc="" target_out="" target_rc=""
 CURRENT="$(rg_primary "$FW0")"
+cell "failback: RG${V6_NA_RG} current=${CURRENT:-<empty>} want=${WANT_AFTER}"
+if [[ -z "$CURRENT" ]]; then
+	# #15959 guard hardening: do not silently skip into the 300s wait
+	# on an unreadable view. Cross-check the peer instance; if it
+	# names a primary different from the target, fail back from
+	# that evidence; otherwise fall through to the wait, which
+	# keeps polling and fails closed on expiry.
+	CURRENT="$(rg_primary "$FW1")"
+	cell "failback: FW0 view empty; peer view current=${CURRENT:-<empty>}"
+fi
 if [[ -n "$CURRENT" && "$CURRENT" != "$WANT_AFTER" ]]; then
 	WANT_INSTANCE="$FW0"
 	[[ "$WANT_AFTER" == node1 ]] && WANT_INSTANCE="$FW1"
-	incus exec "$WANT_INSTANCE" -- cli -c "request chassis cluster failover reset redundancy-group ${V6_NA_RG}" >/dev/null 2>&1 || true
-	incus exec "$WANT_INSTANCE" -- cli -c "request chassis cluster failover redundancy-group ${V6_NA_RG} node ${WANT_NODE_NUM}" >/dev/null 2>&1 || true
+	# #15959: never discard the CLI output/rc — a refused targeted
+	# request (already-primary, not-ready, in-progress) was
+	# invisible until the 300s wait expired. Log both; the wait
+	# below remains the verdict (#6440).
+	reset_out="$(incus exec "$WANT_INSTANCE" -- cli -c "request chassis cluster failover reset redundancy-group ${V6_NA_RG}" 2>&1)" && reset_rc=0 || reset_rc=$?
+	cell "failback reset on ${WANT_INSTANCE}: rc=${reset_rc} out=${reset_out:-<empty>}"
+	target_out="$(incus exec "$WANT_INSTANCE" -- cli -c "request chassis cluster failover redundancy-group ${V6_NA_RG} node ${WANT_NODE_NUM}" 2>&1)" && target_rc=0 || target_rc=$?
+	cell "failback targeted node ${WANT_NODE_NUM} on ${WANT_INSTANCE}: rc=${target_rc} out=${target_out:-<empty>}"
 fi
 wait_primary "$WANT_AFTER" "$FAILOVER_DEADLINE" || FAILBACK_RC=1
 incus exec "$CLUSTER_LAN_HOST" -- rm -f "$REMOTE_PCAP" /tmp/v6na-12495.tcpdump.log >/dev/null 2>&1 || true
