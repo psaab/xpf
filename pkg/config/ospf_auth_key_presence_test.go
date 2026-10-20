@@ -16,8 +16,9 @@ import (
 // Fix: validateOSPFAuthKeyPresenceStrict rejects a keyless auth selection at
 // strict compile (naming area/interface), warns on the tolerant path (#1960),
 // and the renderer refuses to activate a keyless-auth interface (see
-// pkg/frr). Rollover mixes with at least one non-empty key stay valid, and
-// keyed auth is unchanged.
+// pkg/frr). #15715 narrows the rollover rule: every configured MD5 entry
+// must be non-empty (see ospf_md5_rollover_multi_key_15715_test.go); keyed
+// auth is unchanged.
 
 func ospfKeylessTree14397(t *testing.T, variant string) *ConfigTree {
 	t.Helper()
@@ -96,9 +97,9 @@ func TestOSPFAuthKeyPresenceLenientWarns14397(t *testing.T) {
 	}
 }
 
-// Controls: keyed MD5, keyed simple, a rollover mix with one empty + one
-// valid key (at-least-one-non-empty-key rule), and no authentication at all
-// must all still compile strict.
+// Controls: keyed MD5, keyed simple, an all-valid rollover, and no
+// authentication at all must all still compile strict. (The former
+// empty+valid rollover control is now a #15715 rejection.)
 func TestOSPFAuthKeyPresenceControlsCompile14397(t *testing.T) {
 	cases := map[string][]string{
 		"keyed-md5": {
@@ -107,8 +108,8 @@ func TestOSPFAuthKeyPresenceControlsCompile14397(t *testing.T) {
 		"keyed-simple": {
 			`set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password "s3cret"`,
 		},
-		"rollover-mix-one-valid": {
-			`set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication md5 1 key ""`,
+		"rollover-all-valid": {
+			`set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication md5 1 key "s3cret1"`,
 			`set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication md5 2 key "s3cret"`,
 		},
 		"no-authentication": {

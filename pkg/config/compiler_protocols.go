@@ -339,8 +339,33 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 										keyPresent = true
 									}
 								}
-								iface.AuthMD5Keys = append(iface.AuthMD5Keys,
-									OSPFMD5Key12186{ID: keyID, Key: key})
+								// #15715: a same-ID ref authored without a
+								// key in another fragment (e.g. an inline
+								// `md5 1;` packed leaf beside a group
+								// `md5 1 { key ...; }` container, #14414)
+								// is the same key-id restated, not a
+								// distinct keyless rollover entry. Coalesce
+								// by key-id: fill whichever side is empty
+								// (the group container may compile before
+								// or after the inline leaf) instead of
+								// appending a duplicate empty entry the
+								// strict gate would reject; a distinct
+								// keyless ID still appends and rejects.
+								coalesced := false
+								for i := range iface.AuthMD5Keys {
+									if iface.AuthMD5Keys[i].ID != keyID {
+										continue
+									}
+									if iface.AuthMD5Keys[i].Key == "" && key != "" {
+										iface.AuthMD5Keys[i].Key = key
+									}
+									coalesced = true
+									break
+								}
+								if !coalesced {
+									iface.AuthMD5Keys = append(iface.AuthMD5Keys,
+										OSPFMD5Key12186{ID: keyID, Key: key})
+								}
 								if keyPresent {
 									iface.AuthKey = key
 								}
