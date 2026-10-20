@@ -1149,3 +1149,51 @@ fn ndp_token_and_except_15671() {
     state.zone_host_inbound.insert(7, excluded);
     assert!(host_inbound_admits(&state, 7, 58, 0, true, 135), "ND default must admit when not excluded");
 }
+
+// #15931: an interface override WITHOUT an ndp token keeps the ND
+// default (zone parity); only `ndp except` on the override withdraws
+// it. Before the fix the override branch fell through to admits(),
+// which has no implicit ND, so an ssh-only override denied ND.
+#[test]
+fn ndp_interface_override_default_15931() {
+    const IFACE: i32 = 4242;
+    let mut state = ForwardingState::default();
+    state.zone_host_inbound.insert(
+        7,
+        zone_host_inbound_from_tokens(&["ssh".to_string()], &[]),
+    );
+    // ssh-only override: ND admitted by default, ssh admitted, https not.
+    state.ifindex_host_inbound.insert(
+        IFACE,
+        zone_host_inbound_from_tokens(&["ssh".to_string()], &[]),
+    );
+    for ty in [133u8, 134, 135, 136] {
+        assert!(
+            host_inbound_admits_iface(&state, IFACE, 7, 58, 0, true, ty),
+            "ssh-only interface override must keep the ND default (type {ty})"
+        );
+        assert!(
+            host_inbound_admits_iface_for_destination(
+                &state, IFACE, 7, 58, 0, true, ty, "2001:db8::1".parse().unwrap(),
+            ),
+            "destination form must keep the ND default (type {ty})"
+        );
+    }
+    assert!(!host_inbound_admits_iface(&state, IFACE, 7, 58, 0, true, 137), "Redirect stays denied");
+    // Excluding override: ND withdrawn, ssh still admitted.
+    state.ifindex_host_inbound.insert(
+        IFACE,
+        zone_host_inbound_from_tokens_except(&["ssh".to_string()], &[], &["ndp".to_string()]),
+    );
+    assert!(!host_inbound_admits_iface(&state, IFACE, 7, 58, 0, true, 135));
+    assert!(!host_inbound_admits_iface_for_destination(
+        &state, IFACE, 7, 58, 0, true, 135, "2001:db8::1".parse().unwrap(),
+    ));
+    assert!(host_inbound_admits_iface(&state, IFACE, 7, 6, 22, true, 0), "ssh survives ndp except");
+    // Explicit ndp override: ND admitted (positive token).
+    state.ifindex_host_inbound.insert(
+        IFACE,
+        zone_host_inbound_from_tokens(&[], &["ndp".to_string()]),
+    );
+    assert!(host_inbound_admits_iface(&state, IFACE, 7, 58, 0, true, 135));
+}

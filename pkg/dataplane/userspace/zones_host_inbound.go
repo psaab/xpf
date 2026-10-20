@@ -401,7 +401,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		// fewer duplicate blocks). Shares config.CanonicalHostInboundTokenSig with
 		// the commit gate and the ambiguity reporter so all three agree on what
 		// counts as "the same set".
-		sig := zone + "\x00" + config.CanonicalHostInboundTokenSig(svc, proto)
+		sig := zone + "\x00" + config.CanonicalHostInboundTokenSigExcept(svc, proto, exceptTokensOrNil(except))
 		g := groups[sig]
 		if g == nil {
 			var exc []string
@@ -585,7 +585,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		// arrivals on the parent netdev. #9821 #22: a dotted base remains a base
 		// row, and its collapsing unit owns the shared netdev only once.
 		if snap.IsUnit || nativeUnit.name != "" {
-			claimNetdev(snap.LinuxName, viewZone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
+			claimNetdev(snap.LinuxName, viewZone+"\x00"+config.CanonicalHostInboundTokenSigExcept(svc, proto, except))
 		}
 		g := getGroup(viewZone, svc, proto, policyIface, except)
 		for _, a := range snap.Addresses {
@@ -1867,4 +1867,11 @@ func BuildFenceAddrSets(cfg *config.Config, views []ZoneHostInboundView) FenceAd
 // SAME snapshot so install inputs cannot skew mid-apply.
 func BuildFenceAddrSetsFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot, views []ZoneHostInboundView) FenceAddrSets {
 	return buildFenceAddrSetsFromSnaps(cfg, snaps, views)
+}
+
+func exceptTokensOrNil(except [][]string) []string {
+	if len(except) == 0 {
+		return nil
+	}
+	return except[0]
 }

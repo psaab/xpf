@@ -68,31 +68,74 @@ import (
 // runtime signal. Iteration is fully sorted so the first-reported error is
 // deterministic across runs.
 
-// CanonicalHostInboundTokenSig returns a canonical, order-independent signature
-// of an EFFECTIVE host-inbound admission set (system-services ∪ protocols),
-// lower-cased, trimmed, de-duplicated, and sorted within each list. It is the
-// SSOT for comparing "do these two host-inbound scopes admit the same set" and
-// is shared by the commit-time gate here and the runtime reporter
-// (dataplane/userspace.AmbiguousHostInboundAddresses) so the two paths can never
-// disagree on what counts as a DIFFERING service set. The two lists are joined
-// with a separator that can never appear in a token, so an empty set (Junos
-// default-deny) has a stable distinct signature.
-func CanonicalHostInboundTokenSig(svc, proto []string) string {
+// CanonicalHostInboundTokenSigExcept returns a canonical,
+// order-independent signature of an EFFECTIVE host-inbound admission
+// set: the positive system-service/protocol tokens plus the effective
+// ND-withdrawal bit (#15931). It is the SSOT for comparing "do these
+// two host-inbound scopes admit the same set" and is shared by the
+// commit-time gate here, the view builder grouping, and the runtime
+// reporter (dataplane/userspace.AmbiguousHostInboundAddresses) so the
+// paths can never disagree on what counts as a DIFFERING service set.
+//
+// The third component is intentionally NOT the raw `protocols X
+// except` list: non-ND exclusions are already subtracted from the
+// positive tokens by the compiler (#10292 hostInboundFilterExcept),
+// so alias-equivalent spellings (e.g. `igmp except` vs `dvmrp
+// except`, both proto-2) with identical positives are
+// enforcement-identical and must share a signature (Codex F3/GLM M1).
+// Only the ND default distinguishes otherwise-equal positives: an
+// `ndp except` scope withdraws the default ND admission its
+// positive-equal sibling retains, so exactly that bit (effective:
+// ndp in the except set AND no surviving positive ndp tuple) splits
+// the signature. Lists are joined with a separator that can never
+// appear in a token, so an empty set (Junos default-deny) has a
+// stable distinct signature.
+func CanonicalHostInboundTokenSigExcept(svc, proto, except []string) string {
 	norm := func(in []string) string {
 		seen := make(map[string]bool, len(in))
 		out := make([]string, 0, len(in))
-		for _, t := range in {
-			t = strings.ToLower(strings.TrimSpace(t))
-			if t == "" || seen[t] {
+		for _, tok := range in {
+			tok = strings.ToLower(strings.TrimSpace(tok))
+			if tok == "" || seen[tok] {
 				continue
 			}
-			seen[t] = true
-			out = append(out, t)
+			seen[tok] = true
+			out = append(out, tok)
 		}
 		sort.Strings(out)
 		return strings.Join(out, ",")
 	}
-	return norm(svc) + "\x1f" + norm(proto)
+	nd := "nd-default"
+	if effectiveNDPWithdrawn(proto, except) {
+		nd = "nd-withdrawn"
+	}
+	return norm(svc) + "\x1f" + norm(proto) + "\x1f" + nd
+}
+
+// effectiveNDPWithdrawn reports whether the effective admission set
+// withdraws default ND: `ndp` is in the raw except set and no positive
+// token still admits ND tuples (an explicit surviving `ndp`, or `all`
+// whose expansion includes it, would mean the positive set itself
+// admits ND and the raw except token is stale/alias noise).
+func effectiveNDPWithdrawn(proto, except []string) bool {
+	excluded := false
+	for _, tok := range except {
+		if strings.ToLower(strings.TrimSpace(tok)) == "ndp" {
+			excluded = true
+			break
+		}
+	}
+	if !excluded {
+		return false
+	}
+	for _, tok := range proto {
+		for _, m := range HostInboundProtocolMatch(strings.ToLower(strings.TrimSpace(tok)), "ip6") {
+			if m.Proto == HostInboundProtoICMPv6 && m.ICMPType != nil && *m.ICMPType >= 133 && *m.ICMPType <= 136 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // hostLocalAddrFamily normalizes a "ip/prefix" or bare-IP string to its bare
@@ -261,9 +304,20 @@ func effectiveHostInboundSigLocal(zone *ZoneConfig, ref string, override *HostIn
 		ovProto = override.Protocols
 	}
 	overridden := override != nil
-	return CanonicalHostInboundTokenSig(
+	var zoneExcept, ovExcept []string
+	if zone != nil && zone.HostInboundTraffic != nil {
+		zoneExcept = zone.HostInboundTraffic.ProtocolsExceptTokens()
+	}
+	if override != nil {
+		ovExcept = override.ProtocolsExceptTokens()
+	}
+	except := zoneExcept
+	if overridden {
+		except = ovExcept
+	}
+	return CanonicalHostInboundTokenSigExcept(
 		EffectiveHostInboundTokens(zoneSvc, ovSvc, overridden),
-		EffectiveHostInboundTokens(zoneProto, ovProto, overridden))
+		EffectiveHostInboundTokens(zoneProto, ovProto, overridden), except)
 }
 
 // validateDuplicateHostLocalAddressStrict implements the #3718 Option B

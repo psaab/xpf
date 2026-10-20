@@ -82,8 +82,17 @@ func TestHostInboundNonUnicastIsScopedByIngressZone13925(t *testing.T) {
 	if !hasLine13925(link, `iifname "ge-0-0-0"`, "udp dport 161", "accept") {
 		t.Fatalf("link-scope multicast has no snmp-scoped accept for open-zone:\n%s", payload)
 	}
-	if hasLine13925(link, `iifname "ge-0-0-1"`, "accept") {
-		t.Fatalf("link-scope multicast must not be accepted for closed-zone:\n%s", payload)
+	// #15931 (triple-review B1): the closed zone is an empty-token
+	// default-RETAINING view (no ndp except), so ND types are admitted
+	// on its ingress — but no non-ND service may be.
+	for _, l := range link {
+		if strings.Contains(l, `iifname "ge-0-0-1"`) && strings.Contains(l, "accept") &&
+			!strings.Contains(l, "icmpv6 type { 133, 134, 135, 136 }") {
+			t.Fatalf("link-scope multicast non-ND must not be accepted for closed-zone: %q\n%s", l, payload)
+		}
+	}
+	if !hasLine13925(link, `iifname "ge-0-0-1"`, "icmpv6 type { 133, 134, 135, 136 }", "accept") {
+		t.Fatalf("empty-token retaining zone must admit multicast ND (B1):\n%s", payload)
 	}
 
 	// ff02::1 echo-request stays gated on `ping`: open-zone (ping) admits

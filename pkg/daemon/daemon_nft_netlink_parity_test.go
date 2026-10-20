@@ -1023,6 +1023,11 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		{Zone: "shared-trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.91.1"}, V6Addrs: []string{"fe80::91"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave"}}}, IngressDenyNetdevs: []string{"shared-parent"}},
 		{Zone: "shared-untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.92.1"}, V6Addrs: []string{"2001:db8:92::1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"untrust-slave"}}}},
 		{Zone: "shared-trust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.91.2"}, V6Addrs: []string{"fe80::92"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave-2"}}}},
+		// #15931 Codex3: exact mixed ND config — an any-service RETAINING view
+		// beside an ND-EXCEPT sibling — so scoped/fence ND emission (incl.
+		// fence-mode any-service admits) is parity-proven, not just unit-asserted.
+		{Zone: "ndany", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.17.1"}, V6Addrs: []string{"2001:db8:17::1"}, IngressNetdevs: []string{"ge-0-0-17"}},
+		{Zone: "ndexcept", SystemServices: []string{"ssh"}, Protocols: []string{"ospf"}, ProtocolsExcept: []string{"ndp"}, V4Addrs: []string{"10.0.18.1"}, V6Addrs: []string{"2001:db8:18::1"}, IngressNetdevs: []string{"ge-0-0-18"}},
 	}
 	unzonedV4 = []string{"10.0.99.1"}
 	unzonedV6 = []string{"2001:db8:99::1"}

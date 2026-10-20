@@ -110,7 +110,7 @@ func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 						break
 					}
 				}
-				if firstIngressIdx < 0 && strings.HasPrefix(s, "iifname ") && strings.Contains(l, "daddr") && !strings.Contains(l, `"xpf-usp0"`) && !strings.Contains(l, "ct direction reply") && !isCatalogGroupGuard {
+				if firstIngressIdx < 0 && strings.HasPrefix(s, "iifname ") && strings.Contains(l, "daddr") && !strings.Contains(l, `"xpf-usp0"`) && !strings.Contains(l, "ct direction reply") && !isCatalogGroupGuard && !strings.Contains(l, "icmpv6 type { 133, 134, 135, 136 }") {
 					firstIngressIdx = i
 				}
 			}

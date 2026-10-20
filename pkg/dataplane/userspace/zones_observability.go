@@ -493,7 +493,7 @@ func AmbiguousHostInboundAddresses(cfg *config.Config) []AmbiguousHostInboundAdd
 		a.zones[zone] = true
 	}
 	for _, v := range BuildZoneHostInboundViews(cfg) {
-		sig := config.CanonicalHostInboundTokenSig(v.SystemServices, v.Protocols)
+		sig := config.CanonicalHostInboundTokenSigExcept(v.SystemServices, v.Protocols, v.ProtocolsExcept)
 		for _, a := range v.V4Addrs {
 			record("inet", a, sig, v.Zone)
 		}
