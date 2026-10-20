@@ -91,10 +91,17 @@ default RETH ownership/failover path.
   one lock hold (`armAdvertTimer`/`armMasterDownTimer`/
   `armMasterDownSafetyTimer`/`armPreemptHold` — including the
   forced-resign safety net, whose 3x extension is deliberate but whose
-  input is cfg-derived),
-  while paths that only send (VIP-set announce) never re-baseline — so a
-  revert after an intermediate arm still reads as a change and is
-  corrected. The next failover's
+  input is cfg-derived). Two #15927 qualifications keep that truthful:
+  the preempt-hold arm notes `oldHoldSec := <the snapshot it armed at>`
+  unconditionally (a revert landing between snapshot and arm must still
+  read as a change, not net to the pre-batch value), and an arm notes
+  only the fields its duration consumed — the interval, never the
+  priority, which is baselined only by a send that actually carried it
+  (`noteAdvertPriority`) — so a priority-only commit landing during a
+  sendAdvert keeps its delta for the consumer's correction advert,
+  while paths that only send (VIP-set announce) never re-baseline the
+  interval — so a revert after an intermediate arm still reads as a
+  change and is corrected. The next failover's
   `sendGARP` re-reads `cfg.GARPCount`. Before #5087 the stale value
   persisted until an unrelated restart.
   **Ifindex drift (#2294):** before the no-change / in-place branch, a

@@ -302,14 +302,24 @@ func (vi *vrrpInstance) heldMasterIsStale() bool {
 func (vi *vrrpInstance) armPreemptHold(masterDownTimer, preemptHoldTimer *time.Timer, hold time.Duration) {
 	// `hold` is the caller's cfg snapshot (preemptHoldDuration); the
 	// arm and the pending-record baseline must use THAT value, never a
-	// re-read: a manager commit between the snapshot and this call has
-	// already advanced pending newHoldSec past snapSec, and baselining
-	// to the newer cfg would record a 60s arm over a timer actually
-	// armed at the 1s snapshot, letting the config consumer preserve
-	// the stale 1s hold (Codex2). So: snapshot+Reset+note under ONE
-	// vi.mu hold, and note ONLY when the pending record's newest hold
-	// still equals the snapshot (no commit interleaved); otherwise the
-	// record already encodes the mismatch and the consumer disarms.
+	// re-read. Snapshot+Reset+note under ONE vi.mu hold, and note the
+	// hold baseline UNCONDITIONALLY (#15927): oldHoldSec := snapSec
+	// is by definition the value the hold timer was just armed under,
+	// so it stays truthful in every interleaving. Conditioning the
+	// note on newHoldSec == snapSec broke the accumulated
+	// in-window-revert case (commit 60->1, timer fires, snapshot 1s,
+	// revert 1->60 lands before this arm): the record had accumulated
+	// to 60->60, the conditional note skipped, and the consumer
+	// preserved the 1s hold (~59s-early takeover). With the
+	// unconditional note that record reads 1->60 — a change — and the
+	// consumer disarms. The equality case is identical, and the
+	// fresh-record in-window-commit case (newHoldSec=60 != snapSec=1)
+	// also reads 1->60, so it disarms too.
+	//
+	// The advert side is baselined the same way (armIntervalAppliedLocked):
+	// the watchdog below is armed from the locked cfg read in this
+	// same hold, so its interval IS applied; priority is NOT noted
+	// (no advert is sent here).
 	snapSec := int(hold / time.Second)
 	stopAndDrainTimer(preemptHoldTimer)
 	stopAndDrainTimer(masterDownTimer)
@@ -326,9 +336,9 @@ func (vi *vrrpInstance) armPreemptHold(masterDownTimer, preemptHoldTimer *time.T
 		}
 	}
 	masterDownTimer.Reset(3*advert + time.Duration(256-p)*advert/256)
-	if vi.pendingConfigChange.valid && vi.pendingConfigChange.newHoldSec == snapSec {
-		vi.noteHoldBaselineLocked()
-		vi.noteAdvertBaselineLocked()
+	if vi.pendingConfigChange.valid {
+		vi.pendingConfigChange.oldHoldSec = snapSec
+		vi.armIntervalAppliedLocked()
 	}
 	vi.preemptHoldArmed = true
 	vi.preemptHoldArmedAt = time.Now()
