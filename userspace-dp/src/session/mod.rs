@@ -784,8 +784,13 @@ impl SessionEntry {
                 // malformed option cannot overflow the scaled window.
                 self.tcp_window_scale = Some(scale.min(14));
             }
+            self.tcp_syn_seen = true;
         }
-        let shift = if has_syn(tcp_flags) {
+        // RFC 7323: scaling applies only after WSOPT is seen on SYNs in
+        // BOTH directions. tcp_ws_negotiated is set by the table when it
+        // notes/seeds a SYN whose companion has already offered WSOPT;
+        // until then the offered shift is retained but not applied.
+        let shift = if has_syn(tcp_flags) || !self.tcp_ws_negotiated {
             0
         } else {
             self.tcp_window_scale.unwrap_or(0)
@@ -1357,6 +1362,12 @@ struct SessionEntry {
     /// raw u16 header value, so every `maximum-window` above 64K was a
     /// no-op and scaled windows were understated by the shift.
     tcp_window_scale: Option<u8>,
+    /// True once this entry has observed a SYN in its own direction, so
+    /// negotiation state can be distinguished from a mid-stream pickup.
+    tcp_syn_seen: bool,
+    /// True only when BOTH directions offered WSOPT (RFC 7323 requires
+    /// bilateral negotiation before either window field is scaled).
+    tcp_ws_negotiated: bool,
 }
 
 /// Snapshot of one live half after a policy rebind. The worker uses this
@@ -1726,7 +1737,7 @@ pub(crate) struct SessionTable {
     deltas: VecDeque<SessionDelta>,
     /// HA transition withheld by a deferring flow-cache probe until the
     /// packet survives output-filter/policer admission.
-    pending_probe_state_update: Option<(SessionKey, u8, u8)>,
+    pending_probe_state_updates: Vec<(SessionKey, u8, u8)>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2081,7 +2092,7 @@ impl SessionTable {
             owner_rg_sessions: FxHashMap::default(),
             demoted_owner_rgs: FxHashSet::default(),
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
-            pending_probe_state_update: None,
+            pending_probe_state_updates: Vec::new(),
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
             reserved_session_slots: 0,
@@ -3613,14 +3624,20 @@ impl SessionTable {
         // it belongs to this key; a mismatching admission leaves it for
         // its own retransmitted/admitted completing packet.
         let pending_matches = self
-            .pending_probe_state_update
-            .as_ref()
-            .is_some_and(|(matched_key, _, _)| matched_key == key);
-        if pending_matches
-            && let Some((matched_key, class_before, handshake_before)) =
-                self.pending_probe_state_update.take()
-        {
-            self.emit_session_state_update(&matched_key, class_before, handshake_before);
+            .pending_probe_state_updates
+            .iter()
+            .any(|(matched_key, _, _)| matched_key == key);
+        if pending_matches {
+            let pending = std::mem::take(&mut self.pending_probe_state_updates);
+            let mut retained = Vec::with_capacity(pending.len());
+            for (matched_key, class_before, handshake_before) in pending {
+                if matched_key == *key {
+                    self.emit_session_state_update(&matched_key, class_before, handshake_before);
+                } else {
+                    retained.push((matched_key, class_before, handshake_before));
+                }
+            }
+            self.pending_probe_state_updates = retained;
         }
     }
 
@@ -3733,19 +3750,21 @@ impl SessionTable {
                     handshake_state_before,
                 );
             } else {
-                // Never silently overwrite another flow's deferred
-                // transition. Publish the older pending completion inline
-                // before replacing the slot; this is unreachable in the
-                // normal one-completing-packet-at-a-time cache path, but
-                // losing an HA Update permanently is the worse failure.
-                if let Some((old_key, old_class, old_handshake)) =
-                    self.pending_probe_state_update.take()
-                    && old_key != matched_key
-                {
-                    self.emit_session_state_update(&old_key, old_class, old_handshake);
+                // Deferred completions are retained per key: a second
+                // completing flow must neither publish nor discard an
+                // older flow's unadmitted transition. Bound the queue so a
+                // sustained dropped-ACK stream cannot grow it without
+                // limit; 64 covers a full poll batch of completions.
+                self.pending_probe_state_updates
+                    .retain(|(old_key, _, _)| old_key != &matched_key);
+                if self.pending_probe_state_updates.len() >= 64 {
+                    self.pending_probe_state_updates.remove(0);
                 }
-                self.pending_probe_state_update =
-                    Some((matched_key.clone(), close_class_before, handshake_state_before));
+                self.pending_probe_state_updates.push((
+                    matched_key.clone(),
+                    close_class_before,
+                    handshake_state_before,
+                ));
             }
             self.push_to_wheel(&matched_key, now_ns);
         } else if let Some(canonical_key) = canonical_refresh_key {

@@ -89,6 +89,10 @@ fn seed_tcp_window_scale_from_initial_syn_15947() {
         table.entry_by_key(&forward).unwrap().tcp_window_scale,
         Some(7)
     );
+    // Bilateral offer is required before the seed drives scaling; this
+    // seed-only cell records the offer and its later unscaled behaviour
+    // is covered by unilateral_wsopt_not_applied_15947.
+    assert!(!table.entry_by_key(&forward).unwrap().tcp_ws_negotiated);
     table.note_tcp_seq_scaled(
         &forward,
         1001,
@@ -101,7 +105,27 @@ fn seed_tcp_window_scale_from_initial_syn_15947() {
     );
     assert_eq!(
         table.entry_by_key(&forward).unwrap().tcp_rcv_wnd,
-        256 * 1024,
-        "seeded scale applies to later notes and exceeds the old 64K ceiling"
+        8192,
+        "unilateral seed must not scale later windows"
     );
+}
+
+#[test]
+fn unilateral_wsopt_not_applied_15947() {
+    // RFC 7323 requires both SYNs to offer WSOPT. One-sided offer keeps
+    // later windows unscaled; both-sided offer scales to the cap.
+    let build = |both: bool| {
+        let forward = key_v4();
+        let mut table = SessionTable::new();
+        let t0 = 10_000_000_000u64;
+        let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+        table.seed_tcp_window_scale(&forward, Some(7));
+        if both {
+            table.seed_tcp_window_scale(&reverse, Some(7));
+        }
+        table.note_tcp_seq(&forward, 1001, 0, 8192, 0, TCP_ACK, 256 * 1024);
+        table.entry_by_key(&forward).unwrap().tcp_rcv_wnd
+    };
+    assert_eq!(build(false), 8192, "unilateral WSOPT must not scale");
+    assert_eq!(build(true), 256 * 1024, "bilateral WSOPT scales to cap");
 }

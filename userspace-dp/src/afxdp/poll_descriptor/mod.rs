@@ -323,6 +323,7 @@ pub(super) fn syn_cookie_reply_admitted(
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
     sessions: &SessionTable,
     flow: Option<&SessionFlow>,
+    packet_frame: &[u8],
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
     now_ns: u64,
@@ -343,10 +344,26 @@ pub(super) fn syn_cookie_reply_admitted(
         crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, flow.dst_ip)
             .resolution,
     );
+    if resolution.disposition == ForwardingDisposition::LocalDelivery {
+        // Round-3/narrow fold: the challenge SYN-ACK itself must pass
+        // the same host gates as the validated ACK. The raw destination
+        // is the only tuple available on this pre-translation arm, so
+        // this checks host-inbound/lo0 + junos-host on it; translated
+        // host destinations are governed again at final admission.
+        return syn_cookie_host_admission(
+            forwarding,
+            flow,
+            packet_frame,
+            meta,
+            ingress_zone_override,
+            flow.dst_ip,
+            flow.forward_key.dst_port,
+            now_ns,
+        );
+    }
     if !matches!(
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate
-            | ForwardingDisposition::LocalDelivery
             | ForwardingDisposition::MissingNeighbor
             | ForwardingDisposition::FabricRedirect
     ) {
@@ -1600,6 +1617,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.ha_state,
                                 sessions,
                                 flow.as_ref(),
+                                packet_frame,
                                 meta,
                                 ingress_zone_override,
                                 now_ns,

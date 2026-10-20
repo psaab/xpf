@@ -337,6 +337,40 @@ fn deferred_probe_update_survives_intervening_flow_15947() {
     assert_eq!(updates[0].key, forward);
 }
 
+#[test]
+fn deferred_probe_updates_two_completing_flows_retained_15947() {
+    // Two distinct completing flows: B's deferred completion must not
+    // publish or discard A's still-unadmitted Update. Emitting B first
+    // publishes only B; emitting A later publishes exactly one A.
+    let build_pair = |src_port: u16| {
+        let mut table = SessionTable::new();
+        let forward = SessionKey { src_port, ..key_v4() };
+        let now = 1_000_000_000u64;
+        let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+        assert!(table.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+        let _ = table.drain_deltas(16);
+        (table, forward, now)
+    };
+    // This cell uses one table with A installed, then drives B through a
+    // second pair installed in the same table via a distinct tuple.
+    let (mut table, a_forward, now) = build_pair(12345);
+    let b_forward = SessionKey { src_port: 23456, ..key_v4() };
+    let b_reverse = install_forward_reverse_pair(&mut table, &b_forward, now, TCP_SYN);
+    assert!(table.lookup_with_origin(&b_reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    let _ = table.drain_deltas(32);
+    assert!(table.probe_hit_deferring_state_update(&a_forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    assert!(table.probe_hit_deferring_state_update(&b_forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    assert!(table.drain_deltas(32).iter().all(|d| d.kind != SessionDeltaKind::Update), "neither deferred completion may publish before admission");
+    table.emit_probe_hit_state_update(&b_forward);
+    let b_updates: Vec<_> = table.drain_deltas(32).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(b_updates.len(), 1);
+    assert_eq!(b_updates[0].key, b_forward);
+    table.emit_probe_hit_state_update(&a_forward);
+    let a_updates: Vec<_> = table.drain_deltas(32).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(a_updates.len(), 1);
+    assert_eq!(a_updates[0].key, a_forward);
+}
+
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with
 /// payload progress re-stamps, matching the unfused keepalive.

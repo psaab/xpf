@@ -779,3 +779,57 @@ fn syn_cookie_final_admission_uses_translated_tuple_15947() {
         ));
     }
 }
+
+#[test]
+fn syn_cookie_host_admission_three_arm_15947() {
+    // Accept: fixture zones carry any-service host-inbound and no lo0
+    // reject for TCP/443, so a local service is admissible.
+    let fw_accept = forwarding(false);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: LAN_A as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let mut frame = vec![0u8; 54];
+    frame[14] = 0x45;
+    assert!(super::syn_cookie_host_admission(
+        &fw_accept, &flow, &frame, meta, None, flow.dst_ip, 443, 1_000,
+    ), "host accept arm");
+
+    // Host-inbound deny: remove any-service from lan by using a zone set
+    // with no admitted TCP/443 service. The helper must fail closed.
+    let mut denied = forwarding(false);
+    denied.zone_host_inbound.insert(TEST_LAN_ZONE_ID, Default::default());
+    assert!(!super::syn_cookie_host_admission(
+        &denied, &flow, &frame, meta, None, flow.dst_ip, 443, 1_000,
+    ), "host-inbound deny arm");
+
+    // Lo0 deny: compile a protect-re reject for TCP/443 while keeping
+    // host-inbound permissive; the lo0 verdict must suppress the reply.
+    let mut lo0_denied = forwarding(false);
+    lo0_denied.filter_state = crate::filter::parse_filter_state(
+        &[crate::FirewallFilterSnapshot {
+            name: "protect-re".into(),
+            family: "inet".into(),
+            terms: vec![crate::FirewallTermSnapshot {
+                name: "deny-web".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["443".into()],
+                action: "reject".into(),
+                ..Default::default()
+            }],
+        }],
+        &[],
+        &[],
+        "protect-re",
+        "",
+    ).expect("lo0 filter compiles");
+    assert!(!super::syn_cookie_host_admission(
+        &lo0_denied, &flow, &frame, meta, None, flow.dst_ip, 443, 1_000,
+    ), "lo0 deny arm");
+}

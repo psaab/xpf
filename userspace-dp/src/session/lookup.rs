@@ -30,6 +30,13 @@ impl SessionTable {
     }
     /// #15947 (H29-02): note with the WSOPT scale parsed from a SYN.
     pub fn note_tcp_seq_scaled(&mut self, key: &SessionKey, seq: u32, ack: u32, window: u16, window_scale: Option<u8>, payload_len: u32, tcp_flags: u8, max_window: u32) {
+        // Bilateral negotiation: when a SYN carrying WSOPT is noted and
+        // the companion entry already offered WSOPT on its SYN, both
+        // directions become negotiated before either later window scales.
+        let is_syn = crate::tcp_flags::has_syn(tcp_flags);
+        if is_syn && window_scale.is_some() {
+            self.seed_tcp_window_scale(key, window_scale);
+        }
         if let Some(entry) = self.entry_by_key_mut(key) {
             entry.note_tcp_seq_scaled(seq, ack, window, window_scale, payload_len, tcp_flags, max_window);
         }
@@ -41,11 +48,28 @@ impl SessionTable {
     /// this immediately after that install makes the first SYN's WSOPT —
     /// not merely a later hit packet — establish the entry's scale, while
     /// leaving sequence/window state untouched until real segments arrive.
+    /// It also records bilateral negotiation when the companion already
+    /// offered WSOPT, so the shift is never applied unilaterally.
     pub fn seed_tcp_window_scale(&mut self, key: &SessionKey, window_scale: Option<u8>) {
-        if let Some(scale) = window_scale
-            && let Some(entry) = self.entry_by_key_mut(key)
-        {
+        let Some(scale) = window_scale else { return };
+        let nat = self.entry_by_key(key).map(|entry| entry.decision.nat);
+        if let Some(entry) = self.entry_by_key_mut(key) {
             entry.tcp_window_scale = Some(scale.min(14));
+            entry.tcp_syn_seen = true;
+        }
+        if let Some(nat) = nat {
+            let companion_key = reverse_session_key(key, nat);
+            let companion_offered = self
+                .entry_by_key(&companion_key)
+                .is_some_and(|entry| entry.tcp_syn_seen && entry.tcp_window_scale.is_some());
+            if companion_offered {
+                if let Some(entry) = self.entry_by_key_mut(key) {
+                    entry.tcp_ws_negotiated = true;
+                }
+                if let Some(entry) = self.entry_by_key_mut(&companion_key) {
+                    entry.tcp_ws_negotiated = true;
+                }
+            }
         }
     }
     /// Validate RST/FIN seq against the RECEIVER's advertised window.
