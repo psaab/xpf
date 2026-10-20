@@ -2367,6 +2367,124 @@ fn split_rg_cluster_terminal_punt_redirects_15742() {
     );
 }
 
+/// #15742h fail-on-revert: TCP punt on the EXACT live split snapshot
+/// (fw1: RG2 local / RG1 peer, no forwarding default, only the marked
+/// cluster discard) must leave a FabricPuntSeed, and the peer's SYN-ACK
+/// return stamped `wan` must then forward. Pre-fix the seed arm read
+/// owner/zone off the cluster-terminal's zeroed egress (RG 0, zone 0),
+/// so `fabric_punt_seed_metadata` refused and no seed was minted —
+/// live fw1 held only HA-synced sessions with forward In Pkts=0 while
+/// the return counted Out Pkts=3 and died session-less. The TCP form
+/// is the seed-binding shape (ICMP echo is flowless and never seeds).
+#[test]
+fn split_rg_live_snapshot_tcp_punt_seeds_and_return_forwards_15742h() {
+    let raw = include_str!("testdata_15742h/snap-split-fw1.json");
+    let v: serde_json::Value = serde_json::from_str(raw).expect("json");
+    let snapshot: crate::ConfigSnapshot =
+        serde_json::from_value(v["snapshot"].clone()).expect("decode fw1 snapshot");
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Split: LAN RG2 local, WAN RG1 peer-owned.
+    let ha_state = BTreeMap::from([(1, inactive_rg(now_secs)), (2, active_rg(now_secs))]);
+    let lan_mac = [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03];
+    let mut sessions = SessionTable::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 5, 0);
+    binding.interface = Arc::<str>::from("ge-7-0-1");
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(172, 16, 80, 200),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        lan_mac,
+    );
+    let mut meta = txn_meta_v4(5, TCP_FLAG_SYN, syn.len() as u16);
+    meta.flow_src_addr = [10, 0, 61, 102, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    meta.flow_dst_addr = [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    meta.flow_src_port = 12345;
+    meta.flow_dst_port = 443;
+    let (_batch, dbg) = txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &syn, meta);
+    assert_eq!(dbg.policy_deny, 0, "punt must not be denied");
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "split-RG TCP flow must leave across the fabric"
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards[0]
+            .decision
+            .resolution
+            .disposition,
+        ForwardingDisposition::FabricRedirect,
+        "split-RG TCP flow must fabric-redirect"
+    );
+    let shapes = session_shapes_7770(&sessions);
+    assert_eq!(
+        shapes.len(),
+        1,
+        "punt must leave exactly one FabricPuntSeed, got {shapes:?}"
+    );
+    assert_eq!(shapes[0].0, SessionOrigin::FabricPuntSeed, "seed origin: {shapes:?}");
+    assert_eq!(shapes[0].2, 21230, "seed ingress zone must be lan: {shapes:?}");
+    assert_eq!(shapes[0].3, 13098, "seed egress zone must be wan (via source_ifindex): {shapes:?}");
+
+    // ICMP echo (flowless) on the same live snapshot must also leave
+    // across the fabric — this is the gate's actual probe shape.
+    {
+        let mut bsess = SessionTable::new();
+        let mut bb = BindingWorker::new_for_mirror_test(0, 0, 5, 0);
+        bb.interface = Arc::<str>::from("ge-7-0-1");
+        let echo = build_icmp_echo_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(172, 16, 80, 200),
+            64,
+            lan_mac,
+        );
+        let mut emeta = txn_meta_v4(5, 0, echo.len() as u16);
+        emeta.protocol = PROTO_ICMP;
+        emeta.payload_offset = 42;
+        let (_eb, edbg) = txn_run_descriptor(&mut bb, &mut bsess, &forwarding, &ha_state, &echo, emeta);
+        assert_eq!(edbg.policy_deny, 0, "ICMP punt must not be denied");
+        assert_eq!(
+            bb.scratch.scratch_forwards.len(),
+            1,
+            "split-RG ICMP echo must leave across the fabric"
+        );
+        assert_eq!(
+            bb.scratch.scratch_forwards[0]
+                .decision
+                .resolution
+                .disposition,
+            ForwardingDisposition::FabricRedirect,
+            "split-RG ICMP echo must fabric-redirect"
+        );
+    }
+
+    // Return: SYN-ACK off the fabric stamped `wan`, dst = LAN host.
+    let mut ret = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(10, 0, 61, 102),
+        443,
+        12345,
+        TCP_FLAG_SYN | TCP_FLAG_ACK,
+        [0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60],
+    );
+    let [whi, wlo] = 13098u16.to_be_bytes();
+    ret[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, whi, wlo]);
+    let mut rmeta = txn_meta_v4(4, TCP_FLAG_SYN | TCP_FLAG_ACK, ret.len() as u16);
+    rmeta.protocol = PROTO_TCP;
+    let mut rbinding = BindingWorker::new_for_mirror_test(0, 0, 4, 0);
+    rbinding.interface = Arc::<str>::from("ge-7-0-0");
+    let (_rbatch, rdbg) =
+        txn_run_descriptor(&mut rbinding, &mut sessions, &forwarding, &ha_state, &ret, rmeta);
+    assert_eq!(rdbg.policy_deny, 0, "seeded return must not be policy-denied");
+    assert_eq!(
+        rbinding.scratch.scratch_forwards.len(),
+        1,
+        "seeded return must forward to the LAN host"
+    );
+}
+
 fn inactive_rg(now_secs: u64) -> HAGroupRuntime {
     HAGroupRuntime {
         active: false,
