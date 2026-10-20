@@ -5266,8 +5266,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // allocation-failure shape yields no candidate
                             // and suppresses the reply (the real path drops
                             // there). L2 group-unicast stays a hard gate.
-                            let candidate_nat =
-                                nat_exception::candidate_source_nat_for_challenge(
+                            let candidate_nats =
+                                nat_exception::candidate_source_nats_for_challenge(
                                     worker_ctx.forwarding,
                                     meta.ingress_ifindex as i32,
                                     meta.ingress_vlan_id,
@@ -5282,21 +5282,31 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     nat64_match,
                                     policy_packet_icmp(packet_frame, meta),
                                 );
+                            // Fence over EVERY candidate: suppress if the
+                            // untranslated tuple or ANY candidate source
+                            // translation (incl. pre-routing DNAT dst)
+                            // matches a selector. Empty candidate list =
+                            // no source translation, fence sees base only.
+                            let fence_candidates: Vec<NatDecision> =
+                                match &candidate_nats {
+                                    Some(list) if !list.is_empty() => list.clone(),
+                                    _ => vec![decision.nat],
+                                };
                             let fence_dropped = (l2_group_unicast_ip
                                 && owned_packet_frame.is_none())
-                                || candidate_nat.is_some_and(|candidate| {
-                                    ForwardPacketMeta::from(meta)
-                                        .l3_addrs_unfiltered()
-                                        .is_some_and(|(source, destination)| {
+                                || ForwardPacketMeta::from(meta)
+                                    .l3_addrs_unfiltered()
+                                    .is_some_and(|(source, destination)| {
+                                        fence_candidates.iter().any(|candidate| {
                                             worker_ctx
                                                 .forwarding
                                                 .bindless_ipsec_selector_fence
                                                 .matches_with_nat(
-                                                    source, destination, candidate,
+                                                    source, destination, *candidate,
                                                 )
                                         })
-                                });
-                            let admitted = candidate_nat.is_some()
+                                    });
+                            let admitted = candidate_nats.is_some()
                                 && !fence_dropped
                                 && if decision.resolution.disposition
                                     == ForwardingDisposition::LocalDelivery

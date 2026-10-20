@@ -13867,6 +13867,67 @@ fn post_snat_fence_suppresses_cookie_challenge_15947() {
     assert_eq!(sessions.len(), 0, "fenced SYNs must not install sessions");
 }
 #[test]
+fn post_snat_fence_second_pool_address_suppresses_cookie_challenge_15947() {
+    // Fence-all-addresses: pool has TWO addresses; the selector matches
+    // only the SECOND (203.0.113.11). Round-robin choice is allocator
+    // state — the challenge must be suppressed if ANY pool address
+    // matches, not just the first candidate. Same shape as the
+    // one-address fence cell, threshold-crossing tuple asserted.
+    let (forwarding, mut screen) = {
+        let forwarding = build_forwarding_state(&{
+            let mut snapshot = nat_snapshot();
+            snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+                name: "two-addr-pool".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_addresses: vec![
+                    "203.0.113.10".to_string(),
+                    "203.0.113.11".to_string(),
+                ],
+                port_low: 5000,
+                port_high: 5001,
+                ..Default::default()
+            }];
+            snapshot.bindless_selector_fence_enabled = true;
+            snapshot.bindless_selector_rows = vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+                local_ts: "9.9.9.0/24".to_string(),
+                remote_ts: "203.0.113.11/32".to_string(),
+            }];
+            snapshot
+        });
+        let mut profiles = FxHashMap::default();
+        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        let mut screen = ScreenState::new();
+        screen.update_profiles(profiles);
+        screen.update_syn_cookie_master_key(Some([0x42; 16]));
+        (forwarding, screen)
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let src = Ipv4Addr::new(10, 0, 61, 103);
+    let dst = Ipv4Addr::new(9, 9, 9, 9);
+    for (idx, port) in [49180u16, 49181].iter().enumerate() {
+        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
+        m.flow_src_addr[..4].copy_from_slice(&src.octets());
+        m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+        m.flow_src_port = *port;
+        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, m, &mut screen);
+        if idx == 1 {
+            assert_eq!(batch.syn_cookie_challenges, 1, "threshold-crossing tuple must trigger a challenge");
+        }
+        assert_eq!(batch.syn_cookie_syn_ack_sent, 0, "second-address fence SYN {idx} must not receive a SYN-ACK");
+        assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    }
+    assert_eq!(sessions.len(), 2, "first (unchallenged) SYN installs forward+reverse; challenged SYN installs none");
+    let snap = forwarding.source_nat_rules[0].pool_allocator.snapshot();
+    assert_eq!(snap.used_ports, 1, "only the first real flow holds a pool port; challenged SYN minted none");
+    assert_eq!(snap.allocations_total, 1);
+}
+
+#[test]
 fn pbr_discard_is_applied_before_screen_sketches_11332() {
     let denied_source = Ipv4Addr::new(203, 0, 113, 11);
     let mut term = g9528_term("discard", "scrub");
@@ -13935,19 +13996,36 @@ fn unfenced_challenge_does_not_retain_snat_allocation_15947() {
         m.flow_src_port = port;
         txn_run_descriptor_with_screen_state(binding, sessions, &forwarding, &txn_ha_state(), &frame, m, screen).0
     };
+    let pool_snapshot = |forwarding: &ForwardingState| {
+        forwarding.source_nat_rules[0].pool_allocator.snapshot()
+    };
     let a = send(&mut binding, &mut sessions, &mut screen, 49170);
     assert_eq!(a.syn_cookie_challenges, 0);
     assert_eq!(sessions.len(), 2, "normal SYN A installs forward+reverse");
+    let after_a = pool_snapshot(&forwarding);
+    assert_eq!(after_a.used_ports, 1, "A holds exactly one pool port");
+    assert_eq!(after_a.live_flows, 1);
     binding.tx_pipeline.pending_tx_local.clear();
     let b = send(&mut binding, &mut sessions, &mut screen, 49171);
     assert_eq!(b.syn_cookie_challenges, 1);
     assert_eq!(b.syn_cookie_syn_ack_sent, 1, "unfenced challenged SYN B gets its SYN-ACK");
     assert_eq!(sessions.len(), 2, "challenged SYN B installs no session");
+    // Direct allocator-state oracle (not inferred from C's reply): B's
+    // challenge changed NO pool state — used ports, live flows,
+    // persistent leases, and allocation count are exactly A's.
+    let after_b = pool_snapshot(&forwarding);
+    assert_eq!(after_b.used_ports, after_a.used_ports, "B retained no pool port");
+    assert_eq!(after_b.live_flows, after_a.live_flows, "B retained no live flow");
+    assert_eq!(after_b.persistent_leases, after_a.persistent_leases, "B retained no lease");
+    assert_eq!(after_b.allocations_total, after_a.allocations_total, "B minted no allocation");
     binding.tx_pipeline.pending_tx_local.clear();
     let c = send(&mut binding, &mut sessions, &mut screen, 49172);
     assert_eq!(c.syn_cookie_challenges, 1);
     assert_eq!(c.syn_cookie_syn_ack_sent, 1, "challenged SYN C must still reply: B retained no pool identity");
     assert_eq!(sessions.len(), 2, "challenged SYN C installs no session");
+    let after_c = pool_snapshot(&forwarding);
+    assert_eq!(after_c.used_ports, after_a.used_ports, "C retained no pool port either");
+    assert_eq!(after_c.allocations_total, after_a.allocations_total);
 }
 
 #[test]

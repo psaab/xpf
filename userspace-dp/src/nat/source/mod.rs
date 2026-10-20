@@ -1416,19 +1416,19 @@ pub(crate) fn source_nat_tuple_translation_possible(
     false
 }
 
-/// Predicate-only source-NAT candidate for the SYN-cookie challenge fence
-/// check (#15947 predicate-only rework). Returns the SOURCE translation the
-/// first matching translating rule would apply, without minting any pool,
-/// interface, or persistent state and without advancing round-robin or
-/// sticky selection. The returned `rewrite_src_port` is always `None`:
-/// PAT/deterministic ports are allocation-dependent, and the selector fence
-/// consumes only address rewrites. A matched `off` rule wins (no
-/// translation); a poisoned rule fails closed as a translation candidate.
-/// `Err` mirrors an allocation-failure shape the real path would drop on
-/// (for example pool-mode on a non-first fragment, or interface SNAT with
-/// no same-family egress address).
+/// Predicate-only source-NAT candidates for the SYN-cookie challenge fence
+/// check (#15947 predicate-only rework, fence-all-addresses). Returns EVERY
+/// source address the first matching translating rule could apply, without
+/// minting any pool, interface, or persistent state and without advancing
+/// round-robin or sticky selection. Pool rules contribute their whole
+/// same-family pool (round-robin/sticky choice is allocator state the
+/// fence must not guess: a selector matching ANY pool address suppresses
+/// the challenge); deterministic rules contribute their exact subscriber
+/// address; interface rules their egress address. A matched `off` rule
+/// wins (empty candidates = no translation); a poisoned rule fails closed.
+/// `Err` mirrors an allocation-failure shape the real path would drop on.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn candidate_source_nat_translation(
+pub(crate) fn candidate_source_nat_translations(
     rules: &[SourceNatRule],
     scope: &NatScopeCtx<'_>,
     from_zone: &str,
@@ -1441,7 +1441,7 @@ pub(crate) fn candidate_source_nat_translation(
     packet_icmp: Option<(u8, u8)>,
     egress_v4: Option<Ipv4Addr>,
     egress_v6: Option<Ipv6Addr>,
-) -> Result<NatDecision, SourceNatFailure> {
+) -> Result<Vec<NatDecision>, SourceNatFailure> {
     for rule in rules {
         if rule.matches(
             scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, src_port, dst_port,
@@ -1457,7 +1457,7 @@ pub(crate) fn candidate_source_nat_translation(
             ));
         }
         if rule.off {
-            return Ok(NatDecision::default());
+            return Ok(Vec::new());
         }
         if rule.interface_mode {
             let rewrite_src = match src_ip {
@@ -1465,10 +1465,10 @@ pub(crate) fn candidate_source_nat_translation(
                 IpAddr::V6(_) => egress_v6.map(IpAddr::V6),
             };
             return match rewrite_src {
-                Some(rewrite_src) => Ok(NatDecision {
+                Some(rewrite_src) => Ok(vec![NatDecision {
                     rewrite_src: Some(rewrite_src),
                     ..NatDecision::default()
-                }),
+                }]),
                 None => Err(SourceNatFailure::for_rule(
                     rule,
                     SourceNatFailureReason::InterfaceNoEgressAddress,
@@ -1479,7 +1479,7 @@ pub(crate) fn candidate_source_nat_translation(
             if let Some(reason) = rule.pool_failure {
                 return Err(SourceNatFailure::for_rule(rule, reason));
             }
-            let rewrite_src = match src_ip {
+            let candidates: Vec<NatDecision> = match src_ip {
                 IpAddr::V4(src_v4) => {
                     if rule.pool_addresses_v4.is_empty() {
                         return Err(SourceNatFailure::for_rule(
@@ -1502,12 +1502,21 @@ pub(crate) fn candidate_source_nat_translation(
                                 SourceNatFailureReason::AllocatorExhausted,
                             ));
                         };
-                        IpAddr::V4(*addr)
-                    } else if rule.address_persistent {
-                        let idx = crate::nat::sticky_pool_index(src_ip, rule.pool_addresses_v4.len());
-                        IpAddr::V4(rule.pool_addresses_v4[idx])
+                        vec![NatDecision {
+                            rewrite_src: Some(IpAddr::V4(*addr)),
+                            ..NatDecision::default()
+                        }]
                     } else {
-                        IpAddr::V4(rule.pool_addresses_v4[0])
+                        // Every pool address: round-robin/sticky choice is
+                        // allocator state; the fence must suppress if ANY
+                        // candidate address matches a selector.
+                        rule.pool_addresses_v4
+                            .iter()
+                            .map(|addr| NatDecision {
+                                rewrite_src: Some(IpAddr::V4(*addr)),
+                                ..NatDecision::default()
+                            })
+                            .collect()
                     }
                 }
                 IpAddr::V6(_) => {
@@ -1517,21 +1526,19 @@ pub(crate) fn candidate_source_nat_translation(
                             SourceNatFailureReason::WrongAddressFamily,
                         ));
                     }
-                    if rule.address_persistent {
-                        let idx = crate::nat::sticky_pool_index(src_ip, rule.pool_addresses_v6.len());
-                        IpAddr::V6(rule.pool_addresses_v6[idx])
-                    } else {
-                        IpAddr::V6(rule.pool_addresses_v6[0])
-                    }
+                    rule.pool_addresses_v6
+                        .iter()
+                        .map(|addr| NatDecision {
+                            rewrite_src: Some(IpAddr::V6(*addr)),
+                            ..NatDecision::default()
+                        })
+                        .collect()
                 }
             };
-            return Ok(NatDecision {
-                rewrite_src: Some(rewrite_src),
-                ..NatDecision::default()
-            });
+            return Ok(candidates);
         }
     }
-    Ok(NatDecision::default())
+    Ok(Vec::new())
 }
 
 /// Whether the translation already carried by an established flow remains

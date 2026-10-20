@@ -326,7 +326,7 @@ pub(crate) use source::{
 // Untracked, so they ride the same gate — a production caller would silently
 // mint single-holder allocations.
 pub(crate) use source::retire_worker_from_pool_rules;
-pub(crate) use source::{candidate_source_nat_translation, source_nat_translation_matches, source_nat_tuple_translation_possible};
+pub(crate) use source::{candidate_source_nat_translations, source_nat_translation_matches, source_nat_tuple_translation_possible};
 #[cfg(test)]
 pub(crate) use source::{
     match_source_nat, match_source_nat_result, release_source_nat_allocation,

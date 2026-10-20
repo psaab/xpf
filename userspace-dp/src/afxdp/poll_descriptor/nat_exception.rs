@@ -234,18 +234,20 @@ pub(super) fn source_nat_would_translate_flowless(
     }
 }
 
-/// Predicate-only source-NAT candidate for the SYN-cookie challenge path
-/// (#15947 predicate-only rework). Mirrors the allocating miss path's
-/// composition order without minting state: NAT64 (address candidate from
-/// the matched prefix's pool; no port), else NPTv6 outbound, else static
-/// SNAT, else the first matching source-NAT rule. The base decision carries
-/// any pre-routing DNAT/NPTv6-inbound destination rewrite. A candidate
-/// allocation-failure shape returns `None` (the real path drops there, so
-/// no challenge may be emitted on a guessed tuple).
+/// Predicate-only source-NAT candidates for the SYN-cookie challenge path
+/// (#15947 predicate-only rework, fence-all-addresses). Mirrors the
+/// allocating miss path's composition order without minting state: NAT64
+/// (every pool address of the matched prefix; no port), else NPTv6
+/// outbound, else static SNAT, else the first matching source-NAT rule
+/// (every pool address). The base decision carries any pre-routing
+/// DNAT/NPTv6-inbound destination rewrite and is merged into each
+/// candidate. An empty vec means no source translation applies. A
+/// candidate allocation-failure shape returns `None` (the real path
+/// drops there, so no challenge may be emitted on a guessed tuple).
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn candidate_source_nat_for_challenge(
+pub(super) fn candidate_source_nats_for_challenge(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
@@ -259,23 +261,33 @@ pub(super) fn candidate_source_nat_for_challenge(
     base_nat: NatDecision,
     nat64_match: Option<(usize, Ipv4Addr, std::net::Ipv6Addr)>,
     packet_icmp: Option<(u8, u8)>,
-) -> Option<NatDecision> {
+) -> Option<Vec<NatDecision>> {
     if let Some((prefix_idx, dst_v4, _)) = nat64_match {
         let prefix = forwarding.nat64.prefixes.get(prefix_idx)?;
-        let snat_v4 = *prefix.pool_v4.first()?;
-        return Some(crate::nat64::Nat64State::forward_decision(snat_v4, dst_v4, 0));
+        if prefix.pool_v4.is_empty() {
+            return None;
+        }
+        return Some(
+            prefix
+                .pool_v4
+                .iter()
+                .map(|snat_v4| {
+                    crate::nat64::Nat64State::forward_decision(*snat_v4, dst_v4, 0)
+                })
+                .collect(),
+        );
     }
     let nat_match_flow = flow.with_destination(effective_dst, effective_dst_port);
     if let IpAddr::V6(mut src_v6) = nat_match_flow.src_ip {
         match forwarding.nptv6.translate_outbound_result(&mut src_v6, to_zone) {
             crate::nptv6::Nptv6Translation::Translated => {
-                return Some(base_nat.merge(NatDecision {
+                return Some(vec![base_nat.merge(NatDecision {
                     rewrite_src: Some(IpAddr::V6(src_v6)),
                     rewrite_dst: None,
                     nat64: false,
                     nptv6: true,
                     ..NatDecision::default()
-                }));
+                })]);
             }
             crate::nptv6::Nptv6Translation::Untranslatable => return None,
             crate::nptv6::Nptv6Translation::NoMatch => {}
@@ -298,10 +310,10 @@ pub(super) fn candidate_source_nat_for_challenge(
         scope.egress_ifname,
         scope.egress_routing_instance,
     ) {
-        return Some(base_nat.merge(decision));
+        return Some(vec![base_nat.merge(decision)]);
     }
     let egress = forwarding.egress.get(&egress_ifindex);
-    match crate::nat::candidate_source_nat_translation(
+    match crate::nat::candidate_source_nat_translations(
         &forwarding.source_nat_rules,
         &scope,
         from_zone,
@@ -315,7 +327,12 @@ pub(super) fn candidate_source_nat_for_challenge(
         egress.and_then(|e| e.primary_v4),
         egress.and_then(|e| e.primary_v6),
     ) {
-        Ok(decision) => Some(base_nat.merge(decision)),
+        Ok(candidates) => Some(
+            candidates
+                .into_iter()
+                .map(|candidate| base_nat.merge(candidate))
+                .collect(),
+        ),
         Err(_) => None,
     }
 }
