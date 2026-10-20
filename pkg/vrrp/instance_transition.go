@@ -173,7 +173,15 @@ func (vi *vrrpInstance) becomeMaster() bool {
 	vi.addPendingGARPVIPsLocked(res.applied)
 	vi.vipMu.Unlock()
 
+	// #15929 gap 2: this promotion put `pri` on the wire, so baseline
+	// the pending priority record to the SENT value (mirrors the
+	// periodic/consumer/peer-resign sends, #15927). A later revert
+	// then reads as a delta and the MASTER consumer corrects it;
+	// without the note the two net to no-change and the peer keeps
+	// the promotion priority until the periodic timer. The interval
+	// is deliberately NOT baselined here (nothing was re-armed).
 	vi.sendAdvert(pri)
+	vi.noteAdvertPriority(pri)
 	vi.emitEvent()
 	if !vi.suppressGARP.Load() {
 		// Non-forced: a routine MASTER transition is rate-limited by the

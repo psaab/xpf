@@ -39,6 +39,13 @@ func (vi *vrrpInstance) emitEvent() {
 	}
 }
 
+// sendPacketDone, when non-nil, runs at the end of sendAdvert, after
+// every family advert has been emitted. Test seam only (#15929):
+// updateVIPs' announce send needs an interleaving point between the
+// send and the caller's noteAdvertPriority, which a sendPacketFn
+// callback (inside the send, before either) cannot express.
+var sendPacketDone func(vi *vrrpInstance)
+
 func (vi *vrrpInstance) sendAdvert(priority int) {
 	// Serialize wire emission with VIP delta actuation (#10780). updateVIPs
 	// holds vipMu until removed addresses and the configured set agree, so a
@@ -73,6 +80,19 @@ func (vi *vrrpInstance) sendAdvert(priority int) {
 	// not make the peer's interval disagree with this instance's timer.
 	advertMS := normalizeAdvertIntervalMS9914(vi.advertiseIntervalMS())
 	advertCS := advertMS / 10
+	// #15929 gap 1: record the cadence this send actually carries, from
+	// THIS snapshot — a commit landing inside either sendPacketFn below
+	// must not make the record name an interval the peer never saw.
+	// The MASTER config consumer reads it (decideMasterConfigAdvert)
+	// to decide whether an arm-applied interval growth still owes the
+	// peer a correction advert.
+	if len(v4Addrs) > 0 || len(v6Addrs) > 0 {
+		vi.mu.Lock()
+		vi.wireAdvertIntervalMS = advertMS
+		vi.mu.Unlock()
+	}
+
+	// (sendPacketDone fires after the per-family sends below.)
 
 	// Send IPv4 advertisement if we have any IPv4 VIPs.
 	if len(v4Addrs) > 0 {
@@ -102,6 +122,9 @@ func (vi *vrrpInstance) sendAdvert(priority int) {
 			slog.Debug("vrrp: failed to send IPv6 advert",
 				"key", vi.key(), "err", err)
 		}
+	}
+	if sendPacketDone != nil {
+		sendPacketDone(vi)
 	}
 }
 
