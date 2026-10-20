@@ -252,6 +252,8 @@ pub(crate) struct DecapOutcome {
 pub(crate) struct WgPeerConfig {
     pub(crate) pubkey: [u8; 32],
     pub(crate) endpoint: Option<std::net::SocketAddr>,
+    /// #15950: DNS hostname behind `endpoint=None`, if any.
+    pub(crate) endpoint_host: Option<String>,
     pub(crate) persistent_keepalive: u16,
     pub(crate) allowed_ips: Vec<ipnet::IpNet>,
     /// Optional per-peer preshared key (#1434 B2). `WG_ZERO_PSK` (32
@@ -276,6 +278,7 @@ impl std::fmt::Debug for WgPeerConfig {
         f.debug_struct("WgPeerConfig")
             .field("pubkey", &self.pubkey)
             .field("endpoint", &self.endpoint)
+            .field("endpoint_host", &self.endpoint_host)
             .field("persistent_keepalive", &self.persistent_keepalive)
             .field("allowed_ips", &self.allowed_ips)
             .field("preshared_key", &psk_state)
@@ -1122,23 +1125,32 @@ impl WgEngine {
     }
 
     /// #14640: snapshot every peer's adopted live endpoint, keyed by
-    /// pubkey, paired with its configured endpoint so a successor
-    /// engine can tell whether the configured endpoint changed.
+    /// pubkey, paired with its configured endpoint and endpoint_host so a
+    /// successor engine can tell whether the configured endpoint changed.
     /// Peers with no live endpoint are omitted. Slow path / build-time only.
+    /// #15950: `endpoint_host` rides along because a hostname peer's
+    /// configured SocketAddr is None on both sides of a rename — comparing
+    /// only SocketAddr would carry the old name's resolved IP forward.
     pub(crate) fn live_endpoints_by_pubkey(
         &self,
     ) -> Vec<(
         [u8; WG_KEY_LEN],
         Option<std::net::SocketAddr>,
+        Option<String>,
         std::net::SocketAddr,
     )> {
         self.load_table()
             .peers
             .iter()
             .filter_map(|e| {
-                e.peer
-                    .live_endpoint()
-                    .map(|live| (e.peer.pubkey, e.config.endpoint, live))
+                e.peer.live_endpoint().map(|live| {
+                    (
+                        e.peer.pubkey,
+                        e.config.endpoint,
+                        e.config.endpoint_host.clone(),
+                        live,
+                    )
+                })
             })
             .collect()
     }
@@ -1146,22 +1158,25 @@ impl WgEngine {
     /// #14640: seed this engine's per-peer live endpoints from a prior
     /// engine's snapshot across an identity-change rebuild. A pubkey
     /// present in BOTH engines carries its live endpoint forward ONLY
-    /// if its configured endpoint is unchanged; if the operator edited
-    /// that peer's configured endpoint, the new configured value wins
-    /// and the stale live endpoint is dropped. Build-time only.
+    /// if its configured endpoint AND endpoint_host are unchanged; if the
+    /// operator edited either, the new configured value wins and the
+    /// stale live endpoint is dropped. Build-time only.
     pub(crate) fn seed_live_endpoints(
         &self,
         snapshot: &[(
             [u8; WG_KEY_LEN],
             Option<std::net::SocketAddr>,
+            Option<String>,
             std::net::SocketAddr,
         )],
     ) {
         let table = self.load_table();
-        for (pubkey, prev_configured, live) in snapshot {
+        for (pubkey, prev_configured, prev_host, live) in snapshot {
             if let Some(&idx) = table.peer_index_by_pubkey.get(pubkey) {
                 if let Some(entry) = table.peers.get(idx as usize) {
-                    if entry.config.endpoint == *prev_configured {
+                    if entry.config.endpoint == *prev_configured
+                        && entry.config.endpoint_host == *prev_host
+                    {
                         entry.peer.adopt_live_endpoint(*live);
                     }
                 }
@@ -1239,8 +1254,9 @@ impl WgEngine {
                 Some(p) => p,
                 None => Arc::new(Peer::new(cfg.pubkey)),
             };
-            let config = Arc::new(PeerConfig::new(
+            let config = Arc::new(PeerConfig::with_host(
                 cfg.endpoint,
+                cfg.endpoint_host.clone(),
                 cfg.persistent_keepalive,
                 *cfg.preshared_key,
             ));

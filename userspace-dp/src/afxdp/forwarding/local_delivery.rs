@@ -120,6 +120,23 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
         pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
         source_nat_static: None,
     };
+    // #15950: publish LocalMiss to the shared map. The cross-worker
+    // FragAssoc liveness callback consults shared_sessions (by key +
+    // session_id); without this row a sibling worker's consult finds no
+    // shared entry, evicts the association, and the non-first fragment
+    // is dropped. Use the live session_id so that callback's id fence
+    // matches; 0 would never match a live admitting session.
+    if origin == SessionOrigin::LocalMiss {
+        let mut shared_entry = local_entry.clone();
+        shared_entry.session_id = sessions.session_id_for(key);
+        publish_shared_session(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+            &shared_entry,
+        );
+    }
     // #1789: count a failed helper-local session publish (same
     // shim-missing-key consequence as every other publish site).
     if publish_session_map_entry_for_session(

@@ -1980,6 +1980,25 @@ impl SessionTable {
     pub(crate) fn pptp_mut(&mut self) -> &mut crate::session::pptp::PptpAssociations {
         &mut self.pptp
     }
+    /// #15950: the PPTP control channel named by a TCP/1723 session key, or
+    /// None for any other key. Both directions map to one canonical channel.
+    pub(crate) fn pptp_control_channel_for_key(
+        key: &crate::session::SessionKey,
+    ) -> Option<crate::session::pptp::ControlChannelId> {
+        if key.protocol != crate::ip_proto::PROTO_TCP
+            || (key.src_port != crate::session::pptp_control::PPTP_CONTROL_PORT
+                && key.dst_port != crate::session::pptp_control::PPTP_CONTROL_PORT)
+        {
+            return None;
+        }
+        Some(crate::session::pptp::ControlChannelId::new_in_domain(
+            key.routing_domain,
+            key.src_ip,
+            key.src_port,
+            key.dst_ip,
+            key.dst_port,
+        ))
+    }
     /// Clear demotion markers when the requested owner RGs become active again.
     pub(crate) fn activate_owner_rgs(&mut self, owner_rgs: &[i32]) {
         for owner_rg_id in owner_rgs {

@@ -380,6 +380,11 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
         PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
         return;
     }
+    // #15950: deleting a PPTP control session (TCP/1723) by any non-expiry
+    // path must forget its associations (and, via the worker loop's inbox,
+    // buffered segments). Data-session (Pptp handle) deletes leave calls.
+    let pptp_control_channel =
+        crate::session::SessionTable::pptp_control_channel_for_key(&key);
     // Locally initiated clears/policy removals emit one harvested close;
     // peer-driven deletes remain silent to avoid duplicate records.
     if !enforce_peer_owner {
@@ -391,6 +396,9 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
         sessions.delete_with_control_close(&key, reason);
     } else {
         sessions.delete(&key);
+    }
+    if let Some(control) = pptp_control_channel {
+        sessions.pptp_mut().forget_control_channel(control);
     }
     deleted_keys.push(key.clone());
     if let Some(lookup) = delete_alias {

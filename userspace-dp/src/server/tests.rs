@@ -9301,7 +9301,7 @@ mod routing_domain_delete_7160 {
 /// strings — a control that retypes the needle stops controlling the guard the
 /// first time one of them is edited.
 const PPTP_DRAIN_NEEDLE: &str =
-    "crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(";
+    "crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(";
 const PPTP_EXPIRY_NEEDLE: &str =
     "let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns";
 /// #7699: the DATA-channel resolve's call site. Same module-level treatment and
@@ -9355,11 +9355,11 @@ fn pptp_resolve_assignment_line(src: &str) -> Option<usize> {
 /// failed first.
 #[test]
 fn pptp_drain_guard_does_not_accept_a_mention_7699() {
-    const COMMENTED_OUT: &str = "        // crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(\n        //     &pptp_control,\n";
+    const COMMENTED_OUT: &str = "        // crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(\n        //     &pptp_control,\n";
     const PROSE: &str =
-        "        // the drain rides crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker( periodic work\n";
+        "        // the drain rides crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch( periodic work\n";
     const REAL: &str =
-        "        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(\n            &pptp_control,\n";
+        "        crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(\n            &pptp_control,\n";
 
     assert!(
         pptp_drain_line(COMMENTED_OUT, PPTP_DRAIN_NEEDLE).is_none(),
@@ -9370,6 +9370,14 @@ fn pptp_drain_guard_does_not_accept_a_mention_7699() {
         pptp_drain_line(PROSE, PPTP_DRAIN_NEEDLE).is_none(),
         "the guard accepts a PROSE mention of the drain, so a comment naming \
          the function would report the dispatch as wired (#7699)"
+    );
+    // Epoch wiring census: the publisher stamp must exist in the
+    // coordinator publish path, or deleting it leaves every cell green
+    // while workers drain with epoch 0 forever.
+    let coord_src = include_str!("../afxdp/coordinator/mod.rs");
+    assert!(
+        coord_src.contains("self.forwarding.pptp_epoch = self.pptp_epoch_counter;"),
+        "coordinator must stamp pptp_epoch at publish_runtime_view"
     );
     assert!(
         pptp_drain_line(REAL, PPTP_DRAIN_NEEDLE).is_some(),

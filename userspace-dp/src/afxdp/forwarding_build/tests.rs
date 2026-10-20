@@ -12074,10 +12074,10 @@ fn forwarding_publish_population_is_pinned_7015() {
     let want: &[(&str, usize)] = &[
         // Test-only retained-state mutation after publishing a FIB view; not an apply.
         ("coordinator/fib_dump.rs", 1),
-        // Teardown reset + #14677 link-cycle restore (stop_for_link_cycle
+        // Teardown reset + #14677 link-cycle restore + #15950 bring-up preserve (stop_for_link_cycle/stop_preserving_forwarding
         // re-installs the preserved forwarding after stop_inner defaults
         // it) — neither is an apply, neither publishes a commit.
-        ("coordinator/mod.rs", 2),
+        ("coordinator/mod.rs", 3),
         ("coordinator/reconcile/mod.rs", 1),
         // THE RECONCILE APPLY's publish. Its commit point is in reconcile/mod.rs,
         // after bring_up_workers — deliberately not here.
@@ -15441,4 +15441,45 @@ fn zone_to_rgs_reth_member_blank_row_does_not_veto_15742f() {
         "RETH member blank row must not veto lan RG attribution: {:?}",
         state.zone_to_rgs
     );
+}
+
+#[test]
+fn wg_hostname_change_drops_stale_live_endpoint_15950() {
+    const PEER_PUB_HEX: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+    fn snap(endpoint: &str, allowed: &[&str]) -> ConfigSnapshot {
+        ConfigSnapshot { tunnel_endpoints: vec![crate::protocol::snapshot::TunnelEndpointSnapshot { id: 7, interface: "wg0".into(), linux_name: "wg0".into(), ifindex: 42, mode: "wireguard".into(), wg_listen_port: 51820, wg_local_privkey_hex: WG_TEST_PRIVKEY_HEX.into(), wg_peers: vec![crate::protocol::snapshot::TunnelWgPeerSnapshot { wg_peer_pubkey_hex: PEER_PUB_HEX.into(), wg_allowed_ips: allowed.iter().map(|s| s.to_string()).collect(), wg_endpoint: endpoint.into(), ..Default::default() }], ..Default::default() }], ..Default::default() }
+    }
+    fn hex32(s: &str) -> [u8;32] { let mut o=[0u8;32]; for i in 0..32 { o[i]=u8::from_str_radix(&s[2*i..2*i+2],16).unwrap(); } o }
+    let pubk = hex32(PEER_PUB_HEX);
+    let dst: IpAddr = "10.1.0.9".parse().unwrap();
+    let live: std::net::SocketAddr = "192.0.2.44:61001".parse().unwrap();
+    // old hostname, adopted live
+    let prev = build_forwarding_state(&snap("old.example.com:51820", &["10.1.0.0/24"]));
+    let pe = prev.wg_engines.get(&7).unwrap().clone(); pe.adopt_live_endpoint(&pubk, live);
+    assert_eq!(pe.peer_for_dest(dst), Some((pubk, Some(live))));
+    // rename -> rebuild, live must NOT carry
+    let next = build_forwarding_state_with_policy_counters_and_previous(&snap("new.example.com:51820", &["10.1.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev)).unwrap();
+    let ne = next.wg_engines.get(&7).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&pe, ne), "hostname-only change must rebuild engine");
+    assert_eq!(ne.peer_for_dest(dst), Some((pubk, None)), "stale live from old hostname must be dropped");
+    // host -> None responder-only
+    let prev2 = build_forwarding_state(&snap("old.example.com:51820", &["10.1.0.0/24"]));
+    let pe2 = prev2.wg_engines.get(&7).unwrap().clone(); pe2.adopt_live_endpoint(&pubk, live);
+    let next2 = build_forwarding_state_with_policy_counters_and_previous(&snap("", &["10.1.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev2)).unwrap();
+    assert_eq!(next2.wg_engines.get(&7).unwrap().peer_for_dest(dst), Some((pubk, None)), "responder-only transition must drop live");
+    // control: same hostname + benign allowed-ip change carries live
+    let prev3 = build_forwarding_state(&snap("old.example.com:51820", &["10.1.0.0/24"]));
+    let pe3 = prev3.wg_engines.get(&7).unwrap().clone(); pe3.adopt_live_endpoint(&pubk, live);
+    let next3 = build_forwarding_state_with_policy_counters_and_previous(&snap("old.example.com:51820", &["10.1.0.0/24","10.2.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev3)).unwrap();
+    assert_eq!(next3.wg_engines.get(&7).unwrap().peer_for_dest("10.2.0.9".parse().unwrap()), Some((pubk, Some(live))), "unchanged hostname must carry live");
+    // DNS-equivalent spelling (case + trailing dot) must carry like unchanged
+    let prev5 = build_forwarding_state(&snap("Old.Example.COM:51820", &["10.1.0.0/24"]));
+    let pe5 = prev5.wg_engines.get(&7).unwrap().clone(); pe5.adopt_live_endpoint(&pubk, live);
+    let next5 = build_forwarding_state_with_policy_counters_and_previous(&snap("old.example.com.:51820", &["10.1.0.0/24","10.2.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev5)).unwrap();
+    assert_eq!(next5.wg_engines.get(&7).unwrap().peer_for_dest(dst), Some((pubk, Some(live))), "DNS-equivalent spelling must not drop live endpoint");
+    // control: literal peer unchanged carries, wg_peers_eq host sensitivity
+    let prev4 = build_forwarding_state(&snap("203.0.113.1:51820", &["10.1.0.0/24"]));
+    let pe4 = prev4.wg_engines.get(&7).unwrap().clone(); pe4.adopt_live_endpoint(&pubk, live);
+    let next4 = build_forwarding_state_with_policy_counters_and_previous(&snap("203.0.113.1:51820", &["10.1.0.0/24","10.2.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev4)).unwrap();
+    assert_eq!(next4.wg_engines.get(&7).unwrap().peer_for_dest(dst), Some((pubk, Some(live))));
 }

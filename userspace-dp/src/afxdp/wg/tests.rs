@@ -53,6 +53,7 @@ pub(crate) fn established_pair(
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: init_allowed_for_resp,
             preshared_key: [0u8; 32].into(),
@@ -64,6 +65,7 @@ pub(crate) fn established_pair(
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: resp_allowed_for_init,
             preshared_key: [0u8; 32].into(),
@@ -162,6 +164,7 @@ pub(crate) fn established_initiator_for(
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: init_allowed_for_resp,
             preshared_key: [0u8; 32].into(),
@@ -315,6 +318,7 @@ fn cryptokey_routing_overlapping_allowed_ips() {
             WgPeerConfig {
                 pubkey: peer_a_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -322,6 +326,7 @@ fn cryptokey_routing_overlapping_allowed_ips() {
             WgPeerConfig {
                 pubkey: peer_b_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -335,6 +340,7 @@ fn cryptokey_routing_overlapping_allowed_ips() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -346,6 +352,7 @@ fn cryptokey_routing_overlapping_allowed_ips() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -614,6 +621,7 @@ fn decap_lpm_rejects_spoofed_source_inside_more_specific_peer_prefix() {
             WgPeerConfig {
                 pubkey: peer_a_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -621,6 +629,7 @@ fn decap_lpm_rejects_spoofed_source_inside_more_specific_peer_prefix() {
             WgPeerConfig {
                 pubkey: peer_b_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.1.1.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -634,6 +643,7 @@ fn decap_lpm_rejects_spoofed_source_inside_more_specific_peer_prefix() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -645,6 +655,7 @@ fn decap_lpm_rejects_spoofed_source_inside_more_specific_peer_prefix() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.1.1.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -968,6 +979,7 @@ fn handshake_prologue_is_required_for_authentication() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1007,6 +1019,7 @@ fn handshake_prologue_is_required_for_authentication() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1046,6 +1059,7 @@ fn responder_session_blocks_encap_until_initiator_data_authenticated() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1057,6 +1071,7 @@ fn responder_session_blocks_encap_until_initiator_data_authenticated() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1168,6 +1183,7 @@ fn reconcile_peers_updates_endpoint_and_keepalive_for_existing_peer() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: Some(SocketAddr::from(([192, 0, 2, 1], 51820))),
+            endpoint_host: None,
             persistent_keepalive: 25,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1194,6 +1210,7 @@ fn reconcile_peers_updates_endpoint_and_keepalive_for_existing_peer() {
     engine.reconcile_peers(&[WgPeerConfig {
         pubkey: peer_pub,
         endpoint: Some(SocketAddr::from(([198, 51, 100, 7], 51900))),
+        endpoint_host: None,
         persistent_keepalive: 60,
         allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -1216,6 +1233,7 @@ fn reconcile_peers_updates_endpoint_and_keepalive_for_existing_peer() {
     engine.reconcile_peers(&[WgPeerConfig {
         pubkey: peer_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -1263,6 +1281,7 @@ fn old_snapshot_observes_old_config_after_concurrent_reconcile() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: Some(ep_old),
+            endpoint_host: None,
             persistent_keepalive: 25,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: psk_old.into(),
@@ -1292,6 +1311,7 @@ fn old_snapshot_observes_old_config_after_concurrent_reconcile() {
             engine.reconcile_peers(&[WgPeerConfig {
                 pubkey: peer_pub,
                 endpoint: Some(ep_new),
+                endpoint_host: None,
                 persistent_keepalive: 60,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: psk_new.into(),
@@ -1678,6 +1698,7 @@ fn established_pair_responder_confirmation_flips_via_decap_path() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1689,6 +1710,7 @@ fn established_pair_responder_confirmation_flips_via_decap_path() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1783,6 +1805,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4.clone(),
                 preshared_key: [0u8; 32].into(),
@@ -1794,6 +1817,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: init_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4,
                 preshared_key: [0u8; 32].into(),
@@ -2003,6 +2027,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: [0u8; 32], // placeholder, fixed below
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4.clone(),
                 preshared_key: [0u8; 32].into(),
@@ -2014,6 +2039,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: [0u8; 32],
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4,
                 preshared_key: [0u8; 32].into(),
@@ -2025,6 +2051,7 @@ mod framed_handshake {
         init_engine.reconcile_peers(&[WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2032,6 +2059,7 @@ mod framed_handshake {
         resp_engine.reconcile_peers(&[WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2296,6 +2324,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: init2_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -2323,6 +2352,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: known_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -2336,6 +2366,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -2545,6 +2576,7 @@ mod framed_handshake {
         init.reconcile_peers(&[WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2677,6 +2709,7 @@ mod framed_handshake {
         let cfg = vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2750,6 +2783,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4.clone(),
                 preshared_key: [0u8; 32].into(),
@@ -2761,6 +2795,7 @@ mod framed_handshake {
             peers: vec![WgPeerConfig {
                 pubkey: init_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4,
                 preshared_key: [0u8; 32].into(),
@@ -2834,6 +2869,7 @@ mod framed_handshake {
                 let cfg = vec![WgPeerConfig {
                     pubkey: init_pub,
                     endpoint: None,
+                    endpoint_host: None,
                     persistent_keepalive: 0,
                     allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
                     preshared_key: [0u8; 32].into(),
@@ -2908,6 +2944,7 @@ fn wg_request_handshake_is_rate_limited_per_interval() {
         peers: vec![WgPeerConfig {
             pubkey: pk,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2941,6 +2978,7 @@ fn wg_take_handshake_request_consumes_a_single_edge() {
         peers: vec![WgPeerConfig {
             pubkey: pk,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2976,6 +3014,7 @@ fn two_peer_engine_sorted() -> (WgEngine, [u8; 32], [u8; 32]) {
             WgPeerConfig {
                 pubkey: peer_a,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -2983,6 +3022,7 @@ fn two_peer_engine_sorted() -> (WgEngine, [u8; 32], [u8; 32]) {
             WgPeerConfig {
                 pubkey: peer_b,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.1.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -3089,6 +3129,7 @@ fn wg_no_session_encap_triggers_single_init_per_interval() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -3143,6 +3184,7 @@ fn wg_first_peer_pubkey_and_confirmed_session_helpers() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -3164,6 +3206,7 @@ fn wg_tai64n_high_water_seed_round_trips_across_engines() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -3180,6 +3223,7 @@ fn wg_tai64n_high_water_seed_round_trips_across_engines() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -3209,6 +3253,7 @@ fn wg_greatest_tai64n_carry_over_preserves_responder_anti_replay() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -3263,6 +3308,7 @@ fn wg_greatest_tai64n_carry_over_preserves_responder_anti_replay() {
         peers: vec![WgPeerConfig {
             pubkey: other_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -3292,6 +3338,7 @@ fn wg_request_handshake_single_edge_under_concurrent_callers() {
         peers: vec![WgPeerConfig {
             pubkey: pk,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -3459,6 +3506,7 @@ mod telemetry_counters {
             peers: vec![WgPeerConfig {
                 pubkey: init2_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -3672,6 +3720,7 @@ mod telemetry_counters {
         init.reconcile_peers(&[WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -3723,6 +3772,7 @@ mod telemetry_counters {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4.clone(),
                 preshared_key: [0u8; 32].into(),
@@ -3734,6 +3784,7 @@ mod telemetry_counters {
             peers: vec![WgPeerConfig {
                 pubkey: init_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: any_v4,
                 preshared_key: [0u8; 32].into(),
@@ -3871,6 +3922,7 @@ mod s5_timer_tests {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -3882,6 +3934,7 @@ mod s5_timer_tests {
             peers: vec![WgPeerConfig {
                 pubkey: init_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -4336,6 +4389,7 @@ mod s5_timer_tests {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.1.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -4347,6 +4401,7 @@ mod s5_timer_tests {
             peers: vec![WgPeerConfig {
                 pubkey: init_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -4390,6 +4445,7 @@ mod s5_timer_tests {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.1.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -4401,6 +4457,7 @@ mod s5_timer_tests {
             peers: vec![WgPeerConfig {
                 pubkey: init_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -4558,6 +4615,7 @@ mod tai64n_replay_tests {
             peers: vec![WgPeerConfig {
                 pubkey: resp_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![],
                 preshared_key: [0u8; 32].into(),
@@ -4569,6 +4627,7 @@ mod tai64n_replay_tests {
             peers: vec![WgPeerConfig {
                 pubkey: init_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![],
                 preshared_key: [0u8; 32].into(),
@@ -4689,6 +4748,7 @@ fn multi_peer_keepalive_carries_its_peer_7230() {
         WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -4696,6 +4756,7 @@ fn multi_peer_keepalive_carries_its_peer_7230() {
         WgPeerConfig {
             pubkey: decoy_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["203.0.113.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -4794,6 +4855,7 @@ fn multi_peer_malformed_inner_carries_its_peer_7686() {
         WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -4801,6 +4863,7 @@ fn multi_peer_malformed_inner_carries_its_peer_7686() {
         WgPeerConfig {
             pubkey: decoy_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["203.0.113.0/24".parse().unwrap()],
             preshared_key: [0u8; 32].into(),

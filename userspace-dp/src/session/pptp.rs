@@ -365,9 +365,17 @@ impl PptpAssociations {
                 // An imported association has no local TCP channel. Refreshing
                 // an identical record must not erase an existing local binding:
                 // its FIN/RST still needs to clean up this association.
+                // #15950: a control-less (synced) re-install must NOT advance
+                // learned_ns — that would defeat the learned_ns <= closed_ns /
+                // <= disconnected_ns fences for a close stamped before the
+                // replication. Only a real (re)learn on a control channel
+                // restarts the fence clock; last_seen always refreshes.
+                let is_local_learn = control.is_some();
                 self.by_handle.entry(handle).and_modify(|r| {
                     r.control = control.or(r.control);
-                    r.learned_ns = now_ns;
+                    if is_local_learn {
+                        r.learned_ns = now_ns;
+                    }
                     r.last_seen_ns = now_ns;
                 });
                 return Ok(handle);
@@ -1441,5 +1449,25 @@ mod sweep_wiring_tests_7699 {
             Some(handle),
             "the sweep expired a live association before its idle bound"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_15950 {
+    use super::*;
+    fn ip(s:&str)->IpAddr{s.parse().unwrap()}
+    #[test]
+    fn synced_reinstall_does_not_advance_learned_ns_15950(){
+        let mut t=PptpAssociations::default();
+        let a=ip("198.51.100.7"); let b=ip("203.0.113.9");
+        let call=PptpCall::new(a,0xAAAA,b,0xBBBB);
+        let ctl=ControlChannelId::new(a,49152,b,1723);
+        let h=t.install(call,ctl,100).unwrap();
+        t.install_synced_association(call,300).unwrap();
+        assert_eq!(t.forget_control_channel_learned_by(ctl,200),1,"synced reinstall at 300 must not defeat close stamped 200");
+        assert_eq!(t.resolve(a,0xAAAA),None); let _=h;
+        // control: local relearn DOES advance
+        let mut t2=PptpAssociations::default(); t2.install(call,ctl,100).unwrap(); t2.install(call,ctl,300).unwrap();
+        assert_eq!(t2.forget_control_channel_learned_by(ctl,200),0);
     }
 }

@@ -9645,11 +9645,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     now_ns,
                                 );
                             } else {
-                                crate::afxdp::poll_stages::capture_pptp_control_segment(
+                                crate::afxdp::poll_stages::capture_pptp_control_segment_at_epoch(
                                     packet_frame,
                                     flow,
                                     worker_ctx.pptp_control,
                                     now_ns,
+                                    worker_ctx.forwarding.pptp_epoch,
                                 );
                             }
                         }
@@ -12453,8 +12454,7 @@ mod pptp_control_teardown_tests_11053 {
         let (a, b, key) = control_key();
         let inbox = crate::session::pptp_control::PptpControlInbox::default();
         assert!(
-            inbox.push(crate::session::pptp_control::PendingControlSegment {
-                src: a,
+            inbox.push(crate::session::pptp_control::PendingControlSegment { epoch: 0,                src: a,
                 dst: b,
                 src_port: 49152,
                 dst_port: 1723,

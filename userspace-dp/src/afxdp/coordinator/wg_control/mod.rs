@@ -1435,6 +1435,7 @@ mod endpoint_adoption_7158_tests {
             peers: vec![crate::afxdp::wg::WgPeerConfig {
                 pubkey: PK,
                 endpoint: Some(configured),
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),

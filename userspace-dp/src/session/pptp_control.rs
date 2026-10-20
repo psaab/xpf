@@ -50,6 +50,9 @@ use std::sync::Mutex;
 /// after a close has already been observed.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingControlSegment {
+    /// Enable-epoch at capture (stamped by the inbox at push). Entries
+    /// whose epoch is not the inbox's current epoch at drain are dropped.
+    pub(crate) epoch: u64,
     pub(crate) src: IpAddr,
     pub(crate) dst: IpAddr,
     pub(crate) src_port: u16,
@@ -134,6 +137,7 @@ pub(crate) struct PendingCallInstall {
     pub(crate) call: crate::session::pptp::PptpCall,
     pub(crate) control: crate::session::pptp::ControlChannelId,
     pub(crate) learned_ns: u64,
+    pub(crate) epoch: u64,
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
@@ -154,7 +158,7 @@ impl PptpControlInbox {
         self.push_in_domain(0, seg)
     }
 
-    pub(crate) fn push_in_domain(&self, routing_domain: u32, seg: PendingControlSegment) -> bool {
+    pub(crate) fn push_in_domain(&self, routing_domain: u32, mut seg: PendingControlSegment) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -163,6 +167,8 @@ impl PptpControlInbox {
             inner.dropped = inner.dropped.saturating_add(1);
             return false;
         }
+        // Epoch is publisher-stamped at capture (the view under which
+        // the segment was buffered); the inbox never infers it.
         inner.pending.push((routing_domain, seg));
         true
     }
@@ -181,13 +187,13 @@ impl PptpControlInbox {
     /// Returns an empty vec when gated, so a caller cannot distinguish "nothing
     /// to do" from "not yet" — which is correct: both mean do nothing.
     pub(crate) fn take_pending(&self, now_ns: u64) -> Vec<PendingControlSegment> {
-        self.take_pending_in_domain(now_ns)
+        self.take_pending_in_domain(now_ns, 0)
             .into_iter()
             .map(|(_, segment)| segment)
             .collect()
     }
 
-    pub(crate) fn take_pending_in_domain(&self, now_ns: u64) -> Vec<(u32, PendingControlSegment)> {
+    pub(crate) fn take_pending_in_domain(&self, now_ns: u64, current_epoch: u64) -> Vec<(u32, PendingControlSegment)> {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -198,7 +204,13 @@ impl PptpControlInbox {
             return Vec::new();
         }
         inner.last_drain_ns = now_ns;
-        std::mem::take(&mut inner.pending)
+        // When the draining view is enabled, only entries stamped with
+        // that view's exact epoch are eligible: strictly older entries
+        // predate a disable/re-enable, and newer entries were captured
+        // under a view this worker has not adopted yet (a stale enabled
+        // view must not install them after a later publish).
+        let all = std::mem::take(&mut inner.pending);
+        all.into_iter().filter(|(_, seg)| seg.epoch == current_epoch).collect()
     }
 
     pub(crate) fn dropped_count(&self) -> u64 {
@@ -213,6 +225,28 @@ impl PptpControlInbox {
             Ok(g) => g.pending.len(),
             Err(poisoned) => poisoned.into_inner().pending.len(),
         }
+    }
+
+    /// Observe the enabled bit at drain/poll time. On a
+    /// disabled->enabled transition the epoch ADVANCES: every buffered
+    /// segment/install stamped with an older epoch becomes ineligible
+    /// at the next drain. Nothing is cleared here — poll-time state is
+    /// never mutated destructively, so steady-enabled traffic is
+    /// untouched by construction, a skipped disabled generation still
+    /// advances the epoch when the enabled generation is observed, and
+    /// a lagging worker cannot purge current-epoch entries (it only
+    /// ever advances the epoch forward, and entries stamped after the
+    /// advance carry the new epoch).
+    /// #15950: drop every buffered segment (ALG disabled). Returns count.
+    pub(crate) fn purge_pending(&self) -> usize {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let n = inner.pending.len();
+        inner.pending.clear();
+        inner.pending_call_installs.clear();
+        n
     }
 
     /// Drop buffered segments from a control channel that has closed.
@@ -313,6 +347,16 @@ impl PptpControlInbox {
         learned_ns: u64,
         unsent_queue_ids: Vec<usize>,
     ) {
+        self.record_call_install_at(call, control, learned_ns, 0, unsent_queue_ids);
+    }
+    pub(crate) fn record_call_install_at(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+        epoch: u64,
+        unsent_queue_ids: Vec<usize>,
+    ) {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -330,6 +374,7 @@ impl PptpControlInbox {
             } else {
                 let pending = &mut inner.pending_call_installs[index];
                 pending.learned_ns = learned_ns;
+                pending.epoch = epoch;
                 pending.unsent_queue_ids = unsent_queue_ids;
             }
         } else if !unsent_queue_ids.is_empty() {
@@ -337,6 +382,7 @@ impl PptpControlInbox {
                 call,
                 control,
                 learned_ns,
+                epoch,
                 unsent_queue_ids,
             });
         }
@@ -426,7 +472,8 @@ impl PptpControlInbox {
 
     /// Take due install retries without holding the inbox lock while workers
     /// are queued.
-    pub(crate) fn take_call_install_retries(&self, now_ns: u64) -> Vec<PendingCallInstall> {
+    pub(crate) fn take_call_install_retries(&self, now_ns: u64) -> Vec<PendingCallInstall> { self.take_call_install_retries_at(now_ns, 0) }
+    pub(crate) fn take_call_install_retries_at(&self, now_ns: u64, current_epoch: u64) -> Vec<PendingCallInstall> {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -437,7 +484,12 @@ impl PptpControlInbox {
             return Vec::new();
         }
         inner.last_call_install_retry_ns = now_ns;
-        inner.pending_call_installs.clone()
+        inner
+            .pending_call_installs
+            .iter()
+            .filter(|pending| pending.epoch == current_epoch)
+            .cloned()
+            .collect()
     }
 
     /// Acknowledge a close delivered to its queue or applied to its local table.
@@ -521,6 +573,15 @@ const MSG_TYPE_CONTROL: u16 = 1;
 /// ID` is the sender's own, and `Peer's Call ID` echoes the requester's. An
 /// Outgoing-Call-Request alone names one side and cannot pair a call.
 const CTRL_OUTGOING_CALL_REPLY: u16 = 8;
+/// RFC 2637 §2.10 Control Message Type 10 — Incoming-Call-Reply (PAC-initiated
+/// calls; mirror of §2.8 with the same Call ID / Peer's Call ID / Result
+/// offsets, total length 24).
+const CTRL_INCOMING_CALL_REPLY: u16 = 10;
+/// RFC 2637 §2.12 Control Message Type 12 — Call-Clear-Request (Call ID only).
+const CTRL_CALL_CLEAR_REQUEST: u16 = 12;
+/// RFC 2637 §2.3/§2.4 Control Message Types 3/4 — Stop-Control-Connection.
+const CTRL_STOP_CONTROL_REQUEST: u16 = 3;
+const CTRL_STOP_CONTROL_REPLY: u16 = 4;
 /// RFC 2637 §2.13 Control Message Type 13 — Call-Disconnect-Notify.
 const CTRL_CALL_DISCONNECT_NOTIFY: u16 = 13;
 /// Total length of a Call-Disconnect-Notify, including its 12-byte header and
@@ -528,6 +589,13 @@ const CTRL_CALL_DISCONNECT_NOTIFY: u16 = 13;
 const CALL_DISCONNECT_NOTIFY_LEN: usize = 148;
 /// Total length of an Outgoing-Call-Reply, header included (RFC 2637 §2.8).
 const OUTGOING_CALL_REPLY_LEN: usize = 32;
+/// Total length of an Incoming-Call-Reply, header included (RFC 2637 §2.10).
+const INCOMING_CALL_REPLY_LEN: usize = 24;
+/// Total length of a Call-Clear-Request, header included (RFC 2637 §2.12).
+const CALL_CLEAR_REQUEST_LEN: usize = 16;
+/// Minimum lengths of Stop-Control-Connection Request/Reply (§2.3/§2.4).
+const STOP_CONTROL_REQUEST_LEN: usize = 16;
+const STOP_CONTROL_REPLY_LEN: usize = 16;
 /// RFC 2637 §2.8 Result Code 1 — Connected. Any other value is a call that did
 /// NOT come up, and learning an association for it would install state for a
 /// call that does not exist.
@@ -539,7 +607,7 @@ const RESULT_CONNECTED: u8 = 1;
 /// different and two of them are not errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ControlParse {
-    /// A complete, successful Outgoing-Call-Reply naming both call ids.
+    /// A complete, successful Outgoing/Incoming-Call-Reply naming both ids.
     ///
     /// `call_id` belongs to the SENDER of this segment; `peer_call_id` to its
     /// destination. That asymmetry is the whole reason the pair must be learned
@@ -547,6 +615,12 @@ pub(crate) enum ControlParse {
     CallReply { call_id: u16, peer_call_id: u16 },
     /// A complete Call-Disconnect-Notify naming the PAC-allocated call id.
     CallDisconnect { call_id: u16 },
+    /// A complete Call-Clear-Request naming the call id to forget (§2.12).
+    CallClear { call_id: u16 },
+    /// A Stop-Control-Connection Request, or a successful Reply:
+    /// tear down the whole channel. A Reply with Result != 1 (not
+    /// closed, RFC 2637 §2.4) parses as Ignored and tears nothing down.
+    StopControl,
     /// A well-formed control message this stage does not learn from — a
     /// different message type, or a reply whose Result Code says the call did
     /// not connect.
@@ -584,26 +658,49 @@ pub(crate) fn parse_control_segment(payload: &[u8]) -> ControlParse {
         if declared_len != CALL_DISCONNECT_NOTIFY_LEN {
             return ControlParse::Ignored;
         }
-        // The CDN carries a fixed 128-byte statistics tail; do not remove
-        // state from a partial message.
         if payload.len() < CALL_DISCONNECT_NOTIFY_LEN {
             return ControlParse::Truncated;
         }
-        // RFC 2637 §2.13: this is the Call ID assigned by the PAC that sent
-        // the segment, so the association table is queried under `src`.
         let call_id = u16::from_be_bytes([payload[12], payload[13]]);
         return ControlParse::CallDisconnect { call_id };
     }
-    if ctrl_type != CTRL_OUTGOING_CALL_REPLY {
+    if ctrl_type == CTRL_CALL_CLEAR_REQUEST {
+        if declared_len != CALL_CLEAR_REQUEST_LEN {
+            return ControlParse::Ignored;
+        }
+        if payload.len() < CALL_CLEAR_REQUEST_LEN {
+            return ControlParse::Truncated;
+        }
+        let call_id = u16::from_be_bytes([payload[12], payload[13]]);
+        return ControlParse::CallClear { call_id };
+    }
+    if ctrl_type == CTRL_STOP_CONTROL_REQUEST || ctrl_type == CTRL_STOP_CONTROL_REPLY {
+        let want = if ctrl_type == CTRL_STOP_CONTROL_REQUEST {
+            STOP_CONTROL_REQUEST_LEN
+        } else {
+            STOP_CONTROL_REPLY_LEN
+        };
+        if declared_len < want {
+            return ControlParse::Ignored;
+        }
+        if payload.len() < want {
+            return ControlParse::Truncated;
+        }
+        if ctrl_type == CTRL_STOP_CONTROL_REPLY && payload[12] != RESULT_CONNECTED {
+            // RFC 2637 §2.4 Result 2 = general error, connection NOT closed.
+            return ControlParse::Ignored;
+        }
+        return ControlParse::StopControl;
+    }
+    let want_len = match ctrl_type {
+        CTRL_OUTGOING_CALL_REPLY => OUTGOING_CALL_REPLY_LEN,
+        CTRL_INCOMING_CALL_REPLY => INCOMING_CALL_REPLY_LEN,
+        _ => return ControlParse::Ignored,
+    };
+    if declared_len != want_len {
         return ControlParse::Ignored;
     }
-    // A reply that claims a length other than the RFC's is not one we will read
-    // fields out of by offset.
-    if declared_len != OUTGOING_CALL_REPLY_LEN {
-        return ControlParse::Ignored;
-    }
-    // The single-segment bound. Checked against what we ACTUALLY have.
-    if payload.len() < OUTGOING_CALL_REPLY_LEN {
+    if payload.len() < want_len {
         return ControlParse::Truncated;
     }
     let call_id = u16::from_be_bytes([payload[12], payload[13]]);
@@ -650,6 +747,8 @@ pub(crate) fn learn_from_control_segment_in_domain(
             peer_call_id,
         )),
         ControlParse::CallDisconnect { .. }
+        | ControlParse::CallClear { .. }
+        | ControlParse::StopControl
         | ControlParse::Ignored
         | ControlParse::Truncated
         | ControlParse::NotControl => None,
@@ -873,8 +972,7 @@ mod inbox_drop_policy_tests_7699 {
     use super::*;
 
     fn seg(n: u8) -> PendingControlSegment {
-        PendingControlSegment {
-            src: "198.51.100.7".parse().unwrap(),
+        PendingControlSegment { epoch: 0, src: "198.51.100.7".parse().unwrap(),
             dst: "203.0.113.9".parse().unwrap(),
             src_port: PPTP_CONTROL_PORT,
             dst_port: 49152,
@@ -1061,8 +1159,7 @@ mod routing_domain_inbox_13681_tests {
     fn closing_one_routing_domain_does_not_purge_another_domains_reply_13681() {
         let src = "198.51.100.7".parse().unwrap();
         let dst = "203.0.113.9".parse().unwrap();
-        let segment = || PendingControlSegment {
-            src,
+        let segment = || PendingControlSegment { epoch: 0,            src,
             dst,
             src_port: 49_152,
             dst_port: 1723,
@@ -1077,8 +1174,83 @@ mod routing_domain_inbox_13681_tests {
             crate::session::pptp::ControlChannelId::new_in_domain(100_001, src, 49_152, dst, 1723);
         assert_eq!(inbox.forget_channel(closed), 1);
 
-        let pending = inbox.take_pending_in_domain(1);
+        let pending = inbox.take_pending_in_domain(1, 0);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, 100_002);
+    }
+}
+
+#[cfg(test)]
+mod tests_15950_parse {
+    use super::*;
+    fn msg(len:u16, ty:u16, body:&[u8])->Vec<u8>{let mut m=Vec::new(); m.extend_from_slice(&len.to_be_bytes()); m.extend_from_slice(&1u16.to_be_bytes()); m.extend_from_slice(&MAGIC_COOKIE.to_be_bytes()); m.extend_from_slice(&ty.to_be_bytes()); m.extend_from_slice(&0u16.to_be_bytes()); m.extend_from_slice(body); m}
+    #[test]
+    fn incoming_reply_and_teardowns_parse_15950(){
+        // Incoming-Call-Reply len24: CallID, PeerCallID, Result=1, rest
+        let mut body=Vec::new(); body.extend_from_slice(&0xAAAAu16.to_be_bytes()); body.extend_from_slice(&0xBBBBu16.to_be_bytes()); body.push(1); body.extend_from_slice(&[0;7]);
+        assert_eq!(parse_control_segment(&msg(24,10,&body)), ControlParse::CallReply{call_id:0xAAAA, peer_call_id:0xBBBB});
+        let mut bad=body.clone(); bad[4]=2; assert_eq!(parse_control_segment(&msg(24,10,&bad)), ControlParse::Ignored);
+        let mut body=Vec::new(); body.extend_from_slice(&0x1234u16.to_be_bytes()); body.extend_from_slice(&[0;2]);
+        assert_eq!(parse_control_segment(&msg(16,12,&body)), ControlParse::CallClear{call_id:0x1234});
+        assert_eq!(parse_control_segment(&msg(16,3,&body)), ControlParse::StopControl);
+        let mut reply=vec![1u8,0,0,0];
+        assert_eq!(parse_control_segment(&msg(16,4,&reply)), ControlParse::StopControl);
+        reply[0]=2;
+        assert_eq!(parse_control_segment(&msg(16,4,&reply)), ControlParse::Ignored, "failed Stop reply must not tear down");
+    }
+}
+
+#[cfg(test)]
+mod tests_15966r_toggle {
+    use super::*;
+    fn seg(epoch: u64, ns: u64, b: u8) -> PendingControlSegment {
+        PendingControlSegment { epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: ns, payload: vec![b] }
+    }
+    #[test]
+    fn publisher_epoch_drain_filtering_15966r5() {
+        // Steady: entries stamped with current epoch survive drains.
+        let inbox = PptpControlInbox::default();
+        assert!(inbox.push(seg(5, 1, 1)));
+        assert_eq!(inbox.take_pending_in_domain(1_000_000_000, 5).len(), 1, "steady current-epoch reply must install");
+        // Stale-enabled drain: worker's view is epoch 7 (publisher flipped
+        // twice); an entry captured under epoch 5 is dropped at drain even
+        // though no worker observed the disabled generations (all-skip).
+        assert!(inbox.push(seg(5, 2, 2)));
+        assert_eq!(inbox.take_pending_in_domain(2_000_000_000, 7).len(), 0, "old-epoch entry must drop under a newer view epoch (all-skip safe)");
+        // Current-epoch entry under that same view survives (no second purge).
+        assert!(inbox.push(seg(7, 3, 3)));
+        assert_eq!(inbox.take_pending_in_domain(3_000_000_000, 7).len(), 1, "current-epoch entry must survive lagging drains");
+        // Exact-epoch rule: an entry stamped under a NEWER epoch (9) is
+        // not eligible under a stale epoch-5 view — after the publisher
+        // has moved on, the stale enabled view must not install it.
+        assert!(inbox.push(seg(9, 4, 4)));
+        assert_eq!(inbox.take_pending_in_domain(4_000_000_000, 5).len(), 0, "future-epoch entry must drop under a stale view");
+        // And the equal-epoch entry under that same stale view was kept
+        // above at its own drain; strictly-older under current drops:
+        assert!(inbox.push(seg(5, 5, 5)));
+        assert_eq!(inbox.take_pending_in_domain(5_000_000_000, 7).len(), 0, "strictly-older entry must drop under current view");
+    }
+}
+
+#[cfg(test)]
+mod tests_generation_regression {
+    use super::*;
+    fn seg(epoch: u64, ns: u64, b: u8) -> PendingControlSegment {
+        PendingControlSegment { epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: ns, payload: vec![b] }
+    }
+    #[test]
+    fn generation_regression_freeze_must_not_drop_fresh_reply() {
+        // Candidate view epoch G=5 published pre-spawn; rollback republishes
+        // recovery view. Because stop_inner advanced the publisher epoch,
+        // the recovery view is stamped G+1=6 (simulated here by draining
+        // under epoch 6), and a FRESH reply captured under the recovery
+        // view (epoch 6) must install — a tracker frozen at G would have
+        // dropped it as future/stale.
+        let inbox = PptpControlInbox::default();
+        assert!(inbox.push(seg(6, 1, 1)));
+        assert_eq!(inbox.take_pending_in_domain(1_000_000_000, 6).len(), 1, "fresh reply under recovery epoch must not be dropped");
+        // Old candidate-epoch entries (5) under recovery (6) still drop.
+        assert!(inbox.push(seg(5, 2, 2)));
+        assert_eq!(inbox.take_pending_in_domain(2_000_000_000, 6).len(), 0);
     }
 }

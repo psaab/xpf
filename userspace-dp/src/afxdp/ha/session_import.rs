@@ -1470,7 +1470,8 @@ impl crate::afxdp::ha::SessionDomain {
                 ));
             }
             let mut pptp_position = None;
-            if let Some(call) = pptp_call {
+            // #15950: a disabled PPTP ALG must not install HA-imported calls.
+            if let Some(call) = pptp_call.filter(|_| forwarding.pptp_enabled()) {
                 // Queue after the session replica so the worker first has the
                 // discriminator-bearing session that this call resolves.
                 // #15153 (B11-01): a refused association push is repair debt

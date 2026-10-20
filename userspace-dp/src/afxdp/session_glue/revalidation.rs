@@ -757,13 +757,16 @@ pub(in crate::afxdp) fn apply_session_import_repairs(
                 note_stale_replay_fence_drop();
                 stale_replay_dropped_keys.push(entry.key.clone());
             } else {
+                // #15950: repairs must install the replica transform, not
+                // the raw shared origin (else no NAT holder bit and
+                // DeleteSynced is refused as locally-owned).
                 commands::handle_upsert_synced(
                     sessions,
                     session_map,
                     forwarding,
                     ha_state,
                     dynamic_neighbors,
-                    entry,
+                    crate::afxdp::shared_ops::synced_replica_entry(&entry),
                     now_ns,
                     now_secs,
                     worker_id,

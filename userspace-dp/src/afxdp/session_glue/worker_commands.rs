@@ -76,6 +76,9 @@ pub(in crate::afxdp) struct WorkerCommandResults {
     pub transition_debt_pending: bool,
     /// #11360: imported-session repair debt remains latched for a future pass.
     pub session_import_repair_pending: bool,
+    /// #15950: PPTP control channels whose sessions were deleted this tick;
+    /// the worker loop purges their buffered inbox segments.
+    pub deleted_pptp_control_channels: Vec<crate::session::pptp::ControlChannelId>,
 }
 
 impl WorkerCommandResults {
@@ -97,6 +100,7 @@ impl WorkerCommandResults {
             commands_backlogged: false,
             transition_debt_pending: false,
             session_import_repair_pending: false,
+            deleted_pptp_control_channels: Vec::new(),
         }
     }
 }
@@ -140,6 +144,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
     // bursts are control-plane paced and the common no-delete tick pays
     // no allocation (same policy as `cancelled_keys`).
     let mut deleted_synced_keys: Vec<SessionKey> = Vec::new();
+    let mut deleted_pptp_control_channels: Vec<crate::session::pptp::ControlChannelId> = Vec::new();
     // #10612: keys refused by the stale-replay fence this tick (see the
     // `UpsertSynced` arm); drained by the worker loop into shared-map
     // evictions. Not pre-sized — drops are control-plane paced and the
@@ -454,9 +459,12 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
             WorkerCommand::InstallPptpAssociation(call) => {
-                let _ = sessions
-                    .pptp_mut()
-                    .install_synced_association(call, now_ns);
+                // #15950: disabled ALG must not install HA-imported calls.
+                if forwarding.pptp_enabled() {
+                    let _ = sessions
+                        .pptp_mut()
+                        .install_synced_association(call, now_ns);
+                }
             }
             WorkerCommand::UpsertSynced(entry) => {
                 // pre-purge snapshot re-published post-purge (backlog, late
@@ -607,7 +615,14 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let mut deferred = Vec::new();
                         for (index, item) in items.iter().enumerate() {
-                            if commands::handle_remove_policy_item(
+                            // #15966r: forget broadcast PPTP associations only
+                            // AFTER the identity-conditional policy delete
+                            // applies. A stale captured session-id (or a
+                            // companion refusal) returns false and must leave
+                            // a replacement channel's calls and buffered
+                            // segments untouched.
+                            let local_id_before = sessions.session_id_for(&item.key);
+                            let applied = commands::handle_remove_policy_item(
                                 sessions,
                                 session_map,
                                 forwarding,
@@ -620,8 +635,34 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                                 &mut deleted_synced_keys,
                                 worker_id,
                                 &mut deferred,
-                            ) {
+                            );
+                            // Genuine delete = applied here, or this worker
+                            // never held the incarnation (absent): broadcast
+                            // associations must still be purged. A present
+                            // session with a different id is a replacement
+                            // incarnation and is protected.
+                            // Trade-off (explicit, #15966r4): the absent arm
+                            // cannot discriminate a stale batch (captured
+                            // before a replacement was learned on THIS
+                            // worker, which holds no local row to check)
+                            // from a genuine delete on a non-owning worker.
+                            // It chooses purge: leaving broadcast calls
+                            // after a genuine delete resurrects a revoked
+                            // channel, while a stale purge is bounded by
+                            // call re-learning on the live control channel
+                            // and association idle expiry. The present-row
+                            // arm IS incarnation-scoped above.
+                            let genuine = applied || local_id_before == 0;
+                            if applied {
                                 applied_slot[index] = true;
+                            }
+                            if genuine {
+                                if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(&item.key) {
+                                    sessions.pptp_mut().forget_control_channel(ch);
+                                    if !deleted_pptp_control_channels.contains(&ch) {
+                                        deleted_pptp_control_channels.push(ch);
+                                    }
+                                }
                             }
                         }
                         intents
@@ -685,8 +726,12 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 // #7699: learn the association on THIS worker. A collision is
                 // refused rather than merged (two calls sharing one handle
                 // share one session), and counted so a refusal is not silent.
-                if let Err(e) = sessions.pptp_mut().install(call, control, learned_ns) {
-                    debug_log!("PPTP association refused: {:?}", e);
+                // #15950: a command queued while enabled must not install
+                // after the ALG is disabled.
+                if forwarding.pptp_enabled() {
+                    if let Err(e) = sessions.pptp_mut().install(call, control, learned_ns) {
+                        debug_log!("PPTP association refused: {:?}", e);
+                    }
                 }
             }
             WorkerCommand::ForgetPptpCall(handle) => {
@@ -757,6 +802,14 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
     } else {
         worker_queue::has_transition_debt(worker_id)
     };
+    // #15950: derive deleted PPTP channels from the deleted keys.
+    for k in &deleted_synced_keys {
+        if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(k) {
+            if !deleted_pptp_control_channels.contains(&ch) {
+                deleted_pptp_control_channels.push(ch);
+            }
+        }
+    }
     WorkerCommandResults {
         cancelled_keys,
         deleted_synced_keys,
@@ -770,6 +823,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
         commands_backlogged,
         transition_debt_pending,
         session_import_repair_pending,
+        deleted_pptp_control_channels,
     }
 }
 

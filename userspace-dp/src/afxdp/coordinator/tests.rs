@@ -5316,12 +5316,13 @@ fn wg14675_hostname_peer_added_restarts_control_thread() {
     );
 }
 
-/// #14675 regression (pure same-Arc cell): changing ONLY an existing
+/// #14675 as amended by #15950 (H37-01): changing ONLY an existing
 /// peer's endpoint from one hostname to another — same pubkey, same
 /// allowed-ips, endpoint None in the engine table on both sides —
-/// reuses the engine Arc verbatim (`wg_peers_eq` does not compare
-/// `endpoint_host`). Without the peer_config_changed prune the
-/// resolver would keep resolving the old name forever.
+/// REBUILDS the engine, because `wg_peers_eq` now compares
+/// `endpoint_host` (a rename must not carry the old name's live
+/// endpoint). The control thread must still restart and recapture
+/// endpoint_hosts; Arc reuse remains only for unchanged identity.
 #[test]
 fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
     let mut coordinator = Coordinator::new();
@@ -5359,9 +5360,9 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
         .refresh_runtime_snapshot(&snap2)
         .expect("second apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_eq!(
+    assert_ne!(
         entry.engine_ptr, engine_ptr_before,
-        "hostname-only change must reuse the engine Arc — the same-engine path"
+        "hostname-only change must REBUILD the engine (#15950 H37-01)"
     );
     assert_eq!(
         entry.spawned_peer_config[0].endpoint_host.as_deref(),
@@ -14173,4 +14174,78 @@ fn publish_runtime_view_shares_books_arc_15091() {
     );
     assert_eq!(second.forwarding().policy.books.len(), 1);
     assert_eq!(second.forwarding().policy.books[0].v6.prefix_count(), 5000);
+}
+
+#[test]
+fn bringup_failure_preserves_forwarding_15950() {
+    let mut coordinator = Coordinator::new();
+    coordinator.force_ipsec_sa_ready = true;
+    // First successful reconcile installs generation 5 forwarding/validation.
+    let mut bindings0 = six242_three_worker_bindings();
+    coordinator.force_worker_healthy_stub = true;
+    let snap_ok = mandatory_ok_snapshot(5);
+    assert!(coordinator.reconcile(Some(&snap_ok), &mut bindings0, 64).is_ok());
+    let gen_before = coordinator.validation;
+    assert!(gen_before.snapshot_installed);
+    // Second reconcile (gen 6) fails in bring-up (SA not ready).
+    coordinator.force_ipsec_sa_not_ready = true;
+    coordinator.force_ipsec_sa_ready = false;
+    let mut bindings = six242_three_worker_bindings();
+    let snap = mandatory_ok_snapshot(6);
+    let result = coordinator.reconcile(Some(&snap), &mut bindings, 64);
+    assert!(matches!(result, Err(ReconcileError::IpsecSaNotReady(_))), "got {result:?}");
+    assert!(coordinator.workers.records().is_empty(), "workers must still be stopped");
+    // THE preservation assertions (revert-red: stop_inner(false) defaults both):
+    assert_eq!(coordinator.validation.config_generation, 6, "new generation validation must survive bring-up failure, got {:?}", coordinator.validation);
+    assert!(coordinator.validation.snapshot_installed);
+    // Retry (gen 6 again, SA ready) must succeed and keep generation.
+    coordinator.force_ipsec_sa_not_ready = false;
+    coordinator.force_ipsec_sa_ready = true;
+    coordinator.force_worker_healthy_stub = true;
+    let mut bindings2 = six242_three_worker_bindings();
+    let result2 = coordinator.reconcile(Some(&snap), &mut bindings2, 64);
+    assert!(result2.is_ok(), "retry must succeed, got {result2:?}");
+    assert_eq!(coordinator.validation.config_generation, 6);
+    let _ = gen_before;
+}
+
+
+#[test]
+fn stop_preserving_retires_holders_on_preserved_allocator_15966r() {
+    use crate::nat::NatHolder;
+    let mut coordinator = Coordinator::new();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    coordinator.workers.register(3, rec, None);
+    let egress: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+    let alloc = coordinator.forwarding.iface_nat_allocators.allocator_for(egress).expect("allocator");
+    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.0.5".parse().unwrap(), dst_ip: "198.51.100.9".parse().unwrap(), src_port: 4000, dst_port: 80, routing_scope: 0 };
+    assert!(alloc.reserve_flow(flow, crate::nat::TranslatedTuple { ip: egress, port: 20000 }, 0, false, 1_000, NatHolder::Worker(3)));
+    assert!(alloc.debug_is_port_occupied(0, 20000));
+    coordinator.stop_preserving_forwarding();
+    assert!(!alloc.debug_is_port_occupied(0, 20000), "holder retirement through preserving stop must free the preserved allocator's port");
+    assert!(coordinator.workers.records().is_empty());
+}
+
+#[test]
+fn coordinator_recovery_publish_advances_pptp_epoch_15966r7() {
+    use crate::session::pptp_control::PendingControlSegment;
+    let mut coord = Coordinator::new();
+    // Candidate publish (enabled by default): seeds epoch.
+    coord.publish_runtime_view();
+    let candidate_epoch = coord.forwarding.pptp_epoch;
+    let view_epoch = coord.ha.runtime.load().forwarding().pptp_epoch;
+    assert_eq!(view_epoch, candidate_epoch, "published view must carry the stamped epoch");
+    // Failed bring-up teardown + recovery publish must advance the stamp.
+    coord.stop_inner(false);
+    coord.publish_runtime_view();
+    let recovery_epoch = coord.forwarding.pptp_epoch;
+    assert!(recovery_epoch > candidate_epoch, "stop_inner must advance pptp epoch: candidate {candidate_epoch}, recovery {recovery_epoch}");
+    assert_eq!(coord.ha.runtime.load().forwarding().pptp_epoch, recovery_epoch);
+    // Fresh reply captured under the recovery view installs at drain.
+    let inbox = crate::session::pptp_control::PptpControlInbox::default();
+    assert!(inbox.push(PendingControlSegment { epoch: recovery_epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 1, payload: vec![1] }));
+    assert_eq!(inbox.take_pending_in_domain(1_000_000_000, recovery_epoch).len(), 1, "fresh reply under recovery epoch must survive (RED if stop_inner epoch ops removed)");
+    // Candidate-epoch entry still drops under recovery.
+    assert!(inbox.push(PendingControlSegment { epoch: candidate_epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 2, payload: vec![2] }));
+    assert_eq!(inbox.take_pending_in_domain(2_000_000_000, recovery_epoch).len(), 0);
 }

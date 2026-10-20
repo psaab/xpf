@@ -94,6 +94,7 @@ fn single_peer_engine(private_key: [u8; 32], peer_pub: [u8; 32], cidr: &str) -> 
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![cidr.parse().unwrap()],
             preshared_key: [0u8; 32].into(),

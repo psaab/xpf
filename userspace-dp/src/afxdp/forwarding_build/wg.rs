@@ -69,6 +69,7 @@ pub(super) fn populate_wg_engines(
             .map(|p| WgPeerConfig {
                 pubkey: p.pubkey,
                 endpoint: p.endpoint,
+                endpoint_host: p.endpoint_host.clone(),
                 persistent_keepalive: p.keepalive_secs,
                 allowed_ips: p.allowed_ips.clone(),
                 // #4103 F12: clone the Zeroizing carrier (no plaintext

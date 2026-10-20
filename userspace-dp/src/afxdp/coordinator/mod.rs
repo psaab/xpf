@@ -474,6 +474,10 @@ pub struct Coordinator {
     pub(crate) ipsec_snapshot_generation: u64,
     pub(crate) pmech_inventory: Arc<PMechInventory>,
     pub(crate) runtime_view_publication_generation: u64,
+    /// PPTP enable-epoch publisher state: last published enabled bit and
+    /// the epoch to stamp on the next publish when it flips.
+    pub(crate) pptp_last_enabled: Option<bool>,
+    pub(crate) pptp_epoch_counter: u64,
     pub(crate) reconcile_calls: u64,
     /// #2522: count of teardowns that paid the 500ms mlx5 zero-copy
     /// EBUSY quiesce. Bumped only when live workers were torn down AND a
@@ -731,6 +735,8 @@ impl Coordinator {
             ipsec_snapshot_generation: 0,
             pmech_inventory: Arc::new(PMechInventory::default()),
             runtime_view_publication_generation: 0,
+            pptp_last_enabled: None,
+            pptp_epoch_counter: 0,
             reconcile_calls: 0,
             reconcile_quiesce_count: 0,
             last_bind_failures: BTreeMap::new(),
@@ -824,6 +830,25 @@ impl Coordinator {
     ///
     /// The event stream is NOT torn down (same as `stop`): it must
     /// survive XSK bind/unbind cycles.
+    /// #15950: bring-up failure rollback that stops workers (so none forward
+    /// the rejected snapshot) but preserves forwarding/validation, like
+    /// stop_for_link_cycle, so a retry builds with previous = the new
+    /// generation (allocator/WG/counter carry) instead of a default.
+    pub(crate) fn stop_preserving_forwarding(&mut self) {
+        // Clone the Arc-shared forwarding state (collections hold Arcs /
+        // shared stores; this is the teardown-only path) and keep the
+        // ORIGINAL installed while stop_inner joins workers and retires
+        // their NAT holders against its allocators. stop_inner defaults
+        // self.forwarding at the end; reinstall the clone (same allocator
+        // Arcs, now with departed holders retired) afterwards.
+        let preserved_forwarding = self.forwarding.clone();
+        let preserved_validation = self.validation;
+        self.stop_inner(false);
+        self.forwarding = preserved_forwarding;
+        self.validation = preserved_validation;
+        self.publish_runtime_view();
+    }
+
     pub fn stop_for_link_cycle(&mut self) {
         let preserved_forwarding = std::mem::take(&mut self.forwarding);
         let preserved_validation = self.validation;
@@ -1069,6 +1094,14 @@ impl Coordinator {
     }
 
     pub(crate) fn stop_inner(&mut self, clear_synced_state: bool) {
+        // #15966r7: worker-set rebuild resets the PPTP epoch tracker.
+        // Advance the epoch so any view published before this stop (e.g. a
+        // candidate that fails bring-up) can never share an epoch with the
+        // recovery publish, and clear the flip tracker so the recovery
+        // publish re-seeds from its own enabled bit. Fresh replies stamped
+        // under the recovery epoch are therefore never dropped as stale.
+        self.pptp_epoch_counter = self.pptp_epoch_counter.saturating_add(1);
+        self.pptp_last_enabled = None;
         // #10516: stop and join the XFRM-SA monitor before workers and
         // forwarding state are reset. The monitor owns the only snapshot
         // writer, so joining is the no-mutation-after-stop fence.
@@ -2090,6 +2123,18 @@ impl Coordinator {
     /// link-cycle restore, routing-domain seeds) could not be told apart from
     /// a full apply at this single choke point.
     pub(crate) fn publish_runtime_view(&mut self) {
+        // Publisher-stamped PPTP epoch: advance whenever the enabled bit
+        // flips versus the last publish (first publish only seeds).
+        let enabled = self.forwarding.pptp_enabled();
+        match self.pptp_last_enabled {
+            None => { self.pptp_last_enabled = Some(enabled); }
+            Some(prev) if prev != enabled => {
+                self.pptp_epoch_counter = self.pptp_epoch_counter.saturating_add(1);
+                self.pptp_last_enabled = Some(enabled);
+            }
+            _ => {}
+        }
+        self.forwarding.pptp_epoch = self.pptp_epoch_counter;
         let forwarding = Arc::new(self.forwarding.clone());
         self.store_runtime_view(forwarding);
     }

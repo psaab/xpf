@@ -572,8 +572,20 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         for commands in worker_commands {
             // #1807: recover-and-push — `if let Ok` silently DROPPED the
             // activation-prewarm UpsertSynced for a poisoned worker queue.
+            // #15950: raw ForwardFlow/LocalMiss rows need the replica
+            // transform, but a SharedPromote row is locally-owned promoted
+            // authority and must be restored as SharedPromote (its worker
+            // copy is protected by the local-replace guard in upsert).
+            let replica = if forward.origin == SessionOrigin::SharedPromote {
+                forward.clone()
+            } else {
+                synced_replica_entry(forward)
+            };
             let mut pending = worker_queue::lock_recover(commands);
-            worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertSynced(forward.clone()));
+            worker_queue::push_bounded(
+                &mut pending,
+                WorkerCommand::UpsertSynced(replica),
+            );
         }
     }
     if fwd_publish_errors > 0 {
@@ -611,7 +623,10 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             // #1807: recover-and-push — `if let Ok` silently DROPPED the
             // reverse-prewarm UpsertSynced for a poisoned worker queue.
             let mut pending = worker_queue::lock_recover(commands);
-            worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertSynced(reverse.clone()));
+            worker_queue::push_bounded(
+                &mut pending,
+                WorkerCommand::UpsertSynced(synced_replica_entry(&reverse)),
+            );
         }
     }
 }

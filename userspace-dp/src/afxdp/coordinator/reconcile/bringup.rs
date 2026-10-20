@@ -238,11 +238,11 @@ pub(super) fn bring_up_workers(
             .wait_ready(Duration::from_secs(5))
     };
     if !ipsec_sa_ready {
-        // #14130: unwind the plan/publish/replay phases. `stop_inner` joins
-        // any aux threads, defaults the just-published runtime, and clears
-        // the sizing counters, so status cannot report a phantom fleet.
-        // It also stops the SA monitor; the explicit stop above is gone.
-        coord.stop_inner(false);
+        // #14130/#15950: unwind the plan/publish/replay phases. Workers
+        // are stopped/joined and sizing counters cleared so status cannot
+        // report a phantom fleet, while forwarding/validation are preserved
+        // for the retry. It also stops the SA monitor.
+        coord.stop_preserving_forwarding();
         let stage = ReconcileStage::IpsecSaNotReady;
         coord.last_reconcile_stage = stage.clone();
         return Err(WorkerBringUpError::IpsecSaNotReady(stage));
@@ -283,7 +283,7 @@ pub(super) fn bring_up_workers(
                 "xpf-userspace-dp: worker bring-up FAILED ({stage}); a queue set has no \
                  XSK-bound worker after teardown — failing reconcile closed"
             );
-            coord.stop_inner(false);
+            coord.stop_preserving_forwarding();
             coord.last_reconcile_stage = stage.clone();
             return Err(WorkerBringUpError::Spawn(stage));
         }
@@ -310,13 +310,13 @@ pub(super) fn bring_up_workers(
                 // #4952 differential ARM 2 (stays in the shell): stop + JOIN the
                 // newly-started workers (the teardown path) so no live-but-unbound
                 // worker keeps heartbeating past this fail-closed reconcile, and
-                // clear the coordinator worker state so a retry / last-good
-                // reconcile starts from a coherent baseline. Preserved synced
-                // sessions are kept (`clear_synced_state=false`). #6244:
+                // clear the coordinator worker state so a retry starts from
+                // a coherent baseline with the new generation's forwarding
+                // preserved. Preserved synced sessions are kept. #6244:
                 // `stop_inner` no longer writes `last_reconcile_stage`, so the
                 // typed bind-incomplete identity is recorded once, after the
                 // teardown, and survives.
-                coord.stop_inner(false);
+                coord.stop_preserving_forwarding();
                 record_bind_failure_causes(coord, &stage);
                 // #8558: `stop_inner` above emptied `workers.live`, which is
                 // what makes `refresh_bindings` route every slot through

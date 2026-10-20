@@ -177,6 +177,14 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     // new session while the old port stays reserved forever. Nothing else frees
     // it: delete-sync releases the CURRENT decision, which no longer names that
     // port.
+    // #15966r: a prewarm-restored SharedPromote entry is locally-owned in
+    // provenance (peer deletes must refuse it) but its worker replica must
+    // reserve/release NAT holders exactly like a peer-synced replica:
+    // replacing a WorkerLocalImport holder with a non-reserving origin
+    // would free the live translated port. Treat SharedPromote as
+    // reserving for the accounting below without changing its origin.
+    let reserving_origin = entry.origin.is_peer_synced()
+        || entry.origin == SessionOrigin::SharedPromote;
     let previous_reservation = sessions.entry_with_origin(&key);
     // #9412: the Copy fields read after the install, captured before
     // `into_session_install` consumes the entry. It carries the peer's stable
@@ -204,7 +212,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // before re-reserving cannot free the new (different-tuple)
         // reservation; for a same-tuple refresh the translated tuple is
         // unchanged and this branch is not taken, preserving the holder bit.
-        let new_entry_reserves = entry_origin.is_peer_synced()
+        let new_entry_reserves = reserving_origin
             && !metadata.is_reverse
             && entry_decision.nat.rewrite_src.is_some();
         let reservation_target_changed = previous_reservation.as_ref().is_some_and(
@@ -246,7 +254,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // pool source port; a local-origin entry already allocated its port on
         // the active path). The reservation is freed by the standard teardown
         // (`release_source_nat_allocation`) on reap or delete-sync.
-        if entry_origin.is_peer_synced() && !metadata.is_reverse {
+        if reserving_origin && !metadata.is_reverse {
             // #15191: the non-pool domains, from this same generation.
             let synced_static_externals = forwarding.static_nat.external_identities();
             let synced_nptv6_prefixes = forwarding.nptv6.external_prefixes();
@@ -312,7 +320,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // local control binding; a handle mismatch (pair decodes to a
         // different handle than the key names) is not re-derived — that
         // disagreement was already refused at HA import.
-        if let crate::session::TunnelDiscriminator::Pptp(handle) = key.discriminator {
+        if forwarding.pptp_enabled()
+            && let crate::session::TunnelDiscriminator::Pptp(handle) = key.discriminator
+        {
             if let Some(call) = crate::session::pptp::PptpCall::from_wire_call_ids_in_domain(
                 key.routing_domain,
                 pptp_call_ids,

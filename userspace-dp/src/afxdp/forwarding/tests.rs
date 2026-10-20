@@ -3718,14 +3718,17 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
         false,
     ));
     assert!(sessions.lookup(&key, 1_000_000, 0x10).is_some());
-    assert!(
-        shared_sessions
-            .lock()
-            .expect("shared lock")
-            .get(&key)
-            .is_none()
-    );
-    assert!(shared_nat_sessions.lock().expect("nat lock").is_empty());
+    // #15950 contract: LocalMiss itself is published for cross-worker
+    // FragAssoc liveness; transient seeds are not (see seed test below).
+    let shared = shared_sessions.lock().expect("shared lock");
+    let published = shared.get(&key).expect("LocalMiss row must be in shared_sessions");
+    assert_eq!(published.origin, SessionOrigin::LocalMiss);
+    assert_eq!(published.session_id, sessions.session_id_for(&key));
+    drop(shared);
+    // publish_shared_session also files the reverse alias for this same
+    // session (needed for sibling reply lookup); no forward-wire alias
+    // exists because the NAT decision is default (wire key == key).
+    assert!(!shared_nat_sessions.lock().expect("nat lock").is_empty());
     assert!(
         shared_forward_wire_sessions
             .lock()
@@ -3833,14 +3836,10 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         0x10,
         false,
     ));
-    assert!(
-        shared_sessions
-            .lock()
-            .expect("shared lock")
-            .get(&key)
-            .is_none()
-    );
-    assert!(shared_nat_sessions.lock().expect("nat lock").is_empty());
+    let shared = shared_sessions.lock().expect("shared lock");
+    let published = shared.get(&key).expect("LocalMiss replacement must publish its row");
+    assert_eq!(published.origin, SessionOrigin::LocalMiss);
+    drop(shared);
     assert!(
         shared_forward_wire_sessions
             .lock()
@@ -11694,4 +11693,77 @@ fn terminal_attribution_equal_prefix_tie_lowest_ifindex_15917() {
         ForwardingDisposition::FabricRedirect,
         "tie-winner peer-owned target must fabric-redirect"
     );
+}
+
+#[test]
+fn peer_owned_vip_local_delivery_gets_ifindex_15950() {
+    let mut snapshot = nat_snapshot();
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth1.0" { iface.connected_rg_peer_owned = true; }
+    }
+    let state = build_forwarding_state(&snapshot);
+    assert!(state.connected_v4.iter().all(|e| e.host != Ipv4Addr::new(10,0,61,1)));
+    let res = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10,0,61,1))).resolution;
+    assert_eq!(res.disposition, ForwardingDisposition::LocalDelivery, "got {res:?}");
+    assert_eq!(res.local_ifindex, 24, "peer-owned VIP must attribute to its interface, not 0");
+    let now_secs = monotonic_nanos()/1_000_000_000;
+    let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(2, inactive_ha_runtime(now_secs)), (1, active_ha_runtime(now_secs))])));
+    let enforced = enforce_ha_resolution(&state, &ha, res);
+    assert_ne!(enforced.disposition, ForwardingDisposition::LocalDelivery, "peer-owned local delivery must be HA-gated, got {enforced:?}");
+    let res6 = lookup_forwarding_resolution(&state, IpAddr::V6("2001:559:8585:ef00::1".parse().unwrap())).resolution;
+    assert_eq!(res6.disposition, ForwardingDisposition::LocalDelivery, "got {res6:?}");
+    assert_eq!(res6.local_ifindex, 24);
+    assert!(state.connected_v4.iter().all(|e| e.ifindex != 24));
+}
+
+#[test]
+fn local_miss_publishes_to_shared_15950() {
+    // Reuse existing helper test shape via nat_snapshot state
+    let mut sessions = SessionTable::new();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let state = build_forwarding_state(&nat_snapshot());
+    let key = SessionKey { addr_family: libc::AF_INET as u8, protocol: PROTO_TCP, src_ip: "172.16.80.8".parse().unwrap(), dst_ip: "172.16.80.200".parse().unwrap(), src_port: 40278, dst_port: 5201, discriminator: Default::default(), routing_domain: 0 };
+    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(&state, 11, 80, key.src_ip, PROTO_TCP).expect("local"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    // ingress helper may return wan iface resolution; use generic metadata
+    let metadata = SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID, egress_zone: TEST_WAN_ZONE_ID, ingress_zone_check: 0, egress_zone_check: 0, ingress_ifindex: 0, ingress_vlan_id: 0, forward_ingress_vlan_id: None, owner_rg_id: 0, fabric_ingress: false, is_reverse: false, nat64_reverse: None, log_session_init: false, log_session_close: false, policy_id: 0, inactivity_timeout_ns: None, policy_counter_idx: 0, policy_counter: None, nat_scope_ifindex: None };
+    assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::LocalMiss, 1_000_000, PROTO_TCP, 0x10, false));
+    let shared = shared_sessions.lock().unwrap();
+    let entry = shared.get(&key).expect("LocalMiss must be published to shared_sessions (#15950)");
+    assert_eq!(entry.origin, SessionOrigin::LocalMiss);
+    assert_eq!(entry.session_id, sessions.session_id_for(&key));
+    assert_ne!(entry.session_id, 0);
+}
+
+
+#[test]
+fn helper_fabric_punt_seed_stays_out_of_shared_15950() {
+    let mut sessions = SessionTable::new();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let state = build_forwarding_state(&nat_snapshot());
+    let key = SessionKey { addr_family: libc::AF_INET as u8, protocol: PROTO_TCP, src_ip: "172.16.80.8".parse().unwrap(), dst_ip: "172.16.80.200".parse().unwrap(), src_port: 40279, dst_port: 5201, discriminator: Default::default(), routing_domain: 0 };
+    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(&state, 11, 80, key.src_ip, PROTO_TCP).expect("local"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let metadata = SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID, egress_zone: TEST_WAN_ZONE_ID, ingress_zone_check: 0, egress_zone_check: 0, ingress_ifindex: 0, ingress_vlan_id: 0, forward_ingress_vlan_id: None, owner_rg_id: 0, fabric_ingress: false, is_reverse: false, nat64_reverse: None, log_session_init: false, log_session_close: false, policy_id: 0, inactivity_timeout_ns: None, policy_counter_idx: 0, policy_counter: None, nat_scope_ifindex: None };
+    assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::FabricPuntSeed, 1_000_000, PROTO_TCP, 0x10, false));
+    assert!(shared_sessions.lock().unwrap().get(&key).is_none(), "FabricPuntSeed must never become shared authority");
+}
+
+#[test]
+fn nat_only_vip_in_connected_subnet_keeps_ifindex0_15966r() {
+    // NAT-only external inside a configured interface's /24 must NOT acquire
+    // that interface's ifindex (configured_iface gate discriminator).
+    let mut snapshot = nat_snapshot();
+    snapshot.static_nat_rules = vec![crate::StaticNATRuleSnapshot { name: "web-in-subnet".to_string(), from_routing_instance: String::new(), external_ip: "172.16.80.99".to_string(), internal_ip: "10.0.61.99".to_string(), ..Default::default() }];
+    let state = build_forwarding_state(&snapshot);
+    assert!(state.local_v4.contains(&Ipv4Addr::new(172,16,80,99)));
+    assert!(!state.configured_iface_v4.contains(&Ipv4Addr::new(172,16,80,99)));
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let r = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, IpAddr::V4(Ipv4Addr::new(172,16,80,99)), Some("inet.0")).resolution;
+    assert_eq!(r.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(r.local_ifindex, 0, "NAT-only VIP in a connected subnet must keep ifindex 0");
 }
