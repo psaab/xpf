@@ -833,3 +833,33 @@ fn syn_cookie_host_admission_three_arm_15947() {
         &lo0_denied, &flow, &frame, meta, None, flow.dst_ip, 443, 1_000,
     ), "lo0 deny arm");
 }
+
+#[test]
+fn syn_cookie_final_admission_fence_suppresses_challenge_15947() {
+    // A Permit resolution that matches an unconditional miss-path drop
+    // gate (L2 group / IPsec selector fence, represented by the caller's
+    // fence_dropped evaluation) must not earn a challenge SYN-ACK.
+    let fw = forwarding(false);
+    let flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: DMZ as u32,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let ha = std::collections::BTreeMap::new();
+    // Control: same tuple without the fence admits (dmz->wan permit).
+    assert!(super::syn_cookie_final_admission_with_fence(
+        &fw, &ha, &flow, meta, None,
+        cookie_resolution(ForwardingDisposition::ForwardCandidate),
+        flow.dst_ip, 443, false, 1_000, 128,
+    ));
+    assert!(!super::syn_cookie_final_admission_with_fence(
+        &fw, &ha, &flow, meta, None,
+        cookie_resolution(ForwardingDisposition::ForwardCandidate),
+        flow.dst_ip, 443, true, 1_000, 128,
+    ), "fence-matching Permit must suppress the challenge reply");
+}

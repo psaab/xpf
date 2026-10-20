@@ -440,6 +440,32 @@ pub(super) fn syn_cookie_final_admission(
     now_ns: u64,
     now_secs: u64,
 ) -> bool {
+    syn_cookie_final_admission_with_fence(forwarding, ha_state, flow, meta, ingress_zone_override, resolution, effective_dst, effective_dst_port, false, now_ns, now_secs)
+}
+
+/// Final admission with the unconditional miss-path drop gates folded
+/// in (confirmation fold): L2 group-unicast delivery and the bindless
+/// IPsec selector fence drop Permit packets on the ordinary miss path
+/// after policy, so a challenged SYN must not earn a SYN-ACK when any
+/// of them matches. `fence_dropped` is the caller's evaluation of
+/// those gates on the packet's composed decision.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn syn_cookie_final_admission_with_fence(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    resolution: ForwardingResolution,
+    effective_dst: IpAddr,
+    effective_dst_port: u16,
+    fence_dropped: bool,
+    now_ns: u64,
+    now_secs: u64,
+) -> bool {
+    if fence_dropped {
+        return false;
+    }
     let resolution = crate::afxdp::forwarding::finalize_new_flow_ha_resolution(
         forwarding,
         ha_state,
@@ -5226,33 +5252,61 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // is the single reply decision point; no earlier
                         // stage has emitted a challenge reply.
                         if let Some(challenge) = deferred_syn_cookie_challenge.take() {
-                            let admitted = if decision.resolution.disposition
-                                == ForwardingDisposition::LocalDelivery
-                            {
-                                syn_cookie_host_admission(
-                                    worker_ctx.forwarding,
-                                    flow,
-                                    packet_frame,
-                                    meta,
-                                    ingress_zone_override,
-                                    effective_resolution_target,
-                                    policy_dst_port,
-                                    now_ns,
-                                )
-                            } else {
-                                syn_cookie_final_admission(
-                                    worker_ctx.forwarding,
-                                    worker_ctx.ha_state,
-                                    flow,
-                                    meta,
-                                    ingress_zone_override,
-                                    decision.resolution,
-                                    effective_resolution_target,
-                                    policy_dst_port,
-                                    now_ns,
-                                    now_secs,
-                                )
-                            };
+                            // Confirmation fold (Codex5): the ordinary
+                            // miss path drops Permit packets at three
+                            // unconditional gates AFTER this point —
+                            // L2 group-unicast, bindless IPsec selector
+                            // fence (pre-SNAT), and the post-allocation
+                            // fence recheck. A challenged SYN must not
+                            // earn a SYN-ACK the miss path would silently
+                            // drop, so all three are evaluated here on
+                            // the composed decision (the third uses the
+                            // same predicate; allocation has not run for
+                            // a SYN-only challenge, so the composed NAT
+                            // is the pre-routing decision).
+                            let fence_dropped = (l2_group_unicast_ip
+                                && owned_packet_frame.is_none())
+                                || ForwardPacketMeta::from(meta)
+                                    .l3_addrs_unfiltered()
+                                    .is_some_and(|(source, destination)| {
+                                        worker_ctx
+                                            .forwarding
+                                            .bindless_ipsec_selector_fence
+                                            .matches_with_nat(
+                                                source,
+                                                destination,
+                                                decision.nat,
+                                            )
+                                    });
+                            let admitted = !fence_dropped
+                                && if decision.resolution.disposition
+                                    == ForwardingDisposition::LocalDelivery
+                                {
+                                    syn_cookie_host_admission(
+                                        worker_ctx.forwarding,
+                                        flow,
+                                        packet_frame,
+                                        meta,
+                                        ingress_zone_override,
+                                        effective_resolution_target,
+                                        policy_dst_port,
+                                        now_ns,
+                                    )
+                                } else {
+                                    syn_cookie_final_admission_with_fence(
+                                        worker_ctx.forwarding,
+                                        worker_ctx.ha_state,
+                                        flow,
+                                        meta,
+                                        ingress_zone_override,
+                                        decision.resolution,
+                                        effective_resolution_target,
+                                        policy_dst_port,
+                                        fence_dropped,
+                                        now_ns,
+                                        now_secs,
+                                    )
+                                };
                             if admitted {
                                 enqueue_syn_cookie_reply(
                                     &mut binding.tx_pipeline,
