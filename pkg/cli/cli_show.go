@@ -228,6 +228,13 @@ func (c *CLI) handleShow(args []string) error {
 		if len(args) >= 2 && args[1] == "filter" && len(args) < 3 {
 			return fmt.Errorf("usage: show firewall filter <name> [family inet|inet6] [effective]")
 		}
+		// #15719: repeated `effective`/`family` tokens are ignored or
+		// last-wins here (firewallArgsHaveWord / firewallFamilyArg), so
+		// the executed render differs from the canonical string the
+		// RBAC gate judged. Reject duplicates.
+		if firewallArgCount(args, "effective") > 1 || firewallArgCount(args, "family") > 1 {
+			return fmt.Errorf("usage: show firewall filter <name> [family inet|inet6] [effective]")
+		}
 		if firewallArgsHaveWord(args, "effective") {
 			family := firewallFamilyArg(args)
 			if len(args) >= 3 && args[1] == "filter" {
@@ -368,6 +375,17 @@ func firewallArgsHaveWord(args []string, word string) bool {
 
 // firewallFamilyArg extracts the value of the loose trailing `family <f>`
 // modifier from the firewall show arguments, or "" if absent (#4422).
+// firewallArgCount counts exact occurrences of word in args (#15719).
+func firewallArgCount(args []string, word string) int {
+	n := 0
+	for _, a := range args {
+		if a == word {
+			n++
+		}
+	}
+	return n
+}
+
 func firewallFamilyArg(args []string) string {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "family" {
