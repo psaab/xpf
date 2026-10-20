@@ -426,6 +426,7 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
+	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	m.markAppliedSnapshotLocked()
 	if h, ok := postPublishHash(&publishSnap, publishHash, publishHashOK, preSendClear); ok {

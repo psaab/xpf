@@ -184,6 +184,7 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 	requestTypeUses := make(map[string]int)
 	var outside []string
 	inSendSite := 0
+	inWrapper := 0
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -236,9 +237,21 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 				if !ok || lit.Kind != token.STRING || lit.Value != `"apply_snapshot"` {
 					return true
 				}
-				if fn.Name.Name == "requestApplySnapshotPreparedLocked" || fn.Name.Name == "requestApplySnapshotInternalLocked" {
+				// #15955: the literal lives ONLY in the shared send body
+				// (requestApplySnapshotInternalLocked). The two Locked
+				// entry wrappers must stay literal-free: an
+				// "apply_snapshot" literal (re)appearing in
+				// requestApplySnapshotPreparedLocked would mean a second
+				// send crept into the wrapper, which is exactly the
+				// regression this gate exists to catch — so wrappers are
+				// counted separately and asserted empty below, not
+				// allowlisted alongside the body.
+				switch fn.Name.Name {
+				case "requestApplySnapshotInternalLocked":
 					inSendSite++
-				} else {
+				case "requestApplySnapshotPreparedLocked", "requestApplySnapshotPrehashedLocked":
+					inWrapper++
+				default:
 					outside = append(outside, fmt.Sprintf("%s (%s)", fset.Position(lit.Pos()), fn.Name.Name))
 				}
 				return true
@@ -252,11 +265,16 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 		}
 	}
 	if inSendSite == 0 {
-		t.Fatal("liveness: no \"apply_snapshot\" literal found in the send-site functions — the scan " +
+		t.Fatal("liveness: no \"apply_snapshot\" literal found in requestApplySnapshotInternalLocked — the scan " +
 			"is not reading this package, so an empty result below would mean nothing")
 	}
+	if inWrapper != 0 {
+		t.Errorf("found %d \"apply_snapshot\" literal(s) in the Locked entry wrappers "+
+			"(requestApplySnapshotPreparedLocked / requestApplySnapshotPrehashedLocked): the literal must live "+
+			"only in requestApplySnapshotInternalLocked, or a second send site has been introduced", inWrapper)
+	}
 	if len(outside) > 0 {
-		t.Errorf("apply_snapshot is sent outside requestApplySnapshotPreparedLocked:\n  %s\n"+
+		t.Errorf("apply_snapshot is sent outside requestApplySnapshotInternalLocked:\n  %s\n"+
 			"such a send carries no content digest and does not republish past a content conflict (#9520)",
 			strings.Join(outside, "\n  "))
 	}

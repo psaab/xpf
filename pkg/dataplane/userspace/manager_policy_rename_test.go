@@ -393,3 +393,103 @@ func TestStatusPartialRepublishPreservesRenameMetadataWhenFullPending(t *testing
 		t.Fatal("successful status-first publication did not clear the full-snapshot metadata latch")
 	}
 }
+
+// TestCaptureFirstAcceptanceClearsLatchAndDoesNotReplayMetadata15955 is
+// the capture-authority twin of
+// TestStatusPartialRepublishPreservesRenameMetadataWhenFullPending: a
+// capture republish can be the FIRST accepted publication of a deferred
+// full snapshot (pendingFullSnapshotMetadata=true), so it must preserve
+// the one-shot rename metadata on that first send, clear the latch on
+// success, and a second capture publish must strip the metadata rather
+// than replay it. Round-2 review found the latch clear missing from
+// the capture success tail (every sibling publisher clears it).
+func TestCaptureFirstAcceptanceClearsLatchAndDoesNotReplayMetadata15955(t *testing.T) {
+	cfg := &config.Config{}
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.captureEpochProvider = func(uint64, uint32) (
+		uint64,
+		[]QueueEpochSnapshot,
+		uint64,
+		[]IpsecTunnelRowSnapshot,
+	) {
+		return 1, nil, 1, nil
+	}
+	var sent []*ConfigSnapshot
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "apply_snapshot" && req.Snapshot != nil {
+			cp := *req.Snapshot
+			sent = append(sent, &cp)
+			if status != nil {
+				*status = ProcessStatus{
+					ConfigSnapshotProtocolVersion: ProtocolVersion,
+					LastSnapshotGeneration:        req.Snapshot.Generation,
+					LastFIBGeneration:             req.Snapshot.FIBGeneration,
+				}
+			}
+		}
+		return nil
+	}
+	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 5, 0)
+	if err != nil {
+		t.Fatalf("buildSnapshot: %v", err)
+	}
+	snap.Config = cfg
+	snap.PolicyRenameAncestry = []PolicyRenameAncestry{{SourceRuleID: "old", DestinationRuleID: "new"}}
+	snap.PolicySessionRebinds = []PolicySessionRebind{{Family: "ipv4", RuleID: "new", PolicyID: 2}}
+	snap.ClearPolicies = true
+	snap.fullBuild = true
+	m.lastSnapshot = snap
+	m.generation = 5
+	m.publishedSnapshot = 5
+	m.pendingFullSnapshotMetadata = true
+	if h, ok := snapshotContentHash(snap); ok {
+		// Deliberately stale: force the capture publish to actually send
+		// rather than dedup-skip, as a first acceptance would.
+		m.lastSnapshotHash = h
+		snap.Routes = append(snap.Routes, RouteSnapshot{Table: "inet.0", Family: "inet", Destination: "192.0.2.0/24", NextHops: []string{"192.0.2.1"}})
+	}
+
+	published, err := m.RepublishCurrentCaptureAuthority()
+	if err != nil || !published {
+		t.Fatalf("first capture republish = (%t, %v), want a publish", published, err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("first capture publish sent %d snapshots, want 1", len(sent))
+	}
+	if len(sent[0].PolicyRenameAncestry) != 1 || len(sent[0].PolicySessionRebinds) != 1 {
+		t.Fatalf("first accepted capture publish stripped one-shot metadata: ancestry=%v rebinds=%v",
+			sent[0].PolicyRenameAncestry, sent[0].PolicySessionRebinds)
+	}
+	if !sent[0].ClearPolicies {
+		t.Fatal("first accepted capture publish must carry the full build's ClearPolicies authorization")
+	}
+	m.mu.Lock()
+	latch := m.pendingFullSnapshotMetadata
+	m.mu.Unlock()
+	if latch {
+		t.Fatal("successful capture-first publication did not clear the full-snapshot metadata latch")
+	}
+
+	// Second capture publish: the retained snapshot still carries the
+	// one-shot fields (the send spends only the publishSnap copy), but
+	// with the latch cleared the clone must be stripped — no replay.
+	// Force a content change so it sends instead of dedup-skipping.
+	m.mu.Lock()
+	m.lastSnapshot.Routes = append(m.lastSnapshot.Routes, RouteSnapshot{Table: "inet.0", Family: "inet", Destination: "198.51.100.0/24", NextHops: []string{"198.51.100.1"}})
+	m.mu.Unlock()
+	published, err = m.RepublishCurrentCaptureAuthority()
+	if err != nil || !published {
+		t.Fatalf("second capture republish = (%t, %v), want a publish", published, err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("second capture publish sent %d snapshots total, want 2", len(sent))
+	}
+	if len(sent[1].PolicyRenameAncestry) != 0 || len(sent[1].PolicySessionRebinds) != 0 {
+		t.Fatalf("second capture publish replayed one-shot metadata: ancestry=%v rebinds=%v",
+			sent[1].PolicyRenameAncestry, sent[1].PolicySessionRebinds)
+	}
+	if sent[1].ClearPolicies {
+		t.Fatal("second capture publish replayed the spent ClearPolicies authorization")
+	}
+}
