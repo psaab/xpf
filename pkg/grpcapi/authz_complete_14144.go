@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -146,7 +147,37 @@ func (a completionAuth) providerPathAllowed(path []string) bool {
 	if !a.confRestricted || len(path) == 0 {
 		return true
 	}
-	return a.confRules.Evaluate(strings.Join(path, " ")).Allowed
+	return a.configPathFormsAllowed(path)
+}
+
+// effectiveConfigPaths returns the config path spellings a
+// *-configuration rule must judge for a cursor typed under
+// `groups <name> …` (#15942 H1-02): the group's BODY is effective
+// configuration at the unwrapped path, so a class denied
+// `security policies` must not be offered policy names merely because
+// the literal cursor starts with the allowed word `groups`.
+func effectiveConfigPaths(path []string) [][]string {
+	if len(path) >= 2 && path[0] == "groups" {
+		return [][]string{path, path[2:]}
+	}
+	return [][]string{path}
+}
+
+// configPathFormsAllowed reports whether every effective spelling of
+// path is allowed by the *-configuration rules.
+func (a completionAuth) configPathFormsAllowed(path []string) bool {
+	if !a.confRestricted {
+		return true
+	}
+	for _, p := range effectiveConfigPaths(path) {
+		if len(p) == 0 {
+			continue
+		}
+		if !a.confRules.Evaluate(strings.Join(p, " ")).Allowed {
+			return false
+		}
+	}
+	return true
 }
 
 // hintRoots maps a ValueHint to the config subtree(s) its live values are
@@ -165,6 +196,8 @@ var hintRoots = map[config.ValueHint][]string{
 	config.ValueHintStreamName:    {"security log"},
 	config.ValueHintPolicyAddress: {"security address-book"},
 	config.ValueHintPolicyApp:     {"applications"},
+	config.ValueHintPolicyName:    {"security policies"},
+	config.ValueHintUnitNumber:    {"interfaces"},
 }
 
 // providerHintAllowed adjudicates one ValueProvider call by BOTH the cursor
@@ -177,8 +210,7 @@ func (a completionAuth) providerHintAllowed(hint config.ValueHint, path []string
 	if a.unrestricted || !a.confRestricted {
 		return true
 	}
-	switch hint {
-	case config.ValueHintNone, config.ValueHintPolicyName, config.ValueHintUnitNumber:
+	if hint == config.ValueHintNone {
 		return true
 	}
 	roots, ok := hintRoots[hint]
@@ -223,7 +255,7 @@ func (a completionAuth) configPathAllowed(path []string) bool {
 	if !a.confRestricted || len(path) == 0 {
 		return true
 	}
-	return a.confRules.Evaluate(strings.Join(path, " ")).Allowed
+	return a.configPathFormsAllowed(path)
 }
 
 // showConfigPathAllowed adjudicates `show configuration <path>` completion:
@@ -266,16 +298,70 @@ func operationalConfigPaths(words []string) []string {
 	return nil
 }
 
+// canonicalOperationalWords expands uniquely-abbreviated operational
+// words to their canonical spelling before any regex is judged
+// (#15942 H1-02, twin of the CLI gate): the cmdtree completion walkers
+// resolve abbreviations via the same unique-prefix rule, so judging
+// the raw words priced a different command from the one whose
+// DynamicFn values were about to be read. See the CLI twin for the
+// prefix-expansion contract.
+func canonicalOperationalWords(words []string) []string {
+	if len(words) == 0 {
+		return nil
+	}
+	if canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, words); res == cmdtree.CanonicalOK {
+		return canon
+	}
+	out := make([]string, 0, len(words))
+	current := cmdtree.OperationalTree
+	var options map[string]*cmdtree.Node
+	for _, w := range words {
+		resolved, ok := cmdtree.ResolveUniquePrefix(cmdtree.KeysOf(current), w)
+		var node *cmdtree.Node
+		if ok {
+			node = current[resolved]
+		}
+		if !ok && options != nil {
+			if r2, ok2 := cmdtree.ResolveUniquePrefix(cmdtree.KeysOf(options), w); ok2 {
+				resolved, node, ok = r2, options[r2], true
+			}
+		}
+		if !ok {
+			out = append(out, words[len(out):]...)
+			break
+		}
+		out = append(out, resolved)
+		if node == nil {
+			break
+		}
+		if node.Options {
+			options = node.Children
+		}
+		if node.Children == nil {
+			if options == nil {
+				out = append(out, words[len(out):]...)
+				break
+			}
+			current = options
+			continue
+		}
+		current = node.Children
+	}
+	return out
+}
+
 // operationalAllowed reports whether live cmdtree DynamicFn values may be
-// computed for an operational command prefix. Every typed prefix is checked
-// against the operational regexes (a deny on any ancestor command conceals
-// its dynamic values), and the config subtrees the command's providers
-// enumerate are checked against the configuration regexes: the words after
-// `show` for `show …` commands (most `show …` dynamic providers enumerate
-// configured objects — zones, policies, routing instances), and the mapped
-// owning subtree for the non-show providers in operationalConfigPaths
-// (#14708: `test policy from-zone` previously evaluated "policy from-zone",
-// which no ^security deny matches, and leaked zone names).
+// computed for an operational command prefix (canonical spelling, see
+// canonicalOperationalWords). Every typed prefix is checked against the
+// operational regexes (a deny on any ancestor command conceals its
+// dynamic values), and the config subtrees the command's providers
+// enumerate are checked against the configuration regexes: the words
+// after `show` for `show …` commands (most `show …` dynamic providers
+// enumerate configured objects — zones, policies, routing instances),
+// and the mapped owning subtree for the non-show providers in
+// operationalConfigPaths (#14708: `test policy from-zone` previously
+// evaluated "policy from-zone", which no ^security deny matches, and
+// leaked zone names).
 func (a completionAuth) operationalAllowed(words []string) bool {
 	if a.unrestricted {
 		return true
@@ -283,20 +369,24 @@ func (a completionAuth) operationalAllowed(words []string) bool {
 	if !a.liveAllowed() {
 		return false
 	}
+	canon := canonicalOperationalWords(words)
+	if canon == nil {
+		return false
+	}
 	if a.opRestricted {
-		for i := 1; i <= len(words); i++ {
-			if !a.opRules.Evaluate(strings.Join(words[:i], " ")).Allowed {
+		for i := 1; i <= len(canon); i++ {
+			if !a.opRules.Evaluate(strings.Join(canon[:i], " ")).Allowed {
 				return false
 			}
 		}
 	}
-	if a.confRestricted && len(words) > 1 {
-		if words[0] == "show" {
-			if !a.confRules.Evaluate(strings.Join(words[1:], " ")).Allowed {
+	if a.confRestricted && len(canon) > 1 {
+		if canon[0] == "show" {
+			if !a.confRules.Evaluate(strings.Join(canon[1:], " ")).Allowed {
 				return false
 			}
 		}
-		for _, root := range operationalConfigPaths(words) {
+		for _, root := range operationalConfigPaths(canon) {
 			if !a.confRules.Evaluate(root).Allowed {
 				return false
 			}

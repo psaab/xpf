@@ -3,6 +3,8 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"strings"
@@ -91,9 +93,251 @@ func FormatCompareRedacted(oldTree, newTree *ConfigTree) string {
 
 // FormatCompareRedactedAtPath is FormatCompareRedacted filtered to path
 // (#15272 B24-03).
+//
+// #15942 H2-03: the path is navigated on the UNREDACTED trees first and
+// only the matched subtrees are fingerprint-redacted. Redacting the
+// whole tree first rewrites identity tokens the path itself names
+// (`snmp community <name>`, a credential-bearing `archive-sites <url>`),
+// so navigation by the caller's original path matched nothing and a
+// valid secret-identity path rendered "" / "[no changes]" even when
+// the subtree changed.
 func FormatCompareRedactedAtPath(oldTree, newTree *ConfigTree, path []string) string {
-	diff := FormatCompareAtPath(fingerprintRedactedClone(oldTree), fingerprintRedactedClone(newTree), path)
-	return maskCompareFingerprints(diff)
+	if len(path) == 0 {
+		return FormatCompareRedacted(oldTree, newTree)
+	}
+	oldMatches, oldWidth := scopedMatches15942(oldTree, path)
+	newMatches, newWidth := scopedMatches15942(newTree, path)
+	if len(oldMatches) == 0 && len(newMatches) == 0 {
+		return ""
+	}
+	width := oldWidth
+	if len(oldMatches) == 0 {
+		width = newWidth
+	}
+	parentPrefix := append([]string(nil), path[:len(path)-width]...)
+	var b strings.Builder
+	diffNodes(&b, fingerprintMatches15942(oldMatches, parentPrefix), fingerprintMatches15942(newMatches, parentPrefix), parentPrefix)
+	return maskCompareFingerprints(b.String())
+}
+
+// scopedMatches15942 navigates path on tree (unredacted) and reports the
+// matches plus the consumed width, mirroring FormatCompareAtPath.
+func scopedMatches15942(t *ConfigTree, path []string) ([]*Node, int) {
+	if t == nil {
+		return nil, 0
+	}
+	return navigatePathWidth(t.Children, path)
+}
+
+// fingerprintMatches15942 fingerprint-redacts clones of matched nodes.
+// base is the parent prefix the matches sit under, so secretIndices /
+// urlLeafIndices see the same flattened path the whole-tree walk saw.
+func fingerprintMatches15942(matches []*Node, base []string) []*Node {
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]*Node, len(matches))
+	for i, m := range matches {
+		out[i] = cloneNodes([]*Node{m})[0]
+	}
+	fingerprintCompareNodes(out, append([]string(nil), base...))
+	return out
+}
+
+// FormatPathRedacted renders the subtree at path with secrets masked
+// (#15942 H2-03) — the navigate-then-redact order: the path is navigated
+// on the UNREDACTED tree and cloned matches are masked before rendering,
+// so a path naming a masked identity token (`snmp community <name>`)
+// finds its subtree where redact-then-navigate matched nothing.
+func (t *ConfigTree) FormatPathRedacted(path []string) string {
+	matches, _ := t.redactedScopedMatches(path)
+	if matches == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, n := range matches {
+		renderScopedHierarchical15942(&b, n)
+	}
+	return b.String()
+}
+
+// FormatPathSetRedacted is FormatPathRedacted in `display set` form.
+func (t *ConfigTree) FormatPathSetRedacted(path []string) string {
+	matches, width := t.redactedScopedMatches(path)
+	if matches == nil {
+		return ""
+	}
+	if len(path) == 0 {
+		return (&ConfigTree{Children: matches}).FormatSet()
+	}
+	// FormatPathSet renders from path prefixes reconstructed from the
+	// caller's tokens. Feed it an ephemeral parent chain whose matched
+	// terminal nodes are the already-masked clones; joining the set lines
+	// with the original prefix restores the exact requested spelling.
+	parentPrefix := append([]string(nil), path[:len(path)-width]...)
+	var b strings.Builder
+	for _, n := range matches {
+		prefix, prefixQuote, prefixGroup := appendNodeKeysGrouped(parentPrefix, nil, nil, n)
+		if n.IsLeaf {
+			fmt.Fprintf(&b, "set %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup))
+		} else {
+			if len(n.Children) == 0 {
+				fmt.Fprintf(&b, "set %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup))
+			}
+			formatSetNodes(&b, n.Children, prefix, prefixQuote, prefixGroup)
+		}
+		if n.Annotation != "" {
+			fmt.Fprintf(&b, "annotate %s %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup), EscapedAnnotation(n.Annotation))
+		}
+		if n.Inactive {
+			fmt.Fprintf(&b, "deactivate %s\n", joinKeysProvGrouped(prefix, prefixQuote, prefixGroup))
+		}
+	}
+	return b.String()
+}
+
+// FormatPathJSONRedacted is FormatPathRedacted in JSON form.
+func (t *ConfigTree) FormatPathJSONRedacted(path []string) string {
+	matches, width := t.redactedScopedMatches(path)
+	if matches == nil {
+		return ""
+	}
+	parentPath := ""
+	if len(path) > 0 {
+		parentPath = strings.Join(path[:len(path)-width], " ")
+	}
+	data, err := marshalScopedJSON15942(matches, parentPath)
+	if err != nil {
+		return "{}"
+	}
+	return data
+}
+
+// FormatPathXMLRedacted is FormatPathRedacted in XML form.
+func (t *ConfigTree) FormatPathXMLRedacted(path []string) string {
+	matches, _ := t.redactedScopedMatches(path)
+	if matches == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(xml.Header)
+	b.WriteString("<configuration>\n")
+	formatXMLNodes(&b, matches, 1)
+	b.WriteString("</configuration>\n")
+	return b.String()
+}
+
+// FormatPathInheritanceRedactedForNode is FormatPathRedacted with
+// apply-groups inheritance annotations for nodeID. Inheritance expansion
+// returns a fresh expanded tree, so it can use the same order: navigate
+// the expanded tree by the original path, clone the matches, and mask
+// only those matches before rendering with inheritance annotations.
+func (t *ConfigTree) FormatPathInheritanceRedactedForNode(path []string, nodeID int) (string, error) {
+	if t == nil {
+		return "", nil
+	}
+	if len(path) == 0 {
+		return t.RedactedClone().FormatPathInheritanceForNode(path, nodeID)
+	}
+	if _, width := navigatePathWidth(t.Children, path); width == 0 {
+		_ = width
+	}
+	expanded, err := t.expandForInheritance(nodeID)
+	if err != nil {
+		return "", err
+	}
+	matches, width := navigatePathWidth(expanded.Children, path)
+	if len(matches) == 0 {
+		return "", nil
+	}
+	clones := cloneNodes(matches)
+	base := append([]string(nil), path[:len(path)-width]...)
+	redactMatches15942(clones, base)
+	var b strings.Builder
+	for _, n := range clones {
+		if n.Annotation != "" {
+			fmt.Fprintf(&b, "/* %s */\n", n.Annotation)
+		}
+		if n.IsLeaf {
+			fmt.Fprintf(&b, "%s%s;\n", inactivePrefix(n), n.QuotedKeyPath())
+		} else {
+			fmt.Fprintf(&b, "%s%s {\n", inactivePrefix(n), n.QuotedKeyPath())
+			formatNodesInheritance(&b, n.Children, 1)
+			fmt.Fprintf(&b, "}\n")
+		}
+	}
+	return b.String(), nil
+}
+
+const xmlHeader15942 = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+
+func renderScopedHierarchical15942(b *strings.Builder, n *Node) {
+	if n.Annotation != "" {
+		fmt.Fprintf(b, "/* %s */\n", n.Annotation)
+	}
+	if n.IsLeaf {
+		fmt.Fprintf(b, "%s%s;\n", inactivePrefix(n), n.QuotedKeyPath())
+		return
+	}
+	fmt.Fprintf(b, "%s%s {\n", inactivePrefix(n), n.QuotedKeyPath())
+	formatNodes(b, n.Children, 1)
+	fmt.Fprintf(b, "}\n")
+}
+
+func marshalScopedJSON15942(matches []*Node, parentPath string) (string, error) {
+	obj := nodesToJSONAt(matches, parentPath)
+	data, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data) + "\n", nil
+}
+
+func (t *ConfigTree) redactedScopedMatches(path []string) ([]*Node, int) {
+	if t == nil {
+		return nil, 0
+	}
+	if len(path) == 0 {
+		c := t.RedactedClone()
+		if c == nil {
+			return nil, 0
+		}
+		return c.Children, 0
+	}
+	matches, width := navigatePathWidth(t.Children, path)
+	if len(matches) == 0 {
+		return nil, width
+	}
+	clones := cloneNodes(matches)
+	parentPrefix := append([]string(nil), path[:len(path)-width]...)
+	redactMatches15942(clones, parentPrefix)
+	return clones, width
+}
+
+// redactMatches15942 masks secret/URL tokens inside matched nodes with
+// SecretDataPlaceholder, mirroring redactNodes but rooted at base (the
+// parent prefix the matches sit under) instead of the tree root.
+// Tokens at or above base (idx < len(base)) belong to ancestor nodes
+// outside the match and keep their authored spelling — that is what
+// leaves the caller's navigation path intact on the clone.
+func redactMatches15942(matches []*Node, base []string) {
+	for _, n := range matches {
+		full := append(append([]string(nil), base...), n.Keys...)
+		for _, idx := range secretIndices(full) {
+			if idx >= len(base) && idx < len(full) {
+				n.Keys[idx-len(base)] = SecretDataPlaceholder
+			}
+		}
+		for _, idx := range urlLeafIndices(full) {
+			if idx >= len(base) && idx < len(full) {
+				n.Keys[idx-len(base)] = RedactURL(n.Keys[idx-len(base)])
+			}
+		}
+		redactEmbeddedCommands14413(n, full, base)
+		if !n.IsLeaf {
+			redactMatches15942(n.Children, full)
+		}
+	}
 }
 
 func fingerprintRedactedClone(t *ConfigTree) *ConfigTree {

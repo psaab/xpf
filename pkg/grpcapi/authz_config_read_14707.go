@@ -78,7 +78,7 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 			}
 			return nil
 		}
-		return config.AuthorizeConfigShowRollback(cfg, class,
+		return config.AuthorizeConfigShowRollbackAtPath(cfg, class, r.GetPath(),
 			config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())))
 	}
 	return nil

@@ -3,6 +3,7 @@ package cli
 import (
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -173,6 +174,39 @@ var hintRoots14988 = map[config.ValueHint][]string{
 	config.ValueHintStreamName:    {"security log"},
 	config.ValueHintPolicyAddress: {"security address-book"},
 	config.ValueHintPolicyApp:     {"applications"},
+	config.ValueHintPolicyName:    {"security policies"},
+	config.ValueHintUnitNumber:    {"interfaces"},
+}
+
+// effectiveConfigPath returns the config path a *-configuration rule must
+// judge for a cursor typed under `groups <name> …` (#15942 H1-02): the
+// group's BODY is effective configuration at the unwrapped path, so a
+// class denied `security policies` must not be offered policy names
+// merely because the literal cursor starts with the allowed word
+// `groups`. Both spellings are returned (definition and body); the caller
+// requires every one to be allowed.
+func effectiveConfigPaths(path []string) [][]string {
+	if len(path) >= 2 && path[0] == "groups" {
+		return [][]string{path, path[2:]}
+	}
+	return [][]string{path}
+}
+
+// configPathFormsAllowed reports whether every effective spelling of
+// path is allowed by the *-configuration rules.
+func (a completionAuthz) configPathFormsAllowed(path []string) bool {
+	if !a.confRestricted {
+		return true
+	}
+	for _, p := range effectiveConfigPaths(path) {
+		if len(p) == 0 {
+			continue
+		}
+		if !a.confRules.Evaluate(strings.Join(p, " ")).Allowed {
+			return false
+		}
+	}
+	return true
 }
 
 // providerHintAllowed adjudicates one valueProvider call by BOTH the
@@ -185,15 +219,14 @@ func (a completionAuthz) providerHintAllowed(hint config.ValueHint, path []strin
 		return false
 	}
 	if a.confRestricted && len(path) > 0 {
-		if !a.confRules.Evaluate(strings.Join(path, " ")).Allowed {
+		if !a.configPathFormsAllowed(path) {
 			return false
 		}
 	}
 	if !a.confRestricted {
 		return true
 	}
-	switch hint {
-	case config.ValueHintNone, config.ValueHintPolicyName, config.ValueHintUnitNumber:
+	if hint == config.ValueHintNone {
 		return true
 	}
 	roots, ok := hintRoots14988[hint]
@@ -237,7 +270,7 @@ func (a completionAuthz) configPathAllowed(path []string) bool {
 	if !a.confRestricted || len(path) == 0 {
 		return true
 	}
-	return a.confRules.Evaluate(strings.Join(path, " ")).Allowed
+	return a.configPathFormsAllowed(path)
 }
 
 // showConfigPathAllowed additionally evaluates the canonical
@@ -274,6 +307,71 @@ func operationalConfigPaths14988(words []string) []string {
 	return nil
 }
 
+// canonicalOperationalWords expands uniquely-abbreviated operational
+// words to their canonical spelling before any regex is judged
+// (#15942 H1-02). The cmdtree completion walkers resolve abbreviations
+// via the same unique-prefix rule, so judging the raw words (`sh`,
+// `sec`) priced a different command from the one whose DynamicFn values
+// were about to be read. Returns nil when any word does not uniquely
+// resolve to a keyword; trailing value words are kept verbatim (they
+// follow a node that consumes a value, exactly as Canonicalize leaves
+// them), and an Options node's option keywords keep resolving against
+// the option map.
+func canonicalOperationalWords(words []string) []string {
+	if len(words) == 0 {
+		return nil
+	}
+	canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, words)
+	if res == cmdtree.CanonicalOK {
+		return canon
+	}
+	// A consumed-word prefix need not be a complete command (the line
+	// may end at a keyword whose value is still being typed, which
+	// Canonicalize refuses as incomplete). Expand keyword-by-keyword;
+	// once a word fails to resolve it and everything after it are
+	// values under the last resolved node.
+	out := make([]string, 0, len(words))
+	current := operationalTree
+	var options map[string]*cmdtree.Node
+	for _, w := range words {
+		resolved, node, _, ok := resolveTreeWordForCompletion(current, w)
+		if !ok && options != nil {
+			resolved, node, _, ok = resolveTreeWordForCompletion(options, w)
+		}
+		if !ok {
+			out = append(out, words[len(out):]...)
+			break
+		}
+		out = append(out, resolved)
+		if node == nil {
+			break
+		}
+		if node.Options {
+			options = node.Children
+		}
+		if node.Children == nil {
+			if options == nil {
+				out = append(out, words[len(out):]...)
+				break
+			}
+			current = options
+			continue
+		}
+		current = node.Children
+	}
+	return out
+}
+
+// resolveTreeWordForCompletion resolves one word against a cmdtree level
+// via the shared unique-prefix rule.
+func resolveTreeWordForCompletion(level map[string]*cmdtree.Node, w string) (string, *cmdtree.Node, []string, bool) {
+	resolved, ok := cmdtree.ResolveUniquePrefix(cmdtree.KeysOf(level), w)
+	if !ok {
+		return "", nil, nil, false
+	}
+	return resolved, level[resolved], nil, true
+}
+
 func (a completionAuthz) operationalLiveAllowed(words []string) bool {
 	if a.unrestricted {
 		return true
@@ -281,20 +379,24 @@ func (a completionAuthz) operationalLiveAllowed(words []string) bool {
 	if !a.liveAllowed() {
 		return false
 	}
+	canon := canonicalOperationalWords(words)
+	if canon == nil {
+		return false
+	}
 	if a.opRestricted {
-		for i := 1; i <= len(words); i++ {
-			if !a.opRules.Evaluate(strings.Join(words[:i], " ")).Allowed {
+		for i := 1; i <= len(canon); i++ {
+			if !a.opRules.Evaluate(strings.Join(canon[:i], " ")).Allowed {
 				return false
 			}
 		}
 	}
-	if a.confRestricted && len(words) > 1 {
-		if words[0] == "show" {
-			if !a.confRules.Evaluate(strings.Join(words[1:], " ")).Allowed {
+	if a.confRestricted && len(canon) > 1 {
+		if canon[0] == "show" {
+			if !a.confRules.Evaluate(strings.Join(canon[1:], " ")).Allowed {
 				return false
 			}
 		}
-		for _, root := range operationalConfigPaths14988(words) {
+		for _, root := range operationalConfigPaths14988(canon) {
 			if !a.confRules.Evaluate(root).Allowed {
 				return false
 			}

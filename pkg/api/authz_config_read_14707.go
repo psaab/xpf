@@ -52,7 +52,10 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 	case "GET /api/v1/config/compare":
 		return config.AuthorizeConfigShowCompare(cfg, class)
 	case "GET /api/v1/config/show-rollback":
-		return config.AuthorizeConfigShowRollback(cfg, class,
+		// #15942 H2-04: ?path= scopes the render (the handler honours
+		// it), so the gate prices that subtree, not the whole tree.
+		return config.AuthorizeConfigShowRollbackAtPath(cfg, class,
+			strings.Fields(r.URL.Query().Get("path")),
 			config.ConfigShowDisplaySuffix(restShowFormat(format)))
 	}
 	return nil
