@@ -722,13 +722,24 @@ func (m *Manager) applyCompiledSnapshot(
 	// and Go can't track removal of those entries via the index.
 	publishSnap := *snap
 	publishSnap.Neighbors = filterPublishableNeighbors(snap.Neighbors)
+	// #15955: hash the final publish snapshot once, before the send, and
+	// thread it into the send site so the digest stamp reuses it. Between
+	// here and the wire nothing mutates publishSnap's hashed content
+	// (publishPreparedSnapshot* only fails closed on error), so the same
+	// hash is the post-publish lastSnapshotHash below (postPublishHash
+	// recomputes only when the ClearPolicies marker, which is not
+	// hash-zeroed, was in force and got spent by the send). This
+	// publisher has no earlier dedup hash (applyCompiledSnapshot always
+	// sends), so the saving here is stamp+post (2 hashes → 1).
+	publishHash, publishHashOK := snapshotContentHash(&publishSnap)
+	preSendClear := publishSnap.ClearPolicies
 	// #4959: on the samePlanRefresh path the classifier BPF maps were already
 	// mutated IN PLACE above (syncUserspaceClassifierMapsFailClosedLocked) with
 	// ctrl still enabled; publishPreparedSnapshotFailClosedLocked disables ctrl if this
 	// publish is rejected so the maps can never run a generation ahead of the
 	// applied Rust snapshot (fail-open). The bootstrap path already set
 	// ctrl.Enabled=0, so it needs no extra fail-closed.
-	if err := m.publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh); err != nil {
+	if err := m.publishPreparedSnapshotPrehashedLocked(&publishSnap, &status, samePlanRefresh, publishHash, publishHashOK); err != nil {
 		return result, err
 	}
 	// apply_snapshot succeeded, so the scheduler state carried by this full
@@ -759,7 +770,7 @@ func (m *Manager) applyCompiledSnapshot(
 	// #2079: this full apply_snapshot succeeded — record the applied
 	// (config, generation) for the NAT pool-utilization-alarm monitor.
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&publishSnap); ok {
+	if h, ok := postPublishHash(&publishSnap, publishHash, publishHashOK, preSendClear); ok {
 		m.lastSnapshotHash = h
 	}
 	// #9684: the helper now holds exactly the sections re-sampled above.
@@ -878,8 +889,40 @@ func (m *Manager) publishPreparedSnapshotFailClosedLocked(
 	status *ProcessStatus,
 	mapsMutatedInPlace bool,
 ) error {
+	return m.publishPreparedSnapshotInternalLocked(publishSnap, status, mapsMutatedInPlace, [32]byte{}, false, false)
+}
+
+// publishPreparedSnapshotPrehashedLocked is publishPreparedSnapshotFailClosedLocked
+// for a publisher that already hashed publishSnap for its dedup compare
+// (#15955): the hash is threaded into the send site so the digest stamp
+// reuses it instead of recomputing. publishHash must describe publishSnap
+// exactly as sent (post-filter, post-preparation, pre-send ClearPolicies).
+// Callers that cannot prove that keep the plain wrapper.
+func (m *Manager) publishPreparedSnapshotPrehashedLocked(
+	publishSnap *ConfigSnapshot,
+	status *ProcessStatus,
+	mapsMutatedInPlace bool,
+	publishHash [32]byte,
+	publishHashOK bool,
+) error {
+	return m.publishPreparedSnapshotInternalLocked(publishSnap, status, mapsMutatedInPlace, publishHash, publishHashOK, true)
+}
+
+func (m *Manager) publishPreparedSnapshotInternalLocked(
+	publishSnap *ConfigSnapshot,
+	status *ProcessStatus,
+	mapsMutatedInPlace bool,
+	publishHash [32]byte,
+	publishHashOK bool,
+	prehashed bool,
+) error {
 	wasDebt := m.snapshotRetryDebtLocked()
-	err := m.requestApplySnapshotPreparedLocked(publishSnap, status)
+	var err error
+	if prehashed {
+		err = m.requestApplySnapshotPrehashedLocked(publishSnap, status, publishHash, publishHashOK)
+	} else {
+		err = m.requestApplySnapshotPreparedLocked(publishSnap, status)
+	}
 	if err != nil {
 		publishErr := fmt.Errorf("publish userspace snapshot: %w", err)
 		// #7468: a rejected publish must never return with the manager lacking

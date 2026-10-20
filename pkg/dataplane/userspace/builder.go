@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -463,7 +464,14 @@ func forEachBindlessSelectorRow(cfg *config.Config, skipped func(vpn string),
 // when an apply_snapshot reuses its installed generation. Config is excluded
 // because the helper never reads it; a helper change that starts reading it
 // must bring it back into this hash.
+// snapshotContentHashCalls counts snapshotContentHash invocations so tests
+// can pin the per-publish hash budget (#15955). It is not a metrics export:
+// the dedup is enforced by the publish-path call sites, and this counter is
+// the regression seam that fails if a third hash creeps back in.
+var snapshotContentHashCalls atomic.Uint64
+
 func snapshotContentHash(snap *ConfigSnapshot) ([32]byte, bool) {
+	snapshotContentHashCalls.Add(1)
 	// Create a shallow copy with volatile fields zeroed, then JSON-encode.
 	// This is cheaper than a custom hasher and reuses the existing JSON tags.
 	tmp := *snap
@@ -509,6 +517,42 @@ func snapshotContentHash(snap *ConfigSnapshot) ([32]byte, bool) {
 		return [32]byte{}, false
 	}
 	return sha256.Sum256(data), true
+}
+
+// snapshotContentHashWithClear hashes snap exactly as snapshotContentHash
+// does, except the caller supplies the ClearPolicies value the hash must
+// describe (#15955). ClearPolicies is deliberately NOT zeroed by
+// snapshotContentHash (it is helper-visible content: it authorizes the
+// helper to empty its installed policy set), so the digest stamped before
+// the send — when the marker is still set — differs from a post-send hash
+// computed after requestApplySnapshotPreparedLocked spent the marker. A
+// publisher that computed its dedup hash before the send MUST therefore
+// thread the pre-send marker value into its post-publish bookkeeping
+// through this variant, or it would record the spent-marker hash and the
+// next dedup compare would miss the content the helper actually holds.
+func snapshotContentHashWithClear(snap *ConfigSnapshot, clear bool) ([32]byte, bool) {
+	tmp := *snap
+	tmp.ClearPolicies = clear
+	return snapshotContentHash(&tmp)
+}
+
+// postPublishHash returns the hash to record as lastSnapshotHash after a
+// successful prehashed publish (#15955). publishSnap has been through the
+// send, so its ClearPolicies is the SPENT value (false). When the marker
+// was not in force before the send (the common case) nothing the hash
+// covers changed across the send — ContentDigest and Generation are
+// zeroed inside snapshotContentHash — so the pre-send publishHash IS the
+// post-publish hash and no recompute is needed. When the marker WAS in
+// force, the stamped digest described marker-in-force content while the
+// recorded hash must describe the spent struct (exactly what the
+// pre-#15955 post-send snapshotContentHash computed), so recompute once
+// with the marker cleared. That recompute happens only on the
+// authorized-clear path.
+func postPublishHash(publishSnap *ConfigSnapshot, publishHash [32]byte, publishHashOK bool, preSendClear bool) ([32]byte, bool) {
+	if !preSendClear {
+		return publishHash, publishHashOK
+	}
+	return snapshotContentHashWithClear(publishSnap, false)
 }
 
 func userspaceMapPins() UserspaceMapPins {

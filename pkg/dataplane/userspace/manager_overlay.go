@@ -284,12 +284,29 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
 
 	m.refreshCaptureAuthorityLocked(&next)
+	// #15955: build the final publish snapshot BEFORE the dedup compare and
+	// hash it once. Nothing below mutates publishSnap's hashed content
+	// before the send: disarmBeforeUnsupportedPublishLocked only reads it,
+	// consumeRevalidateAttachLocked only attaches XDP programs, and the
+	// send site's only mutation before the wire is the ContentDigest stamp
+	// itself (zeroed inside the hash) plus, on a content conflict, the
+	// Generation bump (also zeroed). The single hash therefore serves the
+	// dedup compare, the digest stamp, and — via postPublishHash,
+	// because the send spends ClearPolicies
+	// after stamping and that marker is NOT hash-zeroed — the
+	// lastSnapshotHash recorded on success. Hashing `next` for the dedup
+	// and `publishSnap` again for the stamp (the pre-#15955 triple) cost
+	// two extra marshal+SHA-256 passes over up to 1.5 MB under m.mu.
+	publishSnap := next
+	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
+	publishHash, publishHashOK := snapshotContentHash(&publishSnap)
+	preSendClear := publishSnap.ClearPolicies
 	// Duplicate-publish skip: identical content (e.g. the actuator ran
 	// twice for the same overlay) does not need a control-socket
 	// round-trip. The content hash excludes Generation/FIBGeneration. Not while an
 	// earlier apply's outcome is unknown (#9520), nor while a partial update's is
 	// (#9684): the hash then describes what Go last sent, not what the helper holds.
-	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown &&
+	if publishHashOK && publishHash == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown &&
 		m.partialOutcomeUnknown == 0 {
 		// #15042: even on a dedup skip, a revalidation that moved a row
 		// must attach its recreated ifindex before adopting next's hash.
@@ -303,15 +320,13 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		return false, nil
 	}
 
-	publishSnap := next
-	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
 	// #2124: disarm before publishing an unsupported-config snapshot.
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
 		return false, err
 	}
 	m.consumeRevalidateAttachLocked(&publishSnap)
-	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
+	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, publishHash, publishHashOK); err != nil {
 		return false, fmt.Errorf("publish route overlay snapshot: %w", err)
 	}
 	// The helper accepted the overlay snapshot, so commit any scheduler state
@@ -330,7 +345,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	// #2079: full apply_snapshot succeeded — record the applied snapshot.
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&publishSnap); ok {
+	if h, ok := postPublishHash(&publishSnap, publishHash, publishHashOK, preSendClear); ok {
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)
@@ -370,8 +385,18 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	m.refreshCaptureAuthorityLocked(&next)
 	m.prepareSnapshotForApply(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next)
-	if hash, ok := snapshotContentHash(&next); ok &&
-		hash == m.lastSnapshotHash &&
+	// #15955: one hash over the final publish snapshot drives the dedup
+	// compare, the digest stamp, and the post-publish bookkeeping; see
+	// PublishRouteOverlaySnapshotWithLatch for the proof obligations. The
+	// pre-send ClearPolicies value is threaded through postPublishHash
+	// because the send spends the marker after stamping and the marker
+	// is not hash-zeroed.
+	publishSnap := next
+	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
+	publishHash, publishHashOK := snapshotContentHash(&publishSnap)
+	preSendClear := publishSnap.ClearPolicies
+	if publishHashOK &&
+		publishHash == m.lastSnapshotHash &&
 		m.publishedSnapshot != 0 &&
 		!m.applySnapshotOutcomeUnknown &&
 		m.partialOutcomeUnknown == 0 {
@@ -385,11 +410,9 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
 		return false, err
 	}
-	publishSnap := next
-	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
 	m.consumeRevalidateAttachLocked(&publishSnap)
-	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
+	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, publishHash, publishHashOK); err != nil {
 		return false, fmt.Errorf("republish capture authority: %w", err)
 	}
 
@@ -406,7 +429,7 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&publishSnap); ok {
+	if h, ok := postPublishHash(&publishSnap, publishHash, publishHashOK, preSendClear); ok {
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)

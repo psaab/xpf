@@ -243,14 +243,14 @@ func TestProtocolGateSitesRouteThroughFailClosedHelper5488(t *testing.T) {
 			file:      "manager_compile.go",
 			fn:        "applyCompiledSnapshot",
 			wantGate:  "m.disarmSnapshotProtocolFailClosedLocked(snap, err, samePlanRefresh)",
-			wantPub:   "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)",
+			wantPub:   "publishPreparedSnapshotPrehashedLocked(&publishSnap, &status, samePlanRefresh, publishHash, publishHashOK)",
 			whyInPlce: "samePlanRefresh mutates the classifier maps in place before the publish",
 		},
 		{
 			file:      "process_status.go",
 			fn:        "syncSnapshotLocked",
 			wantGate:  "m.disarmSnapshotProtocolFailClosedLocked(&publishSnap, err, true)",
-			wantPub:   "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, true)",
+			wantPub:   "publishPreparedSnapshotPrehashedLocked(&publishSnap, &status, true, publishHash, publishHashOK)",
 			whyInPlce: "its only producer of an unpublished lastSnapshot is Compile's pendingXSKStartup branch, which always mutates the maps in place",
 		},
 	} {

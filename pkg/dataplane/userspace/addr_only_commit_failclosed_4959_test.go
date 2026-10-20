@@ -227,10 +227,10 @@ func TestAddressOnlyCommitRejectedPublishFailsClosed4959(t *testing.T) {
 func TestCompileRoutesPublishThroughFailClosedHelper4959(t *testing.T) {
 	t.Parallel()
 	src := goFunctionSource(t, "manager_compile.go", "applyCompiledSnapshot")
-	if !strings.Contains(src, "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)") {
+	if !strings.Contains(src, "publishPreparedSnapshotPrehashedLocked(&publishSnap, &status, samePlanRefresh, publishHash, publishHashOK)") {
 		t.Fatalf("applyCompiledSnapshot must publish the classifier-map snapshot via "+
-			"publishPreparedSnapshotFailClosedLocked(..., samePlanRefresh) so a rejected "+
-			"same-plan apply_snapshot fails closed (#4959); got:\n%s", src)
+			"publishPreparedSnapshotPrehashedLocked(..., samePlanRefresh, ...) (the #15955 prehashed form of the "+
+			"#4959 fail-closed helper) so a rejected same-plan apply_snapshot fails closed (#4959); got:\n%s", src)
 	}
 }
 
@@ -359,9 +359,9 @@ func TestDeferredPublishRejectedFailsClosed4959(t *testing.T) {
 func TestSyncSnapshotRoutesPublishThroughFailClosedHelper4959(t *testing.T) {
 	t.Parallel()
 	src := goFunctionSource(t, "process_status.go", "syncSnapshotLocked")
-	if !strings.Contains(src, "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, true)") {
+	if !strings.Contains(src, "publishPreparedSnapshotPrehashedLocked(&publishSnap, &status, true, publishHash, publishHashOK)") {
 		t.Fatalf("syncSnapshotLocked must publish the deferred snapshot via "+
-			"publishPreparedSnapshotFailClosedLocked(..., true) so a rejected deferred "+
-			"apply_snapshot fails closed (#4959 residual); got:\n%s", src)
+			"publishPreparedSnapshotPrehashedLocked(..., true, ...) (the #15955 prehashed form of the "+
+			"#4959 fail-closed helper) so a rejected deferred apply_snapshot fails closed (#4959 residual); got:\n%s", src)
 	}
 }

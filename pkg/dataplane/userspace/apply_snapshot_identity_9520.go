@@ -73,6 +73,36 @@ func stampSnapshotContentDigest(snap *ConfigSnapshot) error {
 	return nil
 }
 
+// stampSnapshotContentDigestPrehashed stamps snap.ContentDigest from a
+// hash the publisher already computed over this exact snapshot (#15955).
+// The caller must have computed sum via snapshotContentHash (or
+// snapshotContentHashWithClear) over the final form being sent — after
+// the publishable-neighbor filter and any apply-time preparation — and
+// must pass the ClearPolicies value in force at that computation: the
+// digest is stamped before the send spends the marker, so a pre-send
+// hash that described the unspent marker cannot be reproduced from the
+// post-send struct. A nil/failed pre-hash falls back to recomputing.
+func stampSnapshotContentDigestPrehashed(snap *ConfigSnapshot, sum [32]byte, ok bool) error {
+	if !ok {
+		return stampSnapshotContentDigest(snap)
+	}
+	snap.ContentDigest = hex.EncodeToString(sum[:])
+	return nil
+}
+
+// requestApplySnapshotPrehashedLocked is requestApplySnapshotPreparedLocked
+// with the content-digest hash supplied by the caller (#15955). Publishers
+// that already hashed the final snapshot for their dedup compare pass that
+// hash here so the send site does not marshal+SHA-256 the same struct a
+// second (and third) time under m.mu. Publishers that cannot prove the
+// hash describes the exact struct being sent — notably every
+// requestApplySnapshotLocked caller, whose prepareSnapshotForApply step
+// can rebuild sections after any earlier hash — must keep calling
+// requestApplySnapshotPreparedLocked and pay the stamp hash.
+func (m *Manager) requestApplySnapshotPrehashedLocked(snap *ConfigSnapshot, status *ProcessStatus, sum [32]byte, sumOK bool) (err error) {
+	return m.requestApplySnapshotInternalLocked(snap, status, sum, sumOK, true)
+}
+
 // prepareSnapshotForApply detaches and revalidates interface rows before
 // classification and send, then rebuilds the snapshot sections derived
 // from those rows so no derived ifindex can outlive the row it came from
@@ -254,6 +284,20 @@ func (m *Manager) consumeRevalidateAttachLocked(snap *ConfigSnapshot) {
 // worst-case m.mu hold on this refusal is therefore two round trips; once
 // BeginControlShutdown has latched, the retry is skipped.
 func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, status *ProcessStatus) (err error) {
+	return m.requestApplySnapshotInternalLocked(snap, status, [32]byte{}, false, false)
+}
+
+// requestApplySnapshotInternalLocked is the shared body of
+// requestApplySnapshotPreparedLocked and requestApplySnapshotPrehashedLocked.
+// The Locked suffix is load-bearing: the #8526 control-call census
+// classifies control callers by that suffix (callers that do not take
+// m.mu themselves must carry it), so renaming this helper without the
+// suffix would silently remove the sole apply_snapshot send from the
+// census. When prehashed is true, prehash/prehashOK carry a hash the
+// caller proved describes snap exactly as sent, and the digest stamp
+// reuses it instead of recomputing (#15955); otherwise the stamp
+// computes the hash itself.
+func (m *Manager) requestApplySnapshotInternalLocked(snap *ConfigSnapshot, status *ProcessStatus, prehash [32]byte, prehashOK bool, prehashed bool) (err error) {
 	// #15919: this is the ONLY apply_snapshot send site, so gating here
 	// covers every publisher (full Compile, route-overlay, link-refresh,
 	// scheduler, capture-authority, worker-arm) with one check. A
@@ -284,7 +328,13 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	if sendErr := m.validateSnapshotForSend(snap); sendErr != nil {
 		return sendErr
 	}
-	if stampErr := stampSnapshotContentDigest(snap); stampErr != nil {
+	var stampErr error
+	if prehashed {
+		stampErr = stampSnapshotContentDigestPrehashed(snap, prehash, prehashOK)
+	} else {
+		stampErr = stampSnapshotContentDigest(snap)
+	}
+	if stampErr != nil {
 		// Nothing was sent, so the helper's state is known to be unchanged.
 		return stampErr
 	}
