@@ -1278,11 +1278,38 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 		serviceChildren = append(serviceChildren,
 			packedBodyChildren(child, schemaForPath("system", "services"))...)
 	}
-	if len(serviceChildren) == 0 && len(node.Keys) > 1 && node.Keys[1] == "services" {
+	// #15716: also unpack a header-packed `system services ssh
+	// root-login <val>` even when braced `services` children exist, so
+	// the lenient last-wins reader (and strict gate, via the pooled
+	// values) sees the header value instead of silently discarding it.
+	if len(node.Keys) > 1 && node.Keys[1] == "services" {
 		for _, services := range packedBodyChildren(node, systemSchema9792()) {
 			if services.Name() == "services" {
 				serviceChildren = append(serviceChildren,
 					packedBodyChildren(services, schemaForPath("system", "services"))...)
+			}
+		}
+		if v, ok := headerPackedRootLogin15716(node.Keys); ok {
+			// Prepend the header ssh unless packed expansion already
+			// produced an ssh carrying this root-login value.
+			found := false
+			for _, c := range serviceChildren {
+				if c == nil || c.Name() != "ssh" {
+					continue
+				}
+				if len(c.Keys) >= 3 && c.Keys[1] == "root-login" && c.Keys[2] == v {
+					found = true
+					break
+				}
+				for _, rl := range c.FindChildren("root-login") {
+					if len(rl.Keys) >= 2 && rl.Keys[1] == v {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				serviceChildren = append([]*Node{{Keys: []string{"ssh", "root-login", v}}}, serviceChildren...)
 			}
 		}
 	}
