@@ -80,21 +80,16 @@ func (vi *vrrpInstance) sendAdvert(priority int) {
 	// not make the peer's interval disagree with this instance's timer.
 	advertMS := normalizeAdvertIntervalMS9914(vi.advertiseIntervalMS())
 	advertCS := advertMS / 10
-	// #15929 gap 1: record the cadence this send actually carries, from
-	// THIS snapshot — a commit landing inside either sendPacketFn below
+	// #15929 gap 1, #15961 Opus: the wire cadence and the send-sequence
+	// count are recorded ONLY AFTER at least one family write actually
+	// succeeded, from THIS snapshot — a locally failed send must not
+	// claim a cadence the peer never saw (which would suppress the
+	// owed correction), and a commit landing inside either sendPacketFn
 	// must not make the record name an interval the peer never saw.
-	// The MASTER config consumer reads it (decideMasterConfigAdvert)
-	// to decide whether an arm-applied interval growth still owes the
-	// peer a correction advert.
-	if len(v4Addrs) > 0 || len(v6Addrs) > 0 {
-		vi.mu.Lock()
-		vi.wireAdvertIntervalMS = advertMS
-		vi.mu.Unlock()
-	}
-
-	// (sendPacketDone fires after the per-family sends below.)
+	// The MASTER config consumer reads it (decideMasterConfigAdvert).
 
 	// Send IPv4 advertisement if we have any IPv4 VIPs.
+	sentAny := false
 	if len(v4Addrs) > 0 {
 		maxAdvert := uint16(advertCS) // milliseconds → centiseconds
 		pkt := &VRRPPacket{
@@ -106,6 +101,8 @@ func (vi *vrrpInstance) sendAdvert(priority int) {
 		if err := sendPacketFn(vi, pkt, false); err != nil {
 			slog.Debug("vrrp: failed to send IPv4 advert",
 				"key", vi.key(), "err", err)
+		} else {
+			sentAny = true
 		}
 	}
 
@@ -121,7 +118,16 @@ func (vi *vrrpInstance) sendAdvert(priority int) {
 		if err := sendPacketFn(vi, pkt, true); err != nil {
 			slog.Debug("vrrp: failed to send IPv6 advert",
 				"key", vi.key(), "err", err)
+		} else {
+			sentAny = true
 		}
+	}
+
+	if sentAny {
+		vi.mu.Lock()
+		vi.wireAdvertIntervalMS = advertMS
+		vi.sendSeq++
+		vi.mu.Unlock()
 	}
 	if sendPacketDone != nil {
 		sendPacketDone(vi)

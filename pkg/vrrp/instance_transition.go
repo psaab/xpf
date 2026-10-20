@@ -180,8 +180,9 @@ func (vi *vrrpInstance) becomeMaster() bool {
 	// without the note the two net to no-change and the peer keeps
 	// the promotion priority until the periodic timer. The interval
 	// is deliberately NOT baselined here (nothing was re-armed).
+	seq := vi.sendSeqNow()
 	vi.sendAdvert(pri)
-	vi.noteAdvertPriority(pri)
+	vi.noteAdvertPrioritySeq(seq, pri)
 	vi.emitEvent()
 	if !vi.suppressGARP.Load() {
 		// Non-forced: a routine MASTER transition is rate-limited by the

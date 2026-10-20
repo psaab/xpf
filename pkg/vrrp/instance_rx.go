@@ -310,8 +310,9 @@ func (vi *vrrpInstance) handleMasterRx(pkt *VRRPPacket, masterDownTimer, advertT
 	pri := vi.getPriority()
 	if pkt.Priority == 0 {
 		// Peer resigning — send immediate advert and stay Master.
+		seq := vi.sendSeqNow()
 		vi.sendAdvert(pri)
-		vi.noteAdvertPriority(pri)
+		vi.noteAdvertPrioritySeq(seq, pri)
 		vi.armAdvertTimer(advertTimer)
 		return
 	}

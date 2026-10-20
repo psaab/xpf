@@ -320,8 +320,9 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 		// The queued config token remains for stepMaster to advertise
 		// and re-arm at final cfg.
 		sentPriority := vi.getPriority()
+		seq := vi.sendSeqNow()
 		vi.sendAdvert(sentPriority)
-		vi.noteAdvertPriority(sentPriority)
+		vi.noteAdvertPrioritySeq(seq, sentPriority)
 		if len(announcementVIPs) > 0 && !vi.suppressGARP.Load() {
 			// Carry only still-current VIPs whose prior synchronous first
 			// frame was interrupted by the membership epoch change, plus

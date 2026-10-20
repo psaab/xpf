@@ -136,12 +136,15 @@ func TestVRRPMaster_CoalescedPriorityThenGARPOnly_AdvertisesImmediately(t *testi
 // change.
 func TestVRRPMaster_CoalescedIntervalChangeThenRevert_PreservesAdvertTimer(t *testing.T) {
 	vi := newMaster15689(t, 60000)
-	// #15929: seed the wire cadence a running MASTER at 60000ms would
-	// have on the wire (a periodic advert already carried it). The
-	// change-then-revert nets old==new AND wire==new, so silence is
-	// correct — contrast the arm-applied-growth case in the 15929 file.
+	// #15929/#15961: seed the wire cadence a running MASTER at a
+	// 60000ms cfg would ACTUALLY have on the wire: sendAdvert records
+	// the NORMALIZED snapshot (60000 caps to 40950, 4095cs). Seeding
+	// the raw 60000 here would fake a value production can never
+	// record (review-caught test-only-green). The change-then-revert
+	// nets old==new AND, in normalized space, wire==new, so silence
+	// is correct.
 	vi.mu.Lock()
-	vi.wireAdvertIntervalMS = 60000
+	vi.wireAdvertIntervalMS = 40950
 	vi.mu.Unlock()
 	adverts := captureAdverts15920(t)
 

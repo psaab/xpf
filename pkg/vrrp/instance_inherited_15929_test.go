@@ -1,6 +1,7 @@
 package vrrp
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -115,18 +116,14 @@ func TestVRRPMasterTwoInstance_IntervalGrowthDuringSend_CorrectsPeerBeforePeerTi
 	}
 
 	sent := drainAdverts15929(wire)
-	if len(sent) < 2 {
-		t.Fatalf("wire adverts = %v, want [100ms advert, 10000ms correction]: "+
+	if len(sent) != 2 {
+		t.Fatalf("wire adverts = %v, want exactly [100ms advert, 10000ms correction]: "+
 			"interval growth applied by the trailing arm was baselined into "+
 			"silence, so a peer that learned 100ms stays on a ~0.34s horizon "+
 			"while this MASTER is silent for 10s (dual-MASTER window)", sent)
 	}
-	if sent[0].cs != 10 {
-		t.Fatalf("first wire advert MaxAdvertInt = %d cs, want 10 (100ms)", sent[0].cs)
-	}
-	last := sent[len(sent)-1]
-	if last.cs != 1000 {
-		t.Fatalf("correction advert MaxAdvertInt = %d cs, want 1000 (10000ms)", last.cs)
+	if sent[0].cs != 10 || sent[1].cs != 1000 {
+		t.Fatalf("wire adverts = %v cs, want [10 1000] (100ms then 10000ms correction)", sent)
 	}
 
 	// Two-instance leg: deliver the adverts the MASTER actually put on
@@ -183,17 +180,145 @@ func TestDecideMasterConfigAdvert_WireBaseline(t *testing.T) {
 		{"growth already on wire", change(10000, 10000, 200, 200), 10000, masterAdvertNone},
 		{"growth arm-netted, no wire advert yet", change(10000, 10000, 200, 200), 0, masterAdvertSend},
 		{"plain growth not yet armed", change(100, 10000, 200, 200), 100, masterAdvertSend},
-		{"plain shrink sends", change(60000, 100, 200, 200), 60000, masterAdvertSend},
+		{"plain shrink sends", change(60000, 100, 200, 200), 40950, masterAdvertSend},
 		{"shrink already announced on wire re-arms only", change(60000, 100, 200, 200), 100, masterAdvertRearm},
-		{"change-then-revert netted, wire matches", change(60000, 60000, 200, 200), 60000, masterAdvertNone},
+		{"change-then-revert netted, wire matches normalized", change(60000, 60000, 200, 200), 40950, masterAdvertNone},
 		{"unchanged stays silent", change(1000, 1000, 200, 200), 1000, masterAdvertNone},
 		{"priority delta sends", change(1000, 1000, 200, 100), 1000, masterAdvertSend},
 		{"invalid record fails safe", configChange15689{}, 0, masterAdvertSend},
+		// #15961 normalized-space cases: raw cfg vs normalized wire.
+		{"tolerant 60000 with producible wire 40950 stays silent", change(60000, 60000, 200, 200), 40950, masterAdvertNone},
+		{"inexact 15ms normalizes to wire 10ms", change(15, 15, 200, 200), 10, masterAdvertNone},
+		{"raw values above ceiling equal after normalization", change(700000, 60000, 200, 200), 40950, masterAdvertNone},
 	}
 	for _, tc := range cases {
 		if got := decideMasterConfigAdvert(tc.change, tc.wireMS); got != tc.want {
 			t.Errorf("%s: decideMasterConfigAdvert(change=%+v, wire=%d) = %v, want %v", tc.name, tc.change, tc.wireMS, got, tc.want)
 		}
+	}
+}
+
+// TestVRRPMaster_Tolerant60000_GARPOnlyTokensStaySilent is the #15961
+// GLM blocker regression, through the real stepMaster path: a MASTER
+// at a tolerant AdvertiseInterval=60000 (admitted on tolerant load,
+// capped to 40950ms/4095cs on the wire) must NOT emit a redundant
+// correction advert + timer reset on every unrelated (GARP-only)
+// config token. RED on the folded head that compared RAW cfg (60000)
+// against the NORMALIZED wire record (40950): adverts [4095 4095
+// 4095]. GREEN with normalized-space comparison: exactly the one
+// periodic advert, timer untouched.
+func TestVRRPMaster_Tolerant60000_GARPOnlyTokensStaySilent(t *testing.T) {
+	vi := newMaster15689(t, 60000)
+	adverts := captureAdverts15929(t)
+
+	masterDown := time.NewTimer(time.Hour)
+	t.Cleanup(func() { masterDown.Stop() })
+	advert := time.NewTimer(0)
+	t.Cleanup(func() { advert.Stop() })
+	time.Sleep(2 * time.Millisecond)
+
+	// Periodic step: one wire advert at the capped 4095cs cadence.
+	if stop := vi.stepMaster(masterDown, advert); stop {
+		t.Fatal("stepMaster returned stop=true on advert timer")
+	}
+	// The trailing arm set the 40950ms timer; Stop() must report it
+	// still pending (it cannot have fired within this test).
+	if !advert.Stop() {
+		t.Fatal("advertTimer not pending after periodic step (already fired or drained)")
+	}
+	advert.Reset(40950 * time.Millisecond)
+	for i := range 2 {
+		vi.updateConfig(Instance{
+			Interface: "eth0", GroupID: 101, Priority: 200,
+			Preempt: true, AdvertiseInterval: 60000, GARPCount: 5 + i,
+		})
+		if stop := vi.stepMaster(masterDown, advert); stop {
+			t.Fatal("stepMaster returned stop=true on GARP-only update")
+		}
+	}
+	got := drainAdverts15929(adverts)
+	if len(got) != 1 || got[0].cs != 4095 {
+		t.Fatalf("wire adverts = %v, want exactly [{200 4095}]: a tolerant 60000ms cfg must not correct on every unrelated token (raw-vs-normalized comparison)", got)
+	}
+	// The timer armed by the periodic step (40950ms) must survive both
+	// consumptions untouched: still pending, not drained/fired.
+	if !advert.Stop() {
+		select {
+		case <-advert.C:
+		default:
+			t.Fatal("advertTimer disturbed by a GARP-only consumption at a wire-matched cadence")
+		}
+	}
+}
+
+// TestSendAdvert_FailedSendDoesNotAdvanceWireBaseline: a locally
+// failed send must not record the cadence it never emitted (#15961
+// Opus). With the wire baseline pinned at the old 100ms, a failed
+// announce at 10000ms leaves wire!=new, so the MASTER consumer still
+// sends the owed correction once sends recover. On the folded head
+// the record advanced before the attempt and the consumer took the
+// re-arm-only path — the correction was suppressed.
+func TestSendAdvert_FailedSendDoesNotAdvanceWireBaseline(t *testing.T) {
+	vi := newMaster15689(t, 100)
+	vi.mu.Lock()
+	vi.wireAdvertIntervalMS = 100 // last successful cadence
+	vi.mu.Unlock()
+
+	prev := sendPacketFn
+	sendPacketFn = func(_ *vrrpInstance, _ *VRRPPacket, _ bool) error {
+		return errFakeSend15961
+	}
+	t.Cleanup(func() { sendPacketFn = prev })
+
+	vi.mu.Lock()
+	vi.cfg.AdvertiseInterval = 10000
+	vi.mu.Unlock()
+	vi.sendAdvert(200) // fails locally: must NOT advance the baseline
+
+	vi.mu.RLock()
+	wire := vi.wireAdvertIntervalMS
+	seq := vi.sendSeq
+	vi.mu.RUnlock()
+	if wire != 100 || seq != 0 {
+		t.Fatalf("after failed send: wire=%d seq=%d, want wire=100 seq=0 (a failed send claims nothing)", wire, seq)
+	}
+	// The consumer must still owe the growth correction.
+	change := configChange15689{valid: true, oldAdvertiseMS: 10000, newAdvertiseMS: 10000, oldEffectivePrio: 200, newEffectivePrio: 200}
+	if got := decideMasterConfigAdvert(change, wire); got != masterAdvertSend {
+		t.Fatalf("decideMasterConfigAdvert after failed announce = %v, want masterAdvertSend", got)
+	}
+}
+
+var errFakeSend15961 = errors.New("fake send failure")
+
+// TestNoteAdvertPrioritySeq_StaleNoteDropped is the #15961 Codex #2
+// ordering pin: a caller paused between send and note must not rewind
+// the pending baseline past a newer send's basis. Promotion sends 100
+// (seq snapshot S, then "pauses"); a VIP announce sends 200 and notes
+// first (newer basis); promotion's late note(100) resumes and must be
+// dropped, so the record keeps old==200 (the latest wire basis).
+func TestNoteAdvertPrioritySeq_StaleNoteDropped(t *testing.T) {
+	vi := newMaster15689(t, 1000)
+	vi.mu.Lock()
+	vi.pendingConfigChange = configChange15689{
+		valid: true, oldAdvertiseMS: 1000, newAdvertiseMS: 1000,
+		oldEffectivePrio: 200, newEffectivePrio: 200,
+	}
+	vi.sendSeq = 5 // five emitting sends already happened
+	vi.mu.Unlock()
+
+	promoSeq := vi.sendSeqNow() // promotion's snapshot: 5
+	vi.mu.Lock()
+	vi.sendSeq = 6 // the announce actually emitted (advances the count)
+	vi.mu.Unlock()
+	vi.noteAdvertPrioritySeq(vi.sendSeqNow(), 200) // announce notes first
+	vi.noteAdvertPrioritySeq(promoSeq, 100)        // stale: must be dropped
+
+	vi.mu.RLock()
+	p := vi.pendingConfigChange
+	vi.mu.RUnlock()
+	if p.oldEffectivePrio != 200 {
+		t.Fatalf("pending oldEffectivePrio = %d, want 200: the stale promotion note rewound the baseline past the newer announce", p.oldEffectivePrio)
 	}
 }
 
@@ -370,6 +495,19 @@ func TestBecomeMaster_PendingPriorityCommit_NoRevert_NoCorrection(t *testing.T) 
 func TestResignZeroBurst_DoesNotBaselineLivePriority(t *testing.T) {
 	vi := newMaster15689(t, 100)
 	adverts := captureAdverts15929(t)
+	// Seed a LIVE pending record (GLM fold): without one,
+	// noteAdvertPriority* no-ops on invalid records and the pin below
+	// is vacuous — an erroneous note(0) on the burst would pass.
+	vi.updateConfig(Instance{
+		Interface: "eth0", GroupID: 101, Priority: 150,
+		Preempt: true, AdvertiseInterval: 100,
+	})
+	vi.mu.RLock()
+	seeded := vi.pendingConfigChange
+	vi.mu.RUnlock()
+	if !seeded.valid || seeded.oldEffectivePrio != 200 || seeded.newEffectivePrio != 150 {
+		t.Fatalf("seeded pending = %+v, want valid 200->150", seeded)
+	}
 	if !vi.beginResign() {
 		t.Fatal("beginResign did not queue forced resignation")
 	}
@@ -379,22 +517,34 @@ func TestResignZeroBurst_DoesNotBaselineLivePriority(t *testing.T) {
 	t.Cleanup(func() { down.Stop() })
 	advert := time.NewTimer(time.Hour)
 	t.Cleanup(func() { advert.Stop() })
-	if stop := vi.stepMaster(down, advert); stop {
-		t.Fatal("stepMaster returned stop=true on resign")
+	// resignCh and configUpdatedCh are both queued; stepMaster may take
+	// either first. Drive until BACKUP (the resign step ran), at most
+	// a few steps.
+	for range 4 {
+		if vi.getState() == StateBackup {
+			break
+		}
+		if stop := vi.stepMaster(down, advert); stop {
+			t.Fatal("stepMaster returned stop=true during resign drive")
+		}
 	}
 	got := drainAdverts15929(adverts)
-	if len(got) != 3 {
-		t.Fatalf("priority-zero burst = %v, want 3 adverts", got)
-	}
+	zeros := 0
 	for _, a := range got {
-		if a.priority != 0 {
-			t.Fatalf("resign burst advert priority = %d, want 0", a.priority)
+		if a.priority == 0 {
+			zeros++
 		}
+	}
+	if zeros != 3 {
+		t.Fatalf("priority-zero adverts = %d (all %v), want 3", zeros, got)
 	}
 	if vi.getState() != StateBackup {
 		t.Fatalf("state = %s, want BACKUP after resign", vi.getState())
 	}
-	// No pending record may name 0 as its priority baseline.
+	// The burst must not have baselined the live record to 0, and the
+	// recorded pending delta must be exactly what the two updateConfig
+	// calls left (200->150 from the seed; beginResign stashes, it does
+	// not rewrite the record).
 	vi.mu.RLock()
 	p := vi.pendingConfigChange
 	vi.mu.RUnlock()

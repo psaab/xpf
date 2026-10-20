@@ -97,33 +97,37 @@ default RETH ownership/failover path.
   read as a change, not net to the pre-batch value), and an arm notes
   only the fields its duration consumed — the interval, never the
   priority, which is baselined only by a send that actually carried it
-  (`noteAdvertPriority`) — so a priority-only commit landing during a
-  sendAdvert keeps its delta for the consumer's correction advert,
-  while paths that only send (VIP-set announce) never re-baseline the
-  interval — so a revert after an intermediate arm still reads as a
-  change and is corrected.
+  (`noteAdvertPrioritySeq`) — so a priority-only commit landing
+  during a sendAdvert keeps its delta for the consumer's correction
+  advert, while paths that only send (VIP-set announce) never
+  re-baseline the interval — so a revert after an intermediate arm
+  still reads as a change and is corrected.
   Three #15929 refinements complete the wire/arm split: (1) an interval
   GROWTH is not "applied" for peer purposes until it is ON THE WIRE —
   `sendAdvert` records the `MaxAdvertInt` cadence it actually emitted
-  (`wireAdvertIntervalMS`, from its own snapshot), and the MASTER
-  consumer (`decideMasterConfigAdvert`) sends a correction whenever an
-  arm netted the growth record to no-change while the wire still
-  carries the shorter cadence (a peer that learned the short cadence
-  otherwise expires ~0.3s into a 60s silence — a dual-MASTER window);
-  when the wire already carries the desired cadence the consumer only
-  re-arms. (2) Every priority-bearing send now baselines the pending
-  priority record to the SENT value (`noteAdvertPriority` at
-  `becomeMaster`'s promotion and `updateVIPs`' announce, alongside the
+  (`wireAdvertIntervalMS`, from its own snapshot, only after a family
+  write succeeded), and the MASTER consumer
+  (`decideMasterConfigAdvert`, comparing all cadences in normalized
+  space) sends a correction whenever an arm netted the growth record
+  to no-change while the wire still carries the shorter cadence (a
+  peer that learned the short cadence otherwise expires ~0.3s into a
+  60s silence — a dual-MASTER window); when the wire already carries
+  the desired cadence the consumer only re-arms. (2) Every
+  priority-bearing send now baselines the pending priority record to
+  the SENT value (`noteAdvertPrioritySeq` at `becomeMaster`'s
+  promotion and `updateVIPs`' announce, alongside the
   periodic/consumer/peer-resign sends) — the deliberate exception is
   the priority-0 resign/shutdown burst, sent only after BACKUP is
   published, whose 0 must never become a baseline (it would fabricate
   a 0→live delta). Interval is still never baselined by a send.
   (3) The preempt-hold expiry case peeks at the pending record before
   promoting: a queued `PreemptHoldTime` change it never consumed
-  defers to the `configUpdatedCh` case (disarm/revalidate) instead of
+  defers promotion to the `configUpdatedCh` consumption (whose
+  not-armed branch re-arms and lets the next master-down expiry
+  re-derive the decision, arming the new hold time) instead of
   promoting on the stale expiry when `select` picks the timer first.
-  The next failover's `sendGARP` re-reads `cfg.GARPCount`. Before #5087 the stale value
-  persisted until an unrelated restart.
+  The next failover's `sendGARP` re-reads `cfg.GARPCount`. Before
+  #5087 the stale value persisted until an unrelated restart.
   **Ifindex drift (#2294):** before the no-change / in-place branch, a
   cheap tolerant `name→ifindex` probe compares the live kernel ifindex
   against the one the instance's sockets are bound to. A member netdev

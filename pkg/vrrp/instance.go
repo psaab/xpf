@@ -241,10 +241,19 @@ type vrrpInstance struct {
 	// never saw. 0 = no advert sent yet. Guarded by mu; read by the
 	// MASTER config consumer (decideMasterConfigAdvert).
 	wireAdvertIntervalMS int
-
-	state   VRRPState
-	iface   *net.Interface
-	eventCh chan<- VRRPEvent
+	// sendSeq counts sendAdvert calls that emitted at least one family
+	// packet (#15961 review). Callers snapshot it before their send
+	// and pass it to noteAdvertPrioritySeq: a note whose seq is older
+	// than the newest already noted is dropped, so a paused caller
+	// cannot rewind the pending priority baseline past a newer send's
+	// basis. Guarded by mu; advanced inside sendAdvert.
+	sendSeq uint64
+	// lastNotedSendSeq is the newest sendSeq already baselined via
+	// noteAdvertPriority*. Guarded by mu.
+	lastNotedSendSeq uint64
+	state            VRRPState
+	iface            *net.Interface
+	eventCh          chan<- VRRPEvent
 
 	// localIP / localIPv6 are our IPv4 address (for filtering self-sent
 	// adverts) and our link-local IPv6 address (source for IPv6 VRRP
@@ -600,6 +609,38 @@ func (vi *vrrpInstance) noteAdvertPriorityLocked(sentPriority int) {
 	vi.pendingConfigChange.oldEffectivePrio = sentPriority
 }
 
+// sendSeqNow snapshots sendSeq (the count of emitting sendAdvert
+// calls) before a priority-bearing send; the caller passes the value
+// to noteAdvertPrioritySeq after the send returns.
+func (vi *vrrpInstance) sendSeqNow() uint64 {
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
+	return vi.sendSeq
+}
+
+// noteAdvertPrioritySeq is noteAdvertPriority with a send-order guard
+// (#15961 Codex #2): if this note's send (identified by seq, captured
+// before the send via sendSeqNow) is older than the newest send whose
+// note was already applied, the note is DROPPED. Two goroutines emit
+// priority-bearing adverts — the run loop (promotion) and the manager
+// (VIP announce through sendAdvert's vipMu serialization) — and a
+// caller paused between its send and its note must not rewind the
+// pending baseline past a newer send's basis, which could fabricate
+// or suppress a correction against a superseded basis. Dropping the
+// stale note keeps the newer (latest wire) basis — the safe direction.
+func (vi *vrrpInstance) noteAdvertPrioritySeq(seq uint64, sentPriority int) {
+	vi.mu.Lock()
+	if seq < vi.lastNotedSendSeq {
+		vi.mu.Unlock()
+		return
+	}
+	if seq > vi.lastNotedSendSeq {
+		vi.lastNotedSendSeq = seq
+	}
+	vi.noteAdvertPriorityLocked(sentPriority)
+	vi.mu.Unlock()
+}
+
 // masterAdvertAction is what the StateMaster configUpdatedCh consumer
 // must do for a consumed change.
 type masterAdvertAction int
@@ -618,27 +659,24 @@ const (
 // against the SENT baseline (oldEffectivePrio, written only by
 // noteAdvertPriority) sends immediately.
 //
-// Interval leg — the four (armed, desired, wire) relations, where
-// armed/desired come from the record's old/new AdvertiseInterval and
-// wire is what the peer has actually learned:
+// Interval leg — all three inputs normalized
+// (normalizeAdvertIntervalMS9914) first (#15961): old/new are raw cfg,
+// the wire record is the normalized snapshot, and the running timer
+// normalizes too, so the comparison names the cadence that actually
+// runs. Then, in normalized space:
 //
-//   - old==new==wire: nothing is owed. None.
-//   - old==new, wire<new (arm-netted growth): an arm applied the
-//     growth locally while the wire still carries the shorter
-//     cadence. A peer that learned that cadence times the master out
-//     on it, so the growth must REACH THE WIRE before the peer's
-//     short horizon expires: Send (the #15929 dual-MASTER window is
-//     exactly this case going silent).
-//   - old!=new, wire==new (wire already desired, e.g. a VIP announce
-//     rode a shrink onto the wire): only the timer arm is stale:
-//     Rearm.
-//   - old!=new, wire!=new: the desired cadence is neither armed nor
-//     on the wire: Send (its trailing arm re-arms).
+//   - wire == new, old != new: only the timer arm is stale (e.g. a
+//     VIP announce rode a shrink onto the wire): Rearm.
+//   - wire == new, old == new, wire recorded: nothing owed: None.
+//   - wire == new, no advert ever recorded (wire==0): Send rather
+//     than trust silence on a cadence nobody has heard.
+//   - wire != new: the desired cadence is not what the peer learned
+//     — including arm-netted growth (old==new, wire shorter), the
+//     #15929 dual-MASTER window if it stayed silent: Send.
 //
-// Priority (oldEffectivePrio vs new, the SENT baseline of #15927) is
-// an independent Send trigger. Corrections never loop: a Send's own
-// sendAdvert advances the wire baseline to new, and its trailing arm
-// keeps old==new==wire for the next consumption.
+// Corrections never loop: a Send's own sendAdvert advances the wire
+// baseline to new, and its trailing arm keeps old==new==wire for the
+// next consumption.
 func decideMasterConfigAdvert(change configChange15689, wireAdvertIntervalMS int) masterAdvertAction {
 	if !change.valid {
 		// No recorded delta (a bare token): preserve the pre-#15929
@@ -648,17 +686,31 @@ func decideMasterConfigAdvert(change configChange15689, wireAdvertIntervalMS int
 	if change.oldEffectivePrio != change.newEffectivePrio {
 		return masterAdvertSend
 	}
-	oldMS, newMS := change.oldAdvertiseMS, change.newAdvertiseMS
-	if oldMS != newMS {
-		if wireAdvertIntervalMS == newMS {
+	// Compare in NORMALIZED space (#15961 GLM blocker): the record's
+	// old/new are RAW cfg values, but the timer that actually runs
+	// (advertIntervalFromMS) and the wire record both normalize —
+	// capping at 40950ms and flooring to the 10ms quantum
+	// (normalizeAdvertIntervalMS9914). Comparing raw to wire made
+	// every tolerant out-of-domain cfg (60000ms, or 15ms) look like a
+	// growth forever: a redundant correction advert + timer reset on
+	// EVERY config token. Normalizing both sides makes
+	// armed/desired/wire name the cadence that actually runs.
+	oldMS := normalizeAdvertIntervalMS9914(change.oldAdvertiseMS)
+	newMS := normalizeAdvertIntervalMS9914(change.newAdvertiseMS)
+	wireMS := normalizeAdvertIntervalMS9914(wireAdvertIntervalMS)
+	if wireMS == newMS {
+		if oldMS != newMS {
 			return masterAdvertRearm
 		}
-		return masterAdvertSend
+		if wireAdvertIntervalMS == 0 {
+			// No advert was ever recorded; silence would rely on a
+			// timer whose cadence nobody has heard. Send (its own
+			// send advances the wire baseline).
+			return masterAdvertSend
+		}
+		return masterAdvertNone
 	}
-	if wireAdvertIntervalMS < newMS {
-		return masterAdvertSend
-	}
-	return masterAdvertNone
+	return masterAdvertSend
 }
 
 // armAdvertTimer resets advertTimer at the current cfg interval and
@@ -679,16 +731,6 @@ func (vi *vrrpInstance) armAdvertTimer(advertTimer *time.Timer) {
 	d := advertIntervalFromMS(vi.cfg.AdvertiseInterval)
 	advertTimer.Reset(d)
 	vi.armIntervalAppliedLocked()
-	vi.mu.Unlock()
-}
-
-// noteAdvertPriority notes the effective priority a wire advert just
-// carried, taking vi.mu itself (sendAdvert has already returned, so
-// no lock is held). The sent value is passed in, never re-read: see
-// noteAdvertPriorityLocked.
-func (vi *vrrpInstance) noteAdvertPriority(sentPriority int) {
-	vi.mu.Lock()
-	vi.noteAdvertPriorityLocked(sentPriority)
 	vi.mu.Unlock()
 }
 
@@ -959,16 +1001,19 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 		// blocked until both timers were ready and select picked this
 		// case first). Peek WITHOUT consuming: on a hold-time delta,
 		// do not promote on the stale expiry — re-arm masterDownTimer
-		// as the hold watchdog and return, leaving the token for the
-		// configUpdatedCh case, whose disarm/revalidate logic owns
-		// the changed-hold decision. Consuming here would either
-		// strand the token in the new MASTER tenure or force this
-		// case to duplicate the consumer's hold handling.
+		// at the master-down cadence and return, leaving the token for
+		// the configUpdatedCh case. The hold flag was already cleared
+		// above, so that case takes its NOT-armed branch: it re-arms
+		// masterDownTimer again and, at the next master-down expiry,
+		// the takeover decision re-derives from live cfg — arming the
+		// NEW hold time if the master is still live and lower.
+		// Consuming here would either strand the token in the new
+		// MASTER tenure or force this case to duplicate the consumer.
 		pendingHoldChanged := vi.pendingConfigChange.valid &&
 			vi.pendingConfigChange.oldHoldSec != vi.pendingConfigChange.newHoldSec
 		vi.mu.Unlock()
 		if pendingHoldChanged {
-			slog.Info("vrrp: preempt hold-time elapsed with a pending hold-time change; deferring to config revalidation",
+			slog.Info("vrrp: preempt hold-time elapsed with a pending hold-time change; deferring promotion to config consumption",
 				"key", vi.key())
 			stopAndDrainTimer(masterDownTimer)
 			vi.armMasterDownTimer(masterDownTimer)
@@ -1220,9 +1265,10 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 	case pkt := <-vi.rxCh:
 		vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
 	case <-advertTimer.C:
+		seq := vi.sendSeqNow()
 		sentPriority := vi.getPriority()
 		vi.sendAdvert(sentPriority)
-		vi.noteAdvertPriority(sentPriority)
+		vi.noteAdvertPrioritySeq(seq, sentPriority)
 		vi.armAdvertTimer(advertTimer)
 	case <-vi.configUpdatedCh:
 		// Day-2 in-place update while MASTER (#15689). Consuming the
@@ -1245,9 +1291,10 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 		vi.mu.RUnlock()
 		switch decideMasterConfigAdvert(change, wireMS) {
 		case masterAdvertSend:
+			seq := vi.sendSeqNow()
 			sentPriority := vi.getPriority()
 			vi.sendAdvert(sentPriority)
-			vi.noteAdvertPriority(sentPriority)
+			vi.noteAdvertPrioritySeq(seq, sentPriority)
 			stopAndDrainTimer(advertTimer)
 			vi.armAdvertTimer(advertTimer)
 		case masterAdvertRearm:
