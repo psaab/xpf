@@ -455,12 +455,28 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
     forwarding: &ForwardingState,
     target: IpAddr,
 ) -> i32 {
+    connected_owner_rg_for_target_in_table(forwarding, target, None)
+}
+
+/// RI-scoped owner (round-5): only connected rows in `table` (the
+/// session's installing table; None = default instance) may claim
+/// ownership. A cross-RI interface with the same prefix must not
+/// decide this session's destination owner.
+pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+    table: Option<&str>,
+) -> i32 {
     // Source 1: connected_* rows (the FIB's own connected route
     // structs: prefix + ifindex) — longest prefix wins.
     let mut best: Option<(u8, i32)> = None;
     match target {
         IpAddr::V4(ip) => {
             for row in &forwarding.connected_v4 {
+                let want_table = table.unwrap_or("inet.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
                 if row.prefix.contains(ip) {
                     let len = row.prefix.prefix_len();
                     if best.is_none_or(|(best_len, _)| len >= best_len) {
@@ -468,7 +484,7 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
                     }
                 }
             }
-            if best.is_none() {
+            if best.is_none() && table.is_none() {
                 for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
                     for prefix in prefixes {
                         if prefix.contains(ip) {
@@ -483,6 +499,10 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
         }
         IpAddr::V6(ip) => {
             for row in &forwarding.connected_v6 {
+                let want_table = table.unwrap_or("inet6.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
                 if row.prefix.contains(ip) {
                     let len = row.prefix.prefix_len();
                     if best.is_none_or(|(best_len, _)| len >= best_len) {
@@ -490,7 +510,7 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
                     }
                 }
             }
-            if best.is_none() {
+            if best.is_none() && table.is_none() {
                 for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
                     for prefix in prefixes {
                         if prefix.contains(ip) {
@@ -541,68 +561,6 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
     0
 }
 
-/// #15958b: shared zone-egress redirect rule for a fabric-ingress
-/// reverse row. When re-resolution yields a ForwardCandidate that
-/// egresses in a zone other than the companion's destination
-/// (egress) zone, the route does not reach the destination owner —
-/// on the punt origin the connected LAN prefix is HA-suppressed, so
-/// the FIB answers the LAN target with the WAN gateway route (owner
-/// = locally-active WAN RG) and HA enforcement keeps it. The reply
-/// must instead cross the fabric to the destination owner.
-///
-/// Conditions:
-/// * `fabric_link_ingress` — the packet arrives ON the fabric link:
-///   anti-loop refusal, mirroring every other redirect site.
-/// * The DESTINATION ADDRESS's owning RG (per-address connected
-///   ownership, `connected_owner_rg_for_target`) must be peer-owned:
-///   known (> 0) and NOT forwarding-active. A co-zoned interface
-///   owned by a different, active RG does not suppress the redirect,
-///   and an unzoned/`egress_zone_id == 0` candidate alone is not
-///   proof of peer ownership. Callers pass
-///   `destination_owner_active` computed from that per-address RG.
-///
-/// Composition: callers run `redirect_session_via_fabric_if_needed`
-/// FIRST for the HAInactive family; this helper only converts a
-/// surviving ForwardCandidate. Stored-FabricRedirect retention,
-/// failback re-homing and current-peer retargeting live in
-/// `rehome_or_retain_fabric_redirect_15958b`.
-pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
-    forwarding: &ForwardingState,
-    candidate: ForwardingResolution,
-    destination_zone: u16,
-    fabric_link_ingress: bool,
-    destination_owner_active: bool,
-) -> ForwardingResolution {
-    if fabric_link_ingress || destination_owner_active {
-        return candidate;
-    }
-    if candidate.disposition != ForwardingDisposition::ForwardCandidate {
-        return candidate;
-    }
-    // GLM2: the destination zone must be KNOWN from a source other
-    // than this helper's own egress_zone_id read (the candidate's
-    // egress row): a destination zone with no interface/connected
-    // row is UNKNOWN, and absence of evidence is not peer-ownership
-    // — keep the candidate rather than hijack a locally-owned
-    // in-zone reverse to FabricRedirect. Known = some egress row
-    // carries the zone, or some connected prefix is served from it.
-    let destination_zone_known = forwarding.egress.iter().any(|(ifindex, _)| {
-        forwarding.egress_zone_id(*ifindex) == destination_zone
-    }) || forwarding
-        .connected_v4_by_ifindex
-        .keys()
-        .chain(forwarding.connected_v6_by_ifindex.keys())
-        .any(|ifindex| forwarding.egress_zone_id(*ifindex) == destination_zone);
-    if !destination_zone_known {
-        return candidate;
-    }
-    if forwarding.egress_zone_id(candidate.egress_ifindex) == destination_zone {
-        return candidate;
-    }
-    super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, destination_zone)
-        .unwrap_or(candidate)
-}
-
 /// #15958b round-3: re-home-or-retain decision for a stored
 /// FabricRedirect companion, applied per packet (hit) and per HA
 /// transition (refresh/demote), AFTER the HAInactive composition.
@@ -628,10 +586,24 @@ pub(in crate::afxdp) fn connected_ifindex_for_target(
     forwarding: &ForwardingState,
     target: IpAddr,
 ) -> i32 {
+    connected_ifindex_for_target_in_table(forwarding, target, None)
+}
+
+/// RI-scoped connected ifindex (round-5); see
+/// `connected_owner_rg_for_target_in_table`.
+pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+    table: Option<&str>,
+) -> i32 {
     let mut best: Option<(u8, i32)> = None;
     match target {
         IpAddr::V4(ip) => {
             for row in &forwarding.connected_v4 {
+                let want_table = table.unwrap_or("inet.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
                 if row.prefix.contains(ip) {
                     let len = row.prefix.prefix_len();
                     if best.is_none_or(|(best_len, _)| len >= best_len) {
@@ -639,7 +611,7 @@ pub(in crate::afxdp) fn connected_ifindex_for_target(
                     }
                 }
             }
-            if best.is_none() {
+            if best.is_none() && table.is_none() {
                 for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
                     for prefix in prefixes {
                         if prefix.contains(ip) {
@@ -654,6 +626,10 @@ pub(in crate::afxdp) fn connected_ifindex_for_target(
         }
         IpAddr::V6(ip) => {
             for row in &forwarding.connected_v6 {
+                let want_table = table.unwrap_or("inet6.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
                 if row.prefix.contains(ip) {
                     let len = row.prefix.prefix_len();
                     if best.is_none_or(|(best_len, _)| len >= best_len) {
@@ -661,7 +637,7 @@ pub(in crate::afxdp) fn connected_ifindex_for_target(
                     }
                 }
             }
-            if best.is_none() {
+            if best.is_none() && table.is_none() {
                 for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
                     for prefix in prefixes {
                         if prefix.contains(ip) {
@@ -718,12 +694,28 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_for_target_15958b(
     destination_owner_active: bool,
     target: Option<IpAddr>,
 ) -> ForwardingResolution {
+    rehome_or_retain_fabric_redirect_scoped_15958b(
+        forwarding, stored, candidate, destination_zone, destination_owner_active, target, None,
+    )
+}
+
+/// RI-scoped re-home (round-5): the connected-interface test runs
+/// in the session's installing table.
+pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
+    forwarding: &ForwardingState,
+    stored: ForwardingResolution,
+    candidate: ForwardingResolution,
+    destination_zone: u16,
+    destination_owner_active: bool,
+    target: Option<IpAddr>,
+    table: Option<&str>,
+) -> ForwardingResolution {
     if candidate.disposition == ForwardingDisposition::FabricRedirect {
         return candidate;
     }
     if destination_owner_active {
         if let Some(target) = target {
-            let connected_ifindex = connected_ifindex_for_target(forwarding, target);
+            let connected_ifindex = connected_ifindex_for_target_in_table(forwarding, target, table);
             let egress_is_fabric = candidate.egress_ifindex > 0
                 && super::forwarding::ingress_is_fabric(forwarding, candidate.egress_ifindex);
             if candidate.disposition == ForwardingDisposition::ForwardCandidate

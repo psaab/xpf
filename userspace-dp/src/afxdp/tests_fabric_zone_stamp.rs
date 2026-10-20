@@ -5966,10 +5966,15 @@ fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
 /// not HAInactive retention.
 #[test]
 fn split_rg_refresh_failback_rehomes_local_15958b() {
-    let forwarding = fw0_forwarding_15958b();
+    // Sessions synthesized in split state; refresh evaluated under
+    // the FAILBACK (fw1-shaped, LAN locally owned) snapshot — the
+    // same sequence as the packet-level failback cell. Refreshing
+    // under the still-split FIB is the transient cell's job.
+    let split_forwarding = fw0_forwarding_15958b();
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
-    let sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    let sessions = fw0_both_halves_sessions_15958b(&split_forwarding, now_ns);
+    let forwarding = split_fw1_forwarding_15958();
     // Failback: RG2 (LAN) active on this node now.
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
     let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
@@ -5981,19 +5986,17 @@ fn split_rg_refresh_failback_rehomes_local_15958b() {
     );
     let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
     assert!(!reverse_items.is_empty());
-    for (_, decision, metadata, _, _) in &reverse_items {
-        // Item 2's retained marker is the mechanism: refresh keeps
-        // FabricRedirect stamped (egress 4) so TX stays fail-closed;
-        // what must NOT survive failback is a WAN-candidate laundering
-        // (egress 13/6) — and the packet hit path re-homes because
-        // destination_owner_active (RG2 active) makes the helper keep
-        // the local candidate. Assert the refresh outcome is either
-        // the retained marker or a local candidate, never the WAN
-        // gateway egress.
-        assert!(
-            decision.resolution.egress_ifindex == 4
-                || metadata.egress_zone == 21230,
-            "failback must not launder to the WAN gateway egress: {:?}",
+    for (_, decision, _metadata, _, _) in &reverse_items {
+        // Direct: the refreshed resolution IS the LAN candidate.
+        assert_eq!(
+            decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "failback refresh must re-home to the LAN candidate, got {:?}",
+            decision.resolution
+        );
+        assert_eq!(
+            decision.resolution.egress_ifindex, 5,
+            "failback refresh must egress the LAN interface, got {:?}",
             decision.resolution
         );
     }
@@ -6094,6 +6097,9 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     // is asserted on the binding counter below, which the inline
     // LAN submission bumps at drain.
 
+    // LAN-delivery counter: fw1 LAN-egress cells pin actual LAN
+    // TX for this identical candidate shape; here decision+silence
+    // (re-homed candidate + fabric/WAN counters) is the pin.
     // LAN binding TX (actual counter, cross-UMEM): packet 2's
     // re-homed decision (eg5) is submitted inline to the LAN
     // binding and drained by the harness; tx_packets counts it.
@@ -6336,4 +6342,56 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
         "transient state must not transmit LAN (FIB not yet republished)"
     );
     assert!(egress.is_some(), "fabric frame must be emitted");
+}
+
+/// Round-5 cross-RI ownership: the same connected prefix in two
+/// routing instances with opposite owners must not let the other
+/// RI's interface claim this session's destination. The default
+/// table serves 10.0.61.0/24 via RG2; a cross-RI row for the same
+/// prefix (table tenant-a.inet.0) via RG1 must be ignored for a
+/// default-table session and honored only when scoped to that table.
+#[test]
+fn split_rg_connected_owner_scoped_by_ri_15958b() {
+    let mut forwarding = split_fw1_forwarding_15958();
+    // Cross-RI impostor: same LAN prefix, tenant table, RG1 interface.
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net(
+            "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("prefix"),
+        ),
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 14,
+        tunnel_endpoint_id: 0,
+        table: "tenant-a.inet.0".to_string(),
+    });
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    // Default scope: LAN owner is RG2 (reth1), not the tenant RG1 row.
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        2,
+        "default-table owner must be RG2"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+            &forwarding,
+            target,
+            Some("tenant-a.inet.0"),
+        ),
+        1,
+        "tenant-scoped owner must be the cross-RI RG1 row"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
+            &forwarding,
+            target,
+            Some("tenant-a.inet.0"),
+        ),
+        14,
+        "tenant-scoped connected ifindex must be the cross-RI interface"
+    );
+    // Default connected ifindex stays the LAN interface (5).
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+        5,
+        "default connected ifindex must be the LAN interface"
+    );
 }

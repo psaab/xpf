@@ -518,7 +518,8 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
             // Per-address destination owner (round-2 item 1): the RG
             // of the connected interface serving resolution_target,
             // not any RG in the destination zone.
-            let dest_rg = super::connected_owner_rg_for_target(forwarding, resolution_target);
+            let session_table = install_table_name_for_session(forwarding, decision, resolution_target);
+            let dest_rg = super::connected_owner_rg_for_target_in_table(forwarding, resolution_target, session_table);
             // Unknown owner (dest_rg==0) is NOT peer-ownership: keep the candidate (no redirect).
             let destination_owner_active = dest_rg == 0 || (dest_rg > 0
                 && ha_state
@@ -535,13 +536,14 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
             decision.resolution = if fabric_link_ingress {
                 enforced_resolution
             } else {
-                super::rehome_or_retain_fabric_redirect_for_target_15958b(
+                super::rehome_or_retain_fabric_redirect_scoped_15958b(
                     forwarding,
                     resolved.decision.resolution,
                     enforced_resolution,
                     resolved.metadata.egress_zone,
                     destination_owner_active,
                     Some(resolution_target),
+                    session_table,
                 )
             };
         } else {
@@ -765,7 +767,8 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
     );
     // #15958b: same retained-redirect guard as the hit arm above.
     if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-        let dest_rg = super::connected_owner_rg_for_target(forwarding, resolution_target_for_session(flow, resolved.decision));
+        let rev_table = install_table_name_for_session(forwarding, resolved.decision, resolution_target_for_session(flow, resolved.decision));
+        let dest_rg = super::connected_owner_rg_for_target_in_table(forwarding, resolution_target_for_session(flow, resolved.decision), rev_table);
         // Unknown owner (dest_rg==0): keep candidate.
         let destination_owner_active = dest_rg == 0 || (dest_rg > 0
             && ha_state
@@ -780,13 +783,14 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         decision.resolution = if fabric_link_ingress {
             enforced_resolution
         } else {
-            super::rehome_or_retain_fabric_redirect_for_target_15958b(
+            super::rehome_or_retain_fabric_redirect_scoped_15958b(
                 forwarding,
                 resolved.decision.resolution,
                 enforced_resolution,
                 resolved.metadata.egress_zone,
                 destination_owner_active,
                 Some(resolution_target_for_session(flow, resolved.decision)),
+                rev_table,
             )
         };
     } else {

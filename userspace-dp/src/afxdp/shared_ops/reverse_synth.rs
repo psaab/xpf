@@ -473,7 +473,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
     // Destination-owner test (M2, per-address round-2): the RG of
     // the connected interface serving `target_ip` specifically —
     // a co-zoned interface owned by another RG must not decide.
-    let dest_rg = super::connected_owner_rg_for_target(forwarding, target_ip);
+    let dest_rg = super::connected_owner_rg_for_target_in_table(forwarding, target_ip, table);
     let destination_owner_active = dest_rg > 0
         && matches!(
             ha_state.get(&dest_rg),
@@ -491,13 +491,14 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
         // destination owner (dest_rg == 0) is not peer-ownership:
         // keep the candidate.
         if dest_rg > 0 {
-            let redirected = super::rehome_or_retain_fabric_redirect_for_target_15958b(
+            let redirected = super::rehome_or_retain_fabric_redirect_scoped_15958b(
                 forwarding,
                 resolved,
                 resolved,
                 ingress_zone,
                 destination_owner_active,
                 Some(target_ip),
+                table,
             );
             if redirected.disposition == ForwardingDisposition::FabricRedirect {
                 return redirected;
