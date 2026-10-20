@@ -1724,6 +1724,9 @@ pub(crate) struct SessionTable {
     /// authority bit to reject stale same-RG bulk requests until activation.
     demoted_owner_rgs: FxHashSet<i32>,
     deltas: VecDeque<SessionDelta>,
+    /// HA transition withheld by a deferring flow-cache probe until the
+    /// packet survives output-filter/policer admission.
+    pending_probe_state_update: Option<(SessionKey, u8, u8)>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2078,6 +2081,7 @@ impl SessionTable {
             owner_rg_sessions: FxHashMap::default(),
             demoted_owner_rgs: FxHashSet::default(),
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
+            pending_probe_state_update: None,
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
             reserved_session_slots: 0,
@@ -3577,6 +3581,52 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true)
+    }
+
+    /// Probe a flow-cache hit while deferring the HA completion delta.
+    ///
+    /// The cache caller still has output-filter and policer verdicts to
+    /// replay after this probe. Completing the local handshake here is
+    /// needed for liveness, but publishing `SessionDeltaKind::Update`
+    /// before those verdicts would tell the standby that an ACK later
+    /// discarded on this node completed the handshake. The caller invokes
+    /// [`Self::emit_probe_hit_state_update`] only after the packet is
+    /// admitted for TX; a dropped packet simply never publishes it.
+    pub fn probe_hit_deferring_state_update(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+    ) -> bool {
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false)
+    }
+
+    /// Emit the HA Update withheld by
+    /// [`Self::probe_hit_deferring_state_update`] after TX admission.
+    pub fn emit_probe_hit_state_update(&mut self, key: &SessionKey) {
+        if let Some((matched_key, class_before, handshake_before)) =
+            self.pending_probe_state_update.take()
+        {
+            if matched_key == *key {
+                self.emit_session_state_update(&matched_key, class_before, handshake_before);
+            }
+        }
+    }
+
+    fn probe_hit_inner(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        emit_state_update: bool,
+    ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
         // #15947 (H29-04): wire state BEFORE the completion below, so the
         // HA Update emission can tell whether the handshake actually
@@ -3667,12 +3717,18 @@ impl SessionTable {
             // #15947 (H29-04): the slow path emits the HA state Update on
             // this same transition (lookup.rs); without it a cache-served
             // completing ACK leaves the standby holding a pending-handshake
-            // entry on the short opening expiry.
-            self.emit_session_state_update(
-                &matched_key,
-                close_class_before,
-                handshake_state_before,
-            );
+            // entry on the short opening expiry. The flow-cache caller can
+            // defer this until after its output-filter/policer verdict.
+            if emit_state_update {
+                self.emit_session_state_update(
+                    &matched_key,
+                    close_class_before,
+                    handshake_state_before,
+                );
+            } else {
+                self.pending_probe_state_update =
+                    Some((matched_key.clone(), close_class_before, handshake_state_before));
+            }
             self.push_to_wheel(&matched_key, now_ns);
         } else if let Some(canonical_key) = canonical_refresh_key {
             self.touch(&canonical_key, now_ns);

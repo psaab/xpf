@@ -34,6 +34,20 @@ impl SessionTable {
             entry.note_tcp_seq_scaled(seq, ack, window, window_scale, payload_len, tcp_flags, max_window);
         }
     }
+    /// Seed only the RFC 7323 scale from an admitted initial SYN.
+    ///
+    /// The ordinary miss path installs a fresh entry before it has a
+    /// session-hit lookup on which `note_tcp_seq_scaled` can run. Calling
+    /// this immediately after that install makes the first SYN's WSOPT —
+    /// not merely a later hit packet — establish the entry's scale, while
+    /// leaving sequence/window state untouched until real segments arrive.
+    pub fn seed_tcp_window_scale(&mut self, key: &SessionKey, window_scale: Option<u8>) {
+        if let Some(scale) = window_scale
+            && let Some(entry) = self.entry_by_key_mut(key)
+        {
+            entry.tcp_window_scale = Some(scale.min(14));
+        }
+    }
     /// Validate RST/FIN seq against the RECEIVER's advertised window.
     ///
     /// #15947 (H29-02): the pre-fix verdict discarded the companion key

@@ -655,3 +655,127 @@ fn foreign_hit_verdict_uses_descriptor_time_12868() {
         ForeignHitVerdict::Drop(_)
     ));
 }
+
+fn cookie_resolution(disposition: ForwardingDisposition) -> ForwardingResolution {
+    ForwardingResolution {
+        disposition,
+        local_ifindex: 0,
+        egress_ifindex: WAN,
+        tx_ifindex: WAN,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }
+}
+
+fn cookie_flow() -> SessionFlow {
+    SessionFlow {
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+            src_port: 49152,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    }
+}
+
+#[test]
+fn syn_cookie_final_admission_uses_translated_tuple_15947() {
+    // The raw destination is in dmz, whose dmz->wan rule permits any.
+    // The translated destination remains in wan at the resolution's
+    // egress interface, but lan->wan also permits in this fixture's
+    // deny snapshot only via allow-other dmz->wan; use arrival on DMZ
+    // (egress WAN) and a translated dst that still resolves dmz->wan.
+    // The point of the unit is that the helper evaluates the caller-
+    // supplied effective tuple, not flow.dst_ip: deny by choosing a
+    // source in lan (no lan->wan permit in this snapshot).
+    let fw = forwarding(false);
+    let mut flow = cookie_flow();
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: LAN_A as u32,
+        ingress_vlan_id: 0,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        pkt_len: 60,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    let ha = std::collections::BTreeMap::new();
+    // lan -> wan has no permit in policy_deny_snapshot (only dmz->wan),
+    // so even a ForwardCandidate resolution must suppress the ACK-RST.
+    assert!(!super::syn_cookie_final_admission(
+        &fw,
+        &ha,
+        &flow,
+        meta,
+        None,
+        cookie_resolution(ForwardingDisposition::ForwardCandidate),
+        flow.dst_ip,
+        443,
+        1_000,
+        128,
+    ));
+    // Same call from the dmz arrival interface: the dmz->wan permit
+    // admits the translated tuple.
+    let mut meta_dmz = meta;
+    meta_dmz.ingress_ifindex = DMZ as u32;
+    // DMZ is an interface ifindex (26) whose zone is dmz; the source IP
+    // still belongs to the flow, but policy matches zones, not address
+    // ownership, for this helper.
+    assert!(super::syn_cookie_final_admission(
+        &fw,
+        &ha,
+        &flow,
+        meta_dmz,
+        None,
+        cookie_resolution(ForwardingDisposition::ForwardCandidate),
+        flow.dst_ip,
+        443,
+        1_000,
+        128,
+    ));
+    // LocalDelivery does not demand a transit permit.
+    assert!(super::syn_cookie_final_admission(
+        &fw,
+        &ha,
+        &flow,
+        meta,
+        None,
+        cookie_resolution(ForwardingDisposition::LocalDelivery),
+        flow.dst_ip,
+        443,
+        1_000,
+        128,
+    ));
+    // HA-inactive / no-route dispositions never earn a reply.
+    for disposition in [
+        ForwardingDisposition::HAInactive,
+        ForwardingDisposition::NoRoute,
+        ForwardingDisposition::PolicyDenied,
+    ] {
+        assert!(!super::syn_cookie_final_admission(
+            &fw,
+            &ha,
+            &flow,
+            meta_dmz,
+            None,
+            cookie_resolution(disposition),
+            flow.dst_ip,
+            443,
+            1_000,
+            128,
+        ));
+    }
+}

@@ -22712,3 +22712,54 @@ fn stop_control_refusal_recorded_and_retried_15966r() {
     assert_eq!(remote.pptp().resolve(pac, 0xAAAA), None, "recorded refusal must be retried and land");
     let _ = control;
 }
+
+#[test]
+fn cancel_pending_forwards_except_keeps_batch_rst_triggers_15947() {
+    // Two accepted RSTs for the same session in one batch: each teardown
+    // receives the batch's full trigger set, so neither cancels the other.
+    // A non-trigger sibling and a reverse-direction request are recycled.
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    let forward = test_key();
+    let reverse = reverse_session_key(&forward, NatDecision::default());
+    let decision = test_decision();
+    let make = |key: SessionKey, addr: u64| PendingForwardRequest {
+        target_ifindex: 22,
+        target_binding_index: None,
+        ingress_queue_id: 0,
+        desc: crate::xsk_ffi::xdp::XdpDesc { addr, len: 64, options: 0 },
+        frame: PendingForwardFrame::Live,
+        meta: ForwardPacketMeta::default(),
+        decision,
+        apply_nat_on_fabric: false,
+        expected_ports: None,
+        flow_key: Some(key),
+        nat64_reverse: None,
+        overlap_admissions: None,
+        cos_queue_id: None,
+        dscp_rewrite: None,
+        cos_tx_selection_resolved: true,
+    };
+    let mut pending = vec![
+        make(forward.clone(), 0x1000),
+        make(forward.clone(), 0x2000),
+        make(forward.clone(), 0x3000),
+        make(reverse.clone(), 0x4000),
+    ];
+    let keeps = vec![(forward.clone(), 0x1000), (forward.clone(), 0x2000)];
+    cancel_pending_forwards_except(
+        &mut binding,
+        &mut pending,
+        &forward,
+        &reverse,
+        &keeps,
+    );
+    let kept: Vec<u64> = pending.iter().map(|req| req.desc.addr).collect();
+    assert_eq!(kept, vec![0x1000, 0x2000]);
+    let recycled: Vec<u64> = binding
+        .tx_pipeline
+        .pending_fill_frames
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(recycled, vec![0x3000, 0x4000]);
+}

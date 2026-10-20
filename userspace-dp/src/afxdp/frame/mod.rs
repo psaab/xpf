@@ -108,7 +108,8 @@ pub(in crate::afxdp) use inspect::{
     neighbor_ip_is_learnable, neighbor_mac_is_learnable, parse_session_flow,
     post_nat_expected_ports, source_is_invalid_for_icmp_error, src_is_directed_broadcast,
     src_is_directed_broadcast_in_table, term_match_extra_from_frame,
-    term_match_extra_from_meta, transit_dst_is_martian, transit_src_is_martian,
+    term_match_extra_from_meta, term_match_extra_from_meta_and_frame, transit_dst_is_martian,
+    transit_src_is_martian,
     try_parse_metadata, v4_addr_is_directed_broadcast_in_table,
 };
 pub(super) use inspect::{

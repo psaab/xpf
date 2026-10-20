@@ -129,10 +129,15 @@ pub(super) fn enqueue_local_request_to_target_or_owner(
     );
     if let Some(owner_live) = owner_live {
         if !Arc::ptr_eq(owner_live, &target_binding.live) {
-            return owner_live.enqueue_tx_owned(req);
+            // Triple-review fold: use the admission-reporting inbox API.
+            // `enqueue_tx_owned` deliberately returns Ok even when its
+            // bounded MPSC inbox drops the newest request; treating that
+            // as acceptance let multi-fragment callers fire WireGuard
+            // commits for frames that never entered TX. `try_` preserves
+            // the same counters on refusal and returns the request.
+            return owner_live.try_enqueue_tx_owned(req);
         }
     }
-    target_binding.tx_pipeline.pending_tx_local.push_back(req);
     bound_pending_tx_local(target_binding);
     Ok(())
 }

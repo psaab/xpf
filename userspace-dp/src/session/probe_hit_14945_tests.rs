@@ -272,6 +272,44 @@ fn probe_hit_completion_emits_ha_state_update_15947() {
     assert_eq!(updates[0].key, forward);
 }
 
+#[test]
+fn probe_hit_deferring_state_update_waits_for_admission_15947() {
+    // Triple-review fold (H29-04): flow-cache output-drop must not
+    // publish the completion. The deferring probe completes locally and
+    // withholds the Update; emitting it after admission produces exactly
+    // one Update. If the caller drops the packet, it simply never emits.
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    let entry = table.entry_by_key(&forward).expect("completed forward half");
+    assert!(entry.established && !entry.handshake_pending);
+    assert!(
+        table.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update),
+        "deferred probe must not publish Update before TX admission"
+    );
+    table.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = table
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].key, forward);
+}
+
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with
 /// payload progress re-stamps, matching the unfused keepalive.

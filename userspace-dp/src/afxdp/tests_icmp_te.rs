@@ -194,7 +194,23 @@ fn build_local_time_exceeded_request_returns_prebuilt_forward_for_ttl_expiry() {
     // #15947 (H26-02): the generated reply is flowless — it must NOT
     // carry the expired transit packet's session key.
     assert_eq!(request.flow_key, None);
-    assert!(matches!(request.frame, PendingForwardFrame::Prebuilt(_)));
+    // Triple-review fold: request meta describes the generated reply
+    // itself (router -> client, ICMP), not the trigger (client -> remote).
+    assert_eq!(request.meta.protocol, PROTO_ICMP);
+    assert_eq!(
+        request.meta.l3_addrs_unfiltered(),
+        Some((
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+            IpAddr::V4(client_ip),
+        )),
+        "generated TimeExceeded meta must carry router->client addresses"
+    );
+    assert_eq!(request.meta.flow_src_port, 0);
+    assert_eq!(request.meta.flow_dst_port, 0);
+    let PendingForwardFrame::Prebuilt(bytes) = &request.frame else {
+        panic!("expected Time Exceeded reply");
+    };
+    assert_eq!(request.meta.pkt_len as usize, bytes.len());
 }
 
 

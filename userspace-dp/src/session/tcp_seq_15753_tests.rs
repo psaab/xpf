@@ -74,3 +74,34 @@ fn scaled_window_and_receiver_window_verdict_15947() {
     );
     let _ = TCP_RST;
 }
+
+#[test]
+fn seed_tcp_window_scale_from_initial_syn_15947() {
+    // The ordinary first SYN installs; seeding its parsed WSOPT is what
+    // lets a later non-SYN segment use the negotiated scale without a
+    // session-hit note having manually supplied Some(scale) again.
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    table.seed_tcp_window_scale(&forward, Some(7));
+    assert_eq!(
+        table.entry_by_key(&forward).unwrap().tcp_window_scale,
+        Some(7)
+    );
+    table.note_tcp_seq_scaled(
+        &forward,
+        1001,
+        0,
+        8192,
+        None,
+        0,
+        TCP_ACK,
+        256 * 1024,
+    );
+    assert_eq!(
+        table.entry_by_key(&forward).unwrap().tcp_rcv_wnd,
+        256 * 1024,
+        "seeded scale applies to later notes and exceeds the old 64K ceiling"
+    );
+}

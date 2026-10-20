@@ -712,6 +712,38 @@ fn term_extra_from_meta_fragment_sentinel_sets_is_fragment_and_drops_l4_present_
     assert_eq!(extra.fragment_protocol, None);
 }
 
+#[test]
+fn term_extra_from_meta_and_frame_recovers_fragment_protocol_15947() {
+    // A real IPv4 non-first TCP fragment: protocol byte 6 under a nonzero
+    // fragment offset. Frame-backed callers can recover TCP for compound
+    // `protocol tcp; is-fragment` terms; meta-only callers cannot.
+    let frame = frag_v4_packet(PROTO_TCP, 0x0001, &[0xAA, 0xBB, 0xCC, 0xDD]);
+    let meta: ForwardPacketMeta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        l3_offset: 14,
+        l4_offset: 34,
+        pkt_len: frame.len() as u16,
+        ..UserspaceDpMeta::default()
+    }
+    .into();
+    // frag_v4_packet returns the IP packet without Ethernet; shift offsets
+    // back to packet-relative values for this helper's frame contract.
+    let mut packet_meta = meta;
+    packet_meta.l3_offset = 0;
+    packet_meta.l4_offset = 20;
+    let extra = term_match_extra_from_meta_and_frame(&frame, packet_meta);
+    assert!(extra.native_fragment_sentinel);
+    assert!(extra.is_fragment);
+    assert!(!extra.l4_present);
+    assert_eq!(extra.fragment_protocol, Some(PROTO_TCP));
+    assert_eq!(
+        term_match_extra_from_meta(meta).fragment_protocol,
+        None,
+        "control: no-frame variant remains fail-closed"
+    );
+}
+
 
 #[test]
 fn apply_nat_ipv4_non_first_fragment_rewrites_ip_only() {

@@ -1914,7 +1914,6 @@ fn truncated_or_malformed_ipv4_lsrr_ssrr_option_fails_closed_as_ip_malformed_159
         run(&frame_opts, 8).expect_err("malformed TLV after LSRR must fail closed"),
         ScreenParseError::TruncatedIpv4Header
     );
-    frame_opts[8] = 131;
     // Control: well-formed LSRR alone still parses and trips.
     let info = run(&[131, 7, 4, 0, 0, 0, 0, 0], 7).expect("well-formed LSRR parses");
     assert!(info.saw_ipv4_source_route);

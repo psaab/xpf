@@ -434,34 +434,37 @@ pub(super) fn build_local_time_exceeded_request(
         );
     }
 
-    // #15947 (H26-02): describe the GENERATED Time-Exceeded frame, not
-    // the expired transit packet: same family (the builders never
-    // translate), but the reply's own protocol (ICMP/ICMPv6) and its
-    // wire DSCP. The pre-fix ingress meta made dispatch stamp the
-    // transit packet's family/protocol and mirror-classify the reply
-    // as if it were that packet. Computed before the frame moves into
-    // the request below.
-    let wire_meta = {
-        let mut wire_meta: ForwardPacketMeta = meta.into();
-        wire_meta.protocol = match wire_meta.addr_family as i32 {
-            libc::AF_INET => crate::ip_proto::PROTO_ICMP,
-            libc::AF_INET6 => crate::ip_proto::PROTO_ICMPV6,
-            _ => wire_meta.protocol,
-        };
-        wire_meta.dscp = {
-            let l3 = crate::afxdp::frame::frame_l3_offset(&prebuilt_frame)
-                .unwrap_or(wire_meta.l3_offset as usize);
-            match wire_meta.addr_family as i32 {
-                libc::AF_INET => prebuilt_frame.get(l3 + 1).map(|tos| tos >> 2).unwrap_or(0),
-                libc::AF_INET6 => prebuilt_frame
-                    .get(l3..l3 + 2)
-                    .map(|b| (((b[0] & 0x0f) << 2) | (b[1] >> 6)) & 0x3f)
-                    .unwrap_or(0),
-                _ => 0,
-            }
-        };
-        wire_meta
+    // #15947 (H26-02): the request meta must describe the generated
+    // Time-Exceeded frame, not the trigger packet whose TTL expired. The
+    // frame was built above, so parse its actual wire identity (router ->
+    // original sender, ICMP/ICMPv6, no ports, generated length/offsets)
+    // and then carry only the ingress binding identity needed to resolve
+    // the mirror. Parsing failures fail closed: do not queue a reply whose
+    // mirror metadata is knowingly stale.
+    let Some((generated_flow, generated_meta)) =
+        crate::afxdp::poll_descriptor::queued_embedded_icmp_identity(&prebuilt_frame)
+    else {
+        return None;
     };
+    let mut wire_meta: ForwardPacketMeta = generated_meta.into();
+    // `UserspaceDpMeta::default()` in the identity helper intentionally
+    // leaves addresses zero; mirror filtering reads them from this
+    // ForwardPacketMeta when flow_key is None, so stamp the parsed
+    // generated source/destination explicitly.
+    match generated_flow.src_ip {
+        IpAddr::V4(ip) => wire_meta.flow_src_addr[..4].copy_from_slice(&ip.octets()),
+        IpAddr::V6(ip) => wire_meta.flow_src_addr.copy_from_slice(&ip.octets()),
+    }
+    match generated_flow.dst_ip {
+        IpAddr::V4(ip) => wire_meta.flow_dst_addr[..4].copy_from_slice(&ip.octets()),
+        IpAddr::V6(ip) => wire_meta.flow_dst_addr.copy_from_slice(&ip.octets()),
+    }
+    wire_meta.ingress_ifindex = meta.ingress_ifindex;
+    wire_meta.ingress_vlan_id = meta.ingress_vlan_id;
+    wire_meta.ingress_pcp = meta.ingress_pcp;
+    wire_meta.ingress_vlan_present = meta.ingress_vlan_present;
+    wire_meta.fabric_ingress_ifindex = meta.fabric_ingress_ifindex;
+    wire_meta.meta_flags = meta.meta_flags;
 
     Some(PendingForwardRequest {
         target_ifindex,

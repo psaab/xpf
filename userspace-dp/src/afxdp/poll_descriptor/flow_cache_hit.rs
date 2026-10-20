@@ -447,7 +447,9 @@ pub(super) fn stage_flow_cache_hit(
         let session_live = if ttl_would_expire {
             fabric_session_live || sessions.session_is_live_at(&flow.forward_key, now_ns)
         } else {
-            sessions.probe_hit(
+            // HA completion is published only after output-filter/policer
+            // admission below; probe_hit itself would emit it immediately.
+            sessions.probe_hit_deferring_state_update(
                 &flow.forward_key,
                 now_ns,
                 meta.pkt_len as u64,
@@ -632,6 +634,9 @@ pub(super) fn stage_flow_cache_hit(
             scratch.scratch_recycle.push(desc.addr);
             return FlowCacheOutcome::Consumed;
         }
+        // The packet survived the cached output-filter/policer verdicts;
+        // only now may a completing ACK's HA transition be published.
+        sessions.emit_probe_hit_state_update(&flow.forward_key);
         // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,
         // but a filter-pinned queue must not be reclassified. The separate
         // `cos_lp_reclassify` arm refreshes only that pinned queue's rewrite.

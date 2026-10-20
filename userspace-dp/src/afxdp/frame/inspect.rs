@@ -1485,6 +1485,28 @@ pub(in crate::afxdp) fn term_match_extra_from_meta(
     }
 }
 
+/// Meta-only extra for callers that do have the packet bytes.
+///
+/// This retains the metadata-only contract (no frame offsets are trusted
+/// for ICMP/TCP fields) but recovers the fragment's original protocol from
+/// the L3 bytes. Without it, a supported compound term such as
+/// `protocol tcp; is-fragment; then discard` could never match a real TCP
+/// non-first fragment on the TUN/local-origin CoS path, even though the
+/// bytes needed to identify TCP are present. Unrecoverable bytes leave
+/// `fragment_protocol: None`, preserving the existing fail-closed matcher
+/// behavior for protocol-qualified terms.
+pub(in crate::afxdp) fn term_match_extra_from_meta_and_frame(
+    frame: &[u8],
+    meta: ForwardPacketMeta,
+) -> crate::filter::TermMatchExtra<'static> {
+    let mut extra = term_match_extra_from_meta(meta);
+    if extra.native_fragment_sentinel {
+        extra.fragment_protocol =
+            fragment_protocol_from_frame(frame, meta.l3_offset, meta.addr_family);
+    }
+    extra
+}
+
 // #6926: the address-classification group moved to `addr_class.rs` when this
 // file crossed the 2000-LOC [REFACTOR] tier. Re-exported here rather than
 // leaving callers to be rewritten: the tree reaches these by BOTH a bare `use`

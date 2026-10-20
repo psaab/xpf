@@ -728,9 +728,15 @@ fn enqueue_copy_fallback_frame(
                 return (true, true);
             }
             let mut enqueued = 0usize;
-            // WireGuard commits are held until every fragment enqueues;
-            // a mid-loop enqueue failure must not leave committed-but-
-            // undelivered encap state behind a partial send.
+            // WireGuard commits are held until every fragment is accepted
+            // by an enqueue API whose Ok is an admission receipt. The
+            // cross-owner path now uses `try_enqueue_tx_owned`, so Ok
+            // means the bounded inbox actually retained the request. The
+            // local `pending_tx_local` VecDeque is unbounded at push time
+            // and later FIFO-bounded by `bound_pending_tx_local`; that is
+            // a documented queue-eviction contract, not an admission
+            // refusal this fast loop can observe synchronously. Do not
+            // claim hardware delivery—only queue admission.
             let mut pending_wg_commits: Vec<_> = Vec::new();
             for (frame, wg_commit) in frames {
                 if cfg!(feature = "debug-log") && enqueued == 0 {
