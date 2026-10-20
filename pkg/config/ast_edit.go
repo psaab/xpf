@@ -1187,9 +1187,7 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 					saved := &Node{Keys: append([]string(nil), n.Keys...), KeysQuoted: append([]bool(nil), n.KeysQuoted...), KeysBracketed: append([]bool(nil), n.KeysBracketed...), BracketedClosed: n.BracketedClosed, IsLeaf: n.IsLeaf, Children: n.Children}
 					braceCompactStatement12508(n, head, childSchema, sliceBoolElided15714(n.KeysQuoted, step), sliceBoolElided15714(n.KeysBracketed, step))
 					if err := deletePath(&n.Children, path, grouped, childSchema, i+step); err != nil {
-						if errIsPathRefusal15714(err) {
-							restoreBracedElided15714(n, saved)
-						}
+						restoreBracedElided15714(n, saved)
 						return err
 					}
 					return nil
@@ -1425,9 +1423,7 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 					saved := &Node{Keys: append([]string(nil), n.Keys...), KeysQuoted: append([]bool(nil), n.KeysQuoted...), KeysBracketed: append([]bool(nil), n.KeysBracketed...), BracketedClosed: n.BracketedClosed, IsLeaf: n.IsLeaf, Children: n.Children}
 					braceCompactStatement12508(n, head, cs, sliceBoolElided15714(n.KeysQuoted, step), sliceBoolElided15714(n.KeysBracketed, step))
 					if err := setInactiveAtPath(&n.Children, path, grouped, cs, i+step, inactive); err != nil {
-						if errIsPathRefusal15714(err) {
-							restoreBracedElided15714(n, saved)
-						}
+						restoreBracedElided15714(n, saved)
 						return err
 					}
 					return nil
@@ -1887,10 +1883,14 @@ func editableStatement12508(n *Node, nodeKeys []string, schema *schemaNode) bool
 // braceCompactStatement12508 rewrites a compact single-statement leaf such as
 // `filter input A;` into its braced form in place, expanding packed tails
 // through the container schema so nested paths become real AST containers.
-// The node keeps its sibling position and inactive marker.
+// The node keeps its sibling position and inactive marker. Any authored
+// braced body (n.Children) is carried into the expansion: packedBodyChildren
+// attaches it under the deepest packed statement or as a sibling root
+// (#14415), so bracing a mixed packed+braced node never drops authored
+// configuration (triple-review 15915 B1).
 func braceCompactStatement12508(n *Node, nodeKeys []string, schema *schemaNode, quoted, bracketed []bool, closed ...bool) {
 	oldKeys, oldQuoted, oldBracketed := n.Keys, n.KeysQuoted, n.KeysBracketed
-	packed := &Node{Keys: oldKeys}
+	packed := &Node{Keys: oldKeys, Children: n.Children}
 	if len(oldQuoted) == len(oldKeys) {
 		packed.setKeysQuoted(oldQuoted)
 	}
@@ -1935,8 +1935,13 @@ func sliceBoolElided15714(mask []bool, n int) []bool {
 }
 
 // restoreBracedElided15714 re-elides a node from its saved pre-brace
-// shape when a braced descendant edit is refused, so the
-// operator's original compact spelling survives a no-op error (#15714).
+// shape when a braced descendant edit fails, so the operator's original
+// compact spelling survives a no-op error (#15714). Both #15714 call
+// sites restore on ANY error from the braced descent: those errors mean
+// the addressed edit did not commit, so leaving the re-spelled shape
+// would be a silent rewrite on a refused edit (triple-review 15915 M3;
+// the previous refusal-class-only gate kept only ErrPathNotFound /
+// "path not found"-prefixed errors restored).
 func restoreBracedElided15714(n *Node, saved *Node) {
 	if n == nil || saved == nil {
 		return
@@ -1947,19 +1952,6 @@ func restoreBracedElided15714(n *Node, saved *Node) {
 	n.BracketedClosed = saved.BracketedClosed
 	n.IsLeaf = saved.IsLeaf
 	n.Children = saved.Children
-}
-
-// errIsPathRefusal15714 reports whether err is a path-not-found refusal
-// (a no-op delete/deactivate that must leave the tree unmutated).
-func errIsPathRefusal15714(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, ErrPathNotFound) {
-		return true
-	}
-	s := err.Error()
-	return strings.HasPrefix(s, "path not found")
 }
 
 // deleteInterfaceFilterSampling12508 removes the compiler-visible binding

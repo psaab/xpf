@@ -66,7 +66,7 @@ func TestElidedDescendantDelete15714(t *testing.T) {
 			"security { zones { security-zone trust host-inbound-traffic { system-services { ssh; } protocols { ospf; } } security-zone dmz { tcp-rst; } } }",
 			[]string{"security", "zones", "security-zone", "trust", "host-inbound-traffic"},
 			[]string{"security-zone trust", "security-zone dmz"},
-			[]string{"host-inbound-traffic"}},
+			[]string{"host-inbound-traffic", "system-services", "ssh", "ospf"}},
 		{"interface family keeps unit",
 			"interfaces { ge-0/0/0 { unit 0 family inet address 10.0.0.1/24; } ge-0/0/1 { unit 0 { description backup; } } }",
 			[]string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet"},
@@ -116,23 +116,28 @@ func TestElidedDescendantDeactivate15714(t *testing.T) {
 		path      []string
 		target    string // keys line that must be inactive
 		container string // keys line that must stay ACTIVE (no marker)
+		mustKeep  []string
 	}{
 		{"ospf interface passive",
 			"protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 passive; } } }",
 			[]string{"protocols", "ospf", "area", "0.0.0.0", "interface", "ge-0/0/0.0", "passive"},
-			"passive", "interface ge-0/0/0.0"},
+			"passive", "interface ge-0/0/0.0", nil},
 		{"zone host-inbound-traffic",
-			"security { zones { security-zone trust host-inbound-traffic { system-services { ssh; } } } }",
+			"security { zones { security-zone trust host-inbound-traffic { system-services { ssh; } protocols { ospf; } } } }",
 			[]string{"security", "zones", "security-zone", "trust", "host-inbound-traffic"},
-			"host-inbound-traffic", "security-zone trust"},
+			"host-inbound-traffic", "security-zone trust", []string{"system-services", "ssh", "protocols", "ospf"}},
 		{"interface address",
 			"interfaces { ge-0/0/0 { unit 0 family inet address 10.0.0.1/24; } }",
 			[]string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet", "address", "10.0.0.1/24"},
-			"address 10.0.0.1/24", "family inet"},
+			"address 10.0.0.1/24", "family inet", nil},
 		{"fully elided ospf passive",
 			"protocols ospf area 0.0.0.0 interface ge-0/0/0.0 passive;",
 			[]string{"protocols", "ospf", "area", "0.0.0.0", "interface", "ge-0/0/0.0", "passive"},
-			"passive", "interface ge-0/0/0.0"},
+			"passive", "interface ge-0/0/0.0", nil},
+		{"interface family braced body",
+			"interfaces { ge-0/0/0 { unit 0 family inet { address 10.0.0.1/24; } } }",
+			[]string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet"},
+			"family inet", "unit 0", []string{"address 10.0.0.1/24"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,6 +164,16 @@ func TestElidedDescendantDeactivate15714(t *testing.T) {
 			}
 			if got := render15714(tr); strings.Contains(got, "[INACTIVE]") {
 				t.Errorf("activate left an inactive node: %q", got)
+			}
+			// B1 (triple-review 15915): toggling is a marker verb; the
+			// authored braced body under the toggled node must survive
+			// the deactivate+activate round trip verbatim.
+			if got := render15714(tr); tc.mustKeep != nil {
+				for _, keep := range tc.mustKeep {
+					if !strings.Contains(got, keep) {
+						t.Errorf("braced body LOST across toggle round trip: %q missing from %q", keep, got)
+					}
+				}
 			}
 		})
 	}
@@ -215,5 +230,35 @@ func TestElidedDescendantAbsentIsRefusal15714(t *testing.T) {
 	}
 	if got := render15714(tr); got != before {
 		t.Errorf("refused deactivate mutated the tree: before %q after %q", before, got)
+	}
+}
+
+// TestElidedBodySurvivesDeleteOfSiblingPacked15714 (B1, triple-review
+// 15915): deleting a packed DESCENDANT statement must not drop the
+// authored braced body that hangs off the same elided node. The NAT
+// rule shape (`rule r1 match ... { then { ... } }`, fixture dr14h2) is
+// the sibling-body case: `then` is a sibling of the packed `match`,
+// not its child, so a delete of the match descendant that re-braces
+// the node must leave `then { source-nat interface; }` intact.
+func TestElidedBodySurvivesDeleteOfSiblingPacked15714(t *testing.T) {
+	tr := tree15714(t, dr14h2SNATPacked)
+	before := render15714(tr)
+	path := []string{"security", "nat", "source", "rule-set", "rs1", "rule", "r1", "match", "source-address", "10.0.0.0/24"}
+	if err := tr.DeletePath(path); err != nil {
+		// If this shape is refused rather than edited, the refusal
+		// must leave the tree byte-identical (no silent body loss).
+		if render15714(tr) != before {
+			t.Fatalf("refused delete mutated the tree: %q (err %v)", render15714(tr), err)
+		}
+		t.Skipf("sibling-packed delete refused (atomic): %v", err)
+	}
+	got := render15714(tr)
+	for _, keep := range []string{"then", "source-nat interface"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("braced sibling body LOST on delete: %q missing from %q", keep, got)
+		}
+	}
+	if strings.Contains(got, "source-address") {
+		t.Errorf("addressed descendant NOT deleted: %q", got)
 	}
 }
