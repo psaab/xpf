@@ -279,6 +279,16 @@ func (e *PublishedSnapshotTailError) Error() string {
 func (e *PublishedSnapshotTailError) Unwrap() error { return e.err }
 
 func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
+	// #15919: a clustered snapshot built before the daemon wires the RG
+	// provider carries no ownership evidence for its RG>0 connected
+	// rows. Refuse the build (the apply path retains the prior state)
+	// rather than publish rows the predicate had to guess at. The
+	// daemon wires the provider at dataplane construction, before the
+	// first apply, so this fires only for builds that bypass that
+	// wiring (early boot applies, racing refresh publishes).
+	if !m.RGProviderWiredFor(cfg) {
+		return nil, errRGProviderNotWired
+	}
 	// #7079: XDP link-pin removal belongs inside CompileUserspaceShim, after
 	// CompileConfig's pure validation and immediately before attach. The former
 	// pre-call location deleted pins even for configs rejected by validation.

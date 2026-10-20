@@ -3,6 +3,7 @@ package userspace
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"os/exec"
 	"slices"
@@ -371,11 +372,20 @@ type Manager struct {
 	feedOverlay map[string][]string
 	haGroups    map[int]HAGroupStatus
 	// rgPrimaryProvider reports local RG primacy for the route builder
-	// (#15742). Nil means no provider wired: the builder then applies the
-	// conservative unknown-is-inactive rule (clustered config + RG>0 row
-	// with no verdict is filtered). Wired by the daemon from cluster state,
-	// mirroring frrHADemotionState's IsLocalPrimary source.
+	// (#15742). Nil means no provider wired yet (boot window before
+	// applyDataplaneAndHACore, standalone, or tests): the builder then
+	// keeps RG>0 connected rows (#15919) rather than suppressing them on
+	// no evidence. Once wired, an unknown RG verdict fails closed
+	// (filtered). Wired by the daemon from cluster state at client
+	// construction and refreshed in applyDataplaneAndHACore, mirroring
+	// frrHADemotionState's IsLocalPrimary source.
 	rgPrimaryProvider func(rgID int) (primary bool, known bool)
+	// rgProviderWired latches true once SetRGPrimaryProvider installs a
+	// non-nil provider (#15919). The daemon gates clustered snapshot
+	// builds on RGProviderWiredFor so the nil-provider window cannot
+	// publish at all; the predicate's fail-open is only the backstop for
+	// builds that bypass the gate. Guarded by mu (set under mu).
+	rgProviderWired bool
 	// haWatchdogMapWrite writes the watchdog timestamp into the Go-owned
 	// ha_watchdog map. It runs on EVERY heartbeat tick — never throttled — so
 	// Go's own HA refresh paths (refreshHAStateFromMapsLocked,
@@ -817,7 +827,41 @@ func (m *Manager) SetRGPrimaryProvider(provider RGPrimaryProvider) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	wasWired := m.rgProviderWired
 	m.rgPrimaryProvider = provider
+	m.rgProviderWired = provider != nil
+	if m.rgProviderWired && !wasWired {
+		slog.Info("userspace: RG primary provider wired; clustered connected-prefix filtering is authoritative (#15919)")
+	} else if !m.rgProviderWired && wasWired {
+		slog.Warn("userspace: RG primary provider cleared; clustered snapshot builds are gated until it is rewired (#15919)")
+	}
+}
+
+// RGProviderWiredFor reports whether a snapshot build for cfg may rely
+// on RG ownership verdicts (#15919). Standalone configs (no chassis
+// cluster) never need a provider and always return true. Clustered
+// configs require SetRGPrimaryProvider to have installed a non-nil
+// provider; before that the daemon must not publish a clustered
+// snapshot at all (its connected rows would carry no ownership
+// evidence). A nil Manager never blocks builds.
+func (m *Manager) RGProviderWiredFor(cfg *config.Config) bool {
+	if m == nil || cfg == nil || cfg.Chassis.Cluster == nil {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rgProviderWired
+}
+
+// rgProviderWiredForLocked is RGProviderWiredFor for callers already
+// holding m.mu — notably requestApplySnapshotPreparedLocked, the single
+// apply_snapshot send site, which runs under m.mu on every publish
+// path. It must never take the lock itself.
+func (m *Manager) rgProviderWiredForLocked(cfg *config.Config) bool {
+	if m == nil || cfg == nil || cfg.Chassis.Cluster == nil {
+		return true
+	}
+	return m.rgProviderWired
 }
 
 // rgPrimaryNow snapshots the wired provider under m.mu, or nil.
