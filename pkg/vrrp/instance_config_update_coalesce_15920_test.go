@@ -498,3 +498,256 @@ func TestUpdateConfigHeld_CoalescedPendingRecordAccumulates(t *testing.T) {
 	default:
 	}
 }
+
+// --- Timer-applies-intermediate interleavings (triple-review of the
+// first #15920 head, codex P1 x2 / opus MATERIAL) ---
+//
+// The accumulation above is only sound if old* keeps meaning "the cfg
+// the live timers were last armed under". A timer/RX event serviced
+// between two coalesced updates arms from the intermediate cfg; a later
+// revert then nets old==new against the PRE-update baseline and would
+// suppress the correction. noteTimerApplied re-baselines old* at every
+// such arm. The tests below drive that exact ordering through the
+// production step functions.
+
+// armHoldInterleaved arms the preempt hold via the masterDownTimer
+// expiry while a config token is still pending in configUpdatedCh.
+// stepBackup's select would race the two ready cases, so the token is
+// temporarily drained and restored afterwards: the step is then
+// deterministically the master-down case, but the pending record and
+// (restored) token are exactly what the racing run loop would face.
+func armHoldInterleaved(t *testing.T, vi *vrrpInstance) (advert, preemptHold *time.Timer) {
+	t.Helper()
+	select {
+	case <-vi.configUpdatedCh:
+	case <-time.After(time.Second):
+		t.Fatal("configUpdatedCh token missing before interleaved hold arm")
+	}
+	masterDown, advert, preemptHold := expiredMasterDown(t)
+	vi.stepBackup(masterDown, advert, preemptHold)
+	if vi.getState() != StateBackup {
+		t.Fatalf("state = %s, want BACKUP (hold armed)", vi.getState())
+	}
+	vi.mu.RLock()
+	armed := vi.preemptHoldArmed
+	vi.mu.RUnlock()
+	if !armed {
+		t.Fatal("preemptHoldArmed = false, want true after interleaved hold arm")
+	}
+	select {
+	case vi.configUpdatedCh <- struct{}{}:
+	default:
+		t.Fatal("configUpdatedCh unexpectedly full when restoring the pending token")
+	}
+	return advert, preemptHold
+}
+
+// TestVRRPMaster_TimerAppliesIntermediateThenRevert_ReArmsAdvertTimer
+// is the opus/codex reproduction: MASTER at 100ms, expired advert
+// timer; the timer-triggered send's callback first commits 100->60000
+// (the realistic manager-during-send interleave), so the timer case
+// re-arms at 60000ms. A revert to 100ms lands before the config token
+// is consumed. The config consumption must still emit a correction
+// advert and re-arm at 100ms. On the first #15920 head the pending
+// record collapsed to 100->100 and both were suppressed — RED there;
+// on the pre-#15920 parent the adjacent 60000->100 delta happened to
+// correct it.
+func TestVRRPMaster_TimerAppliesIntermediateThenRevert_ReArmsAdvertTimer(t *testing.T) {
+	vi := newMaster15689(t, 100)
+	base := Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: true, AdvertiseInterval: 100}
+	grown := base
+	grown.AdvertiseInterval = 60000
+
+	var intervals []int
+	prev := sendPacketFn
+	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
+		intervals = append(intervals, int(pkt.MaxAdvertInt))
+		if len(intervals) == 1 {
+			// Manager commits the growth while the timer case is
+			// between sendAdvert and advertTimer.Reset — the Reset
+			// therefore arms 60000ms and noteTimerApplied re-baselines.
+			vi.updateConfig(grown)
+		}
+		return nil
+	}
+	t.Cleanup(func() { sendPacketFn = prev })
+
+	masterDown := time.NewTimer(time.Hour)
+	t.Cleanup(func() { masterDown.Stop() })
+	advert := time.NewTimer(0)
+	t.Cleanup(func() { advert.Stop() })
+	time.Sleep(2 * time.Millisecond) // let the advert timer fire
+
+	// Only advertTimer.C is ready: periodic advert at the OLD 100ms
+	// cadence (10cs), then the trailing Reset arms the intermediate.
+	if stop := vi.stepMaster(masterDown, advert); stop {
+		t.Fatal("stepMaster returned stop=true on advert timer")
+	}
+	if len(intervals) != 1 || intervals[0] != 10 {
+		t.Fatalf("timer advert MaxAdvertInt = %v, want [10] (100ms)", intervals)
+	}
+
+	// Revert before the queued config token is consumed.
+	vi.updateConfig(base)
+	if stop := vi.stepMaster(masterDown, advert); stop {
+		t.Fatal("stepMaster returned stop=true on config update")
+	}
+	if len(intervals) != 2 || intervals[1] != 10 {
+		t.Fatalf("adverts = %v, want [10 10]: revert after intermediate timer arm must emit a correction advert at final cfg", intervals)
+	}
+	select {
+	case <-advert.C:
+	case <-time.After(time.Second):
+		t.Fatal("advertTimer still armed for intermediate 60000ms despite final 100ms cfg")
+	}
+}
+
+// TestVRRPMaster_TimerAppliesIntermediateNoRevert_NoCorrectionAdvert
+// is the negative control for the re-baselining: the timer case applies
+// the intermediate (and final) cfg, and NO revert follows. The pending
+// consumption must stay silent — re-baselining old* to the applied cfg
+// makes old==new — rather than emitting a redundant correction advert
+// or touching the correctly armed timer.
+func TestVRRPMaster_TimerAppliesIntermediateNoRevert_NoCorrectionAdvert(t *testing.T) {
+	vi := newMaster15689(t, 100)
+	grown := Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: true, AdvertiseInterval: 60000}
+
+	var intervals []int
+	prev := sendPacketFn
+	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
+		intervals = append(intervals, int(pkt.MaxAdvertInt))
+		if len(intervals) == 1 {
+			vi.updateConfig(grown)
+		}
+		return nil
+	}
+	t.Cleanup(func() { sendPacketFn = prev })
+
+	masterDown := time.NewTimer(time.Hour)
+	t.Cleanup(func() { masterDown.Stop() })
+	advert := time.NewTimer(0)
+	t.Cleanup(func() { advert.Stop() })
+	time.Sleep(2 * time.Millisecond)
+
+	if stop := vi.stepMaster(masterDown, advert); stop {
+		t.Fatal("stepMaster returned stop=true on advert timer")
+	}
+	// Consume the queued token: timer already armed at final cfg.
+	if stop := vi.stepMaster(masterDown, advert); stop {
+		t.Fatal("stepMaster returned stop=true on config update")
+	}
+	if len(intervals) != 1 {
+		t.Fatalf("adverts = %v, want exactly the one timer advert; config consumption must not re-advertise an already-applied cfg", intervals)
+	}
+	if !advert.Stop() {
+		t.Fatal("advertTimer disturbed by config consumption although it was already armed at final cfg")
+	}
+}
+
+// TestVRRPBackup_HoldArmedAtIntermediateThenRevert_DisarmsHold is the
+// codex P1 hold interleaving: BACKUP with hold 60s observing a live
+// lower master; commit 60->1, let the expired masterDownTimer win the
+// select (arming a 1s preempt hold at the intermediate cfg), then
+// revert to 60 before the config token is consumed. The consumption
+// must disarm the 1s hold for re-validation — preserving it would
+// promote ~59s early against the live master. On the first #15920
+// head the record collapsed to 60->60 and the 1s hold survived — RED
+// there.
+func TestVRRPBackup_HoldArmedAtIntermediateThenRevert_DisarmsHold(t *testing.T) {
+	vi := newHoldTestInstance(t, 200, 60)
+	vi.mu.Lock()
+	vi.lastMasterPriority = 100
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+
+	// Commit the intermediate hold-time; token stays unconsumed.
+	vi.updateConfig(Instance{
+		Interface:         "eth0",
+		GroupID:           101,
+		Priority:          200,
+		Preempt:           true,
+		PreemptHoldTime:   1,
+		AdvertiseInterval: 30,
+	})
+	// Refresh the observed master AFTER the commit, as the pre-existing
+	// hold fixtures do right before their single step: with a 30ms
+	// interval the liveness horizon is ~97ms, and this interleaving has
+	// an extra commit between the seeding and armHold's internal sleep.
+	vi.mu.Lock()
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+
+	// masterDownTimer expiry wins over the config token and arms the
+	// hold at the intermediate 1s (armPreemptHold re-baselines old*).
+	advert, preemptHold := armHoldInterleaved(t, vi)
+
+	// Revert to 60s before consuming the token; keep the master fresh
+	// so only the hold-time delta can disarm.
+	vi.updateConfig(Instance{
+		Interface:         "eth0",
+		GroupID:           101,
+		Priority:          200,
+		Preempt:           true,
+		PreemptHoldTime:   60,
+		AdvertiseInterval: 30,
+	})
+	vi.mu.Lock()
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+	masterDownLong := time.NewTimer(time.Hour)
+	defer masterDownLong.Stop()
+	vi.stepBackup(masterDownLong, advert, preemptHold)
+
+	vi.mu.RLock()
+	armed := vi.preemptHoldArmed
+	vi.mu.RUnlock()
+	if armed {
+		t.Fatal("preemptHoldArmed = true: 1s hold armed at intermediate cfg survived a revert to 60s; promotion would fire ~59s early")
+	}
+	if vi.getState() != StateBackup {
+		t.Errorf("state = %s, want BACKUP", vi.getState())
+	}
+}
+
+// TestVRRPBackup_HoldArmedAtIntermediateNoRevert_PreservesHold is the
+// negative control: the hold is armed at the intermediate cfg and that
+// cfg remains final when the token is consumed. The consumption must
+// preserve the running countdown (old* was re-baselined to the arm, so
+// old==new), not disarm it as if the hold-time had changed again.
+func TestVRRPBackup_HoldArmedAtIntermediateNoRevert_PreservesHold(t *testing.T) {
+	vi := newHoldTestInstance(t, 200, 60)
+	vi.mu.Lock()
+	vi.lastMasterPriority = 100
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+
+	vi.updateConfig(Instance{
+		Interface:         "eth0",
+		GroupID:           101,
+		Priority:          200,
+		Preempt:           true,
+		PreemptHoldTime:   1,
+		AdvertiseInterval: 30,
+	})
+	vi.mu.Lock()
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+	advert, preemptHold := armHoldInterleaved(t, vi)
+
+	vi.mu.Lock()
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+	masterDownLong := time.NewTimer(time.Hour)
+	defer masterDownLong.Stop()
+	vi.stepBackup(masterDownLong, advert, preemptHold)
+
+	vi.mu.RLock()
+	armed := vi.preemptHoldArmed
+	vi.mu.RUnlock()
+	if !armed {
+		t.Fatal("preemptHoldArmed = false: hold armed at final cfg must be preserved by the pending consumption")
+	}
+	if !preemptHold.Stop() {
+		t.Fatal("preemptHoldTimer was stopped although the armed hold matches final cfg")
+	}
+}

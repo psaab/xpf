@@ -268,6 +268,7 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 		vi.skipNextPreemptHold = true
 		vi.mu.Unlock()
 		masterDownTimer.Reset(time.Millisecond)
+		vi.noteTimerApplied(true, false)
 		return
 	}
 
@@ -287,6 +288,7 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 	// hold once.
 	if !vi.getPreempt() || int(pkt.Priority) >= pri {
 		masterDownTimer.Reset(vi.masterDownInterval())
+		vi.noteTimerApplied(true, false)
 		vi.disarmPreemptHold(preemptHoldTimer)
 		vi.mu.Lock()
 		vi.skipNextPreemptHold = false
@@ -307,6 +309,7 @@ func (vi *vrrpInstance) handleMasterRx(pkt *VRRPPacket, masterDownTimer, advertT
 		// Peer resigning — send immediate advert and stay Master.
 		vi.sendAdvert(pri)
 		advertTimer.Reset(vi.advertInterval())
+		vi.noteTimerApplied(true, false)
 		return
 	}
 

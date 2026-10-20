@@ -308,6 +308,11 @@ func (vi *vrrpInstance) armPreemptHold(masterDownTimer, preemptHoldTimer *time.T
 	vi.preemptHoldArmed = true
 	vi.preemptHoldArmedAt = time.Now()
 	vi.mu.Unlock()
+	// The hold (and its watchdog) were just armed from the current cfg:
+	// re-baseline any unconsumed pending record so a later revert to the
+	// pre-update hold-time reads as a change against THIS arm, not the
+	// pre-arm value (#15920 review).
+	vi.noteTimerApplied(true, true)
 }
 
 // disarmPreemptHold stops a (possibly) armed preempt hold-time countdown and
@@ -319,4 +324,5 @@ func (vi *vrrpInstance) disarmPreemptHold(preemptHoldTimer *time.Timer) {
 	vi.preemptHoldArmed = false
 	vi.preemptHoldArmedAt = time.Time{}
 	vi.mu.Unlock()
+	vi.noteTimerApplied(false, true)
 }

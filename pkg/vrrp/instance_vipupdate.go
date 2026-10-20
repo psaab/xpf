@@ -312,6 +312,7 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	// demotion's own resignation).
 	if announce && vi.getState() == StateMaster {
 		vi.sendAdvert(vi.getPriority())
+		vi.noteTimerApplied(true, false)
 		if len(announcementVIPs) > 0 && !vi.suppressGARP.Load() {
 			// Carry only still-current VIPs whose prior synchronous first
 			// frame was interrupted by the membership epoch change, plus
