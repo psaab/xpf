@@ -3428,6 +3428,84 @@ fn fabric_nat64_nptv6_missing_provenance_still_fails_closed_15958() {
     }
 }
 
+/// #15958 round 3: defense-in-depth pin for the NAT64/NPTv6 type
+/// conjunct ALONE. The cell above presents provenance `None` (the
+/// production NAT64/NPTv6 shape — admission mints no marker for them),
+/// so it cannot distinguish dropping `!(nat64 || nptv6)` from dropping
+/// the `source_nat_static == Some(false)` equality: either mutation
+/// leaves it revoked. This variant presents positive dynamic
+/// provenance (`Some(false)`) TOGETHER with a type bit and no
+/// destination rewrite, so ONLY the type conjunct keeps it out of the
+/// decline: deleting `&& !(forward_decision.nat.nat64 ||
+/// forward_decision.nat.nptv6)` from the decline reds exactly this
+/// cell (the production `None` cells above stay green, because the
+/// provenance conjunct still excludes them). No current production
+/// producer mints this combination — NAT64/NPTv6 admission never sets
+/// `Some(false)` — which is precisely why the conjunct is defense in
+/// depth and must be pinned rather than deleted as redundant. The
+/// scope is stamped (`Some(11)`) so the post-decline validator is
+/// actually reached under the mutation — a scope-less row return-`None`s
+/// at the #15176 scope arm regardless of translation validity.
+#[test]
+fn fabric_typed_dynamic_provenance_still_fails_closed_15958() {
+    for (shape, nat64, nptv6) in [
+        ("nat64", true, false),
+        ("nptv6", false, true),
+        ("nat64+nptv6", true, true),
+    ] {
+        let forwarding = reverse_snat_forwarding_13771(false);
+        let mut case = reverse_snat_case_from_production_13771(&forwarding);
+        case.5.forward_ingress_vlan_id = None;
+        case.5.fabric_ingress = true;
+        case.5.nat_scope_ifindex = Some(11);
+        case.7 = Some(false);
+        assert!(
+            case.5.forward_ingress_vlan_id.is_none() && case.5.fabric_ingress,
+            "{shape}: fixture must be fabric with missing VLAN provenance"
+        );
+        // The type bits must ride the REVERSE row (`case.4`, whose
+        // decision is the one the gate inspects via `reverse_decision`);
+        // `NatDecision::reverse` preserves them, so the reconstructed
+        // forward decision carries them too. Setting them only on the
+        // forward fixture (`case.2`) would leave the gate's row clear
+        // and the cell green even with the conjunct deleted.
+        case.4.nat.nat64 = nat64;
+        case.4.nat.nptv6 = nptv6;
+        // `NatDecision::reverse` maps reverse `rewrite_dst` -> forward
+        // `rewrite_src` and reverse `rewrite_src` -> forward
+        // `rewrite_dst`. For the reconstructed forward to be
+        // source-only (decline requires `rewrite_dst: None`), the
+        // reverse row must carry `rewrite_src: None` and
+        // `rewrite_dst: Some(translated source)`. The production
+        // reverse row instead carries both (its `rewrite_dst` is the
+        // original client), which would reconstruct a composed
+        // forward and let the destination validator revoke even with
+        // the type conjunct deleted — masking the mutation.
+        case.4.nat.rewrite_src = None;
+        case.4.nat.rewrite_src_port = None;
+        case.4.nat.rewrite_dst = Some("203.0.113.10".parse().expect("translated source"));
+        case.4.nat.rewrite_dst_port = Some(45000);
+        assert!(
+            case.4.nat.nat64 == nat64 && case.4.nat.nptv6 == nptv6 && case.7 == Some(false),
+            "{shape}: fixture must present typed row with dynamic provenance"
+        );
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        let revocation = reverse_snat_hit_fabric_15958(&forwarding, &mut sessions, &case)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{shape}: typed row with dynamic provenance must still fail \
+                     closed — only the NAT64/NPTv6 type conjunct excludes it (#15958)"
+                )
+            });
+        assert!(revocation.canonical_key.is_none());
+        assert!(matches!(
+            revocation.reason,
+            PolicyRevocationReason::StaleSourceNat
+        ));
+    }
+ }
+
 /// #15958 fold (2): the V2 synced-companion shape — scope `Some`,
 /// `forward_ingress_vlan_id` `None` BY CONSTRUCTION
 /// (`build_synced_session_entry` stamps scope at session_sync.rs:581
@@ -3618,6 +3696,117 @@ fn fabric_unknown_provenance_without_vlan_fails_closed_15958() {
         PolicyRevocationReason::StaleSourceNat
     ));
 }
+
+/// #15958 round 3 (older-peer adjudication): the REAL HA-import shape of
+/// a plain dynamic-SNAT row sent by a pre-#12187 peer. Such a peer has
+/// no `source_nat_provenance` field at all (additive, `serde(default)`
+/// 0 = unknown), so `build_synced_session_entry` imports
+/// `source_nat_static == None` while stamping the same fabric,
+/// scope-carrying, VLAN-less metadata as a current peer. Its locally
+/// synthesized reverse companion — installed WITHOUT the forward half,
+/// the exact split-RG shape — must STILL fail closed here, and this is
+/// NOT a regression introduced by #15958: on `origin/master` before
+/// this PR the identical row reached the same `let Some(forward_ingress_
+/// vlan_id) … else StaleSourceNat` arm (#13789) with no decline in
+/// front of it, so it already revoked on its first fabric-arriving
+/// packet. #15958 only ADDS a decline for positively-proven dynamic
+/// rows (`Some(false)`); it does not change the fate of `None` rows.
+/// Conversely, relaxing the decline to admit `None` would re-admit the
+/// wire-lost NPTv6 shape proven above
+/// (`ha_imported_nptv6_wire_shape_still_fails_closed_15958`), which is
+/// indistinguishable from this row at import. Pre-#12187 peers also
+/// predate the `SessionSyncWireVersion` 2→3 bump (#15140): a v2 peer is
+/// outside the supported rolling-upgrade pairing for a v3 node
+/// (`SessionSyncWireCompatible` refuses mismatched nonzero versions),
+/// so no supported upgrade path creates this row at a current node —
+/// the fail-close is pinned as the documented, pre-existing behavior
+/// rather than stamped over at import (stamping would also mint
+/// dynamic provenance for wire-lost NPTv6).
+#[test]
+fn ha_imported_legacy_dynamic_snat_without_provenance_fails_closed_15958() {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    // Provenance 0: the field absent/zero exactly as a pre-#12187 peer
+    // sends it. `imported_snat_request` carries a dynamic-shaped SNAT
+    // translation (nat_src_ip set, no destination rewrite).
+    let synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(0, true),
+        &zones,
+        0,
+    )
+    .expect("legacy dynamic SNAT session must import");
+    assert_eq!(
+        synced.source_nat_static, None,
+        "wire provenance 0 must import as unknown, not be stamped dynamic"
+    );
+    assert!(
+        synced.decision.nat.rewrite_src.is_some() && synced.decision.nat.rewrite_dst.is_none(),
+        "legacy fixture must be plain source-only dynamic SNAT: {:?}",
+        synced.decision.nat
+    );
+    assert!(
+        synced.metadata.fabric_ingress && synced.metadata.forward_ingress_vlan_id.is_none(),
+        "imported row must be the fabric provenance-less shape: {:?}",
+        synced.metadata
+    );
+    // Production reverse synthesis, exactly as HA prewarm does.
+    let ha_state = BTreeMap::new();
+    let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+        &imported_snat_forwarding(false),
+        &ha_state,
+        &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
+        &synced,
+        0,
+    )
+    .expect("synced forward must synthesize a reverse companion");
+    assert!(
+        reverse.source_nat_static.is_none(),
+        "synthesized companion must keep unknown provenance: {:?}",
+        reverse.source_nat_static
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse.key.clone(),
+        reverse.decision,
+        reverse.metadata.clone(),
+        reverse.origin,
+        1_000_000,
+        reverse.key.protocol,
+        0x10,
+    ));
+    sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
+    let flow = SessionFlow {
+        src_ip: reverse.key.src_ip,
+        dst_ip: reverse.key.dst_ip,
+        forward_key: reverse.key.clone(),
+    };
+    let revocation = source_nat_revocation_on_session_hit_with_ingress(
+        &imported_snat_forwarding(false),
+        &mut sessions,
+        &reverse.key,
+        &reverse.metadata.clone_without_policy_counter(),
+        4,
+        0,
+        reverse.decision,
+        &flow,
+        reverse.origin,
+        reverse.source_nat_static,
+        None,
+        1_000_000_000,
+        None,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "legacy (pre-#12187) provenance-unknown dynamic SNAT companion must \
+             keep the pre-existing #13789 fail-close, not decline (#15958)"
+        )
+    });
+    assert!(revocation.canonical_key.is_none());
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+ }
 
 #[test]
 fn reverse_without_companion_no_rewrite_missing_provenance_permitted_13910() {
