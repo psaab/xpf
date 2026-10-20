@@ -18,26 +18,25 @@ pub(super) fn run_pptp_control_drain(
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     loop_now_ns: u64,
     pptp_enabled: bool,
-    view_generation: u64,
+    pptp_epoch: u64,
 ) {
     // #15950: when the PPTP ALG is disabled, do not install associations
     // from segments buffered before the disable. Purge the inbox so a
     // later re-enable cannot resurrect pre-disable calls either.
-    // Epoch eligibility is decided at DRAIN time, never by clearing at
-    // poll: observing the bit only advances the epoch on a
-    // disabled->enabled transition. A skipped disabled generation is
-    // handled because the epoch advances whenever the enabled state is
-    // observed after a disabled observation (by any worker sharing this
-    // inbox), and steady-enabled polls change nothing.
-    pptp_control.note_enabled_state(pptp_enabled, view_generation);
+    // Publisher-stamped epoch: (enabled, epoch) are read atomically from
+    // the worker's loaded ForwardingState (one RuntimeView). Workers
+    // never infer transitions. When enabled, drain drops entries whose
+    // capture epoch is older than this view's epoch; a stale view uses
+    // its own epoch consistently. No poll-time clearing anywhere.
     if !pptp_enabled {
         return;
     }
-    crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+    crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(
         &pptp_control,
         &mut sessions,
         Some(&commands),
         &peer_worker_commands,
         loop_now_ns,
+        pptp_epoch,
     );
 }

@@ -114,17 +114,6 @@ struct InboxInner {
     /// PPTP installs refused by full worker queues.
     pending_call_installs: Vec<PendingCallInstall>,
     last_call_install_retry_ns: u64,
-    /// Current enable-epoch. Advances on every disabled->enabled
-    /// observation at drain time; entries stamped with an older epoch
-    /// are dropped at drain, never at poll.
-    epoch: u64,
-    /// Previous drain/poll observation was disabled (edge detector).
-    was_disabled: bool,
-    /// Whether any poll has been observed (first-poll seeding).
-    seen_poll: bool,
-    /// Newest RuntimeView generation observed; older observations are
-    /// stale snapshots from lagging workers and are ignored entirely.
-    last_gen: u64,
 }
 
 /// A control close still waiting for a bounded worker queue or local table.
@@ -178,7 +167,8 @@ impl PptpControlInbox {
             inner.dropped = inner.dropped.saturating_add(1);
             return false;
         }
-        seg.epoch = inner.epoch;
+        // Epoch is publisher-stamped at capture (the view under which
+        // the segment was buffered); the inbox never infers it.
         inner.pending.push((routing_domain, seg));
         true
     }
@@ -197,13 +187,13 @@ impl PptpControlInbox {
     /// Returns an empty vec when gated, so a caller cannot distinguish "nothing
     /// to do" from "not yet" — which is correct: both mean do nothing.
     pub(crate) fn take_pending(&self, now_ns: u64) -> Vec<PendingControlSegment> {
-        self.take_pending_in_domain(now_ns)
+        self.take_pending_in_domain(now_ns, 0)
             .into_iter()
             .map(|(_, segment)| segment)
             .collect()
     }
 
-    pub(crate) fn take_pending_in_domain(&self, now_ns: u64) -> Vec<(u32, PendingControlSegment)> {
+    pub(crate) fn take_pending_in_domain(&self, now_ns: u64, current_epoch: u64) -> Vec<(u32, PendingControlSegment)> {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -214,9 +204,10 @@ impl PptpControlInbox {
             return Vec::new();
         }
         inner.last_drain_ns = now_ns;
-        let epoch = inner.epoch;
+        // Drain drops entries buffered under an older enable-epoch than
+        // the draining worker's current view epoch.
         let all = std::mem::take(&mut inner.pending);
-        all.into_iter().filter(|(_, seg)| seg.epoch == epoch).collect()
+        all.into_iter().filter(|(_, seg)| seg.epoch >= current_epoch).collect()
     }
 
     pub(crate) fn dropped_count(&self) -> u64 {
@@ -243,36 +234,6 @@ impl PptpControlInbox {
     /// a lagging worker cannot purge current-epoch entries (it only
     /// ever advances the epoch forward, and entries stamped after the
     /// advance carry the new epoch).
-    pub(crate) fn note_enabled_state(&self, enabled: bool, view_generation: u64) {
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        // Stale-generation observations are no-ops: a lagging worker's
-        // old disabled snapshot must not re-advance the epoch and drop
-        // entries stamped under the current generation.
-        if inner.seen_poll && view_generation < inner.last_gen {
-            return;
-        }
-        inner.last_gen = view_generation;
-        if !inner.seen_poll {
-            inner.seen_poll = true;
-            inner.was_disabled = !enabled;
-            return;
-        }
-        if enabled && inner.was_disabled {
-            inner.epoch = inner.epoch.saturating_add(1);
-        }
-        inner.was_disabled = !enabled;
-    }
-
-    pub(crate) fn current_epoch(&self) -> u64 {
-        match self.inner.lock() {
-            Ok(g) => g.epoch,
-            Err(poisoned) => poisoned.into_inner().epoch,
-        }
-    }
-
     /// #15950: drop every buffered segment (ALG disabled). Returns count.
     pub(crate) fn purge_pending(&self) -> usize {
         let mut inner = match self.inner.lock() {
@@ -383,6 +344,16 @@ impl PptpControlInbox {
         learned_ns: u64,
         unsent_queue_ids: Vec<usize>,
     ) {
+        self.record_call_install_at(call, control, learned_ns, 0, unsent_queue_ids);
+    }
+    pub(crate) fn record_call_install_at(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+        epoch: u64,
+        unsent_queue_ids: Vec<usize>,
+    ) {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -398,14 +369,12 @@ impl PptpControlInbox {
             if unsent_queue_ids.is_empty() {
                 inner.pending_call_installs.remove(index);
             } else {
-                let epoch = inner.epoch;
                 let pending = &mut inner.pending_call_installs[index];
                 pending.learned_ns = learned_ns;
                 pending.epoch = epoch;
                 pending.unsent_queue_ids = unsent_queue_ids;
             }
         } else if !unsent_queue_ids.is_empty() {
-            let epoch = inner.epoch;
             inner.pending_call_installs.push(PendingCallInstall {
                 call,
                 control,
@@ -500,7 +469,8 @@ impl PptpControlInbox {
 
     /// Take due install retries without holding the inbox lock while workers
     /// are queued.
-    pub(crate) fn take_call_install_retries(&self, now_ns: u64) -> Vec<PendingCallInstall> {
+    pub(crate) fn take_call_install_retries(&self, now_ns: u64) -> Vec<PendingCallInstall> { self.take_call_install_retries_at(now_ns, 0) }
+    pub(crate) fn take_call_install_retries_at(&self, now_ns: u64, current_epoch: u64) -> Vec<PendingCallInstall> {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -511,11 +481,10 @@ impl PptpControlInbox {
             return Vec::new();
         }
         inner.last_call_install_retry_ns = now_ns;
-        let epoch = inner.epoch;
         inner
             .pending_call_installs
             .iter()
-            .filter(|pending| pending.epoch == epoch)
+            .filter(|pending| pending.epoch >= current_epoch)
             .cloned()
             .collect()
     }
@@ -1202,7 +1171,7 @@ mod routing_domain_inbox_13681_tests {
             crate::session::pptp::ControlChannelId::new_in_domain(100_001, src, 49_152, dst, 1723);
         assert_eq!(inbox.forget_channel(closed), 1);
 
-        let pending = inbox.take_pending_in_domain(1);
+        let pending = inbox.take_pending_in_domain(1, 0);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, 100_002);
     }
@@ -1231,54 +1200,26 @@ mod tests_15950_parse {
 #[cfg(test)]
 mod tests_15966r_toggle {
     use super::*;
-    fn seg(ns: u64, b: u8) -> PendingControlSegment {
-        PendingControlSegment { epoch: 0, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: ns, payload: vec![b] }
+    fn seg(epoch: u64, ns: u64, b: u8) -> PendingControlSegment {
+        PendingControlSegment { epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: ns, payload: vec![b] }
     }
     #[test]
-    fn epoch_drain_filtering_15966r() {
-        // Steady state: enabled polls/drains never drop current-epoch entries.
+    fn publisher_epoch_drain_filtering_15966r5() {
+        // Steady: entries stamped with current epoch survive drains.
         let inbox = PptpControlInbox::default();
-        inbox.note_enabled_state(true, 1);
-        assert!(inbox.push(seg(1, 1)));
-        for _ in 0..5 { inbox.note_enabled_state(true, 1); }
-        assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 1, "steady-enabled reply must survive to drain");
-        // Skipped generation: pre-disable reply stamped epoch N, epoch advances
-        // when enabled is observed (no disabled drain needed), drain drops it.
-        let inbox = PptpControlInbox::default();
-        inbox.note_enabled_state(true, 1);
-        assert!(inbox.push(seg(1, 2)));
-        inbox.note_enabled_state(false, 2);
-        inbox.note_enabled_state(true, 3);
-        assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 0, "pre-disable reply must be epoch-ineligible after re-enable");
-        // Lagging worker: after the epoch advanced, a NEW reply is stamped with
-        // the current epoch; a lagging worker observing enabled again must not
-        // drop it (no second purge).
-        assert!(inbox.push(seg(2, 3)));
-        inbox.note_enabled_state(true, 3);
-        inbox.note_enabled_state(true, 3);
-        assert_eq!(inbox.take_pending_in_domain(2_000_000_000).len(), 1, "current-epoch reply must survive lagging enabled polls");
-        // Two epochs later the same entry would be stale; fresh capture is current.
-        inbox.note_enabled_state(false, 4);
-        inbox.note_enabled_state(true, 5);
-        assert!(inbox.push(seg(3, 4)));
-        assert_eq!(inbox.take_pending_in_domain(3_000_000_000).len(), 1);
-    }
-
-    #[test]
-    fn stale_generation_observation_is_noop_15966r4() {
-        // Worker A observes enabled@gen5; worker B then reports its stale
-        // disabled@gen3 snapshot. The stale observation must not advance
-        // the epoch: a current-epoch entry survives.
-        let inbox = PptpControlInbox::default();
-        inbox.note_enabled_state(true, 5);
-        assert!(inbox.push(seg(1, 1)));
-        inbox.note_enabled_state(false, 3);
-        inbox.note_enabled_state(true, 5);
-        assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 1, "stale disabled@gen3 must not drop current-epoch entries");
-        // Control: a NEWER disabled->enabled transition does advance.
-        inbox.note_enabled_state(false, 6);
-        assert!(inbox.push(seg(2, 2)));
-        inbox.note_enabled_state(true, 7);
-        assert_eq!(inbox.take_pending_in_domain(2_000_000_000).len(), 0, "newer-gen transition must make pre-disable entries ineligible");
+        assert!(inbox.push(seg(5, 1, 1)));
+        assert_eq!(inbox.take_pending_in_domain(1_000_000_000, 5).len(), 1, "steady current-epoch reply must install");
+        // Stale-enabled drain: worker's view is epoch 7 (publisher flipped
+        // twice); an entry captured under epoch 5 is dropped at drain even
+        // though no worker observed the disabled generations (all-skip).
+        assert!(inbox.push(seg(5, 2, 2)));
+        assert_eq!(inbox.take_pending_in_domain(2_000_000_000, 7).len(), 0, "old-epoch entry must drop under a newer view epoch (all-skip safe)");
+        // Current-epoch entry under that same view survives (no second purge).
+        assert!(inbox.push(seg(7, 3, 3)));
+        assert_eq!(inbox.take_pending_in_domain(3_000_000_000, 7).len(), 1, "current-epoch entry must survive lagging drains");
+        // Stale view consistency: a worker still on epoch 5 uses ITS epoch;
+        // an epoch-5 entry is eligible for it (no cross-worker inference).
+        assert!(inbox.push(seg(5, 4, 4)));
+        assert_eq!(inbox.take_pending_in_domain(4_000_000_000, 5).len(), 1, "stale view drains consistently under its own epoch");
     }
 }

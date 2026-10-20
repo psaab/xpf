@@ -9608,11 +9608,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     now_ns,
                                 );
                             } else {
-                                crate::afxdp::poll_stages::capture_pptp_control_segment(
+                                crate::afxdp::poll_stages::capture_pptp_control_segment_at_epoch(
                                     packet_frame,
                                     flow,
                                     worker_ctx.pptp_control,
                                     now_ns,
+                                    worker_ctx.forwarding.pptp_epoch,
                                 );
                             }
                         }

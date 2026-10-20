@@ -740,6 +740,16 @@ pub(in crate::afxdp) fn capture_pptp_control_segment(
     inbox: &crate::session::pptp_control::PptpControlInbox,
     captured_ns: u64,
 ) -> bool {
+    capture_pptp_control_segment_at_epoch(packet_frame, flow, inbox, captured_ns, 0)
+}
+
+pub(in crate::afxdp) fn capture_pptp_control_segment_at_epoch(
+    packet_frame: &[u8],
+    flow: &SessionFlow,
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    captured_ns: u64,
+    epoch: u64,
+) -> bool {
     let Some(offset) = crate::afxdp::frame::tcp_payload_offset(packet_frame) else {
         return false;
     };
@@ -759,7 +769,7 @@ pub(in crate::afxdp) fn capture_pptp_control_segment(
     }
     inbox.push_in_domain(
         flow.forward_key.routing_domain,
-        crate::session::pptp_control::PendingControlSegment { epoch: 0,            src: flow.src_ip,
+        crate::session::pptp_control::PendingControlSegment { epoch,            src: flow.src_ip,
             dst: flow.dst_ip,
             src_port: flow.forward_key.src_port,
             dst_port: flow.forward_key.dst_port,

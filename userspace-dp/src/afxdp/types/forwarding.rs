@@ -470,6 +470,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// (DNS/FTP/SIP) and to gate PPTP control learning / GRE association.
     /// Junos `alg disable` turns the ALG off; it never drops traffic.
     pub(in crate::afxdp) alg_disable_flags: u8,
+    /// Publisher-stamped PPTP enable-epoch (coordinator, at view publish):
+    /// monotonic per helper incarnation, advances whenever pptp_enabled
+    /// flips across publishes. Workers read it atomically with the
+    /// enabled bit from their loaded view; they never infer transitions.
+    pub(in crate::afxdp) pptp_epoch: u64,
     /// #2008 M5: L3/L4 application-identification catalog. Resolves a session's
     /// 5-tuple to the numeric app_id stamped on the conntrack session at
     /// create time, so `show security flow session` reports a real application

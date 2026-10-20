@@ -9301,7 +9301,7 @@ mod routing_domain_delete_7160 {
 /// strings — a control that retypes the needle stops controlling the guard the
 /// first time one of them is edited.
 const PPTP_DRAIN_NEEDLE: &str =
-    "crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(";
+    "crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(";
 const PPTP_EXPIRY_NEEDLE: &str =
     "let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns";
 /// #7699: the DATA-channel resolve's call site. Same module-level treatment and
@@ -9355,11 +9355,11 @@ fn pptp_resolve_assignment_line(src: &str) -> Option<usize> {
 /// failed first.
 #[test]
 fn pptp_drain_guard_does_not_accept_a_mention_7699() {
-    const COMMENTED_OUT: &str = "        // crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(\n        //     &pptp_control,\n";
+    const COMMENTED_OUT: &str = "        // crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(\n        //     &pptp_control,\n";
     const PROSE: &str =
-        "        // the drain rides crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker( periodic work\n";
+        "        // the drain rides crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch( periodic work\n";
     const REAL: &str =
-        "        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(\n            &pptp_control,\n";
+        "        crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(\n            &pptp_control,\n";
 
     assert!(
         pptp_drain_line(COMMENTED_OUT, PPTP_DRAIN_NEEDLE).is_none(),

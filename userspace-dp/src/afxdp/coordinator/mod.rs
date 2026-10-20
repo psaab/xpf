@@ -474,6 +474,10 @@ pub struct Coordinator {
     pub(crate) ipsec_snapshot_generation: u64,
     pub(crate) pmech_inventory: Arc<PMechInventory>,
     pub(crate) runtime_view_publication_generation: u64,
+    /// PPTP enable-epoch publisher state: last published enabled bit and
+    /// the epoch to stamp on the next publish when it flips.
+    pub(crate) pptp_last_enabled: Option<bool>,
+    pub(crate) pptp_epoch_counter: u64,
     pub(crate) reconcile_calls: u64,
     /// #2522: count of teardowns that paid the 500ms mlx5 zero-copy
     /// EBUSY quiesce. Bumped only when live workers were torn down AND a
@@ -731,6 +735,8 @@ impl Coordinator {
             ipsec_snapshot_generation: 0,
             pmech_inventory: Arc::new(PMechInventory::default()),
             runtime_view_publication_generation: 0,
+            pptp_last_enabled: None,
+            pptp_epoch_counter: 0,
             reconcile_calls: 0,
             reconcile_quiesce_count: 0,
             last_bind_failures: BTreeMap::new(),
@@ -2109,6 +2115,18 @@ impl Coordinator {
     /// link-cycle restore, routing-domain seeds) could not be told apart from
     /// a full apply at this single choke point.
     pub(crate) fn publish_runtime_view(&mut self) {
+        // Publisher-stamped PPTP epoch: advance whenever the enabled bit
+        // flips versus the last publish (first publish only seeds).
+        let enabled = self.forwarding.pptp_enabled();
+        match self.pptp_last_enabled {
+            None => { self.pptp_last_enabled = Some(enabled); }
+            Some(prev) if prev != enabled => {
+                self.pptp_epoch_counter = self.pptp_epoch_counter.saturating_add(1);
+                self.pptp_last_enabled = Some(enabled);
+            }
+            _ => {}
+        }
+        self.forwarding.pptp_epoch = self.pptp_epoch_counter;
         let forwarding = Arc::new(self.forwarding.clone());
         self.store_runtime_view(forwarding);
     }

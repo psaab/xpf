@@ -61,9 +61,10 @@ fn retry_pending_pptp_call_installs(
     self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     now_ns: u64,
+    current_epoch: u64,
 ) {
     let self_worker_queue_id = self_worker_commands.map(|queue| Arc::as_ptr(queue) as usize);
-    for retry in inbox.take_call_install_retries(now_ns) {
+    for retry in inbox.take_call_install_retries_at(now_ns, current_epoch) {
         // A worker's peer list excludes itself. If it was the refused
         // recipient, preserve its queue's FIFO just as for peers: an empty
         // queue permits a local install; otherwise append behind its backlog.
@@ -252,6 +253,17 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     now_ns: u64,
 ) -> usize {
+    drain_pptp_control_inbox_at_epoch(inbox, sessions, self_worker_commands, peer_worker_commands, now_ns, 0)
+}
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn drain_pptp_control_inbox_at_epoch(
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    sessions: &mut crate::session::SessionTable,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    now_ns: u64,
+    current_epoch: u64,
+) -> usize {
     // Deliver older teardown retries before replacement installs. The retry
     // gate snapshots are separate, but this order makes a single drainer's
     // accepted commands preserve the old-call -> replacement-call sequence.
@@ -268,9 +280,10 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
         self_worker_commands,
         peer_worker_commands,
         now_ns,
+        current_epoch,
     );
     let mut learned = 0;
-    for (routing_domain, seg) in inbox.take_pending_in_domain(now_ns) {
+    for (routing_domain, seg) in inbox.take_pending_in_domain(now_ns, current_epoch) {
         let parsed = crate::session::pptp_control::parse_control_segment(&seg.payload);
         let control = crate::session::pptp::ControlChannelId::new_in_domain(
             routing_domain,
@@ -322,7 +335,7 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
                 if !local_install_failed && accepted == peer_worker_commands.len() {
                     inbox.complete_call_install_broadcast(call, control, seg.captured_ns);
                 } else {
-                    inbox.record_call_install(call, control, seg.captured_ns, unsent);
+                    inbox.record_call_install_at(call, control, seg.captured_ns, seg.epoch, unsent);
                 }
                 if !local_install_failed {
                     learned += 1;
@@ -460,5 +473,6 @@ pub(in crate::afxdp) fn retry_pending_pptp_call_installs_for_test(
         self_worker_commands,
         peer_worker_commands,
         now_ns,
+        0,
     )
 }
