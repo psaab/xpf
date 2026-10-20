@@ -127,17 +127,16 @@ func TestConnectedPrefixesFilterUnknownClusteredRG15742(t *testing.T) {
 	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
 	withLearnedRoutes(t, fixedLearned())
 
-	for name, provider := range map[string]RGPrimaryProvider{
-		"nil provider": nil,
-		"unknown RG":   func(int) (bool, bool) { return false, false },
-	} {
-		routes, _, err := buildRouteSnapshotsWithRGPrimary(clusteredConfig15742(), connectedRGInterfaces15742(), nil, provider)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if hasConnectedRoute15742(routes, "172.16.80.0/24") {
-			t.Fatalf("%s published unknown clustered RG prefix: %+v", name, routes)
-		}
+	// A WIRED provider returning unknown still fails closed. The nil
+	// provider case moved to #15919 (not wired yet => keep own prefixes;
+	// see TestConnectedNilProviderKeepsOwnPrefixes15919).
+	provider := RGPrimaryProvider(func(int) (bool, bool) { return false, false })
+	routes, _, err := buildRouteSnapshotsWithRGPrimary(clusteredConfig15742(), connectedRGInterfaces15742(), nil, provider)
+	if err != nil {
+		t.Fatalf("unknown RG: %v", err)
+	}
+	if hasConnectedRoute15742(routes, "172.16.80.0/24") {
+		t.Fatalf("unknown RG published clustered RG prefix: %+v", routes)
 	}
 }
 

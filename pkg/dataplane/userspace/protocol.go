@@ -1274,8 +1274,9 @@ type InterfaceSnapshot struct {
 	RedundancyGroup int    `json:"redundancy_group,omitempty"`
 	// ConnectedRGPeerOwned marks this RG>0 interface row peer-owned at
 	// snapshot build (#15742). Go sets it from the daemon's cluster
-	// LocalGroupPrimary provider (nil provider + clustered config => true,
-	// fail-closed; standalone => false). Rust honors it only when dropping
+	// LocalGroupPrimary provider (nil provider => false, ownership source
+	// not wired yet (#15919); wired-but-unknown RG => true, fail-closed;
+	// standalone => false). Rust honors it only when dropping
 	// connected_v4/v6 transit prefixes; local-delivery/by-ifindex state is
 	// never dropped. Old helpers ignore it (v56-only helper is refused).
 	ConnectedRGPeerOwned bool `json:"connected_rg_peer_owned,omitempty"`

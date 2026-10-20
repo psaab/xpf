@@ -10,9 +10,10 @@ import (
 // markConnectedRGPeerOwned returns a copy of interfaces with
 // ConnectedRGPeerOwned set on each peer-owned RG>0 row (#15742). Consistent
 // predicate with connectedRowPeerOwned so Go connected RouteSnapshot rows
-// and Rust connected_v4/v6 rows cannot diverge. Clustered + nil provider
-// fails closed (peer-owned). The copy prevents route-building from mutating
-// a snapshot's retained interface rows.
+// and Rust connected_v4/v6 rows cannot diverge. A nil provider (ownership
+// source not wired yet) keeps rows unmarked (#15919); a wired provider
+// returning an unknown RG fails closed (peer-owned). The copy prevents
+// route-building from mutating a snapshot's retained interface rows.
 func markConnectedRGPeerOwned(cfg *config.Config, interfaces []InterfaceSnapshot, provider RGPrimaryProvider) []InterfaceSnapshot {
 	if len(interfaces) == 0 {
 		return interfaces

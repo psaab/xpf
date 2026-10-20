@@ -181,12 +181,21 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 // transit-ineligible on this node (#15742). Consistent with InterfaceSnapshot
 // marking: standalone (no chassis cluster) never filters; RG<=0 never
 // filters; a clustered RG>0 row needs a provider verdict of local primary.
+//
+// #15919: a nil provider means the daemon has not wired the cluster
+// ownership source yet (boot window before applyDataplaneAndHACore, or a
+// standalone/test build). It is NOT evidence the peer owns the RG, so it
+// must not suppress this node's own prefixes: keep them (fail open) until
+// wiring lands. The boot-window primary otherwise blackholed its own
+// transit until wiring plus an ownership edge/commit republished. A
+// WIRED provider returning unknown still fails closed below, because
+// there the absence of a verdict is a real ownership gap.
 func connectedRowPeerOwned(cfg *config.Config, iface InterfaceSnapshot, provider RGPrimaryProvider) bool {
 	if cfg == nil || cfg.Chassis.Cluster == nil || iface.RedundancyGroup <= 0 {
 		return false
 	}
 	if provider == nil {
-		return true
+		return false
 	}
 	primary, known := provider(iface.RedundancyGroup)
 	return !(known && primary)
