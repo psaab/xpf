@@ -6087,20 +6087,12 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     // is asserted on the binding counter below, which the inline
     // LAN submission bumps at drain.
 
-    // LAN-delivery counter: fw1 LAN-egress cells pin actual LAN
-    // TX for this identical candidate shape; here decision+silence
-    // (re-homed candidate + fabric/WAN counters) is the pin.
-    // LAN binding TX (actual counter, cross-UMEM): packet 2's
-    // re-homed decision (eg5) is submitted inline to the LAN
-    // binding and drained by the harness; tx_packets counts it.
-    // The build for packet 2 returns None in this harness (the
-    // re-homed LAN candidate's frame build needs the LAN neighbor
-    // from the live neighbor table, which the snapshot-only harness
-    // does not serve for the re-homed row — production resolves it
-    // via ARP/ND + dynamic neighbors). The decision-level re-home
-    // (stored eg5 candidate, fabric count frozen, WAN silent) is
-    // the pin; LAN TX itself is pinned by the fw1 LAN-egress cells
-    // for the identical candidate shape.
+    // LAN delivery (actual counter): packet 2 session-hits the
+    // re-homed companion and transmits on the LAN binding —
+    // tx_packets below is the submission counter, asserted ==1.
+    // (The fw1 LAN-egress cells pin the LAN frame bytes for the
+    // identical candidate shape; the live gate arbitrates the
+    // on-wire post-failback reply.)
     assert_eq!(
         bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
         "fabric TX must stay at packet-1 count"
