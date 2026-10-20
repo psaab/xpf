@@ -472,11 +472,39 @@ fn destination_nat_translation_still_valid(
                 )
                 .map(|(decision, _)| decision)
         });
-    // #15934: with the selector waived, validity is GEOMETRY existence:
-    // any collected selector-optional translation reproducing the
-    // stored one counts (typed rules may coexist; the composed first
-    // lookup above may have matched a different type's rule).
+    // #15934: with the selector waived, validity is GEOMETRY existence
+    // through the NORMAL precedence result wherever it already
+    // reproduces the stored translation (a static or persistent
+    // winner needs no DNAT consultation at all), PLUS the
+    // selector-optional DNAT collection — unless an `off`/exempt
+    // winner shadows the tuple (checked next).
     if ignore_icmp_selector {
+        // `destination-nat off` shadow FIRST: if the first decided
+        // tier's selector-optional winner is non-Translate, the tuple
+        // is claimed by an exemption — neither the normal winner nor
+        // the collection may validate through it. (The normal winner
+        // cannot encode this: with the reply selector it may already
+        // be a broader translate past a typed off rule.)
+        if forwarding.dnat_table.has_off_shadow_ignoring_icmp_selector_scoped(
+            forward_key.protocol,
+            forward_key.src_ip,
+            forward_key.dst_ip,
+            forward_key.src_port,
+            forward_key.dst_port,
+            scope.zone_name,
+            scope.ifname,
+            scope.routing_instance,
+        ) {
+            return false;
+        }
+        // Normal precedence winner (static/persistent/DNAT) already
+        // reproducing the stored translation validates directly.
+        if expected.is_some_and(|current| {
+            current.rewrite_dst == Some(translated_dst)
+                && current.rewrite_dst_port == nat.rewrite_dst_port
+        }) {
+            return true;
+        }
         return forwarding
             .dnat_table
             .lookup_all_ignoring_icmp_selector_scoped(

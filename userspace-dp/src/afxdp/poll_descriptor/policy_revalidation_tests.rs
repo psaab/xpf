@@ -5788,3 +5788,95 @@ fn selector_optional_matching_covers_arbitrary_types_15934() {
         "without the waiver the replied selector must not validate type-8 (#15934)"
     );
 }
+
+/// #15934 round-6: (1) same-prefix typed A/B both collected (prefix-LPM
+/// no longer stops at one winner); (2) a selector-less session whose
+/// NORMAL winner is a static translation survives via precedence,
+/// without any DNAT rule; (3) a winning `destination-nat off` shadow
+/// revokes selector-less (no validation through the exemption).
+#[test]
+fn selector_optional_precedence_prefix_and_off_shadow_15934() {
+    let key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    let metadata = meta_14315(2, 1);
+    let valid = |f: &crate::afxdp::ForwardingState, stored: &str| {
+        let decision = decision_14315(NatDecision {
+            rewrite_dst: Some(stored.parse().expect("stored")),
+            source_nat_icmp: None,
+            ..NatDecision::default()
+        });
+        destination_nat_translation_still_valid(
+            f, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        )
+    };
+    // (1) Same /24 prefix, type-8 -> .8 and type-0 -> .9.
+    let prefix_rules = vec![
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "pfx-echo".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            destination_prefix: "198.51.100.0/24".to_string(),
+            pool_address: "10.0.0.8".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(8),
+            match_icmp_code: Some(0),
+            ..Default::default()
+        },
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "pfx-reply".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            destination_prefix: "198.51.100.0/24".to_string(),
+            pool_address: "10.0.0.9".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(0),
+            match_icmp_code: Some(0),
+            ..Default::default()
+        },
+    ];
+    let mut pfx = imported_snat_forwarding(false);
+    pfx.dnat_table = crate::nat::DnatTable::from_snapshots(&prefix_rules, &crate::nat::NatCounterStore::default());
+    assert!(valid(&pfx, "10.0.0.8"), "same-prefix type-8 geometry must survive (#15934)");
+    assert!(valid(&pfx, "10.0.0.9"), "same-prefix type-0 geometry must survive (#15934)");
+    assert!(!valid(&pfx, "10.0.0.10"), "same-prefix unknown geometry must revoke (#15934)");
+
+    // (2) Static winner, no DNAT at all: normal precedence result
+    // already reproduces the stored translation.
+    let mut statik = imported_snat_forwarding(false);
+    statik.static_nat = crate::nat::StaticNatTable::from_snapshots(
+        &[crate::protocol::StaticNATRuleSnapshot {
+            name: "static-icmp".to_string(),
+            external_ip: "198.51.100.9".to_string(),
+            internal_ip: "10.0.0.8".to_string(),
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert!(valid(&statik, "10.0.0.8"), "static-winner selector-less session must survive (#15934)");
+    assert!(!valid(&statik, "10.0.0.9"), "static geometry mismatch must revoke (#15934)");
+
+    // (3) off shadow: an `off` rule for the tuple plus a broader
+    // translate that would otherwise reproduce the stored geometry.
+    let off_rules = vec![
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "off-echo".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            pool_address: "10.0.0.8".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(8),
+            match_icmp_code: Some(0),
+            off: true,
+            ..Default::default()
+        },
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "broad-translate".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            pool_address: "10.0.0.8".to_string(),
+            protocol: "icmp".to_string(),
+            ..Default::default()
+        },
+    ];
+    let mut off_state = imported_snat_forwarding(false);
+    off_state.dnat_table = crate::nat::DnatTable::from_snapshots(&off_rules, &crate::nat::NatCounterStore::default());
+    assert!(
+        !valid(&off_state, "10.0.0.8"),
+        "destination-nat off shadow must revoke selector-less, not validate through (#15934)"
+    );
+}
