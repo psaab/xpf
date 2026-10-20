@@ -213,14 +213,30 @@ func (m *Manager) syncSnapshotLocked() error {
 	// became retained another way) never re-marks here: provenance for
 	// a genuinely new clear comes only from Manager.Compile, and
 	// partial clones had both bits stripped at clone time.
+	// #15955: one hash over the final publish snapshot drives the dedup
+	// compare, the digest stamp, and the post-publish bookkeeping below
+	// (the `hash`/`hashOK` locals this function already threads to its
+	// tail). retained was prepared and resampled above and nothing after
+	// this point mutates its hashed content before the send:
+	// ensureRequiredSnapshotProtocolLocked and
+	// disarmBeforeUnsupportedPublishLocked only read it. The pre-send
+	// ClearPolicies value is captured before the send spends the marker
+	// so the tail can rebuild the stamped hash without recomputing over
+	// the spent struct — ClearPolicies is not hash-zeroed, so a naive
+	// post-send hash would differ exactly on the authorized-clear path.
+	publishSnap := retained
+	publishSnap.Neighbors = filterPublishableNeighbors(retained.Neighbors)
 	if len(retained.Policies) == 0 && retained.fullBuild {
+		publishSnap.ClearPolicies = true
+	}
+	publishHash, publishHashOK := snapshotContentHash(&publishSnap)
+	// The re-mark above must also land on the retained copy the tail
+	// retains: pre-#15955 it was applied to `retained` before the dedup
+	// hash, so a dedup skip retained the marked struct. Keep that.
+	if publishSnap.ClearPolicies {
 		retained.ClearPolicies = true
 	}
-	// Content-hash dedup: skip the control socket publish if the snapshot's
-	// forwarding-relevant content hasn't changed since the last publish.
-	// This eliminates redundant publishes during route convergence where
-	// BumpFIBGeneration fires repeatedly but routes/neighbors are unchanged.
-	hash, hashOK := snapshotContentHash(&retained)
+	hash, hashOK := publishHash, publishHashOK
 	// #9520 / #9684: not while an earlier apply's or partial update's outcome is
 	// unknown; see the catch-up above.
 	if hashOK && hash == m.lastSnapshotHash && m.publishedSnapshot != 0 && !m.applySnapshotOutcomeUnknown &&
@@ -236,10 +252,6 @@ func (m *Manager) syncSnapshotLocked() error {
 		m.notifyPolicySnapshotCommitterLocked(m.lastSnapshot.Generation)
 		return nil
 	}
-	// #1197 v5 (Codex code-review v4 #2): publishable-only filter
-	// for parity with update_neighbors path.
-	publishSnap := retained
-	publishSnap.Neighbors = filterPublishableNeighbors(retained.Neighbors)
 	// #5488 (F7): mapsMutatedInPlace is unconditionally true here for the same
 	// reason the publishPreparedSnapshotFailClosedLocked call below passes true — the
 	// only producer of an unpublished lastSnapshot is Compile's pendingXSKStartup
@@ -279,7 +291,7 @@ func (m *Manager) syncSnapshotLocked() error {
 	// the shim against classifier maps a generation ahead of the applied Rust
 	// snapshot (fail OPEN). publishPreparedSnapshotFailClosedLocked disables ctrl on a
 	// rejection so transit drops to the kernel-only fail-closed posture.
-	if err := m.publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, true); err != nil {
+	if err := m.publishPreparedSnapshotPrehashedLocked(&publishSnap, &status, true, publishHash, publishHashOK); err != nil {
 		if errors.Is(err, errHelperRejected) && m.policySnapshotPublishFailure != nil {
 			m.policySnapshotPublishFailure(m.lastSnapshot.Generation, err)
 		}
@@ -322,6 +334,11 @@ func (m *Manager) syncSnapshotLocked() error {
 	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	// #2079: deferred full apply_snapshot succeeded — record applied.
 	m.markAppliedSnapshotLocked()
+	// `hash` is the single pre-send hash over publishSnap (#15955). The
+	// send spent ClearPolicies on publishSnap after stamping, but `hash`
+	// was computed with preSendClear in force, so it already describes
+	// the content the helper holds — no post-send recompute is needed
+	// (and one over the spent struct would differ on the clear path).
 	if hashOK {
 		m.lastSnapshotHash = hash
 	}

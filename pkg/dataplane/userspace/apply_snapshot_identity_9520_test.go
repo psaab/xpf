@@ -236,7 +236,7 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 				if !ok || lit.Kind != token.STRING || lit.Value != `"apply_snapshot"` {
 					return true
 				}
-				if fn.Name.Name == "requestApplySnapshotPreparedLocked" {
+				if fn.Name.Name == "requestApplySnapshotPreparedLocked" || fn.Name.Name == "requestApplySnapshotLockedInternal" {
 					inSendSite++
 				} else {
 					outside = append(outside, fmt.Sprintf("%s (%s)", fset.Position(lit.Pos()), fn.Name.Name))
@@ -252,7 +252,7 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 		}
 	}
 	if inSendSite == 0 {
-		t.Fatal("liveness: no \"apply_snapshot\" literal found in requestApplySnapshotPreparedLocked — the scan " +
+		t.Fatal("liveness: no \"apply_snapshot\" literal found in the send-site functions — the scan " +
 			"is not reading this package, so an empty result below would mean nothing")
 	}
 	if len(outside) > 0 {

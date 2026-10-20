@@ -193,7 +193,22 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	// unshimmed until the next full Compile. The reconcile is a no-op
 	// for tracked ifindexes, so an unchanged refresh issues no attach.
 	m.reconcileInterfaceAttachmentsForRefreshLocked(&next)
-	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash &&
+	// #15955: one hash over the final publish snapshot drives the dedup
+	// compare, the digest stamp, and the post-publish bookkeeping. This
+	// publisher never goes through prepareSnapshotForApply after this
+	// point (its rows were rebuilt and revalidated above), and neither
+	// ensureRequiredSnapshotProtocolLocked, GeneratedAt assignment
+	// (hash-zeroed), disarmBeforeUnsupportedPublishLocked (read-only),
+	// nor the attach reconcile mutates hashed content before the send;
+	// see PublishRouteOverlaySnapshotWithLatch for the full proof. The
+	// pre-send ClearPolicies value is threaded through postPublishHash
+	// because the send spends the marker
+	// after stamping and the marker is not hash-zeroed.
+	publishSnap := next
+	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
+	publishHash, publishHashOK := snapshotContentHash(&publishSnap)
+	preSendClear := publishSnap.ClearPolicies
+	if publishHashOK && publishHash == m.lastSnapshotHash &&
 		!m.applySnapshotOutcomeUnknown && m.partialOutcomeUnknown == 0 && resampled == 0 {
 		return false, nil
 	}
@@ -208,6 +223,12 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 		return false, fmt.Errorf("userspace: snapshot generation exhausted during interface-link refresh")
 	}
 	next.GeneratedAt = time.Now().UTC()
+	// publishSnap is a value copy of next taken before this line; the
+	// GeneratedAt refresh must be mirrored or the dedup hash above would
+	// describe a different struct than the one sent. GeneratedAt is
+	// zeroed inside snapshotContentHash, so the hash is unaffected —
+	// the mirror keeps the sent struct identical to the pre-#15955 one.
+	publishSnap.GeneratedAt = next.GeneratedAt
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
 		return false, err
 	}
@@ -215,10 +236,8 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	// #14133/#15042: the attach reconcile already ran above, before the
 	// hash dedup, so it covers both the deduped and the publishing path;
 	// it is a no-op for already-tracked ifindexes.
-	publishSnap := next
-	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
-	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
+	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, publishHash, publishHashOK); err != nil {
 		return false, fmt.Errorf("publish interface-link refresh: %w", err)
 	}
 	// next already owns the interface rows sampled before this publish.
@@ -232,7 +251,7 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	m.pendingFullSnapshotMetadata = false
 	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&publishSnap); ok {
+	if h, ok := postPublishHash(&publishSnap, publishHash, publishHashOK, preSendClear); ok {
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)
