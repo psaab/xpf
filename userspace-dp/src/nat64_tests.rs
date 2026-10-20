@@ -9537,3 +9537,26 @@ fn nat64_15930_any_matches_any_source() {
         "constrained control must still refuse outside sources"
     );
 }
+
+// #15930 (review fold): a wildcard token beside a narrower literal in
+// the SAME list still wins — the side matches any source. Reverting
+// the Rust wildcard normalisation to first-token-only makes the
+// any-last case match nothing outside the narrow prefix.
+#[test]
+fn nat64_15930_mixed_any_wins() {
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let outside: Ipv6Addr = "2001:db8:2::5".parse().unwrap();
+    for sources in [
+        vec!["any".to_string(), "2001:db8:1::/48".to_string()],
+        vec!["2001:db8:1::/48".to_string(), "any".to_string()],
+    ] {
+        let state = Nat64State::from_snapshots(&[scoped_snap("", "", sources.clone())]);
+        assert!(
+            matches!(
+                state.classify_ipv6_packet_scoped(outside, dst, "", ""),
+                Nat64Match::MatchReady { .. }
+            ),
+            "mixed selector {sources:?} must match any source"
+        );
+    }
+}

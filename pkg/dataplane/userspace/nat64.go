@@ -158,54 +158,66 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			}
 		}
 		// #15930: preserve authored source constrainedness end-to-end.
-		// The literal list starts as authored; a wildcard token (`any` or
-		// an IPv6 family keyword) means match-any ONLY when no other
-		// authored entry constrains the side — beside a real constraint
-		// the union already covers every source, so dropping it is
-		// inert. An authored name is resolved below; ANY poisoned name
-		// replaces the whole side with the never-match sentinel below
-		// (a non-address token the Rust parser drops while keeping
-		// source_constrained=true), so a transient DNS failure, an
-		// empty authored set, or an unknown member can NEVER widen the
-		// rule to any-source the way clearing the list did. A name that
+		// Junos list semantics: a v6-covering wildcard token (`any`,
+		// `any6`, `any-ipv6`, or `::/0` itself) ANYWHERE in the authored
+		// selector — literals or resolved names — makes the whole side
+		// match-any: the union already covers every source, so the
+		// wildcard wins and the side lowers to the canonical `::/0`.
+		// Stripping it beside narrower entries would narrow the
+		// authored scope, the exact inversion this fix removes. The
+		// match-any shortcut applies only when NO name poisoned: an
+		// authored-but-unusable name must stay fail-closed (never-match)
+		// rather than be silently dropped beside a wildcard it was
+		// unioned with — poison wins over wildcard. A name that
 		// resolves empty without poisoning (present-empty fail-mode-drop
-		// feed, zero-answer DNS entry) keeps the same sentinel via
-		// appendNATAddressNamesPoisoned, so it also matches nothing.
+		// feed, zero-answer DNS entry) keeps the never-match sentinel
+		// via appendNATAddressNamesPoisoned, so it also matches nothing
+		// unless a real wildcard token was authored.
 		authoredConstrained := len(rs.SourceAddresses) > 0 || len(rs.SourceAddressNames) > 0
-		wildcardOnly := authoredConstrained && len(rs.SourceAddressNames) == 0
+		wildcardAuthored := false
 		sourceAddrs := make([]string, 0, len(rs.SourceAddresses))
 		for _, a := range rs.SourceAddresses {
+			if a == "::/0" {
+				wildcardAuthored = true
+				continue
+			}
 			if _, v6, isWildcard := config.PolicyAddressWildcardFamilies(a); isWildcard {
-				if !v6 {
+				if v6 {
+					wildcardAuthored = true
+				} else {
 					// An IPv4-only wildcard can never match an IPv6
 					// NAT64 source; keep it as a never-match entry rather
-					// than silently widening to any IPv6 source.
-					wildcardOnly = false
+					// than silently widening to any IPv6 source. It does
+					// not make the side match-any.
 					sourceAddrs = append(sourceAddrs, a)
 				}
 				continue
 			}
-			wildcardOnly = false
 			sourceAddrs = append(sourceAddrs, a)
 		}
 		if resolved, poisoned := appendNATAddressNamesPoisoned(cfg, feedOverlay, sourceAddrs, rs.SourceAddressNames); poisoned != "" {
 			slog.Warn("userspace snapshot: NAT64 rule-set has poisoned source address-name closure; shipping fail-closed",
 				"rule-set", rs.Name, "address_name", poisoned)
 			sourceAddrs = []string{natUnresolvedAddressNamePrefix + poisoned}
+			wildcardAuthored = false
 		} else {
 			sourceAddrs = resolved
+			for _, a := range sourceAddrs {
+				if a == "::/0" {
+					wildcardAuthored = true
+					break
+				}
+			}
 		}
-		if wildcardOnly {
-			// Explicit `any` (or an IPv6 family wildcard) with no other
-			// authored constraint: match any source, exactly like an
-			// omitted selector. Ship the canonical `::/0` so the wire
-			// token parses in every helper vintage; emitting `any`
-			// verbatim made Rust keep source_constrained=true over zero
-			// parseable prefixes and match NOTHING — the authored scope
-			// inverted.
+		if wildcardAuthored {
+			// Explicit match-any wins over every narrower authored
+			// entry. Ship the canonical `::/0` so the wire token parses
+			// in every helper vintage; emitting `any` verbatim made
+			// Rust keep source_constrained=true over zero parseable
+			// prefixes and match NOTHING — the authored scope inverted.
 			sourceAddrs = []string{"::/0"}
 		}
-		if authoredConstrained && len(sourceAddrs) == 0 && !wildcardOnly {
+		if authoredConstrained && len(sourceAddrs) == 0 && !wildcardAuthored {
 			// Defence in depth: an authored constraint must never reach
 			// the wire as an empty (unconstrained) list.
 			sourceAddrs = []string{natUnresolvedAddressNamePrefix + "nat64-source"}
@@ -217,7 +229,7 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			FromZone:                   rs.FromZone,
 			FromRoutingInstance:        rs.FromRoutingInstance,
 			SourceAddresses:            sourceAddrs,
-			SourceConstrained:          authoredConstrained && !wildcardOnly,
+			SourceConstrained:          authoredConstrained && !wildcardAuthored,
 			NoV6FragHeader:             noV6FragHeader,
 			DeterministicBlockSize:     detBlockSize,
 			DeterministicBlocksPerIP:   detBlocksPerIP,

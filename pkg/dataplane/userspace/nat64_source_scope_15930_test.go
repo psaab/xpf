@@ -170,6 +170,47 @@ func TestNAT64ExplicitAnyMatchesAny15930(t *testing.T) {
 	}
 }
 
+func TestNAT64MixedAnyWins15930(t *testing.T) {
+	// Junos list semantics (triple-review fold): a v6-covering wildcard
+	// ANYWHERE in the authored selector makes the whole side match-any;
+	// stripping it beside narrower entries would narrow the authored
+	// scope. Covers literal+wildcard in both orders, wildcard + valid
+	// name, and a name resolving to ::/0.
+	addresses := map[string]*config.Address{
+		"clients-v6": {Name: "clients-v6", Value: "2001:db8:1::/48"},
+		"all-v6":     {Name: "all-v6", Value: "::/0"},
+	}
+	for _, tc := range []struct {
+		name    string
+		sources []string
+		names   []string
+	}{
+		{"any-first", []string{"any", "2001:db8:1::/48"}, nil},
+		{"any-last", []string{"2001:db8:1::/48", "any"}, nil},
+		{"any6-mixed", []string{"any6", "2001:db8:1::/48"}, nil},
+		{"slash0-mixed", []string{"2001:db8:1::/48", "::/0"}, nil},
+		{"any-plus-valid-name", []string{"any"}, []string{"clients-v6"}},
+		{"name-resolves-slash0", nil, []string{"all-v6"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := nat64Snap15930(t, nat64ScopeCfg15930(tc.sources, tc.names, addresses, nil))
+			if !matchAny15930(s) {
+				t.Fatalf("mixed selector %v/%v must match any: constrained=%v addrs=%v", tc.sources, tc.names, s.SourceConstrained, s.SourceAddresses)
+			}
+			if len(s.SourceAddresses) != 1 || s.SourceAddresses[0] != "::/0" || s.SourceConstrained {
+				t.Fatalf("mixed selector must lower to unconstrained [::/0], got constrained=%v addrs=%v", s.SourceConstrained, s.SourceAddresses)
+			}
+		})
+	}
+	// Poison still wins over a literal wildcard: an authored-but-
+	// unusable name beside `any` stays fail-closed, never silently
+	// dropped into match-any.
+	s := nat64Snap15930(t, nat64ScopeCfg15930([]string{"any"}, []string{"nosuchname"}, nil, nil))
+	if !neverMatch15930(s) {
+		t.Fatalf("any + poisoned name must fail closed: constrained=%v addrs=%v", s.SourceConstrained, s.SourceAddresses)
+	}
+}
+
 func TestNAT64Any4NeverMatchesV6_15930(t *testing.T) {
 	// An IPv4-only wildcard beside nothing else can never match an IPv6
 	// NAT64 source; it must not widen to any-IPv6.
