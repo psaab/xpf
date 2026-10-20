@@ -6018,16 +6018,6 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
     let mut sessions = fw0_both_halves_sessions_15958b(&split_forwarding, now_ns);
-    sessions.delete(&crate::session::SessionKey {
-        addr_family: libc::AF_INET as u8,
-        protocol: PROTO_ICMP,
-        src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
-        src_port: 0x1234,
-        dst_port: 0x1234,
-        discriminator: Default::default(),
-        routing_domain: 0,
-    });
     sessions.set_forwarding_revalidation_gen(7, 9);
     let split_ha = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
     let frame = build_txn_tcp_syn_frame_v4(
@@ -6393,5 +6383,58 @@ fn split_rg_connected_owner_scoped_by_ri_15958b() {
         crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
         5,
         "default connected ifindex must be the LAN interface"
+    );
+}
+
+/// Round-5 r6: peer-owned named-RI prefixes live ONLY in the
+/// by-ifindex ledger (FIB row suppressed). Scoped owner/ifindex
+/// must consult the ledger WITH the RI filter: a tenant-RI LAN
+/// prefix (by-ifindex only, interface in tenant RI, RG2 peer-owned)
+/// resolves for a tenant-scoped session and must NOT claim a
+/// default-scope session (and vice versa).
+#[test]
+fn split_rg_peer_owned_ledger_scoped_by_ri_15958b() {
+    let mut forwarding = ForwardingState::default();
+    // Default LAN interface: ifindex 5, RG2, default RI, prefix in ledger + FIB row.
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 5,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.connected_v4_by_ifindex.insert(5, vec![
+        crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+    ]);
+    // Tenant LAN interface: ifindex 24, RG1, RI "tenant-a", SAME prefix,
+    // peer-owned style: ledger ONLY (no connected_v4 row).
+    forwarding.connected_v4_by_ifindex.insert(24, vec![
+        crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+    ]);
+    forwarding.ifindex_to_routing_instance.insert(24, "tenant-a".to_string());
+    forwarding.egress.insert(5, crate::afxdp::EgressInterface {
+        bind_ifindex: 5, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+        redundancy_group: 2, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+    });
+    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
+        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
+        redundancy_group: 1, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+    });
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    // Default scope: default interface (RG2/5), tenant ledger row must not claim.
+    assert_eq!(crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target), 2);
+    assert_eq!(crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target), 5);
+    // Tenant scope: tenant ledger row (RG1/24) claims; default FIB row must not.
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(&forwarding, target, Some("tenant-a.inet.0")),
+        1,
+        "tenant-scoped owner must come from the peer-owned ledger row"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(&forwarding, target, Some("tenant-a.inet.0")),
+        24,
+        "tenant-scoped ifindex must be the ledger-only interface"
     );
 }
