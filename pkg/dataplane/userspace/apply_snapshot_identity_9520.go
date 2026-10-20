@@ -271,14 +271,16 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	if snap != nil && snap.Config != nil && !m.rgProviderWiredForLocked(snap.Config) {
 		return errRGProviderNotWired
 	}
-	// HARDENING (#15742 follow-up): refuse a snapshot whose Summary claims
-	// policies its Policies slice does not carry — the 670274c712 defect
-	// class, caught here for EVERY builder path (partial-republish clones
-	// and hand-built publishers bypass the builder invariant). Same refusal
-	// class as errRGProviderNotWired above: nothing reaches the helper, so
-	// no generation is burned and no retry debt is adopted
+	// HARDENING (#15742 follow-up): refuse a snapshot whose published
+	// policies disagree with EITHER its self-declared Summary.PolicyCount
+	// OR the manager's stamped expectation from the last full Compile —
+	// the 670274c712 defect class, caught here for EVERY builder path
+	// (partial-republish clones and hand-built publishers bypass the
+	// builder invariant), including the both-fields-zeroed shape. Same
+	// refusal class as errRGProviderNotWired above: nothing reaches the
+	// helper, so no generation is burned and no retry debt is adopted
 	// (isKnownUnsentFailure matches errSnapshotPolicyMismatch).
-	if sendErr := validateSnapshotForSend(snap); sendErr != nil {
+	if sendErr := m.validateSnapshotForSend(snap); sendErr != nil {
 		return sendErr
 	}
 	if stampErr := stampSnapshotContentDigest(snap); stampErr != nil {

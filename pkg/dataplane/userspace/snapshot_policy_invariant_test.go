@@ -149,6 +149,93 @@ func TestSendSiteRefusesPolicyCountMismatch(t *testing.T) {
 	}
 }
 
+// TestSendSiteRefusesBothZeroedPartialPublish is the joint-omission
+// shape the triple review required: a partial publisher zeroing BOTH
+// Policies and Summary.PolicyCount (0 == 0, self-consistent) must still
+// refuse at the send site whenever the manager's stamped expectation
+// from the last full Compile is non-zero. A legitimate zero-policy
+// expectation (stamped 0) must still send.
+func TestSendSiteRefusesBothZeroedPartialPublish(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	zeroed := *good
+	zeroed.Policies = nil
+	zeroed.Summary.PolicyCount = 0
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(good, rec)
+	m.expectedPolicyCount = len(good.Policies) // as Manager.Compile stamps it
+	genBefore := m.generation
+	err := m.requestApplySnapshotPreparedLocked(&zeroed, &ProcessStatus{})
+	if !errors.Is(err, errSnapshotPolicyMismatch) {
+		t.Fatalf("both-zeroed send error = %v, want errSnapshotPolicyMismatch", err)
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("both-zeroed snapshot reached the helper: %d sends, want 0", len(rec.sent))
+	}
+	if m.generation != genBefore {
+		t.Fatalf("known-unsent refusal burned a generation: %d -> %d", genBefore, m.generation)
+	}
+	if !isKnownUnsentFailure(err) {
+		t.Fatalf("both-zeroed refusal must be known-unsent: %v", err)
+	}
+	// Legitimate clear: expectation stamped 0 (e.g. fully-quarantined or
+	// policy-free Compile) — a 0/0 publish must send.
+	rec2 := &applyRecorder9520{}
+	m2 := newRepublishManager9520(good, rec2)
+	m2.expectedPolicyCount = 0
+	emptySnap := *good
+	emptySnap.Policies = nil
+	emptySnap.Summary.PolicyCount = 0
+	if err := m2.requestApplySnapshotPreparedLocked(&emptySnap, &ProcessStatus{}); err != nil {
+		t.Fatalf("legitimate 0/0 send with zero expectation: %v", err)
+	}
+	if len(rec2.sent) != 1 {
+		t.Fatalf("legitimate 0/0 sends = %d, want 1", len(rec2.sent))
+	}
+}
+
+// TestBuilderFullyQuarantinedConfigPasses pins the post-quarantine
+// ground truth: a config whose ONLY policies are scrubbed by zone
+// quarantine legitimately publishes zero policies and must NOT trip the
+// builder invariant (regression for the review finding against the
+// raw-count arm; the production-path twin is
+// TestBuildSnapshotDropsDanglingGlobalMatchZone).
+func TestBuilderFullyQuarantinedConfigPasses(t *testing.T) {
+	if config.StableZoneID("z174") == config.StableZoneID("z214") {
+		// keep the premise explicit; the collision pair is fixed upstream
+	} else {
+		t.Skip("premise: z174/z214 no longer collide")
+	}
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"z174": {Name: "z174"},
+		"z214": {Name: "z214"},
+	}
+	cfg.Security.GlobalPolicies = []*config.Policy{{
+		Name:   "g-scoped-quarantined",
+		Match:  config.PolicyMatch{FromZones: []string{"z214"}, Applications: []string{"any"}},
+		Action: config.PolicyPermit,
+	}}
+	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 3, 0)
+	if err != nil {
+		t.Fatalf("fully-quarantined build must pass the builder invariant: %v", err)
+	}
+	if len(snap.Policies) != 0 || snap.Summary.PolicyCount != 0 {
+		t.Fatalf("fully-quarantined snapshot = %d policies / count %d, want 0/0", len(snap.Policies), snap.Summary.PolicyCount)
+	}
+	exp, err := expectedPolicyCount(cfg)
+	if err != nil || exp != 0 {
+		t.Fatalf("expectedPolicyCount(fully-quarantined) = %d, %v; want 0, nil", exp, err)
+	}
+	// And the surviving-rule twin: one rule survives quarantine, so the
+	// expectation is non-zero and a dropped Policies field still fails.
+	cfg2 := hardeningPolicyCfg()
+	exp2, err := expectedPolicyCount(cfg2)
+	if err != nil || exp2 != len(mustBuildSnapshot(t, cfg2, config.UserspaceConfig{}, 1, 0).Policies) {
+		t.Fatalf("expectedPolicyCount(representative) = %d, %v; want the built policy count", exp2, err)
+	}
+}
+
 // TestFullBuilderPopulatesEverySnapshotField is the field-coverage census:
 // it catches the NEXT dropped literal field, not just Policies. Every
 // exported ConfigSnapshot field must be populated (non-zero) by the full

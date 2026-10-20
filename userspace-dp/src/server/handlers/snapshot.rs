@@ -64,6 +64,36 @@ pub(super) fn apply(
         );
         return;
     }
+    // HARDENING (#15742 follow-up, joint-omission arm): an empty policy
+    // install over a NON-EMPTY installed set is refused even when the
+    // transmitted counts agree (both zeroed) — there is no explicit
+    // full-clear signal on the wire (adding one needs a protocol bump,
+    // recorded as follow-up), so a legitimate clear-all commit goes
+    // through the Go Compile path whose stamping + the next non-empty
+    // publish converge; silently emptying enforcement mid-stream is
+    // never legitimate on a partial publish. First apply (no installed
+    // snapshot) is unaffected: fresh boot may legitimately start empty.
+    let installed_policies = guard
+        .snapshot
+        .as_ref()
+        .map_or(0, |installed| installed.policies.len());
+    if snapshot.policies.is_empty() && installed_policies > 0 {
+        guard.snapshot_policy_mismatch_total =
+            guard.snapshot_policy_mismatch_total.saturating_add(1);
+        guard.status.snapshot_policy_mismatch_total = guard.snapshot_policy_mismatch_total;
+        response.ok = false;
+        response.error = format!(
+            "snapshot policy count mismatch: apply carries 0 policies over {} installed (no full-clear signal on the wire); refusing apply (keeping prior policies)",
+            installed_policies
+        );
+        eprintln!(
+            "ERROR: apply_snapshot refused (snapshot policy mismatch): policies_len=0 installed_policies={} generation={} total={}",
+            installed_policies,
+            snapshot.generation,
+            guard.snapshot_policy_mismatch_total
+        );
+        return;
+    }
     // #5169: monotonicity gate for the FULL apply_snapshot path, mirroring the
     // #3767 H5 rollback guard on `bump_fib` below. Flow-cache validation is
     // EQUALITY based on the (config_generation, fib_generation) PAIR — an entry

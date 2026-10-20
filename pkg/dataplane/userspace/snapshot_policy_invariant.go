@@ -15,15 +15,19 @@ import (
 // default-denied all transit with no error anywhere. Three independent
 // gates now catch the class:
 //
-//   - validateSnapshotPolicyInvariant (builder): a full build whose
-//     compiled config carries >=1 security policy rule must publish a
-//     non-empty Policies slice whose length equals Summary.PolicyCount.
+//   - validateSnapshotPolicyInvariant (builder): the published policy
+//     set must equal the effective POST-QUARANTINE set derived from the
+//     compiled config (a fully-quarantined config legitimately expects
+//     zero; non-quarantined rules vanishing still fails).
 //   - the requestApplySnapshotPreparedLocked send-site gate (see
-//     apply_snapshot_identity_9520.go): any snapshot whose
-//     Summary.PolicyCount != len(Policies) never reaches the helper.
-//   - the Rust helper (userspace-dp snapshot apply): policy_count>0 with
-//     empty policies increments snapshot_policy_mismatch_total and the
-//     whole apply is refused, keeping prior policies.
+//     apply_snapshot_identity_9520.go): len(Policies) must agree with
+//     BOTH the snapshot's self-declared Summary.PolicyCount AND the
+//     manager's stamped expectation from the last full Compile — so
+//     zeroing both transmitted fields (0 == 0) still refuses.
+//   - the Rust helper (userspace-dp snapshot apply): a count mismatch,
+//     or an empty policy install over a non-empty installed set,
+//     increments snapshot_policy_mismatch_total and the whole apply is
+//     refused, keeping prior policies.
 //
 // errSnapshotPolicyMismatch marks a snapshot send refused because its
 // published policy set disagrees with its own Summary.PolicyCount. Like
@@ -53,63 +57,68 @@ func firstPolicyZonePair(snap *ConfigSnapshot, cfg *config.Config) string {
 	return ""
 }
 
-// compiledPolicyRuleCount counts the RAW security policy rules the
-// compiled config carries: every zone-pair rule plus every global rule,
-// before lowering/quarantine. It is the builder-side ground truth for
-// "this config has policies" — lowering may legitimately drop rules only
-// via zone quarantine, which resyncs Summary.PolicyCount afterwards.
-func compiledPolicyRuleCount(cfg *config.Config) int {
+// expectedPolicyCount returns the effective POST-QUARANTINE rule count
+// a full build of cfg must publish: lower the compiled rules, scrub the
+// ones zone quarantine removes (the exact scrub quarantineCollidingZones
+// applies — policySnapshotAfterZoneQuarantine), and count the
+// survivors. This is the correct ground truth for the builder gate: a
+// config whose every rule is legitimately quarantined expects ZERO
+// published policies (TestBuildSnapshotDropsDanglingGlobalMatchZone),
+// while the 670274c712 dropped-field shape — non-quarantined rules
+// vanishing between lowering and the literal — still disagrees.
+func expectedPolicyCount(cfg *config.Config) (int, error) {
 	if cfg == nil {
-		return 0
+		return 0, nil
 	}
-	n := len(cfg.Security.GlobalPolicies)
-	for _, zp := range cfg.Security.Policies {
-		if zp != nil {
-			n += len(zp.Policies)
-		}
+	policies, err := buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, nil, nil, nil, false)
+	if err != nil {
+		return 0, err
 	}
-	return n
+	surviving, _ := policySnapshotAfterZoneQuarantine(cfg, policies)
+	return len(surviving), nil
 }
 
 // validateSnapshotPolicyInvariant is the builder-layer gate. It runs on
-// the post-quarantine snapshot, so Summary.PolicyCount already equals
-// len(Policies) for every legitimate build (the literal sets both from
-// the same slice; quarantine resyncs after scrubbing). A violation here
-// means the builder itself drifted — the exact #15742 mechanism — so the
-// build fails closed and the prior snapshot stays enforced.
+// the post-quarantine snapshot and checks it against the post-quarantine
+// ground truth (expectedPolicyCount), NOT the raw authored rule count:
+// quarantine legitimately scrubs rules and resyncs Summary.PolicyCount,
+// so a fully-scrubbed build is 0 == 0 == 0 and passes. A violation means
+// the builder itself drifted between lowering and publication — the
+// exact #15742 mechanism — so the build fails closed and the prior
+// snapshot stays enforced.
 func validateSnapshotPolicyInvariant(snap *ConfigSnapshot, cfg *config.Config) error {
 	if snap == nil {
 		return nil
 	}
-	if snap.Summary.PolicyCount != len(snap.Policies) {
-		slog.Error("userspace: refusing to publish snapshot: summary policy count does not match published policies",
-			"policy_count", snap.Summary.PolicyCount,
-			"policies_len", len(snap.Policies),
-			"first_zone_pair", firstPolicyZonePair(snap, cfg),
-			"generation", snap.Generation)
-		return fmt.Errorf("%w: summary policy_count=%d but snapshot carries %d policies (first zone pair %s)",
-			errSnapshotPolicyMismatch, snap.Summary.PolicyCount, len(snap.Policies), firstPolicyZonePair(snap, cfg))
+	expected, err := expectedPolicyCount(cfg)
+	if err != nil {
+		return fmt.Errorf("%w: cannot derive expected policy count: %v", errSnapshotPolicyMismatch, err)
 	}
-	if compiled := compiledPolicyRuleCount(cfg); compiled > 0 && len(snap.Policies) == 0 {
-		slog.Error("userspace: refusing to publish snapshot: compiled config carries security policy rules but snapshot policies are empty",
-			"compiled_policy_rules", compiled,
+	if snap.Summary.PolicyCount != len(snap.Policies) || len(snap.Policies) != expected {
+		slog.Error("userspace: refusing to publish snapshot: published policies disagree with the post-quarantine policy set",
+			"expected_policy_count", expected,
 			"policy_count", snap.Summary.PolicyCount,
 			"policies_len", len(snap.Policies),
 			"first_zone_pair", firstPolicyZonePair(snap, cfg),
 			"generation", snap.Generation)
-		return fmt.Errorf("%w: compiled config carries %d security policy rules (first zone pair %s) but snapshot policies are empty",
-			errSnapshotPolicyMismatch, compiled, firstPolicyZonePair(snap, cfg))
+		return fmt.Errorf("%w: expected %d policies after quarantine but snapshot carries %d (summary policy_count=%d, first zone pair %s)",
+			errSnapshotPolicyMismatch, expected, len(snap.Policies), snap.Summary.PolicyCount, firstPolicyZonePair(snap, cfg))
 	}
 	return nil
 }
 
-// validateSnapshotForSend is the send-site gate: it refuses any snapshot
-// whose Summary.PolicyCount disagrees with the policies it actually
-// carries, whatever builder path produced it (full Compile, partial
-// republish clones, hand-built publishers). It needs no Config: the wire
-// carries both numbers, and their disagreement is self-evidently a
-// dropped-field defect.
-func validateSnapshotForSend(snap *ConfigSnapshot) error {
+// validateSnapshotForSend is the send-site gate, with the manager's
+// stamped expectation as ground truth. Manager.Compile stamps
+// expectedPolicyCount (post-quarantine) on every successful full build;
+// partial publishers clone the retained snapshot and must preserve that
+// expectation. A send whose len(Policies) disagrees with EITHER the
+// snapshot's self-declared Summary.PolicyCount OR the stamped count is
+// refused known-unsent — so zeroing BOTH transmitted fields (0 == 0)
+// still refuses whenever the last full Compile expected policies.
+// Before any stamp (expected < 0: no full Compile yet), only the
+// self-consistency arm applies; the Rust helper's installed-set gate is
+// the backstop there.
+func (m *Manager) validateSnapshotForSend(snap *ConfigSnapshot) error {
 	if snap == nil {
 		return nil
 	}
@@ -121,6 +130,16 @@ func validateSnapshotForSend(snap *ConfigSnapshot) error {
 			"generation", snap.Generation)
 		return fmt.Errorf("%w: summary policy_count=%d but snapshot carries %d policies (first zone pair %s)",
 			errSnapshotPolicyMismatch, snap.Summary.PolicyCount, len(snap.Policies), firstPolicyZonePair(snap, snap.Config))
+	}
+	if m.expectedPolicyCount >= 0 && len(snap.Policies) != m.expectedPolicyCount {
+		slog.Error("userspace: refusing snapshot send: published policies disagree with the last full Compile expectation",
+			"expected_policy_count", m.expectedPolicyCount,
+			"policy_count", snap.Summary.PolicyCount,
+			"policies_len", len(snap.Policies),
+			"first_zone_pair", firstPolicyZonePair(snap, snap.Config),
+			"generation", snap.Generation)
+		return fmt.Errorf("%w: last full Compile expects %d policies but snapshot carries %d (summary policy_count=%d, first zone pair %s)",
+			errSnapshotPolicyMismatch, m.expectedPolicyCount, len(snap.Policies), snap.Summary.PolicyCount, firstPolicyZonePair(snap, snap.Config))
 	}
 	return nil
 }

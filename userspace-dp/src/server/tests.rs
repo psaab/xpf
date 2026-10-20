@@ -2517,6 +2517,97 @@ fn apply_snapshot_policy_count_mismatch_is_refused_and_counted() {
     assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
 }
 
+/// HARDENING (#15742 follow-up, joint omission): both transmitted fields
+/// zeroed (policy_count=0, policies=[]) over a non-empty installed set
+/// must ALSO refuse — there is no full-clear signal on the wire. A
+/// legitimate empty FIRST apply (nothing installed) still succeeds.
+#[test]
+fn apply_snapshot_both_zeroed_over_installed_is_refused() {
+    use crate::protocol::snapshot::SnapshotSummary;
+    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    let policy = || PolicyRuleSnapshot {
+        rule_id: "lan->wan/allow-all".to_string(),
+        name: "allow-all".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..PolicyRuleSnapshot::default()
+    };
+    let zones = || {
+        vec![
+            crate::ZoneSnapshot {
+                name: "lan".to_string(),
+                id: 100,
+                ..crate::ZoneSnapshot::default()
+            },
+            crate::ZoneSnapshot {
+                name: "wan".to_string(),
+                id: 200,
+                ..crate::ZoneSnapshot::default()
+            },
+        ]
+    };
+    // Legitimate empty first apply: nothing installed yet.
+    {
+        let fresh = new_state(ProcessStatus::default());
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            generated_at: chrono::Utc::now(),
+            zones: zones(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(fresh, request);
+        assert!(response.ok, "empty first apply must succeed: {}", response.error);
+    }
+    // Seed one installed policy.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                policy_count: 1,
+                ..SnapshotSummary::default()
+            },
+            policies: vec![policy()],
+            zones: zones(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(response.ok, "seed apply must succeed: {}", response.error);
+    }
+    // Both-zeroed partial shape over the installed set.
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 2,
+        generated_at: chrono::Utc::now(),
+        summary: SnapshotSummary::default(),
+        policies: Vec::new(),
+        zones: zones(),
+        ..ConfigSnapshot::default()
+    });
+    let response = run_request(state.clone(), request);
+    assert!(!response.ok, "both-zeroed apply over installed policies must be refused");
+    assert!(
+        response.error.contains("no full-clear signal"),
+        "unexpected error: {}",
+        response.error
+    );
+    let guard = state.lock().expect("state");
+    assert_eq!(guard.snapshot_policy_mismatch_total, 1);
+    assert_eq!(guard.status.last_snapshot_generation, 1);
+    let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
+    assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
+}
+
 #[test]
 fn apply_snapshot_integrity_preflight_rejects_without_mutating_state() {
     use crate::{AddressBookSnapshot, ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};

@@ -392,6 +392,13 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	snap.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
 	snap.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
 	snap.ColdPathSampleMask = m.coldPathSampleMask
+	// HARDENING (#15742 follow-up): stamp the send-site ground truth from
+	// this full build. The builder invariant already validated
+	// len(snap.Policies) against the post-quarantine ground truth, so the
+	// built count IS the expectation every later partial publish must
+	// preserve. Stamped BEFORE applyCompiledSnapshot so even this
+	// Compile's own send is checked against it.
+	m.expectedPolicyCount = len(snap.Policies)
 	m.mu.Unlock()
 	compiled, applyErr := m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
 	if replayInFlight {

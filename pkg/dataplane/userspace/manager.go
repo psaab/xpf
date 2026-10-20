@@ -341,6 +341,18 @@ type Manager struct {
 	// xpf_userspace_zone_id_collision gauge. nil/empty means no active
 	// collision.
 	lastZoneIDCollisions []string
+	// expectedPolicyCount is the HARDENING (#15742 follow-up) send-site
+	// ground truth: the effective post-quarantine policy count of the
+	// last SUCCESSFUL full Compile (stamped in Compile from the built
+	// snapshot, whose count the builder invariant already validated).
+	// Partial publishers clone the retained snapshot and must preserve
+	// this expectation; the send gate refuses any publish whose
+	// len(Policies) differs — including a snapshot zeroing BOTH Policies
+	// and Summary.PolicyCount. Guarded by m.mu (the send site holds it).
+	// Negative = no full Compile has stamped yet (gate falls back to
+	// self-consistency + the helper's installed-set gate). Initialized
+	// to -1 by New().
+	expectedPolicyCount int
 	// policySchedulerActive is the APPLIED scheduler-state view exposed to
 	// show surfaces. It changes only after a snapshot carrying the state has
 	// been accepted by the helper; a failed/deferred publication leaves it at
@@ -902,6 +914,7 @@ func New() *Manager {
 	bpfShim.SelectUserspaceXDPShimEntryProgram()
 	m := &Manager{
 		bpfShim:             bpfShim,
+		expectedPolicyCount: -1,
 		configuredMode:      ModeUserspaceCompat,
 		haGroups:            make(map[int]HAGroupStatus),
 		haWatchdogMapWrite:  bpfShim.UpdateHAWatchdog,
