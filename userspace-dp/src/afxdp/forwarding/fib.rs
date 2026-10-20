@@ -966,6 +966,9 @@ fn lookup_forwarding_resolution_v4_inner(
                     ecmp_flow_hash,
                     suppress_nat_local,
                 );
+                if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                    continue;
+                }
                 return resolved;
             }
         }

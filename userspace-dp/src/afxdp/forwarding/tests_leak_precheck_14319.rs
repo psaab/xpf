@@ -428,3 +428,191 @@ fn tunnel_leak_target_still_selected_when_tunnels_allowed_v4_14319() {
         "tunnel route counts as a route for incarnation when tunnels allowed"
     );
 }
+
+/// #15934 mixed-topology regression: the FIRST leak is precheck-admitted
+/// only via a longer-prefix tunnel-only route (so the recursive target
+/// LPM selects it and, with `allow_tunnels == false`, returns NoRoute),
+/// while a shorter-prefix physical route also exists in that same target
+/// table. Pre-#15934 the v4 walk returned that NoRoute terminally and
+/// never tried the second leak; the walk must continue to the second
+/// leak's physical route. Also covers the single-leak fall-through to
+/// the source table when the tunnel route is the longer prefix.
+#[test]
+fn mixed_tunnel_longest_prefix_falls_to_next_leak_v4_15934() {
+    let dst = Ipv4Addr::new(172, 16, 100, 1);
+    let mut state = ForwardingState::default();
+    state.leak_rules_v4.insert(
+        "overlay.inet.0".to_string(),
+        vec![
+            LeakRuleV4 {
+                prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+                next_table: "spoke.inet.0".to_string(),
+                rule_priority: 1,
+                incarnation: 91,
+            },
+            LeakRuleV4 {
+                prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+                next_table: "hub.inet.0".to_string(),
+                rule_priority: 2,
+                incarnation: 92,
+            },
+        ],
+    );
+    // spoke: a /25 tunnel-only route (longest prefix, wins the target
+    // LPM and NoRoutes under allow_tunnels=false) covering dst, plus a
+    // /24 physical route that the target LPM never reaches because it
+    // stops at the longest prefix tier. The precheck admits spoke via
+    // either row (any()), so only the recursive-NoRoute continue —
+    // not the precheck — can save this topology.
+    state.routes_v4.insert(
+        "spoke.inet.0".to_string(),
+        vec![
+            RouteEntryV4::single(
+                PrefixV4::from_net("172.16.100.0/25".parse().unwrap()),
+                0,
+                7,
+                None,
+                false,
+                String::new(),
+                10,
+            ),
+            RouteEntryV4::single(
+                PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+                8,
+                0,
+                Some(Ipv4Addr::new(10, 8, 0, 1)),
+                false,
+                String::new(),
+                10,
+            ),
+        ],
+    );
+    state.connected_v4.push(connected_v4(
+        "spoke.inet.0",
+        "10.8.0.0/24",
+        Ipv4Addr::new(10, 8, 0, 1),
+        8,
+    ));
+    state.neighbors.insert(
+        (8, IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1))),
+        NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x88],
+        },
+    );
+    state.egress.insert(8, egress(8));
+    // hub: physical route out ifindex 9.
+    state.connected_v4.push(connected_v4(
+        "hub.inet.0",
+        "10.9.0.0/24",
+        Ipv4Addr::new(10, 9, 0, 1),
+        9,
+    ));
+    state.routes_v4.insert(
+        "hub.inet.0".to_string(),
+        vec![RouteEntryV4::single(
+            PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+            9,
+            0,
+            Some(Ipv4Addr::new(10, 9, 0, 1)),
+            false,
+            String::new(),
+            10,
+        )],
+    );
+    state.neighbors.insert(
+        (9, IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1))),
+        NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        },
+    );
+    state.egress.insert(9, egress(9));
+
+    let resolved =
+        lookup_forwarding_resolution_v4(&state, None, dst, "overlay.inet.0", 0, false, None)
+            .resolution;
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "mixed tunnel/non-tunnel first leak must not blackhole v4 (#15934)"
+    );
+    assert_eq!(
+        resolved.egress_ifindex, 9,
+        "walk must continue past the tunnel-only longest prefix to the hub leak"
+    );
+}
+
+/// #15934 control: a terminal (non-NoRoute) result from a leak target —
+/// here a DiscardRoute — must NOT be continued past. The restored
+/// continue is NoRoute-only, mirroring v6.
+#[test]
+fn leak_terminal_discard_is_not_continued_v4_15934() {
+    let dst = Ipv4Addr::new(172, 16, 100, 1);
+    let mut state = ForwardingState::default();
+    state.leak_rules_v4.insert(
+        "overlay.inet.0".to_string(),
+        vec![
+            LeakRuleV4 {
+                prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+                next_table: "spoke.inet.0".to_string(),
+                rule_priority: 1,
+                incarnation: 93,
+            },
+            LeakRuleV4 {
+                prefix: PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+                next_table: "hub.inet.0".to_string(),
+                rule_priority: 2,
+                incarnation: 94,
+            },
+        ],
+    );
+    // spoke: discard route for dst.
+    let mut discard = RouteEntryV4::single(
+        PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+        0,
+        0,
+        None,
+        false,
+        String::new(),
+        10,
+    );
+    discard.discard = true;
+    state
+        .routes_v4
+        .insert("spoke.inet.0".to_string(), vec![discard]);
+    // hub would forward, but the discard is terminal and must win.
+    state.connected_v4.push(connected_v4(
+        "hub.inet.0",
+        "10.9.0.0/24",
+        Ipv4Addr::new(10, 9, 0, 1),
+        9,
+    ));
+    state.routes_v4.insert(
+        "hub.inet.0".to_string(),
+        vec![RouteEntryV4::single(
+            PrefixV4::from_net("172.16.100.0/24".parse().unwrap()),
+            9,
+            0,
+            Some(Ipv4Addr::new(10, 9, 0, 1)),
+            false,
+            String::new(),
+            10,
+        )],
+    );
+    state.neighbors.insert(
+        (9, IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1))),
+        NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        },
+    );
+    state.egress.insert(9, egress(9));
+
+    let resolved =
+        lookup_forwarding_resolution_v4(&state, None, dst, "overlay.inet.0", 0, false, None)
+            .resolution;
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "a terminal discard from the first leak must not be continued past (#15934)"
+    );
+}
+

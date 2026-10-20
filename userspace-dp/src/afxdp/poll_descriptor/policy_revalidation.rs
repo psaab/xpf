@@ -980,7 +980,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         &forward_query,
                         source_nat_static,
                         now_ns,
-                        forward_decision.nat.source_nat_icmp,
+                        packet_icmp.or(forward_decision.nat.source_nat_icmp),
                     );
                     return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
