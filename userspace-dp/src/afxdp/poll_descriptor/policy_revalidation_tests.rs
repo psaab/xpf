@@ -2832,6 +2832,48 @@ fn reverse_snat_hit_13652(
     )
 }
 
+/// #15958 fold: fabric-shaped variant of `reverse_snat_hit_13652`. The
+/// companion row keeps its own (zeroed) ingress identity and the packet
+/// arrives on fabric ifindex 4, so the provenance-less synced-companion
+/// shape reaches the gate unchanged instead of being rewritten to the
+/// VLAN-200 observation the ordinary helper simulates.
+fn reverse_snat_hit_fabric_15958(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    case: &(
+        SessionKey,
+        SessionKey,
+        SessionDecision,
+        SessionMetadata,
+        SessionDecision,
+        SessionMetadata,
+        SessionOrigin,
+        Option<bool>,
+    ),
+) -> Option<PolicyRevocation> {
+    let flow = SessionFlow {
+        src_ip: case.1.src_ip,
+        dst_ip: case.1.dst_ip,
+        forward_key: case.1.clone(),
+    };
+    let observed_metadata = case.5.clone_without_policy_counter();
+    source_nat_revocation_on_session_hit_with_ingress(
+        forwarding,
+        sessions,
+        &case.1,
+        &observed_metadata,
+        4,
+        0,
+        case.4,
+        &flow,
+        case.6,
+        case.7,
+        None,
+        1_000_000_000,
+        None,
+    )
+}
+
 /// #13652: a keep-transient reverse hit (the reverse row is not in the
 /// worker's local table) must still revalidate its forward companion's
 /// translation when the SNAT rule has been withdrawn, exactly like the
@@ -3337,6 +3379,81 @@ fn reverse_without_companion_nptv6_rederived_14315() {
 /// with NO source rewrite and no NAT64/NPTv6 translation is deliberately
 /// permitted through to the ordinary policy gate despite missing forward
 /// VLAN provenance.
+#[test]
+/// #15958 fold (1): the fabric decline must NOT bypass the #13910
+/// missing-provenance fail-close for NAT64/NPTv6 rows. Same shape as
+/// `reverse_without_companion_nat64_nptv6_missing_provenance_fails_closed_13910`
+/// but with `fabric_ingress = true` and no recorded NAT scope — the
+/// exact row class the #15958 exemption declines for plain SNAT. The
+/// type guard must keep these revoked: their validator exempts
+/// rule-table re-derivation (NAT64) or re-derives from live prefix
+/// state (NPTv6, #14315), so provenance is their only guard.
+#[test]
+fn fabric_nat64_nptv6_missing_provenance_still_fails_closed_15958() {
+    for (shape, nat64, nptv6) in [
+        ("nat64", true, false),
+        ("nptv6", false, true),
+        ("nat64+nptv6", true, true),
+    ] {
+        let forwarding = reverse_snat_forwarding_13771(false);
+        let mut case = reverse_snat_case_from_production_13771(&forwarding);
+        case.5.forward_ingress_vlan_id = None;
+        case.5.fabric_ingress = true;
+        case.5.nat_scope_ifindex = None;
+        assert!(
+            case.5.forward_ingress_vlan_id.is_none() && case.5.fabric_ingress,
+            "{shape}: fixture must be fabric with missing VLAN provenance"
+        );
+        case.4.nat.nat64 = nat64;
+        case.4.nat.nptv6 = nptv6;
+        case.4.nat.rewrite_src = Some("203.0.113.10".parse().expect("translated source"));
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        let revocation = reverse_snat_hit_fabric_15958(&forwarding, &mut sessions, &case)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{shape}: fabric NAT64/NPTv6 without forward VLAN provenance \
+                     must still fail closed (#13910 type guard)"
+                )
+            });
+        assert!(revocation.canonical_key.is_none());
+        assert!(matches!(
+            revocation.reason,
+            PolicyRevocationReason::StaleSourceNat
+        ));
+    }
+}
+
+/// #15958 fold (2): the V2 synced-companion shape — scope `Some`,
+/// `forward_ingress_vlan_id` `None` BY CONSTRUCTION
+/// (`build_synced_session_entry` stamps scope at session_sync.rs:581
+/// while hardcoding VLAN provenance `None` at :496, and reverse
+/// synthesis stamps it only from an observed forward ingress, which a
+/// fabric-admitted forward never has). This is the likely LIVE path:
+/// it must decline like the scope-`None` shape, while the scoped
+/// #13789 controls (provenance present) stay green.
+#[test]
+fn fabric_scoped_synced_companion_without_vlan_provenance_survives_15958() {
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut case = reverse_snat_case_from_production_13771(&forwarding);
+    case.5.forward_ingress_vlan_id = None;
+    case.5.fabric_ingress = true;
+    case.5.nat_scope_ifindex = Some(11);
+    case.7 = Some(false);
+    assert!(
+        case.5.forward_ingress_vlan_id.is_none()
+            && case.5.fabric_ingress
+            && case.5.nat_scope_ifindex.is_some(),
+        "fixture must be the V2 scoped synced-companion shape"
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(
+        reverse_snat_hit_fabric_15958(&forwarding, &mut sessions, &case).is_none(),
+        "fabric scoped synced companion without VLAN provenance must survive (#15958 V2)"
+    );
+}
+
 #[test]
 fn reverse_without_companion_no_rewrite_missing_provenance_permitted_13910() {
     let forwarding = reverse_snat_forwarding_13771(false);

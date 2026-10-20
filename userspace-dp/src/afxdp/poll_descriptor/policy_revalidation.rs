@@ -937,22 +937,27 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                     {
                         return None;
                     }
-                    // #15958: a fabric-arriving reverse row carries no
-                    // forward ingress VLAN provenance by construction: reverse
-                    // synthesis zeroes its own ingress identity
-                    // (`forward_ingress_vlan_id` is stamped only from an
-                    // observed forward ingress) and HA session sync does not
-                    // carry the field, so an HA-synced companion installed
-                    // locally always presents `None` here. The #13789
-                    // fail-closed arm below exists for rows that DO carry
-                    // (or should carry) that provenance; for a
-                    // fabric-ingress row with no recorded NAT scope there is
-                    // no scope to rebuild, so — exactly like the
-                    // scope-decline at the tail of this arm — decline to
-                    // revoke on scope grounds and keep the session. A row
-                    // WITH a recorded NAT scope still fails closed below:
-                    // its translation remains judgeable.
-                    if metadata.fabric_ingress && metadata.nat_scope_ifindex.is_none() {
+                    // #15958 fold: a companion-less fabric/synced reverse
+                    // row carries no forward VLAN provenance by construction:
+                    // reverse synthesis zeroes the companion ingress identity,
+                    // and HA sync never carries `forward_ingress_vlan_id`.
+                    // That absence is structural, not staleness evidence.
+                    // Decline this provenance-only revocation for a plain
+                    // dynamic source-NAT row in exactly that shape (fabric
+                    // row, zeroed ingress identity, no forward VLAN), for
+                    // both the scope-less companion and the scoped V2
+                    // companion. Rows with an observed identity or recorded
+                    // forward VLAN keep the fail-close below; static rows
+                    // keep their own validity arm. NAT64/NPTv6 are excluded:
+                    // their #13910 missing-provenance fail-close is their
+                    // only stale-translation guard and must not be bypassed.
+                    if metadata.fabric_ingress
+                        && metadata.ingress_ifindex == 0
+                        && metadata.forward_ingress_vlan_id.is_none()
+                        && forward_decision.nat.rewrite_src.is_some()
+                        && source_nat_static != Some(true)
+                        && !(forward_decision.nat.nat64 || forward_decision.nat.nptv6)
+                    {
                         return None;
                     }
                     let Some(forward_ingress_vlan_id) = metadata.forward_ingress_vlan_id else {

@@ -1,16 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Fix split-RG fabric return blackhole: an HA-synced reverse session
-    whose forward half is not installed locally was revoked as
-    StaleSourceNat on its first fabric-arriving packet, because reverse
-    synthesis carries no forward ingress VLAN provenance and the
-    sessionless revalidation arm treated that absence as fail-closed.
-    Fabric-ingress reverse rows with no recorded NAT scope now decline
-    revocation on scope grounds (as the arm's tail already did), so
-    return traffic egresses the LAN binding again. Also count cached
-    `then discard`/`then reject` flow-cache drops as forward build
-    failures with a `transit_output_filter_drop` exception-ring entry,
-    mirroring the slow path (#15958, #15742).
+  * Fix split-RG fabric return blackhole: a companion-less fabric/
+    synced reverse row (scope-less or scoped V2 companion) was revoked
+    as StaleSourceNat on its first fabric-arriving packet because
+    reverse synthesis and HA sync carry no forward ingress VLAN
+    provenance. The provenance-only revocation now declines for a plain
+    dynamic source-NAT row in exactly that construction shape, while
+    NAT64/NPTv6 rows keep the #13910 missing-provenance fail-close.
+    Also count cached `then discard`/`then reject` flow-cache drops
+    (early cached-drop arm) as forward build failures with a
+    `transit_output_filter_drop` exception-ring entry, mirroring the
+    slow path (#15958, #15742).
 
 xpf (0.0.0) unstable; urgency=medium
 
