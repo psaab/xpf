@@ -501,7 +501,23 @@ func walkGroupToContext(groupChildren []*Node, ancestorPath [][]string) []*Node 
 		matched := false
 		ownsNext := false
 		for _, child := range current {
+			// #15716: a packed group leaf (`system services ssh
+			// root-login allow;`) is a leaf, but it names the context
+			// node in its Keys. Unpack it to its braced shape so the
+			// walk can descend into it instead of skipping it.
 			if child.IsLeaf {
+				if synth := synthesizePackedSystemRootLogin15716(child); synth != nil && keysEqual(synth.Keys, pathKeys) {
+					if !matched {
+						next = synth.Children
+						matched = true
+						continue
+					}
+					if !ownsNext {
+						next = append([]*Node(nil), next...)
+						ownsNext = true
+					}
+					next = append(next, synth.Children...)
+				}
 				continue
 			}
 			// Exact match or wildcard match (group keys may contain <*>).
@@ -614,6 +630,7 @@ func expandLevelRefs15033(nodes *[]*Node, groups map[string]*Node, ancestorPath 
 				}
 				body := cloneNodes(cached)
 				markDefaultPolicyGroupBlocks12823(budget, ancestorPath, body)
+				markGroupRootLoginLeaves14447(budget, ancestorPath, body)
 				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
 				prevOrigin15033 := budget.applyOriginLevel15033
 				budget.applyOriginLevel15033 = len(ancestorPath)
@@ -645,6 +662,7 @@ func expandLevelRefs15033(nodes *[]*Node, groups map[string]*Node, ancestorPath 
 				tagNodesInherited(cloned, name)
 			}
 			markDefaultPolicyGroupBlocks12823(budget, ancestorPath, cloned)
+			markGroupRootLoginLeaves14447(budget, ancestorPath, cloned)
 			if haveExcept {
 				addNodeContrib9862(cloned, []string{name})
 			}
@@ -664,6 +682,7 @@ func expandLevelRefs15033(nodes *[]*Node, groups map[string]*Node, ancestorPath 
 				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
 			}
 			markDefaultPolicyGroupBlocks12823(budget, ancestorPath, body)
+			markGroupRootLoginLeaves14447(budget, ancestorPath, body)
 			prevOrigin15033 := budget.applyOriginLevel15033
 			budget.applyOriginLevel15033 = len(ancestorPath)
 			err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards)
@@ -835,6 +854,22 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			}
 		}
 		if s.IsLeaf {
+			// #15716: a group packed `system services ssh root-login
+			// <val>;` leaf at the top level has no leaf peer (the inline
+			// `system` is a braced container). Synthesise its braced shape
+			// and merge it so the value reaches the compiler and gate.
+			if isRootLoginLeaf14447(ancestorPath, s) {
+				if synth := synthesizePackedSystemRootLogin15716(s); synth != nil {
+					if err := budget.charge(countNodes([]*Node{synth})); err != nil {
+						return err
+					}
+					markGroupRootLoginLeaves14447(budget, ancestorPath, []*Node{synth})
+					if err := mergeNodes(dst, []*Node{synth}, ancestorPath, budget, group, vars, level, haveExcept, deferWildcards); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			// #14433 leaf arm: a group `then accept;` leaf beside an inline
 			// `then reject;` leaf (or container) at statement level.
 			if peer := policyStatementThenPeer14433(ancestorPath, *dst, s); peer != nil && peer != s {
@@ -1005,6 +1040,11 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						addNodeContrib9862(body, contrib)
 					}
 					budget.notePromoted9855(peer)
+					// #15716: if the peer was group-adopted and s carries a
+					// packed root-login tail, the synthesized root-login child
+					// in body inherits group provenance so a later group's
+					// conflicting value adopts beside it for the #14447 gate.
+					propagatePackedGroupRootLogin14447(budget, ancestorPath, peer, s, body)
 					appendDuplicateBlockMergeMarkersToLeaves9023(body, markers)
 					if err := budget.charge(countNodes(body)); err != nil {
 						return err
