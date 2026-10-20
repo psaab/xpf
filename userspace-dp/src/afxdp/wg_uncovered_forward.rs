@@ -241,9 +241,10 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
                 // ihl..ihl+4. Hashing those bytes steers fragments of one
                 // datagram to different workers. Use tuple-only (0,0).
                 let frag_offset = u16::from_be_bytes([inner[6] & 0x1f, inner[7]]);
+                let fragmented = frag_offset != 0 || inner[6] & 0x20 != 0;
                 let (src_port, dst_port) = match proto {
                     crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP
-                        if frag_offset == 0 && inner.len() >= ihl + 4 =>
+                        if !fragmented && inner.len() >= ihl + 4 =>
                     {
                         (
                             u16::from_be_bytes([inner[ihl], inner[ihl + 1]]),
@@ -260,7 +261,8 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
             // Fragment header (44) means only offset 0 carries ports.
             let mut proto = inner[6];
             let mut off = 40usize;
-            let mut frag_offset: u16 = 1;
+            let mut frag_offset: u16 = 0;
+            let mut fragmented = false;
             loop {
                 match proto {
                     0 | 43 | 60 if inner.len() >= off + 2 => {
@@ -276,6 +278,7 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
                     44 if inner.len() >= off + 8 => {
                         proto = inner[off];
                         frag_offset = (u16::from_be_bytes([inner[off + 2], inner[off + 3]]) >> 3) & 0x1fff;
+                        fragmented = true;
                         off += 8;
                         break;
                     }
@@ -294,7 +297,7 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
             }
             let (src_port, dst_port) = match proto {
                 crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP
-                    if frag_offset == 0 && inner.len() >= off + 4 =>
+                    if !fragmented && inner.len() >= off + 4 =>
                 {
                     (
                         u16::from_be_bytes([inner[off], inner[off + 1]]),
@@ -1369,5 +1372,14 @@ mod tests_15950_hash {
         let mut p=vec![0u8;48]; p[0]=0x60; p[6]=44; p[8..24].copy_from_slice(&[0x20,0x01,0xd,0xb8,0,0,0,0,0,0,0,0,0,0,0,1]); p[24..40].copy_from_slice(&[0x20,0x01,0xd,0xb8,0,0,0,0,0,0,0,0,0,0,0,2]); p[40]=17; p[42..44].copy_from_slice(&((185u16<<3).to_be_bytes())); p[44]=0xde;
         let mut q=p.clone(); q[44]=0x11; q[45]=0x22; q[46]=0x33; q[47]=0x44;
         assert_eq!(wg_uncovered_flow_hash(&p), wg_uncovered_flow_hash(&q), "v6 non-first must not hash payload");
+        // first-vs-tail IPv4 affinity
+        let first=v4(0,true); // actually unfragmented helper; make fragmented first below
+        let mut ff=vec![0u8;40]; ff[0]=0x45; ff[6]=0x20; ff[9]=17; ff[12..16].copy_from_slice(&[10,0,0,1]); ff[16..20].copy_from_slice(&[10,0,0,2]); ff[20..24].copy_from_slice(&[0,53,0,99]);
+        assert_eq!(wg_uncovered_flow_hash(&ff), wg_uncovered_flow_hash(&a), "v4 first and tail fragments must steer together");
+        // Unfragmented v6 port entropy
+        let mut u=vec![0u8;44]; u[0]=0x60; u[6]=17; u[8..24].copy_from_slice(&[0x20,0x01,0xd,0xb8,0,0,0,0,0,0,0,0,0,0,0,1]); u[24..40].copy_from_slice(&[0x20,0x01,0xd,0xb8,0,0,0,0,0,0,0,0,0,0,0,2]); u[40..42].copy_from_slice(&1111u16.to_be_bytes()); u[42..44].copy_from_slice(&53u16.to_be_bytes());
+        let mut u2=u.clone(); u2[40..42].copy_from_slice(&2222u16.to_be_bytes());
+        assert_ne!(wg_uncovered_flow_hash(&u), wg_uncovered_flow_hash(&u2), "unfragmented v6 must hash ports");
+        let _=first;
     }
 }

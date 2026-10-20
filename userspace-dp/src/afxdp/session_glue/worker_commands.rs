@@ -615,6 +615,16 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let mut deferred = Vec::new();
                         for (index, item) in items.iter().enumerate() {
+                            // #15966: a worker that does not own the TCP/1723
+                            // session still holds broadcast PPTP associations
+                            // for its channel; forget them even when the
+                            // policy item does not apply locally.
+                            if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(&item.key) {
+                                sessions.pptp_mut().forget_control_channel(ch);
+                                if !deleted_pptp_control_channels.contains(&ch) {
+                                    deleted_pptp_control_channels.push(ch);
+                                }
+                            }
                             if commands::handle_remove_policy_item(
                                 sessions,
                                 session_map,
@@ -693,8 +703,12 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 // #7699: learn the association on THIS worker. A collision is
                 // refused rather than merged (two calls sharing one handle
                 // share one session), and counted so a refusal is not silent.
-                if let Err(e) = sessions.pptp_mut().install(call, control, learned_ns) {
-                    debug_log!("PPTP association refused: {:?}", e);
+                // #15950: a command queued while enabled must not install
+                // after the ALG is disabled.
+                if forwarding.pptp_enabled() {
+                    if let Err(e) = sessions.pptp_mut().install(call, control, learned_ns) {
+                        debug_log!("PPTP association refused: {:?}", e);
+                    }
                 }
             }
             WorkerCommand::ForgetPptpCall(handle) => {

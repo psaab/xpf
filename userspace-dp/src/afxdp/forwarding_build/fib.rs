@@ -1302,51 +1302,25 @@ fn infer_connected_route_target_v4(
     ip: Ipv4Addr,
     table: &str,
 ) -> Option<(i32, u16)> {
-    // #4446: table-scoped (see history); #15950: peer-owned prefixes are
-    // suppressed from connected_v4, so fall back to the by-ifindex table
-    // scoped by routing-instance ownership of `table`.
-    if let Some(hit) = state
+    // #4446: Gateway -> egress-interface inference at FIB-build time:
+    // "which interface in the ROUTE'S OWN table can reach this next-hop
+    // gateway IP". The connected scan is filtered on `entry.table == table`
+    // (the canonical install table threaded from `populate_routes`),
+    // mirroring the #2388 lookup-site connected filter. Without the filter
+    // the scan was GLOBAL and a bare-gateway static route in VRF A could
+    // bind VRF B's overlapping connected prefix -> cross-VRF wrong egress:
+    // the inferred ifindex is baked into `RouteEntryV4.next_hops` and used
+    // verbatim at lookup, so the lookup-time #2388 filter could NOT correct
+    // it. A route-leak / next-table cross-VRF reach is not affected: a
+    // leaked route is emitted as a `NextTable` snapshot with no forwarding
+    // next-hop (never reaches this inference), and the recursion re-resolves
+    // in the target table's own scope. `connected_v4` is sorted
+    // longest-prefix-first, so the first in-table match is the most specific.
+    state
         .connected_v4
         .iter()
         .find(|entry| entry.table == table && entry.prefix.contains(ip))
         .map(|entry| (entry.ifindex, entry.tunnel_endpoint_id))
-    {
-        return Some(hit);
-    }
-    let mut best: Option<(u8, i32, u16)> = None;
-    for (ifindex, prefixes) in &state.connected_v4_by_ifindex {
-        let instance = state
-            .ifindex_to_routing_instance
-            .get(ifindex)
-            .map(String::as_str)
-            .unwrap_or("");
-        let owns = if instance.is_empty() {
-            table == "inet.0"
-        } else {
-            table.len() == instance.len() + ".inet.0".len()
-                && table.starts_with(instance)
-                && table[instance.len()..] == *".inet.0"
-        };
-        if !owns {
-            continue;
-        }
-        for prefix in prefixes {
-            if prefix.contains(ip) {
-                let tunnel = state
-                    .tunnel_endpoint_by_ifindex
-                    .get(ifindex)
-                    .copied()
-                    .unwrap_or(0);
-                let cand = (prefix.prefix_len(), *ifindex, tunnel);
-                best = Some(match best {
-                    None => cand,
-                    Some(b) if cand.0 > b.0 || (cand.0 == b.0 && cand.1 < b.1) => cand,
-                    Some(b) => b,
-                });
-            }
-        }
-    }
-    best.map(|(_, ifindex, tunnel)| (ifindex, tunnel))
 }
 
 fn infer_connected_route_target_v6(
@@ -1355,6 +1329,16 @@ fn infer_connected_route_target_v6(
     table: &str,
 ) -> Option<(i32, u16)> {
     if ip.is_unicast_link_local() {
+        // #11322: the daemon adds a synthetic fe80::/64 candidate for every
+        // IPv6-capable interface. Mirror that with connected IPv6 rows in this
+        // table, not only rows whose observed prefix contains the gateway:
+        // link-local addresses may be absent from a snapshot. Address scope is
+        // carried from the interface snapshot: only RT_SCOPE_UNIVERSE (0) is
+        // an eligible candidate. This excludes incidental kernel LINK rows
+        // (such as networkd's automatic fe80 address) while preserving an
+        // explicitly configured link-local address, whose configured scope is
+        // Universe. As before, only infer when candidates collapse to one
+        // egress; returning the first sorted entry would forward ambiguously.
         let mut target: Option<(i32, u16)> = None;
         for entry in state
             .connected_v6
@@ -1368,84 +1352,17 @@ fn infer_connected_route_target_v6(
                 None => target = Some(candidate),
             }
         }
-        if target.is_some() {
-            return target;
-        }
-        // #15950: peer-owned link-local candidates live only by-ifindex;
-        // infer only when they collapse to one egress (scope unknown here,
-        // so require uniqueness across the table's instances).
-        let mut by_ifindex: Vec<i32> = Vec::new();
-        for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
-            let instance = state
-                .ifindex_to_routing_instance
-                .get(ifindex)
-                .map(String::as_str)
-                .unwrap_or("");
-            let owns = if instance.is_empty() {
-                table == "inet6.0"
-            } else {
-                table.len() == instance.len() + ".inet6.0".len()
-                    && table.starts_with(instance)
-                    && table[instance.len()..] == *".inet6.0"
-            };
-            if owns && !prefixes.is_empty() && !by_ifindex.contains(ifindex) {
-                by_ifindex.push(*ifindex);
-            }
-        }
-        return match by_ifindex.as_slice() {
-            [only] => Some((
-                *only,
-                state
-                    .tunnel_endpoint_by_ifindex
-                    .get(only)
-                    .copied()
-                    .unwrap_or(0),
-            )),
-            _ => None,
-        };
+        return target;
     }
-    if let Some(hit) = state
+
+    // #4446: table-scoped gateway inference — see
+    // `infer_connected_route_target_v4` for the full rationale. Global
+    // next-hops keep longest-prefix selection.
+    state
         .connected_v6
         .iter()
         .find(|entry| entry.table == table && entry.prefix.contains(ip))
         .map(|entry| (entry.ifindex, entry.tunnel_endpoint_id))
-    {
-        return Some(hit);
-    }
-    let mut best: Option<(u8, i32, u16)> = None;
-    for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
-        let instance = state
-            .ifindex_to_routing_instance
-            .get(ifindex)
-            .map(String::as_str)
-            .unwrap_or("");
-        let owns = if instance.is_empty() {
-            table == "inet6.0"
-        } else {
-            table.len() == instance.len() + ".inet6.0".len()
-                && table.starts_with(instance)
-                && table[instance.len()..] == *".inet6.0"
-        };
-        if !owns {
-            continue;
-        }
-        for prefix in prefixes {
-            if prefix.contains(ip) {
-                let tunnel = state
-                    .tunnel_endpoint_by_ifindex
-                    .get(ifindex)
-                    .copied()
-                    .unwrap_or(0);
-                let cand = (prefix.prefix_len(), *ifindex, tunnel);
-                best = Some(match best {
-                    None => cand,
-                    Some(b) if cand.0 > b.0 || (cand.0 == b.0 && cand.1 < b.1) => cand,
-                    Some(b) => b,
-                });
-            }
-        }
-    }
-    best.map(|(_, ifindex, tunnel)| (ifindex, tunnel))
 }
 #[cfg(test)]
 mod recursive_cycle_guard_12398_tests {

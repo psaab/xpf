@@ -390,7 +390,7 @@ pub(in crate::afxdp) fn hydrate_wg_identity(
                 // USE: an accepted endpoint becomes a real SocketAddr with the
                 // authored port before the peer initiates.
                 WgEndpointForm::Hostname => {
-                    endpoint_host = Some(wire.wg_endpoint.clone());
+                    endpoint_host = Some(normalize_wg_endpoint_host(&wire.wg_endpoint));
                 }
                 // Neither a usable literal nor a resolvable-shaped host:port:
                 // drop the ROW rather than coercing the peer to
@@ -512,6 +512,20 @@ pub(super) fn classify_wg_endpoint(s: &str) -> WgEndpointForm {
 ///
 /// Syntax only, and deliberately no DNS: this runs on the config-apply path,
 /// where a blocking lookup would stall the apply.
+/// #15966: canonical DNS form for endpoint_host identity: DNS labels are
+/// case-insensitive and a single trailing dot is the FQ form, so spelling-
+/// only changes must not invalidate a live endpoint. Lowercases the host,
+/// strips one trailing dot, preserves the authored port verbatim.
+pub(super) fn normalize_wg_endpoint_host(s: &str) -> String {
+    match s.rsplit_once(':') {
+        Some((host, port)) => {
+            let lower = host.to_ascii_lowercase();
+            format!("{}:{port}", lower.strip_suffix('.').unwrap_or(&lower))
+        }
+        None => s.to_ascii_lowercase(),
+    }
+}
+
 pub(super) fn wg_endpoint_hostname_shape_ok(s: &str) -> bool {
     // Reject a bracketed form here: `[..]:port` is the IPv6 literal spelling,
     // so if it did not parse as a SocketAddr above it is a malformed literal,

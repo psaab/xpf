@@ -15472,6 +15472,11 @@ fn wg_hostname_change_drops_stale_live_endpoint_15950() {
     let pe3 = prev3.wg_engines.get(&7).unwrap().clone(); pe3.adopt_live_endpoint(&pubk, live);
     let next3 = build_forwarding_state_with_policy_counters_and_previous(&snap("old.example.com:51820", &["10.1.0.0/24","10.2.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev3)).unwrap();
     assert_eq!(next3.wg_engines.get(&7).unwrap().peer_for_dest("10.2.0.9".parse().unwrap()), Some((pubk, Some(live))), "unchanged hostname must carry live");
+    // DNS-equivalent spelling (case + trailing dot) must carry like unchanged
+    let prev5 = build_forwarding_state(&snap("Old.Example.COM:51820", &["10.1.0.0/24"]));
+    let pe5 = prev5.wg_engines.get(&7).unwrap().clone(); pe5.adopt_live_endpoint(&pubk, live);
+    let next5 = build_forwarding_state_with_policy_counters_and_previous(&snap("old.example.com.:51820", &["10.1.0.0/24","10.2.0.0/24"]), &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev5)).unwrap();
+    assert_eq!(next5.wg_engines.get(&7).unwrap().peer_for_dest(dst), Some((pubk, Some(live))), "DNS-equivalent spelling must not drop live endpoint");
     // control: literal peer unchanged carries, wg_peers_eq host sensitivity
     let prev4 = build_forwarding_state(&snap("203.0.113.1:51820", &["10.1.0.0/24"]));
     let pe4 = prev4.wg_engines.get(&7).unwrap().clone(); pe4.adopt_live_endpoint(&pubk, live);

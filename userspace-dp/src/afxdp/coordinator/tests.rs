@@ -14179,28 +14179,32 @@ fn publish_runtime_view_shares_books_arc_15091() {
 fn bringup_failure_preserves_forwarding_15950() {
     let mut coordinator = Coordinator::new();
     coordinator.force_ipsec_sa_ready = true;
-    // Seed a forwarding marker that only preservation can keep: WG engine map non-empty via set_forwarding
-    let mut fwd = crate::afxdp::ForwardingState::default();
-    fwd.has_wg_tunnels = true;
-    coordinator.set_forwarding_for_test(fwd);
-    let before_ptr = coordinator.forwarding.wg_engines.len();
-    let _ = before_ptr;
-    // Use ipsec-not-ready arm: simplest bringup failure
+    // First successful reconcile installs generation 5 forwarding/validation.
+    let mut bindings0 = six242_three_worker_bindings();
+    coordinator.force_worker_healthy_stub = true;
+    let snap_ok = mandatory_ok_snapshot(5);
+    assert!(coordinator.reconcile(Some(&snap_ok), &mut bindings0, 64).is_ok());
+    let gen_before = coordinator.validation;
+    assert!(gen_before.snapshot_installed);
+    // Second reconcile (gen 6) fails in bring-up (SA not ready).
     coordinator.force_ipsec_sa_not_ready = true;
+    coordinator.force_ipsec_sa_ready = false;
     let mut bindings = six242_three_worker_bindings();
-    let snap = mandatory_ok_snapshot(5);
+    let snap = mandatory_ok_snapshot(6);
     let result = coordinator.reconcile(Some(&snap), &mut bindings, 64);
     assert!(matches!(result, Err(ReconcileError::IpsecSaNotReady(_))), "got {result:?}");
-    // forwarding must be the NEW generation (has_wg_tunnels from snap? snap has none) — instead assert not defaulted validation:
-    // The preserved forwarding is whatever apply_snapshot published; a default wipe would clear snapshot_installed validation pairing.
-    // Assert workers stopped
-    assert!(coordinator.workers.records().is_empty());
-    // Retry with ready SA and healthy stubs succeeds (proves retry not bricked on wiped state)
+    assert!(coordinator.workers.records().is_empty(), "workers must still be stopped");
+    // THE preservation assertions (revert-red: stop_inner(false) defaults both):
+    assert_eq!(coordinator.validation.config_generation, 6, "new generation validation must survive bring-up failure, got {:?}", coordinator.validation);
+    assert!(coordinator.validation.snapshot_installed);
+    // Retry (gen 6 again, SA ready) must succeed and keep generation.
     coordinator.force_ipsec_sa_not_ready = false;
     coordinator.force_ipsec_sa_ready = true;
     coordinator.force_worker_healthy_stub = true;
     let mut bindings2 = six242_three_worker_bindings();
-    let snap2 = mandatory_ok_snapshot(6);
-    let result2 = coordinator.reconcile(Some(&snap2), &mut bindings2, 64);
+    let result2 = coordinator.reconcile(Some(&snap), &mut bindings2, 64);
     assert!(result2.is_ok(), "retry must succeed, got {result2:?}");
+    assert_eq!(coordinator.validation.config_generation, 6);
+    let _ = gen_before;
 }
+

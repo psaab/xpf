@@ -366,27 +366,35 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
                 inbox.forget_channel(control);
                 inbox.forget_call_installs_for_channel(control, seg.captured_ns);
                 let _ = sessions.pptp_mut().forget_control_channel_learned_by(control, seg.captured_ns);
+                let mut unsent: Vec<usize> = Vec::new();
                 for queue in peer_worker_commands {
                     let mut pending = lock_recover(queue);
-                    let _ = push_bounded(
+                    if !push_bounded(
                         &mut pending,
                         WorkerCommand::ForgetPptpControlChannel {
                             control,
                             closed_ns: seg.captured_ns,
                         },
-                    );
+                    ) {
+                        unsent.push(Arc::as_ptr(queue) as usize);
+                    }
                 }
                 if let Some(queue) = self_worker_commands {
                     let mut pending = lock_recover(queue);
-                    if !pending.is_empty() {
-                        let _ = push_bounded(
+                    if !pending.is_empty()
+                        && !push_bounded(
                             &mut pending,
                             WorkerCommand::ForgetPptpControlChannel {
                                 control,
                                 closed_ns: seg.captured_ns,
                             },
-                        );
+                        )
+                    {
+                        unsent.push(Arc::as_ptr(queue) as usize);
                     }
+                }
+                if !unsent.is_empty() {
+                    inbox.record_channel_forget(control, seg.captured_ns, unsent);
                 }
             }
             crate::session::pptp_control::ControlParse::Ignored

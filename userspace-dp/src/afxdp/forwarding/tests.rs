@@ -3718,14 +3718,17 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
         false,
     ));
     assert!(sessions.lookup(&key, 1_000_000, 0x10).is_some());
-    assert!(
-        shared_sessions
-            .lock()
-            .expect("shared lock")
-            .get(&key)
-            .is_none()
-    );
-    assert!(shared_nat_sessions.lock().expect("nat lock").is_empty());
+    // #15950 contract: LocalMiss itself is published for cross-worker
+    // FragAssoc liveness; transient seeds are not (see seed test below).
+    let shared = shared_sessions.lock().expect("shared lock");
+    let published = shared.get(&key).expect("LocalMiss row must be in shared_sessions");
+    assert_eq!(published.origin, SessionOrigin::LocalMiss);
+    assert_eq!(published.session_id, sessions.session_id_for(&key));
+    drop(shared);
+    // publish_shared_session also files the reverse alias for this same
+    // session (needed for sibling reply lookup); no forward-wire alias
+    // exists because the NAT decision is default (wire key == key).
+    assert!(!shared_nat_sessions.lock().expect("nat lock").is_empty());
     assert!(
         shared_forward_wire_sessions
             .lock()
@@ -3833,14 +3836,10 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         0x10,
         false,
     ));
-    assert!(
-        shared_sessions
-            .lock()
-            .expect("shared lock")
-            .get(&key)
-            .is_none()
-    );
-    assert!(shared_nat_sessions.lock().expect("nat lock").is_empty());
+    let shared = shared_sessions.lock().expect("shared lock");
+    let published = shared.get(&key).expect("LocalMiss replacement must publish its row");
+    assert_eq!(published.origin, SessionOrigin::LocalMiss);
+    drop(shared);
     assert!(
         shared_forward_wire_sessions
             .lock()
@@ -11736,4 +11735,20 @@ fn local_miss_publishes_to_shared_15950() {
     assert_eq!(entry.origin, SessionOrigin::LocalMiss);
     assert_eq!(entry.session_id, sessions.session_id_for(&key));
     assert_ne!(entry.session_id, 0);
+}
+
+
+#[test]
+fn helper_fabric_punt_seed_stays_out_of_shared_15950() {
+    let mut sessions = SessionTable::new();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let state = build_forwarding_state(&nat_snapshot());
+    let key = SessionKey { addr_family: libc::AF_INET as u8, protocol: PROTO_TCP, src_ip: "172.16.80.8".parse().unwrap(), dst_ip: "172.16.80.200".parse().unwrap(), src_port: 40279, dst_port: 5201, discriminator: Default::default(), routing_domain: 0 };
+    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(&state, 11, 80, key.src_ip, PROTO_TCP).expect("local"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let metadata = SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID, egress_zone: TEST_WAN_ZONE_ID, ingress_zone_check: 0, egress_zone_check: 0, ingress_ifindex: 0, ingress_vlan_id: 0, forward_ingress_vlan_id: None, owner_rg_id: 0, fabric_ingress: false, is_reverse: false, nat64_reverse: None, log_session_init: false, log_session_close: false, policy_id: 0, inactivity_timeout_ns: None, policy_counter_idx: 0, policy_counter: None, nat_scope_ifindex: None };
+    assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::FabricPuntSeed, 1_000_000, PROTO_TCP, 0x10, false));
+    assert!(shared_sessions.lock().unwrap().get(&key).is_none(), "FabricPuntSeed must never become shared authority");
 }

@@ -215,6 +215,22 @@ impl PptpControlInbox {
         }
     }
 
+    /// Whether a disabled-ALG purge is due (at most once per drain interval,
+    /// so the worker loop does not lock this inbox on every poll).
+    pub(crate) fn purge_due(&self, now_ns: u64) -> bool {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inner.last_drain_ns != 0
+            && now_ns.saturating_sub(inner.last_drain_ns) < CONTROL_DRAIN_INTERVAL_NS
+        {
+            return false;
+        }
+        inner.last_drain_ns = now_ns;
+        true
+    }
+
     /// #15950: drop every buffered segment (ALG disabled). Returns count.
     pub(crate) fn purge_pending(&self) -> usize {
         let mut inner = match self.inner.lock() {
@@ -577,7 +593,9 @@ pub(crate) enum ControlParse {
     CallDisconnect { call_id: u16 },
     /// A complete Call-Clear-Request naming the call id to forget (§2.12).
     CallClear { call_id: u16 },
-    /// A Stop-Control-Connection Request/Reply: tear down the whole channel.
+    /// A Stop-Control-Connection Request, or a successful Reply:
+    /// tear down the whole channel. A Reply with Result != 1 (not
+    /// closed, RFC 2637 §2.4) parses as Ignored and tears nothing down.
     StopControl,
     /// A well-formed control message this stage does not learn from — a
     /// different message type, or a reply whose Result Code says the call did
@@ -643,6 +661,10 @@ pub(crate) fn parse_control_segment(payload: &[u8]) -> ControlParse {
         }
         if payload.len() < want {
             return ControlParse::Truncated;
+        }
+        if ctrl_type == CTRL_STOP_CONTROL_REPLY && payload[12] != RESULT_CONNECTED {
+            // RFC 2637 §2.4 Result 2 = general error, connection NOT closed.
+            return ControlParse::Ignored;
         }
         return ControlParse::StopControl;
     }
@@ -1149,6 +1171,9 @@ mod tests_15950_parse {
         let mut body=Vec::new(); body.extend_from_slice(&0x1234u16.to_be_bytes()); body.extend_from_slice(&[0;2]);
         assert_eq!(parse_control_segment(&msg(16,12,&body)), ControlParse::CallClear{call_id:0x1234});
         assert_eq!(parse_control_segment(&msg(16,3,&body)), ControlParse::StopControl);
-        assert_eq!(parse_control_segment(&msg(16,4,&body)), ControlParse::StopControl);
+        let mut reply=vec![1u8,0,0,0];
+        assert_eq!(parse_control_segment(&msg(16,4,&reply)), ControlParse::StopControl);
+        reply[0]=2;
+        assert_eq!(parse_control_segment(&msg(16,4,&reply)), ControlParse::Ignored, "failed Stop reply must not tear down");
     }
 }

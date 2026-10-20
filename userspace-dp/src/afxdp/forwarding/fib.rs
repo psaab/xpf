@@ -800,7 +800,10 @@ fn local_delivery_resolution_v4_suppressing(
         .map(|entry| entry.ifindex)
         .min()
         .unwrap_or(0);
-    if local_ifindex == 0 {
+    if local_ifindex == 0 && state.configured_iface_v4.contains(&ip) {
+        // Peer-owned interface host suppressed from connected_v4: attribute
+        // via its by-ifindex prefix. NAT-only locals are not configured
+        // interface addresses and must keep ifindex 0.
         local_ifindex = connected_lpm_ifindex_v4(state, ip, table);
     }
     if local_ifindex == 0 {
@@ -856,7 +859,7 @@ fn local_delivery_resolution_v6_suppressing(
             .map(|entry| entry.ifindex)
             .min()
             .unwrap_or(0);
-        if idx == 0 {
+        if idx == 0 && state.configured_iface_v6.contains(&ip) {
             idx = connected_lpm_ifindex_v6(state, ip, table);
         }
         idx
@@ -873,22 +876,15 @@ fn local_delivery_resolution_v6_suppressing(
             })
             .map(|entry| entry.ifindex);
         if found.is_none() {
-            let lpm = connected_lpm_ifindex_v6(state, ip, table);
-            if lpm != 0 && (1..127).contains(&{
-                // only accept when ip is the prefix network address
-                let mut len_ok = false;
-                for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
-                    if *ifindex == lpm {
-                        for p in prefixes {
-                            if p.addr() == ip && (1..127).contains(&p.prefix_len()) {
-                                len_ok = true;
-                            }
-                        }
-                    }
+            // Anycast network address on a peer-owned prefix: accept only
+            // when ip is exactly that prefix's network address.
+            for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
+                let instance = state.ifindex_to_routing_instance.get(ifindex).map(String::as_str).unwrap_or("");
+                if !instance_owns_table_v6(instance, table) { continue; }
+                if prefixes.iter().any(|p| (1..127).contains(&p.prefix_len()) && p.addr() == ip) {
+                    found = Some(*ifindex);
+                    break;
                 }
-                if len_ok { 64u8 } else { 0u8 }
-            }) {
-                found = Some(lpm);
             }
         }
         found?

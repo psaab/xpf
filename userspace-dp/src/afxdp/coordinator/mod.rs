@@ -829,7 +829,13 @@ impl Coordinator {
     /// stop_for_link_cycle, so a retry builds with previous = the new
     /// generation (allocator/WG/counter carry) instead of a default.
     pub(crate) fn stop_preserving_forwarding(&mut self) {
-        let preserved_forwarding = std::mem::take(&mut self.forwarding);
+        // Clone the Arc-shared forwarding state (collections hold Arcs /
+        // shared stores; this is the teardown-only path) and keep the
+        // ORIGINAL installed while stop_inner joins workers and retires
+        // their NAT holders against its allocators. stop_inner defaults
+        // self.forwarding at the end; reinstall the clone (same allocator
+        // Arcs, now with departed holders retired) afterwards.
+        let preserved_forwarding = self.forwarding.clone();
         let preserved_validation = self.validation;
         self.stop_inner(false);
         self.forwarding = preserved_forwarding;

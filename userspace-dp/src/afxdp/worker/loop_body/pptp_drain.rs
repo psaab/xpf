@@ -23,7 +23,9 @@ pub(super) fn run_pptp_control_drain(
     // from segments buffered before the disable. Purge the inbox so a
     // later re-enable cannot resurrect pre-disable calls either.
     if !pptp_enabled {
-        pptp_control.purge_pending();
+        if pptp_control.purge_due(loop_now_ns) {
+            pptp_control.purge_pending();
+        }
         return;
     }
     crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
