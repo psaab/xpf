@@ -1273,44 +1273,7 @@ impl DnatTable {
     /// it to honour `destination-nat off` shadowing: an Exempt/Poisoned
     /// winner must not be validated through the geometry collection.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn winning_outcome_ignoring_icmp_selector_scoped(
-        &self,
-        protocol: u8,
-        src_ip: IpAddr,
-        dst_ip: IpAddr,
-        src_port: u16,
-        dst_port: u16,
-        ingress_zone: &str,
-        ingress_ifname: &str,
-        ingress_routing_instance: &str,
-    ) -> Option<bool> {
-        // Returns Some(true) iff the winner is a Translate.
-        let protocol_key = u16::from(protocol);
-        let winner = self
-            .match_entries_mode(
-                self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port }),
-                src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
-            )
-            .or_else(|| {
-                self.match_entries_mode(
-                    self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port: 0 }),
-                    src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
-                )
-            })
-            .or_else(|| {
-                self.match_entries_mode(
-                    self.entries.get(&DnatKey { protocol: PROTO_ANY, dst_ip, dst_port: 0 }),
-                    src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
-                )
-            })
-            .or_else(|| {
-                self.match_prefix_lpm_mode(
-                    protocol_key, src_ip, dst_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
-                )
-            });
-        winner.map(|outcome| matches!(outcome, DnatOutcome::Translate(..)))
-    }
-
+    
     /// #15934: is there a selector-optional NON-Translate winner
     /// (Exempt/Poisoned, e.g. a typed `destination-nat off`) whose tier
     /// is at least as specific as the best selector-optional Translate
@@ -1326,7 +1289,16 @@ impl DnatTable {
     /// non-Translate winner in an earlier-or-equal tier to the first
     /// Translate tier counts as a shadow.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn has_off_shadow_ignoring_icmp_selector_scoped(
+    
+    /// #15934: the selector-RELAXED tier-walk outcome for revalidation:
+    /// first tier (exact -> wildcard-port -> PROTO_ANY -> prefix-LPM,
+    /// normal order) with any eligible entry decides; returns
+    /// Some(true) iff some entry AT the deciding tier translates to
+    /// `want_dst`/`want_dst_port`, Some(false) if the deciding tier's
+    /// entries are all non-Translate (off/poisoned) or translate
+    /// elsewhere, None if no tier decides. Streaming: no allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tier_walk_reproduces_ignoring_icmp_selector_scoped(
         &self,
         protocol: u8,
         src_ip: IpAddr,
@@ -1336,100 +1308,155 @@ impl DnatTable {
         ingress_zone: &str,
         ingress_ifname: &str,
         ingress_routing_instance: &str,
-    ) -> bool {
-        // Walk the normal chain; the first tier with ANY eligible
-        // entry decides: if its winner (normal best-tier selection,
-        // waiver applied) is non-Translate, it shadows. If the first
-        // decided tier is Translate, later tiers cannot shadow it.
-        let protocol_key = u16::from(protocol);
-        for entries in [
-            self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port }),
-            self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port: 0 }),
-            self.entries.get(&DnatKey { protocol: PROTO_ANY, dst_ip, dst_port: 0 }),
-        ] {
-            if let Some(outcome) = self.match_entries_mode(
-                entries, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
-            ) {
-                return !matches!(outcome, DnatOutcome::Translate(..));
-            }
-        }
-        if let Some(outcome) = self.match_prefix_lpm_mode(
-            protocol_key, src_ip, dst_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
-        ) {
-            return !matches!(outcome, DnatOutcome::Translate(..));
-        }
-        false
-    }
-
-    pub(crate) fn lookup_all_ignoring_icmp_selector_scoped(
-        &self,
-        protocol: u8,
-        src_ip: IpAddr,
-        dst_ip: IpAddr,
-        src_port: u16,
-        dst_port: u16,
-        ingress_zone: &str,
-        ingress_ifname: &str,
-        ingress_routing_instance: &str,
-    ) -> Vec<NatDecision> {
+        want_dst: IpAddr,
+        want_dst_port: Option<u16>,
+    ) -> Option<bool> {
         let protocol_has_l4_ports = crate::ip_proto::has_l4_ports(protocol);
         let protocol_key = u16::from(protocol);
-        // Collect across ALL tiers (no or_else short-circuit): typed
-        // rules for one destination may live in different tiers. Every
-        // ELIGIBLE entry contributes (not just each tier's winner):
-        // with the selector waived, two typed rules in one tier differ
-        // only in geometry, and geometry must decide.
-        let mut outcomes: Vec<DnatOutcome> = Vec::new();
+        // The deciding tier is chosen by the NORMAL (selector-applied)
+        // winner per key: relaxation lets typed rules compete, it does
+        // not demote a winning off/typed rule below an untyped one in
+        // the same key. Within the deciding key, relaxed eligibility
+        // decides geometry. Two keys are distinct tiers only across
+        // proto/port buckets; entries sharing a key are co-deciders.
+        let reproduces = |entry: &DnatEntry| {
+            let rewrite_dst_port = if protocol_has_l4_ports
+                && entry.value.new_dst_port != 0
+                && entry.value.new_dst_port != dst_port
+            {
+                Some(entry.value.new_dst_port)
+            } else {
+                None
+            };
+            entry.value.new_dst_ip == want_dst && rewrite_dst_port == want_dst_port
+        };
+        let eligible = |entry: &DnatEntry| {
+            (entry.from_zone.is_empty() || entry.from_zone.as_ref() == ingress_zone)
+                && entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                && entry.source_matches(src_ip)
+                && entry.l4_extra_matches_mode(src_port, dst_port, None, true)
+        };
         for entries in [
             self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port }),
             self.entries.get(&DnatKey { protocol: protocol_key, dst_ip, dst_port: 0 }),
             self.entries.get(&DnatKey { protocol: PROTO_ANY, dst_ip, dst_port: 0 }),
         ] {
             if let Some(entries) = entries {
+                // Deciding group = best scope tier among eligible
+                // entries (mirrors match_entries winner selection);
+                // only that group's outcomes decide.
+                let mut best_tier = u8::MAX;
                 for entry in entries {
-                    if (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != ingress_zone)
-                        || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
-                        || !entry.source_matches(src_ip)
-                        || !entry.l4_extra_matches_mode(src_port, dst_port, None, true)
-                    {
+                    if eligible(entry) {
+                        best_tier = best_tier.min(entry.scope_tier());
+                    }
+                }
+                if best_tier == u8::MAX {
+                    continue;
+                }
+                // Within the deciding group, a non-Translate winner
+                // (off/poisoned) at config-order precedence claims the
+                // tuple: Junos matched-rule-wins means the FIRST
+                // eligible entry of the best tier decides whether the
+                // group translates at all. Only if that winner is a
+                // Translate do co-winners' geometries decide.
+                let winner = entries
+                    .iter()
+                    .find(|entry| eligible(entry) && entry.scope_tier() == best_tier)
+                    .expect("best tier has an eligible entry");
+                if !matches!(winner.to_outcome(), DnatOutcome::Translate(..)) {
+                    return Some(false);
+                }
+                let mut reproduces_any = false;
+                for entry in entries {
+                    if !eligible(entry) || entry.scope_tier() != best_tier {
                         continue;
                     }
-                    outcomes.push(entry.to_outcome());
+                    if matches!(entry.to_outcome(), DnatOutcome::Translate(..)) && reproduces(entry) {
+                        reproduces_any = true;
+                    }
                 }
+                return Some(reproduces_any);
             }
         }
-        // Prefix-LPM tiers contribute every eligible slot of the
-        // first non-empty tier (same-prefix typed A/B included).
-        outcomes.extend(self.match_prefix_lpm_mode_collect(
-            protocol_key, src_ip, dst_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
-        ));
-        let mut decisions: Vec<NatDecision> = Vec::new();
-        for outcome in outcomes {
-            let DnatOutcome::Translate(value, _) = outcome else {
+        // Prefix-LPM: deciding (tier, prefix-length) group.
+        self.match_prefix_lpm_tier_walk(
+            protocol_key,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            ingress_zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            want_dst,
+            want_dst_port,
+            protocol_has_l4_ports,
+        )
+    }
+
+    /// Prefix-LPM leg of the tier walk: first non-empty proto/port
+    /// tier, winner's (scope-tier, prefix-length) group decides.
+    #[allow(clippy::too_many_arguments)]
+    fn match_prefix_lpm_tier_walk(
+        &self,
+        protocol: u16,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        src_port: u16,
+        dst_port: u16,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        want_dst: IpAddr,
+        want_dst_port: Option<u16>,
+        protocol_has_l4_ports: bool,
+    ) -> Option<bool> {
+        for slots in [
+            self.prefix_entries.get(&DnatProtoPortKey { protocol, dst_port }),
+            self.prefix_entries.get(&DnatProtoPortKey { protocol, dst_port: 0 }),
+            self.prefix_entries.get(&DnatProtoPortKey { protocol: PROTO_ANY, dst_port: 0 }),
+        ] {
+            let Some(slots) = slots else { continue };
+            let Some(winner) = match_prefix_slots_winner_slot(
+                slots, dst_ip, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, None, true,
+            ) else {
                 continue;
             };
-            let rewrite_dst_port =
-                if protocol_has_l4_ports && value.new_dst_port != 0 && value.new_dst_port != dst_port {
-                    Some(value.new_dst_port)
-                } else {
-                    None
-                };
-            let decision = NatDecision {
-                rewrite_src: None,
-                rewrite_dst: Some(value.new_dst_ip),
-                rewrite_src_port: None,
-                rewrite_dst_port,
-                source_nat_icmp: None,
-                nat64: false,
-                nptv6: false,
-            };
-            if !decisions.contains(&decision) {
-                decisions.push(decision);
+            let winner_tier = winner.entry.scope_tier();
+            let winner_len = winner.prefix_len();
+            let mut any_translate_reproduces = false;
+            for slot in slots {
+                if (!slot.entry.from_zone.is_empty() && slot.entry.from_zone.as_ref() != ingress_zone)
+                    || !slot.entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                    || !slot.contains(dst_ip)
+                    || !slot.entry.source_matches(src_ip)
+                    || !slot.entry.l4_extra_matches_mode(src_port, dst_port, None, true)
+                    || slot.entry.scope_tier() != winner_tier
+                    || slot.prefix_len() != winner_len
+                {
+                    continue;
+                }
+                if matches!(slot.entry.to_outcome(), DnatOutcome::Translate(..)) {
+                    let rewrite_dst_port = if protocol_has_l4_ports
+                        && slot.entry.value.new_dst_port != 0
+                        && slot.entry.value.new_dst_port != dst_port
+                    {
+                        Some(slot.entry.value.new_dst_port)
+                    } else {
+                        None
+                    };
+                    if slot.entry.value.new_dst_ip == want_dst && rewrite_dst_port == want_dst_port {
+                        any_translate_reproduces = true;
+                    }
+                }
             }
+            return Some(any_translate_reproduces);
         }
-        decisions
+        None
     }
-    /// #15534: single-pass outcome over the same tier chain
+
+        /// #15534: single-pass outcome over the same tier chain
     /// `lookup_with_counter_scoped` probes (exact -> wildcard-port ->
     /// PROTO_ANY -> prefix LPM). That wrapper collapses `Exempt`/`Poisoned`
     /// to `None`; callers that must distinguish them re-run the chain here
@@ -1995,42 +2022,18 @@ impl DnatTable {
         packet_icmp: Option<(u8, u8)>,
         ignore_icmp_selector: bool,
     ) -> Option<DnatOutcome> {
-        self.match_prefix_lpm_mode_collect(protocol, src_ip, dst_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, ignore_icmp_selector)
-            .into_iter()
-            .next()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn match_prefix_lpm_mode_collect(
-        &self,
-        protocol: u16,
-        src_ip: IpAddr,
-        dst_ip: IpAddr,
-        src_port: u16,
-        dst_port: u16,
-        ingress_zone: &str,
-        ingress_ifname: &str,
-        ingress_routing_instance: &str,
-        packet_icmp: Option<(u8, u8)>,
-        ignore_icmp_selector: bool,
-    ) -> Vec<DnatOutcome> {
-        // #15934: first non-empty tier wins (normal precedence), but
-        // WITHIN that tier every eligible slot's outcome is collected
-        // so simultaneous typed rules at the same prefix are all
-        // represented for the caller's geometry check.
         for slots in [
             self.prefix_entries.get(&DnatProtoPortKey { protocol, dst_port }),
             self.prefix_entries.get(&DnatProtoPortKey { protocol, dst_port: 0 }),
             self.prefix_entries.get(&DnatProtoPortKey { protocol: PROTO_ANY, dst_port: 0 }),
         ] {
-            let collected = self.match_prefix_slots_mode_collect(
+            if let Some(winner) = self.match_prefix_slots_mode(
                 slots, dst_ip, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, ignore_icmp_selector,
-            );
-            if !collected.is_empty() {
-                return collected;
+            ) {
+                return Some(winner);
             }
         }
-        Vec::new()
+        None
     }
 
     /// #3164: pick the best prefix slot within one proto/port bucket. Context
@@ -2073,57 +2076,7 @@ impl DnatTable {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn match_prefix_slots_mode_collect(
-        &self,
-        slots: Option<&Vec<DnatPrefixSlot>>,
-        dst_ip: IpAddr,
-        src_ip: IpAddr,
-        src_port: u16,
-        dst_port: u16,
-        ingress_zone: &str,
-        ingress_ifname: &str,
-        ingress_routing_instance: &str,
-        packet_icmp: Option<(u8, u8)>,
-        ignore_icmp_selector: bool,
-    ) -> Vec<DnatOutcome> {
-        let Some(slots) = slots else {
-            return Vec::new();
-        };
-        // Normal winner selection first (scope tier, then longest
-        // prefix, first wins ties): the winner's outcome leads.
-        let mut collected: Vec<DnatOutcome> = Vec::new();
-        if let Some(winner) = match_prefix_slots_winner_slot(slots, dst_ip, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, ignore_icmp_selector) {
-            collected.push(winner.entry.to_outcome());
-        }
-        // #15934: additionally, every OTHER eligible slot at the
-        // winner's (scope tier, prefix length) contributes its outcome
-        // — simultaneous typed rules at the same prefix differ only in
-        // geometry once the selector is waived, and geometry must
-        // decide. A broader/narrower or lower-tier slot never
-        // contributes (normal precedence preserved).
-        if let Some(winner_slot) = match_prefix_slots_winner_slot(slots, dst_ip, src_ip, src_port, dst_port, ingress_zone, ingress_ifname, ingress_routing_instance, packet_icmp, ignore_icmp_selector) {
-            let winner_tier = winner_slot.entry.scope_tier();
-            let winner_len = winner_slot.prefix_len();
-            for slot in slots {
-                if std::ptr::eq(slot, winner_slot) {
-                    continue;
-                }
-                if (!slot.entry.from_zone.is_empty() && slot.entry.from_zone.as_ref() != ingress_zone)
-                    || !slot.entry.scope_ok(ingress_ifname, ingress_routing_instance)
-                    || !slot.contains(dst_ip)
-                    || !slot.entry.source_matches(src_ip)
-                    || !slot.entry.l4_extra_matches_mode(src_port, dst_port, packet_icmp, ignore_icmp_selector)
-                    || slot.entry.scope_tier() != winner_tier
-                    || slot.prefix_len() != winner_len
-                {
-                    continue;
-                }
-                collected.push(slot.entry.to_outcome());
-            }
-        }
-        collected
-    }
-
+    
     /// #3164: dedup-insert a prefix slot. Like `insert_entry`, two slots with the
     /// same (from_zone, source constraint) AND the same prefix are the same rule
     /// and the later one replaces the earlier; distinct prefixes or distinct

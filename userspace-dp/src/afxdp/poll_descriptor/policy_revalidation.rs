@@ -375,9 +375,11 @@ fn arrival_carries_translated_source(nat: NatDecision, flow: &SessionFlow) -> bo
 /// #15934: DNAT geometry verdict. `ignore_icmp_selector` splits the
 /// verdict into its selector-dependent and selector-independent parts:
 /// when true, the DNAT lookup falls back to the selector-optional
-/// matching mode (`lookup_all_ignoring_icmp_selector_scoped`): rules
-/// match ignoring ICMP type/code, every distinct translation is
-/// collected, and only one reproducing the stored geometry counts.
+/// matching mode (the DNAT tier-walk
+/// `tier_walk_reproduces_ignoring_icmp_selector_scoped`): tiers
+/// decide in normal precedence order with ICMP type/code ignored,
+/// and the deciding tier validates only if it reproduces the
+/// stored geometry.
 /// Rule existence, scope, source, ports, and geometry are all still
 /// judged; only the type/code sub-check is non-revoking. It is set only for a reverse ICMP hit with no stored
 /// forward selector (DNAT-only provenance gap): such a hit must not
@@ -472,42 +474,55 @@ fn destination_nat_translation_still_valid(
                 )
                 .map(|(decision, _)| decision)
         });
-    // #15934: with the selector waived, validity is GEOMETRY existence
-    // through the NORMAL precedence result wherever it already
-    // reproduces the stored translation (a static or persistent
-    // winner needs no DNAT consultation at all), PLUS the
-    // selector-optional DNAT collection — unless an `off`/exempt
-    // winner shadows the tuple (checked next).
+    // #15934: with the selector waived, validity is ONE tier-walk
+    // verdict in normal precedence order (static -> persistent ->
+    // DNAT), each tier deciding with selector-relaxed matching:
+    // the first tier that decides at all (any relaxed match,
+    // including an off/Exempt) owns the verdict — it validates only
+    // if its winning/co-winning outcome reproduces the stored
+    // geometry. A higher-tier mismatch or off therefore revokes
+    // even when a lower tier would reproduce (no resurrection), and
+    // a higher Translate wins over an off below.
     if ignore_icmp_selector {
-        // `destination-nat off` shadow FIRST: if the first decided
-        // tier's selector-optional winner is non-Translate, the tuple
-        // is claimed by an exemption — neither the normal winner nor
-        // the collection may validate through it. (The normal winner
-        // cannot encode this: with the reply selector it may already
-        // be a broader translate past a typed off rule.)
-        if forwarding.dnat_table.has_off_shadow_ignoring_icmp_selector_scoped(
-            forward_key.protocol,
-            forward_key.src_ip,
+        // Tiers 1-2 reuse the normal computations: `expected` is the
+        // static/persistent/DNAT composed winner, but tier OWNERSHIP
+        // must be probed explicitly because `expected` collapses
+        // them. Static decides first.
+        let static_hit = forwarding.static_nat.match_dnat_with_counter_scoped(
             forward_key.dst_ip,
-            forward_key.src_port,
             forward_key.dst_port,
+            Some(forward_key.src_ip),
             scope.zone_name,
             scope.ifname,
             scope.routing_instance,
+        );
+        if let Some((current, _)) = static_hit {
+            return current.rewrite_dst == Some(translated_dst)
+                && current.rewrite_dst_port == nat.rewrite_dst_port;
+        }
+        let internal_zone = forwarding
+            .zone_id_to_name
+            .get(&metadata.egress_zone)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if let Some(current) = persistent_nat_destination(
+            forwarding,
+            forward_key,
+            now_ns,
+            scope.zone_name,
+            scope.ifname,
+            scope.routing_instance,
+            internal_zone,
         ) {
-            return false;
+            return current.rewrite_dst == Some(translated_dst)
+                && current.rewrite_dst_port == nat.rewrite_dst_port;
         }
-        // Normal precedence winner (static/persistent/DNAT) already
-        // reproducing the stored translation validates directly.
-        if expected.is_some_and(|current| {
-            current.rewrite_dst == Some(translated_dst)
-                && current.rewrite_dst_port == nat.rewrite_dst_port
-        }) {
-            return true;
-        }
+        // DNAT tier: single selector-relaxed tier-walk. Some(true)
+        // validates; Some(false)/None revoke (off at the deciding
+        // tier, geometry mismatch, or no rule at all).
         return forwarding
             .dnat_table
-            .lookup_all_ignoring_icmp_selector_scoped(
+            .tier_walk_reproduces_ignoring_icmp_selector_scoped(
                 forward_key.protocol,
                 forward_key.src_ip,
                 forward_key.dst_ip,
@@ -516,12 +531,10 @@ fn destination_nat_translation_still_valid(
                 scope.zone_name,
                 scope.ifname,
                 scope.routing_instance,
+                translated_dst,
+                nat.rewrite_dst_port,
             )
-            .iter()
-            .any(|current| {
-                current.rewrite_dst == Some(translated_dst)
-                    && current.rewrite_dst_port == nat.rewrite_dst_port
-            });
+            .unwrap_or(false);
     }
     expected.is_some_and(|current| {
         current.rewrite_dst == Some(translated_dst)

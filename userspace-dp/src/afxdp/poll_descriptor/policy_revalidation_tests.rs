@@ -5880,3 +5880,85 @@ fn selector_optional_precedence_prefix_and_off_shadow_15934() {
         "destination-nat off shadow must revoke selector-less, not validate through (#15934)"
     );
 }
+
+/// #15934 round-7: ONE tier-walk verdict. (a) off at the deciding
+/// tier revokes even with a reproduce below; (b) Translate above an
+/// off survives; (c) static-B over DNAT-A revokes (no resurrection);
+/// (d) /25-type0 vs /24-type8 unchanged: stored type-8 geometry
+/// survives via the longer-prefix... (the /25 group decides: stored
+/// must be judged at the DECIDING group — stored=/25 target
+/// survives, stored=/24 target revokes because the /25 tier
+/// decided and did not reproduce it).
+#[test]
+fn tier_walk_single_verdict_15934() {
+    let key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    let metadata = meta_14315(2, 1);
+    let valid = |f: &crate::afxdp::ForwardingState, stored: &str| {
+        let decision = decision_14315(NatDecision {
+            rewrite_dst: Some(stored.parse().expect("stored")),
+            source_nat_icmp: None,
+            ..NatDecision::default()
+        });
+        destination_nat_translation_still_valid(
+            f, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        )
+    };
+    let mk = |rules: Vec<crate::protocol::DestinationNATRuleSnapshot>| {
+        let mut f = imported_snat_forwarding(false);
+        f.dnat_table = crate::nat::DnatTable::from_snapshots(&rules, &crate::nat::NatCounterStore::default());
+        f
+    };
+    let dnat = |name: &str, prefix: &str, ty: Option<u8>, pool: &str, off: bool| {
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: name.to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            destination_prefix: prefix.to_string(),
+            pool_address: pool.to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: ty,
+            match_icmp_code: ty.map(|_| 0),
+            off,
+            ..Default::default()
+        }
+    };
+    // (a) off (exact host, type-8) above prefix translate reproducing stored.
+    let off_above = mk(vec![
+        {
+            let mut r = dnat("off", "", Some(8), "10.0.0.8", true);
+            r.destination_prefix = String::new();
+            r
+        },
+        dnat("pfx", "198.51.100.0/24", None, "10.0.0.8", false),
+    ]);
+    assert!(!valid(&off_above, "10.0.0.8"), "off at deciding tier must revoke (#15934)");
+    // (b) Translate (exact host) above prefix off: survives.
+    let translate_above = mk(vec![
+        {
+            let mut r = dnat("xlate", "", Some(8), "10.0.0.8", false);
+            r.destination_prefix = String::new();
+            r
+        },
+        dnat("pfxoff", "198.51.100.0/24", None, "10.0.0.9", true),
+    ]);
+    assert!(valid(&translate_above, "10.0.0.8"), "translate above off must survive (#15934)");
+    // (c) static-B decides over DNAT-A: stored A revokes.
+    let mut static_over = mk(vec![dnat("dnat-a", "", Some(8), "10.0.0.8", false)]);
+    static_over.static_nat = crate::nat::StaticNatTable::from_snapshots(
+        &[crate::protocol::StaticNATRuleSnapshot {
+            name: "static-b".to_string(),
+            external_ip: "198.51.100.9".to_string(),
+            internal_ip: "10.0.0.99".to_string(),
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert!(!valid(&static_over, "10.0.0.8"), "static-B over DNAT-A must revoke, no resurrection (#15934)");
+    assert!(valid(&static_over, "10.0.0.99"), "static-B stored geometry must survive (#15934)");
+    // (d) /25 type-0 (-> .25) vs /24 type-8 (-> .24), unchanged.
+    let nested = mk(vec![
+        dnat("narrow", "198.51.100.0/25", Some(0), "10.0.0.25", false),
+        dnat("wide", "198.51.100.0/24", Some(8), "10.0.0.24", false),
+    ]);
+    assert!(valid(&nested, "10.0.0.25"), "deciding /25 geometry must survive (#15934)");
+    assert!(!valid(&nested, "10.0.0.24"), "non-deciding /24 geometry must revoke: /25 tier decided (#15934)");
+}
