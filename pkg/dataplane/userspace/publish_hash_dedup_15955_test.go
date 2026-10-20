@@ -24,11 +24,15 @@ import (
 //     send); the authorized-clear path is the only one that pays a
 //     second, spent-marker recompute;
 //   - the ContentDigest on the wire equals the pre-fix stamped digest
-//     over the exact sent struct;
+//     over the exact sent struct, and the recorded lastSnapshotHash
+//     equals the value the pre-fix post-send hash produced (the spent-
+//     marker hash on the clear path — see postPublishHash);
 //   - ClearPolicies (NOT hash-zeroed) is handled explicitly: the
-//     recorded lastSnapshotHash describes the pre-send (marker-in-force)
-//     content, so the next publish of identical content still dedups
-//     and the helper never sees a spent marker replayed;
+//     stamped digest describes the pre-send (marker-in-force) content,
+//     while the recorded lastSnapshotHash equals the pre-fix post-send
+//     (spent-marker) value, so the next ordinary stripped partial
+//     dedups exactly as before and the helper never sees a spent
+//     marker replayed;
 //   - requestApplySnapshotLocked publishers (scheduler, worker-arm) are
 //     NOT deduped: prepareSnapshotForApply may rebuild sections after
 //     any earlier hash, so their post-publish hash stays authoritative
@@ -86,9 +90,9 @@ func TestPublishHashDedupOverlayCountsOnce15955(t *testing.T) {
 	if got := hashCount15955(); got != 1 {
 		t.Fatalf("overlay publish hashed %d times, want 1 (the pre-send publish hash is reused for the stamp and, ClearPolicies being unset here, for lastSnapshotHash); pre-fix was 3", got)
 	}
-	// The recorded hash must describe what the helper holds: the sent
-	// struct with its pre-send ClearPolicies value. That is exactly the
-	// prehash the publisher computed.
+	// The recorded hash must equal the pre-fix post-send value: the
+	// hash of the sent struct (whose ClearPolicies is unset on this
+	// path, so it equals the prehash the publisher computed).
 	want, ok := snapshotContentHash(&sent[0])
 	if !ok {
 		t.Fatal("sent snapshot did not hash")

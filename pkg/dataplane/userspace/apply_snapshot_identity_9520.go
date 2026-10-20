@@ -100,7 +100,7 @@ func stampSnapshotContentDigestPrehashed(snap *ConfigSnapshot, sum [32]byte, ok 
 // can rebuild sections after any earlier hash — must keep calling
 // requestApplySnapshotPreparedLocked and pay the stamp hash.
 func (m *Manager) requestApplySnapshotPrehashedLocked(snap *ConfigSnapshot, status *ProcessStatus, sum [32]byte, sumOK bool) (err error) {
-	return m.requestApplySnapshotLockedInternal(snap, status, sum, sumOK, true)
+	return m.requestApplySnapshotInternalLocked(snap, status, sum, sumOK, true)
 }
 
 // prepareSnapshotForApply detaches and revalidates interface rows before
@@ -284,15 +284,20 @@ func (m *Manager) consumeRevalidateAttachLocked(snap *ConfigSnapshot) {
 // worst-case m.mu hold on this refusal is therefore two round trips; once
 // BeginControlShutdown has latched, the retry is skipped.
 func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, status *ProcessStatus) (err error) {
-	return m.requestApplySnapshotLockedInternal(snap, status, [32]byte{}, false, false)
+	return m.requestApplySnapshotInternalLocked(snap, status, [32]byte{}, false, false)
 }
 
-// requestApplySnapshotLockedInternal is the shared body of
+// requestApplySnapshotInternalLocked is the shared body of
 // requestApplySnapshotPreparedLocked and requestApplySnapshotPrehashedLocked.
-// When prehashed is true, prehash/prehashOK carry a hash the caller proved
-// describes snap exactly as sent, and the digest stamp reuses it instead
-// of recomputing (#15955); otherwise the stamp computes the hash itself.
-func (m *Manager) requestApplySnapshotLockedInternal(snap *ConfigSnapshot, status *ProcessStatus, prehash [32]byte, prehashOK bool, prehashed bool) (err error) {
+// The Locked suffix is load-bearing: the #8526 control-call census
+// classifies control callers by that suffix (callers that do not take
+// m.mu themselves must carry it), so renaming this helper without the
+// suffix would silently remove the sole apply_snapshot send from the
+// census. When prehashed is true, prehash/prehashOK carry a hash the
+// caller proved describes snap exactly as sent, and the digest stamp
+// reuses it instead of recomputing (#15955); otherwise the stamp
+// computes the hash itself.
+func (m *Manager) requestApplySnapshotInternalLocked(snap *ConfigSnapshot, status *ProcessStatus, prehash [32]byte, prehashOK bool, prehashed bool) (err error) {
 	// #15919: this is the ONLY apply_snapshot send site, so gating here
 	// covers every publisher (full Compile, route-overlay, link-refresh,
 	// scheduler, capture-authority, worker-arm) with one check. A

@@ -93,7 +93,12 @@ func analyzeControlCalls8526(t *testing.T, dir string) []controlCallFacts {
 				switch sel.Sel.Name {
 				// #9520: requestApplySnapshotPreparedLocked is the shared apply_snapshot send site.
 				// requestApplySnapshotLocked prepares and delegates; callers issue a round trip.
-				case "requestLocked", "requestDetailedLocked", "requestApplySnapshotLocked", "requestApplySnapshotPreparedLocked":
+				// #15955: requestApplySnapshotPrehashedLocked and its shared body
+				// requestApplySnapshotInternalLocked are the same send site reached
+				// with a caller-computed digest; both are only ever invoked under
+				// m.mu by their Locked wrappers/callers, so they classify as
+				// control callers exactly like the prepared entry point.
+				case "requestLocked", "requestDetailedLocked", "requestApplySnapshotLocked", "requestApplySnapshotPreparedLocked", "requestApplySnapshotPrehashedLocked", "requestApplySnapshotInternalLocked":
 					cf.callsReq = true
 				case "SetDeadline":
 					cf.setsDeadline = true

@@ -236,7 +236,7 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 				if !ok || lit.Kind != token.STRING || lit.Value != `"apply_snapshot"` {
 					return true
 				}
-				if fn.Name.Name == "requestApplySnapshotPreparedLocked" || fn.Name.Name == "requestApplySnapshotLockedInternal" {
+				if fn.Name.Name == "requestApplySnapshotPreparedLocked" || fn.Name.Name == "requestApplySnapshotInternalLocked" {
 					inSendSite++
 				} else {
 					outside = append(outside, fmt.Sprintf("%s (%s)", fset.Position(lit.Pos()), fn.Name.Name))
@@ -293,7 +293,7 @@ func TestCompileCommitsThePublishedGeneration9520(t *testing.T) {
 				return true
 			}
 			switch sel.Sel.Name {
-			case "publishPreparedSnapshotFailClosedLocked":
+			case "publishPreparedSnapshotPrehashedLocked":
 				if publish == token.NoPos {
 					publish = x.Pos()
 				}
@@ -323,7 +323,7 @@ func TestCompileCommitsThePublishedGeneration9520(t *testing.T) {
 	}
 	adopt := adopts[0]
 	if !(publish < adopt.Pos() && adopt.Pos() < retain) {
-		t.Fatalf("adoptPublishedGenerationLocked must run after publishPreparedSnapshotFailClosedLocked and before " +
+		t.Fatalf("adoptPublishedGenerationLocked must run after publishPreparedSnapshotPrehashedLocked (the #15955 prehashed form of the #4959 fail-closed publish helper) and before " +
 			"m.lastSnapshot = snap, or the retained snapshot records the refused generation")
 	}
 	if len(adopt.Args) != 2 {
