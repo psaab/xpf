@@ -519,6 +519,24 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"one zone and re-commits. 0 when every zone has a distinct id.",
 		nil, nil,
 	)
+	c.userspaceSnapshotPolicyMismatch = prometheus.NewDesc(
+		"xpf_userspace_snapshot_policy_mismatch_total",
+		"Total userspace snapshot applies the helper REFUSED because "+
+			"summary.policy_count disagreed with the policies the "+
+			"snapshot carried (policy_count>0 with empty policies is "+
+			"the #15742 dropped-field shape). The helper keeps the "+
+			"prior policies; the Go builder and send-site gates refuse "+
+			"earlier, so any increment means a producer bypassed both. "+
+			"Alert on > 0.",
+		nil, nil,
+	)
+	c.userspaceLastSnapshotPolicyCount = prometheus.NewDesc(
+		"xpf_userspace_last_snapshot_policy_count",
+		"Policy rule count of the last snapshot the userspace helper "+
+			"APPLIED (its summary.policy_count, #15742 follow-up). 0 "+
+			"before the first apply or from an older helper.",
+		nil, nil,
+	)
 	c.rpmPinInstallFailures = prometheus.NewDesc(
 		"xpf_rpm_probe_pin_install_failures",
 		"Number of RPM next-hop tests currently held because their kernel pin "+

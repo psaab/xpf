@@ -371,6 +371,18 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		snap.Summary.ZoneCount = len(snap.Zones)
 		snap.Summary.PolicyCount = len(snap.Policies)
 	}
+	// HARDENING (#15742 follow-up): a full snapshot whose Summary claims
+	// policies the Policies slice does not carry is the exact 670274c712
+	// defect — the helper default-denies all transit while the summary
+	// reports the compiled rule count. Refuse to publish such a snapshot:
+	// a compile ERROR keeps the prior snapshot enforced (fail closed)
+	// instead of installing an empty policy set silently. The check runs
+	// AFTER quarantineCollidingZones, which legitimately drops rules for
+	// quarantined zones and resyncs Summary.PolicyCount, so a quarantined
+	// build whose rules were all scrubbed still passes (count 0 == len 0).
+	if err := validateSnapshotPolicyInvariant(snap, cfg); err != nil {
+		return nil, err
+	}
 	// #7717: report (do NOT foreclose) a NAT pool overlapping an interface-mode
 	// SNAT egress address that is only knowable at snapshot build — a DHCP or
 	// netlink-learned address the commit-time gate cannot see. Quarantining the

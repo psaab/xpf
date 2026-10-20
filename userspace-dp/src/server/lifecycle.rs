@@ -404,6 +404,8 @@ pub(crate) fn run() -> Result<(), String> {
             neg_neigh_fast_fail_total: 0,
             pending_neigh_duplicate_drops_total: 0,
             policy_revoked_sessions_total: 0,
+            snapshot_policy_mismatch_total: 0,
+            last_snapshot_policy_count: 0,
             unzoned_ingress_denied_total: 0,
             unzoned_egress_denied_total: 0,
             pending_neigh_decap_drops_total: 0,
@@ -663,6 +665,7 @@ pub(crate) fn run() -> Result<(), String> {
         },
         state_writer: state_writer.clone(),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     eprintln!("xpf-userspace-dp: poll_mode={:?}", args.poll_mode);
 

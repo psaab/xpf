@@ -45,6 +45,7 @@ fn new_state(status: ProcessStatus) -> Arc<Mutex<ServerState>> {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }))
 }
 
@@ -1633,6 +1634,7 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v4_9956() {
         afxdp,
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     let mut request = req("sync_session");
     request.session_sync = Some(SessionSyncRequest {
@@ -1698,6 +1700,7 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
         afxdp,
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     let mut request = req("sync_session");
     request.session_sync = Some(SessionSyncRequest {
@@ -2417,6 +2420,103 @@ fn apply_snapshot_missing_payload_is_rejected() {
     );
 }
 
+/// HARDENING (#15742 follow-up): a snapshot whose summary.policy_count
+/// disagrees with the policies it carries — policy_count=2 with an empty
+/// policies vec is the exact 670274c712 dropped-field shape — must be
+/// REFUSED before any mutation, keeping the prior snapshot/policies, and
+/// counted on snapshot_policy_mismatch_total. A consistent snapshot
+/// still applies and stamps last_snapshot_policy_count.
+#[test]
+fn apply_snapshot_policy_count_mismatch_is_refused_and_counted() {
+    use crate::protocol::snapshot::SnapshotSummary;
+    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    // Seed a good snapshot carrying one policy.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                policy_count: 1,
+                ..SnapshotSummary::default()
+            },
+            policies: vec![PolicyRuleSnapshot {
+                rule_id: "lan->wan/allow-all".to_string(),
+                name: "allow-all".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..PolicyRuleSnapshot::default()
+            }],
+            zones: vec![
+                crate::ZoneSnapshot {
+                    name: "lan".to_string(),
+                    id: 100,
+                    ..crate::ZoneSnapshot::default()
+                },
+                crate::ZoneSnapshot {
+                    name: "wan".to_string(),
+                    id: 200,
+                    ..crate::ZoneSnapshot::default()
+                },
+            ],
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(response.ok, "seed apply must succeed: {}", response.error);
+    }
+    {
+        let guard = state.lock().expect("state");
+        assert_eq!(guard.status.last_snapshot_policy_count, 1);
+        assert_eq!(guard.snapshot_policy_mismatch_total, 0);
+    }
+    // The dropped-field shape: summary claims 2, policies empty.
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 2,
+        generated_at: chrono::Utc::now(),
+        summary: SnapshotSummary {
+            policy_count: 2,
+            ..SnapshotSummary::default()
+        },
+        policies: Vec::new(),
+        ..ConfigSnapshot::default()
+    });
+    let response = run_request(state.clone(), request);
+    assert!(!response.ok, "mismatched apply must be refused");
+    assert!(
+        response.error.contains("snapshot policy count mismatch"),
+        "unexpected error: {}",
+        response.error
+    );
+    let guard = state.lock().expect("state");
+    assert_eq!(
+        guard.snapshot_policy_mismatch_total, 1,
+        "refusal must increment the dedicated mismatch counter"
+    );
+    assert_eq!(
+        guard.status.snapshot_policy_mismatch_total, 1,
+        "refusal must be visible in status immediately"
+    );
+    assert_eq!(
+        guard.status.last_snapshot_generation, 1,
+        "refused apply must not advance the reported generation"
+    );
+    assert_eq!(
+        guard.status.last_snapshot_policy_count, 1,
+        "refused apply must not change the applied policy count"
+    );
+    let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
+    assert_eq!(installed.generation, 1, "prior snapshot must stay installed");
+    assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
+}
+
 #[test]
 fn apply_snapshot_integrity_preflight_rejects_without_mutating_state() {
     use crate::{AddressBookSnapshot, ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
@@ -2470,6 +2570,10 @@ fn apply_snapshot_reuses_policy_preflight_on_same_plan_refresh_11005() {
         generation,
         fib_generation: generation as u32,
         generated_at: chrono::Utc::now(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            policy_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         zones: vec![
             ZoneSnapshot {
                 name: "trust".to_string(),
@@ -2799,6 +2903,7 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
 
     // New same-plan apply: defer_workers=false, unparseable address -> the
@@ -2911,6 +3016,7 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
 
     // Force the single planned worker's spawn to fail on the post-teardown
@@ -3107,6 +3213,7 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
 
     // Force the single planned worker's spawn to fail on the post-teardown
@@ -3276,6 +3383,7 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
 
     // Force the single planned worker to SPAWN but report an INCOMPLETE bound
@@ -3438,6 +3546,7 @@ fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     {
         let mut guard = state.lock().expect("state");
@@ -3533,6 +3642,7 @@ fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     {
         let mut guard = state.lock().expect("state");
@@ -4591,6 +4701,7 @@ fn armed_state_with_failing_reconcile(bindings: Vec<BindingStatus>) -> Arc<Mutex
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }))
 }
 
@@ -4728,6 +4839,7 @@ fn never_settling_state() -> Arc<Mutex<ServerState>> {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }))
 }
 
@@ -7039,6 +7151,7 @@ fn drain_session_deltas_survive_write_state_failure_5294() {
         afxdp: coord,
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
 
     // A state_file inside a directory that does not exist makes write_state's
@@ -7755,6 +7868,7 @@ fn failed_forwarding_reconcile_restores_the_prior_arm_state_6750() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
 
     let mut request = req("set_forwarding_state");
@@ -8154,6 +8268,7 @@ mod routing_domain_delete_7160 {
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }))
     }
 
@@ -8190,6 +8305,7 @@ mod routing_domain_delete_7160 {
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }))
     }
 
@@ -8362,6 +8478,7 @@ mod routing_domain_delete_7160 {
                 afxdp,
                 state_writer: Arc::new(StateWriter::new()),
                 quarantined_after_panic: false,
+                snapshot_policy_mismatch_total: 0,
             }));
             let mut request = bare_five_tuple_delete();
             request
@@ -8426,6 +8543,7 @@ mod routing_domain_delete_7160 {
                     afxdp,
                     state_writer: Arc::new(StateWriter::new()),
                     quarantined_after_panic: false,
+                    snapshot_policy_mismatch_total: 0,
                 }));
                 let mut request = bare_five_tuple_delete();
                 request
@@ -8508,6 +8626,7 @@ mod routing_domain_delete_7160 {
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
 
         let mut request = req("sync_session");
@@ -8557,6 +8676,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         // Install with an explicit identity (adopted by the helper).
         let mut install = req("sync_session");
@@ -8600,6 +8720,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         let mut install = req("sync_session");
         let mut install_sync = upsert_request();
@@ -8637,6 +8758,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         let mut install = req("sync_session");
         let mut install_sync = upsert_request();
@@ -8680,6 +8802,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         let list = req("list_sessions_by_policy");
         let response = run_request(state.clone(), list);
@@ -8702,6 +8825,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         let mut list = req("list_sessions_by_policy");
         list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
@@ -8736,6 +8860,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         let mut list = req("list_sessions_by_policy");
         list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
@@ -8789,6 +8914,7 @@ mod routing_domain_delete_7160 {
             afxdp: coordinator,
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         let mut list = req("list_sessions_by_policy");
         list.session_policy_list = Some(crate::protocol::SessionPolicyListRequest {
@@ -8840,6 +8966,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         // Same tuple in two domains: default (stated 1) + tenant 100007,
         // each with an explicit adopted identity.
@@ -8928,6 +9055,7 @@ mod routing_domain_delete_7160 {
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
         let mut request = req("sync_session");
         request.session_sync = Some(upsert_request());
@@ -9000,6 +9128,7 @@ mod routing_domain_delete_7160 {
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }));
 
         let mut request = req("sync_session");
@@ -10027,6 +10156,7 @@ fn same_plan_retry_after_bind_failure_reconciles_14130() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     {
         let mut guard = state.lock().expect("state");
