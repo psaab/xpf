@@ -237,16 +237,31 @@ python3 "${_CELL_DIR}/v6-na-parse-12495.py" "$T/cap.pcap" >"$T/events.txt" ||
 	die_void "the capture could not be read (bad magic/linktype) — not evidence of anything"
 
 # ── 6. Fail back — restore the shared cluster's placement ────────────────
-# The failover moved the RG to the OTHER node; a failback request issued on
-# the CURRENT primary moves it back to its peer. Ask, then wait out the
-# deadline.
+# #15959: the failback MUST follow the operator sequence, not a plain
+# failover request on the current primary. A plain
+# `request chassis cluster failover redundancy-group $RG` is a LOCAL yield
+# (ManualFailover): it parks the current primary in secondary-hold and
+# clears its transfer-commit pin, but under Preempt=no it does not move
+# the RG to the peer — the old primary is left in secondary-hold with
+# Manual=yes and the committed primary is re-elected, so waiting for the
+# peer to become primary strands the RG past any deadline (recorded
+# 300s strand on 61c7d45603 and 9e94cf62ab; #15734 fixed the product
+# half by releasing the spent hold, which deliberately does NOT promote
+# the committed secondary). The operator path that converges in ~1s is:
+# release the stranded hold on the target node (failover reset), then a
+# TARGETED request naming the target node, which runs the coordinated
+# RequestPeerFailover transfer and commits the target as primary.
+# The wait below remains the verdict: request text is never ownership
+# proof (#6440).
 WANT_AFTER="$PRIMARY_BEFORE"
+WANT_NODE_NUM="${WANT_AFTER#node}"
 FAILBACK_RC=0
 CURRENT="$(rg_primary "$FW0")"
-REQUEST_BACK="$FW0"
-[[ "$CURRENT" == node1 ]] && REQUEST_BACK="$FW1"
 if [[ -n "$CURRENT" && "$CURRENT" != "$WANT_AFTER" ]]; then
-	incus exec "$REQUEST_BACK" -- cli -c "request chassis cluster failover redundancy-group ${V6_NA_RG}" >/dev/null 2>&1 || true
+	WANT_INSTANCE="$FW0"
+	[[ "$WANT_AFTER" == node1 ]] && WANT_INSTANCE="$FW1"
+	incus exec "$WANT_INSTANCE" -- cli -c "request chassis cluster failover reset redundancy-group ${V6_NA_RG}" >/dev/null 2>&1 || true
+	incus exec "$WANT_INSTANCE" -- cli -c "request chassis cluster failover redundancy-group ${V6_NA_RG} node ${WANT_NODE_NUM}" >/dev/null 2>&1 || true
 fi
 wait_primary "$WANT_AFTER" "$FAILOVER_DEADLINE" || FAILBACK_RC=1
 incus exec "$CLUSTER_LAN_HOST" -- rm -f "$REMOTE_PCAP" /tmp/v6na-12495.tcpdump.log >/dev/null 2>&1 || true

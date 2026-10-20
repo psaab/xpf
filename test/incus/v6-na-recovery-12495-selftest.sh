@@ -355,19 +355,36 @@ open(path, "wb").write(b"".join(out))
 PYEOF
 cat >"$STUB/bin/date" <<'STUB_DATE'
 #!/usr/bin/env bash
-# Pin the gate clock at +400ms of the fixture epoch: T0 and all
-# neighbor samples read 4102444800400; wire events are stamped
-# exactly 4102444800400, so they are in [T0, T0+window] and the NA
-# is at-or-before the first flipped sample (also 4102444800400).
-if [[ "${1:-}" == "+%s%3N" ]]; then echo 4102444800400; elif [[ "${1:-}" == "+%s" ]]; then echo 4102444800; else echo 4102444800400; fi
+# Two clocks, deliberately separated. +%s%3N (the gate's T0 and
+# neighbor-sample stamps) is CONSTANT at the wire stamps'
+# epoch+400ms, so every wire event is exactly at T0 and at-or-before
+# the first flipped sample — the attribution the fixture models.
+# +%s (whole seconds) is used ONLY by wait_primary's deadline
+# arithmetic, and it ADVANCES 1s per date call: a constant seconds
+# clock would freeze `now - start` and hang the gate forever on any
+# case whose failback cannot move (the pre-#15959 gate under the
+# stranded stub included). Advancing only the seconds clock keeps
+# the millisecond attribution exact while deadlines still expire —
+# a 4s deadline after ~4 wait_primary polls.
+c="${V6NA_DATE_COUNTER:-/dev/null}"
+n=0; [[ -f "$c" ]] && n="$(cat "$c")"
+echo $((n + 1)) >"$c" 2>/dev/null || true
+if [[ "${1:-}" == "+%s%3N" ]]; then echo 4102444800400; elif [[ "${1:-}" == "+%s" ]]; then echo $((4102444800 + n)); else echo 4102444800400; fi
 STUB_DATE
 chmod +x "$STUB/bin/date"
 rm -f "$STUB/fake.pcap.marker"
 cat >"$STUB/bin/incus" <<'STUB_INCUS'
 #!/usr/bin/env bash
-# Hermetic incus stub for #15733 gate-preservation cases. State (RG
-# primary) lives in $V6NA_STUB_STATE: line1 = primary before, and the
-# stub flips it on every failover request, like the real cluster.
+# Hermetic incus stub for #15733 gate-preservation cases and the #15959
+# failback-sequence case. State (RG primary) lives in $V6NA_STUB_STATE:
+# line1 = primary before, and the stub flips it on every failover
+# request, like the real cluster — EXCEPT when V6NA_STUB_STRANDED=1,
+# which models the recorded #15959 strand: a plain (untargeted) failover
+# request is a local yield that moves nothing (Preempt=no strands the
+# RG on the current primary), a failover reset alone moves nothing, and
+# only a targeted `... node <n>` request issued on the target node
+# commits the transfer. Gate CLI commands are appended to
+# $V6NA_STUB_CLI_LOG as "<host> <request>" before any state change.
 case "$1" in
 info) exit 0 ;;
 exec)
@@ -405,8 +422,37 @@ exec)
 				echo "node1 primary"
 			fi ;;
 		*"request chassis cluster failover"*)
+			printf '%s %s\n' "$host" "$*" >>"${V6NA_STUB_CLI_LOG:-/dev/null}"
 			cur="$(cat "$V6NA_STUB_STATE")"
-			if [[ "$cur" == node0 ]]; then echo node1 >"$V6NA_STUB_STATE"; else echo node0 >"$V6NA_STUB_STATE"; fi ;;
+			if [[ "${V6NA_STUB_STRANDED:-0}" == 1 ]]; then
+				# #15959 strand model. A TARGETED request naming the
+				# node that hosts this command commits the transfer
+				# to that node. A PLAIN request moves the RG only on
+				# the FIRST failover (the gate's move under test,
+				# tracked by $V6NA_STUB_MOVED): replayed as a
+				# failback it is a local yield that moves NOTHING —
+				# the recorded strand. A reset alone moves nothing.
+				case "$*" in
+				*" node 0"*) [[ "$host" == *fw0 ]] && echo node0 >"$V6NA_STUB_STATE" ;;
+				*" node 1"*) [[ "$host" == *fw1 ]] && echo node1 >"$V6NA_STUB_STATE" ;;
+				*"reset redundancy-group"*) : ;;
+				*)
+					if [[ ! -e "${V6NA_STUB_STATE}.moved" ]]; then
+						: >"${V6NA_STUB_STATE}.moved"
+						if [[ "$cur" == node0 ]]; then echo node1 >"$V6NA_STUB_STATE"; else echo node0 >"$V6NA_STUB_STATE"; fi
+					fi ;;
+				esac
+			elif [[ "${V6NA_STUB_STRANDED:-0}" != 1 ]]; then
+				# Faithful request classes: reset moves nothing, a
+				# targeted request sets the named primary, a plain
+				# request flips (yields the current primary).
+				case "$*" in
+				*"reset redundancy-group"*) : ;;
+				*" node 0"*) echo node0 >"$V6NA_STUB_STATE" ;;
+				*" node 1"*) echo node1 >"$V6NA_STUB_STATE" ;;
+				*) if [[ "$cur" == node0 ]]; then echo node1 >"$V6NA_STUB_STATE"; else echo node0 >"$V6NA_STUB_STATE"; fi ;;
+				esac
+			fi ;;
 		*) : ;;
 		esac ;;
 	esac ;;
@@ -457,5 +503,43 @@ run_gate() { # <name> <transit-recv> <want-rc>
 run_gate fail-transit 0 1
 # PASS shape (rc 0): transit healthy — scratch removed, nothing kept.
 run_gate pass 5 0
+# ── #15959: the gate failback must use the operator sequence ──────────
+# With V6NA_STUB_STRANDED=1 the stub models the recorded strand: a
+# plain (untargeted) failover request is a local yield that moves
+# NOTHING (Preempt=no strands the RG on the current primary), a reset
+# alone moves nothing, and only a targeted `... node <n>` request
+# issued on the target node commits the transfer. The gate must
+# therefore still converge to PASS (rc 0) — under the pre-#15959
+# plain-request failback this case exits 3 (failback strands RG2) —
+# and its CLI log must show the operator order on the target host:
+# reset BEFORE the targeted request. FAILOVER_DEADLINE is pinned to
+# 4s so a regression fails in seconds, not 300s. The one plain request
+# in the log is the initial failover (the move under test); the
+# failback half must contribute none — asserted by counting exactly
+# one untargeted request.
+run_gate_stranded() {
+	local g="$STUB/stranded" out rc log reset_ln target_ln plain_count
+	mkdir -p "$g/logs"
+	echo node0 >"$g/state"
+	rm -f "$g/state.moved"
+	: >"$g/cli.log"
+	printf 'LAN_VIP6="%s"\nLAN_HOST="cluster-userspace-host"\nINCUS_REMOTE="loss"\n' "$VIP" >"$g/cluster.env"
+	out="$(cd "$SCRIPT_DIR" && BPFRX_CLUSTER_ENV="$g/cluster.env" V6NA_DATE_COUNTER="$g/date-counter" V6NA_STUB_STATE="$g/state" V6NA_STUB_PCAP="$STUB/fake.pcap" \
+		V6NA_STUB_TRANSIT=5 V6NA_STUB_STRANDED=1 V6NA_STUB_CLI_LOG="$g/cli.log" V6_NA_LOG_DIR="$g/logs" \
+		V6_NA_WINDOW_MS=1000 V6_NA_POLL_MS=500 FAILOVER_DEADLINE=4 \
+		PATH="$STUB/bin:$PATH" bash "$GATE" 2>&1)" && rc=0 || rc=$?
+	log="$(cat "$g/cli.log")"
+	reset_ln="$(grep -n 'fw0 .*failover reset redundancy-group 2$' "$g/cli.log" | head -1 | cut -d: -f1)"
+	target_ln="$(grep -n 'fw0 .*failover redundancy-group 2 node 0$' "$g/cli.log" | head -1 | cut -d: -f1)"
+	plain_count="$(grep -cE 'failover redundancy-group 2$' "$g/cli.log" || true)"
+	if [[ "$rc" -eq 0 && -n "$reset_ln" && -n "$target_ln" && "$reset_ln" -lt "$target_ln" && "$plain_count" -eq 1 ]]; then
+		ok "gate stranded: operator failback (reset then targeted node 0 on fw0) returns RG2, rc 0"
+	else
+		bad "gate stranded: rc=$rc reset_ln=${reset_ln:-none} target_ln=${target_ln:-none} plain=$plain_count (pre-#15959 plain failback exits 3 here)"
+		printf '%s\n' "$out" | sed 's/^/      /' >&2
+		printf '%s\n' "$log" | sed 's/^/      cli: /' >&2
+	fi
+}
+run_gate_stranded
 echo "RESULTS: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
