@@ -889,6 +889,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 							continue
 						}
 						var toks []string
+						complete := false
 						for _, sib := range children[i+1:] {
 							if sib.Name() == "range" {
 								break
@@ -911,8 +912,38 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 								len(toks) == 3 && toks[1] == "to" {
 								setPortRange(toks)
 								toks = nil
+								complete = true
 							}
 							if sib.Name() == "no-translation" || sib.Name() == "deterministic" || sib.Name() == "random-allocation" || sib.Name() == "no-random-allocation" {
+								// #15935 (positional model): apply the
+								// modifier AT ITS AUTHORED POSITION,
+								// immediately after the range flush
+								// above. Collect-and-replay-at-end
+								// was wrong: a modifier before a LATER
+								// range must be superseded by that
+								// range (#13212 later-wins), and only
+								// modifiers after the final range
+								// override it. Modifiers coexist —
+								// applying one never undoes another
+								// (random does not supersede
+								// no-translation, and vice versa a
+								// later range clears no-translation
+								// via setPortRange).
+								switch sib.Name() {
+								case "no-translation":
+									pool.PortNoTranslation = true
+									pool.PortLow = 0
+									pool.PortHigh = 0
+									pool.PortRangeInvalidSpec = ""
+								case "random-allocation":
+									pool.PortRandomAllocation = true
+									pool.PortNoRandomAllocationAuthored = false
+								case "no-random-allocation":
+									pool.PortRandomAllocation = false
+									pool.PortNoRandomAllocationAuthored = true
+								case "deterministic":
+									applyDeterministicChildren(ensureDet(), sib)
+								}
 								continue
 							}
 							toks = append(toks, sib.Keys...)
@@ -920,7 +951,22 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 								toks = append(toks, gc.Keys...)
 							}
 						}
-						setPortRange(toks)
+						// Tail: pending endpoint tokens flush as the
+						// final range (superseding any modifier applied
+						// before them). If a complete range already
+						// flushed and only positionally-applied
+						// modifiers followed, there is nothing to
+						// stamp — setPortRange(nil) here would
+						// fabricate "<empty>", zero the valid range,
+						// clear PortNoTranslation, and erase an
+						// invalid later range's strict-reject marker.
+						// Only a segment with no endpoints at all is
+						// the genuinely empty range.
+						if toks != nil {
+							setPortRange(toks)
+						} else if !complete {
+							setPortRange(nil)
+						}
 					}
 				}
 			case "persistent-nat":

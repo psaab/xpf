@@ -5,9 +5,42 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
+
+// canonicalRAPrefix15935 returns the canonical masked CIDR spelling
+// (e.g. "2001:db8::/64") for a parseable prefix, so equivalent author
+// spellings share one identity. ok=false for unparseable values, which
+// keep exact-string identity on tolerant paths.
+func canonicalRAPrefix15935(s string) (string, bool) {
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return "", false
+	}
+	return p.Masked().String(), true
+}
+
+func appendUniqueInt15935(ids []int, id int) []int {
+	for _, v := range ids {
+		if v == id {
+			return ids
+		}
+	}
+	return append(ids, id)
+}
+
+// decodedOSPFMD5Key15935 returns the effective key bytes for conflict
+// comparison: a valid Junos $9$ value decodes to its plaintext, any
+// other value (including a malformed $9$ blob, which the #15051 gate
+// rejects/warns on separately) compares as authored.
+func decodedOSPFMD5Key15935(s Secret) string {
+	if decoded, err := DecodeJunos9Secret(s.Reveal()); err == nil {
+		return decoded
+	}
+	return s.Reveal()
+}
 
 // validateLLDPInterfacePackedTokens rejects an unknown token on an LLDP
 // interface statement (#14616). Only the optional disable flag may follow
@@ -335,7 +368,18 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 								keyPresent := false
 								for _, kc := range authChild.Children {
 									if kc.Name() == "key" {
-										key = Secret(nodeVal(kc))
+										candidate := Secret(nodeVal(kc))
+										if keyPresent && key != "" && candidate != "" &&
+											decodedOSPFMD5Key15935(key) != decodedOSPFMD5Key15935(candidate) {
+											// #15935: two different keys
+											// inside ONE md5 stanza are a
+											// conflicting duplicate, not a
+											// last-wins restatement.
+											iface.AuthMD5KeyConflictIDs = appendUniqueInt15935(iface.AuthMD5KeyConflictIDs, keyID)
+										}
+										if !keyPresent {
+											key = candidate
+										}
 										keyPresent = true
 									}
 								}
@@ -358,6 +402,14 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 									}
 									if iface.AuthMD5Keys[i].Key == "" && key != "" {
 										iface.AuthMD5Keys[i].Key = key
+									} else if iface.AuthMD5Keys[i].Key != "" && key != "" && decodedOSPFMD5Key15935(iface.AuthMD5Keys[i].Key) != decodedOSPFMD5Key15935(key) {
+										// #15935: same key-id restated with a
+										// DIFFERENT non-empty key is a
+										// conflicting duplicate Junos rejects,
+										// not a rollover merge. Record it for
+										// the strict gate (lenient warns);
+										// first key wins deterministically.
+										iface.AuthMD5KeyConflictIDs = appendUniqueInt15935(iface.AuthMD5KeyConflictIDs, keyID)
 									}
 									coalesced = true
 									break
@@ -1446,17 +1498,36 @@ func compileRouterAdvertisement(node *Node, proto *ProtocolsConfig) error {
 					// present in this occurrence overwrite, absent
 					// fields keep their prior value (defaults only
 					// on first creation).
+					// #15935: key by canonical CIDR identity
+					// (masked netip.Prefix), not author spelling —
+					// `2001:db8::/64` and `2001:0db8:0:0::/64`
+					// are one PIO. Unparseable prefixes keep
+					// exact-string identity so tolerant paths
+					// never merge distinct garbage.
+					pfxKey, pfxKeyOK := canonicalRAPrefix15935(pfxName)
 					var pfx *RAPrefix
 					for _, existing := range ra.Prefixes {
-						if existing != nil && existing.Prefix == pfxName {
+						if existing == nil {
+							continue
+						}
+						if pfxKeyOK {
+							if ek, ok := canonicalRAPrefix15935(existing.Prefix); ok && ek == pfxKey {
+								pfx = existing
+								break
+							}
+						} else if existing.Prefix == pfxName {
 							pfx = existing
 							break
 						}
 					}
 					appendPfx := pfx == nil
 					if appendPfx {
+						stored := pfxName
+						if pfxKeyOK {
+							stored = pfxKey
+						}
 						pfx = &RAPrefix{
-							Prefix:     pfxName,
+							Prefix:     stored,
 							OnLink:     true, // defaults
 							Autonomous: true,
 						}

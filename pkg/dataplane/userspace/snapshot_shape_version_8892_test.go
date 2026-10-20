@@ -558,6 +558,10 @@ const (
 	// a field of an EXISTING walked struct (unlike the NAT64 fields added
 	// at v51 before NAT64RuleSnapshot joined the walk), so the golden
 	// below moves.
+	// Version 61 (#15707): ConfigSnapshot carries
+	// no_ipv6_reject_zero_hop_limit. The v60 pin/golden were left
+	// stale by that bump and were corrected to 61 by #15935; the
+	// protocol has since moved on (below).
 	// Version 62 (#15930) adds NAT64RuleSnapshot source_constrained. It
 	// is a field of an EXISTING walked struct, so the golden below moves.
 	snapshotShapeVersion8892 = 62
