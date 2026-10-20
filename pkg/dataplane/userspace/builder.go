@@ -283,7 +283,8 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		// #15707: `system internet-options no-ipv6-reject-zero-hop-limit`
 		// suppresses the helper's ICMPv6 Time Exceeded for hop-limit=0.
 		NoIPv6RejectZeroHopLimit: cfg.System.InternetOptions != nil && cfg.System.InternetOptions.NoIPv6RejectZeroHopLimit,
-		PolicyRematchExtensive: cfg.Security.PolicyRematchExtensive,
+		Policies:                 policies,
+		PolicyRematchExtensive:   cfg.Security.PolicyRematchExtensive,
 		// #3303: thread feedOverlay into the NAT builders so a NAT rule scoped
 		// to a feed-backed `match {source,destination}-address-name` resolves the
 		// live feed prefixes, exactly as the policy/address-book path does. Static
