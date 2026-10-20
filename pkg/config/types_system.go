@@ -28,6 +28,14 @@ type SystemConfig struct {
 	// so widening the shared field would have been churn in three packages to
 	// serve one of them.
 	NTPServerOptions map[string]NTPServerOption
+	// NTPPeers / NTPPeerOptions carry `system ntp peer <addr>` (#15709),
+	// rendered as chrony `peer` directives. Mirror of NTPServers/
+	// NTPServerOptions for the symmetric-mode sources.
+	NTPPeers       []string                   `json:"-"`
+	NTPPeerOptions map[string]NTPServerOption `json:"-"`
+	// NTPTrustedKeyIDs carries `system ntp trusted-key <id>` ids (#15709),
+	// retained keyword-only for the commit advisory; no key material.
+	NTPTrustedKeyIDs []int `json:"-"`
 	// NTPServerKeyIDs carries the per-server `key <id>` ids stripped by
 	// the compiler (#14596): xpf writes no chrony keyfile, so a rendered
 	// `key <id>` would make chronyd refuse to poll the source. The ids
@@ -617,6 +625,13 @@ type SystemSyslogConfig struct {
 	Hosts []*SyslogHostConfig
 	Files []*SyslogFileConfig
 	Users []*SyslogUserConfig // user destinations (e.g. "user * { any emergency; }")
+	// DefaultSourceAddress is top-level `system syslog source-address`
+	// (#15709): inherited by hosts without their own source-address.
+	DefaultSourceAddress string `json:"-"`
+	// TopLevelInert holds sorted top-level syslog keywords xpf does not
+	// apply (console, time-format, archive, log-rotate-frequency) for
+	// the #15709 commit advisory. Keywords only, never values.
+	TopLevelInert []string `json:"-"`
 }
 
 // SyslogUserConfig defines a syslog user destination.
@@ -2055,4 +2070,8 @@ type NTPServerOption struct {
 	// per-source VRF directive, so acting on it needs a routing change rather
 	// than a config one.
 	RoutingInstance string
+	// SourceAddress is `server/peer <addr> source-address <ip>` (#15709).
+	// Recorded but not rendered: chrony sources have no per-source
+	// source-bind xpf emits, so the compiler warns instead of dropping.
+	SourceAddress string
 }
