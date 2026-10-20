@@ -275,6 +275,21 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #15717: post-compile login-class gate, appended dead-last so it
+	// cannot steal an established first-error slot (invariant #6): a
+	// `system login user <n> class <c>` whose class is neither built-in
+	// nor defined in the effective config (e.g. defined only in an
+	// un-applied group, which the permissive schema-refs union passes)
+	// is rejected here; tolerant loads warn and keep booting (#1960).
+	if err := validateLoginUserClassReferencesStrict(cfg); err != nil {
+		if opts.lenientLoginUserClassRef {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("login user class (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	if err := runUniformGatesUnknownSecurityPoliciesChild12217(cfg, opts); err != nil {
 		return err
 	}

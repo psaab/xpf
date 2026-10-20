@@ -90,7 +90,14 @@ func TestUndefinedLoginClassStillRejected(t *testing.T) {
 	tree := buildTree4303(t, []string{
 		"set system login user dave class ghost-class",
 	})
-	c, err := CompileConfig(tree)
+	// Since #15717 the post-compile gate rejects the undefined class
+	// during CompileConfig itself; assert that first, then (via the
+	// lenient compile, which downgrades the new gate) prove the
+	// original SchemaValidate gate still rejects it too.
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatalf("CompileConfig accepted an undefined login class (fail-open regression, #15717 gate)")
+	}
+	c, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

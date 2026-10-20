@@ -515,3 +515,50 @@ func validateHelperStateFileStrict(cfg *Config) error {
 	}
 	return nil
 }
+
+// validateLoginUserClassReferencesStrict (#15717) is the post-compile gate
+// for `system login user <name> class <class>`: every non-empty user class
+// must resolve via ResolveClassPermissions against the EFFECTIVE compiled
+// config (built-ins first, then custom classes that survived apply-groups
+// expansion). It closes two holes the tree-based schema gate cannot:
+//
+//   - collectSchemaRefs deliberately collects login-class definitions from
+//     group bodies, applied or not (#1319 PR 3 permissive union — a
+//     definition living only in the peer node's un-applied group must keep
+//     satisfying shared-section references at schema-validate time). A
+//     class defined ONLY in an un-applied group therefore passes the
+//     schema gate, but ExpandGroups discards that group, so the compiled
+//     cfg carries the user with no such class in cfg.System.Login.Classes.
+//   - CompileConfig / CompileConfigLenient never ran SchemaValidate at
+//     all, so a directly-compiled `user bob class totally-undefined`
+//     succeeded silently.
+//
+// At runtime ResolveClassPermissions(cfg, unknown) returns ok=false and
+// every authorization check denies (fail-closed), so the pre-fix impact
+// is a silently-accepted config whose user can never log in usefully —
+// a lockout the operator only discovers at the next login. Junos rejects
+// the same shape at commit (`class '<c>' is not defined`).
+//
+// Strict on commit / commit-check; the uniform-gate call site downgrades
+// to a warning on the tolerant load / peer-sync path (opts
+// .lenientLoginUserClassRef, #1960 no-brick) so an already-persisted or
+// peer-synced config with this defect still boots — its users were
+// already denied at runtime, so tolerant behaviour is unchanged.
+// Users are visited in configured order; the first offender wins.
+func validateLoginUserClassReferencesStrict(cfg *Config) error {
+	if cfg == nil || cfg.System.Login == nil {
+		return nil
+	}
+	for _, u := range cfg.System.Login.Users {
+		if u == nil || u.Class == "" {
+			continue
+		}
+		if _, ok := ResolveClassPermissions(cfg, u.Class); !ok {
+			return fmt.Errorf("system login user %s class %s: login class %q is not defined in the effective configuration; "+
+				"use a system-defined class (one of: %s) or define it with `set system login class %s permissions <...>` "+
+				"in a stanza that survives apply-groups (a class defined only in an un-applied group does not exist)",
+				u.Name, u.Class, u.Class, strings.Join(ValidLoginClasses(), ", "), u.Class)
+		}
+	}
+	return nil
+}
