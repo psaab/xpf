@@ -805,7 +805,7 @@ fn build_nat64_inner_frame(
             {
                 let capacity = frame.len().checked_add(4)?;
                 let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
-                out.resize(capacity, 0);
+                crate::afxdp::cos::redirect_pool::extend_pooled_for_build(&mut out, capacity);
                 let Some(written) = crate::nat64::build_nat64_v6_to_v4_nonfirst_frame_into(
                     &mut out, frame, snat_v4, dst_v4, dst_mac, src_mac, vlan_id,
                 ) else {
@@ -817,7 +817,7 @@ fn build_nat64_inner_frame(
             }
             let capacity = frame.len().checked_add(4)?;
             let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
-            out.resize(capacity, 0);
+            crate::afxdp::cos::redirect_pool::extend_pooled_for_build(&mut out, capacity);
             let Some(written) = crate::nat64::build_nat64_v6_to_v4_frame_into(
                 &mut out,
                 frame,
@@ -863,7 +863,7 @@ fn build_nat64_inner_frame(
             // fragment reaches the session-hit record site.
             let capacity = frame.len().checked_add(44)?;
             let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
-            out.resize(capacity, 0);
+            crate::afxdp::cos::redirect_pool::extend_pooled_for_build(&mut out, capacity);
             let reverse_non_first = frame_l3_offset(frame).is_some_and(|l3| {
                 frame
                     .get(l3..)

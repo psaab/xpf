@@ -9720,3 +9720,156 @@ fn nat64_scoped_revalidation_honours_pool_port_range_15932() {
         "out-of-range tuple must not survive destination-only revalidation"
     );
 }
+
+// #15956: direct `_into` poison corpus. Every frame builder (forward,
+// reverse, both non-first directions, both ICMP-error directions) is fed
+// a 0xEE-poisoned destination and must produce byte-identical output to
+// the zero-filled reference. Any translator that read an unwritten `dst`
+// byte (the gap a `resize(.., 0)` used to paper over) leaks 0xEE into the
+// published prefix and fails here. Catches the defect even if the pooled
+// call sites in frame/mod.rs are later changed independently.
+#[test]
+fn nat64_15956_into_builders_byte_identical_with_poisoned_dst() {
+    let snat = Ipv4Addr::new(198, 51, 100, 1);
+    let dst4 = Ipv4Addr::new(198, 51, 100, 50);
+    let src6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+
+    let check = |name: &str, want: &[u8], got: &[u8]| {
+        assert_eq!(got, want, "#15956 {name}: poisoned-dst build diverged");
+        assert!(!got.contains(&0xEE), "#15956 {name}: poison in output");
+    };
+    // Outer IPv4 Identification (frame bytes 18..20) + header checksum
+    // (24..26) for header-less v6->v4 outputs are process-global
+    // `next_frag_id()` output; two builds legitimately differ there.
+    // Mask those four bytes on copies before comparing.
+    let mask_outer_id = |v: &[u8]| -> Vec<u8> {
+        let mut v = v.to_vec();
+        if v.len() >= 26 && v[14] >> 4 == 4 {
+            v[18..20].fill(0);
+            v[24..26].fill(0);
+        }
+        v
+    };
+
+    // Forward first-fragment (TCP) + v6->v4 ICMP error.
+    {
+        let pkt = make_ipv6_tcp_packet(src6, dst6, 12345, 80, b"poison-check");
+        let mut frame = vec![0xaau8; 12];
+        frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+        frame.extend_from_slice(&pkt);
+        let mut want = build_nat64_v6_to_v4_frame(&frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("ref v6to4");
+        let mut dst = vec![0xEEu8; frame.len() + 4];
+        let n = build_nat64_v6_to_v4_frame_into(&mut dst, &frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("into v6to4");
+        // Identification (L3 bytes 4..6) + header checksum (10..12) are
+        // process-global next_frag_id() output here; mask like the
+        // existing differential test.
+        check("v6to4", &mask_outer_id(&want), &mask_outer_id(&dst[..n]));
+
+        // ICMPv6 error (Dest Unreachable quoting the TCP packet).
+        let mut err = vec![0u8; 40 + 8 + pkt.len()];
+        err[0] = 0x60;
+        err[4..6].copy_from_slice(&((8 + pkt.len()) as u16).to_be_bytes());
+        err[6] = PROTO_ICMPV6;
+        err[7] = 64;
+        err[8..24].copy_from_slice(&dst6.octets());
+        err[24..40].copy_from_slice(&src6.octets());
+        err[40] = 1; // Dest Unreachable
+        err[41] = 3;
+        err[48..].copy_from_slice(&pkt);
+        let sum = checksum16_ipv6_pseudo(dst6, src6, PROTO_ICMPV6, &err[40..]);
+        err[42..44].copy_from_slice(&sum.to_be_bytes());
+        let mut eframe = vec![0xaau8; 12];
+        eframe.extend_from_slice(&0x86ddu16.to_be_bytes());
+        eframe.extend_from_slice(&err);
+        let want = build_nat64_v6_to_v4_icmp_error_frame(&eframe, snat, dst4, Some(40001), [0x11; 6], [0x22; 6], 0, false)
+            .expect("ref v6to4 icmp err");
+        let mut dst = vec![0xEEu8; eframe.len() + 4];
+        let n = build_nat64_v6_to_v4_icmp_error_frame_into(&mut dst, &eframe, snat, dst4, Some(40001), [0x11; 6], [0x22; 6], 0, false)
+            .expect("into v6to4 icmp err");
+        check("v6to4-icmp-error", &mask_outer_id(&want), &mask_outer_id(&dst[..n]));
+    }
+
+    // Reverse first-fragment (TCP) + v4->v6 ICMP error.
+    {
+        let pkt = make_ipv4_tcp_packet(dst4, snat, 80, 12345, b"poison-check");
+        let mut frame = vec![0xaau8; 12];
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        frame.extend_from_slice(&pkt);
+        let want = build_nat64_v4_to_v6_frame(&frame, dst6, src6, [0x11; 6], [0x22; 6], 0).expect("ref v4to6");
+        let mut dst = vec![0xEEu8; frame.len() + 44];
+        let n = build_nat64_v4_to_v6_frame_into(&mut dst, &frame, dst6, src6, [0x11; 6], [0x22; 6], 0).expect("into v4to6");
+        check("v4to6", &want, &dst[..n]);
+
+        // ICMPv4 error (Dest Unreachable quoting the TCP packet).
+        let mut err = vec![0u8; 20 + 8 + pkt.len()];
+        err[0] = 0x45;
+        err[2..4].copy_from_slice(&((20 + 8 + pkt.len()) as u16).to_be_bytes());
+        err[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+        err[8] = 64;
+        err[9] = PROTO_ICMP;
+        err[12..16].copy_from_slice(&dst4.octets());
+        err[16..20].copy_from_slice(&snat.octets());
+        let s = checksum16(&err[..20]);
+        err[10..12].copy_from_slice(&s.to_be_bytes());
+        err[20] = 3; // Dest Unreachable
+        err[21] = 3;
+        err[28..].copy_from_slice(&pkt);
+        let s = checksum16(&err[20..]);
+        err[22..24].copy_from_slice(&s.to_be_bytes());
+        let mut eframe = vec![0xaau8; 12];
+        eframe.extend_from_slice(&0x0800u16.to_be_bytes());
+        eframe.extend_from_slice(&err);
+        let want = build_nat64_v4_to_v6_icmp_error_frame(&eframe, dst6, src6, Some(5000), [0x11; 6], [0x22; 6], 0)
+            .expect("ref v4to6 icmp err");
+        let mut dst = vec![0xEEu8; eframe.len() + 44];
+        let n = build_nat64_v4_to_v6_icmp_error_frame_into(&mut dst, &eframe, dst6, src6, Some(5000), [0x11; 6], [0x22; 6], 0)
+            .expect("into v4to6 icmp err");
+        check("v4to6-icmp-error", &want, &dst[..n]);
+    }
+
+    // Non-first fragments both directions (L3-only translators).
+    {
+        // v6 non-first: eth + v6(40) + FragHdr(8) + payload.
+        let payload = [0x5au8; 24];
+        let mut pkt = vec![0u8; 40 + 8 + payload.len()];
+        pkt[0] = 0x60;
+        pkt[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        pkt[6] = 44;
+        pkt[7] = 64;
+        pkt[8..24].copy_from_slice(&src6.octets());
+        pkt[24..40].copy_from_slice(&dst6.octets());
+        pkt[40] = PROTO_UDP;
+        pkt[42..44].copy_from_slice(&((100u16 << 3) as u16).to_be_bytes());
+        pkt[44..48].copy_from_slice(&0x0001_2345u32.to_be_bytes());
+        pkt[48..].copy_from_slice(&payload);
+        let mut frame = vec![0xaau8; 12];
+        frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+        frame.extend_from_slice(&pkt);
+        let want = build_nat64_v6_to_v4_nonfirst_frame(&frame, snat, dst4, [0x11; 6], [0x22; 6], 0).expect("ref nonfirst v6to4");
+        let mut dst = vec![0xEEu8; frame.len() + 4];
+        let n = build_nat64_v6_to_v4_nonfirst_frame_into(&mut dst, &frame, snat, dst4, [0x11; 6], [0x22; 6], 0).expect("into nonfirst v6to4");
+        check("nonfirst-v6to4", &want, &dst[..n]);
+
+        // v4 non-first: eth + v4(20, offset>0) + payload.
+        let mut pkt4 = vec![0u8; 20 + payload.len()];
+        pkt4[0] = 0x45;
+        pkt4[2..4].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+        pkt4[4..6].copy_from_slice(&0x2345u16.to_be_bytes());
+        pkt4[6..8].copy_from_slice(&((100u16 & 0x1fff) as u16).to_be_bytes());
+        pkt4[8] = 64;
+        pkt4[9] = PROTO_UDP;
+        pkt4[12..16].copy_from_slice(&dst4.octets());
+        pkt4[16..20].copy_from_slice(&snat.octets());
+        let s = checksum16(&pkt4[..20]);
+        pkt4[10..12].copy_from_slice(&s.to_be_bytes());
+        pkt4[20..].copy_from_slice(&payload);
+        let mut frame4 = vec![0xaau8; 12];
+        frame4.extend_from_slice(&0x0800u16.to_be_bytes());
+        frame4.extend_from_slice(&pkt4);
+        let want = build_nat64_v4_to_v6_nonfirst_frame(&frame4, dst6, src6, [0x11; 6], [0x22; 6], 0).expect("ref nonfirst v4to6");
+        let mut dst = vec![0xEEu8; frame4.len() + 44];
+        let n = build_nat64_v4_to_v6_nonfirst_frame_into(&mut dst, &frame4, dst6, src6, [0x11; 6], [0x22; 6], 0).expect("into nonfirst v4to6");
+        check("nonfirst-v4to6", &want, &dst[..n]);
+    }
+}

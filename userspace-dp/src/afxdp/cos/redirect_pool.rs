@@ -77,6 +77,50 @@ pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
     })
 }
 
+/// #15956: publish `capacity` bytes of a pooled checkout's spare capacity
+/// as the Vec's length WITHOUT the `resize(capacity, 0)` zero-fill pass,
+/// for reused-buffer builders that overwrite the bytes they publish.
+///
+/// Contract with the caller (the NAT64 build sites in `frame/mod.rs` and
+/// `poll_descriptor/nat64_icmp_error.rs`): the builder is one of the
+/// `crate::nat64::build_*_frame_into` family. Each writes the Ethernet
+/// header and every L3 byte in `0..written` (header fields first, payload
+/// copy, then checksums computed over bytes it just wrote — no translator
+/// reads `dst` before writing the byte it later checksums), and returns
+/// `Some(written)` with `written <= capacity` or `None`. This helper only
+/// changes how `0..capacity` becomes addressable: instead of zero-filling
+/// the whole window, it exposes the already-owned spare capacity. The
+/// caller then `truncate`s to `written`, so bytes in `written..capacity`
+/// are never read as Vec elements, and on `None` the caller recycles the
+/// Vec (whose next checkout `clear()`s it) without publishing anything.
+///
+/// Soundness rests on that contract, pinned by the fail-on-revert corpus
+/// in `tests_nat_rewrite.rs`: forward / reverse / non-first / ICMP-error
+/// NAT64 builds over a `0xEE`-poisoned tail must stay byte-identical to
+/// the zero-filled build. If a future translator ever read an unwritten
+/// byte of `dst`, that corpus — not this comment — is what catches it.
+///
+/// `buf` must come from [`checkout_with_capacity`] with the same
+/// `capacity` (length 0, capacity >= `capacity`).
+#[inline]
+pub(in crate::afxdp) fn extend_pooled_for_build(buf: &mut Vec<u8>, capacity: usize) {
+    debug_assert_eq!(buf.len(), 0, "build checkout must start empty");
+    debug_assert!(buf.capacity() >= capacity, "checkout under capacity");
+    let spare_len = buf.spare_capacity_mut().len();
+    assert!(
+        spare_len >= capacity,
+        "pooled checkout spare capacity below build capacity"
+    );
+    // SAFETY: `spare_capacity_mut()[..capacity]` is owned, writable spare
+    // capacity of `buf`. Per the contract above the consuming builder
+    // initializes every byte in `0..written` before the caller truncates
+    // to `written` and publishes the Vec; bytes beyond `written` are
+    // never read, and the failure path recycles without publishing.
+    unsafe {
+        buf.set_len(capacity);
+    }
+}
+
 /// Return a finished local-TX buffer to the per-worker pool for reuse.
 /// The caller MUST be done with `buf` — its bytes already copied into a
 /// UMEM TX frame — so the buffer is dead. Drops the buffer if the pool

@@ -2621,3 +2621,207 @@ fn nat64_14305_slow_path_nonfirst_non_ip_family_fails_closed() {
         "#14305: v4 non-first fragment with non-IP meta family must fail closed"
     );
 }
+
+// #15956: reused-buffer NAT64 builds publish spare capacity instead of
+// zero-filling it (`extend_pooled_for_build`). The builders' contract is
+// that every byte in `0..written` is initialized by the translator, so a
+// buffer poisoned with 0xEE beyond the written length MUST produce
+// byte-identical output to the zero-filled build (modulo the
+// process-global fragment Identification). If a translator ever read an
+// unwritten `dst` byte, 0xEE would leak into the published prefix here.
+// The pool is thread-local and tests in this binary run serialized by
+// the harness invocation; each cell clears it first for isolation.
+#[test]
+fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
+    use crate::afxdp::cos::redirect_pool;
+    redirect_pool::clear_for_test();
+
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+
+    // Forward (v6->v4, first fragment) via the production wrapper: this
+    // exercises the frame/mod.rs spare-capacity site end to end.
+    let frame = build_ipv6_tcp_syn_with_mss(client, synthetic, 5000, 443, 1460);
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
+    let mut want = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("zero-filled forward build");
+    // Poison the pool: recycle a 0xEE-filled buffer at the build capacity,
+    // then rebuild. The published prefix must not contain the poison. The
+    // IPv4 Identification (frame bytes 18..20) and its header checksum
+    // (24..26) are process-global `next_frag_id()` output for this
+    // fragmentable size, so they legitimately differ between two builds;
+    // mask them exactly like the existing differential test does.
+    let capacity = frame.len() + 4;
+    redirect_pool::recycle(vec![0xEEu8; capacity]);
+    let mut got = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("spare-capacity forward build");
+    want[18..20].fill(0);
+    want[24..26].fill(0);
+    got[18..20].fill(0);
+    got[24..26].fill(0);
+    assert_eq!(got, want, "#15956: forward build leaked unwritten spare-capacity bytes");
+    assert!(!got.contains(&0xEE), "#15956: poison byte in forward output");
+
+    // Reverse (v4->v6) via the production wrapper (frame/mod.rs third site).
+    let fwd = Nat64State::forward_decision(pool, server, 40001);
+    let rev = fwd.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443);
+    let rdecision = icmp_test_decision(rev);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let reply = build_ipv4_tcp_frame(server, pool, 443, 40001, 1, 1, 0x10);
+    let want_rev = build_nat64_forwarded_frame(
+        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
+    )
+    .expect("zero-filled reverse build");
+    redirect_pool::recycle(vec![0xEEu8; reply.len() + 44]);
+    let got_rev = build_nat64_forwarded_frame(
+        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
+    )
+    .expect("spare-capacity reverse build");
+    assert_eq!(got_rev, want_rev, "#15956: reverse build leaked unwritten spare-capacity bytes");
+}
+
+// #15956 measurement (not a gate): production-path NAT64 build ns/pkt at
+// 64/512/1460B payloads, through `build_nat64_forwarded_frame`. Run with:
+//   cargo test --release nat64_15956_build_bench -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore = "MEASUREMENT #15956: NAT64 build ns/pkt; prints numbers, asserts nothing"]
+fn nat64_15956_build_bench() {
+    use std::time::Instant;
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
+    let rev = Nat64State::forward_decision(pool, server, 40001)
+        .reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443);
+    let rdecision = icmp_test_decision(rev);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    for payload_len in [64usize, 512, 1460] {
+        let mut frame = Vec::new();
+        write_eth_header(&mut frame, [0xaa; 6], [0xbb; 6], 0, 0x86dd);
+        let plen = (20 + payload_len) as u16;
+        frame.extend_from_slice(&[0x60, 0, 0, 0, (plen >> 8) as u8, plen as u8, PROTO_TCP, 64]);
+        frame.extend_from_slice(&client.octets());
+        frame.extend_from_slice(&synthetic.octets());
+        frame.extend_from_slice(&12345u16.to_be_bytes());
+        frame.extend_from_slice(&80u16.to_be_bytes());
+        frame.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0]);
+        frame.extend_from_slice(&vec![0x5au8; payload_len]);
+        recompute_l4_checksum_ipv6(&mut frame[14..], 40, PROTO_TCP).expect("v6 sum");
+        let iters = 50_000u32;
+        for _ in 0..1000 {
+            let _ = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default());
+        }
+        let t0 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default()).expect("build");
+            sink = sink.wrapping_add(out.len());
+            std::hint::black_box(&out);
+            crate::afxdp::cos::redirect_pool::recycle(out);
+        }
+        eprintln!("15956-BENCH v6to4 payload={payload_len} frame={} ns/pkt={:.1} sink={sink}", frame.len(), t0.elapsed().as_nanos() as f64 / iters as f64);
+
+        let mut frame4 = Vec::new();
+        write_eth_header(&mut frame4, [0xaa; 6], [0xbb; 6], 0, 0x0800);
+        let total = (20 + 20 + payload_len) as u16;
+        frame4.extend_from_slice(&[0x45, 0, (total >> 8) as u8, total as u8, 0, 1, 0x40, 0, 64, PROTO_TCP, 0, 0]);
+        frame4.extend_from_slice(&server.octets());
+        frame4.extend_from_slice(&pool.octets());
+        let cs = checksum16(&frame4[14..34]);
+        frame4[24..26].copy_from_slice(&cs.to_be_bytes());
+        frame4.extend_from_slice(&443u16.to_be_bytes());
+        frame4.extend_from_slice(&40001u16.to_be_bytes());
+        frame4.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 0x50, 0x10, 0x20, 0x00, 0, 0, 0, 0]);
+        frame4.extend_from_slice(&vec![0x5au8; payload_len]);
+        recompute_l4_checksum_ipv4(&mut frame4[14..], 20, PROTO_TCP, false).expect("v4 sum");
+        for _ in 0..1000 {
+            let _ = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default());
+        }
+        let t0 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            let out = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default()).expect("rbuild");
+            sink = sink.wrapping_add(out.len());
+            std::hint::black_box(&out);
+            crate::afxdp::cos::redirect_pool::recycle(out);
+        }
+        eprintln!("15956-BENCH v4to6 payload={payload_len} frame={} ns/pkt={:.1} sink={sink}", frame4.len(), t0.elapsed().as_nanos() as f64 / iters as f64);
+    }
+}
+
+// #15956 interleaved A/B (measurement, not a gate): same `_into` builder,
+// same reused pooled buffer; the ONLY difference is how the build window
+// is published — `resize(capacity, 0)` zero-fill (before) vs
+// `extend_pooled_for_build` spare-capacity publish (after). Arms are
+// interleaved per round so host drift hits both. Run with:
+//   cargo test --release nat64_15956_resize_ab_bench -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore = "MEASUREMENT #15956: resize vs spare-capacity A/B; prints numbers, asserts nothing"]
+fn nat64_15956_resize_ab_bench() {
+    use crate::afxdp::cos::redirect_pool;
+    use std::time::Instant;
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    for payload_len in [64usize, 512, 1460] {
+        let mut frame = Vec::new();
+        write_eth_header(&mut frame, [0xaa; 6], [0xbb; 6], 0, 0x86dd);
+        let plen = (20 + payload_len) as u16;
+        frame.extend_from_slice(&[0x60, 0, 0, 0, (plen >> 8) as u8, plen as u8, PROTO_TCP, 64]);
+        frame.extend_from_slice(&client.octets());
+        frame.extend_from_slice(&synthetic.octets());
+        frame.extend_from_slice(&12345u16.to_be_bytes());
+        frame.extend_from_slice(&80u16.to_be_bytes());
+        frame.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0]);
+        frame.extend_from_slice(&vec![0x5au8; payload_len]);
+        recompute_l4_checksum_ipv6(&mut frame[14..], 40, PROTO_TCP).expect("v6 sum");
+        let cap = frame.len() + 4;
+        let run = |extend: bool, iters: u32| -> f64 {
+            let t0 = Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..iters {
+                let mut out = redirect_pool::checkout_with_capacity(cap);
+                if extend {
+                    redirect_pool::extend_pooled_for_build(&mut out, cap);
+                } else {
+                    out.resize(cap, 0);
+                }
+                let w = crate::nat64::build_nat64_v6_to_v4_frame_into(&mut out, &frame, pool, server, [0x11; 6], [0x22; 6], 0, false).expect("into");
+                sink = sink.wrapping_add(w);
+                out.truncate(w);
+                std::hint::black_box(&out);
+                redirect_pool::recycle(out);
+            }
+            std::hint::black_box(sink);
+            t0.elapsed().as_nanos() as f64 / iters as f64
+        };
+        // Warm both arms, then interleave ABBA rounds so host drift
+        // (frequency scaling, noisy neighbours on this shared host) hits
+        // both arms symmetrically; report trimmed medians.
+        for _ in 0..2000 { run(false, 1); run(true, 1); }
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for _ in 0..9 {
+            a.push(run(false, 20_000));
+            b.push(run(true, 20_000));
+            b.push(run(true, 20_000));
+            a.push(run(false, 20_000));
+        }
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        eprintln!(
+            "15956-AB payload={payload_len} frame={} resize_ns={:.1} extend_ns={:.1} delta_ns={:.1} a={:?} b={:?}",
+            frame.len(), a[a.len()/2], b[b.len()/2], a[a.len()/2]-b[b.len()/2],
+            a.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>(),
+            b.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>()
+        );
+    }
+}
