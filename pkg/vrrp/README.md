@@ -88,7 +88,10 @@ default RETH ownership/failover path.
   change-then-revert nets to no change. The baseline is the cfg the live
   timers were last armed under, not merely the pre-first-update cfg:
   every run-loop arm from cfg snapshots, resets, and re-baselines under
-  one lock hold (`armAdvertTimer`/`armMasterDownTimer`/`armPreemptHold`),
+  one lock hold (`armAdvertTimer`/`armMasterDownTimer`/
+  `armMasterDownSafetyTimer`/`armPreemptHold` — including the
+  forced-resign safety net, whose 3x extension is deliberate but whose
+  input is cfg-derived),
   while paths that only send (VIP-set announce) never re-baseline — so a
   revert after an intermediate arm still reads as a change and is
   corrected. The next failover's

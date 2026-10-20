@@ -174,7 +174,8 @@ type vrrpInstance struct {
 	// A timer can also be (re)armed from an intermediate cfg before the
 	// token is consumed (advertTimer.C, masterDownTimer.C arming a
 	// preempt hold, handleBackupRx, transitions). The arm helpers
-	// (armAdvertTimer/armMasterDownTimer/armPreemptHold) re-baseline
+	// (armAdvertTimer/armMasterDownTimer/armMasterDownSafetyTimer/
+	// armPreemptHold) re-baseline
 	// the pending record's old* fields to the cfg they armed under,
 	// atomically with the arm, so a later revert that nets old==new
 	// can only suppress the config handler's correction when the live
@@ -609,6 +610,38 @@ func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 	}
 	skew := time.Duration(256-p) * advert / 256
 	masterDownTimer.Reset(3*advert + skew)
+	vi.noteAdvertBaselineLocked()
+	vi.mu.Unlock()
+}
+
+// armMasterDownSafetyTimer arms the forced-resignation safety net:
+// 3x masterDownInterval() with a 500ms floor. That IS a deliberate
+// extension beyond the plain master-down arm (a just-resigned node at
+// short intervals must not re-elect itself before the peer starts
+// advertising), but the 3x input is still cfg-derived, so the arm
+// follows the same snapshot -> Reset -> note invariant under ONE
+// vi.mu hold (Codex3): a manager commit landing during the
+// priority-0 sends is the cfg this arm uses and the baseline it
+// records, so a later revert reads as a change and the BACKUP config
+// consumer re-arms instead of retaining an intermediate horizon.
+func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
+	vi.mu.Lock()
+	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
+	p := vi.cfg.Priority
+	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
+		p -= vi.cfg.TrackPriorityCost
+		if p < 1 {
+			p = 1
+		} else if p > 254 {
+			p = 254
+		}
+	}
+	masterDown := 3*advert + time.Duration(256-p)*advert/256
+	safety := 3 * masterDown
+	if safety < 500*time.Millisecond {
+		safety = 500 * time.Millisecond
+	}
+	masterDownTimer.Reset(safety)
 	vi.noteAdvertBaselineLocked()
 	vi.mu.Unlock()
 }
@@ -1089,12 +1122,11 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 		// Use an extended safety-net timer instead of stopping entirely.
 		// With short RETH intervals (30ms), the normal masterDown timer
 		// at priority 0 is only ~120ms, which can re-elect us before the
-		// peer starts advertising.
-		safetyTimeout := 3 * vi.masterDownInterval()
-		if safetyTimeout < 500*time.Millisecond {
-			safetyTimeout = 500 * time.Millisecond
-		}
-		masterDownTimer.Reset(safetyTimeout)
+		// peer starts advertising. The 3x extension is deliberate, but
+		// its input is cfg-derived: arm+note atomically (arm-helper
+		// invariant) so a commit during the sends above is what the
+		// baseline records.
+		vi.armMasterDownSafetyTimer(masterDownTimer)
 	}
 	return false
 }

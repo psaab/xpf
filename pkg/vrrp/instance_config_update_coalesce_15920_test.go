@@ -986,3 +986,81 @@ func TestArmPreemptHold_CommitBetweenSnapshotAndArm_DisarmsStaleArm(t *testing.T
 		t.Fatal("1s hold survived a config update to 60s; live lower master could be preempted 59s early")
 	}
 }
+
+// TestVRRPMaster_ForcedResignSafetyArmThenRevert_BackupReArms is the
+// Codex3 safety-timer interleaving (review scratch overlay, adapted):
+// the forced-resign safety net is 3x masterDownInterval() — a
+// deliberate extension, but cfg-DERIVED, so it must follow the
+// snapshot->Reset->note invariant. MASTER (no-preempt, so the BACKUP
+// consumer's reset decision rests on the record + live preempt check)
+// at 100ms resigns; during the priority-0 sends the manager commits
+// A (100->40950); becomeBackup has already armed from the old cfg,
+// and the safety arm then uses A's cfg. Reverting A before the token
+// is consumed must make the BACKUP consumption re-arm masterDown at
+// the final 100ms horizon. On head dbdf3d01 the safety Reset was
+// unwrapped and un-noted: the record netted old==new, the consumer
+// skipped its reset, and the ~395s intermediate horizon survived —
+// RED there (scratch: no fire within 1.5s).
+func TestVRRPMaster_ForcedResignSafetyArmThenRevert_BackupReArms(t *testing.T) {
+	vi := newMaster15689(t, 100)
+	vi.mu.Lock()
+	vi.cfg.Preempt = false
+	vi.desiredPreempt = false
+	vi.mu.Unlock()
+	if !vi.beginResign() {
+		t.Fatal("beginResign did not queue forced resignation")
+	}
+	vi.triggerResign()
+
+	sent := 0
+	prev := sendPacketFn
+	sendPacketFn = func(_ *vrrpInstance, _ *VRRPPacket, _ bool) error {
+		sent++
+		if sent == 1 {
+			// Commit A during the priority-0 sends, before the
+			// safety arm: the arm must use (and baseline) A's cfg.
+			vi.updateConfig(Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: false, AdvertiseInterval: 40950})
+		}
+		return nil
+	}
+	t.Cleanup(func() { sendPacketFn = prev })
+
+	down := time.NewTimer(time.Hour)
+	t.Cleanup(func() { down.Stop() })
+	advert := time.NewTimer(time.Hour)
+	t.Cleanup(func() { advert.Stop() })
+	hold := time.NewTimer(time.Hour)
+	t.Cleanup(func() { hold.Stop() })
+
+	if stop := vi.stepMaster(down, advert); stop {
+		t.Fatal("stepMaster returned stop=true on resign")
+	}
+	if sent != 3 {
+		t.Fatalf("priority-zero adverts sent = %d, want 3", sent)
+	}
+	if vi.getState() != StateBackup {
+		t.Fatalf("state = %s, want BACKUP after resign", vi.getState())
+	}
+	// Mid-state: the safety arm applied A, so the pending baseline
+	// must name A (40950), not the pre-resign 100.
+	vi.mu.RLock()
+	mid := vi.pendingConfigChange
+	vi.mu.RUnlock()
+	if !mid.valid || mid.oldAdvertiseMS != 40950 {
+		t.Fatalf("pending after safety arm = %+v, want oldAdvertiseMS=40950 (baseline = safety-arm cfg)", mid)
+	}
+
+	// Revert A before consuming the token.
+	vi.updateConfig(Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: false, AdvertiseInterval: 100})
+	if stop := vi.stepBackup(down, advert, hold); stop {
+		t.Fatal("stepBackup returned stop=true on config consumption")
+	}
+	// Final cfg 100ms/priority 200: the re-armed master-down horizon
+	// is ~0.4s (and even the 500ms safety floor would fire); an
+	// A-derived ~395s arm never fires in this window.
+	select {
+	case <-down.C:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("cfg-derived safety timer stayed on intermediate 40950ms horizon after 100ms revert")
+	}
+}
