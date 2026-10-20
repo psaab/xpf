@@ -287,7 +287,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// first apply, so this fires only for builds that bypass that
 	// wiring (early boot applies, racing refresh publishes).
 	if !m.RGProviderWiredFor(cfg) {
-		return nil, fmt.Errorf("userspace: RG primary provider not wired yet; refusing clustered snapshot build until cluster ownership is available (#15919)")
+		return nil, errRGProviderNotWired
 	}
 	// #7079: XDP link-pin removal belongs inside CompileUserspaceShim, after
 	// CompileConfig's pure validation and immediately before attach. The former

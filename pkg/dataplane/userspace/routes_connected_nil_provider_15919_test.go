@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -75,4 +76,126 @@ func TestManagerRGProviderWiredGate15919(t *testing.T) {
 	if !nilMgr.RGProviderWiredFor(clusteredConfig15742()) {
 		t.Fatal("nil manager must not block snapshot builds")
 	}
+}
+
+// Publisher-level gate (#15924 Codex P2): the Compile-only refusal left
+// the partial publishers open — after SetRGPrimaryProvider(nil), an
+// overlay or link-refresh publish cloned the retained clustered
+// snapshot, rebuilt routes with the nil (fail-open) provider, and sent
+// a peer-owned RG prefix unmarked to the helper. The single
+// apply_snapshot send site now refuses clustered sends while unwired.
+// This drives the REAL Compile, PublishRouteOverlaySnapshot, and
+// RefreshInterfaceRowsForLink APIs against the fake-helper fixtures
+// with the provider cleared, and asserts no apply_snapshot is sent.
+// Re-wiring restores the overlay publish (positive control), and the
+// wired peer-owned rebuild still suppresses the RG1 prefix.
+func TestUnwiredPublishersRefuseClearedProvider15919(t *testing.T) {
+	origRules := ruleListFn
+	t.Cleanup(func() { ruleListFn = origRules })
+	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
+	withLearnedRoutes(t, fixedLearned())
+
+	cfg := clusteredConfig15742()
+	// RG1 peer-owned, RG2 local: the baseline helper state is the
+	// non-owner's, with the RG1 connected prefix suppressed.
+	peerRG1 := RGPrimaryProvider(func(rgID int) (bool, bool) { return rgID != 1, true })
+	snap := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	snap.Interfaces = markConnectedRGPeerOwned(cfg, connectedRGInterfaces15742(), peerRG1)
+	var err error
+	snap.Routes, _, err = buildRouteSnapshotsWithRGPrimary(cfg, snap.Interfaces, nil, peerRG1)
+	if err != nil {
+		t.Fatalf("baseline routes: %v", err)
+	}
+	if hasConnectedRoute15742(snap.Routes, "172.16.80.0/24") || !snap.Interfaces[0].ConnectedRGPeerOwned {
+		t.Fatal("premise: baseline must suppress peer-owned RG1 (route absent, row marked)")
+	}
+
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(snap, rec)
+	m.SetRGPrimaryProvider(peerRG1)
+
+	// Real Compile gate: unwired clustered build is refused.
+	unwired := New()
+	if _, err := unwired.Compile(cfg); !errors.Is(err, errRGProviderNotWired) {
+		t.Fatalf("Compile unwired = %v, want errRGProviderNotWired", err)
+	}
+
+	m.SetRGPrimaryProvider(nil)
+	if m.RGProviderWiredFor(cfg) {
+		t.Fatal("premise: cleared provider must report unwired")
+	}
+
+	// Overlay publish: refused, nothing sent, retry debt unarmed.
+	published, err := m.PublishRouteOverlaySnapshot(cfg, nil, nil)
+	if published || !errors.Is(err, errRGProviderNotWired) {
+		t.Fatalf("overlay publish unwired = (%t, %v), want (false, errRGProviderNotWired)", published, err)
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("overlay publish sent %d snapshots while unwired, want 0", len(rec.sent))
+	}
+	if m.applySnapshotOutcomeUnknown {
+		t.Fatal("refused (unsent) publish adopted retry debt; want untouched outcome state")
+	}
+
+	// Link-refresh publish: refused by the same send-site gate, after
+	// its rebuild — assert the error, not the early-return no-op.
+	linkPublished, linkErr := refreshForGate15919(t, m, cfg)
+	if linkPublished || !errors.Is(linkErr, errRGProviderNotWired) {
+		t.Fatalf("link refresh unwired = (%t, %v), want (false, errRGProviderNotWired)", linkPublished, linkErr)
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("link refresh sent %d snapshots while unwired, want 0", len(rec.sent))
+	}
+
+	// Positive control: re-wiring lifts the gate. The rebuilt content is
+	// identical to what the helper already holds, so the publish
+	// dedups to a no-op (false, nil) and sends nothing — the peer-owned
+	// RG1 prefix stays suppressed either way; nothing unmarked can
+	// reach the helper while wired with the peer-owned verdict.
+	m.SetRGPrimaryProvider(peerRG1)
+	published, err = m.PublishRouteOverlaySnapshot(cfg, nil, nil)
+	if err != nil || published {
+		t.Fatalf("overlay publish rewired = (%t, %v), want dedup no-op (false, nil)", published, err)
+	}
+	if len(rec.sent) != 0 {
+		t.Fatalf("rewired dedup sent %d snapshots, want 0", len(rec.sent))
+	}
+	if hasConnectedRoute15742(m.lastSnapshot.Routes, "172.16.80.0/24") || !m.lastSnapshot.Interfaces[0].ConnectedRGPeerOwned {
+		t.Fatal("retained snapshot lost the peer-owned RG1 suppression after rewired publish")
+	}
+}
+
+// refreshForGate15919 drives RefreshInterfaceRowsForLink on m with a
+// link name present in the retained config. clusteredConfig15742 has
+// no interface rows, so it grafts one configured interface (reth0,
+// RG1) onto a copy of the config and re-points the retained snapshot
+// at it; buildLinkSnapshot is stubbed so the rebuilt row differs from
+// the retained one and the publish path (not the dedup skip) runs.
+func refreshForGate15919(t *testing.T, m *Manager, cfg *config.Config) (published bool, err error) {
+	t.Helper()
+	linkCfg := *cfg
+	linkCfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"reth0": {RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{80: {}}},
+	}
+	m.mu.Lock()
+	m.lastSnapshot.Config = &linkCfg
+	m.mu.Unlock()
+	// Restore the exact retained-config pointer before returning (not via
+	// t.Cleanup, which runs too late): the route-only publish's hybrid
+	// guard (#5680) content-compares cfg against lastSnapshot.Config,
+	// and the positive control below publishes with the original cfg.
+	defer func() {
+		m.mu.Lock()
+		m.lastSnapshot.Config = cfg
+		m.mu.Unlock()
+	}()
+	oldBuild := buildLinkSnapshot
+	t.Cleanup(func() { buildLinkSnapshot = oldBuild })
+	buildLinkSnapshot = func(name string) (int, int, string, []InterfaceAddressSnapshot) {
+		if name == "reth0" {
+			return 12, 9000, "02:00:00:00:15:19", nil
+		}
+		return 0, 0, "", nil
+	}
+	return m.RefreshInterfaceRowsForLink(&linkCfg, "reth0")
 }

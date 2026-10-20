@@ -853,6 +853,17 @@ func (m *Manager) RGProviderWiredFor(cfg *config.Config) bool {
 	return m.rgProviderWired
 }
 
+// rgProviderWiredForLocked is RGProviderWiredFor for callers already
+// holding m.mu — notably requestApplySnapshotPreparedLocked, the single
+// apply_snapshot send site, which runs under m.mu on every publish
+// path. It must never take the lock itself.
+func (m *Manager) rgProviderWiredForLocked(cfg *config.Config) bool {
+	if m == nil || cfg == nil || cfg.Chassis.Cluster == nil {
+		return true
+	}
+	return m.rgProviderWired
+}
+
 // rgPrimaryNow snapshots the wired provider under m.mu, or nil.
 func (m *Manager) rgPrimaryNow() RGPrimaryProvider {
 	if m == nil {

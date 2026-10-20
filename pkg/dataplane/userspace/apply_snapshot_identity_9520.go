@@ -3,6 +3,7 @@ package userspace
 import (
 	"encoding/hex"
 	"errors"
+
 	"log/slog"
 	"strings"
 	"time"
@@ -46,6 +47,12 @@ func isSnapshotContentConflict(err error) bool {
 	var rejected *helperRejectedError
 	return errors.As(err, &rejected) && strings.HasPrefix(rejected.msg, snapshotContentConflictPrefix)
 }
+
+// errRGProviderNotWired marks a snapshot send refused because the RG
+// ownership provider is not wired (#15919). Like errSnapshotDigest it
+// provably never reached the helper, so it must never adopt retry-debt
+// authority; callers surface it and the next wired publish converges.
+var errRGProviderNotWired = errors.New("userspace: RG primary provider not wired; refusing snapshot publish until cluster ownership is available (#15919)")
 
 // errSnapshotDigest marks a snapshot whose content digest cannot be computed.
 // The request body marshals the same content, so a snapshot that fails here
@@ -246,6 +253,24 @@ func (m *Manager) consumeRevalidateAttachLocked(snap *ConfigSnapshot) {
 // worst-case m.mu hold on this refusal is therefore two round trips; once
 // BeginControlShutdown has latched, the retry is skipped.
 func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, status *ProcessStatus) (err error) {
+	// #15919: this is the ONLY apply_snapshot send site, so gating here
+	// covers every publisher (full Compile, route-overlay, link-refresh,
+	// scheduler, capture-authority, worker-arm) with one check. A
+	// clustered snapshot carries RG>0 connected rows whose peer-owned
+	// marking is only meaningful once the daemon wired the cluster
+	// ownership provider; before that the predicate fails open and an
+	// unwired publish would install a peer-owned prefix as local transit
+	// on the non-owner. Refuse the send (nothing reaches the helper, so
+	// no generation is consumed and no retry debt is adopted); the
+	// caller retains its prior snapshot and the next wired publish
+	// converges. Manager.Compile refuses earlier with the same error;
+	// this choke is the backstop for partial publishers that clone the
+	// retained snapshot and bypass Compile. A snapshot with no Config
+	// cannot be classified clustered, so it is not gated here (Compile's
+	// cfg-based gate covers the full-build path).
+	if snap != nil && snap.Config != nil && !m.rgProviderWiredForLocked(snap.Config) {
+		return errRGProviderNotWired
+	}
 	if stampErr := stampSnapshotContentDigest(snap); stampErr != nil {
 		// Nothing was sent, so the helper's state is known to be unchanged.
 		return stampErr
