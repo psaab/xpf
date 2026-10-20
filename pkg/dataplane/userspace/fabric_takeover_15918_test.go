@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #15918: takeover must not be ready when the only fabric row cannot install
@@ -28,8 +30,9 @@ func healthyFabricManager15918(t *testing.T, fabrics []FabricSnapshot) *Manager 
 }
 
 func TestTakeoverReadyFabricInstallable15918(t *testing.T) {
+	installableFab1 := FabricSnapshot{Name: "fab1", ParentIfindex: 21, PeerAddress: peerV4_15918, LocalMAC: localMAC_15918, PeerMAC: peerMAC_15918}
 	t.Run("unresolved peer blocked", func(t *testing.T) {
-		m := healthyFabricManager15918(t, []FabricSnapshot{{Name: "fab1", ParentIfindex: 21, PeerMAC: ""}})
+		m := healthyFabricManager15918(t, []FabricSnapshot{{Name: "fab1", ParentIfindex: 21, PeerAddress: peerV4_15918, LocalMAC: localMAC_15918, PeerMAC: ""}})
 		ready, reasons := m.TakeoverReady()
 		if ready {
 			t.Fatalf("ready=true with unresolved fabric peer, reasons=%v", reasons)
@@ -37,32 +40,55 @@ func TestTakeoverReadyFabricInstallable15918(t *testing.T) {
 		if !strings.Contains(strings.Join(reasons, ";"), "fabric peer unresolved") {
 			t.Fatalf("reasons=%v, want fabric peer unresolved", reasons)
 		}
-		if s := m.HATakeoverReadiness(); len(s.Blockers) == 0 || s.Blockers[len(s.Blockers)-1] != "fabric_peer_unresolved" {
-			// blocker may not be last if other reasons; just check presence
-			found := false
-			for _, b := range s.Blockers {
-				if b == "fabric_peer_unresolved" {
-					found = true
-				}
+		found := false
+		for _, b := range m.HATakeoverReadiness().Blockers {
+			if b == "fabric_peer_unresolved" {
+				found = true
 			}
-			if !found {
-				t.Fatalf("blockers=%v, want fabric_peer_unresolved", s.Blockers)
-			}
+		}
+		if !found {
+			t.Fatalf("blockers missing fabric_peer_unresolved")
 		}
 	})
 
 	t.Run("resolved peer ready", func(t *testing.T) {
-		m := healthyFabricManager15918(t, []FabricSnapshot{{Name: "fab1", ParentIfindex: 21, PeerMAC: peerMAC_15918}})
-		ready, reasons := m.TakeoverReady()
-		if !ready {
+		m := healthyFabricManager15918(t, []FabricSnapshot{installableFab1})
+		if ready, reasons := m.TakeoverReady(); !ready {
 			t.Fatalf("ready=false with resolved fabric, reasons=%v", reasons)
+		}
+	})
+
+	t.Run("missing local MAC blocked", func(t *testing.T) {
+		row := installableFab1
+		row.LocalMAC = ""
+		m := healthyFabricManager15918(t, []FabricSnapshot{row})
+		if ready, reasons := m.TakeoverReady(); ready {
+			t.Fatalf("ready=true with empty LocalMAC (Rust UnresolvedLocalMac), reasons=%v", reasons)
+		}
+	})
+
+	t.Run("malformed peer MAC blocked", func(t *testing.T) {
+		row := installableFab1
+		row.PeerMAC = "not-a-mac"
+		m := healthyFabricManager15918(t, []FabricSnapshot{row})
+		if ready, _ := m.TakeoverReady(); ready {
+			t.Fatal("ready=true with malformed PeerMAC")
+		}
+	})
+
+	t.Run("unparseable peer address blocked", func(t *testing.T) {
+		row := installableFab1
+		row.PeerAddress = "not-an-ip"
+		m := healthyFabricManager15918(t, []FabricSnapshot{row})
+		if ready, _ := m.TakeoverReady(); ready {
+			t.Fatal("ready=true with unparseable PeerAddress")
 		}
 	})
 
 	t.Run("one installable among two suffices", func(t *testing.T) {
 		m := healthyFabricManager15918(t, []FabricSnapshot{
-			{Name: "fab0", ParentIfindex: 11, PeerMAC: ""},
-			{Name: "fab1", ParentIfindex: 21, PeerMAC: peerMAC_15918},
+			{Name: "fab0", ParentIfindex: 11, PeerAddress: peerV4_15918, LocalMAC: localMAC_15918, PeerMAC: ""},
+			installableFab1,
 		})
 		if ready, reasons := m.TakeoverReady(); !ready {
 			t.Fatalf("ready=false with fab1 installable, reasons=%v", reasons)
@@ -70,7 +96,7 @@ func TestTakeoverReadyFabricInstallable15918(t *testing.T) {
 	})
 
 	t.Run("partial fabrics debt blocked even if resolved", func(t *testing.T) {
-		m := healthyFabricManager15918(t, []FabricSnapshot{{Name: "fab1", ParentIfindex: 21, PeerMAC: peerMAC_15918}})
+		m := healthyFabricManager15918(t, []FabricSnapshot{installableFab1})
 		m.partialOutcomeUnknown = partialFabrics
 		ready, reasons := m.TakeoverReady()
 		if ready {
@@ -81,10 +107,30 @@ func TestTakeoverReadyFabricInstallable15918(t *testing.T) {
 		}
 	})
 
-	t.Run("no fabric rows unaffected", func(t *testing.T) {
+	t.Run("no fabric rows and no config unaffected", func(t *testing.T) {
 		m := healthyFabricManager15918(t, nil)
 		if ready, reasons := m.TakeoverReady(); !ready {
 			t.Fatalf("ready=false with no fabrics, reasons=%v", reasons)
+		}
+	})
+
+	t.Run("configured fabric with zero rows blocked", func(t *testing.T) {
+		m := healthyFabricManager15918(t, nil)
+		cfg := &config.Config{}
+		cfg.Chassis.Cluster = &config.ClusterConfig{FabricInterface: "fab0", FabricPeerAddress: peerV4_15918}
+		m.lastSnapshot.Config = cfg
+		if ready, reasons := m.TakeoverReady(); ready {
+			t.Fatalf("ready=true with configured fab0 but zero rows, reasons=%v", reasons)
+		}
+	})
+
+	t.Run("config naming no fabric stays ready with zero rows", func(t *testing.T) {
+		m := healthyFabricManager15918(t, nil)
+		cfg := &config.Config{}
+		cfg.Chassis.Cluster = &config.ClusterConfig{}
+		m.lastSnapshot.Config = cfg
+		if ready, reasons := m.TakeoverReady(); !ready {
+			t.Fatalf("ready=false with cluster config naming no fabric, reasons=%v", reasons)
 		}
 	})
 

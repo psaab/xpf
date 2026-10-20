@@ -3,6 +3,7 @@ package userspace
 import (
 	"bytes"
 	"net"
+	"net/netip"
 	"sort"
 	"sync"
 
@@ -458,39 +459,64 @@ func SelectFabricPeerLinkLocalMAC(
 }
 
 // fabricPeerMACOverrides holds daemon-supplied identity constraints for the
-// link-local fallback, keyed by configured peer address (#15918). The daemon
-// owns the address-matched identity hint (it observes ARP/NDP for the
-// configured peer and clears it on peer replacement); it registers the hint
-// here so buildFabricSnapshots — also called from full snapshot builds
-// without a daemon round-trip — constrains its fallback identically.
-// Keyed by peer string so fab0/fab1 (and a peer replacement under a new key)
-// cannot alias. Guarded by fabricPeerMACOverridesMu.
+// link-local fallback, keyed by CANONICAL configured peer address (#15918,
+// review fold). The daemon owns the address-matched identity hint (it
+// observes ARP/NDP for the configured peer and clears it on peer
+// replacement); it registers the hint here so buildFabricSnapshots — also
+// called from full snapshot builds without a daemon round-trip — constrains
+// its fallback identically. All register/lookup/clear paths go through
+// fabricPeerKey so equivalent spellings (e.g. expanded vs compressed IPv6)
+// cannot miss: registration used peerIP.String() (canonical) while lookup
+// used raw config text, which dropped the known-peer constraint and let a
+// sole decoy link-local neighbour be accepted. Guarded by
+// fabricPeerMACOverridesMu.
 var (
 	fabricPeerMACOverridesMu sync.RWMutex
 	fabricPeerMACOverrides   = map[string]net.HardwareAddr{}
 )
 
+// fabricPeerKey is the single canonical key for a configured fabric peer
+// address. Parseable addresses canonicalize via netip (zone preserved);
+// unparseable text keys verbatim so register/clear/lookup still agree.
+func fabricPeerKey(peer string) string {
+	if addr, err := netip.ParseAddr(peer); err == nil {
+		return addr.String()
+	}
+	return peer
+}
+
+// fabricPeerKeyValid reports whether peer parses as an IP address (the
+// Rust build_fabric_link_or_skip peer-address admission, Go side).
+func fabricPeerKeyValid(peer string) bool {
+	_, err := netip.ParseAddr(peer)
+	return err == nil
+}
+
 // RegisterFabricPeerMACConstraint records (or, with a nil/short MAC, clears)
-// the known peer MAC for a configured fabric peer address (#15918).
+// the known peer MAC for a configured fabric peer address (#15918). A clear
+// prunes the entry (peer replacement / removal), so no stale identity can
+// bind a later fabric that reuses the slot.
 func RegisterFabricPeerMACConstraint(peer string, mac net.HardwareAddr) {
 	if peer == "" {
 		return
 	}
+	key := fabricPeerKey(peer)
 	fabricPeerMACOverridesMu.Lock()
 	defer fabricPeerMACOverridesMu.Unlock()
 	if len(mac) != 6 {
-		delete(fabricPeerMACOverrides, peer)
+		delete(fabricPeerMACOverrides, key)
 		return
 	}
 	stored := make(net.HardwareAddr, 6)
 	copy(stored, mac)
-	fabricPeerMACOverrides[peer] = stored
+	fabricPeerMACOverrides[key] = stored
 }
 
 func fabricPeerMACConstraint(peer string) net.HardwareAddr {
+	key := fabricPeerKey(peer)
 	fabricPeerMACOverridesMu.RLock()
 	defer fabricPeerMACOverridesMu.RUnlock()
-	mac, ok := fabricPeerMACOverrides[peer]
+	mac, ok := fabricPeerMACOverrides[key]
 	if !ok || len(mac) != 6 {
 		return nil
 	}

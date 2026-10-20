@@ -140,3 +140,49 @@ func TestSelectFabricPeerLinkLocalMACShared15918(t *testing.T) {
 	}
 	_ = net.ParseIP
 }
+
+// Review fold (#15923 Codex/Opus): registration canonicalizes via
+// peerIP.String() while lookup previously used raw config text. A valid
+// non-canonical IPv6 peer spelling dropped the known-peer constraint and
+// a sole decoy link-local neighbour was accepted as the redirect MAC.
+func TestFabricPeerConstraintNonCanonicalIPv6_15918(t *testing.T) {
+	local := mustMAC7443(t, localMAC_15918)
+	known := mustMAC7443(t, peerMAC_15918)
+	const canonical = "2001:db8::2"
+	const expanded = "2001:0db8:0000:0000:0000:0000:0000:0002"
+
+	// Register as the daemon does (canonical), look up as the builder
+	// does (raw expanded config text). Must hit.
+	RegisterFabricPeerMACConstraint(canonical, known)
+	t.Cleanup(func() { RegisterFabricPeerMACConstraint(expanded, nil) })
+	if got := fabricPeerMACConstraint(expanded); got == nil || got.String() != peerMAC_15918 {
+		t.Fatalf("constraint lookup with expanded spelling = %v, want %s (key canonicalization dropped the hint)", got, peerMAC_15918)
+	}
+	// Reverse direction: register expanded, lookup canonical.
+	RegisterFabricPeerMACConstraint(expanded, known)
+	if got := fabricPeerMACConstraint(canonical); got == nil || got.String() != peerMAC_15918 {
+		t.Fatalf("constraint lookup with canonical spelling = %v, want %s", got, peerMAC_15918)
+	}
+
+	// End-to-end through buildFabricPeerMAC with the registry constraint:
+	// sole decoy must be refused, known-MAC neighbour must resolve.
+	stubFabricNeighList(t, map[int][]netlink.Neigh{
+		parentIfindex7443: {neigh15918(t, "fe80::dec0", decoyMAC_15918)},
+	}, nil)
+	if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, expanded, local, fabricPeerMACConstraint(expanded)); got != "" {
+		t.Fatalf("buildFabricPeerMAC with non-canonical peer + sole decoy = %q, want \"\" (decoy accepted via dropped constraint)", got)
+	}
+	stubFabricNeighList(t, map[int][]netlink.Neigh{
+		parentIfindex7443: {neigh15918(t, "fe80::b", peerMAC_15918)},
+	}, nil)
+	if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, expanded, local, fabricPeerMACConstraint(expanded)); got != peerMAC_15918 {
+		t.Fatalf("buildFabricPeerMAC with non-canonical peer + known LL = %q, want %q", got, peerMAC_15918)
+	}
+
+	// Clear via either spelling prunes (peer replacement): stale identity
+	// must not bind afterwards.
+	RegisterFabricPeerMACConstraint(expanded, nil)
+	if got := fabricPeerMACConstraint(canonical); got != nil {
+		t.Fatalf("constraint after clear via expanded spelling = %v, want nil (stale entry)", got)
+	}
+}
