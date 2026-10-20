@@ -1109,6 +1109,16 @@ type ConfigSnapshot struct {
 	// whose flow-cache and session-policy decisions were made for the old
 	// content leaves those decisions fresh.
 	ContentDigest string `json:"content_digest,omitempty"`
+	// fullBuild (#15937) marks a snapshot produced by the full builder in
+	// THIS Manager incarnation (set at the build site, re-affirmed by
+	// Manager.Compile). The send-site stamp arm exempts full builds —
+	// they are ground truth, already validated by the builder invariant —
+	// and enforces the stamp only on partial-publisher clones. Unexported:
+	// never on the wire, never in the content hash; a retained clone
+	// keeps it only while it still IS the last full build's struct, and
+	// partial publishers that rebuild policy sections re-derive content
+	// under the stamp instead. See snapshot_policy_invariant.go.
+	fullBuild bool
 	// zoneIDCollisions is the manager-facing (#3719) record of every security
 	// zone the snapshot builder QUARANTINED because its StableZoneID collided
 	// with an earlier-sorting zone. It is unexported so it never rides the wire

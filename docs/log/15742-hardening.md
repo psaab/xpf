@@ -136,3 +136,8 @@ and immediately at every layer, each independently sufficient:
   subtests/output).
 - Traceability: this work is driven by #15937; commits and PR now
   carry `Refs #15937` alongside `Refs #15742`.
+
+
+## Round-3 fold (Codex3)
+
+Full builds bypass the send-site stamp arm via an unexported `fullBuild` provenance bit (builder-set, Compile-affirmed, stripped on every partial clone alongside the clear marker); the stamp enforces only on partial publishers and re-commits after a successful full apply. Clear-attempt timeouts converge via the Compile retry re-marking from the build itself. See commit message.

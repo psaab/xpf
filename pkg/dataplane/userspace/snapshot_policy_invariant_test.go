@@ -2,11 +2,15 @@ package userspace
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // HARDENING (#15742 follow-up): regression tests for the empty-policy
@@ -163,6 +167,9 @@ func TestSendSiteRefusesBothZeroedPartialPublish(t *testing.T) {
 	zeroed := *good
 	zeroed.Policies = nil
 	zeroed.Summary.PolicyCount = 0
+	// A partial publisher's clone: stripSingleUseCommitMetadata clears
+	// provenance (and the clear marker) — model exactly that.
+	stripSingleUseCommitMetadata(&zeroed)
 	rec := &applyRecorder9520{}
 	m := newRepublishManager9520(good, rec)
 	m.expectedPolicyCount = len(good.Policies) // as Manager.Compile stamps it
@@ -383,6 +390,7 @@ func TestCompileClearAllCommitsStampAndMarker(t *testing.T) {
 	clearSnap.Policies = nil
 	clearSnap.Summary.PolicyCount = 0
 	clearSnap.ClearPolicies = true // as Manager.Compile marks an empty full build
+	// clearSnap keeps fullBuild=true: it IS this Compile's build.
 	clearSnap.Generation = 8
 	if err := m.requestApplySnapshotPreparedLocked(&clearSnap, &ProcessStatus{}); err != nil {
 		t.Fatalf("authorized-clear send must pass the gate: %v", err)
@@ -401,6 +409,7 @@ func TestCompileClearAllCommitsStampAndMarker(t *testing.T) {
 	partial.Policies = nil
 	partial.Summary.PolicyCount = 0
 	partial.Generation = 9
+	stripSingleUseCommitMetadata(&partial) // partial clone: provenance + marker stripped
 	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); !errors.Is(err, errSnapshotPolicyMismatch) {
 		t.Fatalf("unmarked both-zeroed partial = %v, want errSnapshotPolicyMismatch", err)
 	}
@@ -409,40 +418,273 @@ func TestCompileClearAllCommitsStampAndMarker(t *testing.T) {
 	}
 }
 
-// TestRefusedCompileLeavesPriorStamp pins the stamp-poisoning fix: the
-// expectedPolicyCount stamp commits ONLY after a successful apply, so a
-// refused full Compile leaves the prior stamp and partial publishes
-// sized for the RETAINED set still send.
-func TestRefusedCompileLeavesPriorStamp(t *testing.T) {
+// TestFullBuildCountChangeSendsAndCommitsStamp rewrites the round-2
+// :423 expectation per Codex3: an ordinary policy-count change arriving
+// as a FULL build is ground truth and must SEND (the builder invariant
+// already validated it) — gating it on the prior stamp deadlocked every
+// policy edit. The stamp commits only after the successful apply; a
+// PARTIAL carrying a different count still refuses, and a refused full
+// build leaves the prior stamp so retained-count partials still send.
+func TestFullBuildCountChangeSendsAndCommitsStamp(t *testing.T) {
 	cfg := hardeningPolicyCfg()
 	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	if !good.fullBuild {
+		t.Fatal("premise: builder output must carry full-build provenance")
+	}
 	rec := &applyRecorder9520{}
 	m := newRepublishManager9520(good, rec)
 	m.expectedPolicyCount = len(good.Policies)
 	prior := m.expectedPolicyCount
 
-	// Simulate the refused-Compile sequence at the gate level: a new
-	// full build with a DIFFERENT count is refused at the send site
-	// (helper rejection); the stamp must remain the prior value because
-	// Compile commits it only on applyErr == nil.
+	// Full build with a changed count (1->2 rules): bypasses the stamp
+	// arm and sends.
 	bigger := *good
 	bigger.Policies = append(append([]PolicyRuleSnapshot{}, good.Policies...), good.Policies[0])
 	bigger.Summary.PolicyCount = len(bigger.Policies)
 	bigger.Generation = 8
-	// The gate refuses it against the prior stamp before sending.
-	if err := m.validateSnapshotForSend(&bigger); !errors.Is(err, errSnapshotPolicyMismatch) {
-		t.Fatalf("changed-count build vs prior stamp = %v, want errSnapshotPolicyMismatch", err)
+	if err := m.requestApplySnapshotPreparedLocked(&bigger, &ProcessStatus{}); err != nil {
+		t.Fatalf("full-build count change must SEND (builder is ground truth): %v", err)
 	}
-	if m.expectedPolicyCount != prior {
-		t.Fatalf("stamp moved on refusal: %d -> %d (poisoning)", prior, m.expectedPolicyCount)
+	if len(rec.sent) != 1 {
+		t.Fatalf("full-build count change sends = %d, want 1", len(rec.sent))
 	}
-	// Partial publish sized for the retained (old-count) set still sends.
-	partial := *good
+	// Simulate Compile's post-success commit (applyErr == nil branch).
+	m.expectedPolicyCount = len(bigger.Policies)
+	if m.expectedPolicyCount != prior+1 {
+		t.Fatalf("stamp after successful full apply = %d, want %d", m.expectedPolicyCount, prior+1)
+	}
+
+	// A partial (provenance stripped by the clone path) carrying a
+	// count different from the committed stamp still refuses.
+	partial := bigger
+	partial.Policies = partial.Policies[:1]
+	partial.Summary.PolicyCount = 1
 	partial.Generation = 9
-	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); err != nil {
-		t.Fatalf("retained-count partial after refused Compile must still send: %v", err)
+	stripSingleUseCommitMetadata(&partial)
+	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); !errors.Is(err, errSnapshotPolicyMismatch) {
+		t.Fatalf("partial with wrong count = %v, want errSnapshotPolicyMismatch", err)
 	}
-	if len(rec.sent) == 0 {
-		t.Fatal("retained-count partial never reached the helper")
+	if len(rec.sent) != 1 {
+		t.Fatalf("refused partial reached the helper: sends = %d, want still 1", len(rec.sent))
+	}
+
+	// Refused FULL build leaves the prior stamp: validate-only against
+	// a stamp that was never committed (Compile commits on success
+	// only) — model by refusing at the transport and confirming the
+	// stamp variable is untouched by the gate itself.
+	rec2 := &applyRecorder9520{replies: []error{errors.New("apply_snapshot: helper refused")}}
+	m2 := newRepublishManager9520(good, rec2)
+	m2.expectedPolicyCount = prior
+	full2 := *good
+	full2.Generation = 8
+	if err := m2.requestApplySnapshotPreparedLocked(&full2, &ProcessStatus{}); err == nil {
+		t.Fatal("premise: scripted helper refusal must surface")
+	}
+	if m2.expectedPolicyCount != prior {
+		t.Fatalf("gate moved the stamp on a refused full build: %d -> %d", prior, m2.expectedPolicyCount)
+	}
+	retainedPartial := *good
+	retainedPartial.Generation = 9
+	stripSingleUseCommitMetadata(&retainedPartial)
+	if err := m2.requestApplySnapshotPreparedLocked(&retainedPartial, &ProcessStatus{}); err != nil {
+		t.Fatalf("retained-count partial after refused full build must still send: %v", err)
+	}
+}
+
+// seedPoliciesForOverlayFixture grows the overlay fixture config with
+// `n` zone-pair rules between its zones. The overlay fixture itself is
+// route-only (no zones/policies); seed policies so the Compile tests
+// below measure policy-count movement on a real Compile.
+func seedPoliciesForOverlayFixture(cfg *config.Config, n int) {
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"lan": {Name: "lan"},
+		"wan": {Name: "wan"},
+	}
+	rules := []*config.Policy{
+		{
+			Name:   "base-rule",
+			Action: config.PolicyPermit,
+			Match: config.PolicyMatch{
+				SourceAddresses:      []string{"any"},
+				DestinationAddresses: []string{"any"},
+				Applications:         []string{"any"},
+			},
+		},
+		{
+			Name:   "extra-rule",
+			Action: config.PolicyPermit,
+			Match: config.PolicyMatch{
+				SourceAddresses:      []string{"any"},
+				DestinationAddresses: []string{"any"},
+				Applications:         []string{"junos-https"},
+			},
+		},
+	}
+	if n > len(rules) {
+		n = len(rules)
+	}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "lan",
+		ToZone:   "wan",
+		Policies: rules[:n],
+	}}
+}
+
+// TestCompilePolicyCountChangeEndToEnd drives the REAL Manager.Compile
+// (shim hook + REAL fixture config + fake helper recorder, modeled on
+// TestCompilePublishesCaptureAuthorityRows10485) for a rule-count
+// change: the full build must reach the helper and the stamp must
+// commit to the new count after success. Before the Codex3 fix the
+// send gate refused this shape known-unsent forever (deadlock).
+func TestCompilePolicyCountChangeEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	controlSock, reqCh := overlayControlServer(t, dir)
+	cfg := overlayTestConfig()
+	seedPoliciesForOverlayFixture(cfg, 1)
+	cfg.System.UserspaceDataplane = &config.UserspaceConfig{ControlSocket: controlSock}
+	ucfg := deriveUserspaceConfig(cfg)
+	m := New()
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m.proc = &exec.Cmd{Process: proc}
+	m.cfg = ucfg
+	m.syncCancel = func() {}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.clearHelperHAStateHook = func() error { return nil }
+	m.lastStatus = ProcessStatus{ConfigSnapshotProtocolVersion: ProtocolVersion}
+	m.helperStatusObserved = true
+	m.xskLivenessProven = true
+	seed := mustBuildSnapshotWithSchedulerState(t, cfg, ucfg, 7, 0, nil, nil, nil)
+	if len(seed.Policies) == 0 {
+		t.Fatal("premise: seeded fixture must publish policies")
+	}
+	m.lastSnapshot = seed
+	m.generation = 7
+	m.publishedSnapshot = 7
+	m.publishedPlanKey = snapshotBindingPlanKey(seed)
+	if h, ok := snapshotContentHash(seed); ok {
+		m.lastSnapshotHash = h
+	}
+	m.compileUserspaceShimHook = func(_ *config.Config, preflight func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error) {
+		result := &dataplane.CompileResult{}
+		if err := preflight(result); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	m.expectedPolicyCount = len(seed.Policies)
+	priorStamp := m.expectedPolicyCount
+
+	// Grow the config by one zone-pair rule (count change via Compile).
+	grown := overlayTestConfig()
+	seedPoliciesForOverlayFixture(grown, 2)
+	grown.System.UserspaceDataplane = cfg.System.UserspaceDataplane
+	if _, err := m.Compile(grown); err != nil {
+		t.Fatalf("policy-count change via Compile must succeed end-to-end: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case req := <-reqCh:
+			if req.Type != "apply_snapshot" || req.Snapshot == nil {
+				continue
+			}
+			if len(req.Snapshot.Policies) != priorStamp+1 {
+				t.Fatalf("helper received %d policies, want %d (prior %d + 1 grown rule)",
+					len(req.Snapshot.Policies), priorStamp+1, priorStamp)
+			}
+			m.mu.Lock()
+			stamp := m.expectedPolicyCount
+			m.mu.Unlock()
+			if stamp != priorStamp+1 {
+				t.Fatalf("stamp after successful count-change Compile = %d, want %d", stamp, priorStamp+1)
+			}
+			return
+		case <-deadline:
+			t.Fatal("Compile never reached the helper with an apply_snapshot")
+		}
+	}
+}
+
+// TestCompileClearAllEndToEnd drives the REAL Manager.Compile (same
+// fixture) for a delete-all-policies config: the sent snapshot must
+// carry ClearPolicies (this test FAILS if the Compile marker line is
+// neutered), the helper accepts it, and the stamp commits to 0 only
+// after success. A subsequent unmarked partial clone must refuse.
+func TestCompileClearAllEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	controlSock, reqCh := overlayControlServer(t, dir)
+	cfg := overlayTestConfig()
+	seedPoliciesForOverlayFixture(cfg, 1)
+	cfg.System.UserspaceDataplane = &config.UserspaceConfig{ControlSocket: controlSock}
+	ucfg := deriveUserspaceConfig(cfg)
+	m := New()
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m.proc = &exec.Cmd{Process: proc}
+	m.cfg = ucfg
+	m.syncCancel = func() {}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.clearHelperHAStateHook = func() error { return nil }
+	m.lastStatus = ProcessStatus{ConfigSnapshotProtocolVersion: ProtocolVersion}
+	m.helperStatusObserved = true
+	m.xskLivenessProven = true
+	seed := mustBuildSnapshotWithSchedulerState(t, cfg, ucfg, 7, 0, nil, nil, nil)
+	if len(seed.Policies) == 0 {
+		t.Fatal("premise: overlay fixture must seed policies")
+	}
+	m.lastSnapshot = seed
+	m.generation = 7
+	m.publishedSnapshot = 7
+	m.publishedPlanKey = snapshotBindingPlanKey(seed)
+	if h, ok := snapshotContentHash(seed); ok {
+		m.lastSnapshotHash = h
+	}
+	m.compileUserspaceShimHook = func(_ *config.Config, preflight func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error) {
+		result := &dataplane.CompileResult{}
+		if err := preflight(result); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	m.expectedPolicyCount = len(seed.Policies)
+
+	cleared := overlayTestConfig()
+	seedPoliciesForOverlayFixture(cleared, 0)
+	cleared.System.UserspaceDataplane = cfg.System.UserspaceDataplane
+	if _, err := m.Compile(cleared); err != nil {
+		t.Fatalf("clear-all via Compile must succeed end-to-end: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case req := <-reqCh:
+			if req.Type != "apply_snapshot" || req.Snapshot == nil {
+				continue
+			}
+			if len(req.Snapshot.Policies) != 0 {
+				t.Fatalf("clear-all snapshot carries %d policies, want 0", len(req.Snapshot.Policies))
+			}
+			if !req.Snapshot.ClearPolicies {
+				t.Fatal("clear-all snapshot reached the helper WITHOUT the authorized-clear marker (Compile marker neutered?)")
+			}
+			m.mu.Lock()
+			stamp := m.expectedPolicyCount
+			m.mu.Unlock()
+			if stamp != 0 {
+				t.Fatalf("stamp after successful clear-all Compile = %d, want 0", stamp)
+			}
+			return
+		case <-deadline:
+			t.Fatal("clear-all Compile never reached the helper")
+		}
 	}
 }

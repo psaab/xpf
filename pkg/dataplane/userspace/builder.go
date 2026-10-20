@@ -385,6 +385,9 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 	if err := validateSnapshotPolicyInvariant(snap, cfg); err != nil {
 		return nil, err
 	}
+	// #15937: this struct is a full build — the send-site stamp arm
+	// exempts it (builder invariant above is its ground-truth check).
+	snap.fullBuild = true
 	// #7717: report (do NOT foreclose) a NAT pool overlapping an interface-mode
 	// SNAT egress address that is only knowable at snapshot build — a DHCP or
 	// netlink-learned address the commit-time gate cannot see. Quarantining the

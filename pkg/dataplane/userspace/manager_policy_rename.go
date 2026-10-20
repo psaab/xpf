@@ -127,5 +127,12 @@ func stripSingleUseCommitMetadata(next *ConfigSnapshot) {
 	// inherit a live authorization. syncSnapshotLocked re-marks only
 	// when helper status proves the cleared set already landed.
 	next.ClearPolicies = false
+	// #15937 (Codex3): a partial clone is NOT the full build even when
+	// it copies the retained struct verbatim — clear the provenance so
+	// the send-site stamp arm enforces the last accepted full count on
+	// it. The pendingFullSnapshotMetadata latch path skips this strip
+	// entirely, so a deferred first publication of the actual full
+	// build keeps its provenance and its clear authorization together.
+	next.fullBuild = false
 	invalidatePolicySnapshotIdentity(next)
 }

@@ -131,14 +131,18 @@ func (m *Manager) validateSnapshotForSend(snap *ConfigSnapshot) error {
 		return fmt.Errorf("%w: summary policy_count=%d but snapshot carries %d policies (first zone pair %s)",
 			errSnapshotPolicyMismatch, snap.Summary.PolicyCount, len(snap.Policies), firstPolicyZonePair(snap, snap.Config))
 	}
-	// The authorized-clear full build is the one deliberate exception to
-	// the stamp arm: when its count differs from the stamp it IS the
-	// stamp's successor, sent by Compile itself (which re-stamps only
-	// after success). Any OTHER empty send over a non-zero stamp is the
-	// both-zeroed partial shape and refuses below. (Compile's own send
-	// still passes this gate because the gate runs before the re-stamp;
-	// a refused Compile send leaves the stamp untouched.)
-	if snap.ClearPolicies && len(snap.Policies) == 0 && snap.Summary.PolicyCount == 0 {
+	// FULL builds bypass the stamp arm entirely (Codex3): a full build
+	// is ground truth — the builder invariant already validated its
+	// count against the post-quarantine expectation — and ANY ordinary
+	// policy-count change (N->M, 0->M, clear-all) arrives as one.
+	// Gating it on the prior stamp deadlocked every policy edit. The
+	// stamp is re-committed only after the full apply succeeds, so a
+	// refused full build leaves partials sized for the retained set.
+	// Partial publishers (clones: overlay/link-refresh/scheduler/
+	// capture/deferred) carry fullBuild=false once they rebuild or
+	// clone content, and the stamp arm below enforces the last ACCEPTED
+	// full count on them — including the both-zeroed shape.
+	if snap.fullBuild {
 		return nil
 	}
 	if m.expectedPolicyCount >= 0 && len(snap.Policies) != m.expectedPolicyCount {
