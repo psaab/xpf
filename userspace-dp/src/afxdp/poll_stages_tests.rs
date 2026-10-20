@@ -1338,6 +1338,62 @@ fn neighbor_learn_ctx(
     }));
     (ctx, dynamic_neighbors)
 }
+fn with_neighbor_learn_ctx_ha<R>(
+    forwarding: &ForwardingState,
+    ha_state: BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
+    run: impl for<'a> FnOnce(&WorkerContext<'a>, &Arc<ShardedNeighborMap>) -> R,
+) -> R {
+    let ha_state = Box::leak(Box::new(ha_state));
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-0"),
+        ifindex: 21,
+    };
+    let binding_lookup = WorkerBindingLookup::default();
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let pptp_control = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let ctx = WorkerContext {
+        pptp_control: &pptp_control,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding,
+        ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: None,
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+    run(&ctx, &dynamic_neighbors)
+}
+
 fn with_neighbor_learn_ctx<R>(
     forwarding: &ForwardingState,
     run: impl for<'a> FnOnce(&WorkerContext<'a>, &Arc<ShardedNeighborMap>) -> R,
@@ -3712,6 +3768,7 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
             meta,
             None,
             None,
+            None,
             &live,
             &worker_ctx,
             TEST_NOW_NS,
@@ -3737,6 +3794,7 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
                 &frame,
                 meta,
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -3756,6 +3814,7 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
                 None,
                 &frame,
                 meta,
+                None,
                 None,
                 None,
                 &live,
@@ -3995,6 +4054,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
         &new_ike,
         ike_v4_meta(&new_ike, DENY_IF),
         None,
+            None,
         None,
         &live,
         &worker_ctx,
@@ -4023,6 +4083,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &new_ike,
                 ike_v4_meta(&new_ike, PERMIT_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4060,6 +4121,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &new_natt,
                 ike_v4_meta(&new_natt, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4083,6 +4145,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &est_ike,
                 ike_v4_meta(&est_ike, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4105,6 +4168,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &esp_udp,
                 ike_v4_meta(&esp_udp, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4127,6 +4191,7 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
                 &new_ike,
                 esp_meta,
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4240,6 +4305,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &forged,
                 ike_v4_meta(&forged, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4261,6 +4327,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &forged_natt,
                 ike_v4_meta(&forged_natt, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4283,6 +4350,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &forged,
                 ike_v4_meta(&forged, PERMIT_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4318,6 +4386,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &legit,
                 ike_v4_meta(&legit, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4339,6 +4408,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &wrong_spi,
                 ike_v4_meta(&wrong_spi, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4362,6 +4432,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &legit,
                 ike_v4_meta(&legit, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4384,6 +4455,7 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
                 &esp_udp,
                 ike_v4_meta(&esp_udp, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4494,6 +4566,7 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
                 &est,
                 ike_v4_meta(&est, PERMIT_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4512,6 +4585,7 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
                 &est,
                 ike_v4_meta(&est, DENY_IF),
                 None,
+            None,
                 None,
                 &live,
                 &worker_ctx,
@@ -4652,6 +4726,7 @@ fn stage_ipsec_claim_follows_effective_table_14314() {
                 &esp,
                 meta,
                 None,
+            None,
                 table,
                 &live,
                 worker_ctx,
@@ -4841,6 +4916,7 @@ fn run_stage11_on_ifindex(
         frame,
         meta,
         None,
+            None,
         None,
         &live,
         &worker_ctx,
@@ -6479,6 +6555,91 @@ fn stage9_fabric_ingress_populates_scoped_ifindex_only_from_validated_v2_stamp_1
         assert!(
             outcome.invalid_zone_stamp,
             "14238: an unknown-scope V2 stamp must be reported Invalid"
+        );
+    });
+}
+
+/// #15925 B3: an ambiguous claimed zone must be promoted for IKE
+/// host-inbound only by the destination address's local owner RG.
+/// The claimed `lan` zone denies IKE (ping only) while the fabric
+/// physical ingress is unzoned (zone 0 admit-all), so evaluating the
+/// packet under the fabric zone would fail open. With the target
+/// address's RG locally active, the claimed deny zone governs; with
+/// no local owner, it degrades to the fabric zone as before.
+#[test]
+fn ambiguous_ike_stamp_is_judged_under_claimed_zone_15925() {
+    let mut snapshot = super::super::test_fixtures::nat_snapshot_with_fabric();
+    // wan is the locally-owned destination zone/RG1 and admits IKE;
+    // lan is the claimed ingress zone/RG2 and denies IKE.
+    for zone in &mut snapshot.zones {
+        if zone.name == "lan" {
+            zone.host_inbound_system_services = vec!["ping".to_string()];
+        }
+        if zone.name == "wan" {
+            zone.host_inbound_system_services = vec!["ike".to_string()];
+        }
+    }
+    // Give the destination interface (reth0.80/wan/RG1) its local
+    // address ownership; nat fixture already does. Claimed lan/RG2 is
+    // also locally active, making the stamp ambiguous.
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = TEST_NOW_SECS;
+    let active = |rg| {
+        (
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAForwardingLease::ActiveUntil(now_secs + 60),
+            },
+        )
+    };
+    let ha_state = BTreeMap::from([active(1), active(2)]);
+    let frame = ike_v4_frame(false, true);
+    let flow = ipsec_flow_to(
+        libc::AF_INET,
+        PROTO_UDP,
+        500,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+    );
+    with_neighbor_learn_ctx_ha(&forwarding, ha_state, |ctx, _neighbors| {
+        let live = BindingLiveState::new();
+        let outcome = stage_ipsec_passthrough_check(
+            Some(&flow),
+            &frame,
+            ike_v4_meta(&frame, 21),
+            None,
+            Some(TEST_LAN_ZONE_ID),
+            None,
+            &live,
+            ctx,
+            TEST_NOW_NS,
+            now_secs,
+        );
+        assert!(
+            matches!(outcome, IpsecPassthroughOutcome::Denied { .. }),
+            "ambiguous IKE must be denied under claimed lan zone, got a non-denied Stage 11 outcome"
+        );
+    });
+    // Control: no locally-active destination owner -> no promotion;
+    // the unzoned fabric ingress admits, matching the backup posture.
+    with_neighbor_learn_ctx(&forwarding, |ctx, _neighbors| {
+        let live = BindingLiveState::new();
+        let outcome = stage_ipsec_passthrough_check(
+            Some(&flow),
+            &frame,
+            ike_v4_meta(&frame, 21),
+            None,
+            Some(TEST_LAN_ZONE_ID),
+            None,
+            &live,
+            ctx,
+            TEST_NOW_NS,
+            now_secs,
+        );
+        assert!(
+            matches!(outcome, IpsecPassthroughOutcome::Passthrough),
+            "unpromoted ambiguous IKE must retain fabric-zone posture"
         );
     });
 }

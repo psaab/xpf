@@ -106,7 +106,8 @@ use session_hit_authority::{
 
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
-    SynCookieAckOutcome, ike_host_inbound_gate_context, reinject_ipsec_passthrough,
+    SynCookieAckOutcome, ike_host_inbound_gate_context,
+    ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough,
     screen_zone_with_state, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
     stage_link_layer_classify, stage_native_gre_decap, stage_parse_flow_and_learn,
     stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
@@ -1070,9 +1071,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // #10670: preserve the validated #6458 stamp for session-hit
                 // authority. New-flow policy uses a separate RG-gated copy;
                 // a session hit must still judge the peer's claimed arrival
-                // zone when that new-flow gate declines the stamp.
+                // zone when that new-flow gate declines the stamp. #15925:
+                // ambiguous stamps carry the same raw arrival claim: judge
+                // it here without promoting it for new-flow policy.
                 let fabric_arrival_zone = if packet_fabric_ingress {
-                    ingress_zone_override
+                    ingress_zone_override.or(ambiguous_zone)
                 } else {
                     None
                 };
@@ -1414,7 +1417,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             stage11_packet_frame,
                             meta,
                             flow,
-                            ingress_zone_override,
+                            ingress_zone_override.or(ambiguous_zone),
                             now_ns,
                             None,
                         ) {
@@ -1435,6 +1438,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     stage11_packet_frame,
                     meta,
                     ingress_zone_override,
+                    ambiguous_zone,
                     stage11_route_table.as_deref(),
                     &binding.live,
                     worker_ctx,
@@ -1452,7 +1456,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ),
                                 Some(flow),
                                 meta,
-                                ingress_zone_override,
+                                ingress_zone_override.or(ambiguous_zone),
                                 now_ns,
                             )
                             .expect("Stage 11 input filter flow");
@@ -1489,7 +1493,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     stage11_packet_frame,
                                     meta,
                                     flow,
-                                    ingress_zone_override,
+                                    ingress_zone_override.or(ambiguous_zone),
                                     worker_ctx.event_stream,
                                     now_ns,
                                     Some(crate::afxdp::forwarding::PbrRejectSink {
@@ -1743,10 +1747,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // initiation, resolved exactly as Stage 11
                             // resolves its match key.
                             let (_seed_logical, seed_zone_id, _seed_override) =
-                                ike_host_inbound_gate_context(
+                                ike_host_inbound_gate_context_with_ambiguous(
                                     flow,
                                     meta,
                                     ingress_zone_override,
+                                    ambiguous_zone,
                                     now_secs,
                                     worker_ctx,
                                 );
@@ -1772,10 +1777,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // here: the outlet arm above continued on None.
                         if let Some(flow) = flow.as_ref() {
                             let (ingress_logical, from_zone_id, ingress_zone_override) =
-                                ike_host_inbound_gate_context(
+                                ike_host_inbound_gate_context_with_ambiguous(
                                     flow,
                                     meta,
                                     ingress_zone_override,
+                                    ambiguous_zone,
                                     now_secs,
                                     worker_ctx,
                                 );
@@ -3605,7 +3611,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         {
                             // Raw stage-9 override (mirrors the commit-site capture —
                             // arm-scoped shadows below do not reach this tail).
-                            let frag_authority_zone_override = ingress_zone_override;
+                            let frag_authority_zone_override =
+                                ingress_zone_override.or(ambiguous_zone);
                             let frag_authority = frag_ingress_authority_with_nat_scope(
                                 worker_ctx.forwarding,
                                 meta,
@@ -4498,8 +4505,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // CONSTRUCTION; stamping the gated value at install while the
                         // consult can only see the raw one would desynchronize them
                         // and turn legitimate same-domain fragments into misses.
-                        let frag_authority_zone_override = ingress_zone_override;
-                        let frag_authority_nat_scope_ifindex = ingress_nat_scope_ifindex;
+                        let frag_authority_zone_override = ingress_zone_override.or(ambiguous_zone);
+                        let frag_authority_nat_scope_ifindex =
+                            ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex);
                         let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
                             worker_ctx.forwarding,
                             worker_ctx.ha_state,
@@ -4528,8 +4536,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         // NAT scope identity is only authoritative when its
                         // zone survived the same owner-RG gate used for policy.
-                        let ingress_nat_scope_ifindex =
-                            ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex).filter(|_| ingress_zone_override.is_some());
+                        let ingress_nat_scope_ifindex = ingress_nat_scope_ifindex
+                            .or(ambiguous_scope_ifindex)
+                            .filter(|_| ingress_zone_override.is_some());
                         let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
                             worker_ctx.forwarding,
                             ingress_logical,
@@ -5420,8 +5429,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     let authority = frag_ingress_authority_with_nat_scope(
                                         worker_ctx.forwarding,
                                         meta,
-                                        ingress_zone_override,
-                                        ingress_nat_scope_ifindex,
+                                        ingress_zone_override.or(ambiguous_zone),
+                                        ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex),
                                     );
                                     if same_family_or_plain_install_forward_fragment_assoc(
                                         worker_ctx.forwarding,
@@ -7472,8 +7481,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let frag_authority = frag_ingress_authority_with_nat_scope(
                             worker_ctx.forwarding,
                             meta,
-                            ingress_zone_override,
-                            ingress_nat_scope_ifindex,
+                            ingress_zone_override.or(ambiguous_zone),
+                            ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex),
                         );
                         nat64_consult_forward_fragment_assoc(
                             worker_ctx.forwarding,
@@ -8419,8 +8428,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     if ingress_zone_override.is_none() {
                         meta.fabric_ingress_ifindex = 0;
                     }
-                    let ingress_nat_scope_ifindex =
-                        ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex).filter(|_| ingress_zone_override.is_some());
+                    let ingress_nat_scope_ifindex = ingress_nat_scope_ifindex
+                        .or(ambiguous_scope_ifindex)
+                        .filter(|_| ingress_zone_override.is_some());
 
                     // (3) Zone security policy — only for TRANSIT
                     //     (ForwardCandidate). Local delivery (host-inbound) is
@@ -10124,8 +10134,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // Preserve the un-gated arrival stamp for the
                                 // fragment-cache key, matching the ordinary
                                 // session-install path.
-                                let frag_authority_zone_override = ingress_zone_override;
-                                let frag_authority_nat_scope_ifindex = ingress_nat_scope_ifindex;
+                                let frag_authority_zone_override =
+                                    ingress_zone_override.or(ambiguous_zone);
+                                let frag_authority_nat_scope_ifindex =
+                                    ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex);
                                 let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,

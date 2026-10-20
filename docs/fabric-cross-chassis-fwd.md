@@ -991,9 +991,12 @@ zone. V1 remains accepted for compatibility, but has no recoverable peer
 interface/RI identity and therefore keeps the legacy local-fabric scope
 behavior. In the #15916 ambiguous shape (the identity's RG is locally
 active because every bound RG is) the V2 stamp degrades to
-`Ambiguous` with the scope ifindex WITHHELD: no DNAT/SNAT scope
-consumer sees the peer identity, and promotion (owner-RG gate) carries
-zone only, exactly like V1.
+`Ambiguous`: the scope ifindex is withheld at stage 9, so no
+pre-promotion DNAT scope consumer sees it. If the owner-RG gate
+later promotes the claimed zone, the same scope ifindex is attached
+for SNAT scope on the flow-backed and flowless miss paths, exactly
+as the local ingress identity for that claimed interface; it is
+never attached when promotion fails.
 
 This deterministic ID is a scope selector, not authentication: the shared-L2
 forgery residual described below still applies.
@@ -1065,6 +1068,9 @@ ambiguous disposition is reverted to a stage-9 drop;
 `forged_fabric_stamp_denied_for_host_inbound_when_owner_rg_remote_6458` —
 RED when the V2 gate is neutralized), plus the split-RG preservation pins
 named above.
+
+## The cluster-peer return fast path is removed (#6478)
+
 The sections above describing `cluster_peer_return_fast_path` and its
 #4439/#4453/#4414 guard set are HISTORICAL. The fast path adopted
 session-less fabric-ingress TCP SYN-ACK / ACK / ICMP echo-reply forms

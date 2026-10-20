@@ -1181,7 +1181,7 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
 // claimed zone is withheld from policy until the V2 owner-RG gate
 // proves the packet's own resolution is locally owned. The
 // fail-on-revert property moves with it — see
-// `forged_stamp_on_primary_promotes_nothing_without_owner_proof_15916`
+// `ambiguous_stamp_with_local_owner_is_adjudicated_like_local_ingress_15916`
 // and `co_moved_punt_admitted_when_all_data_rgs_local_15916` in
 // tests_fabric_zone_stamp.rs.
 #[test]
