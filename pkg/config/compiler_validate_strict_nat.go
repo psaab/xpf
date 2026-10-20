@@ -3277,7 +3277,13 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 			}
 		}
 		for _, n := range rs.SourceAddressNames {
-			if n == "" || n == "any" {
+			// #15930: wildcard keywords in the name slot are authored
+			// match-any (v6) / never-match (v4-only), classified before
+			// any book lookup by the builder; never undefined names.
+			if n == "" {
+				continue
+			}
+			if _, _, isWildcard := PolicyAddressWildcardFamilies(n); isWildcard {
 				continue
 			}
 			found := false

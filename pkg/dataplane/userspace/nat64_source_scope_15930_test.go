@@ -211,6 +211,34 @@ func TestNAT64MixedAnyWins15930(t *testing.T) {
 	}
 }
 
+func TestNAT64NameSlotAnyIsWildcard15930(t *testing.T) {
+	// Round-2 fold: `source-address-name any` (and family variants) is
+	// exempted by the strict gate as a wildcard, so the builder must
+	// classify it as one BEFORE any book lookup — never as an
+	// undefined name (which would ship the never-match sentinel and
+	// silently flip base match-any to match-none). A book object
+	// literally named `any` must not capture the keyword either.
+	addresses := map[string]*config.Address{
+		"any": {Name: "any", Value: "2001:db8:7::/48"},
+	}
+	for _, names := range [][]string{{"any"}, {"any6"}, {"any-ipv6"}} {
+		s := nat64Snap15930(t, nat64ScopeCfg15930(nil, names, addresses, nil))
+		if !matchAny15930(s) || s.SourceConstrained || len(s.SourceAddresses) != 1 || s.SourceAddresses[0] != "::/0" {
+			t.Fatalf("source-address-name %v must lower to unconstrained [::/0], got constrained=%v addrs=%v", names, s.SourceConstrained, s.SourceAddresses)
+		}
+	}
+	// IPv4-only keyword in the name slot: never-match, not match-any.
+	s := nat64Snap15930(t, nat64ScopeCfg15930(nil, []string{"any4"}, nil, nil))
+	if matchAny15930(s) || !s.SourceConstrained {
+		t.Fatalf("source-address-name any4 must stay never-match: constrained=%v addrs=%v", s.SourceConstrained, s.SourceAddresses)
+	}
+	// Name-slot wildcard beside a narrower literal still wins.
+	s = nat64Snap15930(t, nat64ScopeCfg15930([]string{"2001:db8:1::/48"}, []string{"any"}, nil, nil))
+	if !matchAny15930(s) || s.SourceConstrained {
+		t.Fatalf("name-slot any beside literal must match any: constrained=%v addrs=%v", s.SourceConstrained, s.SourceAddresses)
+	}
+}
+
 func TestNAT64Any4NeverMatchesV6_15930(t *testing.T) {
 	// An IPv4-only wildcard beside nothing else can never match an IPv6
 	// NAT64 source; it must not widen to any-IPv6.

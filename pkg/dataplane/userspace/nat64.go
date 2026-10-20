@@ -195,7 +195,27 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			}
 			sourceAddrs = append(sourceAddrs, a)
 		}
-		if resolved, poisoned := appendNATAddressNamesPoisoned(cfg, feedOverlay, sourceAddrs, rs.SourceAddressNames); poisoned != "" {
+		// #15930 (round-2 fold): a wildcard keyword in the NAME slot is
+		// classified BEFORE any book lookup, exactly as the strict gate
+		// exempts it (compiler_validate_strict_nat.go) and as every
+		// policy resolver asks IsPolicyAddressWildcardKeyword first
+		// (#9523). `source-address-name any` therefore means the same
+		// wildcard ::/0, never an undefined-book sentinel; an IPv4-only
+		// keyword name stays a never-match entry. A book object named
+		// `any` cannot capture the keyword.
+		realNames := make([]string, 0, len(rs.SourceAddressNames))
+		for _, n := range rs.SourceAddressNames {
+			if _, v6, isWildcard := config.PolicyAddressWildcardFamilies(n); isWildcard {
+				if v6 {
+					wildcardAuthored = true
+				} else {
+					sourceAddrs = append(sourceAddrs, n)
+				}
+				continue
+			}
+			realNames = append(realNames, n)
+		}
+		if resolved, poisoned := appendNATAddressNamesPoisoned(cfg, feedOverlay, sourceAddrs, realNames); poisoned != "" {
 			slog.Warn("userspace snapshot: NAT64 rule-set has poisoned source address-name closure; shipping fail-closed",
 				"rule-set", rs.Name, "address_name", poisoned)
 			sourceAddrs = []string{natUnresolvedAddressNamePrefix + poisoned}

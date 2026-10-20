@@ -44,3 +44,22 @@ func TestNAT64SourceNameDNSDefinedAdmitted15930(t *testing.T) {
 		t.Fatalf("dns-clients must compile to a dns-name entry: %+v", ab)
 	}
 }
+
+func TestNAT64SourceAddressNameAnyAdmitted15930(t *testing.T) {
+	// The strict gate exempts `source-address-name any` as a wildcard
+	// (validateNAT64ScopeStrict); the compiled rule-set must carry the
+	// name verbatim so the builder can lower it to ::/0. Family
+	// variants are admitted by the same gate.
+	for _, spelling := range []string{"any", "any6", "any-ipv6", "any4", "any-ipv4"} {
+		cfg, err := compileNAT64Scope(t, nat64ScopeLines(
+			"set security nat nat64 rule-set rs1 match source-address-name "+spelling,
+		))
+		if err != nil {
+			t.Fatalf("source-address-name %s must be admitted at strict commit: %v", spelling, err)
+		}
+		rs := cfg.Security.NAT.NAT64[0]
+		if len(rs.SourceAddressNames) != 1 || rs.SourceAddressNames[0] != spelling {
+			t.Fatalf("source-address-name %s compiled to %v, want [%s]", spelling, rs.SourceAddressNames, spelling)
+		}
+	}
+}
