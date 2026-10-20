@@ -415,12 +415,33 @@ exec)
 		case "$*" in
 		*"show chassis cluster status"*)
 			prim="$(cat "$V6NA_STUB_STATE")"
-			echo "Redundancy group: 2 , Monitor fail: 0, Hold: 0"
-			if [[ "$prim" == node0 ]]; then
-				echo "node0 primary"
+			# #15959: emit the REAL 6-line block (FormatStatus,
+			# pkg/cluster/status.go): header, QUERIED HOST's row
+			# first, its Takeover/Transfer/Forwarding sub-lines,
+			# then the peer row. Prior stub emitted a 2-line block
+			# (header + single primary row), which hid the gate's
+			# grep -A2 blindness: in split state the peer primary
+			# row is 5 lines below the header. Priorities follow
+			# the live render (primary 200 / secondary* 100).
+			# V6NA_STUB_HOLD=1 renders BOTH rows secondary-hold
+			# (dual-hold transient: no primary row -> fail-closed).
+			echo "Redundancy group: 2 , Failover count: 1"
+			if [[ "$host" == *fw1 ]]; then local_node=node1; peer_node=node0; else local_node=node0; peer_node=node1; fi
+			if [[ "${V6NA_STUB_HOLD:-0}" == 1 ]]; then
+				local_row="secondary-hold"; peer_row="secondary-hold"
+			elif [[ "$prim" == "$local_node" ]]; then
+				local_row="primary"; peer_row="secondary"
 			else
-				echo "node1 primary"
-			fi ;;
+				local_row="secondary-hold"; peer_row="primary"
+			fi
+			if [[ "$local_row" == primary ]]; then local_prio=200; peer_prio=100; else local_prio=100; peer_prio=200; fi
+			[[ "${V6NA_STUB_HOLD:-0}" == 1 ]] && { local_prio=100; peer_prio=100; }
+			local_manual=no; [[ "$local_row" == secondary-hold ]] && local_manual=yes
+			printf '%s %s %s no %s None\n' "$local_node" "$local_prio" "$local_row" "$local_manual"
+			echo "  Takeover ready: yes"
+			echo "  Transfer ready: yes"
+			echo "  Forwarding: rg-active=inactive"
+			printf '%s %s %s no no None\n' "$peer_node" "$peer_prio" "$peer_row" ;;
 		*"request chassis cluster failover"*)
 			printf '%s %s\n' "$host" "$*" >>"${V6NA_STUB_CLI_LOG:-/dev/null}"
 			cur="$(cat "$V6NA_STUB_STATE")"
@@ -517,6 +538,14 @@ run_gate pass 5 0
 # in the log is the initial failover (the move under test); the
 # failback half must contribute none — asserted by counting exactly
 # one untargeted request.
+# Parser regression (#15959): the stub emits the REAL 6-line block, so
+# in split state rg_primary(fw0) must read node1 (peer row 5 lines below
+# the header) and the failback branch must fire. Note this stranded case
+# does NOT pin the parser: the gate's FW1 cross-check rescues it under
+# the old grep -A2 parser (fw1's own primary row sits inside the -A2
+# window), so it still passes with the parser reverted — verified by
+# reverting it. The parser unit cases below are the parser pin: they
+# fail (3 cases) under the old parser.
 run_gate_stranded() {
 	local g="$STUB/stranded" out rc log reset_ln target_ln plain_count
 	mkdir -p "$g/logs"
@@ -541,5 +570,83 @@ run_gate_stranded() {
 	fi
 }
 run_gate_stranded
+# ── #15959 parser unit cases: rg_primary over the REAL 6-line block ──
+# Extract the gate's rg_primary verbatim and drive it against canned
+# status text (stub incus below returns $V6NA_STUB_STATUS verbatim).
+# Old grep -A2 parser MUST fail the split cases: on fw0's view the
+# node1-primary row is 5 lines below the header, outside -A2.
+mkdir -p "$T/parser/bin"
+cat >"$T/parser/bin/incus" <<'STUB_PARSER_INCUS'
+#!/usr/bin/env bash
+case "$*" in
+*"show chassis cluster status"*) printf '%s\n' "$V6NA_STUB_STATUS" ;;
+*) : ;;
+esac
+exit 0
+STUB_PARSER_INCUS
+chmod +x "$T/parser/bin/incus"
+sed -n '/^rg_primary() {/,/^}/p' "$GATE" >"$T/parser/rg_primary.sh"
+check_rg() { # <name> <host fw0|fw1> <want> <status>
+	local name="$1" host="$2" want="$3" status="$4" got
+	got="$(V6NA_STUB_STATUS="$status" PATH="$T/parser/bin:$PATH" bash -c 'source "$1"; V6_NA_RG=2; rg_primary "$2"' _ "$T/parser/rg_primary.sh" "$host")"
+	if [[ "$got" == "$want" ]]; then ok "parser $name: rg_primary($host)=${want:-<empty>}"; else bad "parser $name: rg_primary($host)=${got:-<empty>}, want ${want:-<empty>}"; fi
+}
+# Host-ordered 6-line blocks: queried host's row first, then its three
+# sub-lines, then the peer row (pkg/cluster/status.go FormatStatus).
+BLK_FW0_N0='Redundancy group: 2 , Failover count: 1
+node0 200 primary no no None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active
+node1 100 secondary no no None'
+BLK_FW0_N1='Redundancy group: 2 , Failover count: 6
+node0 100 secondary-hold no yes None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive
+node1 100 primary no no None'
+BLK_FW1_N1='Redundancy group: 2 , Failover count: 6
+node1 100 primary no no None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active
+node0 100 secondary-hold no yes None'
+BLK_FW1_N0='Redundancy group: 2 , Failover count: 1
+node1 100 secondary no no None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive
+node0 200 primary no no None'
+BLK_HOLD='Redundancy group: 2 , Failover count: 6
+node0 100 secondary-hold no yes None
+  Takeover ready: no (peer secondary not ready to become primary)
+  Transfer ready: yes
+  Forwarding: rg-active=inactive
+node1 100 secondary-hold no no None'
+BLK_MULTI='Redundancy group: 1 , Failover count: 0
+node0 200 primary no no None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active
+node1 100 secondary no no None
+Redundancy group: 2 , Failover count: 6
+node0 100 secondary-hold no yes None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive
+node1 100 primary no no None
+Redundancy group: 10 , Failover count: 0
+node0 200 primary no no None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active
+node1 100 secondary no no None'
+check_rg node0-primary-fw0 fw0 node0 "$BLK_FW0_N0"
+check_rg node1-primary-split-fw0 fw0 node1 "$BLK_FW0_N1"
+check_rg node1-primary-fw1 fw1 node1 "$BLK_FW1_N1"
+check_rg node0-primary-split-fw1 fw1 node0 "$BLK_FW1_N0"
+check_rg dual-hold-empty fw0 "" "$BLK_HOLD"
+check_rg multi-rg-scoped fw0 node1 "$BLK_MULTI"
+check_rg empty-status fw0 "" ""
 echo "RESULTS: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
