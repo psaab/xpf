@@ -974,8 +974,20 @@ type ConfigSnapshot struct {
 	// not originate an ICMPv6 Time Exceeded for a packet that arrived
 	// with hop limit 0. Additive/omitempty: an old helper ignores it
 	// (pre-#15707 behaviour), an old Go binary leaves it false.
-	NoIPv6RejectZeroHopLimit bool                 `json:"no_ipv6_reject_zero_hop_limit,omitempty"`
-	Policies                 []PolicyRuleSnapshot `json:"policies,omitempty"`
+	NoIPv6RejectZeroHopLimit bool `json:"no_ipv6_reject_zero_hop_limit,omitempty"`
+	// ClearPolicies (#15937 authorized clear): set ONLY by Manager.Compile
+	// on a full build (never by partial publishers, which clone the
+	// retained snapshot and must not inherit a spent authorization — see
+	// clearPoliciesSpendAtBuild sites). Tells a competent helper that
+	// this empty Policies set is the full Compile's deliberate clear-all,
+	// authorizing the installed-set gate's empty install. Partial
+	// publishers clone before Compile stamps the new snapshot and the
+	// marker is consumed (zeroed) by the send site after each send, so a
+	// clone can never carry a live authorization. Additive/omitempty +
+	// serde(default), no protocol bump: old helpers ignore it (their
+	// installed-set gate simply does not exist), old Go sends false.
+	ClearPolicies bool                 `json:"clear_policies,omitempty"`
+	Policies      []PolicyRuleSnapshot `json:"policies,omitempty"`
 	// PolicyRematchExtensive enables the conditional retain/rebind rotation arm.
 	PolicyRematchExtensive bool                         `json:"policy_rematch_extensive,omitempty"`
 	PolicyRenameAncestry   []PolicyRenameAncestry       `json:"policy_rename_ancestry,omitempty"`

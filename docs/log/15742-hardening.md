@@ -47,13 +47,11 @@ and immediately at every layer, each independently sufficient:
    one needs a protocol bump (follow-up below), so silently emptying
    enforcement mid-stream is never accepted from a partial publish;
    a legitimate empty FIRST apply (nothing installed) still succeeds.
-   Trade-off, explicit: a deliberate clear-all config commit applied
-   while the helper already holds policies is refused at the helper
-   until the helper restarts or a non-empty publish lands; the Go
-   send-site (stamped 0) admits it, the helper arm is the fail-closed
-   backstop, and the refusal is loud (ERROR + counter + metric), never
-   silent. The wire already carries `summary.policy_count`, so arm (a)
-   needed no protocol bump.
+   Round-2 update: the deliberate clear-all path now exists via the
+   additive authorized-clear marker (see Residual gaps) — a marked
+   full-Compile clear installs empty at the helper; only unmarked
+   empty publishes refuse. The refusal stays loud (ERROR + counter +
+   metric), never silent.
 
 4. **Observability**:
    - Go: `slog.Error` on builder and send-site refusals (counts +
@@ -95,13 +93,21 @@ and immediately at every layer, each independently sufficient:
 
 ## Residual gaps
 
-- **No full-clear wire signal**: a deliberate clear-all commit to a
-  helper already holding policies is refused by Rust arm (b) until
-  helper restart / non-empty publish. Closing this properly needs an
-  explicit signal (e.g. `policies_expected`/clear marker) on the wire
-  — a protocol bump, deliberately NOT done here; recorded as the
-  follow-up. The refusal is loud (ERROR, counter, metric), never a
-  silent empty install, which is the safe direction.
+- **Authorized clear (round-2 fold, #15937)**: closed WITHOUT a
+  protocol bump via the additive `clear_policies` marker (option (c),
+  the smallest authorized-clear path). Only `Manager.Compile` sets it,
+  on a full build; the send site spends (zeroes) it after the send;
+  `stripSingleUseCommitMetadata` strips it from every partial clone;
+  `syncSnapshotLocked` re-marks only when helper status proves the
+  cleared set already landed (idempotent landing-confirmation, not a
+  fresh authorization). The Rust gate accepts a marked empty install
+  over a non-empty installed set; unmarked both-zeroed publishes still
+  refuse at both layers. Old helpers ignore the field (additive,
+  `serde(default)`); old Go sends false. A mixed-version old-helper
+  fleet predating the installed-set gate has no gate to authorize —
+  no worse than before this hardening. The stamp now commits ONLY
+  after a successful apply (a refused Compile leaves the prior stamp,
+  so retained-count partials still publish — stamp-poisoning fix).
 - The send-site stamped expectation is per-Manager-process: a daemon
   restart before any full Compile leaves expected=-1, where only the
   self-consistency arm + the helper's installed-set gate apply.

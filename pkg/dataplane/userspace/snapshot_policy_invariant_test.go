@@ -271,6 +271,7 @@ func TestFullBuilderPopulatesEverySnapshotField(t *testing.T) {
 		"DeferWorkers":                  "only on deferred-worker publishes",
 		"ColdPathSampleMask":            "only with operator cold-path sampling flags",
 		"ContentDigest":                 "stamped at the send site, not by the builder",
+		"ClearPolicies":                 "authorized-clear marker set only by Manager.Compile on an empty full build; the representative build is non-empty",
 		"DestinationNAT":                "representative config has no destination NAT rules",
 		"SourceNAT":                     "representative config has no source NAT rules",
 		"StaticNAT":                     "representative config has no static NAT rules",
@@ -362,5 +363,86 @@ func TestFullBuilderPopulatesEverySnapshotField(t *testing.T) {
 	}
 	if snap.Summary.HostName != cfg.System.HostName || snap.Summary.DataplaneType != cfg.System.DataplaneType {
 		t.Errorf("Summary identity = %q/%q, want %q/%q from config", snap.Summary.HostName, snap.Summary.DataplaneType, cfg.System.HostName, cfg.System.DataplaneType)
+	}
+}
+
+// TestCompileClearAllCommitsStampAndMarker is the authorized-clear path:
+// a full Compile that empties the policy set must (a) send the snapshot
+// WITH ClearPolicies marked (the helper's authorized-clear input),
+// (b) commit expectedPolicyCount=0 ONLY after the successful apply, and
+// (c) leave the retained snapshot with the marker SPENT, so a later
+// partial clone cannot replay it.
+func TestCompileClearAllCommitsStampAndMarker(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(good, rec)
+	m.expectedPolicyCount = len(good.Policies) // retained-set expectation
+
+	clearSnap := *good
+	clearSnap.Policies = nil
+	clearSnap.Summary.PolicyCount = 0
+	clearSnap.ClearPolicies = true // as Manager.Compile marks an empty full build
+	clearSnap.Generation = 8
+	if err := m.requestApplySnapshotPreparedLocked(&clearSnap, &ProcessStatus{}); err != nil {
+		t.Fatalf("authorized-clear send must pass the gate: %v", err)
+	}
+	if len(rec.sent) != 1 || !rec.sent[0].ClearPolicies {
+		t.Fatalf("sent snapshots = %+v, want exactly one WITH ClearPolicies marked", rec.sent)
+	}
+	if clearSnap.ClearPolicies {
+		t.Fatal("marker must be SPENT after the send (retained clones must not inherit it)")
+	}
+	// A partial both-zeroed clone of the now-retained snapshot (marker
+	// spent) against the still-non-zero stamp must refuse: the stamp
+	// only moves after a successful full-Compile apply (see
+	// TestRefusedCompileLeavesPriorStamp), never on a partial send.
+	partial := *good
+	partial.Policies = nil
+	partial.Summary.PolicyCount = 0
+	partial.Generation = 9
+	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); !errors.Is(err, errSnapshotPolicyMismatch) {
+		t.Fatalf("unmarked both-zeroed partial = %v, want errSnapshotPolicyMismatch", err)
+	}
+	if len(rec.sent) != 1 {
+		t.Fatalf("refused partial reached the helper: %d sends, want still 1", len(rec.sent))
+	}
+}
+
+// TestRefusedCompileLeavesPriorStamp pins the stamp-poisoning fix: the
+// expectedPolicyCount stamp commits ONLY after a successful apply, so a
+// refused full Compile leaves the prior stamp and partial publishes
+// sized for the RETAINED set still send.
+func TestRefusedCompileLeavesPriorStamp(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(good, rec)
+	m.expectedPolicyCount = len(good.Policies)
+	prior := m.expectedPolicyCount
+
+	// Simulate the refused-Compile sequence at the gate level: a new
+	// full build with a DIFFERENT count is refused at the send site
+	// (helper rejection); the stamp must remain the prior value because
+	// Compile commits it only on applyErr == nil.
+	bigger := *good
+	bigger.Policies = append(append([]PolicyRuleSnapshot{}, good.Policies...), good.Policies[0])
+	bigger.Summary.PolicyCount = len(bigger.Policies)
+	bigger.Generation = 8
+	// The gate refuses it against the prior stamp before sending.
+	if err := m.validateSnapshotForSend(&bigger); !errors.Is(err, errSnapshotPolicyMismatch) {
+		t.Fatalf("changed-count build vs prior stamp = %v, want errSnapshotPolicyMismatch", err)
+	}
+	if m.expectedPolicyCount != prior {
+		t.Fatalf("stamp moved on refusal: %d -> %d (poisoning)", prior, m.expectedPolicyCount)
+	}
+	// Partial publish sized for the retained (old-count) set still sends.
+	partial := *good
+	partial.Generation = 9
+	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); err != nil {
+		t.Fatalf("retained-count partial after refused Compile must still send: %v", err)
+	}
+	if len(rec.sent) == 0 {
+		t.Fatal("retained-count partial never reached the helper")
 	}
 }

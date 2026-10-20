@@ -297,6 +297,19 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	if preHeartbeat {
 		m.sendSchedulerHeartbeatLocked()
 	}
+	// #15937: ClearPolicies is single-use. It rides this send (whichever
+	// round trip ultimately lands the content) and is spent on the way
+	// out — success, refusal, or lost response alike — so the retained
+	// snapshot and its future partial clones can never replay the
+	// authorization. A re-mark happens only when publish provenance is
+	// re-established (full Compile, or status observation proving the
+	// helper already holds the cleared set).
+	spendClear := snap.ClearPolicies
+	defer func() {
+		if spendClear {
+			snap.ClearPolicies = false
+		}
+	}()
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
 	if err == nil {
 		m.recordSchedulerSnapshotAppliedLocked(snap)

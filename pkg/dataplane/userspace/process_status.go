@@ -195,6 +195,17 @@ func (m *Manager) syncSnapshotLocked() error {
 		// success, ctrl pinned at 0). Idempotent.
 		m.ensureStatusLoopLocked()
 	}
+	// #15937: re-mark a retained clear-only snapshot ONLY when helper
+	// status proves the cleared set already landed (policy count 0 at a
+	// generation >= the retained one) — i.e. this publish is an idempotent
+	// landing-confirmation, not a fresh authorization. Any other retained
+	// empty snapshot sends unmarked and the helper's installed-set gate
+	// decides (refuses over a non-empty installed set). Provenance for a
+	// genuinely new clear comes only from Manager.Compile.
+	if len(retained.Policies) == 0 && m.lastStatus.LastSnapshotPolicyCount == 0 &&
+		m.lastStatus.LastSnapshotGeneration >= retained.Generation {
+		retained.ClearPolicies = true
+	}
 	// Content-hash dedup: skip the control socket publish if the snapshot's
 	// forwarding-relevant content hasn't changed since the last publish.
 	// This eliminates redundant publishes during route convergence where

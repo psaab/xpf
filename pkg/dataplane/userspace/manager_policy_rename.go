@@ -122,5 +122,10 @@ func stripSingleUseCommitMetadata(next *ConfigSnapshot) {
 	}
 	next.PolicyRenameAncestry = nil
 	next.PolicySessionRebinds = nil
+	// #15937: the authorized-clear marker is single-use like the rename
+	// metadata — a partial clone of the retained snapshot must never
+	// inherit a live authorization. syncSnapshotLocked re-marks only
+	// when helper status proves the cleared set already landed.
+	next.ClearPolicies = false
 	invalidatePolicySnapshotIdentity(next)
 }

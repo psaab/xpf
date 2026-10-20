@@ -66,18 +66,19 @@ pub(super) fn apply(
     }
     // HARDENING (#15742 follow-up, joint-omission arm): an empty policy
     // install over a NON-EMPTY installed set is refused even when the
-    // transmitted counts agree (both zeroed) — there is no explicit
-    // full-clear signal on the wire (adding one needs a protocol bump,
-    // recorded as follow-up), so a legitimate clear-all commit goes
-    // through the Go Compile path whose stamping + the next non-empty
-    // publish converge; silently emptying enforcement mid-stream is
-    // never legitimate on a partial publish. First apply (no installed
-    // snapshot) is unaffected: fresh boot may legitimately start empty.
+    // transmitted counts agree (both zeroed), UNLESS the snapshot
+    // carries the #15937 authorized-clear marker (`clear_policies`),
+    // which only the Go full-Compile path sets and the Go send site
+    // spends (zeroes) after the send, so partial-publisher clones of
+    // the retained snapshot can never replay it. There is no other
+    // full-clear signal on the wire; silently emptying enforcement
+    // mid-stream is never legitimate on a partial publish. First apply
+    // (no installed snapshot) is unaffected: fresh boot may start empty.
     let installed_policies = guard
         .snapshot
         .as_ref()
         .map_or(0, |installed| installed.policies.len());
-    if snapshot.policies.is_empty() && installed_policies > 0 {
+    if snapshot.policies.is_empty() && installed_policies > 0 && !snapshot.clear_policies {
         guard.snapshot_policy_mismatch_total =
             guard.snapshot_policy_mismatch_total.saturating_add(1);
         guard.status.snapshot_policy_mismatch_total = guard.snapshot_policy_mismatch_total;

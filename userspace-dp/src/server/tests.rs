@@ -10287,3 +10287,127 @@ fn same_plan_retry_after_bind_failure_reconciles_14130() {
         guard.status.bindings[0].last_error
     );
 }
+
+/// #15937 authorized clear (helper arm): the Go full-Compile marker
+/// (`clear_policies`, spent by the Go send site) authorizes an empty
+/// install over a non-empty installed set. An unmarked both-zeroed
+/// apply over the same installed set still refuses.
+#[test]
+fn apply_snapshot_authorized_clear_marker_installs_empty() {
+    use crate::protocol::snapshot::SnapshotSummary;
+    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let zones = || {
+        vec![
+            crate::ZoneSnapshot {
+                name: "lan".to_string(),
+                id: 100,
+                ..crate::ZoneSnapshot::default()
+            },
+            crate::ZoneSnapshot {
+                name: "wan".to_string(),
+                id: 200,
+                ..crate::ZoneSnapshot::default()
+            },
+        ]
+    };
+    let state = new_state(ProcessStatus::default());
+    // Seed one installed policy.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                policy_count: 1,
+                ..SnapshotSummary::default()
+            },
+            policies: vec![PolicyRuleSnapshot {
+                rule_id: "lan->wan/allow-all".to_string(),
+                name: "allow-all".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..PolicyRuleSnapshot::default()
+            }],
+            zones: zones(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(response.ok, "seed apply must succeed: {}", response.error);
+    }
+    // Marked clear installs empty.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 2,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary::default(),
+            policies: Vec::new(),
+            clear_policies: true,
+            zones: zones(),
+            ..ConfigSnapshot::default()
+        });
+        let response = run_request(state.clone(), request);
+        assert!(
+            response.ok,
+            "authorized clear must install empty: {}",
+            response.error
+        );
+        let guard = state.lock().expect("state");
+        assert_eq!(guard.snapshot_policy_mismatch_total, 0, "authorized clear is not a mismatch");
+        let installed = guard.snapshot.as_ref().expect("snapshot installed");
+        assert_eq!(installed.policies.len(), 0, "clear must install the empty set");
+        assert_eq!(guard.status.last_snapshot_policy_count, 0);
+    }
+    // Reseed one policy, then an UNMARKED both-zeroed apply still refuses.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 3,
+            generated_at: chrono::Utc::now(),
+            summary: SnapshotSummary {
+                policy_count: 1,
+                ..SnapshotSummary::default()
+            },
+            policies: vec![PolicyRuleSnapshot {
+                rule_id: "lan->wan/allow-all".to_string(),
+                name: "allow-all".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..PolicyRuleSnapshot::default()
+            }],
+            zones: zones(),
+            ..ConfigSnapshot::default()
+        });
+        assert!(run_request(state.clone(), request).ok);
+    }
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 4,
+        generated_at: chrono::Utc::now(),
+        summary: SnapshotSummary::default(),
+        policies: Vec::new(),
+        zones: zones(),
+        ..ConfigSnapshot::default()
+    });
+    let response = run_request(state.clone(), request);
+    assert!(!response.ok, "unmarked both-zeroed apply must still refuse");
+    let guard = state.lock().expect("state");
+    assert_eq!(guard.snapshot_policy_mismatch_total, 1);
+    assert_eq!(
+        guard.snapshot.as_ref().expect("retained").policies.len(),
+        1,
+        "prior policies retained after unmarked refusal"
+    );
+}

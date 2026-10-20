@@ -392,15 +392,31 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	snap.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
 	snap.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
 	snap.ColdPathSampleMask = m.coldPathSampleMask
-	// HARDENING (#15742 follow-up): stamp the send-site ground truth from
-	// this full build. The builder invariant already validated
-	// len(snap.Policies) against the post-quarantine ground truth, so the
-	// built count IS the expectation every later partial publish must
-	// preserve. Stamped BEFORE applyCompiledSnapshot so even this
-	// Compile's own send is checked against it.
-	m.expectedPolicyCount = len(snap.Policies)
+	// HARDENING (#15742/#15937): set the authorized-clear marker on THIS
+	// full build when it empties the policy set. Only full Compile marks
+	// (partials clone the retained snapshot; the send site spends the
+	// marker after the send, so clones never inherit a live mark). The
+	// expected-count stamp is deliberately NOT committed here: it moves
+	// ONLY after a successful apply (below), so a refused Compile cannot
+	// poison partial publishes sized for the retained set.
+	snap.ClearPolicies = len(snap.Policies) == 0
+	builtPolicyCount := len(snap.Policies)
 	m.mu.Unlock()
 	compiled, applyErr := m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
+	if applyErr == nil {
+		// Commit the expectation only once the helper accepted the full
+		// build; known rejections restore/keep the prior stamp implicitly
+		// (it was never moved). Unknown-outcome applies do not commit:
+		// the retry-debt republication carries its provenance marker
+		// re-established from status, and its own send is gated by the
+		// PRIOR stamp (== its policy count only if it equals the retained
+		// expectation; a changed-count unknown outcome stays refused
+		// until a successful apply re-stamps — fail closed, converges on
+		// the debt republication once status proves what landed).
+		m.mu.Lock()
+		m.expectedPolicyCount = builtPolicyCount
+		m.mu.Unlock()
+	}
 	if replayInFlight {
 		m.mu.Lock()
 		if applyErr == nil {

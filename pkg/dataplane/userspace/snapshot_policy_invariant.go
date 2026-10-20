@@ -131,6 +131,16 @@ func (m *Manager) validateSnapshotForSend(snap *ConfigSnapshot) error {
 		return fmt.Errorf("%w: summary policy_count=%d but snapshot carries %d policies (first zone pair %s)",
 			errSnapshotPolicyMismatch, snap.Summary.PolicyCount, len(snap.Policies), firstPolicyZonePair(snap, snap.Config))
 	}
+	// The authorized-clear full build is the one deliberate exception to
+	// the stamp arm: when its count differs from the stamp it IS the
+	// stamp's successor, sent by Compile itself (which re-stamps only
+	// after success). Any OTHER empty send over a non-zero stamp is the
+	// both-zeroed partial shape and refuses below. (Compile's own send
+	// still passes this gate because the gate runs before the re-stamp;
+	// a refused Compile send leaves the stamp untouched.)
+	if snap.ClearPolicies && len(snap.Policies) == 0 && snap.Summary.PolicyCount == 0 {
+		return nil
+	}
 	if m.expectedPolicyCount >= 0 && len(snap.Policies) != m.expectedPolicyCount {
 		slog.Error("userspace: refusing snapshot send: published policies disagree with the last full Compile expectation",
 			"expected_policy_count", m.expectedPolicyCount,
