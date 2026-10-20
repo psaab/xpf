@@ -478,5 +478,17 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #15712: login-class regex gate — runs LAST so established tail-gate
+	// diagnostics retain first-error priority. Reads the COMPILED classes
+	// (post-#8436 merge, post-group-expansion), so duplicate/invalid regexes
+	// are judged on the effective values every spelling produces. Strict
+	// rejects non-POSIX patterns and conflicting same-leaf duplicates;
+	// lenient warns and keeps the last-authored value (#1960).
+	loginRegexWarnings15712, err := validateLoginClassRegexes15712(cfg, opts.lenientLoginClassRegex15712)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, loginRegexWarnings15712...)
+
 	return nil
 }

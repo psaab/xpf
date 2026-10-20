@@ -372,16 +372,20 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						}
 					case "allow-commands":
 						lc.AllowCommands = nodeVal(prop)
+						recordLoginClassRegexValue15712(lc, "allow-commands", nodeVal(prop))
 					case "deny-commands":
 						// Value only. PRESENCE is recorded above, off
 						// loginClassLeafRestrictive, because the value cannot
 						// carry it: a quoted-empty or valueless deny-commands
 						// flattens to "" yet denies EVERY command in Junos.
 						lc.DenyCommands = nodeVal(prop)
+						recordLoginClassRegexValue15712(lc, "deny-commands", nodeVal(prop))
 					case "allow-configuration":
 						lc.AllowConfiguration = nodeVal(prop)
+						recordLoginClassRegexValue15712(lc, "allow-configuration", nodeVal(prop))
 					case "deny-configuration":
 						lc.DenyConfiguration = nodeVal(prop)
+						recordLoginClassRegexValue15712(lc, "deny-configuration", nodeVal(prop))
 					}
 				}
 				lc.MappedPermissions, _ = mapJunosPermissions(lc.Permissions)

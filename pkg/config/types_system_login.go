@@ -143,6 +143,16 @@ type LoginClass struct {
 	// (compiler_login_deny.go), the same table-driven shape DenyLeavesPresent
 	// uses, so classifying a new allow leaf is the only edit needed.
 	AllowLeavesPresent []string
+	// RegexValues15712 records every DISTINCT authored value per regex leaf
+	// (#15712), in author order, populated by compiler_system.go alongside
+	// the presence lists. The scalar fields above keep only the last value
+	// (the #8436 merge overwrite), so without this record a conflicting
+	// duplicate — an earlier deny silently overwritten by a later block —
+	// is invisible to any compiled-config gate. One distinct value is the
+	// normal case; >1 is a strict-commit rejection / tolerant warning.
+	// Not serialized: it is commit-time diagnostic provenance, rebuilt on
+	// every compile from the authored tree.
+	RegexValues15712 map[string][]string `json:"-" yaml:"-"`
 }
 
 // mapJunosPermissions folds a custom login class's Junos permission tokens onto

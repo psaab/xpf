@@ -72,6 +72,19 @@ var peerEffectiveStrictSubjects = []peerEffectiveStrictSubject{
 			"tunnel): %w",
 		fn: validateIpipTunnelStrictView,
 	},
+	{
+		// #15712. A login-class regex (invalid POSIX, or a conflicting
+		// same-leaf duplicate across #8436-merged blocks) that only the
+		// peer's effective view carries via `groups nodeN`: the origin
+		// commits green and the peer lenient-loads, leaving an enforced
+		// restriction silently overwritten or failing closed per-command
+		// on the peer. Re-run the compiled-config gate strictly here.
+		// (Also covered by #9619's whole-pipeline peer strict compile;
+		// registered for its specific message, like the subjects above.)
+		format: "chassis cluster peer node%d effective login class regex is " +
+			"not valid (a shared commit would strand the standby): %w",
+		fn: validateLoginClassRegexesStrictView,
+	},
 }
 
 // ValidatePeerEffectiveStrict re-runs every registered strict subject against
