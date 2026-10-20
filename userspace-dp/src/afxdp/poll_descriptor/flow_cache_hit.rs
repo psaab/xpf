@@ -226,8 +226,7 @@ pub(super) fn stage_flow_cache_hit(
         // evict and re-resolve on the slow path.
         if neighbor_mac_stale
             || (fabric_link_ingress
-                && cached.decision.resolution.disposition
-                    == ForwardingDisposition::FabricRedirect)
+                && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect)
             || !cached_flow_decision_valid(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
@@ -292,11 +291,9 @@ pub(super) fn stage_flow_cache_hit(
                 flow_state.flow_cache.reclassify_hit_as_miss();
                 return FlowCacheOutcome::FallThrough;
             }
-            cached_descriptor
-                .input_filter_counters
-                .for_each(|counter| {
-                    crate::filter::record_filter_counter(counter, meta.pkt_len as u64);
-                });
+            cached_descriptor.input_filter_counters.for_each(|counter| {
+                crate::filter::record_filter_counter(counter, meta.pkt_len as u64);
+            });
             emit_cached_input_filter_log(
                 worker_ctx.forwarding,
                 worker_ctx.event_stream,
@@ -348,8 +345,7 @@ pub(super) fn stage_flow_cache_hit(
                     crate::policy::record_policy_hit_counter(counter, meta.pkt_len as u64);
                 }
             }
-            let resolution_debug =
-                ResolutionDebug::from_flow(meta.ingress_ifindex as i32, flow);
+            let resolution_debug = ResolutionDebug::from_flow(meta.ingress_ifindex as i32, flow);
             record_forwarding_disposition(
                 &worker_ctx.ident,
                 DispositionCounters::Hot(telemetry.counters),
@@ -397,10 +393,11 @@ pub(super) fn stage_flow_cache_hit(
                     .forwarding
                     .bindless_ipsec_selector_fence
                     .matches_with_nat(source, destination, cached_decision.nat)
-            }) {
+            })
+        {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.dbg.policy_deny += 1;
-            telemetry.counters.touched = true;
+            telemetry.counters.record_transit_ipsec_fence_drop();
             return FlowCacheOutcome::Consumed;
         }
 
@@ -416,7 +413,7 @@ pub(super) fn stage_flow_cache_hit(
             fabric_arrival_zone,
         ) {
             scratch.scratch_recycle.push(desc.addr);
-            telemetry.counters.touched = true;
+            telemetry.counters.record_transit_source_martian_drop();
             return FlowCacheOutcome::Consumed;
         }
         // #10691: a Consumed flow-cache hit bypasses every poll-loop
@@ -428,7 +425,7 @@ pub(super) fn stage_flow_cache_hit(
         ) && l2_group_unicast_ip
         {
             scratch.scratch_recycle.push(desc.addr);
-            telemetry.counters.touched = true;
+            telemetry.counters.record_transit_l2_group_drop();
             return FlowCacheOutcome::Consumed;
         }
         // #9991/#10670/#14945: a cached descriptor requires a live backing
@@ -442,10 +439,11 @@ pub(super) fn stage_flow_cache_hit(
         // still never refreshed, completed, or charged — a would-expire
         // packet takes the liveness-only probe instead, matching the slow
         // path, which also drops before accounting.
-        let ttl_would_expire = matches!(
-            cached_decision.resolution.disposition,
-            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
-        ) && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true));
+        let ttl_would_expire =
+            matches!(
+                cached_decision.resolution.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+            ) && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true));
         let session_live = if ttl_would_expire {
             fabric_session_live || sessions.session_is_live_at(&flow.forward_key, now_ns)
         } else {
@@ -520,10 +518,8 @@ pub(super) fn stage_flow_cache_hit(
             .tx_selection
             .filter_forwarding_class_fallback_pinned
         {
-            crate::afxdp::tx::FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL.fetch_add(
-                1,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            crate::afxdp::tx::FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         // #2573: replay ALL matched `then count` term counters, not just the
         // last. A #2544 fall-through flow can match multiple count terms.
@@ -539,11 +535,9 @@ pub(super) fn stage_flow_cache_hit(
         // reported only the seed packet of an N-packet cacheable flow. The
         // routing-instance (PBR) count is excluded at capture time (owned by the
         // routing evaluator), so this cannot double-count a mixed filter.
-        cached_descriptor
-            .input_filter_counters
-            .for_each(|counter| {
-                crate::filter::record_filter_counter(counter, meta.pkt_len as u64);
-            });
+        cached_descriptor.input_filter_counters.for_each(|counter| {
+            crate::filter::record_filter_counter(counter, meta.pkt_len as u64);
+        });
         // #3073: re-count this cached established-session packet against the
         // admitting policy's hit counter, mirroring the `then count` filter
         // replay above. This is the hot path for long-lived flows (most
@@ -611,6 +605,7 @@ pub(super) fn stage_flow_cache_hit(
             now_ns,
         );
         if cached_descriptor.tx_selection.drop || policer_action.drop {
+            telemetry.counters.record_transit_output_filter_drop();
             scratch.scratch_recycle.push(desc.addr);
             return FlowCacheOutcome::Consumed;
         }
@@ -823,10 +818,7 @@ pub(super) fn stage_flow_cache_hit(
                         config.rate,
                         &mut next_counter,
                         worker_ctx.mirror_targets,
-                        resolve_tx_binding_ifindex(
-                            worker_ctx.forwarding,
-                            config.output_ifindex,
-                        ),
+                        resolve_tx_binding_ifindex(worker_ctx.forwarding, config.output_ifindex),
                         worker_ctx.ident.queue_id,
                         packet_frame.len(),
                     );
@@ -1015,6 +1007,12 @@ pub(super) fn stage_flow_cache_hit(
                     telemetry.dbg.tx += 1;
                     scratch.scratch_forwards.push(request);
                     recycle_now = false;
+                } else {
+                    // #15941: the fallback builder returned None only on a
+                    // cos.drop verdict (its sole None return); the cached
+                    // descriptor was non-dropping, so this is a re-resolved
+                    // output-filter/policer drop.
+                    telemetry.counters.record_transit_output_filter_drop();
                 }
             }
         }

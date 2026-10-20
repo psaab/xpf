@@ -11,8 +11,8 @@
 // Pure relocation. `use super::*;` brings every type and helper from
 // afxdp.rs into scope.
 
-use super::*;
 use super::worker::WorkerTxPipeline;
+use super::*;
 
 /// #3608: the tx-pipeline + counters an output-filter `then reject` needs to
 /// synthesize its active reply (TCP RST / ICMP admin-prohibited) on the transit
@@ -556,11 +556,7 @@ pub(super) fn l3_wire_session_flow_from_frame(
 ) -> Option<SessionFlow> {
     let mut pre = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)?;
     pre.forward_key.protocol = if meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4 {
-        crate::afxdp::frame::fragment_protocol_from_frame(
-            frame,
-            meta.l3_offset,
-            meta.addr_family,
-        )?
+        crate::afxdp::frame::fragment_protocol_from_frame(frame, meta.l3_offset, meta.addr_family)?
     } else {
         // Preserve the prior metadata-based behavior for non-sentinel flows.
         meta.protocol
@@ -595,9 +591,18 @@ pub(super) fn apply_cos_drop_side_effects(
     ctx: CoSDropSideEffects<'_>,
     frame: &[u8],
     tx_selection_flow: Option<&SessionFlow>,
-    reject_reply: Option<ForwardRejectReply<'_>>,
+    mut reject_reply: Option<ForwardRejectReply<'_>>,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
 ) -> bool {
+    // #15941: every cos.drop verdict is a named transit output-filter drop,
+    // regardless of which sub-verdict (discard/reject/policer) fired. The
+    // reject-reply context carries the caller's batch counters; callers
+    // without one are counted by their caller instead.
+    if cos.drop {
+        if let Some(reply) = &mut reject_reply {
+            reply.counters.record_transit_output_filter_drop();
+        }
+    }
     // #3608: an output firewall-filter `then reject` on the transit forward path
     // now emits the SAME active reply as the input/lo0 path (#2521) — a TCP RST
     // for TCP, an ICMP/ICMPv6 admin-prohibited unreachable otherwise — instead
@@ -665,7 +670,8 @@ pub(super) fn apply_cos_drop_side_effects(
             ctx.meta.ingress_vlan_id,
         )
         .unwrap_or(ctx.meta.ingress_ifindex as i32);
-        let ingress_zone_id = ctx.fabric_ingress_zone
+        let ingress_zone_id = ctx
+            .fabric_ingress_zone
             .filter(|id| ctx.forwarding.zone_id_to_name.contains_key(id))
             .or_else(|| {
                 ctx.forwarding

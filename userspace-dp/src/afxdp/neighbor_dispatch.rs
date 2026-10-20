@@ -884,6 +884,17 @@ pub(super) fn retry_pending_neigh(
                 }),
                 event_stream,
             );
+            // #15941: ring attribution for the deferred output-filter drop
+            // (counted in apply_cos_drop_side_effects above).
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "transit_output_filter_drop",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }

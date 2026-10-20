@@ -83,6 +83,13 @@ type BindingStatus struct {
 	// #15243 (A60-01): native GRE/WG-decapsulated reverse packets refused
 	// at the PMech hold site (recycled, not held).
 	PMechDecapHoldRefused uint64 `json:"pmech_decap_hold_refused,omitempty"`
+	// #15941: terminal transit drops exported per binding.
+	TransitOutputFilterDrops  uint64 `json:"transit_output_filter_drops,omitempty"`
+	TransitSourceMartianDrops uint64 `json:"transit_source_martian_drops,omitempty"`
+	TransitIPSecFenceDrops    uint64 `json:"transit_ipsec_fence_drops,omitempty"`
+	TransitL2GroupDrops       uint64 `json:"transit_l2_group_drops,omitempty"`
+	ForwardBuildFailures      uint64 `json:"forward_build_failures,omitempty"`
+	NoEgressBindingDrops      uint64 `json:"no_egress_binding_drops,omitempty"`
 	// #4743/#11413: destination-martian drops, including NoRoute
 	// classifications (IPv4 multicast/broadcast/unspecified/loopback, IPv6
 	// multicast/unspecified/loopback) and post-FIB transit rejections (IPv4
@@ -164,15 +171,15 @@ type BindingStatus struct {
 	// (xpf_host_inbound_denies_total), and `show security flow statistics`
 	// reflect the drop. Before #3326 these denies were never counted.
 	HostInboundDeniedPackets uint64 `json:"host_inbound_denied_packets,omitempty"`
-	ScreenDrops uint64 `json:"screen_drops,omitempty"`
+	ScreenDrops              uint64 `json:"screen_drops,omitempty"`
 	// #13285: per-worker ScreenState security and detector-saturation counters.
-	ScreenSubstitutedDefaultDrops uint64 `json:"screen_substituted_default_drops,omitempty"`
-	ScreenSYNFloodDstDrops        uint64 `json:"screen_syn_flood_dst_drops,omitempty"`
-	ScreenSYNFloodSrcDrops        uint64 `json:"screen_syn_flood_src_drops,omitempty"`
-	ScreenSYNFloodAlarmEvents     uint64 `json:"screen_syn_flood_alarm_events,omitempty"`
-	ScreenAlarmWithoutDropEvents  uint64 `json:"screen_alarm_without_drop_events,omitempty"`
-	ScreenMissingProfileWarns     uint64 `json:"screen_missing_profile_warns,omitempty"`
-	ScreenInertProfileWarns       uint64 `json:"screen_inert_profile_warns,omitempty"`
+	ScreenSubstitutedDefaultDrops  uint64 `json:"screen_substituted_default_drops,omitempty"`
+	ScreenSYNFloodDstDrops         uint64 `json:"screen_syn_flood_dst_drops,omitempty"`
+	ScreenSYNFloodSrcDrops         uint64 `json:"screen_syn_flood_src_drops,omitempty"`
+	ScreenSYNFloodAlarmEvents      uint64 `json:"screen_syn_flood_alarm_events,omitempty"`
+	ScreenAlarmWithoutDropEvents   uint64 `json:"screen_alarm_without_drop_events,omitempty"`
+	ScreenMissingProfileWarns      uint64 `json:"screen_missing_profile_warns,omitempty"`
+	ScreenInertProfileWarns        uint64 `json:"screen_inert_profile_warns,omitempty"`
 	ScreenScanSweepSkippedPressure uint64 `json:"screen_scan_sweep_skipped_pressure,omitempty"`
 	ScreenScanSweepEvictedPressure uint64 `json:"screen_scan_sweep_evicted_pressure,omitempty"`
 	// ScreenReasonDrops (#3343): per-screen-reason DROP counters, one element per
@@ -389,9 +396,9 @@ type BindingStatus struct {
 	// fabric XSK binding, or the forward-frame build/enqueue failed)
 	// instead of being reinjected to the local kernel FIB (#1946).
 	// Wire-additive: older helpers omit it.
-	FabricRedirectUnsendableDrops   uint64 `json:"fabric_redirect_unsendable_drops,omitempty"`
-	KernelRXDropped                 uint64 `json:"kernel_rx_dropped,omitempty"`
-	KernelRXInvalidDescs            uint64 `json:"kernel_rx_invalid_descs,omitempty"`
+	FabricRedirectUnsendableDrops uint64 `json:"fabric_redirect_unsendable_drops,omitempty"`
+	KernelRXDropped               uint64 `json:"kernel_rx_dropped,omitempty"`
+	KernelRXInvalidDescs          uint64 `json:"kernel_rx_invalid_descs,omitempty"`
 	// KernelRXRingFull is the kernel XDP rx_ring_full counter (#15285),
 	// distinct from KernelRXDropped. Wire-additive: older helpers omit it.
 	KernelRXRingFull                uint64 `json:"kernel_rx_ring_full,omitempty"`

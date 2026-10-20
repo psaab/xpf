@@ -90,6 +90,8 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 				FlowlessForwardPkts: 7, FlowlessForwardBytes: 700,
 				RouteMissPackets: 2, UMEMSliceDropped: 1, UnknownVLANDropped: 2, DstMACDropped: 3,
 				MartianDropped: 1, DNSIllegalReplyDropped: 13, IPv6ExtHeaderDropped: 4, NeighborMissPackets: 1, ExceptionPackets: 3,
+				TransitOutputFilterDrops: 11, TransitSourceMartianDrops: 12, TransitIPSecFenceDrops: 13,
+				TransitL2GroupDrops: 14, ForwardBuildFailures: 15, NoEgressBindingDrops: 16,
 				InvalidFabricStampDrops: 5, UnstampedFabricIngressDrops: 6, AmbiguousFabricZoneDrops: 7,
 				FlowCacheHits: 40, FlowCacheMisses: 10, FlowCacheEvictions: 1,
 				SessionHits: 50, SessionMisses: 12, SessionCreates: 8, SessionExpires: 4,

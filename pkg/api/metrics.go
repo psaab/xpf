@@ -820,11 +820,18 @@ type xpfCollector struct {
 	userspaceUnknownVLANDropped *prometheus.Desc
 	userspaceDstMACDropped      *prometheus.Desc
 	// #15243 (A60-01): PMech hold refusals for decapsulated packets.
-	userspacePMechDecapHoldRefused    *prometheus.Desc
-	userspaceFlowCacheActiveFlows     *prometheus.Desc
-	userspaceFlowCacheCapacity        *prometheus.Desc
-	userspaceNptv6TranslationsTotal   *prometheus.Desc
-	userspaceNptv6UntranslatableDrops *prometheus.Desc
+	userspacePMechDecapHoldRefused *prometheus.Desc
+	// #15941: terminal transit drops, summed across bindings.
+	userspaceTransitOutputFilterDrops  *prometheus.Desc
+	userspaceTransitSourceMartianDrops *prometheus.Desc
+	userspaceTransitIPSecFenceDrops    *prometheus.Desc
+	userspaceTransitL2GroupDrops       *prometheus.Desc
+	userspaceForwardBuildFailures      *prometheus.Desc
+	userspaceNoEgressBindingDrops      *prometheus.Desc
+	userspaceFlowCacheActiveFlows      *prometheus.Desc
+	userspaceFlowCacheCapacity         *prometheus.Desc
+	userspaceNptv6TranslationsTotal    *prometheus.Desc
+	userspaceNptv6UntranslatableDrops  *prometheus.Desc
 	// #10069: dual slow-path outlet health/counters, labelled by outlet
 	// (`trusted` or `delegated`) so the delegated TUN does not disappear from
 	// Prometheus when its MTU or reinject counters diverge.
@@ -1571,6 +1578,12 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceUnknownVLANDropped
 	ch <- c.userspaceDstMACDropped
 	ch <- c.userspacePMechDecapHoldRefused
+	ch <- c.userspaceTransitOutputFilterDrops
+	ch <- c.userspaceTransitSourceMartianDrops
+	ch <- c.userspaceTransitIPSecFenceDrops
+	ch <- c.userspaceTransitL2GroupDrops
+	ch <- c.userspaceForwardBuildFailures
+	ch <- c.userspaceNoEgressBindingDrops
 	ch <- c.userspaceFlowCacheActiveFlows
 	ch <- c.userspaceFlowCacheCapacity
 	ch <- c.userspaceNptv6TranslationsTotal

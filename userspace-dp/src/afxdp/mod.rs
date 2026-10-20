@@ -4,9 +4,8 @@ use super::{
 };
 use crate::nat::{
     DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule, StaticNatTable,
-    parse_source_nat_rules_with_previous,
-    release_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker,
-    rollback_source_nat_allocation_for_worker,
+    parse_source_nat_rules_with_previous, release_source_nat_allocation_for_worker,
+    reserve_synced_source_nat_allocation_for_worker, rollback_source_nat_allocation_for_worker,
 };
 // #9902 review: `match_source_nat` is #[cfg(test)]-gated (Untracked
 // allocator) — this import exists only for the test-only
@@ -20,12 +19,13 @@ use crate::policy::{
     parse_policy_state_with_counters,
 };
 use crate::prefix::{PrefixV4, PrefixV6};
-use crate::screen::{InertProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info};
+use crate::screen::{
+    InertProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info,
+};
 use crate::session::{
     ForwardSessionMatch, SessionCounters, SessionDecision, SessionDelta, SessionDeltaKind,
-    SessionInstall, SessionKey, SessionLookup, SessionLookupAux,
-    SessionMetadata, SessionOrigin, SessionTable,
-    SessionUpdate, forward_wire_key, reverse_canonical_key, reverse_session_key,
+    SessionInstall, SessionKey, SessionLookup, SessionLookupAux, SessionMetadata, SessionOrigin,
+    SessionTable, SessionUpdate, forward_wire_key, reverse_canonical_key, reverse_session_key,
 };
 use crate::slowpath::{EnqueueOutcome, SlowPathReinjector, SlowPathStatus, open_tun};
 use crate::xsk_ffi::xdp::XdpDesc;
@@ -91,27 +91,28 @@ mod forwarding_build;
 pub(crate) mod frame;
 #[path = "gre.rs"]
 mod gre;
+mod gre_discriminator;
 mod gre_reassembly;
-mod logical_ingress;
+mod ha;
 pub(crate) mod ipsec_inner;
 pub(crate) mod ipsec_inner_queue;
 mod ipsec_selector_fence;
+mod logical_ingress;
 pub(crate) mod wg_uncovered_forward;
-mod gre_discriminator;
-mod ha;
 // #6785: the control handler needs the synced-import outcome type and its
 // #10512: expose the typed conditional-delete result and mutation replay
 // outcome to the protocol handler and coordinator wrapper.
-pub(crate) use ha::{
-    HelperMutationBegin, HelperMutationOutcome, SyncedDeleteOutcome, SyncedImportOutcome,
-    SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
-};
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
+pub(crate) use ha::{
+    HelperMutationBegin, HelperMutationOutcome, SYNCED_DELETE_REFUSED_PREFIX,
+    SYNCED_IMPORT_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SyncedDeleteOutcome,
+    SyncedImportOutcome,
+};
 // #7919: the per-session counter query's wait handle + reply row, used by the
 // control-socket handler's two-phase dispatch.
-pub(crate) use ha::{SessionCounterQueryWait, WorkerSessionCounters};
-pub(crate) use ha::SessionDomain;
 pub(crate) use ha::HaRefreshOutcome;
+pub(crate) use ha::SessionDomain;
+pub(crate) use ha::{SessionCounterQueryWait, WorkerSessionCounters};
 #[path = "icmp.rs"]
 mod icmp;
 mod icmp_embed;
@@ -144,7 +145,7 @@ pub(crate) use session_glue::forward_export_candidates_for_owner_rgs;
 /// so the coordinator status accessors and their wiring cell can name it
 /// without reaching into a private module.
 pub(crate) use session_glue::{
-    SESSION_DELETE_REPLICA_DROPPED, SESSION_DELETE_REPLICA_DROP_REPAIRED,
+    SESSION_DELETE_REPLICA_DROP_REPAIRED, SESSION_DELETE_REPLICA_DROPPED,
 };
 // #2653: the unbounded "emit all at once" helper is now a test-only fixture
 // (the production paths use the chunked drain-as-you-export in worker::loop_body).
@@ -214,11 +215,6 @@ use self::icmp::{
     FABRIC_INGRESS_FLAG, GRE_DECAP_INGRESS_FLAG, build_local_time_exceeded_request, is_icmp_error,
     packet_ttl_would_expire,
 };
-use self::icmp_ptb::{
-    EgressMtuDecision, build_frag_needed_v4, build_packet_too_big_v6,
-    forwarded_egress_mtu_decision, post_transform_inner_mtu, ptb_reply_suppressed,
-};
-use self::icmp_ratelimit::{GeneratedErrorReason, allow_generated_error_zoned};
 #[cfg(test)]
 use self::icmp::{
     build_local_time_exceeded_v4, build_local_time_exceeded_v6, build_reject_icmp_unreachable,
@@ -227,29 +223,38 @@ use self::icmp::{
 #[cfg(test)]
 use self::icmp_embed::{
     EmbeddedIcmpMatch, try_embedded_icmp_nat_match_from_frame,
-    try_embedded_icmp_nat_match_from_frame_without_ingress_zone,
     try_embedded_icmp_nat_match_from_frame_with_ingress_zone,
+    try_embedded_icmp_nat_match_from_frame_without_ingress_zone,
     try_embedded_icmp_session_match_from_frame,
 };
 use self::icmp_embed::{
-    EmbeddedMatchOutcome, Nat64IcmpErrorMatch, build_nat_reversed_icmp_error_v4,
+    EmbeddedMatchOutcome,
+    Nat64IcmpErrorMatch,
+    build_nat_reversed_icmp_error_v4,
     build_nat_reversed_icmp_error_v6,
-    build_snat_outbound_icmp_error_v4, build_snat_outbound_icmp_error_v6,
-    finalize_embedded_icmp_resolution, finalize_embedded_icmp_resolution_parts,
+    build_snat_outbound_icmp_error_v4,
+    build_snat_outbound_icmp_error_v6,
+    finalize_embedded_icmp_resolution,
+    finalize_embedded_icmp_resolution_parts,
     // #8271: production names the frame slice explicitly; it also supplies the
     try_embedded_icmp_nat_match_from_frame_with_owner_indexes,
     try_nat64_icmp_error_match_from_frame,
 };
+use self::icmp_ptb::{
+    EgressMtuDecision, build_frag_needed_v4, build_packet_too_big_v6,
+    forwarded_egress_mtu_decision, post_transform_inner_mtu, ptb_reply_suppressed,
+};
+use self::icmp_ratelimit::{GeneratedErrorReason, allow_generated_error_zoned};
 use self::mirror::*;
 use self::mpsc_inbox::MpscInbox;
-use self::neighbor::*;
-pub use self::neighbor::{neighbor_state_usable_str, parse_mac_str};
 pub(crate) use self::neighbor::monotonic_nanos;
+use self::neighbor::*;
 #[cfg(test)]
 pub(crate) use self::neighbor::{
     kernel_arp_probe_test_capture_count, start_kernel_arp_probe_test_capture,
     stop_kernel_arp_probe_test_capture,
 };
+pub use self::neighbor::{neighbor_state_usable_str, parse_mac_str};
 pub(crate) use self::rst::remove_kernel_rst_suppression;
 use self::rst::*;
 use self::session_glue::*;
@@ -545,7 +550,9 @@ const HA_WATCHDOG_STALE_AFTER_SECS: u64 = 10;
 const FABRIC_ZONE_MAC_MAGIC: u8 = 0xfe;
 /// #11337: V2 fabric source-MAC marker followed by a stable 24-bit NAT-scope id.
 const FABRIC_NAT_SCOPE_MAC_PREFIX: [u8; 3] = [0x02, 0xbf, 0x73];
-use crate::ip_proto::{PROTO_AH, PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
+use crate::ip_proto::{
+    PROTO_AH, PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP,
+};
 // #2151: TCP flag bits now live in the shared crate::tcp_flags SSOT.
 // Re-exported here under the historical TCP_FLAG_* spellings (and made
 // visible to `super::*` consumers: event_emit, tx/tcp_segmentation,
@@ -647,7 +654,7 @@ pub(crate) use coordinator::neigh_monitor_test_serial;
 /// #10512 T2: test-only worker bundle for server-level policy-list
 /// cells (lets server tests drive a populated coordinator).
 #[cfg(test)]
-pub(crate) use coordinator::{register_list_test_worker, ListTestWorker};
+pub(crate) use coordinator::{ListTestWorker, register_list_test_worker};
 // #8121 part 2: idle persistent-NAT lease sync records.
 pub(crate) use coordinator::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
 // afxdp/tests.rs (14k-LOC catch-all) was split into cohesive per-subsystem
@@ -655,29 +662,29 @@ pub(crate) use coordinator::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLe
 // code-motion; each file carries the union use-block and reaches production
 // items through `super::*`, identical to the pre-split single module.
 #[cfg(test)]
-#[path = "tests_support.rs"]
-mod tests_support;
-#[cfg(test)]
-#[path = "tests_gre_session_sync_7188.rs"]
-mod tests_gre_session_sync_7188;
+#[path = "tests_9782.rs"]
+mod tests_9782;
 #[cfg(test)]
 #[path = "tests_bind_forward.rs"]
 mod tests_bind_forward;
 #[cfg(test)]
-#[path = "tests_9782.rs"]
-mod tests_9782;
-#[cfg(test)]
-#[path = "tests_icmp_te.rs"]
-mod tests_icmp_te;
+#[path = "tests_gre_session_sync_7188.rs"]
+mod tests_gre_session_sync_7188;
 #[cfg(test)]
 #[path = "tests_icmp_reject_reversal.rs"]
 mod tests_icmp_reject_reversal;
+#[cfg(test)]
+#[path = "tests_icmp_te.rs"]
+mod tests_icmp_te;
 #[cfg(test)]
 #[path = "tests_icmp_zero_hop_15707.rs"]
 mod tests_icmp_zero_hop_15707;
 #[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;
+#[cfg(test)]
+#[path = "tests_support.rs"]
+mod tests_support;
 // #8486: the peer-supplied owner_rg_id filing bound.
 #[cfg(test)]
 #[path = "owner_rg_bound_8486_tests.rs"]
@@ -719,11 +726,40 @@ mod tests_host_bound_revalidation_9563;
 // #7160 (#2387): the routing-domain stamp on the REAL poll path — the WIRING,
 // which no unit-level cell can reach.
 #[cfg(test)]
-#[path = "tests_routing_domain_7160.rs"]
-mod tests_routing_domain_7160;
+#[path = "tests_directed_broadcast_14654.rs"]
+mod tests_directed_broadcast_14654;
 #[cfg(test)]
 #[path = "tests_fabric_zone_stamp.rs"]
 mod tests_fabric_zone_stamp;
+#[cfg(test)]
+#[path = "tests_gre_local_delivery.rs"]
+mod tests_gre_local_delivery;
+#[cfg(test)]
+mod tests_gre_outer_bound_6748;
+#[cfg(test)]
+#[path = "tests_iface_nat64_14367.rs"]
+mod tests_iface_nat64_14367;
+#[cfg(test)]
+#[path = "tests_martian_destination_11413.rs"]
+mod tests_martian_destination_11413;
+#[cfg(test)]
+#[path = "tests_martian_source_10689.rs"]
+mod tests_martian_source_10689;
+#[cfg(test)]
+#[path = "tests_nat64_local_10685.rs"]
+mod tests_nat64_local_10685;
+#[cfg(test)]
+#[path = "tests_nat64_overlap_8115.rs"]
+mod tests_nat64_overlap_8115;
+#[cfg(test)]
+#[path = "tests_nat64_protocol_ineligible_8670.rs"]
+mod tests_nat64_protocol_ineligible_8670;
+#[cfg(test)]
+#[path = "tests_nat64_tunnel.rs"]
+mod tests_nat64_tunnel;
+#[cfg(test)]
+#[path = "tests_routing_domain_7160.rs"]
+mod tests_routing_domain_7160;
 #[cfg(test)]
 #[path = "tests_session_ingress_identity.rs"]
 mod tests_session_ingress_identity;
@@ -731,17 +767,8 @@ mod tests_session_ingress_identity;
 #[path = "tests_slow_path_disposition.rs"]
 mod tests_slow_path_disposition;
 #[cfg(test)]
-#[path = "tests_txn_flow_cache.rs"]
-mod tests_txn_flow_cache;
-#[cfg(test)]
-#[path = "tests_nat64_tunnel.rs"]
-mod tests_nat64_tunnel;
-#[cfg(test)]
-#[path = "tests_nat64_overlap_8115.rs"]
-mod tests_nat64_overlap_8115;
-#[cfg(test)]
-#[path = "tests_iface_nat64_14367.rs"]
-mod tests_iface_nat64_14367;
+#[path = "tests_static_pool_overlap_14368.rs"]
+mod tests_static_pool_overlap_14368;
 #[cfg(test)]
 #[path = "tests_synced_iface_15146.rs"]
 mod tests_synced_iface_15146;
@@ -749,40 +776,26 @@ mod tests_synced_iface_15146;
 #[path = "tests_synced_static_nptv6_15191.rs"]
 mod tests_synced_static_nptv6_15191;
 #[cfg(test)]
-#[path = "tests_static_pool_overlap_14368.rs"]
-mod tests_static_pool_overlap_14368;
-#[cfg(test)]
-#[path = "tests_nat64_protocol_ineligible_8670.rs"]
-mod tests_nat64_protocol_ineligible_8670;
-#[cfg(test)]
-#[path = "tests_nat64_local_10685.rs"]
-mod tests_nat64_local_10685;
-#[cfg(test)]
-#[path = "tests_martian_source_10689.rs"]
-mod tests_martian_source_10689;
-#[cfg(test)]
-#[path = "tests_martian_destination_11413.rs"]
-mod tests_martian_destination_11413;
-#[cfg(test)]
-#[path = "tests_directed_broadcast_14654.rs"]
-mod tests_directed_broadcast_14654;
-#[cfg(test)]
-#[path = "tests_gre_local_delivery.rs"]
-mod tests_gre_local_delivery;
-#[cfg(test)]
-mod tests_gre_outer_bound_6748;
+#[path = "tests_txn_flow_cache.rs"]
+mod tests_txn_flow_cache;
 // #7541: the same bound with an IPv6 OUTER. Separate module rather than added to
 // the file above so the v4 cells' file-level docstring stays true about itself.
 #[cfg(test)]
-mod tests_gre_outer_bound_v6_7541;
-#[cfg(test)]
 mod pkt_len_fixture_drift_6883_tests;
 #[cfg(test)]
-#[path = "tests_gre_version_6842.rs"]
-mod tests_gre_version_6842;
+#[path = "tests_9950.rs"]
+mod tests_9950;
 #[cfg(test)]
-#[path = "tests_gre_reserved0_13662.rs"]
-mod tests_gre_reserved0_13662;
+#[path = "tests_bindless_fence_ordering_12904.rs"]
+mod tests_bindless_fence_ordering_12904;
+#[cfg(test)]
+#[path = "tests_decap_dnat_table.rs"]
+mod tests_decap_dnat_table;
+#[cfg(test)]
+#[path = "tests_fragment.rs"]
+mod tests_fragment;
+#[cfg(test)]
+mod tests_gre_outer_bound_v6_7541;
 #[cfg(test)]
 #[path = "tests_gre_outer_frag_14645.rs"]
 mod tests_gre_outer_frag_14645;
@@ -790,38 +803,32 @@ mod tests_gre_outer_frag_14645;
 #[path = "tests_gre_outer_unverified_14652.rs"]
 mod tests_gre_outer_unverified_14652;
 #[cfg(test)]
+#[path = "tests_gre_reserved0_13662.rs"]
+mod tests_gre_reserved0_13662;
+#[cfg(test)]
 #[path = "tests_gre_transit_frag_15095.rs"]
 mod tests_gre_transit_frag_15095;
 #[cfg(test)]
-#[path = "tests_wg_outer_frag_15102.rs"]
-mod tests_wg_outer_frag_15102;
-#[cfg(test)]
-#[path = "tests_decap_dnat_table.rs"]
-mod tests_decap_dnat_table;
-#[cfg(test)]
-#[path = "tests_policy_inbound_nat.rs"]
-mod tests_policy_inbound_nat;
-#[cfg(test)]
-#[path = "tests_fragment.rs"]
-mod tests_fragment;
-#[cfg(test)]
-#[path = "tests_session_delta_json.rs"]
-mod tests_session_delta_json;
-#[cfg(test)]
-#[path = "tests_9950.rs"]
-mod tests_9950;
+#[path = "tests_gre_version_6842.rs"]
+mod tests_gre_version_6842;
 #[cfg(test)]
 #[path = "tests_ipsec_selector_fence_10683.rs"]
 mod tests_ipsec_selector_fence_10683;
 #[cfg(test)]
+#[path = "tests_missing_neighbor_probe_gate_14661.rs"]
+mod tests_missing_neighbor_probe_gate_14661;
+#[cfg(test)]
+#[path = "tests_policy_inbound_nat.rs"]
+mod tests_policy_inbound_nat;
+#[cfg(test)]
+#[path = "tests_session_delta_json.rs"]
+mod tests_session_delta_json;
+#[cfg(test)]
 #[path = "tests_session_hit_guards_13638.rs"]
 mod tests_session_hit_guards_13638;
 #[cfg(test)]
-#[path = "tests_bindless_fence_ordering_12904.rs"]
-mod tests_bindless_fence_ordering_12904;
-#[cfg(test)]
-#[path = "tests_missing_neighbor_probe_gate_14661.rs"]
-mod tests_missing_neighbor_probe_gate_14661;
+#[path = "tests_wg_outer_frag_15102.rs"]
+mod tests_wg_outer_frag_15102;
 #[path = "worker/mod.rs"]
 mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /
@@ -864,13 +871,13 @@ pub(crate) use self::coordinator::WarmItem;
 pub(in crate::afxdp) use self::coordinator::{
     WARM_GC_INTERVAL_NS, WARM_GC_MAX_AGE_NS, WARM_PER_KEY_RATE_LIMIT_NS, WARM_QUEUE_DEPTH,
 };
+#[cfg(test)]
+pub(crate) use self::worker::fabric_queue_hash_seeded;
 pub(crate) use self::worker::{
-    BindingLiveSnapshot, BindingWorker, SyncedSessionEntry, WorkerControlChannels, WorkerCoSState,
+    BindingLiveSnapshot, BindingWorker, SyncedSessionEntry, WorkerCoSState, WorkerControlChannels,
     WorkerLaunchPlan, WorkerPublishedTelemetry, WorkerSharedDataplane, XskBindMode,
     fabric_queue_hash, push_recent_exception, push_recent_session_delta, worker_loop,
 };
-#[cfg(test)]
-pub(crate) use self::worker::fabric_queue_hash_seeded;
 
 // Lifted from `poll_binding` so the per-descriptor batch function
 // (`poll_binding_process_descriptor`) can take `&mut BatchCounters`.
@@ -1155,6 +1162,15 @@ pub(in crate::afxdp) struct BatchCounters {
     // Batched here like the sibling named drops; pending decapsulated
     // packets are bounded (at most 4 per token, 512 per binding).
     pmech_decap_hold_refused: u64,
+    // #15941: terminal transit drops that previously wrote only dbg.* or
+    // nothing. Each is batched here and flushed to the same-named
+    // BindingLiveState atomic, then exported through status/Prometheus.
+    transit_output_filter_drops: u64,
+    transit_source_martian_drops: u64,
+    transit_ipsec_fence_drops: u64,
+    transit_l2_group_drops: u64,
+    forward_build_failures: u64,
+    no_egress_binding_drops: u64,
     neighbor_miss_packets: u64,
     discard_route_packets: u64,
     next_table_packets: u64,
@@ -1200,6 +1216,50 @@ impl BatchCounters {
     pub(in crate::afxdp) fn record_martian_drop(&mut self) {
         self.touched = true;
         self.martian_dropped += 1;
+    }
+    /// #15941: record a transit output-filter/policer drop (cos.drop at the
+    /// forward-request build or deferred neighbor retry).
+    #[inline]
+    pub(in crate::afxdp) fn record_transit_output_filter_drop(&mut self) {
+        self.touched = true;
+        self.transit_output_filter_drops += 1;
+    }
+
+    /// #15941: record a #11074 transit source-martian refusal.
+    #[inline]
+    pub(in crate::afxdp) fn record_transit_source_martian_drop(&mut self) {
+        self.touched = true;
+        self.transit_source_martian_drops += 1;
+    }
+
+    /// #15941: record a #10683 bindless IPsec selector-fence refusal.
+    #[inline]
+    pub(in crate::afxdp) fn record_transit_ipsec_fence_drop(&mut self) {
+        self.touched = true;
+        self.transit_ipsec_fence_drops += 1;
+    }
+
+    /// #15941: record a #10691 L2-group unicast-IP transit refusal.
+    #[inline]
+    pub(in crate::afxdp) fn record_transit_l2_group_drop(&mut self) {
+        self.touched = true;
+        self.transit_l2_group_drops += 1;
+    }
+
+    /// #15941: record a forward build failure (release-visible mirror of
+    /// dbg.build_fail).
+    #[inline]
+    pub(in crate::afxdp) fn record_forward_build_failure(&mut self) {
+        self.touched = true;
+        self.forward_build_failures += 1;
+    }
+
+    /// #15941: record a missing-egress-binding drop (release-visible mirror
+    /// of dbg.no_egress_binding).
+    #[inline]
+    pub(in crate::afxdp) fn record_no_egress_binding_drop(&mut self) {
+        self.touched = true;
+        self.no_egress_binding_drops += 1;
     }
 
     /// #14668: record one Junos-default illegal DNS-reply drop (first UDP
@@ -1609,7 +1669,8 @@ impl BatchCounters {
         // #3343: flush each non-zero per-reason screen-drop slot.
         for i in 0..crate::screen::SCREEN_REASON_DROP_COUNT {
             if self.screen_reason_drops[i] != 0 {
-                live.screen_reason_drops[i].fetch_add(self.screen_reason_drops[i], Ordering::Relaxed);
+                live.screen_reason_drops[i]
+                    .fetch_add(self.screen_reason_drops[i], Ordering::Relaxed);
                 self.screen_reason_drops[i] = 0;
             }
         }
@@ -1714,8 +1775,10 @@ impl BatchCounters {
             self.ptb_output_filter_drops = 0;
         }
         if self.generated_reply_classify_parse_errors != 0 {
-            live.generated_reply_classify_parse_errors
-                .fetch_add(self.generated_reply_classify_parse_errors, Ordering::Relaxed);
+            live.generated_reply_classify_parse_errors.fetch_add(
+                self.generated_reply_classify_parse_errors,
+                Ordering::Relaxed,
+            );
             self.generated_reply_classify_parse_errors = 0;
         }
         if self.policy_denied_packets != 0 {
@@ -1776,6 +1839,36 @@ impl BatchCounters {
                 .fetch_add(self.pmech_decap_hold_refused, Ordering::Relaxed);
             self.pmech_decap_hold_refused = 0;
         }
+        if self.transit_output_filter_drops != 0 {
+            live.transit_output_filter_drops
+                .fetch_add(self.transit_output_filter_drops, Ordering::Relaxed);
+            self.transit_output_filter_drops = 0;
+        }
+        if self.transit_source_martian_drops != 0 {
+            live.transit_source_martian_drops
+                .fetch_add(self.transit_source_martian_drops, Ordering::Relaxed);
+            self.transit_source_martian_drops = 0;
+        }
+        if self.transit_ipsec_fence_drops != 0 {
+            live.transit_ipsec_fence_drops
+                .fetch_add(self.transit_ipsec_fence_drops, Ordering::Relaxed);
+            self.transit_ipsec_fence_drops = 0;
+        }
+        if self.transit_l2_group_drops != 0 {
+            live.transit_l2_group_drops
+                .fetch_add(self.transit_l2_group_drops, Ordering::Relaxed);
+            self.transit_l2_group_drops = 0;
+        }
+        if self.forward_build_failures != 0 {
+            live.forward_build_failures
+                .fetch_add(self.forward_build_failures, Ordering::Relaxed);
+            self.forward_build_failures = 0;
+        }
+        if self.no_egress_binding_drops != 0 {
+            live.no_egress_binding_drops
+                .fetch_add(self.no_egress_binding_drops, Ordering::Relaxed);
+            self.no_egress_binding_drops = 0;
+        }
         if self.neighbor_miss_packets != 0 {
             live.neighbor_miss_packets
                 .fetch_add(self.neighbor_miss_packets, Ordering::Relaxed);
@@ -1792,10 +1885,8 @@ impl BatchCounters {
             self.next_table_packets = 0;
         }
         if self.table_unavailable_packets != 0 {
-            live.table_unavailable_packets.fetch_add(
-                self.table_unavailable_packets,
-                Ordering::Relaxed,
-            );
+            live.table_unavailable_packets
+                .fetch_add(self.table_unavailable_packets, Ordering::Relaxed);
             self.table_unavailable_packets = 0;
         }
         if self.invalid_fabric_stamp_drops != 0 {

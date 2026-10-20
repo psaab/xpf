@@ -74,8 +74,7 @@ fn final_live_tx_dispatch_rechecks_transit_source_martian_11074() {
     let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
         Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
-    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
-        BTreeMap::new();
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = BTreeMap::new();
     let mut dbg = DebugPollCounters::default();
     let mut counters = BatchCounters::default();
     let (left, rest) = bindings.split_at_mut(0);
@@ -109,6 +108,20 @@ fn final_live_tx_dispatch_rechecks_transit_source_martian_11074() {
             && bindings[1].tx_pipeline.pending_tx_local.is_empty(),
         "a live transit request whose source is now martian must not reach TX"
     );
+    // #15941: named counter + exception-ring attribution (dbg.policy_deny
+    // alone was invisible in status).
+    assert_eq!(counters.transit_source_martian_drops, 1);
+    assert_eq!(
+        counters.martian_dropped, 0,
+        "source split must not pollute destination total"
+    );
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    assert_eq!(reasons, vec!["transit_source_martian"]);
     assert_eq!(
         ingress_recycled_count(&bindings[0]),
         1,

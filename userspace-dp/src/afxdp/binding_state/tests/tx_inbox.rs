@@ -200,10 +200,7 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // #14668 adds one unconditional DNS illegal-reply counter before them;
 // offsets are now 2480/2609, size unchanged.
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
-    assert_eq!(
-        std::mem::size_of::<BindingLiveState>(),
-        2624,
-    );
+    assert_eq!(std::mem::size_of::<BindingLiveState>(), 2688,);
     assert_eq!(
         std::mem::align_of::<BindingLiveState>(),
         64,
@@ -211,12 +208,12 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-2480,
+        2544,
         "#14668 must keep pinned admission-counter layout consistent"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2609,
+        2673,
         "#14668 must keep pinned final-field offset consistent"
     );
 }

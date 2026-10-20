@@ -522,6 +522,20 @@ pub(crate) struct BindingStatus {
     /// at the PMech hold site (recycled, not held).
     #[serde(rename = "pmech_decap_hold_refused", default)]
     pub pmech_decap_hold_refused: u64,
+    /// #15941: terminal transit drops (see BindingLiveState). `default`
+    /// keeps cross-version wire safety.
+    #[serde(rename = "transit_output_filter_drops", default)]
+    pub transit_output_filter_drops: u64,
+    #[serde(rename = "transit_source_martian_drops", default)]
+    pub transit_source_martian_drops: u64,
+    #[serde(rename = "transit_ipsec_fence_drops", default)]
+    pub transit_ipsec_fence_drops: u64,
+    #[serde(rename = "transit_l2_group_drops", default)]
+    pub transit_l2_group_drops: u64,
+    #[serde(rename = "forward_build_failures", default)]
+    pub forward_build_failures: u64,
+    #[serde(rename = "no_egress_binding_drops", default)]
+    pub no_egress_binding_drops: u64,
     #[serde(rename = "neighbor_miss_packets", default)]
     pub neighbor_miss_packets: u64,
     #[serde(rename = "discard_route_packets", default)]

@@ -39,6 +39,9 @@ pub(in crate::afxdp) fn handle_forward_build_failure(
 ) {
     let meta = meta.into();
     dbg.build_fail += 1;
+    // #15941: release-visible mirror of dbg.build_fail (direct atomic —
+    // this handler already receives the live state).
+    live.forward_build_failures.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "debug-log")]
     if dbg.build_fail <= 3 {
         debug_log!(
@@ -185,9 +188,7 @@ pub(in crate::afxdp) fn reinject_host_authorized(
 /// retry queue, while GRE-decapped packets keep the existing probe/resolver and
 /// retransmission recovery. Also refuse stamped NoRoute and build-failure
 /// ForwardCandidate fallbacks, which would otherwise be looked up in MAIN.
-pub(in crate::afxdp) fn slow_path_route_identity_requires_drop(
-    decision: SessionDecision,
-) -> bool {
+pub(in crate::afxdp) fn slow_path_route_identity_requires_drop(decision: SessionDecision) -> bool {
     decision.resolution.tunnel_endpoint_id == 0
         && (decision.resolution.disposition == ForwardingDisposition::MissingNeighbor
             || (decision.install_table_domain != 0
@@ -196,7 +197,6 @@ pub(in crate::afxdp) fn slow_path_route_identity_requires_drop(
                     ForwardingDisposition::ForwardCandidate | ForwardingDisposition::NoRoute
                 )))
 }
-
 
 #[cold]
 #[inline(never)]

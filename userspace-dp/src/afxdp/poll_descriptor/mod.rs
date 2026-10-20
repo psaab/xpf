@@ -98,7 +98,10 @@ use host_inbound_policy::{
 use nat64_icmp_error::try_translate_nat64_icmp_error;
 use noroute_adjudication::{noroute_policy_adjudication, noroute_policy_protocol};
 use rx_telemetry::record_rx_descriptor_telemetry;
-use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow, strict_syn_check_drops_new_flow_tunnel};
+use session_admission::{
+    new_flow_session_limit_drop, strict_syn_check_drops_new_flow,
+    strict_syn_check_drops_new_flow_tunnel,
+};
 use session_hit_authority::{
     ForeignHitVerdict, HitAuthority, HitPolicyDeny, OwnerHitIcmpVerdict, foreign_hit_verdict,
     owner_hit_icmp_verdict, session_hit_authority,
@@ -564,8 +567,14 @@ pub(super) fn acquire_persistent_inbound_hold(
     decision_nat: crate::nat::NatDecision,
     now_ns: u64,
 ) -> bool {
-    let Some(key) = hold else { return false; };
-    if decision_nat.rewrite_src.is_some() || decision_nat.rewrite_dst.is_none() || decision_nat.nat64 || decision_nat.nptv6 {
+    let Some(key) = hold else {
+        return false;
+    };
+    if decision_nat.rewrite_src.is_some()
+        || decision_nat.rewrite_dst.is_none()
+        || decision_nat.nat64
+        || decision_nat.nptv6
+    {
         return false;
     }
     for rule in &forwarding.source_nat_rules {
@@ -582,7 +591,9 @@ pub(super) fn rollback_persistent_inbound_hold(
     hold: Option<crate::nat::PersistentSourceKey>,
     now_ns: u64,
 ) {
-    let Some(key) = hold else { return; };
+    let Some(key) = hold else {
+        return;
+    };
     for rule in &forwarding.source_nat_rules {
         if rule.pool_mode {
             rule.pool_allocator.rollback_persistent_inbound(key, now_ns);
@@ -2075,14 +2086,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // note seq for non-closing. Invalid blind RST/FIN is dropped
                 // before resolve mutates close state.
                 if meta.protocol == crate::ip_proto::PROTO_TCP {
-                    if let (Some(fl), Some((seq, ack, win))) = (flow.as_ref(), crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame)) {
-                        if crate::tcp_flags::is_closing(meta.tcp_flags) && !worker_ctx.forwarding.tcp_no_sequence_check {
-                            if sessions.tcp_closing_seq_verdict(&fl.forward_key, seq) == crate::session::SeqVerdict::Invalid {
+                    if let (Some(fl), Some((seq, ack, win))) = (
+                        flow.as_ref(),
+                        crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame),
+                    ) {
+                        if crate::tcp_flags::is_closing(meta.tcp_flags)
+                            && !worker_ctx.forwarding.tcp_no_sequence_check
+                        {
+                            if sessions.tcp_closing_seq_verdict(&fl.forward_key, seq)
+                                == crate::session::SeqVerdict::Invalid
+                            {
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
                         }
-                        sessions.note_tcp_seq(&fl.forward_key, seq, ack, win, tcp_payload_len(packet_frame, meta), meta.tcp_flags, worker_ctx.forwarding.tcp_maximum_window);
+                        sessions.note_tcp_seq(
+                            &fl.forward_key,
+                            seq,
+                            ack,
+                            win,
+                            tcp_payload_len(packet_frame, meta),
+                            meta.tcp_flags,
+                            worker_ctx.forwarding.tcp_maximum_window,
+                        );
                     }
                 }
                 // ── End flow cache fast path ─────────────────────────
@@ -2307,7 +2333,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         {
                             binding.scratch.scratch_recycle.push(desc.addr);
                             telemetry.dbg.policy_deny += 1;
-                            telemetry.counters.touched = true;
+                            telemetry.counters.record_transit_ipsec_fence_drop();
                             continue;
                         }
                         if transit_source_class_drop(
@@ -2319,7 +2345,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             fabric_arrival_zone,
                         ) {
                             binding.scratch.scratch_recycle.push(desc.addr);
-                            telemetry.counters.touched = true;
+                            telemetry.counters.record_transit_source_martian_drop();
                             continue;
                         }
                         if matches!(
@@ -2331,7 +2357,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             && owned_packet_frame.is_none()
                         {
                             binding.scratch.scratch_recycle.push(desc.addr);
-                            telemetry.counters.touched = true;
+                            telemetry.counters.record_transit_l2_group_drop();
                             continue;
                         }
                         if is_injected
@@ -3802,7 +3828,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 )
                         };
                         let mut persistent_dnat = None;
-                        let mut persistent_lease_hold: Option<crate::nat::PersistentSourceKey> = None;
+                        let mut persistent_lease_hold: Option<crate::nat::PersistentSourceKey> =
+                            None;
                         let mut persistent_dnat_denied = false;
                         if !ndp_hop255 && static_dnat_decision.is_none() {
                             for rule in &worker_ctx.forwarding.source_nat_rules {
@@ -4006,96 +4033,97 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // fail-OPEN that could leak it upstream on a default
                         // IPv6 route. Now MatchUnavailable fails CLOSED (drop +
                         // counter); only NoPrefixMatch continues IPv6 routing.
-                        let nat64_match = if !ndp_hop255 && pre_routing_dnat.is_none() && nptv6_inbound.is_none() {
-                            if let IpAddr::V6(dst_v6) = resolution_target {
-                                // #5623: gate on SOURCE eligibility BEFORE any
-                                // NAT64 allocation/translation. RFC 6146 §3.5
-                                // mandates dropping an incoming IPv6 packet whose
-                                // source itself lies within a configured Pref64 —
-                                // a looping/synthesized "already-translated"
-                                // source (the §5 hairpin construction), including
-                                // the lower/upper Pref64 boundary and any embedded
-                                // non-global v4. `classify_ipv6_packet` folds that
-                                // check ahead of the unchanged destination match,
-                                // so an eligible global-unicast source translates
-                                // exactly as before. An IPv6 destination always
-                                // pairs with an IPv6 source at L3; the V4 arm is
-                                // unreachable for a real packet and degrades to the
-                                // dest-only classify rather than asserting.
-                                let nat64_result = match flow.forward_key.src_ip {
-                                    // #15678: enforce the rule-set's ingress
-                                    // scope (from-zone / routing-instance /
-                                    // source-address) using the pre-routing
-                                    // scope identity resolved above.
-                                    IpAddr::V6(src_v6) => worker_ctx
-                                        .forwarding
-                                        .nat64
-                                        .classify_ipv6_packet_scoped(
-                                            src_v6,
+                        let nat64_match =
+                            if !ndp_hop255 && pre_routing_dnat.is_none() && nptv6_inbound.is_none()
+                            {
+                                if let IpAddr::V6(dst_v6) = resolution_target {
+                                    // #5623: gate on SOURCE eligibility BEFORE any
+                                    // NAT64 allocation/translation. RFC 6146 §3.5
+                                    // mandates dropping an incoming IPv6 packet whose
+                                    // source itself lies within a configured Pref64 —
+                                    // a looping/synthesized "already-translated"
+                                    // source (the §5 hairpin construction), including
+                                    // the lower/upper Pref64 boundary and any embedded
+                                    // non-global v4. `classify_ipv6_packet` folds that
+                                    // check ahead of the unchanged destination match,
+                                    // so an eligible global-unicast source translates
+                                    // exactly as before. An IPv6 destination always
+                                    // pairs with an IPv6 source at L3; the V4 arm is
+                                    // unreachable for a real packet and degrades to the
+                                    // dest-only classify rather than asserting.
+                                    let nat64_result = match flow.forward_key.src_ip {
+                                        // #15678: enforce the rule-set's ingress
+                                        // scope (from-zone / routing-instance /
+                                        // source-address) using the pre-routing
+                                        // scope identity resolved above.
+                                        IpAddr::V6(src_v6) => {
+                                            worker_ctx.forwarding.nat64.classify_ipv6_packet_scoped(
+                                                src_v6,
+                                                dst_v6,
+                                                ingress_zone_name,
+                                                ingress_ri_dnat,
+                                            )
+                                        }
+                                        IpAddr::V4(_) => {
+                                            worker_ctx.forwarding.nat64.classify_ipv6_dest(dst_v6)
+                                        }
+                                    };
+                                    match nat64_result {
+                                        crate::nat64::Nat64Match::NoPrefixMatch => None,
+                                        // #4381: the source `(snat_v4, port)` is no
+                                        // longer allocated here — it is allocated
+                                        // per-flow at the Permit branch below so a
+                                        // denied flow never consumes a pool port.
+                                        crate::nat64::Nat64Match::MatchReady {
+                                            prefix_idx,
+                                            dst_v4,
                                             dst_v6,
-                                            ingress_zone_name,
-                                            ingress_ri_dnat,
-                                        ),
-                                    IpAddr::V4(_) => {
-                                        worker_ctx.forwarding.nat64.classify_ipv6_dest(dst_v6)
+                                        } => Some((prefix_idx, dst_v4, dst_v6)),
+                                        crate::nat64::Nat64Match::IneligibleSource => {
+                                            // #5623: RFC 6146 §3.5 source/hairpin drop.
+                                            // The source is inside a configured Pref64
+                                            // (looping/synthesized). Fail closed with a
+                                            // distinct counter BEFORE route lookup,
+                                            // policy, or `allocate_source` — no session,
+                                            // BIB, or allocation state is minted.
+                                            telemetry.counters.record_nat64_ineligible_source();
+                                            binding.scratch.scratch_recycle.push(desc.addr);
+                                            continue;
+                                        }
+                                        crate::nat64::Nat64Match::IneligibleDestination => {
+                                            // #6475: RFC 6052 §3.1 non-global
+                                            // embedded-destination drop. The extracted
+                                            // v4 destination is 0.0.0.0/8, 127.0.0.0/8,
+                                            // 169.254.0.0/16, 224.0.0.0/4, or
+                                            // 240.0.0.0/4 — e.g. `64:ff9b::127.0.0.1`,
+                                            // which would otherwise resolve
+                                            // LocalDelivery to the localhost-only
+                                            // control plane (gRPC 50051 / REST 8080)
+                                            // once lo0 lands in `state.local_v4`.
+                                            // Fail closed with a distinct counter
+                                            // BEFORE route lookup, policy, or
+                                            // `allocate_source` — no session, BIB, or
+                                            // allocation state is minted.
+                                            telemetry.counters.record_nat64_ineligible_dest();
+                                            binding.scratch.scratch_recycle.push(desc.addr);
+                                            continue;
+                                        }
+                                        crate::nat64::Nat64Match::MatchUnavailable => {
+                                            // Fail closed: a NAT64 prefix matched
+                                            // but the source pool is empty/exhausted.
+                                            // Drop rather than route the synthetic
+                                            // IPv6 destination as ordinary IPv6.
+                                            telemetry.counters.nat64_no_source_pool += 1;
+                                            binding.scratch.scratch_recycle.push(desc.addr);
+                                            continue;
+                                        }
                                     }
-                                };
-                                match nat64_result {
-                                    crate::nat64::Nat64Match::NoPrefixMatch => None,
-                                    // #4381: the source `(snat_v4, port)` is no
-                                    // longer allocated here — it is allocated
-                                    // per-flow at the Permit branch below so a
-                                    // denied flow never consumes a pool port.
-                                    crate::nat64::Nat64Match::MatchReady {
-                                        prefix_idx,
-                                        dst_v4,
-                                        dst_v6,
-                                    } => Some((prefix_idx, dst_v4, dst_v6)),
-                                    crate::nat64::Nat64Match::IneligibleSource => {
-                                        // #5623: RFC 6146 §3.5 source/hairpin drop.
-                                        // The source is inside a configured Pref64
-                                        // (looping/synthesized). Fail closed with a
-                                        // distinct counter BEFORE route lookup,
-                                        // policy, or `allocate_source` — no session,
-                                        // BIB, or allocation state is minted.
-                                        telemetry.counters.record_nat64_ineligible_source();
-                                        binding.scratch.scratch_recycle.push(desc.addr);
-                                        continue;
-                                    }
-                                    crate::nat64::Nat64Match::IneligibleDestination => {
-                                        // #6475: RFC 6052 §3.1 non-global
-                                        // embedded-destination drop. The extracted
-                                        // v4 destination is 0.0.0.0/8, 127.0.0.0/8,
-                                        // 169.254.0.0/16, 224.0.0.0/4, or
-                                        // 240.0.0.0/4 — e.g. `64:ff9b::127.0.0.1`,
-                                        // which would otherwise resolve
-                                        // LocalDelivery to the localhost-only
-                                        // control plane (gRPC 50051 / REST 8080)
-                                        // once lo0 lands in `state.local_v4`.
-                                        // Fail closed with a distinct counter
-                                        // BEFORE route lookup, policy, or
-                                        // `allocate_source` — no session, BIB, or
-                                        // allocation state is minted.
-                                        telemetry.counters.record_nat64_ineligible_dest();
-                                        binding.scratch.scratch_recycle.push(desc.addr);
-                                        continue;
-                                    }
-                                    crate::nat64::Nat64Match::MatchUnavailable => {
-                                        // Fail closed: a NAT64 prefix matched
-                                        // but the source pool is empty/exhausted.
-                                        // Drop rather than route the synthetic
-                                        // IPv6 destination as ordinary IPv6.
-                                        telemetry.counters.nat64_no_source_pool += 1;
-                                        binding.scratch.scratch_recycle.push(desc.addr);
-                                        continue;
-                                    }
+                                } else {
+                                    None
                                 }
                             } else {
                                 None
-                            }
-                        } else {
-                            None
-                        };
+                            };
 
                         let effective_resolution_target = if let Some((_, dst_v4, _)) = &nat64_match
                         {
@@ -4553,7 +4581,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 == ForwardingDisposition::ClusterTerminalHAInactive
                             && resolution.source_ifindex > 0
                         {
-                            worker_ctx.forwarding.egress_zone_id(resolution.source_ifindex)
+                            worker_ctx
+                                .forwarding
+                                .egress_zone_id(resolution.source_ifindex)
                         } else {
                             to_zone_id
                         };
@@ -4805,7 +4835,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ForwardPacketMeta::from(meta),
                             fabric_arrival_zone,
                         ) {
-                            telemetry.counters.touched = true;
+                            telemetry.counters.record_transit_source_martian_drop();
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -5372,7 +5402,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 )
                             {
                                 // #15111: host-local inbound session anchors the lease hold.
-                                if acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, decision.nat, now_ns) { persistent_lease_hold_outer = None; }
+                                if acquire_persistent_inbound_hold(
+                                    worker_ctx.forwarding,
+                                    persistent_lease_hold_outer,
+                                    decision.nat,
+                                    now_ns,
+                                ) {
+                                    persistent_lease_hold_outer = None;
+                                }
                                 telemetry.counters.session_creates += 1;
                                 telemetry.dbg.session_create += 1;
                                 // #14120: replay state for LocalDelivery
@@ -5463,7 +5500,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             }
                             if !local_session_capacity_available {
                                 sessions.note_admission_refused();
-                                if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_lease_hold_outer = None; }
+                                if persistent_lease_hold_outer.is_some() {
+                                    rollback_persistent_inbound_hold(
+                                        worker_ctx.forwarding,
+                                        persistent_lease_hold,
+                                        now_ns,
+                                    );
+                                    persistent_lease_hold_outer = None;
+                                }
                             }
                         }
                         // #5690: the generic embedded-ICMP NAT reversal is
@@ -5566,7 +5610,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // Keep zone policy evaluation, then drop before
                                 // NAT, session installation, or egress effects.
                                 if l2_group_unicast_ip && owned_packet_frame.is_none() {
-                                    telemetry.counters.touched = true;
+                                    telemetry.counters.record_transit_l2_group_drop();
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
@@ -5616,7 +5660,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     })
                                 {
                                     telemetry.dbg.policy_deny += 1;
-                                    telemetry.counters.touched = true;
+                                    telemetry.counters.record_transit_ipsec_fence_drop();
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
@@ -5872,8 +5916,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     None
                                 };
                                 // #15111: final NAT is composed; take the inbound lease hold unless SNAT joined it via active_flows.
-                                let mut persistent_inbound_acquired = acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, decision.nat, now_ns);
-                                if persistent_inbound_acquired { persistent_lease_hold_outer = None; }
+                                let mut persistent_inbound_acquired =
+                                    acquire_persistent_inbound_hold(
+                                        worker_ctx.forwarding,
+                                        persistent_lease_hold_outer,
+                                        decision.nat,
+                                        now_ns,
+                                    );
+                                if persistent_inbound_acquired {
+                                    persistent_lease_hold_outer = None;
+                                }
                                 // #12904: allocation composed the final NAT
                                 // tuple (SNAT/NPTv6/NAT64 translated source),
                                 // which can match a selector pair the
@@ -5919,9 +5971,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         now_ns,
                                         worker_id,
                                     );
-                                    if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
+                                    if persistent_inbound_acquired {
+                                        rollback_persistent_inbound_hold(
+                                            worker_ctx.forwarding,
+                                            persistent_lease_hold,
+                                            now_ns,
+                                        );
+                                        persistent_inbound_acquired = false;
+                                    }
                                     telemetry.dbg.policy_deny += 1;
-                                    telemetry.counters.touched = true;
+                                    telemetry.counters.record_transit_ipsec_fence_drop();
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
@@ -5985,7 +6044,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         now_ns,
                                         worker_id,
                                     );
-                                    if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
+                                    if persistent_inbound_acquired {
+                                        rollback_persistent_inbound_hold(
+                                            worker_ctx.forwarding,
+                                            persistent_lease_hold,
+                                            now_ns,
+                                        );
+                                        persistent_inbound_acquired = false;
+                                    }
                                     binding.scratch.scratch_forwards.push(request);
                                     // #14831: consume the descriptor, as on
                                     // session hits. The prebuilt reply owns
@@ -6011,7 +6077,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         now_ns,
                                         worker_id,
                                     );
-                                    if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
+                                    if persistent_inbound_acquired {
+                                        rollback_persistent_inbound_hold(
+                                            worker_ctx.forwarding,
+                                            persistent_lease_hold,
+                                            now_ns,
+                                        );
+                                        persistent_inbound_acquired = false;
+                                    }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 } else {
@@ -6206,7 +6279,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     if needed_sessions > 0 && !admission_allowed {
                                         sessions.note_admission_refused();
-                                        if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
+                                        if persistent_inbound_acquired {
+                                            rollback_persistent_inbound_hold(
+                                                worker_ctx.forwarding,
+                                                persistent_lease_hold,
+                                                now_ns,
+                                            );
+                                            persistent_inbound_acquired = false;
+                                        }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,
@@ -6356,7 +6436,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             Ok(permits) => permits,
                                             Err(_) => {
                                                 sessions.note_admission_refused();
-                                                if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
+                                                if persistent_inbound_acquired {
+                                                    rollback_persistent_inbound_hold(
+                                                        worker_ctx.forwarding,
+                                                        persistent_lease_hold,
+                                                        now_ns,
+                                                    );
+                                                    persistent_inbound_acquired = false;
+                                                }
                                                 rollback_source_nat_allocation_for_worker(
                                                     &worker_ctx.forwarding.iface_nat_allocators,
                                                     &worker_ctx.forwarding.source_nat_rules,
@@ -6546,7 +6633,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             "forward install failed after can_admit preflight"
                                         );
                                         sessions.note_install_partial();
-                                        if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
+                                        if persistent_inbound_acquired {
+                                            rollback_persistent_inbound_hold(
+                                                worker_ctx.forwarding,
+                                                persistent_lease_hold,
+                                                now_ns,
+                                            );
+                                            persistent_inbound_acquired = false;
+                                        }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,
@@ -6821,7 +6915,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // release any allocation. No-op for the
                                         // DNS fast-path (its guard requires no
                                         // NAT).
-                                        if persistent_inbound_acquired { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_inbound_acquired = false; }
+                                        if persistent_inbound_acquired {
+                                            rollback_persistent_inbound_hold(
+                                                worker_ctx.forwarding,
+                                                persistent_lease_hold,
+                                                now_ns,
+                                            );
+                                            persistent_inbound_acquired = false;
+                                        }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,
@@ -7104,7 +7205,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // resolved from the POST-translation dst port
                                 // (#2520/#3058) so a DNAT'd deny logs the inside
                                 // app, not UNKNOWN(pre-NAT port).
-                                if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold, now_ns); persistent_lease_hold_outer = None; }
+                                if persistent_lease_hold_outer.is_some() {
+                                    rollback_persistent_inbound_hold(
+                                        worker_ctx.forwarding,
+                                        persistent_lease_hold,
+                                        now_ns,
+                                    );
+                                    persistent_lease_hold_outer = None;
+                                }
                                 let policy_app_id = resolve_policy_deny_app_id(
                                     &worker_ctx.forwarding.app_catalog,
                                     flow,
@@ -7266,21 +7374,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     flow.forward_key.dst_port,
                                     policy_packet_icmp(packet_frame, meta),
                                     now_ns,
-                                ) && (owned_packet_frame.is_some()
-                                    || !l2_group_unicast_ip)
+                                ) && (owned_packet_frame.is_some() || !l2_group_unicast_ip)
                                 {
-                                    let capacity = if let Some(reuse_key) =
-                                        owner_syn_reuse_key.as_ref()
-                                    {
-                                        sessions
-                                            .can_admit_after_closing_tcp_pair_for_syn(
+                                    let capacity =
+                                        if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
+                                            sessions.can_admit_after_closing_tcp_pair_for_syn(
                                                 1,
                                                 reuse_key,
                                                 meta.tcp_flags,
                                             )
-                                    } else {
-                                        true
-                                    };
+                                        } else {
+                                            true
+                                        };
                                     if capacity {
                                         if owner_syn_reuse {
                                             crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
@@ -7445,7 +7550,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding.has_routing_domains,
                                         ) {
                                             // #15111: punt seed anchors the inbound hold.
-                                            if acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, decision.nat, now_ns) { persistent_lease_hold_outer = None; }
+                                            if acquire_persistent_inbound_hold(
+                                                worker_ctx.forwarding,
+                                                persistent_lease_hold_outer,
+                                                decision.nat,
+                                                now_ns,
+                                            ) {
+                                                persistent_lease_hold_outer = None;
+                                            }
                                         }
                                     } else {
                                         sessions.note_admission_refused();
@@ -8396,7 +8508,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                         )
                     {
-                        telemetry.counters.touched = true;
+                        telemetry.counters.record_transit_source_martian_drop();
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
                     }
@@ -8850,10 +8962,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 {
                     // #15742: cluster-terminal resolutions zero their egress;
                     // the would-be egress RG lives on source_ifindex.
-                    owner_rg_for_flow(
-                        worker_ctx.forwarding,
-                        decision.resolution.source_ifindex,
-                    )
+                    owner_rg_for_flow(worker_ctx.forwarding, decision.resolution.source_ifindex)
                 } else {
                     owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution)
                 };
@@ -8955,7 +9064,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         fabric_arrival_zone,
                     )
                 }) {
-                    telemetry.counters.touched = true;
+                    telemetry.counters.record_transit_source_martian_drop();
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
@@ -8970,7 +9079,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 ) && l2_group_unicast_ip
                     && owned_packet_frame.is_none()
                 {
-                    telemetry.counters.touched = true;
+                    telemetry.counters.record_transit_l2_group_drop();
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
@@ -8996,7 +9105,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     });
                 if bindless_selector_match {
                     telemetry.dbg.policy_deny += 1;
-                    telemetry.counters.touched = true;
+                    telemetry.counters.record_transit_ipsec_fence_drop();
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
@@ -9319,8 +9428,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             }
                         }
                     }
-                    if should_teardown_tcp_rst_with(meta, worker_ctx.forwarding.tcp_rst_invalidate_session)
-                        && let Some(flow) = flow.as_ref()
+                    if should_teardown_tcp_rst_with(
+                        meta,
+                        worker_ctx.forwarding.tcp_rst_invalidate_session,
+                    ) && let Some(flow) = flow.as_ref()
                     {
                         binding
                             .scratch
@@ -9604,6 +9715,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     } else {
                         drop(overlap_admission_9950.take());
                         telemetry.dbg.build_fail += 1;
+                        // #15941: the builder's sole None return is the
+                        // cos.drop verdict, already counted in
+                        // apply_cos_drop_side_effects via the reject-reply
+                        // counters threaded above. This else also covers it
+                        // as a build failure so the exported build_fail
+                        // mirror never undercounts a build-None exit.
+                        telemetry.counters.record_forward_build_failure();
+                        record_exception(
+                            worker_ctx.recent_exceptions,
+                            &worker_ctx.ident,
+                            "transit_output_filter_drop",
+                            desc.len,
+                            Some(meta),
+                            None,
+                            worker_ctx.forwarding,
+                        );
                         if cfg!(feature = "debug-log") {
                             if telemetry.dbg.build_fail <= 3 {
                                 eprintln!(
@@ -9997,7 +10124,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         )
                                 {
                                     telemetry.dbg.policy_deny += 1;
-                                    telemetry.counters.touched = true;
+                                    telemetry.counters.record_transit_ipsec_fence_drop();
                                     decision.resolution.disposition =
                                         ForwardingDisposition::PolicyDenied;
                                 }
@@ -10107,7 +10234,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     })
                                 {
                                     telemetry.dbg.policy_deny += 1;
-                                    telemetry.counters.touched = true;
+                                    telemetry.counters.record_transit_ipsec_fence_drop();
                                     break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                 }
                                 telemetry.dbg.missing_neigh += 1;
@@ -11204,9 +11331,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_id,
                                             );
                                         }
-                                        if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, now_ns); persistent_lease_hold_outer = None; }
+                                        if persistent_lease_hold_outer.is_some() {
+                                            rollback_persistent_inbound_hold(
+                                                worker_ctx.forwarding,
+                                                persistent_lease_hold_outer,
+                                                now_ns,
+                                            );
+                                            persistent_lease_hold_outer = None;
+                                        }
                                         telemetry.dbg.policy_deny += 1;
-                                        telemetry.counters.touched = true;
+                                        telemetry.counters.record_transit_ipsec_fence_drop();
                                         break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                     }
                                     // #14661: every later gate (NPTv6
@@ -11448,7 +11582,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // Permit held in seed_install_permit_14661
                                     // until after the shared/BPF publish below.
                                     // #15111: committed seed anchors the inbound hold (pending_decision carries the DNAT).
-                                    if pending_installed && acquire_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, pending_decision.nat, now_ns) { persistent_lease_hold_outer = None; }
+                                    if pending_installed
+                                        && acquire_persistent_inbound_hold(
+                                            worker_ctx.forwarding,
+                                            persistent_lease_hold_outer,
+                                            pending_decision.nat,
+                                            now_ns,
+                                        )
+                                    {
+                                        persistent_lease_hold_outer = None;
+                                    }
                                     let pending_install_info = pending_installed.then(|| {
                                         sessions
                                             .installed_session_info(&flow.forward_key)
@@ -11691,7 +11834,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // and drop the frame instead of
                                         // buffering it for replay.
                                         seed_install_refused = true;
-                                        if persistent_lease_hold_outer.is_some() { rollback_persistent_inbound_hold(worker_ctx.forwarding, persistent_lease_hold_outer, now_ns); persistent_lease_hold_outer = None; }
+                                        if persistent_lease_hold_outer.is_some() {
+                                            rollback_persistent_inbound_hold(
+                                                worker_ctx.forwarding,
+                                                persistent_lease_hold_outer,
+                                                now_ns,
+                                            );
+                                            persistent_lease_hold_outer = None;
+                                        }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,

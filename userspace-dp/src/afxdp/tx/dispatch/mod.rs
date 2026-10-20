@@ -644,23 +644,23 @@ fn enqueue_copy_fallback_frame(
     let mut build_failed = false;
     let mut fallback_to_slow_path = false;
     let built_frames = if is_nat64 {
-        let (v4_egress_mtu, v6_egress_mtu) =
-            if request.meta.addr_family as i32 == libc::AF_INET6 {
-                (
-                    nat64_v4_egress_mtu_with_dynamic(
-                        source_frame,
-                        request.meta,
-                        &request.decision,
-                        forwarding,
-                        inputs.dynamic_neighbors,
-                    ),
-                    0,
-                )
-            } else {
-                let l3 = frame_l3_offset(source_frame)
-                    .unwrap_or(request.meta.l3_offset as usize);
-                let input_df = source_frame.get(l3 + 6).is_some_and(|b| b & 0x40 != 0);
-                (0, if input_df {
+        let (v4_egress_mtu, v6_egress_mtu) = if request.meta.addr_family as i32 == libc::AF_INET6 {
+            (
+                nat64_v4_egress_mtu_with_dynamic(
+                    source_frame,
+                    request.meta,
+                    &request.decision,
+                    forwarding,
+                    inputs.dynamic_neighbors,
+                ),
+                0,
+            )
+        } else {
+            let l3 = frame_l3_offset(source_frame).unwrap_or(request.meta.l3_offset as usize);
+            let input_df = source_frame.get(l3 + 6).is_some_and(|b| b & 0x40 != 0);
+            (
+                0,
+                if input_df {
                     0
                 } else {
                     nat64_v6_egress_mtu_with_dynamic(
@@ -670,8 +670,9 @@ fn enqueue_copy_fallback_frame(
                         forwarding,
                         inputs.dynamic_neighbors,
                     )
-                })
-            };
+                },
+            )
+        };
         crate::afxdp::frame::build_nat64_forwarded_frames_with_commit_and_dynamic(
             source_frame,
             request.meta,
@@ -973,7 +974,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 })
         {
             dbg.policy_deny += 1;
-            counters.touched = true;
+            counters.record_transit_ipsec_fence_drop();
+            record_exception(
+                recent_exceptions,
+                ingress_ident,
+                "transit_ipsec_selector_fence",
+                request.desc.len,
+                Some(request.meta.into()),
+                None,
+                forwarding,
+            );
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
@@ -999,7 +1009,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 })
         {
             dbg.policy_deny += 1;
-            counters.touched = true;
+            counters.record_transit_source_martian_drop();
+            record_exception(
+                recent_exceptions,
+                ingress_ident,
+                "transit_source_martian",
+                request.desc.len,
+                Some(request.meta.into()),
+                None,
+                forwarding,
+            );
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
@@ -1025,6 +1044,15 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 })
         {
             counters.record_martian_drop();
+            record_exception(
+                recent_exceptions,
+                ingress_ident,
+                "transit_destination_martian",
+                request.desc.len,
+                Some(request.meta.into()),
+                None,
+                forwarding,
+            );
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
@@ -1243,6 +1271,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 continue;
             }
             dbg.no_egress_binding += 1;
+            counters.record_no_egress_binding_drop();
             if cfg!(feature = "debug-log") && dbg.no_egress_binding <= 3 {
                 debug_log!(
                     "DBG NO_EGRESS_BINDING: target_ifindex={} ingress_if={} ingress_q={}",

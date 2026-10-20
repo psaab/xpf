@@ -35,8 +35,8 @@ use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
 use crate::test_zone_ids::*;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// PHYSICAL AF_XDP bind port this worker owns.
 const PHYS_INGRESS_IFINDEX: i32 = 6;
@@ -3824,6 +3824,10 @@ fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
     assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
     assert_eq!(run.dbg_forward, 0);
     assert_eq!(run.dbg_tx, 0);
+    assert_eq!(
+        run.counters.transit_source_martian_drops, 1,
+        "#15941 source-martian named counter"
+    );
     assert_eq!(
         run.sessions.len(),
         1,

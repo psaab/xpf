@@ -29,6 +29,20 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 			"xpf_userspace_unknown_vlan_dropped_total", "test", nil, nil),
 		userspaceDstMACDropped: prometheus.NewDesc(
 			"xpf_userspace_dst_mac_dropped_total", "test", nil, nil),
+		userspaceTransitOutputFilterDrops: prometheus.NewDesc(
+			"xpf_userspace_transit_output_filter_drops_total", "test", nil, nil),
+		userspaceTransitSourceMartianDrops: prometheus.NewDesc(
+			"xpf_userspace_transit_source_martian_dropped_total", "test", nil, nil),
+		userspaceTransitIPSecFenceDrops: prometheus.NewDesc(
+			"xpf_userspace_transit_ipsec_fence_drops_total", "test", nil, nil),
+		userspaceTransitL2GroupDrops: prometheus.NewDesc(
+			"xpf_userspace_transit_l2_group_drops_total", "test", nil, nil),
+		userspaceForwardBuildFailures: prometheus.NewDesc(
+			"xpf_userspace_forward_build_failures_total", "test", nil, nil),
+		userspaceNoEgressBindingDrops: prometheus.NewDesc(
+			"xpf_userspace_no_egress_binding_drops_total", "test", nil, nil),
+		userspacePMechDecapHoldRefused: prometheus.NewDesc(
+			"xpf_userspace_pmech_decap_hold_refused_total", "test", nil, nil),
 	}
 
 	status := dpuserspace.ProcessStatus{
@@ -66,18 +80,25 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 		byName[m.Desc().String()] = pb.Counter.GetValue()
 	}
 
-	if count != 7 {
-		t.Fatalf("want exactly 7 aggregate metrics, got %d", count)
+	if count != 14 {
+		t.Fatalf("want exactly 14 aggregate metrics, got %d", count)
 	}
 
 	want := map[string]float64{
-		"martian_dropped_total":           7,
-		"dns_illegal_reply_dropped_total": 7,
-		"ipv6_ext_header_dropped_total":   15,
-		"v4_mapped_ipv6_dropped_total":    15,
-		"umem_slice_dropped_total":        6,
-		"unknown_vlan_dropped_total":      9,
-		"dst_mac_dropped_total":           14,
+		"userspace_martian_dropped_total":                7,
+		"dns_illegal_reply_dropped_total":                7,
+		"ipv6_ext_header_dropped_total":                  15,
+		"v4_mapped_ipv6_dropped_total":                   15,
+		"umem_slice_dropped_total":                       6,
+		"unknown_vlan_dropped_total":                     9,
+		"dst_mac_dropped_total":                          14,
+		"transit_output_filter_drops_total":              0,
+		"userspace_transit_source_martian_dropped_total": 0,
+		"transit_ipsec_fence_drops_total":                0,
+		"transit_l2_group_drops_total":                   0,
+		"forward_build_failures_total":                   0,
+		"no_egress_binding_drops_total":                  0,
+		"pmech_decap_hold_refused_total":                 0,
 	}
 	for desc, value := range byName {
 		matched := false
@@ -113,7 +134,7 @@ func TestEmitDropClassCounters_4768(t *testing.T) {
 		}
 		zeros++
 	}
-	if zeros != 7 {
-		t.Errorf("empty bindings: want 7 series emitted at 0, got %d", zeros)
+	if zeros != 14 {
+		t.Errorf("empty bindings: want 14 series emitted at 0, got %d", zeros)
 	}
 }

@@ -97,6 +97,14 @@ fn run_final_live_tx_destination_11413(destination: Ipv4Addr) {
         counters.martian_dropped, 1,
         "the final-TX transit backstop must count the destination drop"
     );
+    // #15941: exception-ring attribution for the destination backstop.
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    assert_eq!(reasons, vec!["transit_destination_martian"]);
     assert_eq!(
         ingress_recycled_count(&bindings[0]),
         1,

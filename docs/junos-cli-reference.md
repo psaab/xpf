@@ -628,6 +628,23 @@ From zone: guest, To zone: lan
         `martian_dropped`; a NoRoute martian also increments
         `route_miss_packets`. This lets operators distinguish these drops
         from ordinary route misses and correlate them with filter-`accept` logs.
+    - **Transit terminal drops** (#15941): `transit_output_filter_drops`
+      counts transit forwards dropped by an egress output filter/policer
+      (`cos.drop` at the forward-request build, flow-cache fallback, or
+      deferred neighbor retry) — the transit mirror of the generated-reply
+      `*_output_filter_drops` family. `transit_source_martian_drops` counts
+      #11074 source-class refusals, split from the destination
+      `martian_dropped`; `transit_ipsec_fence_drops` counts #10683 bindless
+      selector-fence refusals; `transit_l2_group_drops` counts #10691
+      L2-group unicast-IP refusals; `forward_build_failures` and
+      `no_egress_binding_drops` are the exported mirrors of the debug
+      `build_fail` / `no_egress_binding` tallies. All six are per-binding in
+      helper status, summed in `show chassis cluster data-plane statistics`,
+      and exported as `xpf_userspace_*_total` Prometheus counters. The
+      dispatch rechecks and output-filter build-None exits also record
+      exception-ring entries (`transit_source_martian`,
+      `transit_destination_martian`, `transit_ipsec_selector_fence`,
+      `transit_output_filter_drop`).
     - **IPv6 extension-header fail-closed drops** (#4743): an IPv6 packet
       whose extension-header chain is still on an extension header after
       `MAX_IPV6_EXT_HEADERS` (8) iterations is dropped fail-closed and counted

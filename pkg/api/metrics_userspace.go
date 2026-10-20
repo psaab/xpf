@@ -111,6 +111,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 // real "no such drops" signal, not an absent series.
 func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
 	var martian, dnsIllegalReply, ipv6ExtHeader, v4MappedIPv6, umemSlice, unknownVLAN, dstMAC, pmechDecapHoldRefused uint64
+	var transitOutputFilter, transitSourceMartian, transitIPSecFence, transitL2Group, forwardBuildFailures, noEgressBinding uint64
 	for _, b := range status.Bindings {
 		martian += b.MartianDropped
 		dnsIllegalReply += b.DNSIllegalReplyDropped
@@ -120,6 +121,12 @@ func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status
 		unknownVLAN += b.UnknownVLANDropped
 		dstMAC += b.DstMACDropped
 		pmechDecapHoldRefused += b.PMechDecapHoldRefused
+		transitOutputFilter += b.TransitOutputFilterDrops
+		transitSourceMartian += b.TransitSourceMartianDrops
+		transitIPSecFence += b.TransitIPSecFenceDrops
+		transitL2Group += b.TransitL2GroupDrops
+		forwardBuildFailures += b.ForwardBuildFailures
+		noEgressBinding += b.NoEgressBindingDrops
 	}
 	c.emitConstMetric(ch, c.userspaceMartianDropped, prometheus.CounterValue, float64(martian))
 	c.emitConstMetric(ch, c.userspaceDNSIllegalReplyDropped, prometheus.CounterValue, float64(dnsIllegalReply))
@@ -129,6 +136,12 @@ func (c *xpfCollector) emitDropClassCounters(ch chan<- prometheus.Metric, status
 	c.emitConstMetric(ch, c.userspaceUnknownVLANDropped, prometheus.CounterValue, float64(unknownVLAN))
 	c.emitConstMetric(ch, c.userspaceDstMACDropped, prometheus.CounterValue, float64(dstMAC))
 	c.emitConstMetric(ch, c.userspacePMechDecapHoldRefused, prometheus.CounterValue, float64(pmechDecapHoldRefused))
+	c.emitConstMetric(ch, c.userspaceTransitOutputFilterDrops, prometheus.CounterValue, float64(transitOutputFilter))
+	c.emitConstMetric(ch, c.userspaceTransitSourceMartianDrops, prometheus.CounterValue, float64(transitSourceMartian))
+	c.emitConstMetric(ch, c.userspaceTransitIPSecFenceDrops, prometheus.CounterValue, float64(transitIPSecFence))
+	c.emitConstMetric(ch, c.userspaceTransitL2GroupDrops, prometheus.CounterValue, float64(transitL2Group))
+	c.emitConstMetric(ch, c.userspaceForwardBuildFailures, prometheus.CounterValue, float64(forwardBuildFailures))
+	c.emitConstMetric(ch, c.userspaceNoEgressBindingDrops, prometheus.CounterValue, float64(noEgressBinding))
 }
 
 // emitFabricSkipCounters exposes the #3773 (M13) fabric-link skip
