@@ -46,6 +46,16 @@ var lookupAddressDNSName = func(fqdn string) ([]string, error) {
 	return out, nil
 }
 
+// SetLookupAddressDNSNameForTest substitutes the dns-name resolver and
+// returns a restore func. It exists for tests in OTHER packages (the
+// daemon's periodic-refresh regression, #15933) that drive the resolver
+// through RefreshDNSAddressBooks without network access.
+func SetLookupAddressDNSNameForTest(fn func(fqdn string) ([]string, error)) func() {
+	orig := lookupAddressDNSName
+	lookupAddressDNSName = fn
+	return func() { lookupAddressDNSName = orig }
+}
+
 // dnsIPsToPrefixes converts resolved IPs to /32 or /128 CIDRs, applying the
 // family filter, deduplicated and sorted for determinism.
 func dnsIPsToPrefixes(ips []string, family string) []string {
@@ -93,9 +103,18 @@ func resolveDNSAddressEntry(a *Address) {
 	a.DNSAddresses = dnsIPsToPrefixes(ips, a.DNSFamily)
 }
 
-// RefreshDNSAddressBooks re-resolves every dns-name entry in the global and
-// zone-local books. Called at compile time and periodically by the daemon so
-// a changed DNS answer republishes through the normal snapshot path.
+// RefreshDNSAddressBooks re-resolves every dns-name entry in the global,
+// named, and zone-local books. Called at compile time and periodically by
+// the daemon so a changed DNS answer republishes through the normal snapshot
+// path.
+//
+// It MUTATES cfg in place: every Address.DNSAddresses field is replaced.
+// cfg MUST NOT be a published active config (#15933): a config handed out
+// by configstore (ActiveConfig / ActiveSnapshot) is shared with concurrent
+// applies and readers, so the daemon refresh path resolves into a private
+// copy (CloneForDNSRefresh) and publishes through the apply lock instead of
+// writing into the shared generation. Compile-time callers own their cfg
+// exclusively, as do callers already holding the daemon apply semaphore.
 func RefreshDNSAddressBooks(cfg *Config) {
 	if cfg == nil {
 		return
@@ -119,6 +138,77 @@ func RefreshDNSAddressBooks(cfg *Config) {
 			refresh(z.AddressBook)
 		}
 	}
+}
+
+// CloneForDNSRefresh returns a copy of cfg that shares everything with the
+// original EXCEPT the mutable DNS-resolution state: every dns-name Address
+// (global, named, and zone-local books, including the folded
+// zone-local/<zone>/<name> copies in the global book) is a fresh *Address
+// with its own DNSAddresses slice. RefreshDNSAddressBooks may therefore
+// write into the clone without touching the published generation it was
+// cloned from (#15933).
+//
+// The address maps themselves are copied (not aliased) wherever a cloned
+// entry is installed, so a writer cannot add/remove entries in the
+// original's maps through the clone. Non-DNS entries are shared —
+// nothing in the refresh path mutates them. Cost is O(zones + named
+// books + all address-book entries), not a deep copy of the whole
+// config.
+func (cfg *Config) CloneForDNSRefresh() *Config {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Security.AddressBook = cloneBookForDNSRefresh(cfg.Security.AddressBook)
+	if cfg.Security.NamedAddressBooks != nil {
+		named := make(map[string]*NamedAddressBook, len(cfg.Security.NamedAddressBooks))
+		for name, nb := range cfg.Security.NamedAddressBooks {
+			if nb == nil {
+				named[name] = nil
+				continue
+			}
+			cp := *nb
+			if cloned := cloneBookForDNSRefresh(&nb.AddressBook); cloned != nil {
+				cp.AddressBook = *cloned
+			}
+			named[name] = &cp
+		}
+		out.Security.NamedAddressBooks = named
+	}
+	if cfg.Security.Zones != nil {
+		zones := make(map[string]*ZoneConfig, len(cfg.Security.Zones))
+		for name, z := range cfg.Security.Zones {
+			if z == nil {
+				zones[name] = nil
+				continue
+			}
+			cp := *z
+			cp.AddressBook = cloneBookForDNSRefresh(z.AddressBook)
+			zones[name] = &cp
+		}
+		out.Security.Zones = zones
+	}
+	return &out
+}
+
+func cloneBookForDNSRefresh(b *AddressBook) *AddressBook {
+	if b == nil {
+		return nil
+	}
+	out := *b
+	if b.Addresses != nil {
+		addrs := make(map[string]*Address, len(b.Addresses))
+		for name, a := range b.Addresses {
+			if a != nil && a.DNSName != "" {
+				cp := *a
+				cp.DNSAddresses = append([]string(nil), a.DNSAddresses...)
+				a = &cp
+			}
+			addrs[name] = a
+		}
+		out.Addresses = addrs
+	}
+	return &out
 }
 
 // expandWildcardAddress converts `ip/wildcard-mask` (e.g.

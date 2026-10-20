@@ -334,6 +334,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// abort, the factory-reset refusal, the test seam — is covered without anyone
 	// having to remember. A per-caller clear would be four sites today and a fifth
 	// silently missing tomorrow.
+	defer func() { d.recordAppliedDNSBaseline(cfg, retErr) }()
 	defer func() {
 		if retErr != nil {
 			if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg &&
