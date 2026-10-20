@@ -1075,13 +1075,18 @@ type Daemon struct {
 	applyBodyForTest func(*config.Config)
 	// dnsRefreshMu guards the per-generation published-answer baseline.
 	// lastDNSRefreshAnswers holds the DNS answers last actually APPLIED
-	// for lastDNSRefreshBase (read back after the apply-time re-resolution
-	// under applySem, never the pre-apply proposal, #15933/#15962). Any
-	// other successful apply of that base replaces it with what it read
-	// back; a failed apply invalidates it.
-	dnsRefreshMu          sync.Mutex
-	lastDNSRefreshBase    *config.Config
-	lastDNSRefreshAnswers map[string][]string
+	// for the baseline identity (store generation + config pointer, read
+	// back after the apply-time re-resolution under applySem, never the
+	// pre-apply proposal, #15933/#15962). Writes are a CAS: a writer may
+	// record only a newer generation, or the same generation with the
+	// same answers digest (round-3 lost-update fix); failed applies
+	// invalidate at the same generation.
+	dnsRefreshMu            sync.Mutex
+	lastDNSRefreshGen       uint64
+	lastDNSRefreshBase      *config.Config
+	lastDNSRefreshDigest    uint64
+	lastDNSRefreshAnswers   map[string][]string
+	dnsBaselineTickGuardOff bool // test-only: disables the CAS (fail-on-revert)
 	// buildRuntimeDataPlaneForTest replaces dataplane construction in the
 	// startup fixture. It is nil in production and exists so the setup path
 	// can be exercised without arming a host dataplane.

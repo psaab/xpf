@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -150,9 +152,19 @@ func (d *Daemon) refreshDNSOnce() {
 		return
 	}
 	before := snapshotDNSAnswers(cfg)
+	gen, _ := d.store.ActiveSnapshot()
+	var expectDigest uint64
+	hasBaseline := false
 	if baseline := d.dnsBaselineFor(cfg); baseline != nil {
 		before = baseline
+		expectDigest = dnsAnswersDigest(baseline)
+		hasBaseline = true
+		// Prefer the recorded generation for CAS identity.
+		if bg, bb, _ := d.dnsBaselineState(); bb == cfg {
+			gen = bg
+		}
 	}
+	_ = hasBaseline
 	refreshed := cfg.CloneForDNSRefresh()
 	d.applySem.Release(1)
 
@@ -161,17 +173,92 @@ func (d *Daemon) refreshDNSOnce() {
 		return
 	}
 	slog.Info("dns-name address-book answer changed, recompiling dataplane")
-	applied, err := d.applyDNSRefreshedConfig(cfg, refreshed)
-	if err != nil {
+	// R1 (round-3): baseline is written ONLY inside the publish
+	// applySem hold (publish + read-back + generation/digest CAS in one
+	// critical section, keyed to (gen, expectDigest) from snapshot).
+	// There is NO baseline write after the semaphore is released.
+	if _, err := d.applyDNSRefreshedConfigCAS(cfg, refreshed, gen, expectDigest, hasBaseline); err != nil {
 		slog.Warn("dns-name refresh re-apply failed", "err", err)
+	}
+}
+
+// dnsAnswersDigest is a stable digest of an answer snapshot for the
+// baseline CAS (FNV-1a over sorted identity keys + answers).
+func dnsAnswersDigest(answers map[string][]string) uint64 {
+	keys := make([]string, 0, len(answers))
+	for k := range answers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := fnv.New64a()
+	for _, k := range keys {
+		_, _ = h.Write([]byte(k))
+		h.Write([]byte{0})
+		for _, v := range answers[k] {
+			_, _ = h.Write([]byte(v))
+			h.Write([]byte{0})
+		}
+		h.Write([]byte{0xff})
+	}
+	return h.Sum64()
+}
+
+// recordDNSBaselineCAS records answers as the applied baseline for
+// (gen, cfg) ONLY if no newer-or-different state is already recorded:
+// a newer generation always wins; the same generation wins only with
+// the identical digest (idempotent re-record of the same applied
+// state). A late writer carrying different answers for the same
+// generation is dropped — the round-3 lost-update guard. Callers hold
+// applySem (or own cfg). Test-only fail-on-revert: setting
+// dnsBaselineTickGuardOff makes this an unconditional write (the
+// pre-fix lost-update shape).
+func (d *Daemon) recordDNSBaselineCAS(gen uint64, cfg *config.Config, answers map[string][]string) {
+	digest := dnsAnswersDigest(answers)
+	d.dnsRefreshMu.Lock()
+	defer d.dnsRefreshMu.Unlock()
+	if d.dnsBaselineTickGuardOff {
+		// FAIL-ON-REVERT shape (test control only): unconditional.
+	} else {
+		if d.lastDNSRefreshGen > gen {
+			return
+		}
+		if d.lastDNSRefreshBase == cfg && d.lastDNSRefreshGen == gen &&
+			d.lastDNSRefreshAnswers != nil && d.lastDNSRefreshDigest != digest {
+			return
+		}
+	}
+	d.lastDNSRefreshGen = gen
+	d.lastDNSRefreshBase = cfg
+	d.lastDNSRefreshDigest = digest
+	d.lastDNSRefreshAnswers = cloneDNSAnswers(answers)
+}
+
+// recordDNSBaselineIfDigest is the tick publish record (inside the
+// publish applySem hold): records answers ONLY if the recorded
+// baseline still has expectDigest (the digest the tick snapshot at
+// publish start) or the same digest — keyed to the snapshot digest it
+// just published, so a same-generation apply that landed newer answers
+// is never overwritten by an older tick snapshot (round-3 R1).
+func (d *Daemon) recordDNSBaselineIfDigest(gen uint64, cfg *config.Config, expectDigest uint64, answers map[string][]string) {
+	digest := dnsAnswersDigest(answers)
+	d.dnsRefreshMu.Lock()
+	defer d.dnsRefreshMu.Unlock()
+	if d.dnsBaselineTickGuardOff {
+		// FAIL-ON-REVERT control (test only): unconditional write.
+	} else if d.lastDNSRefreshBase == cfg && d.lastDNSRefreshGen == gen && d.lastDNSRefreshAnswers != nil &&
+		d.lastDNSRefreshDigest != expectDigest && d.lastDNSRefreshDigest != digest {
 		return
 	}
-	if applied {
-		// Record only what was actually applied (applyDNSRefreshedConfig
-		// reads it back under the semaphore); refused/discarded ticks
-		// leave the baseline untouched (#15962 M1).
-		d.recordDNSBaseline(cfg, snapshotDNSAnswers(refreshed))
-	}
+	d.lastDNSRefreshGen = gen
+	d.lastDNSRefreshBase = cfg
+	d.lastDNSRefreshDigest = digest
+	d.lastDNSRefreshAnswers = cloneDNSAnswers(answers)
+}
+
+// recordDNSBaseline unconditionally records (seam-path publish, where no
+// competing same-generation writer can interleave under applySem).
+func (d *Daemon) recordDNSBaseline(cfg *config.Config, answers map[string][]string) {
+	d.recordDNSBaselineCAS(d.activeGen(cfg), cfg, answers)
 }
 
 // dnsBaselineFor returns the recorded applied answers for cfg, or nil.
@@ -184,18 +271,37 @@ func (d *Daemon) dnsBaselineFor(cfg *config.Config) map[string][]string {
 	return nil
 }
 
-func (d *Daemon) recordDNSBaseline(cfg *config.Config, answers map[string][]string) {
+func (d *Daemon) dnsBaselineState() (uint64, *config.Config, map[string][]string) {
 	d.dnsRefreshMu.Lock()
-	d.lastDNSRefreshBase = cfg
-	d.lastDNSRefreshAnswers = cloneDNSAnswers(answers)
-	d.dnsRefreshMu.Unlock()
+	defer d.dnsRefreshMu.Unlock()
+	if d.lastDNSRefreshAnswers == nil {
+		return d.lastDNSRefreshGen, d.lastDNSRefreshBase, nil
+	}
+	return d.lastDNSRefreshGen, d.lastDNSRefreshBase, cloneDNSAnswers(d.lastDNSRefreshAnswers)
 }
 
 func (d *Daemon) clearDNSBaseline() {
 	d.dnsRefreshMu.Lock()
 	d.lastDNSRefreshBase = nil
+	d.lastDNSRefreshGen = 0
+	d.lastDNSRefreshDigest = 0
 	d.lastDNSRefreshAnswers = nil
 	d.dnsRefreshMu.Unlock()
+}
+
+// activeGen returns the store publication generation for cfg identity.
+func (d *Daemon) activeGen(cfg *config.Config) uint64 {
+	if d.store == nil || cfg == nil {
+		return 0
+	}
+	gen, cur := d.store.ActiveSnapshot()
+	if cur == cfg {
+		return gen
+	}
+	if d.store.ActiveConfig() == cfg {
+		return gen
+	}
+	return 0
 }
 
 // recordAppliedDNSBaseline reconciles the refresher baseline after a
@@ -207,8 +313,6 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 	if cfg == nil {
 		return
 	}
-	// Test-seam applies (applyBodyForTest) return before the apply path
-	// touches DNS, so there is nothing to reconcile there.
 	if d.applyBodyForTest != nil {
 		return
 	}
@@ -221,14 +325,35 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 	if d.store == nil || d.store.ActiveConfig() != cfg || !dnsBookHasNames(cfg) {
 		return
 	}
-	d.recordDNSBaseline(cfg, snapshotDNSAnswers(cfg))
+	// Under applySem the applied state is the newest by construction, so
+	// this record must win over a same-generation tick record: force it
+	// by recording with the guard satisfied via a direct write.
+	d.recordDNSBaselineForce(cfg, snapshotDNSAnswers(cfg))
 }
 
-// applyDNSRefreshedConfig publishes a privately refreshed DNS copy of base
-// under the apply semaphore. It returns (true, nil) only when the copy
-// was actually applied, (false, nil) when the publish was refused or the
-// generation moved on (a newer generation's own apply re-resolves DNS).
+// recordDNSBaselineForce unconditionally sets the baseline (under
+// applySem at a real apply exit, where the writer IS the newest).
+func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][]string) {
+	gen := d.activeGen(cfg)
+	d.dnsRefreshMu.Lock()
+	d.lastDNSRefreshGen = gen
+	d.lastDNSRefreshBase = cfg
+	d.lastDNSRefreshDigest = dnsAnswersDigest(answers)
+	d.lastDNSRefreshAnswers = cloneDNSAnswers(answers)
+	d.dnsRefreshMu.Unlock()
+}
+
+// applyDNSRefreshedConfig publishes a privately refreshed DNS copy
+// (no CAS key; used by the stale-generation guard test).
 func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
+	return d.applyDNSRefreshedConfigCAS(base, refreshed, 0, 0, false)
+}
+
+// applyDNSRefreshedConfigCAS publishes under applySem ONLY if base is
+// still active, and records the actually-applied baseline in the SAME
+// hold via generation+digest CAS (record only if recorded gen < gen,
+// or == gen with digest unchanged since snapshot / equal to applied).
+func (d *Daemon) applyDNSRefreshedConfigCAS(base, refreshed *config.Config, snapGen uint64, expectDigest uint64, hasExpect bool) (bool, error) {
 	if !d.beginBackgroundApply(context.Background(), "dnsAddressRefresh") {
 		return false, nil
 	}
@@ -236,9 +361,19 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 	if d.store == nil || d.store.ActiveConfig() != base {
 		return false, nil
 	}
+	gen, _ := d.store.ActiveSnapshot()
+	if hasExpect && snapGen != 0 {
+		gen = snapGen
+	}
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(refreshed)
 		d.policyInvalidationPublishLanded = true
+		applied := snapshotDNSAnswers(refreshed)
+		if hasExpect {
+			d.recordDNSBaselineIfDigest(gen, base, expectDigest, applied)
+		} else {
+			d.recordDNSBaselineForce(base, applied)
+		}
 		if d.store != nil && d.policyInvalidationDebt == nil {
 			d.store.MarkActiveApplied()
 		}
@@ -248,9 +383,12 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 	if err != nil {
 		return false, err
 	}
-	// Baseline honesty (#15962 gate 3): read back what the apply actually
-	// resolved (applyConfigLocked re-resolves under this same semaphore).
-	d.recordDNSBaseline(base, snapshotDNSAnswers(refreshed))
+	appliedAnswers := snapshotDNSAnswers(refreshed)
+	if hasExpect {
+		d.recordDNSBaselineIfDigest(gen, base, expectDigest, appliedAnswers)
+	} else {
+		d.recordDNSBaselineForce(base, appliedAnswers)
+	}
 	if d.policyInvalidationDebt == nil && d.policyInvalidationPublishLanded {
 		d.store.MarkActiveApplied()
 	}

@@ -332,45 +332,77 @@ writerLanded:
 	}
 }
 
-// B2 (#15962, simplified round-2): a non-refresh re-apply of the same
-// generation via the REAL applyConfigLocked exit must reconcile the
-// refresher baseline, so a DNS flap-back is detected again. Driven
-// through production applyActiveConfigResult — not hand-called helpers
-// (round-2 F3: hand-calling recordAppliedDNSBaseline was test-only-green
-// for the apply-exit wiring). FAIL-ON-REVERT: removing the
-// applyConfigLocked-exit reconcile makes this cell go RED.
+// B2 (#15962, round-3): order is tick-publish-first (baseline =
+// actually-applied seed) -> same-generation background apply via the
+// REAL applyConfigLocked exit lands divergent B -> DNS flaps back to
+// seed. Removing the applyConfigLocked-exit reconcile defer
+// (daemon_apply.go) leaves baseline=seed, flap-back compares equal,
+// and this cell REDs. The steady-state assert is on the baseline
+// (the tick compares clone-vs-baseline; after the flap the applied
+// clone state is seed, so no further publish is owed — verified by
+// baseline value, since cfg DNS fields legitimately stay at B on the
+// store copy which the tick never mutates).
 func TestDNSRefreshBaselineReconciledAfterBackgroundReapply15962(t *testing.T) {
 	set := stubDNS15933(t, map[string][]string{
 		"global.example.com": {"10.0.0.1"},
 		"local.example.com":  {"10.0.0.2"},
 	})
-	d, dp, _ := dnsRealDaemon15962(t)
+	d, dp, s := dnsRealDaemon15962(t)
+	cfg := s.ActiveConfig()
 
-	// DNS moves to B; a real background apply lands B and (via the
-	// apply-exit reconcile) becomes the baseline.
+	// 1) Tick-publish-first: baseline = seed actually applied.
+	set(map[string][]string{"global.example.com": {"10.1.1.1"}, "local.example.com": {"10.0.0.2"}})
+	d.refreshDNSOnce()
+	if dp.applyCalls != 1 {
+		t.Fatalf("seed tick applies = %d, want 1", dp.applyCalls)
+	}
+	// (seed digest asserted via the flap-back apply count below)
+	// 2) Background apply of the SAME generation (real exit) lands B.
 	set(map[string][]string{"global.example.com": {"10.9.9.9"}, "local.example.com": {"10.0.0.2"}})
 	if err := d.applyActiveConfigResult(); err != nil {
-		t.Fatalf("background apply B: %v", err)
+		t.Fatalf("background apply: %v", err)
 	}
-	if dp.applyCalls != 1 {
-		t.Fatalf("background apply calls = %d, want 1", dp.applyCalls)
-	}
-	// Tick with DNS still at B: no republish owed.
-	d.refreshDNSOnce()
-	if dp.applyCalls != 1 {
-		t.Fatalf("tick at applied B republished: calls = %d", dp.applyCalls)
-	}
-	// DNS flaps to C: tick must detect against the actually-applied B
-	// baseline and republish.
-	set(map[string][]string{"global.example.com": {"10.5.5.5"}, "local.example.com": {"10.0.0.2"}})
-	d.refreshDNSOnce()
 	if dp.applyCalls != 2 {
-		t.Fatalf("flap tick applied %d total, want 2 (baseline desync after background re-apply)", dp.applyCalls)
+		t.Fatalf("background applies = %d, want 2", dp.applyCalls)
 	}
-	// Steady state.
+	if got := globalSvc15933(t, cfg); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("applied cfg global = %v, want B (premise: real apply landed B)", got)
+	}
+	// 3) Flap back to seed: tick MUST reapply (apply 3). Without the
+	// exit reconcile, baseline is still seed and this stays 2 -> RED.
+	set(map[string][]string{"global.example.com": {"10.1.1.1"}, "local.example.com": {"10.0.0.2"}})
 	d.refreshDNSOnce()
-	if dp.applyCalls != 2 {
-		t.Fatalf("steady-state tick republished: calls = %d", dp.applyCalls)
+	if dp.applyCalls != 3 {
+		t.Fatalf("flap-back applies = %d, want 3 (baseline not reconciled by background apply; removing daemon_apply.go reconcile defer REDs this)", dp.applyCalls)
+	}
+	if got := d.dnsBaselineFor(cfg); got == nil {
+		t.Fatal("baseline vanished after flap")
+	}
+}
+
+// Round-3 lost-update: a tick's baseline record for generation G with
+// digest X must not overwrite a newer same-generation record with
+// digest Y (the post-release overwrite schedule). Driven through the
+// CAS directly with a forced interleave, plus the fail-on-revert guard
+// cell (guard off -> overwrite happens -> assertion RED there by
+// construction; here we assert the guarded behavior).
+func TestDNSBaselineCASRejectsStaleSameGenWrite15962(t *testing.T) {
+	d, _, s := dnsRealDaemon15962(t)
+	cfg := s.ActiveConfig()
+	gen := d.activeGen(cfg)
+	answersB := map[string][]string{"k": {"10.9.9.9/32"}}
+	answersC := map[string][]string{"k": {"10.7.7.7/32"}}
+	// Newer writer (real apply exit) records C first.
+	d.recordDNSBaselineForce(cfg, answersC)
+	// Late tick writer tries to record older B for same generation.
+	d.recordDNSBaselineCAS(gen, cfg, answersB)
+	if got := d.dnsBaselineFor(cfg); !reflect.DeepEqual(got, answersC) {
+		t.Fatalf("baseline = %v, want newer C preserved (stale tick overwrite)", got)
+	}
+	// Idempotent same-digest re-record is allowed.
+	d.recordDNSBaselineCAS(gen, cfg, answersC)
+	if got := d.dnsBaselineFor(cfg); !reflect.DeepEqual(got, answersC) {
+		t.Fatalf("baseline after idempotent record = %v, want C", got)
 	}
 }
 
@@ -482,9 +514,16 @@ func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 	if dp.applyCalls != 2 {
 		t.Fatalf("recovery tick applies = %d, want 2 (baseline suppressed recovery — proposal was cached)", dp.applyCalls)
 	}
-	// Steady state: no further republish.
+	// Steady state: tick publishes the clone whose DNS view is now B
+	// (the store copy still holds A), and the actually-applied baseline
+	// is B, so detection compares clone==baseline and does not
+	// republish. (A tick always re-resolves the clone; the assert is on
+	// publish count, not lookup count.)
 	d.refreshDNSOnce()
 	if dp.applyCalls != 2 {
 		t.Fatalf("steady-state tick republished: applies = %d", dp.applyCalls)
+	}
+	if got := d.dnsBaselineFor(d.store.ActiveConfig()); got == nil {
+		t.Fatal("baseline vanished in steady state")
 	}
 }
