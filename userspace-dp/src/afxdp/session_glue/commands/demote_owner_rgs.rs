@@ -94,19 +94,17 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up_resolution);
             // #15958b (fold): same shared zone-egress rule as refresh.
             let resolution = if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-                let destination_owner_active = forwarding
-                    .egress
-                    .iter()
-                    .filter(|(ifindex, _)| {
-                        forwarding.egress_zone_id(**ifindex) == metadata.egress_zone
-                    })
-                    .any(|(ifindex, _)| {
-                        let rg = owner_rg_for_flow(forwarding, *ifindex);
-                        rg > 0
-                            && ha_state
-                                .get(&rg)
-                                .is_some_and(|group| group.is_forwarding_active(now_secs))
-                    });
+                let dest_rg = super::super::connected_owner_rg_for_target(forwarding, resolution_target);
+                let destination_owner_active = dest_rg > 0
+                    && ha_state
+                        .get(&dest_rg)
+                        .is_some_and(|group| group.is_forwarding_active(now_secs));
+                let enforced_resolution = redirect_session_via_fabric_if_needed(
+                    forwarding,
+                    enforced_resolution,
+                    metadata.fabric_ingress,
+                    metadata.ingress_zone,
+                );
                 let redirected = super::super::fabric_redirect_for_zone_egress_15958b(
                     forwarding,
                     enforced_resolution,
@@ -114,16 +112,7 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                     false,
                     destination_owner_active,
                 );
-                if redirected.disposition == ForwardingDisposition::ForwardCandidate {
-                    redirect_session_via_fabric_if_needed(
-                        forwarding,
-                        enforced_resolution,
-                        metadata.fabric_ingress,
-                        metadata.ingress_zone,
-                    )
-                } else {
-                    redirected
-                }
+                super::super::retain_stored_fabric_redirect_15958b(decision.resolution, redirected)
             } else {
                 redirect_session_via_fabric_if_needed(
                     forwarding,

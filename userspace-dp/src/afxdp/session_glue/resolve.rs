@@ -515,36 +515,35 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
             // M1: never re-redirect a packet that arrived on the fabric
             // link (anti-loop, mirroring redirect_session_via_fabric_if_needed).
-            let destination_owner_active = forwarding
-                .egress
-                .iter()
-                .filter(|(ifindex, _)| {
-                    forwarding.egress_zone_id(**ifindex) == resolved.metadata.egress_zone
-                })
-                .any(|(ifindex, _)| {
-                    let rg = owner_rg_for_flow(forwarding, *ifindex);
-                    rg > 0
-                        && ha_state
-                            .get(&rg)
-                            .is_some_and(|group| group.is_forwarding_active(now_secs))
-                });
-            decision.resolution = super::fabric_redirect_for_zone_egress_15958b(
+            // Per-address destination owner (round-2 item 1): the RG
+            // of the connected interface serving resolution_target,
+            // not any RG in the destination zone.
+            let dest_rg = super::connected_owner_rg_for_target(forwarding, resolution_target);
+            let destination_owner_active = dest_rg > 0
+                && ha_state
+                    .get(&dest_rg)
+                    .is_some_and(|group| group.is_forwarding_active(now_secs));
+            // Composition (item 3): HAInactive conversion first; the
+            // zone-egress helper only converts a surviving candidate.
+            let enforced_resolution = redirect_session_via_fabric_if_needed(
+                forwarding,
+                enforced_resolution,
+                fabric_link_ingress,
+                resolved.metadata.ingress_zone,
+            );
+            let resolved_redirect = super::fabric_redirect_for_zone_egress_15958b(
                 forwarding,
                 enforced_resolution,
                 resolved.metadata.egress_zone,
                 fabric_link_ingress,
                 destination_owner_active,
             );
-            if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
-                && enforced_resolution.disposition == ForwardingDisposition::ForwardCandidate
-            {
-                decision.resolution = redirect_session_via_fabric_if_needed(
-                    forwarding,
-                    enforced_resolution,
-                    fabric_link_ingress,
-                    resolved.metadata.ingress_zone,
-                );
-            }
+            // Item 2: no resolvable fabric -> retain stored marker
+            // (fail closed at TX), never launder to WAN candidate.
+            decision.resolution = super::retain_stored_fabric_redirect_15958b(
+                resolved.decision.resolution,
+                resolved_redirect,
+            );
         } else {
             decision.resolution = redirect_session_via_fabric_if_needed(
                 forwarding,
@@ -766,36 +765,28 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
     );
     // #15958b: same retained-redirect guard as the hit arm above.
     if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-        let destination_owner_active = forwarding
-            .egress
-            .iter()
-            .filter(|(ifindex, _)| {
-                forwarding.egress_zone_id(**ifindex) == resolved.metadata.egress_zone
-            })
-            .any(|(ifindex, _)| {
-                let rg = owner_rg_for_flow(forwarding, *ifindex);
-                rg > 0
-                    && ha_state
-                        .get(&rg)
-                        .is_some_and(|group| group.is_forwarding_active(now_secs))
-            });
-        decision.resolution = super::fabric_redirect_for_zone_egress_15958b(
+        let dest_rg = super::connected_owner_rg_for_target(forwarding, resolution_target_for_session(flow, resolved.decision));
+        let destination_owner_active = dest_rg > 0
+            && ha_state
+                .get(&dest_rg)
+                .is_some_and(|group| group.is_forwarding_active(now_secs));
+        let enforced_resolution = redirect_session_via_fabric_if_needed(
+            forwarding,
+            enforced_resolution,
+            fabric_link_ingress,
+            resolved.metadata.ingress_zone,
+        );
+        let resolved_redirect = super::fabric_redirect_for_zone_egress_15958b(
             forwarding,
             enforced_resolution,
             resolved.metadata.egress_zone,
             fabric_link_ingress,
             destination_owner_active,
         );
-        if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
-            && enforced_resolution.disposition == ForwardingDisposition::ForwardCandidate
-        {
-            decision.resolution = redirect_session_via_fabric_if_needed(
-                forwarding,
-                enforced_resolution,
-                fabric_link_ingress,
-                resolved.metadata.ingress_zone,
-            );
-        }
+        decision.resolution = super::retain_stored_fabric_redirect_15958b(
+            resolved.decision.resolution,
+            resolved_redirect,
+        );
     } else {
         decision.resolution = redirect_session_via_fabric_if_needed(
             forwarding,

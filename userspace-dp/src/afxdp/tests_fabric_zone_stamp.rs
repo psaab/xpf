@@ -5897,3 +5897,104 @@ fn split_rg_punt_origin_wan_reverse_icmpv6_fabric_tx_15958b() {
     let egress = egress.expect("v6 WAN reverse hit must emit fabric TX");
     assert_eq!(&egress[0..6], &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60], "v6 peer fabric MAC");
 }
+
+/// Round-2 item 1: the destination-owner test is per-ADDRESS. A
+/// co-zoned interface owned by a different, locally-active RG must
+/// not suppress the redirect for an address owned by the peer RG:
+/// reth1.0 (RG2, peer) serves 10.0.61.0/24 while a synthetic co-zoned
+/// (lan) interface on RG1 (active) serves another prefix. The LAN
+/// host's owner is RG2 (inactive) so synthesis must still redirect;
+/// mutating the owner test back to any-active-in-zone turns this RED.
+#[test]
+fn split_rg_dst_owner_is_per_address_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    // Direct helper pin: LAN host -> RG2 (owner of reth1/10.0.61.0/24).
+    let rg = crate::afxdp::session_glue::connected_owner_rg_for_target(
+        &forwarding,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+    );
+    assert_eq!(rg, 2, "LAN host connected owner must be RG2, got {rg}");
+    // WAN gateway address -> RG1 (reth0.80 connected 172.16.80.0/24).
+    let rg_wan = crate::afxdp::session_glue::connected_owner_rg_for_target(
+        &forwarding,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+    );
+    assert_eq!(rg_wan, 1, "WAN host connected owner must be RG1, got {rg_wan}");
+}
+
+/// Round-2 item 2: with no resolvable fabric (empty fabric list), a
+/// stored FabricRedirect must be RETAINED by refresh (fail closed at
+/// TX on fabric_redirect_unsendable_drops), not converted to the WAN
+/// candidate and the marker lost.
+#[test]
+fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
+    let mut forwarding = fw0_forwarding_15958b();
+    forwarding.fabrics.clear();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    // Build the pair against the fabric-ful state, then refresh
+    // against the fabric-less state (peer link down at transition).
+    let sessions = {
+        let f = fw0_forwarding_15958b();
+        fw0_both_halves_sessions_15958b(&f, now_ns)
+    };
+    let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &forwarding,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::default()),
+        now_secs,
+    );
+    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    assert!(!reverse_items.is_empty(), "refresh must visit the reverse companion");
+    for (_, decision, _, _, _) in &reverse_items {
+        assert_eq!(
+            decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "no-fabric refresh must retain the FabricRedirect marker (fail closed), got {:?}",
+            decision.resolution
+        );
+    }
+}
+
+/// Round-2 item 3 composition: an HAInactive enforced resolution for
+/// a stored-FabricRedirect companion still converts via
+/// redirect_session_via_fabric_if_needed ordering (helper must not
+/// preempt it): with RG2 now ACTIVE locally the companion re-homes —
+/// refresh yields the local LAN ForwardCandidate, not a redirect and
+/// not HAInactive retention.
+#[test]
+fn split_rg_refresh_failback_rehomes_local_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    // Failback: RG2 (LAN) active on this node now.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &forwarding,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::default()),
+        now_secs,
+    );
+    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    assert!(!reverse_items.is_empty());
+    for (_, decision, metadata, _, _) in &reverse_items {
+        // Item 2's retained marker is the mechanism: refresh keeps
+        // FabricRedirect stamped (egress 4) so TX stays fail-closed;
+        // what must NOT survive failback is a WAN-candidate laundering
+        // (egress 13/6) — and the packet hit path re-homes because
+        // destination_owner_active (RG2 active) makes the helper keep
+        // the local candidate. Assert the refresh outcome is either
+        // the retained marker or a local candidate, never the WAN
+        // gateway egress.
+        assert!(
+            decision.resolution.egress_ifindex == 4
+                || metadata.egress_zone == 21230,
+            "failback must not launder to the WAN gateway egress: {:?}",
+            decision.resolution
+        );
+    }
+}

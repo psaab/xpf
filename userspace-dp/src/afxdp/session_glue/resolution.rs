@@ -444,6 +444,66 @@ now_secs: u64,) -> bool {
     true
 }
 
+/// #15958b: the RG that owns `target` as a connected destination:
+/// the redundancy group of the interface whose connected prefix
+/// contains the address (per-address ownership, not per-zone —
+/// a co-zoned interface owned by a different RG must not decide).
+/// `connected_*_by_ifindex` is populated for every interface
+/// regardless of HA suppression, so a peer-owned connected prefix
+/// still names its owner here. 0 when no connected prefix matches.
+pub(in crate::afxdp) fn connected_owner_rg_for_target(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+) -> i32 {
+    let ifindexes: Vec<i32> = match target {
+        IpAddr::V4(ip) => forwarding
+            .connected_v4_by_ifindex
+            .iter()
+            .filter(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
+            .map(|(ifindex, _)| *ifindex)
+            .collect(),
+        IpAddr::V6(ip) => forwarding
+            .connected_v6_by_ifindex
+            .iter()
+            .filter(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
+            .map(|(ifindex, _)| *ifindex)
+            .collect(),
+    };
+    // Longest-prefix wins when prefixes nest: re-scan by prefix length.
+    let mut best: Option<(u8, i32)> = None;
+    for ifindex in ifindexes {
+        let len = match target {
+            IpAddr::V4(ip) => forwarding
+                .connected_v4_by_ifindex
+                .get(&ifindex)
+                .and_then(|prefixes| {
+                    prefixes
+                        .iter()
+                        .filter(|prefix| prefix.contains(ip))
+                        .map(|prefix| prefix.prefix_len())
+                        .max()
+                })
+                .unwrap_or(0),
+            IpAddr::V6(ip) => forwarding
+                .connected_v6_by_ifindex
+                .get(&ifindex)
+                .and_then(|prefixes| {
+                    prefixes
+                        .iter()
+                        .filter(|prefix| prefix.contains(ip))
+                        .map(|prefix| prefix.prefix_len())
+                        .max()
+                })
+                .unwrap_or(0),
+        };
+        let rg = owner_rg_for_flow(forwarding, ifindex);
+        if best.is_none_or(|(best_len, _)| len >= best_len) {
+            best = Some((len, rg));
+        }
+    }
+    best.map(|(_, rg)| rg).unwrap_or(0)
+}
+
 /// #15958b: shared zone-egress redirect rule for a fabric-ingress
 /// reverse row. When re-resolution yields a ForwardCandidate that
 /// egresses in a zone other than the companion's destination
@@ -453,21 +513,26 @@ now_secs: u64,) -> bool {
 /// = locally-active WAN RG) and HA enforcement keeps it. The reply
 /// must instead cross the fabric to the destination owner.
 ///
-/// Conditions (M1/M2):
-/// * `fabric_link_ingress` — the packet/command arrives ON the fabric
-///   link: anti-loop refusal, mirroring every other redirect site
-///   (a redirect back onto the fabric from fabric ingress loops).
-/// * The destination-zone RG must be peer-owned here: known
-///   (`owner_rg_for_resolution` on a resolution synthesized toward
-///   the destination, or the companion's recorded owner) and NOT
-///   forwarding-active. A bare zone inequality (including
-///   `egress_zone_id == 0` for an unzoned egress) is not proof the
-///   LAN is peer-owned; locally-owned destinations keep the
-///   candidate. Callers pass `destination_owner_active`: true only
-///   when the destination zone's RG is forwarding-active locally.
+/// Conditions:
+/// * `fabric_link_ingress` — the packet arrives ON the fabric link:
+///   anti-loop refusal, mirroring every other redirect site.
+/// * The DESTINATION ADDRESS's owning RG (per-address connected
+///   ownership, `connected_owner_rg_for_target`) must be peer-owned:
+///   known (> 0) and NOT forwarding-active. A co-zoned interface
+///   owned by a different, active RG does not suppress the redirect,
+///   and an unzoned/`egress_zone_id == 0` candidate alone is not
+///   proof of peer ownership. Callers pass
+///   `destination_owner_active` computed from that per-address RG.
 ///
-/// Returns the zone-encoded FabricRedirect when the rule fires,
-/// otherwise the candidate unchanged.
+/// Composition (round-2): callers run
+/// `redirect_session_via_fabric_if_needed` FIRST for the HAInactive
+/// family; this helper only converts a surviving ForwardCandidate
+/// and never preempts the HAInactive -> FabricRedirect ordering.
+/// When no fabric redirect can be resolved (no peer/link), the
+/// candidate is NOT silently converted to WAN egress by callers
+/// that held a stored FabricRedirect: they retain the stored
+/// disposition so TX fails closed on
+/// `fabric_redirect_unsendable_drops` instead of losing the marker.
 pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
     forwarding: &ForwardingState,
     candidate: ForwardingResolution,
@@ -486,6 +551,27 @@ pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
     }
     super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, destination_zone)
         .unwrap_or(candidate)
+}
+
+/// #15958b round-2 (item 2): when the shared rule cannot produce a
+/// redirect (no peer fabric/link resolvable) but the stored decision
+/// was FabricRedirect, retain the stored resolution instead of the
+/// WAN candidate. TX then fails closed: the dispatcher finds no
+/// sendable fabric target (or the stored target binding is absent)
+/// and counts `fabric_redirect_unsendable_drops`, rather than the
+/// marker being laundered away and the frame leaving on the WAN
+/// egress. When a redirect WAS resolved, keep it.
+pub(in crate::afxdp) fn retain_stored_fabric_redirect_15958b(
+    stored: ForwardingResolution,
+    resolved: ForwardingResolution,
+) -> ForwardingResolution {
+    if stored.disposition == ForwardingDisposition::FabricRedirect
+        && resolved.disposition == ForwardingDisposition::ForwardCandidate
+    {
+        stored
+    } else {
+        resolved
+    }
 }
 
 pub(in crate::afxdp) fn redirect_session_resolution_for_metadata(forwarding: &ForwardingState,
