@@ -1197,10 +1197,21 @@ impl Nat64State {
             // #15678: parse the authored source-address scoping. Empty list =
             // unconstrained; a non-empty list whose entries all fail to parse
             // stays constrained with no prefixes and matches NOTHING.
-            let source_constrained = !snap.source_addresses.is_empty();
+            // #15930: the explicit `source_constrained` flag is OR'd in, so
+            // an authored constraint stays constrained even if the list
+            // arrives empty; `any`/family wildcards are normalised here too
+            // (defence in depth for a hand-built or older snapshot) so the
+            // wildcard matches any source instead of nothing. An IPv4-only
+            // wildcard can never match an IPv6 source and stays a
+            // never-match entry.
+            let mut source_constrained =
+                snap.source_constrained || !snap.source_addresses.is_empty();
             let mut source_prefixes: Vec<PrefixV6> = Vec::new();
             for a in &snap.source_addresses {
-                let parsed = if let Ok(net) = a.parse::<ipnet::Ipv6Net>() {
+                let parsed = if a == "any" || a == "any6" || a == "any-ipv6" {
+                    source_constrained = false;
+                    None
+                } else if let Ok(net) = a.parse::<ipnet::Ipv6Net>() {
                     Some(PrefixV6::from_net(net))
                 } else if let Ok(addr) = a.parse::<Ipv6Addr>() {
                     Some(PrefixV6::from_net(ipnet::Ipv6Net::new(addr, 128).expect("host net")))
@@ -1210,6 +1221,9 @@ impl Nat64State {
                 if let Some(p) = parsed {
                     source_prefixes.push(p);
                 }
+            }
+            if !source_constrained {
+                source_prefixes.clear();
             }
             let pool_index_v4 = nat64_pool_index(&pool_v4);
             prefixes.push(Nat64Prefix {

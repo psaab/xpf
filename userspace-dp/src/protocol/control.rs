@@ -286,7 +286,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v60 -> v61 (#15707): ConfigSnapshot carries
 // no_ipv6_reject_zero_hop_limit; a v60 helper ignores it and keeps
 // originating ICMPv6 Time Exceeded for hop-limit=0 packets.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 61;
+// v61 -> v62 (#15930): NAT64RuleSnapshot carries source_constrained;
+// a v61 helper ignores it and derives constrainedness from the source
+// list alone, which the new builder's never-match sentinel keeps
+// fail-closed, but the explicit flag is the durable record.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 62;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

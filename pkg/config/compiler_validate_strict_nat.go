@@ -3248,7 +3248,13 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 			}
 		}
 		for _, a := range rs.SourceAddresses {
-			if a == "" || a == "any" || a == "::/0" {
+			// #15930: every wildcard spelling is an authored match-any
+			// (v6-covering) or never-match (v4-only) token, not an
+			// unparseable entry; the builder lowers them accordingly.
+			if a == "" || a == "::/0" {
+				continue
+			}
+			if _, _, isWildcard := PolicyAddressWildcardFamilies(a); isWildcard {
 				continue
 			}
 			pfx, err := netip.ParsePrefix(a)

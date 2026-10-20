@@ -451,7 +451,13 @@ const (
 	// originating ICMPv6 Time Exceeded for hop-limit=0 packets the
 	// operator configured it not to reject — so exact-equality
 	// versioning fences the pairing instead of degrading silently.
-	ProtocolVersion = 61
+	// v61 -> v62 (#15930): NAT64RuleSnapshot carries source_constrained.
+	// A v61 helper ignores it and derives constrainedness from the
+	// source list alone — correct for the sentinel the new builder
+	// ships, but the explicit flag is the durable record that an
+	// authored constraint existed; exact-equality versioning fences
+	// the pairing instead of degrading silently.
+	ProtocolVersion = 62
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

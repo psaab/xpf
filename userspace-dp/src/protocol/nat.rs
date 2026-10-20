@@ -344,12 +344,16 @@ pub(crate) struct NAT64RuleSnapshot {
     /// `source_addresses` empty = match any IPv6 source. An old control
     /// plane omits them and the rule stays global (pre-#15678 behaviour);
     /// the v60 protocol bump fences a new control plane from an old helper.
+    /// #15930: `source_constrained` records an authored source
+    /// restriction independent of resolution; `any` arrives as `::/0`.
     #[serde(rename = "from_zone", default)]
     pub from_zone: String,
     #[serde(rename = "from_routing_instance", default)]
     pub from_routing_instance: String,
     #[serde(rename = "source_addresses", default)]
     pub source_addresses: Vec<String>,
+    #[serde(rename = "source_constrained", default)]
+    pub source_constrained: bool,
     // #2214: null-tolerant. A NAT64 rule with no resolvable source pool
     // makes the Go builder emit `pool_addresses:null` (nil slice, no
     // `,omitempty`); plain `default` would only cover an ABSENT key, so an

@@ -15398,6 +15398,25 @@ Rust #6982 aggregate budget is the only bound. Tests:
 `nat64_scope_15678_test.go` (config + userspace),
 `compiler_nat64_cap_15678_test.go`, `nat64_scoped_*_15678` (Rust).
 
+### #15930 — NAT64 source scope fail-closed (poisoned name / explicit `any`)
+
+The authored source constrainedness of a NAT64 rule-set is preserved
+end-to-end. A `match source-address-name` whose closure is poisoned
+(dns-name with zero answers, defined-but-empty address-set, unknown set
+member, undefined name on the tolerant path) ships the never-match
+`unresolved-address-name:` sentinel with `source_constrained=true`, so
+the Rust matcher matches NO source — it never clears to an empty list
+(which Rust reads as unconstrained / any-source). A name resolving
+empty without poisoning (present-empty fail-mode-drop feed) keeps the
+same sentinel. Conversely an explicit `match source-address any` (or
+`any6` / `any-ipv6`) lowers to `::/0` and matches any source, exactly
+like an omitted selector; `any4` / `any-ipv4` can never match an IPv6
+source and stays never-match. Wire: `NAT64RuleSnapshot` gains
+`source_constrained` under ProtocolVersion 62 (Go + Rust lockstep,
+shape golden updated); Rust ORs the flag with the list derivation and
+normalises wildcard tokens. Tests: `nat64_source_scope_15930_test.go`
+(config + userspace), `nat64_15930_*` (Rust).
+
 ### #2217 — firewall / application undefined-reference validation
 
 Three firewall/application cross-references compiled cleanly with no operator
