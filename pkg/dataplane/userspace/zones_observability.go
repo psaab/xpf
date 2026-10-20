@@ -33,18 +33,34 @@ func hostInboundInterfaceAdminDisabled(cfg *config.Config, ref string) bool {
 	if cfg == nil {
 		return false
 	}
-	base, unitRef, hasUnit := strings.Cut(ref, ".")
-	ifc := cfg.Interfaces.Interfaces[base]
+	// #15934: resolve through the declared-name-aware splitter so
+	// VLAN-qualified refs ("ge-0/0/0.100:12" — unit 100, VLAN 12) and
+	// declared dotted bases bind the same unit the zone mapper binds;
+	// the naive first-dot cut + Atoi treated every such ref as
+	// enabled. A trailing ":<vlan>" qualifier is not part of the
+	// unit identity: strip it before splitting.
+	splitRef := ref
+	if i := strings.LastIndexByte(splitRef, ':'); i >= 0 {
+		// Only a canonical VLAN qualifier (decimal digits, 0..=4094) is
+		// stripped; signed or out-of-range suffixes (":-1", ":+12",
+		// ":4095") stay part of the ref and remain inert, exactly as a
+		// non-numeric suffix does.
+		if vid, err := strconv.Atoi(splitRef[i+1:]); err == nil && vid >= 0 && vid <= 4094 && strconv.Itoa(vid) == splitRef[i+1:] {
+			splitRef = splitRef[:i]
+		}
+	}
+	s := cfg.SplitInterfaceUnitRef(splitRef)
+	ifc := cfg.Interfaces.Interfaces[s.Base]
 	if ifc == nil {
 		return false
 	}
 	if ifc.Disable {
 		return true
 	}
-	if !hasUnit {
+	if !s.HasUnit {
 		return false
 	}
-	unitNum, err := strconv.Atoi(unitRef)
+	unitNum, _, err := config.CanonicalLogicalUnit(s.UnitTok)
 	if err != nil {
 		return false
 	}

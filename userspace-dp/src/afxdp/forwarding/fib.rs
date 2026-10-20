@@ -446,12 +446,30 @@ fn lookup_forwarding_resolution_without_nat_local_inner(
     )
 }
 
-/// #9951: identify the exact inter-VRF leak selected by the immutable FIB
-/// walk. This deliberately does not re-run neighbor/ECMP/HA resolution:
+/// #9951: identify the first precedence-ordered leak incarnation that
+/// owns this destination for ABA/revocation stamping (NOT necessarily
+/// the leak that carried any given packet — see the #15934 note below).
+/// This deliberately does not re-run neighbor/ECMP/HA resolution:
 /// those mutable inputs can change between the session lookup and provenance
 /// stamping, which must never turn a valid leak match into an unstamped one.
 /// The first matching leak whose target table has a route is the same
 /// precedence-ordered rule selected by the forwarding walk.
+///
+/// #15934 alignment note: since the #14319 recursive-NoRoute `continue`
+/// was restored in the v4 walk (mirroring v6), the FORWARDING walk can
+/// select a LATER leak than the one stamped here when an earlier
+/// precheck-admitted target resolves `NoRoute` at lookup time (e.g.
+/// tunnel-only longest prefix under `allow_tunnels == false`). This
+/// provenance stamp intentionally remains the FIRST precheck-admitted
+/// leak: the stamp answers "which leak incarnation owns this
+/// destination for ABA/revocation purposes" (`leak_incarnation_is_live`
+/// — a removed-and-re-added rule must fail closed), not "which leak
+/// carried this packet". Re-stamping to the packet's eventual leak
+/// would require re-running the mutable neighbor/ECMP/tunnel
+/// resolution this function deliberately avoids, and a stamp mismatch
+/// is fail-closed in `resolve.rs` (a differing current incarnation
+/// yields NoRoute), never a permit. The same divergence pre-exists on
+/// v6, whose walk has always continued past recursive NoRoute.
 pub(in crate::afxdp) fn leak_incarnation_for_resolution(
     state: &ForwardingState,
     target: IpAddr,
@@ -966,6 +984,9 @@ fn lookup_forwarding_resolution_v4_inner(
                     ecmp_flow_hash,
                     suppress_nat_local,
                 );
+                if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                    continue;
+                }
                 return resolved;
             }
         }
