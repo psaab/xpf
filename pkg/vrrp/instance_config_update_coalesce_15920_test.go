@@ -815,25 +815,35 @@ func TestVRRPMaster_IntervalShrinkPlusVIPEdit_ConfigStillReArms(t *testing.T) {
 
 // TestVRRPMaster_ConfigHandlerArmBetweenUpdates_ThenRevert is the
 // Opus2 round-3 interleaving: the config consumer itself arms the
-// timer. MASTER at 100ms (advertTimer armed at 100ms); commit A:
-// 100->1000; consume the token — the consumer's correction advert
-// callback commits B: 1000->60000, so the consumer's trailing
-// armAdvertTimer uses B's 60000ms and must baseline old*:=60000
-// atomically with that arm. Commit C then reverts to the ORIGINAL
-// 100ms. Consuming the queued token must still emit a correction
-// advert and re-arm at 100ms: against the armed 60000ms baseline,
-// 100 is a change. If the consumer armed without noting (head
-// 7d08d595), C's accumulated record would read 100->100 — A/B/C
-// netting against the pre-A baseline — and suppress the correction,
-// stranding the 60000ms arm (review scratch: adverts [10], want
-// [10 10] in its 100/60000/100 encoding; here A is 1000ms=100cs).
+// timer. MASTER at 10000ms (advertTimer armed at 10000ms); commit A:
+// 10000->100; consume the token — the consumer's correction advert
+// callback commits B: 100->10000, so the consumer's trailing
+// armAdvertTimer uses B's 10000ms and must baseline old*:=10000
+// atomically with that arm. Commit C then reverts B, back to A's
+// 100ms. Consuming the queued token must STILL emit a second
+// correction advert and re-arm at 100ms: against the armed 10000ms
+// baseline, 100 is a change.
+//
+// Why C reverts to A's 100 (Codex3): the consumer's trailing arm is
+// at B (10000ms, the pre-A value). At head, armAdvertTimer notes
+// old:=10000 (armed) while new is still B's 10000, so the record
+// captured between the consumptions reads {10000->10000} — B fully
+// applied. C then refreshes new:=100 and the second consumption
+// sees {10000->100}: second correction advert (10cs) and a 100ms
+// deadline, asserted below. Fold-reverted (consumer arm without
+// note, via a shim armAdvertTimer), that mid-test record instead
+// reads {100->10000} — baseline still at A's old value, B recorded
+// only as desired — and the test fails there (verified by overlay).
+// The earlier committed encoding (C back to the pre-A value) let
+// the fold-reverted record read old != new at the second
+// consumption, so it passed vacuously; reverting to A's value plus
+// the mid-test record assertion is what discriminates.
 func TestVRRPMaster_ConfigHandlerArmBetweenUpdates_ThenRevert(t *testing.T) {
-	vi := newMaster15689(t, 100)
-	base := Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: true, AdvertiseInterval: 100}
+	vi := newMaster15689(t, 10000)
+	base := Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: true, AdvertiseInterval: 10000}
 	toA := base
-	toA.AdvertiseInterval = 1000
-	toB := base
-	toB.AdvertiseInterval = 60000
+	toA.AdvertiseInterval = 100
+	toB := base // B == pre-A value 10000, committed mid-consumer
 
 	var intervals []int
 	prev := sendPacketFn
@@ -855,22 +865,30 @@ func TestVRRPMaster_ConfigHandlerArmBetweenUpdates_ThenRevert(t *testing.T) {
 	if stop := vi.stepMaster(masterDown, advert); stop {
 		t.Fatal("stepMaster returned stop=true on first consumption")
 	}
-	if len(intervals) != 1 || intervals[0] != 100 {
-		t.Fatalf("first correction advert = %v cs, want [100] (1000ms)", intervals)
+	if len(intervals) != 1 || intervals[0] != 10 {
+		t.Fatalf("first correction advert = %v cs, want [10] (100ms)", intervals)
 	}
-	// The trailing arm used B (60000ms); B's token is still queued.
-	// Revert to the original 100ms before consuming it.
-	vi.updateConfig(base)
+	// The trailing arm used B (10000ms); B's token is still queued.
+	// At head the pending record must already read baseline == armed
+	// B (old == new == 10000): B is fully applied by the arm.
+	vi.mu.RLock()
+	mid := vi.pendingConfigChange
+	vi.mu.RUnlock()
+	if !mid.valid || mid.oldAdvertiseMS != 10000 || mid.newAdvertiseMS != 10000 {
+		t.Fatalf("pending after consumer arm = %+v, want old==new==10000 (baseline = armed B)", mid)
+	}
+	// Revert B by re-committing A's 100ms before consuming it.
+	vi.updateConfig(toA)
 	if stop := vi.stepMaster(masterDown, advert); stop {
 		t.Fatal("stepMaster returned stop=true on revert consumption")
 	}
 	if len(intervals) != 2 || intervals[1] != 10 {
-		t.Fatalf("adverts = %v cs, want [100 10]: revert after consumer armed at intermediate must correct", intervals)
+		t.Fatalf("adverts = %v cs, want [10 10]: revert to A after consumer armed at B must correct a second time", intervals)
 	}
 	select {
 	case <-advert.C:
 	case <-time.After(250 * time.Millisecond):
-		t.Fatal("advertTimer still armed at intermediate 60000ms after final revert to 100ms")
+		t.Fatal("advertTimer still armed at B's 10000ms after final revert to A's 100ms")
 	}
 }
 
