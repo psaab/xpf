@@ -3758,7 +3758,14 @@ impl SessionTable {
                 self.pending_probe_state_updates
                     .retain(|(old_key, _, _)| old_key != &matched_key);
                 if self.pending_probe_state_updates.len() >= 64 {
-                    self.pending_probe_state_updates.remove(0);
+                    // Overflow must not silently lose an HA transition:
+                    // publish the evicted oldest Update immediately and
+                    // latch delta-loss so the worker forces a full resync
+                    // (the same recovery used for delta-ring overflow).
+                    let (old_key, old_class, old_handshake) =
+                        self.pending_probe_state_updates.remove(0);
+                    self.emit_session_state_update(&old_key, old_class, old_handshake);
+                    self.set_delta_loss();
                 }
                 self.pending_probe_state_updates.push((
                     matched_key.clone(),

@@ -371,6 +371,29 @@ fn deferred_probe_updates_two_completing_flows_retained_15947() {
     assert_eq!(a_updates[0].key, a_forward);
 }
 
+
+#[test]
+fn deferred_probe_update_overflow_publishes_oldest_and_latches_resync_15947() {
+    // Fill the bounded deferred queue past its 64-entry cap with distinct
+    // completing flows. The 65th completion must publish the evicted
+    // oldest Update immediately and latch delta-loss for a full resync,
+    // rather than silently losing the HA transition.
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let mut first_forward = None;
+    for index in 0..65u16 {
+        let forward = SessionKey { src_port: 30000 + index, ..key_v4() };
+        if index == 0 { first_forward = Some(forward.clone()); }
+        let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+        assert!(table.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+        let _ = table.drain_deltas(64);
+        assert!(table.probe_hit_deferring_state_update(&forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    }
+    let updates: Vec<_> = table.drain_deltas(256).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(updates.len(), 1, "overflow must publish exactly the evicted oldest");
+    assert_eq!(updates[0].key, first_forward.expect("first flow"));
+    assert!(table.take_delta_loss(), "overflow must latch resync");
+}
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with
 /// payload progress re-stamps, matching the unfused keepalive.

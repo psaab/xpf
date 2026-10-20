@@ -304,20 +304,16 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
 /// firewall would deny, cannot route, classifies martian, or does not
 /// own (HA-inactive) — an oracle / split-brain response, and a fresh
 /// cookie ISN hijacking an Opening session's retransmitted SYN.
-/// This helper deliberately answers a narrower question than full
-/// session-miss admission: "is there a live session, or is the raw
-/// destination plausibly admissible?" A live session suppresses a
-/// fresh challenge; the caller still recycles the descriptor on this
-/// pre-session arm (it cannot reconstruct the later session-hit path
-/// here), so an Opening retransmit is protected from a second cookie
-/// ISN but does not get forwarded by this stage. Full translated-tuple
-/// admission (DNAT/NPTv6/NAT64/PBR and host-bound gates) is finalized
-/// later at `syn_cookie_final_admission` on the session-miss path,
-/// immediately before a validated ACK earns its ACK-RST. Any failure
-/// suppresses the reply — the packet is recycled silently, exactly as
-/// a denied SYN is dropped on the miss path. An unresolvable
-/// FIB/policy context (no flow, no route, unzoned) fails closed for
-/// the REPLY only.
+/// This helper is a necessary-but-not-sufficient challenge prescreen:
+/// it suppresses disproven replies, but a positive result is NOT final
+/// admission. The challenge caller therefore records a deferred
+/// challenge and lets the actual miss path re-derive DNAT/NPTv6/
+/// NAT64/PBR, select the route, and run the disposition-specific
+/// final/host admission before a SYN-ACK is emitted. It retains two
+/// useful early signals: an existing session suppresses a fresh
+/// cookie, and an unzoned/raw-disproven packet cannot earn a reply.
+/// "Plausible" here remains deliberately raw-tuple for transit; final
+/// admission's translated tuple is authoritative.
 pub(super) fn syn_cookie_reply_admitted(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
@@ -1036,6 +1032,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         &mut binding.tx_pipeline.free_tx_frames,
     );
     loop {
+        let mut deferred_syn_cookie_challenge: Option<crate::screen::SynCookieChallenge> = None;
         // #15243 (A60-01): a held packet that carries an owned inner frame
         // replays from those bytes; the native descriptor is recycled by
         // the ordinary `recycle_now` epilogue below (fail-closed if the
@@ -1607,11 +1604,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(
                             challenge,
                         )) => {
-                            // #15947 (H28-01): never answer a SYN whose
-                            // destination admission (session/FIB/HA/
-                            // martian/policy) would refuse it — recycle
-                            // silently instead of emitting a SYN-ACK
-                            // oracle / hijacking an Opening retransmit.
+                            // Final fold: this positive prescreen is not
+                            // final admission, so no SYN-ACK is emitted
+                            // here. Defer a plausible challenge to the
+                            // actual session-miss path below, which
+                            // re-derives translation/PBR/host or transit
+                            // admission before replying. A failed
+                            // prescreen recycles as before; a plausible
+                            // challenge keeps the descriptor live so the
+                            // ordinary miss machinery can also handle
+                            // established/session races correctly.
                             if syn_cookie_reply_admitted(
                                 worker_ctx.forwarding,
                                 worker_ctx.ha_state,
@@ -1623,20 +1625,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_ns,
                                 now_secs,
                             ) {
-                                enqueue_syn_cookie_reply(
-                                    &mut binding.tx_pipeline,
-                                    worker_ctx.forwarding,
-                                    worker_ctx.event_stream,
-                                    binding.ifindex,
-                                    packet_frame,
-                                    meta,
-                                    flow.as_ref(),
-                                    SynCookieReply::SynAck(challenge),
-                                    telemetry.counters,
-                                );
+                                deferred_syn_cookie_challenge = Some(challenge);
+                            } else {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
                             }
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
                         }
                     }
                 }
@@ -5224,6 +5217,58 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // final-admission helper repeats martian + policy
                         // on that authoritative tuple; LocalDelivery is
                         // admitted without a transit-policy requirement
+                        // Final fold: a SYN that survived the early
+                        // prescreen as a cookie challenge earns its
+                        // SYN-ACK under exactly the same
+                        // disposition-specific final/host admission as
+                        // a validated ACK (translated/PBR tuple for
+                        // transit; host gates for LocalDelivery). This
+                        // is the single reply decision point; no earlier
+                        // stage has emitted a challenge reply.
+                        if let Some(challenge) = deferred_syn_cookie_challenge.take() {
+                            let admitted = if decision.resolution.disposition
+                                == ForwardingDisposition::LocalDelivery
+                            {
+                                syn_cookie_host_admission(
+                                    worker_ctx.forwarding,
+                                    flow,
+                                    packet_frame,
+                                    meta,
+                                    ingress_zone_override,
+                                    effective_resolution_target,
+                                    policy_dst_port,
+                                    now_ns,
+                                )
+                            } else {
+                                syn_cookie_final_admission(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.ha_state,
+                                    flow,
+                                    meta,
+                                    ingress_zone_override,
+                                    decision.resolution,
+                                    effective_resolution_target,
+                                    policy_dst_port,
+                                    now_ns,
+                                    now_secs,
+                                )
+                            };
+                            if admitted {
+                                enqueue_syn_cookie_reply(
+                                    &mut binding.tx_pipeline,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    binding.ifindex,
+                                    packet_frame,
+                                    meta,
+                                    Some(flow),
+                                    SynCookieReply::SynAck(challenge),
+                                    telemetry.counters,
+                                );
+                            }
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         // because its host gates run on the normal path.
                         if validated_syn_cookie_ack {
                             let admitted = if decision.resolution.disposition
