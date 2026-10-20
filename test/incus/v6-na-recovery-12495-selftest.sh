@@ -540,9 +540,12 @@ run_gate pass 5 0
 # one untargeted request.
 # Parser regression (#15959): the stub emits the REAL 6-line block, so
 # in split state rg_primary(fw0) must read node1 (peer row 5 lines below
-# the header) and the failback branch must fire. Under the old grep -A2
-# parser CURRENT=[] and this case exits 3 with NO reset/targeted lines
-# in the CLI log — verified by reverting the parser.
+# the header) and the failback branch must fire. Note this stranded case
+# does NOT pin the parser: the gate's FW1 cross-check rescues it under
+# the old grep -A2 parser (fw1's own primary row sits inside the -A2
+# window), so it still passes with the parser reverted — verified by
+# reverting it. The parser unit cases below are the parser pin: they
+# fail (3 cases) under the old parser.
 run_gate_stranded() {
 	local g="$STUB/stranded" out rc log reset_ln target_ln plain_count
 	mkdir -p "$g/logs"
