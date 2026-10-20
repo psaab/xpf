@@ -8323,9 +8323,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 continue;
                             }
                             EmbeddedIcmpReversal::Dropped => {
-                                // Matched but egress CoS / output-filter dropped
-                                // the reversed error — fail-closed silent drop
-                                // (never answer an ICMP error with an ICMP error).
+                                // Matched but not delivered for a non-output-
+                                // filter reason (budget/identity/TTL) —
+                                // fail-closed drop (never answer an ICMP
+                                // error with an ICMP error). The output-
+                                // filter verdict is OutputFilterDropped above.
                                 telemetry.counters.touched = true;
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;

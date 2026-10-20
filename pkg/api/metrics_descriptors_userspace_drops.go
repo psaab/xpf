@@ -353,7 +353,7 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 	)
 	c.userspaceForwardBuildFailures = prometheus.NewDesc(
 		"xpf_userspace_forward_build_failures_total",
-		"Forward build failures (release-visible mirror of the debug "+
+		"Forward build failures (release-visible counterpart, a superset, of the debug "+
 			"build_fail tally: build-None exits and dispatch build "+
 			"failures). Summed across bindings and emitted "+
 			"unconditionally (#15941).",
@@ -362,7 +362,7 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 	c.userspaceNoEgressBindingDrops = prometheus.NewDesc(
 		"xpf_userspace_no_egress_binding_drops_total",
 		"Forward requests dropped because no XSK binding exists for "+
-			"the target interface (release-visible mirror of the debug "+
+			"the target interface (release-visible counterpart, a superset, of the debug "+
 			"no_egress_binding tally). Summed across bindings and "+
 			"emitted unconditionally (#15941).",
 		nil, nil,

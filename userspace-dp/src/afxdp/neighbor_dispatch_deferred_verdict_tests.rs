@@ -288,7 +288,7 @@ fn flush_one(
 fn flush_oversized_pending_tcp(
     output_filter_action: Option<&str>,
     include_egress_binding: bool,
-) -> (Vec<BindingWorker>, Vec<String>) {
+) -> (Vec<BindingWorker>, Vec<String>, u64, u64) {
     const FRAME_LEN: usize = 14 + 1500;
     let src_ip = Ipv4Addr::new(10, 0, 0, 1);
     let dst_ip = Ipv4Addr::new(10, 0, 0, 2);
@@ -481,12 +481,17 @@ fn flush_oversized_pending_tcp(
         .iter()
         .map(|event| event.reason().to_string())
         .collect();
-    (bindings, reasons)
+    (
+        bindings,
+        reasons,
+        counters.no_egress_binding_drops,
+        counters.forward_build_failures,
+    )
 }
 
 #[test]
 fn deferred_neighbor_replay_emits_ptb_for_1500_df_on_1400_egress_11410() {
-    let (bindings, reasons) = flush_oversized_pending_tcp(None, true);
+    let (bindings, reasons, _no_egress, _build_fail) = flush_oversized_pending_tcp(None, true);
     let ingress_tx = &bindings[0].tx_pipeline.pending_tx_local;
     assert_eq!(
         ingress_tx.len(),
@@ -522,7 +527,7 @@ fn deferred_neighbor_replay_emits_ptb_for_1500_df_on_1400_egress_11410() {
 
 #[test]
 fn deferred_neighbor_output_discard_preempts_ptb_11410() {
-    let (bindings, reasons) = flush_oversized_pending_tcp(Some("discard"), true);
+    let (bindings, reasons, _no_egress, _build_fail) = flush_oversized_pending_tcp(Some("discard"), true);
     assert!(
         bindings[0].tx_pipeline.pending_tx_local.is_empty(),
         "an output-filter discard must not be answered with a PTB"
@@ -545,12 +550,18 @@ fn deferred_neighbor_output_discard_preempts_ptb_11410() {
 
 #[test]
 fn deferred_neighbor_missing_egress_binding_skips_ptb_11410() {
-    let (bindings, reasons) = flush_oversized_pending_tcp(None, false);
+    let (bindings, reasons, no_egress, _build_fail) = flush_oversized_pending_tcp(None, false);
 
     assert!(
         bindings[0].tx_pipeline.pending_tx_local.is_empty()
             && bindings[0].tx_pipeline.pending_tx_prepared.is_empty(),
         "an oversized frame with no target binding must not emit a PTB or TX original"
+    );
+    // #15941 revert-guard: retry no-target must count + ring.
+    assert_eq!(no_egress, 1, "#15941 retry no-binding site must increment the named counter");
+    assert!(
+        reasons.iter().any(|reason| reason == "missing_egress_binding"),
+        "retry no-binding must ring missing_egress_binding: {reasons:?}"
     );
     assert!(
         !reasons.iter().any(|reason| reason == "egress_mtu_exceeded"),

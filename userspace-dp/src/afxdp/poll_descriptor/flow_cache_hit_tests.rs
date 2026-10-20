@@ -802,6 +802,24 @@ impl LiveCallSiteFixture {
     /// therefore never consulted on a VLAN-tagged frame — measured: it leaves
     /// `pending_tx_local` empty and looks exactly like the reject branch not
     /// running at all.
+    /// #15941: install a bindless selector fence matching the stock
+    /// test tuple (10.0.1.0/24 <-> 172.16.50.0/24) so the cached-hit
+    /// fence arm can fire.
+    fn with_selector_fence(mut self) -> Self {
+        let snapshot = crate::protocol::ConfigSnapshot {
+            bindless_selector_fence_enabled: true,
+            bindless_selector_rows: vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+                local_ts: "10.0.1.0/24".to_string(),
+                remote_ts: "172.16.50.0/24".to_string(),
+            }],
+            ..Default::default()
+        };
+        self.forwarding.bindless_ipsec_selector_fence =
+            crate::afxdp::ipsec_selector_fence::BindlessIpsecSelectorFence::from_snapshot(&snapshot)
+                .expect("valid selector snapshot");
+        self
+    }
+
     fn with_ingress_primary_v4(mut self) -> Self {
         self.forwarding.egress.insert(
             LOGICAL_INGRESS_IFINDEX,
@@ -5326,4 +5344,23 @@ fn cached_output_filter_discard_counts_transit_drop_15941() {
     );
     assert!(run.scratch.scratch_forwards.is_empty());
     assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
+}
+
+/// #15941 revert-guard: the cached-hit IPsec selector fence
+/// (`flow_cache_hit.rs` fence arm) must increment
+/// `transit_ipsec_fence_drops`.
+#[test]
+fn cached_selector_fence_counts_transit_fence_drop_15941() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_selector_fence();
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let run = run_stage(&fixture, &frame, 0);
+    assert_eq!(run.flow_cache_tallies.0, 1, "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(
+        run.counters.transit_ipsec_fence_drops, 1,
+        "#15941 cached-hit fence site must increment the named counter"
+    );
+    assert_eq!(run.dbg_tx, 0, "fenced hit must not transmit");
+    assert!(run.scratch.scratch_forwards.is_empty());
 }

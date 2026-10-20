@@ -14753,3 +14753,149 @@ fn nat64_embedded_error_output_drop_counts_transit_15941() {
         "control must not count"
     );
 }
+
+/// #15941 revert-guard: the GENERIC (non-NAT64) embedded-ICMP caller arm
+/// must count the egress output-filter drop. Same-family NAT44 reversal
+/// egresses toward the client on the LAN; an output discard there drops
+/// it at queue time via `OutputFilterDropped`.
+#[test]
+fn generic_embedded_error_output_drop_counts_transit_15941() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let frame = build_icmp_te_frame_v4_with_mac(
+        router_ip,
+        snat_ip,
+        server_ip,
+        40000,
+        80,
+        PROTO_TCP,
+        TEST_WAN_MAC,
+    );
+    let mut snapshot = nat_snapshot();
+    snapshot.flow.allow_embedded_icmp = true;
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.filter_output_v4 = "lan-out-15941".to_string();
+        }
+    }
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "lan-out-15941".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "drop-icmp".to_string(),
+            protocols: vec!["icmp".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: 12345,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some(N6472_WAN_GW_MAC),
+                src_mac: Some(N6472_WAN_SRC_MAC),
+                tx_vlan_id: 80,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_src_port: Some(40000),
+                ..Default::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        123_000_000_000 - 1,
+        PROTO_TCP,
+        0x18,
+    ));
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    learn_dynamic_neighbor(
+        &forwarding,
+        &dynamic_neighbors,
+        24,
+        0,
+        IpAddr::V4(client_ip),
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    );
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
+    let (batch, _dbg) = txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &dynamic_neighbors,
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "output-discarded reversed error must not queue"
+    );
+    assert_eq!(
+        batch.transit_output_filter_drops, 1,
+        "#15941 generic embedded caller must count the output-filter drop"
+    );
+}

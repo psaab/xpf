@@ -3256,14 +3256,13 @@ fn poll_output_filter_build_none_counts_and_rings_15941() {
     meta.flow_dst_addr[..4].copy_from_slice(&dst.octets());
     meta.flow_src_port = 40000;
     meta.flow_dst_port = 443;
-    let (batch, dbg) = txn_run_descriptor_checked(
+    let (batch, dbg, reasons) = txn_run_descriptor_capturing_exceptions(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
-        true,
     );
     assert_eq!(
         batch.validated_packets, 1,
@@ -3277,5 +3276,9 @@ fn poll_output_filter_build_none_counts_and_rings_15941() {
     assert_eq!(
         batch.forward_build_failures, 1,
         "#15941 poll build-None must count the build failure"
+    );
+    assert!(
+        reasons.iter().any(|r| r == "transit_output_filter_drop"),
+        "#15941 poll build-None must ring transit_output_filter_drop: {reasons:?}"
     );
 }

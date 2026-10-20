@@ -1176,6 +1176,20 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                         None,
                         forwarding,
                     );
+                } else {
+                    // #15941: non-fabric Prebuilt enqueue failure (today
+                    // reachable only via test fault injection; count it
+                    // like the dispatch build-failure family regardless).
+                    counters.record_forward_build_failure();
+                    record_exception(
+                        recent_exceptions,
+                        ingress_ident,
+                        "forward_build_failed",
+                        request.desc.len,
+                        Some(request.meta.into()),
+                        None,
+                        forwarding,
+                    );
                 }
                 recycle_ingress_frame(ingress_binding, source_offset, now_ns);
                 continue;
