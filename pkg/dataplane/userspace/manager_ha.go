@@ -490,6 +490,10 @@ func (m *Manager) HATakeoverReadiness() HATakeoverReadiness {
 			s.Blockers = append(s.Blockers, "pending_ha_replay")
 		case strings.Contains(reason, "event stream listener not bound"):
 			s.Blockers = append(s.Blockers, "event_stream_unbound")
+		case strings.Contains(reason, "fabric state not converged"):
+			s.Blockers = append(s.Blockers, "fabric_not_converged")
+		case strings.Contains(reason, "fabric peer unresolved"):
+			s.Blockers = append(s.Blockers, "fabric_peer_unresolved")
 		default:
 			s.Blockers = append(s.Blockers, "forwarding_unsupported")
 		}
@@ -602,6 +606,30 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 	}
 	if m.pendingHAStateReplay {
 		reasons = append(reasons, "userspace HA state replay pending")
+	}
+	// #15918: a fabric the daemon marked populated is not takeover-ready
+	// unless the helper-facing snapshot can actually install it. When a
+	// fabric is configured (lastSnapshot carries a row) in cluster HA mode,
+	// at least one row must have a resolved PeerMAC and an unconverged
+	// update_fabrics (partialFabrics debt) must not be outstanding. This
+	// closes the fab1 link-local false-ready: daemon fabric1Populated=true
+	// with PeerMAC="" / UnresolvedPeerMac in Rust no longer passes.
+	// Non-clustered / no-fabric snapshots carry no rows and are unaffected.
+	if m.clusterHA && m.lastSnapshot != nil && len(m.lastSnapshot.Fabrics) > 0 {
+		if m.partialSectionUnknownLocked(partialFabrics) {
+			reasons = append(reasons, "userspace fabric state not converged (update_fabrics outcome unknown)")
+		} else {
+			installable := false
+			for _, f := range m.lastSnapshot.Fabrics {
+				if f.PeerMAC != "" && f.ParentIfindex > 0 {
+					installable = true
+					break
+				}
+			}
+			if !installable {
+				reasons = append(reasons, "userspace fabric peer unresolved (no installable fabric link)")
+			}
+		}
 	}
 	return len(reasons) == 0, reasons
 }
