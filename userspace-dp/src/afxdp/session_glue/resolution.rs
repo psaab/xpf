@@ -456,39 +456,26 @@ pub(in crate::afxdp) fn interface_in_table_scope(
     ifindex: i32,
     table: Option<&str>,
 ) -> bool {
-    let Some(want) = table else {
-        // Default scope: the interface must not belong to a named RI.
-        // The connected rows' table for default interfaces is the
-        // canonical default; an interface with no RI row is default.
-        return forwarding
-            .ifindex_to_routing_instance
-            .get(&ifindex)
-            .is_none_or(|ri| ri.is_empty());
-    };
-    // Named table (e.g. "tenant-a.inet.0"): the interface's RI is the
-    // table's instance part (strip the family suffix) or the table
-    // name itself as recorded on egress rows.
-    forwarding
+    let instance = forwarding
         .ifindex_to_routing_instance
         .get(&ifindex)
-        .is_some_and(|ri| {
-            !ri.is_empty()
-                && (want == ri
-                    || want.starts_with(ri.as_str())
-                    || forwarding
-                        .egress
-                        .get(&ifindex)
-                        .is_some_and(|egress| egress_table_matches(egress, want)))
-        })
-}
-
-fn egress_table_matches(egress: &EgressInterface, want: &str) -> bool {
-    // EgressInterface carries no table name; RI match falls back to
-    // the ifindex ledger above. Kept as a named seam so a future
-    // table field on the egress row slots in without call-site churn.
-    let _ = egress;
-    let _ = want;
-    false
+        .map(String::as_str)
+        .unwrap_or("");
+    let Some(want) = table else {
+        return instance.is_empty();
+    };
+    // Exact match (fib.rs `instance_owns_table_*` precedent): the
+    // instance owns exactly `<instance>.inet.0` / `<instance>.inet6.0`
+    // (length + suffix), so "tenant-a" never matches "tenant-ab...".
+    if instance.is_empty() {
+        return want == "inet.0" || want == "inet6.0";
+    }
+    (want.len() == instance.len() + ".inet.0".len()
+        && want.starts_with(instance)
+        && &want[instance.len()..] == ".inet.0")
+        || (want.len() == instance.len() + ".inet6.0".len()
+            && want.starts_with(instance)
+            && &want[instance.len()..] == ".inet6.0")
 }
 
 /// #15958b: the RG that owns `target` as a connected destination:
@@ -735,27 +722,6 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
         }
     }
     best.map(|(_, ifindex)| ifindex).unwrap_or(0)
-}
-
-/// Target-aware re-home (round-4): re-home ONLY when the fresh
-/// candidate genuinely reaches the destination locally —
-/// `ForwardCandidate`, its egress IS the destination's connected
-/// interface (`connected_ifindex_for_target`), and it is not a
-/// fabric egress. During the RG2-active-but-FIB-not-yet-republished
-/// window the fresh candidate is the HA-suppressed WAN default
-/// (egress = WAN gateway, not the connected LAN interface), so the
-/// redirect is retained instead of laundering the reply onto WAN.
-pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_for_target_15958b(
-    forwarding: &ForwardingState,
-    stored: ForwardingResolution,
-    candidate: ForwardingResolution,
-    destination_zone: u16,
-    destination_owner_active: bool,
-    target: Option<IpAddr>,
-) -> ForwardingResolution {
-    rehome_or_retain_fabric_redirect_scoped_15958b(
-        forwarding, stored, candidate, destination_zone, destination_owner_active, target, None,
-    )
 }
 
 /// RI-scoped re-home (round-5): the connected-interface test runs
