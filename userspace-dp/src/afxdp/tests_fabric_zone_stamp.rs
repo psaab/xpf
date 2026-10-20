@@ -5496,14 +5496,16 @@ fn split_rg_fabric_return_scoped_tcp_egresses_lan_15958() {
 
 // ---------------------------------------------------------------------------
 // #15958b PIVOT (HuntFreshGLM round 6): the return dies on the PUNT
-// ORIGIN (fw0), not fw1. fw0 holds both halves locally created: the
-// forward LAN->WAN flow (fabric_ingress=false, admitted on fw0's LAN,
-// punted via fabric) and its reverse companion, whose resolution must
-// be FabricRedirect toward the LAN owner (fw1, RG2 active there,
-// INACTIVE on fw0). Drive the WAN-side reverse hit (plain WAN ingress,
-// no fabric stamp) through poll -> FabricRedirect decision -> enqueue
-// -> fabric TX submit and assert a frame is emitted on the fabric
-// binding (ifindex 4). Instrument every TX-submit exit.
+// ORIGIN (fw0), not fw1. fw0 holds both halves: the forward LAN->WAN
+// flow arrived as a fabric punt (live shape per split-live-row.md:
+// fabric_ingress=true, ingress_ifindex 0, provenance Some(false),
+// scope None, forward resolution FabricRedirect-shaped on the peer)
+// and its reverse companion, whose resolution must be FabricRedirect
+// toward the LAN owner (fw1, RG2 active there, INACTIVE on fw0).
+// Drive the WAN-side reverse hit (plain WAN ingress, no fabric
+// stamp) through poll -> FabricRedirect decision -> enqueue ->
+// fabric TX submit and assert a frame is emitted on the fabric
+// binding (ifindex 4).
 // ---------------------------------------------------------------------------
 
 fn fw0_forwarding_15958b() -> ForwardingState {
@@ -5711,4 +5713,187 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
         assert!(egress.is_some(), "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX");
         assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX TCP return");
     }
+}
+
+/// Fold cell (GLM B1): an HA RefreshOwnerRGS pass must not launder
+/// the stored FabricRedirect companion back onto the WAN gateway
+/// route. Synthesize the fw0 pair, run the production refresh
+/// collector, and assert the companion still redirects (egress 4),
+/// for IPv4 and IPv6.
+#[test]
+fn split_rg_refresh_keeps_fabric_redirect_15958b() {
+    for v6 in [false, true] {
+        let forwarding = fw0_forwarding_15958b();
+        let now_ns = monotonic_nanos();
+        let now_secs = now_ns / 1_000_000_000;
+        let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+        let mut sessions = if v6 {
+            fw0_both_halves_sessions_v6_15958b(&forwarding, now_ns)
+        } else {
+            fw0_both_halves_sessions_15958b(&forwarding, now_ns)
+        };
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+            &sessions,
+            &forwarding,
+            &ha_state,
+            &Arc::new(ShardedNeighborMap::default()),
+            now_secs,
+        );
+        let reverse_items: Vec<_> = items
+            .iter()
+            .filter(|(_, _, metadata, _, _)| metadata.is_reverse)
+            .collect();
+        assert!(!reverse_items.is_empty(), "v6={v6}: refresh must visit the reverse companion");
+        for (_, decision, metadata, _, _) in &reverse_items {
+            assert_eq!(
+                decision.resolution.disposition,
+                ForwardingDisposition::FabricRedirect,
+                "v6={v6}: refresh must keep FabricRedirect, got {:?} (metadata egress_zone={})",
+                decision.resolution, metadata.egress_zone
+            );
+            assert_eq!(decision.resolution.egress_ifindex, 4, "v6={v6}: redirect egress must be the fabric parent");
+        }
+    }
+}
+
+fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+    let lan_host: Ipv6Addr = "2001:559:8585:ef00:1266:6aff:fe0b:d017".parse().expect("lan v6");
+    let wan_host: Ipv6Addr = "2001:559:8585:80::200".parse().expect("wan v6");
+    let snat_ip: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6");
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let forward_resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(wan_host)),
+        neighbor_mac: Some([0xf6, 0xf0, 0x06, 0x10, 0x77, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]),
+        tx_vlan_id: 80,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let dyn_neigh = Arc::new(ShardedNeighborMap::default());
+    let mut sessions = SessionTable::new();
+    for (protocol, src_port, dst_port, tcp_flags) in [
+        (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
+        (PROTO_ICMPV6, 0x1234u16, 0u16, 0u8),
+    ] {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol,
+                src_ip: IpAddr::V6(lan_host),
+                dst_ip: IpAddr::V6(wan_host),
+                src_port,
+                dst_port,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+            decision: SessionDecision {
+                resolution: forward_resolution,
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V6(snat_ip)),
+                    rewrite_src_port: None,
+                    source_nat_icmp: (protocol == PROTO_ICMPV6).then_some((128, 0)),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: SessionMetadata {
+                ingress_zone: 21230,
+                egress_zone: 13098,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 1,
+                fabric_ingress: true,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            source_nat_static: Some(false),
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol,
+            tcp_flags,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+        };
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
+        )
+        .expect("v6 reverse synthesis must produce a companion");
+        assert_eq!(
+            reverse.decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "v6 companion must redirect to LAN owner, got {:?}",
+            reverse.decision.resolution
+        );
+        assert!(sessions.install_with_protocol_with_origin(
+            entry.key.clone(), entry.decision, entry.metadata.clone(),
+            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
+        ));
+        sessions.set_source_nat_static(&entry.key, Some(false));
+        assert!(sessions.install_with_protocol_with_origin(
+            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
+            reverse.origin, now_ns, protocol, tcp_flags,
+        ));
+        sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
+    }
+    sessions
+}
+
+/// M5: IPv6 WAN-side reverse hit must also emit on the fabric binding.
+#[test]
+fn split_rg_punt_origin_wan_reverse_icmpv6_fabric_tx_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_v6_15958b(&forwarding, now_ns);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("src");
+    let dst: Ipv6Addr = "2001:559:8585:80::8".parse().expect("dst");
+    let mut frame = build_icmp_echo_frame_v6(src, dst, 64, [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]);
+    // echo-reply type 129
+    let icmp_start = 14 + 40;
+    frame[icmp_start] = 129;
+    frame[icmp_start + 2] = 0;
+    frame[icmp_start + 3] = 0;
+    let csum = checksum16_ipv6(src, dst, PROTO_ICMPV6, &frame[icmp_start..]);
+    frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&csum.to_be_bytes());
+    let mut meta = txn_meta_v6(14, frame.len());
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_ICMPV6;
+    meta.payload_offset = 62;
+    meta.flow_src_addr = src.octets();
+    meta.flow_dst_addr = dst.octets();
+    meta.flow_src_port = 0x1234;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    let (batch, dbg, egress) = txn_run_multi_binding_15958(
+        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+    );
+    assert_eq!(batch.session_hits, 1, "v6 return must session-hit");
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1, "v6 fabric TX");
+    assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "v6 WAN must not TX");
+    let egress = egress.expect("v6 WAN reverse hit must emit fabric TX");
+    assert_eq!(&egress[0..6], &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60], "v6 peer fabric MAC");
 }

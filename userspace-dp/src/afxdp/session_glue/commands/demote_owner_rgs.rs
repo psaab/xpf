@@ -92,13 +92,48 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
             );
             let enforced_resolution =
                 enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up_resolution);
-            let refreshed_decision = SessionDecision {
-                resolution: redirect_session_via_fabric_if_needed(
+            // #15958b (fold): same shared zone-egress rule as refresh.
+            let resolution = if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+                let destination_owner_active = forwarding
+                    .egress
+                    .iter()
+                    .filter(|(ifindex, _)| {
+                        forwarding.egress_zone_id(**ifindex) == metadata.egress_zone
+                    })
+                    .any(|(ifindex, _)| {
+                        let rg = owner_rg_for_flow(forwarding, *ifindex);
+                        rg > 0
+                            && ha_state
+                                .get(&rg)
+                                .is_some_and(|group| group.is_forwarding_active(now_secs))
+                    });
+                let redirected = super::super::fabric_redirect_for_zone_egress_15958b(
+                    forwarding,
+                    enforced_resolution,
+                    metadata.egress_zone,
+                    false,
+                    destination_owner_active,
+                );
+                if redirected.disposition == ForwardingDisposition::ForwardCandidate {
+                    redirect_session_via_fabric_if_needed(
+                        forwarding,
+                        enforced_resolution,
+                        metadata.fabric_ingress,
+                        metadata.ingress_zone,
+                    )
+                } else {
+                    redirected
+                }
+            } else {
+                redirect_session_via_fabric_if_needed(
                     forwarding,
                     enforced_resolution,
                     metadata.fabric_ingress,
                     metadata.ingress_zone,
-                ),
+                )
+            };
+            let refreshed_decision = SessionDecision {
+                resolution,
                 ..decision
             };
             observed_terminal |= refreshed_decision.resolution.disposition

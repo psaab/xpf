@@ -444,6 +444,50 @@ now_secs: u64,) -> bool {
     true
 }
 
+/// #15958b: shared zone-egress redirect rule for a fabric-ingress
+/// reverse row. When re-resolution yields a ForwardCandidate that
+/// egresses in a zone other than the companion's destination
+/// (egress) zone, the route does not reach the destination owner —
+/// on the punt origin the connected LAN prefix is HA-suppressed, so
+/// the FIB answers the LAN target with the WAN gateway route (owner
+/// = locally-active WAN RG) and HA enforcement keeps it. The reply
+/// must instead cross the fabric to the destination owner.
+///
+/// Conditions (M1/M2):
+/// * `fabric_link_ingress` — the packet/command arrives ON the fabric
+///   link: anti-loop refusal, mirroring every other redirect site
+///   (a redirect back onto the fabric from fabric ingress loops).
+/// * The destination-zone RG must be peer-owned here: known
+///   (`owner_rg_for_resolution` on a resolution synthesized toward
+///   the destination, or the companion's recorded owner) and NOT
+///   forwarding-active. A bare zone inequality (including
+///   `egress_zone_id == 0` for an unzoned egress) is not proof the
+///   LAN is peer-owned; locally-owned destinations keep the
+///   candidate. Callers pass `destination_owner_active`: true only
+///   when the destination zone's RG is forwarding-active locally.
+///
+/// Returns the zone-encoded FabricRedirect when the rule fires,
+/// otherwise the candidate unchanged.
+pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
+    forwarding: &ForwardingState,
+    candidate: ForwardingResolution,
+    destination_zone: u16,
+    fabric_link_ingress: bool,
+    destination_owner_active: bool,
+) -> ForwardingResolution {
+    if fabric_link_ingress || destination_owner_active {
+        return candidate;
+    }
+    if candidate.disposition != ForwardingDisposition::ForwardCandidate {
+        return candidate;
+    }
+    if forwarding.egress_zone_id(candidate.egress_ifindex) == destination_zone {
+        return candidate;
+    }
+    super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, destination_zone)
+        .unwrap_or(candidate)
+}
+
 pub(in crate::afxdp) fn redirect_session_resolution_for_metadata(forwarding: &ForwardingState,
 resolution: ForwardingResolution,
 metadata: &SessionMetadata,) -> ForwardingResolution {
