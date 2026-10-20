@@ -457,7 +457,11 @@ const (
 	// ships, but the explicit flag is the durable record that an
 	// authored constraint existed; exact-equality versioning fences
 	// the pairing instead of degrading silently.
-	ProtocolVersion = 62
+	// v62 -> v63 (#15932): NAT64RuleSnapshot carries from_zones, the
+	// union of every authored `from zone` value. A v62 helper ignores
+	// it and scopes the prefix to the singular from_zone only — the
+	// last-zone truncation — so exact-equality versioning fences it.
+	ProtocolVersion = 63
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

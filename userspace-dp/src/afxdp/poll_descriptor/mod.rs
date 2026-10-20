@@ -2610,10 +2610,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         };
                         // #9519: a foreign packet is not the admitting rule's
                         // traffic, whatever its own zone decides below.
-                        // #15664: LocalDelivery is no longer excluded — its
-                        // permitted hits count through the bound handle here
-                        // (the hit re-check below counts only Deny/Reject).
-                        if foreign_arrival_zone.is_none() {
+                        // #15664: LocalDelivery permitted hits count through
+                        // the bound handle (the hit re-check below counts only
+                        // Deny/Reject).
+                        // #15932: a LocalDelivery hit is NOT charged here.
+                        // The host gates below (input filter, source-NAT /
+                        // zone-policy revalidation, host-inbound, lo0, and
+                        // the junos-host re-check) can still deny/drop this
+                        // packet and charge their own denying rule; charging
+                        // the admitting permit first double-charged every
+                        // denied host hit (permit + deny for one dropped
+                        // packet). The bound charge is deferred to
+                        // `charge_bound_policy_hit` after every host gate
+                        // has passed. Transit hits keep charging here,
+                        // exactly as before.
+                        let is_local_delivery_hit = resolved.decision.resolution.disposition
+                            == ForwardingDisposition::LocalDelivery;
+                        if foreign_arrival_zone.is_none() && !is_local_delivery_hit {
                             if let Some(counter) =
                                 worker_ctx.forwarding.policy.resolve_session_hit_counter(
                                     bound_policy_counter.as_ref(),
@@ -3574,6 +3587,31 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             telemetry.dbg.policy_deny += 1;
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
+                        }
+                        // #15932: every host gate above has now passed
+                        // (input filter, NAT/policy revalidation,
+                        // host-inbound, lo0, junos-host). Charge the
+                        // deferred LocalDelivery bound hit exactly once.
+                        // A denied hit already `continue`d above after
+                        // charging only its denying rule, so a dropped
+                        // packet never charges both permit and deny.
+                        // Foreign arrivals never charge the admitting
+                        // rule (#9519). The bound handle was moved into
+                        // `flow_cache_policy_counter` above; borrow it back
+                        // from there (LocalDelivery never seeds the flow
+                        // cache, so the handle is still the hit's own).
+                        if is_local_delivery_hit && foreign_arrival_zone.is_none() {
+                            if let Some(counter) =
+                                worker_ctx.forwarding.policy.resolve_session_hit_counter(
+                                    flow_cache_policy_counter.as_ref(),
+                                    resolved.metadata.policy_counter_idx,
+                                )
+                            {
+                                crate::policy::record_policy_hit_counter(
+                                    counter,
+                                    meta.pkt_len as u64,
+                                );
+                            }
                         }
                         // TTL/hop-limit check on session-hit path: generate
                         // ICMP Time Exceeded for packets that would expire

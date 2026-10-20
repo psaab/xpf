@@ -5769,9 +5769,15 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
             None,
         )
     };
-    assert!(run(mk_nat64(32)).is_none(), "#15178 control: minting geometry survives");
+    assert!(
+        run(mk_nat64(32)).is_none(),
+        "#15178 control: minting geometry survives"
+    );
     let revocation = run(mk_nat64(1024)).expect("#15178: stale geometry must revoke");
-    assert!(matches!(revocation.reason, PolicyRevocationReason::StaleSourceNat));
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
     // The mismatch predicate itself: positive only under the new geometry.
     assert!(mk_nat64(1024).nat64_deterministic_translation_mismatch(
         sub,
@@ -5792,5 +5798,238 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
         pool_addresses: vec!["198.51.100.1".to_string()],
         ..Default::default()
     }]);
-    assert!(run(rr).is_none(), "#15178 control: round-robin NAT64 survives");
+    assert!(
+        run(rr).is_none(),
+        "#15178 control: round-robin NAT64 survives"
+    );
+}
+
+// #15932: cross-generation NAT64 revalidation must judge a session
+// against the prefix that ADMITTED it (recorded zone/RI/source), not
+// the first destination-only /96. Fixture: A (first, zone "a-zone",
+// deterministic, pool .1) and B (second, zone "b-zone", round-robin,
+// pool .2) share one /96 with disjoint pools. A B session survives an
+// unrelated generation bump; tightening B's zone away revokes it (U1);
+// a legacy row with no recorded scope keeps the old exemption.
+#[test]
+fn nat64_scoped_cross_generation_revalidation_15932() {
+    use std::net::Ipv6Addr;
+    let det_a = crate::NAT64RuleSnapshot {
+        name: "a-det".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        from_zones: vec!["a-zone".to_string()],
+        deterministic_block_size: 32,
+        deterministic_blocks_per_ip: 2016,
+        deterministic_host_prefix_len: 32,
+        deterministic_host_base_v6: "2001:db8::".to_string(),
+        ..Default::default()
+    };
+    let rr_b = |zone: &str| crate::NAT64RuleSnapshot {
+        name: "b-rr".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.2".to_string()],
+        from_zones: vec![zone.to_string()],
+        ..Default::default()
+    };
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let pool_b = Ipv4Addr::new(198, 51, 100, 2);
+    // Scoped predicate: B's tuple is valid under B, invalid under A.
+    let both = crate::nat64::Nat64State::from_snapshots(&[det_a.clone(), rr_b("b-zone")]);
+    assert!(
+        both.nat64_revalidation_still_valid(sub, dst, pool_b, Some(4000), "b-zone", "", true),
+        "B session must validate against its admitting B owner"
+    );
+    assert!(
+        !both.nat64_revalidation_still_valid(sub, dst, pool_b, Some(4000), "a-zone", "", true),
+        "same tuple judged under A must not validate (disjoint pool)"
+    );
+    // U1: B rescoped away — no live scoped owner — must revoke.
+    let tightened = crate::nat64::Nat64State::from_snapshots(&[det_a.clone(), rr_b("other-zone")]);
+    assert!(
+        !tightened.nat64_revalidation_still_valid(sub, dst, pool_b, Some(4000), "b-zone", "", true),
+        "U1: scope tightening must revoke the round-robin session"
+    );
+    // Legacy (no recorded scope): the destination-only path applies.
+    // Here the first /96 owner A is deterministic and does not hold
+    // B's tuple, so the legacy predicate reports a positive mismatch —
+    // exactly the pre-#15932 cross-owner false positive that the
+    // recorded-scope path above eliminates. (Production legacy rows
+    // are only peer/import rows whose scope was never stamped; locally
+    // minted rows always carry `nat_scope_ifindex`.)
+    assert!(
+        tightened.nat64_deterministic_translation_mismatch(sub, dst, pool_b, Some(4000)),
+        "legacy destination-only selection still misjudges B's tuple under A (the old defect)"
+    );
+    // Full revocation path: a recorded-scope B session (nat_scope 21 in
+    // b-zone) survives the unchanged two-owner state and revokes when B
+    // is tightened away.
+    let key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: IpAddr::V6(sub),
+        dst_ip: IpAddr::V6(dst),
+        src_port: 40001,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: crate::nat::NatDecision {
+            rewrite_src: Some(IpAddr::V4(pool_b)),
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            rewrite_src_port: Some(4000),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: true,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut metadata = SessionMetadata {
+        ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 24,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        forward_ingress_vlan_id: None,
+        nat_scope_ifindex: Some(21),
+    };
+    let mk_forwarding = |nat64: crate::nat64::Nat64State| {
+        let mut forwarding = ForwardingState::default();
+        forwarding.nat64 = nat64;
+        // The recorded scope unit (21) AND the session's physical
+        // ingress (24) both resolve to b-zone: revalidation keys the
+        // scope maps off 21 but the zone fallback off the resolved
+        // logical unit of 24.
+        forwarding.ifindex_to_zone_id.insert(21, 1);
+        forwarding.ifindex_to_zone_id.insert(24, 1);
+        forwarding.zone_id_to_name.insert(1, "b-zone".to_string());
+        forwarding
+            .ifindex_to_config_name
+            .insert(21, "ge-0/0/0.0".to_string());
+        forwarding
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: metadata.clone(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: 6,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 15932,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let run = |nat64: crate::nat64::Nat64State| {
+        let forwarding = mk_forwarding(nat64);
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        assert!(sessions.upsert_synced_with_origin(entry.clone().into_session_install(1), false));
+        source_nat_revocation_on_session_hit(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            SessionOrigin::SyncImport,
+            None,
+            None,
+            1_000_000_000,
+            None,
+        )
+    };
+    assert!(
+        run(crate::nat64::Nat64State::from_snapshots(&[
+            det_a.clone(),
+            rr_b("b-zone")
+        ]))
+        .is_none(),
+        "B session must survive an unrelated generation bump under its own owner"
+    );
+    let revocation = run(tightened).expect("U1: tightened B scope must revoke");
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+    // No recorded scope: same tightened state must NOT revoke (legacy keep).
+    metadata.nat_scope_ifindex = None;
+    metadata.ingress_ifindex = 0;
+    metadata.ingress_zone = 0;
+    let legacy_entry = SyncedSessionEntry {
+        metadata: metadata.clone(),
+        key: entry.key.clone(),
+        decision: entry.decision,
+        leak_incarnation: entry.leak_incarnation,
+        origin: entry.origin,
+        protocol: entry.protocol,
+        tcp_flags: entry.tcp_flags,
+        generation: entry.generation,
+        session_id: entry.session_id,
+        tcp_close_class: entry.tcp_close_class,
+        tcp_handshake_state: entry.tcp_handshake_state,
+        pptp_call_ids: entry.pptp_call_ids,
+        source_nat_static: entry.source_nat_static,
+    };
+    let forwarding = mk_forwarding(crate::nat64::Nat64State::from_snapshots(&[
+        det_a.clone(),
+        rr_b("other-zone"),
+    ]));
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(legacy_entry.into_session_install(1), false));
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            SessionOrigin::SyncImport,
+            None,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_none(),
+        "legacy scopeless row must keep (no invented empty scope)"
+    );
 }

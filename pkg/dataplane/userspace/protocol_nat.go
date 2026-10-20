@@ -369,6 +369,7 @@ type NAT64RuleSnapshot struct {
 	// wire flag below carries the same distinction explicitly, so it
 	// survives even if a future encoding drops the sentinel.
 	FromZone            string   `json:"from_zone,omitempty"`
+	FromZones           []string `json:"from_zones,omitempty"`
 	FromRoutingInstance string   `json:"from_routing_instance,omitempty"`
 	SourceAddresses     []string `json:"source_addresses,omitempty"`
 	// SourceConstrained (#15930) records that the operator authored a

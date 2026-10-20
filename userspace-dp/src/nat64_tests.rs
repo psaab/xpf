@@ -8947,7 +8947,11 @@ fn embedded_v6_to_v4_advertises_original_len_10432() {
         1480,
         "RFC 7915 §5.2: advertised IPv4 Total must be 20 + original PL 1460"
     );
-    assert_eq!(&out[20..28], &q[40..48], "emitted L4 must be the quoted bytes");
+    assert_eq!(
+        &out[20..28],
+        &q[40..48],
+        "emitted L4 must be the quoted bytes"
+    );
     assert_eq!(
         checksum16(&out[..20]),
         0,
@@ -8971,7 +8975,11 @@ fn embedded_v4_to_v6_advertises_original_len_10432() {
         1480,
         "RFC 7915 §4.2: advertised IPv6 Payload must be original Total 1500 - IHL 20"
     );
-    assert_eq!(&out[40..48], &q[20..28], "emitted L4 must be the quoted bytes");
+    assert_eq!(
+        &out[40..48],
+        &q[20..28],
+        "emitted L4 must be the quoted bytes"
+    );
 }
 
 #[test]
@@ -8984,7 +8992,10 @@ fn embedded_v6_to_v4_pmtud_preserves_original_len_10432() {
     let mut out = [0u8; MAX_EMBEDDED_LEN];
     let n = translate_icmpv6_message_to_icmpv4(&mut out, &icmp6, &embed_map_v6_to_v4_10432())
         .expect("PTB with truncated quote must translate");
-    assert_eq!(n, 36, "outer must stay truncated: 8-byte header + 28 emitted");
+    assert_eq!(
+        n, 36,
+        "outer must stay truncated: 8-byte header + 28 emitted"
+    );
     assert_eq!(out[0], 3, "ICMPv4 Dest-Unreachable type");
     assert_eq!(out[1], 4, "Frag-Needed code");
     assert_eq!(&out[4..6], &[0, 0], "Frag-Needed unused word must be zero");
@@ -9000,7 +9011,11 @@ fn embedded_v6_to_v4_pmtud_preserves_original_len_10432() {
         1480,
         "embedded advertised IPv4 Total must be the original 1480"
     );
-    assert_eq!(&emb[20..28], &quote[40..48], "embedded L4 stays the quoted bytes");
+    assert_eq!(
+        &emb[20..28],
+        &quote[40..48],
+        "embedded L4 stays the quoted bytes"
+    );
     assert_eq!(
         checksum16(&out[..n]),
         0,
@@ -9019,7 +9034,10 @@ fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
     let mut out = [0u8; MAX_EMBEDDED_LEN];
     let n = translate_icmpv4_message_to_icmpv6(&mut out, &icmp4, &embed_map_v4_to_v6_10432())
         .expect("Frag-Needed with truncated quote must translate");
-    assert_eq!(n, 56, "outer must stay truncated: 8-byte header + 48 emitted");
+    assert_eq!(
+        n, 56,
+        "outer must stay truncated: 8-byte header + 48 emitted"
+    );
     assert_eq!(out[0], 2, "ICMPv6 Packet-Too-Big type");
     assert_eq!(out[1], 0, "PTB code 0");
     assert_eq!(
@@ -9027,7 +9045,11 @@ fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
         1420,
         "PTB MTU must be v4 next-hop MTU + 20"
     );
-    assert_eq!(&out[2..4], &[0, 0], "ICMPv6 checksum left zeroed for caller");
+    assert_eq!(
+        &out[2..4],
+        &[0, 0],
+        "ICMPv6 checksum left zeroed for caller"
+    );
     let emb = &out[8..n];
     assert_eq!(emb.len(), 48, "embedded emitted length stays truncated");
     assert_eq!(
@@ -9035,9 +9057,12 @@ fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
         1480,
         "embedded advertised IPv6 Payload must be the original 1480"
     );
-    assert_eq!(&emb[40..48], &quote[20..28], "embedded L4 stays the quoted bytes");
+    assert_eq!(
+        &emb[40..48],
+        &quote[20..28],
+        "embedded L4 stays the quoted bytes"
+    );
 }
-
 
 // #14962 (D27-01): a NAT64 snapshot whose source pool is unusable
 // (PoolUnusable, stamped Go-side from SourceNATPoolUnusableReason or by the
@@ -9068,8 +9093,7 @@ fn nat64_pool_unusable_installs_prefix_and_drops_14962() {
         "#14962: an unusable pool must install with NO mintable addresses"
     );
     assert_eq!(
-        state.prefixes[0].pool_unusable_reason,
-        "invalid_pool",
+        state.prefixes[0].pool_unusable_reason, "invalid_pool",
         "#14962: the Go-stamped reason must survive onto the prefix for operator diagnosis"
     );
     // 64:ff9b::198.51.100.50 — inside the prefix, global embedded v4.
@@ -9089,10 +9113,7 @@ fn nat64_pool_unusable_installs_prefix_and_drops_14962() {
     };
     let ok = Nat64State::from_snapshots(&[healthy]);
     assert!(
-        matches!(
-            ok.classify_ipv6_dest(dst),
-            Nat64Match::MatchReady { .. }
-        ),
+        matches!(ok.classify_ipv6_dest(dst), Nat64Match::MatchReady { .. }),
         "#14962 control: a usable NAT64 pool must still translate"
     );
     // Control: the interface-overlap quarantine reason installs the same way.
@@ -9138,7 +9159,7 @@ fn det_nat64_snap_15178(block_size: u16, host_base: &str, prefix_len: u8) -> NAT
         port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
-    ..Default::default()
+        ..Default::default()
     }
 }
 
@@ -9159,7 +9180,8 @@ fn nat64_15178_block_size_change_does_not_reuse_allocator() {
     // Same prefix + pool, block-size 32 -> 1024. New block for word 5:
     // [6144,7167]. The allocator must NOT be reused.
     let new_snap = det_nat64_snap_15178(1024, "2001:db8::", 32);
-    let state2 = Nat64State::from_snapshots_with_previous(&[new_snap], Some(&state1), 2, 2_000_000_000);
+    let state2 =
+        Nat64State::from_snapshots_with_previous(&[new_snap], Some(&state1), 2, 2_000_000_000);
     assert_eq!(
         state2.prefixes[0].port_allocator.live_flow_count(),
         0,
@@ -9195,7 +9217,15 @@ fn nat64_15178_noop_reapply_reuses_allocator_and_eim() {
     );
     // EIM: same socket to a new remote reuses the same BIB tuple.
     let tuple2 = state2
-        .allocate_source(0, PROTO_TCP, sub, Ipv4Addr::new(9, 9, 9, 9), 40001, 443, 2_000_000_000)
+        .allocate_source(
+            0,
+            PROTO_TCP,
+            sub,
+            Ipv4Addr::new(9, 9, 9, 9),
+            40001,
+            443,
+            2_000_000_000,
+        )
         .expect("EIM reuse");
     assert_eq!(tuple2, tuple1, "#15178 control: no-op re-apply keeps EIM");
 }
@@ -9207,23 +9237,35 @@ fn nat64_15178_mode_and_hostbase_changes_do_not_reuse() {
     // deterministic -> round-robin (host base cleared)
     let det = det_nat64_snap_15178(32, "2001:db8::", 32);
     let s1 = Nat64State::from_snapshots(&[det]);
-    let _ = s1.allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000).expect("alloc");
+    let _ = s1
+        .allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000)
+        .expect("alloc");
     let mut rr = det_nat64_snap_15178(32, "2001:db8::", 32);
     rr.deterministic_host_base_v6 = String::new();
     rr.deterministic_block_size = 0;
     let s2 = Nat64State::from_snapshots_with_previous(&[rr], Some(&s1), 2, 2_000_000_000);
     assert!(s2.prefixes[0].deterministic_v6.is_none());
-    assert_eq!(s2.prefixes[0].port_allocator.live_flow_count(), 0, "#15178: det->RR must not reuse");
+    assert_eq!(
+        s2.prefixes[0].port_allocator.live_flow_count(),
+        0,
+        "#15178: det->RR must not reuse"
+    );
     // host-base change
     let s3 = Nat64State::from_snapshots(&[det_nat64_snap_15178(32, "2001:db8::", 32)]);
-    let _ = s3.allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000).expect("alloc");
+    let _ = s3
+        .allocate_source(0, PROTO_TCP, sub, dst_v4, 40001, 443, 1_000_000_000)
+        .expect("alloc");
     let s4 = Nat64State::from_snapshots_with_previous(
         &[det_nat64_snap_15178(32, "2001:db9::", 32)],
         Some(&s3),
         2,
         2_000_000_000,
     );
-    assert_eq!(s4.prefixes[0].port_allocator.live_flow_count(), 0, "#15178: host-base change must not reuse");
+    assert_eq!(
+        s4.prefixes[0].port_allocator.live_flow_count(),
+        0,
+        "#15178: host-base change must not reuse"
+    );
 }
 
 #[test]
@@ -9261,14 +9303,12 @@ fn nat64_15178_tuple_matches_new_geometry_only() {
     );
     // Fail-closed edges: missing port / unknown pool address / no prefix.
     assert!(!new_state.nat64_source_translation_still_valid(sub, dst_v6, ip2, None));
-    assert!(
-        !new_state.nat64_source_translation_still_valid(
-            sub,
-            dst_v6,
-            Ipv4Addr::new(203, 0, 113, 99),
-            Some(port2)
-        )
-    );
+    assert!(!new_state.nat64_source_translation_still_valid(
+        sub,
+        dst_v6,
+        Ipv4Addr::new(203, 0, 113, 99),
+        Some(port2)
+    ));
     assert!(
         !new_state.nat64_source_translation_still_valid(
             sub,
@@ -9297,7 +9337,10 @@ fn nat64_15283_pool_port_range_is_honoured() {
     };
     let state = Nat64State::from_snapshots(&[snap]);
     assert_eq!(
-        (state.prefixes[0].port_allocator.port_low, state.prefixes[0].port_allocator.port_high),
+        (
+            state.prefixes[0].port_allocator.port_low,
+            state.prefixes[0].port_allocator.port_high
+        ),
         (2000, 3000),
         "#15283: the allocator must be built over the pool's port range"
     );
@@ -9305,14 +9348,25 @@ fn nat64_15283_pool_port_range_is_honoured() {
     for i in 0..8u16 {
         let src: Ipv6Addr = format!("2001:db8::{:x}", i + 1).parse().unwrap();
         let (_ip, port) = state
-            .allocate_source(0, crate::ip_proto::PROTO_TCP, src, dst_v4, 40000 + i, 443, 0)
+            .allocate_source(
+                0,
+                crate::ip_proto::PROTO_TCP,
+                src,
+                dst_v4,
+                40000 + i,
+                443,
+                0,
+            )
             .expect("ranged NAT64 allocation");
         assert!(
             (2000..=3000).contains(&port),
             "#15283: translated port {port} outside the pool range 2000..=3000"
         );
         if i == 0 {
-            assert_eq!(port, 2000, "#15283: first flow starts at the honoured window low (1024 on revert)");
+            assert_eq!(
+                port, 2000,
+                "#15283: first flow starts at the honoured window low (1024 on revert)"
+            );
         }
     }
 }
@@ -9559,4 +9613,110 @@ fn nat64_15930_mixed_any_wins() {
             "mixed selector {sources:?} must match any source"
         );
     }
+}
+
+#[test]
+fn nat64_zone_list_unions_15932() {
+    let mut snap = scoped_snap("trust", "", vec![]);
+    snap.from_zones = vec!["trust".to_string(), "untrust".to_string()];
+    let state = Nat64State::from_snapshots(&[snap]);
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    for zone in ["trust", "untrust"] {
+        assert!(
+            matches!(
+                state.classify_ipv6_packet_scoped(src, dst, zone, ""),
+                Nat64Match::MatchReady { .. }
+            ),
+            "listed zone {zone} must match"
+        );
+    }
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(src, dst, "dmz", ""),
+        Nat64Match::NoPrefixMatch,
+        "unlisted zone must not match"
+    );
+}
+
+// #15932: ONE authored rule-set carrying a two-zone union over ONE pool
+// owns exactly ONE allocator: two subscribers admitted from different
+// zones mint distinct external tuples (no cross-zone double-mint, no
+// PoolPeerAddressOverlap), and a reload reuses that same allocator so a
+// live tuple is never re-minted invisibly.
+#[test]
+fn nat64_two_zone_union_shares_one_allocator_15932() {
+    let mut snap = scoped_snap("trust", "", vec![]);
+    snap.name = "union".to_string();
+    snap.from_zones = vec!["trust".to_string(), "untrust".to_string()];
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let sub_a: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let sub_b: Ipv6Addr = "2001:db8::2".parse().unwrap();
+
+    let state = Nat64State::from_snapshots(&[snap.clone()]);
+    assert_eq!(state.prefixes.len(), 1, "one snapshot must build one prefix");
+    let (idx_a, _) = state
+        .match_ipv6_dest_scoped(sub_a, dst, "trust", "")
+        .expect("trust admits");
+    let (idx_b, _) = state
+        .match_ipv6_dest_scoped(sub_b, dst, "untrust", "")
+        .expect("untrust admits");
+    assert_eq!(idx_a, idx_b, "both zones select the single union prefix");
+    let alloc_a = state
+        .allocate_source(idx_a, crate::ip_proto::PROTO_TCP, sub_a, dst_v4, 5000, 443, 1)
+        .expect("mint A");
+    let alloc_b = state
+        .allocate_source(idx_b, crate::ip_proto::PROTO_TCP, sub_b, dst_v4, 5000, 443, 1)
+        .expect("mint B must not hit PoolPeerAddressOverlap");
+    assert_ne!(
+        alloc_a, alloc_b,
+        "two subscribers behind one union pool must never double-mint a tuple"
+    );
+    // Reload: the single allocator is reused, so the live tuple stays owned.
+    let reloaded = Nat64State::from_snapshots_with_previous(&[snap], Some(&state), 1, 0);
+    assert!(
+        reloaded.prefixes[0]
+            .port_allocator
+            .same_allocator(&state.prefixes[0].port_allocator),
+        "reload must reuse the union allocator"
+    );
+    let alloc_c = reloaded
+        .allocate_source(
+            0,
+            crate::ip_proto::PROTO_TCP,
+            "2001:db8::3".parse().unwrap(),
+            dst_v4,
+            5000,
+            443,
+            2,
+        )
+        .expect("mint C after reload");
+    assert_ne!(alloc_c, alloc_a, "live tuple A must stay owned after reload");
+    assert_ne!(alloc_c, alloc_b, "live tuple B must stay owned after reload");
+}
+
+// #15932 (Codex): scoped round-robin revalidation honours the pool's
+// live port range (#15283) — an in-range tuple survives, an out-of-range
+// tuple does not, for both scoped and destination-only predicates.
+#[test]
+fn nat64_scoped_revalidation_honours_pool_port_range_15932() {
+    let mut snap = scoped_snap("trust", "", vec![]);
+    snap.port_low = 500;
+    snap.port_high = 600;
+    let state = Nat64State::from_snapshots(&[snap]);
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let pool_ip = Ipv4Addr::new(198, 51, 100, 1);
+    assert!(
+        state.nat64_revalidation_still_valid(src, dst, pool_ip, Some(550), "trust", "", true),
+        "in-range tuple must survive scoped revalidation"
+    );
+    assert!(
+        !state.nat64_revalidation_still_valid(src, dst, pool_ip, Some(4000), "trust", "", true),
+        "out-of-range tuple must not survive scoped revalidation"
+    );
+    assert!(
+        !state.nat64_source_translation_still_valid(src, dst, pool_ip, Some(4000)),
+        "out-of-range tuple must not survive destination-only revalidation"
+    );
 }

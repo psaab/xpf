@@ -652,37 +652,77 @@ fn source_nat_translation_still_valid(
         return (destination_valid, None);
     };
     if nat.nat64 {
-        // #15178: NAT64 source translations are no longer BLANKET-exempt,
-        // but the revocation fires only on a POSITIVE deterministic
-        // mismatch. A stored tuple minted under a previous deterministic
-        // geometry (block-size, host-base, /32<->/64, or
-        // deterministic<->round-robin edit on the same pool) must be torn
-        // down: the stateless reverse map now assigns it to a different
-        // subscriber, and keeping it makes a same-socket new-remote flow
-        // join the stale BIB lease and fail AllocatorExhausted. The
-        // mismatch is judged against the LIVE prefix selected by the
-        // synthetic destination, through `deterministic_v6_tuple_matches`
-        // — the predicate the synced reserve already uses.
+        // #15178/#15932: NAT64 source translations are judged against
+        // the prefix that ADMITTED the session, not the first
+        // destination-only /96. The admitting scope is re-derived from
+        // the session's recorded ingress identity exactly as the mint
+        // resolved it (`prerouting_ingress_scope` from the recorded
+        // ifindex/VLAN/scope stamp, honoring a fabric zone override) —
+        // this is the "carry the admitting provenance into
+        // revalidation" fix: with two same-/96 rule-sets in different
+        // zones/RIs with disjoint pools, a B-zone session is no longer
+        // revoked because A (first, deterministic) does not hold its
+        // tuple.
         //
-        // Everything else keeps the pre-#15178 exemption: no live prefix
-        // for the destination, a round-robin prefix, or a missing
-        // translated port is not a geometry mismatch, and revoking there
-        // would pre-empt the zone-policy gate (#9604 declines, #13910
-        // provenance) with a source-NAT verdict those paths never had.
-        // The destination side stays exempt (prefix-driven, see
-        // `destination_nat_translation_still_valid`).
-        let mismatch = match (forward_key.src_ip, forward_key.dst_ip, translated_src) {
-            (IpAddr::V6(src_v6), IpAddr::V6(dst_v6), IpAddr::V4(translated_v4)) => forwarding
-                .nat64
-                .nat64_deterministic_translation_mismatch(
-                    src_v6,
-                    dst_v6,
-                    translated_v4,
-                    nat.rewrite_src_port,
-                ),
-            _ => false,
+        // U1 (#15932, validated): the same scoped re-selection closes
+        // the scope-tightening hole. Previously only a POSITIVE
+        // deterministic geometry mismatch revoked, so a round-robin
+        // (or deterministic) session whose rule stopped matching its
+        // source/zone/RI kept its translation forever. Now, when a
+        // scope was recorded at admission (`nat_scope_ifindex` present,
+        // or a fabric row with a recorded ingress zone), a live scoped
+        // re-match that finds NO owner — or an owner that no longer
+        // holds the translated tuple — is invalid and revokes. Rows
+        // with NO recorded scope (legacy peer / identity-less import)
+        // keep the pre-#15932 destination-only deterministic-mismatch
+        // exemption, so they are never revoked against an invented
+        // empty scope (the #15176 discipline).
+        let (from_zone, routing_instance, scope_known) = {
+            let ingress_ifindex = metadata.ingress_ifindex as i32;
+            let zone_override =
+                (metadata.fabric_ingress || ingress_ifindex == 0).then_some(metadata.ingress_zone);
+            let scope = super::prerouting_ingress_scope(
+                forwarding,
+                ingress_ifindex,
+                metadata.ingress_vlan_id,
+                zone_override,
+                metadata.nat_scope_ifindex,
+            );
+            // A scope is "known" when admission recorded one: an
+            // explicit NAT-scope stamp, or a fabric/identity-less row
+            // that still carries a real ingress zone id to override
+            // with. A plain legacy row (no stamp, ifindex 0, zone 0)
+            // has nothing truthful to judge against.
+            let known = metadata.nat_scope_ifindex.is_some()
+                || (zone_override.is_some() && metadata.ingress_zone != 0);
+            (scope.zone_name, scope.routing_instance, known)
         };
-        return (!mismatch && destination_valid, None);
+        let valid = match (forward_key.src_ip, forward_key.dst_ip, translated_src) {
+            (IpAddr::V6(src_v6), IpAddr::V6(dst_v6), IpAddr::V4(translated_v4)) => {
+                if scope_known {
+                    forwarding.nat64.nat64_revalidation_still_valid(
+                        src_v6,
+                        dst_v6,
+                        translated_v4,
+                        nat.rewrite_src_port,
+                        from_zone,
+                        routing_instance,
+                        true,
+                    )
+                } else {
+                    // Legacy row: preserve the #15178 positive-mismatch
+                    // contract byte-for-byte.
+                    !forwarding.nat64.nat64_deterministic_translation_mismatch(
+                        src_v6,
+                        dst_v6,
+                        translated_v4,
+                        nat.rewrite_src_port,
+                    )
+                }
+            }
+            _ => true,
+        };
+        return (valid && destination_valid, None);
     }
     if nat.nptv6 {
         // #14315: an NPTv6 source rewrite is re-derived from live state.
