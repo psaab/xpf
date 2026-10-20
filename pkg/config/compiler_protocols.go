@@ -31,6 +31,17 @@ func appendUniqueInt15935(ids []int, id int) []int {
 	return append(ids, id)
 }
 
+// decodedOSPFMD5Key15935 returns the effective key bytes for conflict
+// comparison: a valid Junos $9$ value decodes to its plaintext, any
+// other value (including a malformed $9$ blob, which the #15051 gate
+// rejects/warns on separately) compares as authored.
+func decodedOSPFMD5Key15935(s Secret) string {
+	if decoded, err := DecodeJunos9Secret(s.Reveal()); err == nil {
+		return decoded
+	}
+	return s.Reveal()
+}
+
 // validateLLDPInterfacePackedTokens rejects an unknown token on an LLDP
 // interface statement (#14616). Only the optional disable flag may follow
 // the interface name, in either shape: packed onto the interface node's
@@ -357,7 +368,18 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 								keyPresent := false
 								for _, kc := range authChild.Children {
 									if kc.Name() == "key" {
-										key = Secret(nodeVal(kc))
+										candidate := Secret(nodeVal(kc))
+										if keyPresent && key != "" && candidate != "" &&
+											decodedOSPFMD5Key15935(key) != decodedOSPFMD5Key15935(candidate) {
+											// #15935: two different keys
+											// inside ONE md5 stanza are a
+											// conflicting duplicate, not a
+											// last-wins restatement.
+											iface.AuthMD5KeyConflictIDs = appendUniqueInt15935(iface.AuthMD5KeyConflictIDs, keyID)
+										}
+										if !keyPresent {
+											key = candidate
+										}
 										keyPresent = true
 									}
 								}
@@ -380,7 +402,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 									}
 									if iface.AuthMD5Keys[i].Key == "" && key != "" {
 										iface.AuthMD5Keys[i].Key = key
-									} else if iface.AuthMD5Keys[i].Key != "" && key != "" && iface.AuthMD5Keys[i].Key != key {
+									} else if iface.AuthMD5Keys[i].Key != "" && key != "" && decodedOSPFMD5Key15935(iface.AuthMD5Keys[i].Key) != decodedOSPFMD5Key15935(key) {
 										// #15935: same key-id restated with a
 										// DIFFERENT non-empty key is a
 										// conflicting duplicate Junos rejects,

@@ -890,7 +890,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						}
 						var toks []string
 						complete := false
-						lastModifier := ""
+						var trailingMods []string
 						for _, sib := range children[i+1:] {
 							if sib.Name() == "range" {
 								break
@@ -907,6 +907,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 							// <hi>`), regardless of whether the
 							// endpoints validate — an invalid range
 							// is still a complete authored range
+							// that the next endpoint group replaces.
 							if len(toks) == 4 && toks[0] == "low" && toks[2] == "high" ||
 								len(toks) == 1 ||
 								len(toks) == 3 && toks[1] == "to" {
@@ -916,13 +917,14 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 							}
 							if sib.Name() == "no-translation" || sib.Name() == "deterministic" || sib.Name() == "random-allocation" || sib.Name() == "no-random-allocation" {
 								// #15935: the children loop already applied
-								// this modifier (no-translation clears the
-								// range, random-allocation sets its flag).
-								// Remember it so the tail handling below
-								// re-applies it AFTER a flushed range —
-								// authored order — instead of stamping the
-								// range last and clearing the modifier.
-								lastModifier = sib.Name()
+								// this modifier, but the deferred range
+								// flush above may have undone its effect
+								// (setPortRange clears PortNoTranslation).
+								// Remember EVERY trailing modifier so the
+								// tail can re-apply them all, in authored
+								// order — modifiers coexist (random does
+								// not supersede no-translation).
+								trailingMods = append(trailingMods, sib.Name())
 								continue
 							}
 							toks = append(toks, sib.Keys...)
@@ -935,16 +937,36 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						// setPortRange(nil) here would fabricate an
 						// "<empty>" invalid spec, zero the valid range, and
 						// clear PortNoTranslation. Only an incomplete or
-						// absent tail is a genuinely empty range.
+						// absent tail is a genuinely empty range. When
+						// modifiers flushed the range, re-apply ALL of
+						// them in authored order: no-translation clears
+						// the range (as in the children loop), the
+						// random flags toggle independently, and
+						// deterministic re-stamps its accumulated fields.
 						if toks != nil || !complete {
 							setPortRange(toks)
-						} else if lastModifier == "no-translation" {
-							// Modifier ordered after the range: it
-							// supersedes it (children-loop semantics).
-							pool.PortNoTranslation = true
-							pool.PortLow = 0
-							pool.PortHigh = 0
-							pool.PortRangeInvalidSpec = ""
+						} else {
+							for _, mod := range trailingMods {
+								switch mod {
+								case "no-translation":
+									pool.PortNoTranslation = true
+									pool.PortLow = 0
+									pool.PortHigh = 0
+									pool.PortRangeInvalidSpec = ""
+								case "random-allocation":
+									pool.PortRandomAllocation = true
+									pool.PortNoRandomAllocationAuthored = false
+								case "no-random-allocation":
+									pool.PortRandomAllocation = false
+									pool.PortNoRandomAllocationAuthored = true
+								case "deterministic":
+									for _, sib := range children[i+1:] {
+										if sib.Name() == "deterministic" {
+											applyDeterministicChildren(ensureDet(), sib)
+										}
+									}
+								}
+							}
 						}
 					}
 				}

@@ -60,6 +60,98 @@ func TestGroupedEmptyRangeStillFails15935(t *testing.T) {
 	}
 }
 
+// Two trailing modifiers after a grouped range must ALL survive, in
+// authored order: random-allocation does not supersede no-translation.
+func TestGroupedRangeTwoTrailingModifiers15935(t *testing.T) {
+	for name, cmds := range map[string][]string{
+		"no-translation-then-random": {
+			"set security nat source pool p1 port range 5000 to 6000",
+			"set security nat source pool p1 port no-translation",
+			"set security nat source pool p1 port random-allocation",
+		},
+		"no-translation-then-no-random": {
+			"set security nat source pool p1 port range 5000 to 6000",
+			"set security nat source pool p1 port no-translation",
+			"set security nat source pool p1 port no-random-allocation",
+		},
+		"random-then-no-translation": {
+			"set security nat source pool p1 port range 5000 to 6000",
+			"set security nat source pool p1 port random-allocation",
+			"set security nat source pool p1 port no-translation",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := snatPoolTree(t, append([]string{"set security nat source pool p1 address 203.0.113.5/32"}, cmds...)...)
+			for _, strict := range []bool{true, false} {
+				var cfg *Config
+				var err error
+				if strict {
+					cfg, err = CompileConfig(tree)
+				} else {
+					cfg, err = CompileConfigLenient(tree)
+				}
+				if err != nil {
+					t.Fatalf("compile strict=%v: %v", strict, err)
+				}
+				pool := cfg.Security.NAT.SourcePools["p1"]
+				if !pool.PortNoTranslation {
+					t.Fatalf("strict=%v: PortNoTranslation lost (low=%d high=%d invalid=%q random=%v)", strict, pool.PortLow, pool.PortHigh, pool.PortRangeInvalidSpec, pool.PortRandomAllocation)
+				}
+				if pool.PortLow != 0 || pool.PortHigh != 0 || pool.PortRangeInvalidSpec != "" {
+					t.Fatalf("strict=%v: no-translation must clear range, got %d-%d invalid=%q", strict, pool.PortLow, pool.PortHigh, pool.PortRangeInvalidSpec)
+				}
+				wantRandom := name != "no-translation-then-no-random"
+				if pool.PortRandomAllocation != wantRandom {
+					t.Fatalf("strict=%v: PortRandomAllocation=%v want %v", strict, pool.PortRandomAllocation, wantRandom)
+				}
+				if strings.Contains(name, "no-random") && !pool.PortNoRandomAllocationAuthored {
+					t.Fatalf("strict=%v: no-random-allocation authored marker lost", strict)
+				}
+			}
+		})
+	}
+}
+
+// Three trailing modifiers: no-translation + random + a random toggle
+// back off — all applied in order, no-translation preserved throughout.
+func TestGroupedRangeThreeTrailingModifiers15935(t *testing.T) {
+	tree := snatPoolTree(t,
+		"set security nat source pool p1 address 203.0.113.5/32",
+		"set security nat source pool p1 port range 5000 to 6000",
+		"set security nat source pool p1 port no-translation",
+		"set security nat source pool p1 port random-allocation",
+		"set security nat source pool p1 port no-random-allocation")
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile: %v", err)
+	}
+	pool := cfg.Security.NAT.SourcePools["p1"]
+	if !pool.PortNoTranslation || pool.PortRandomAllocation || !pool.PortNoRandomAllocationAuthored {
+		t.Fatalf("three modifiers: notrans=%v random=%v norandomAuth=%v low=%d high=%d invalid=%q",
+			pool.PortNoTranslation, pool.PortRandomAllocation, pool.PortNoRandomAllocationAuthored, pool.PortLow, pool.PortHigh, pool.PortRangeInvalidSpec)
+	}
+	// Deterministic as the third modifier is re-stamped, not dropped:
+	// it conflicts with no-translation at the strict gate (#15675
+	// exclusivity), proving the deterministic node was re-applied
+	// after the flush rather than silently lost.
+	treeDet := snatPoolTree(t,
+		"set security nat source pool p1 address 203.0.113.5/32",
+		"set security nat source pool p1 port range 5000 to 6000",
+		"set security nat source pool p1 port no-translation",
+		"set security nat source pool p1 port random-allocation",
+		"set security nat source pool p1 port deterministic")
+	if _, err := CompileConfig(treeDet); err == nil {
+		t.Fatalf("range+no-translation+random+deterministic must hit the no-translation/deterministic exclusivity gate")
+	}
+	cfgDet, err := CompileConfigLenient(treeDet)
+	if err != nil {
+		t.Fatalf("lenient deterministic: %v", err)
+	}
+	if cfgDet.Security.NAT.SourcePools["p1"].Deterministic == nil {
+		t.Fatalf("deterministic modifier dropped after grouped-range flush")
+	}
+}
+
 // (2) Annotation change on one block must not suppress a changed
 // sibling block in FormatCompare.
 func TestAnnotationCompareKeepsSiblingChange15935(t *testing.T) {
@@ -199,5 +291,76 @@ func TestOSPFMD5DuplicateKeyConflict15935(t *testing.T) {
 		if _, err := CompileConfig(tr); err != nil {
 			t.Fatalf("%s must compile strict: %v", name, err)
 		}
+	}
+}
+
+// Two different `key` children inside ONE md5 stanza are a conflicting
+// duplicate (strict rejects, lenient warns, first key wins) — not a
+// silent last-wins overwrite.
+func TestOSPFMD5NestedKeyConflict15935(t *testing.T) {
+	tree := hierTree(t, `protocols {
+    ospf {
+        area 0.0.0.0 {
+            interface ge-0/0/0.0 {
+                authentication { md5 1 { key alpha; key beta; } }
+            }
+        }
+    }
+}`)
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "md5 1") {
+		t.Fatalf("strict must reject nested duplicate keys naming md5 1, got: %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "duplicate key-id") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("lenient must warn duplicate key-id, warnings=%v", cfg.Warnings)
+	}
+	iface := cfg.Protocols.OSPF.Areas[0].Interfaces[0]
+	if len(iface.AuthMD5Keys) != 1 || iface.AuthMD5Keys[0].Key.Reveal() != "alpha" {
+		t.Fatalf("first nested key must win, got %+v", iface.AuthMD5Keys)
+	}
+	same := hierTree(t, `protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 {
+        authentication { md5 1 { key alpha; key alpha; } } } } } }`)
+	if _, err := CompileConfig(same); err != nil {
+		t.Fatalf("identical nested keys must compile strict: %v", err)
+	}
+}
+
+// A $9$-encoded key and its plaintext decode to the same secret, so
+// restating one as the other (either order) is NOT a conflict and must
+// pass strict, keeping the decoded first key.
+func TestOSPFMD5EquivalentEncodedKey15935(t *testing.T) {
+	const blob = "$9$SpRrMLYgaZDirexdwgUDzFn9uO1RhlKW"
+	const plain = "QZ1agnL21L"
+	for name, body := range map[string]string{
+		"encoded-then-plain":   `authentication { md5 1 { key "` + blob + `"; } md5 1 { key ` + plain + `; } }`,
+		"plain-then-encoded":   `authentication { md5 1 { key ` + plain + `; } md5 1 { key "` + blob + `"; } }`,
+		"nested-encoded-plain": `authentication { md5 1 { key "` + blob + `"; key ` + plain + `; } }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := hierTree(t, `protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { `+body+` } } } }`)
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("equivalent decoded keys must pass strict: %v", err)
+			}
+			iface := cfg.Protocols.OSPF.Areas[0].Interfaces[0]
+			if len(iface.AuthMD5Keys) != 1 || iface.AuthMD5Keys[0].Key.Reveal() != plain {
+				t.Fatalf("decoded first key must be %q, got %+v", plain, iface.AuthMD5Keys)
+			}
+		})
+	}
+	// The blob contains a literal `$`; inside a Go raw string it stays
+	// verbatim, so build this control with a quoted concatenation too.
+	tree := hierTree(t, `protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { authentication { md5 1 { key "`+blob+`"; } md5 1 { key beta; } } } } } }`)
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatalf("encoded key vs different plaintext must still reject strict")
 	}
 }
