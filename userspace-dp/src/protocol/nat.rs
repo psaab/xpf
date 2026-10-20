@@ -348,6 +348,12 @@ pub(crate) struct NAT64RuleSnapshot {
     /// restriction independent of resolution; `any` arrives as `::/0`.
     #[serde(rename = "from_zone", default)]
     pub from_zone: String,
+    /// #15932: the full authored zone list (one entry per expanded
+    /// rule-set member). Empty = fall back to `from_zone`. An old control
+    /// plane omits it and the rule keeps its singular scope; the v62
+    /// protocol bump fences the pairing.
+    #[serde(rename = "from_zones", default)]
+    pub from_zones: Vec<String>,
     #[serde(rename = "from_routing_instance", default)]
     pub from_routing_instance: String,
     #[serde(rename = "source_addresses", default)]

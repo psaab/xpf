@@ -146,9 +146,23 @@ func validateNATRuleSetMixedScopeAST(nodes []*Node, lenient bool) ([]string, err
 				return err
 			}
 			// Static NAT: `from` only.
-			return forEachChild(nat.Children, "static", func(st *Node) error {
+			if err := forEachChild(nat.Children, "static", func(st *Node) error {
 				for _, rs := range namedInstances(st.FindChildren("rule-set")) {
 					if err := checkClause("static", rs.name, rs.node, "from"); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			// NAT64 (#15932): `from` only. Before this arm a mixed
+			// zone+RI NAT64 clause compiled into two expanded rule-sets
+			// and the typed scope gate never saw the conjunction (each
+			// member carries only one axis), silently OR-widening.
+			return forEachChild(nat.Children, "nat64", func(n64 *Node) error {
+				for _, rs := range namedInstances(n64.FindChildren("rule-set")) {
+					if err := checkClause("nat64", rs.name, rs.node, "from"); err != nil {
 						return err
 					}
 				}

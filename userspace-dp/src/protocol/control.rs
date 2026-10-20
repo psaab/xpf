@@ -290,7 +290,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // a v61 helper ignores it and derives constrainedness from the source
 // list alone, which the new builder's never-match sentinel keeps
 // fail-closed, but the explicit flag is the durable record.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 62;
+// v62 -> v63 (#15932): NAT64RuleSnapshot carries from_zones; a v62
+// helper ignores it and scopes to the singular from_zone only.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 63;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

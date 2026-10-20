@@ -620,6 +620,114 @@ fn local_delivery_session_hit_counts_bound_admitting_rule_across_insert_reorder_
     );
 }
 
+/// #15932 fail-on-revert (deny double-charge): an established host-local
+/// session admitted under permit A must NOT charge A when a later hit is
+/// denied by a newly inserted deny B — the packet charges B once and A
+/// stays at its miss count. Pre-fix the bound permit charge ran before
+/// the host gates, so the denied hit read A=2, B=1 for one dropped
+/// packet. The fix defers the LocalDelivery bound charge until after
+/// every host gate passes.
+#[test]
+fn local_delivery_denied_hit_charges_only_denying_rule_15932() {
+    use crate::afxdp::forwarding_build::build_forwarding_state_with_policy_counters;
+
+    // Admit under host-permit-log only.
+    let store = crate::policy::PolicyCounterStore::default();
+    let admit_fw =
+        build_forwarding_state_with_policy_counters(&junos_host_two_rule_snapshot(false), &store);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let hits = |f: &ForwardingState, name: &str| -> u64 {
+        f.policy
+            .counter_snapshots()
+            .into_iter()
+            .find(|c| c.rule_id.ends_with(name))
+            .map(|c| c.packets)
+            .unwrap_or(0)
+    };
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let (_b, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &admit_fw,
+        &ha_state,
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(dbg.local, 1, "SYN must take the LocalDelivery arm");
+    assert_eq!(sessions.len(), 1, "the permitted SYN installs one session");
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        hits(&admit_fw, "host-permit-log"),
+        1,
+        "miss counts the permit once"
+    );
+
+    // Live config: a deny for the same tuple inserted ahead of the permit.
+    let mut deny_snapshot = junos_host_two_rule_snapshot(false);
+    deny_snapshot.policies.insert(
+        0,
+        PolicyRuleSnapshot {
+            name: "host-deny-now".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "junos-host".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            application_terms: Vec::new(),
+            action: "deny".to_string(),
+            policy_id: 9002,
+            ..Default::default()
+        },
+    );
+    let live_fw = build_forwarding_state_with_policy_counters(&deny_snapshot, &store);
+    let ack = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        0x10_u8,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(24, 0x10_u8, (ack.len() - 14) as u16);
+    let (_b, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &live_fw,
+        &ha_state,
+        &ack,
+        ack_meta,
+        true,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the ACK must HIT the established session"
+    );
+    crate::policy::flush_recorded_policy_hit_counters();
+    assert_eq!(
+        hits(&live_fw, "host-permit-log"),
+        1,
+        "#15932: a denied hit must NOT charge the admitting permit (pre-fix reads 2)"
+    );
+    assert_eq!(
+        hits(&live_fw, "host-deny-now"),
+        1,
+        "#15932: the denying rule charges exactly once"
+    );
+    assert_eq!(sessions.len(), 0, "the denied hit tears the session down");
+}
+
 /// #3326 LITERAL fail-on-revert (session-MISS): a host-bound packet denied by
 /// the zone host-inbound admission gate must increment the
 /// `host_inbound_denied_packets` batch counter (which `syncBPFCountersLocked`

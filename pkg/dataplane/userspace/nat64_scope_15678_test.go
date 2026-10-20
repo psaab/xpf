@@ -44,3 +44,24 @@ func TestBuildNAT64SnapshotsCarriesScope15678(t *testing.T) {
 		t.Fatalf("SourceAddresses = %v, want authored + resolved name prefixes", s.SourceAddresses)
 	}
 }
+
+// #15932: the snapshot builder folds a hand-built rule-set's FromZones
+// list (plus its singular FromZone) into the plural wire field so the
+// dataplane unions every authored zone.
+func TestBuildNAT64SnapshotsCarriesZoneList15932(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+		"p64": {Name: "p64", Addresses: []string{"100.64.0.1/32"}},
+	}
+	cfg.Security.NAT.NAT64 = []*config.NAT64RuleSet{{
+		Name: "rs1", Prefix: "64:ff9b::/96", SourcePool: "p64",
+		FromZone: "trust", FromZones: []string{"trust", "untrust"},
+	}}
+	snaps := buildNAT64Snapshots(cfg)
+	if len(snaps) != 1 || len(snaps[0].FromZones) != 2 {
+		t.Fatalf("FromZones = %v, want [trust untrust]", snaps)
+	}
+	if snaps[0].FromZones[0] != "trust" || snaps[0].FromZones[1] != "untrust" {
+		t.Fatalf("FromZones = %v, want [trust untrust]", snaps[0].FromZones)
+	}
+}

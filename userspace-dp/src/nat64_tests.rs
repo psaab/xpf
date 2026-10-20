@@ -8947,7 +8947,11 @@ fn embedded_v6_to_v4_advertises_original_len_10432() {
         1480,
         "RFC 7915 §5.2: advertised IPv4 Total must be 20 + original PL 1460"
     );
-    assert_eq!(&out[20..28], &q[40..48], "emitted L4 must be the quoted bytes");
+    assert_eq!(
+        &out[20..28],
+        &q[40..48],
+        "emitted L4 must be the quoted bytes"
+    );
     assert_eq!(
         checksum16(&out[..20]),
         0,
@@ -8971,7 +8975,11 @@ fn embedded_v4_to_v6_advertises_original_len_10432() {
         1480,
         "RFC 7915 §4.2: advertised IPv6 Payload must be original Total 1500 - IHL 20"
     );
-    assert_eq!(&out[40..48], &q[20..28], "emitted L4 must be the quoted bytes");
+    assert_eq!(
+        &out[40..48],
+        &q[20..28],
+        "emitted L4 must be the quoted bytes"
+    );
 }
 
 #[test]
@@ -8984,7 +8992,10 @@ fn embedded_v6_to_v4_pmtud_preserves_original_len_10432() {
     let mut out = [0u8; MAX_EMBEDDED_LEN];
     let n = translate_icmpv6_message_to_icmpv4(&mut out, &icmp6, &embed_map_v6_to_v4_10432())
         .expect("PTB with truncated quote must translate");
-    assert_eq!(n, 36, "outer must stay truncated: 8-byte header + 28 emitted");
+    assert_eq!(
+        n, 36,
+        "outer must stay truncated: 8-byte header + 28 emitted"
+    );
     assert_eq!(out[0], 3, "ICMPv4 Dest-Unreachable type");
     assert_eq!(out[1], 4, "Frag-Needed code");
     assert_eq!(&out[4..6], &[0, 0], "Frag-Needed unused word must be zero");
@@ -9000,7 +9011,11 @@ fn embedded_v6_to_v4_pmtud_preserves_original_len_10432() {
         1480,
         "embedded advertised IPv4 Total must be the original 1480"
     );
-    assert_eq!(&emb[20..28], &quote[40..48], "embedded L4 stays the quoted bytes");
+    assert_eq!(
+        &emb[20..28],
+        &quote[40..48],
+        "embedded L4 stays the quoted bytes"
+    );
     assert_eq!(
         checksum16(&out[..n]),
         0,
@@ -9019,7 +9034,10 @@ fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
     let mut out = [0u8; MAX_EMBEDDED_LEN];
     let n = translate_icmpv4_message_to_icmpv6(&mut out, &icmp4, &embed_map_v4_to_v6_10432())
         .expect("Frag-Needed with truncated quote must translate");
-    assert_eq!(n, 56, "outer must stay truncated: 8-byte header + 48 emitted");
+    assert_eq!(
+        n, 56,
+        "outer must stay truncated: 8-byte header + 48 emitted"
+    );
     assert_eq!(out[0], 2, "ICMPv6 Packet-Too-Big type");
     assert_eq!(out[1], 0, "PTB code 0");
     assert_eq!(
@@ -9027,7 +9045,11 @@ fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
         1420,
         "PTB MTU must be v4 next-hop MTU + 20"
     );
-    assert_eq!(&out[2..4], &[0, 0], "ICMPv6 checksum left zeroed for caller");
+    assert_eq!(
+        &out[2..4],
+        &[0, 0],
+        "ICMPv6 checksum left zeroed for caller"
+    );
     let emb = &out[8..n];
     assert_eq!(emb.len(), 48, "embedded emitted length stays truncated");
     assert_eq!(
@@ -9035,9 +9057,12 @@ fn embedded_v4_to_v6_pmtud_preserves_original_len_10432() {
         1480,
         "embedded advertised IPv6 Payload must be the original 1480"
     );
-    assert_eq!(&emb[40..48], &quote[20..28], "embedded L4 stays the quoted bytes");
+    assert_eq!(
+        &emb[40..48],
+        &quote[20..28],
+        "embedded L4 stays the quoted bytes"
+    );
 }
-
 
 // #14962 (D27-01): a NAT64 snapshot whose source pool is unusable
 // (PoolUnusable, stamped Go-side from SourceNATPoolUnusableReason or by the
@@ -9068,8 +9093,7 @@ fn nat64_pool_unusable_installs_prefix_and_drops_14962() {
         "#14962: an unusable pool must install with NO mintable addresses"
     );
     assert_eq!(
-        state.prefixes[0].pool_unusable_reason,
-        "invalid_pool",
+        state.prefixes[0].pool_unusable_reason, "invalid_pool",
         "#14962: the Go-stamped reason must survive onto the prefix for operator diagnosis"
     );
     // 64:ff9b::198.51.100.50 — inside the prefix, global embedded v4.
@@ -9089,10 +9113,7 @@ fn nat64_pool_unusable_installs_prefix_and_drops_14962() {
     };
     let ok = Nat64State::from_snapshots(&[healthy]);
     assert!(
-        matches!(
-            ok.classify_ipv6_dest(dst),
-            Nat64Match::MatchReady { .. }
-        ),
+        matches!(ok.classify_ipv6_dest(dst), Nat64Match::MatchReady { .. }),
         "#14962 control: a usable NAT64 pool must still translate"
     );
     // Control: the interface-overlap quarantine reason installs the same way.
@@ -9138,7 +9159,7 @@ fn det_nat64_snap_15178(block_size: u16, host_base: &str, prefix_len: u8) -> NAT
         port_high: 0,
         pool_unusable: false,
         pool_unusable_reason: String::new(),
-    ..Default::default()
+        ..Default::default()
     }
 }
 
@@ -9159,7 +9180,8 @@ fn nat64_15178_block_size_change_does_not_reuse_allocator() {
     // Same prefix + pool, block-size 32 -> 1024. New block for word 5:
     // [6144,7167]. The allocator must NOT be reused.
     let new_snap = det_nat64_snap_15178(1024, "2001:db8::", 32);
-    let state2 = Nat64State::from_snapshots_with_previous(&[new_snap], Some(&state1), 2, 2_000_000_000);
+    let state2 =
+        Nat64State::from_snapshots_with_previous(&[new_snap], Some(&state1), 2, 2_000_000_000);
     assert_eq!(
         state2.prefixes[0].port_allocator.live_flow_count(),
         0,

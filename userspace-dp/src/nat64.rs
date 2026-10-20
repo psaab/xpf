@@ -242,6 +242,9 @@ pub(crate) struct Nat64Prefix {
     /// `source_constrained` with an empty vec and matches NOTHING (never
     /// silently widened to any-source).
     pub(crate) from_zone: String,
+    /// #15932: every authored zone for this prefix (the union). Empty
+    /// means fall back to `from_zone` (singular, pre-#15932 snapshots).
+    pub(crate) from_zones: Vec<String>,
     pub(crate) from_routing_instance: String,
     pub(crate) source_prefixes: Vec<PrefixV6>,
     pub(crate) source_constrained: bool,
@@ -345,6 +348,7 @@ impl Nat64Prefix {
         Self {
             prefix_bytes,
             from_zone: String::new(),
+            from_zones: Vec::new(),
             from_routing_instance: String::new(),
             source_prefixes: Vec::new(),
             source_constrained: false,
@@ -369,6 +373,7 @@ impl Clone for Nat64Prefix {
         Self {
             prefix_bytes: self.prefix_bytes,
             from_zone: self.from_zone.clone(),
+            from_zones: self.from_zones.clone(),
             from_routing_instance: self.from_routing_instance.clone(),
             source_prefixes: self.source_prefixes.clone(),
             source_constrained: self.source_constrained,
@@ -1187,7 +1192,11 @@ impl Nat64State {
             } else {
                 new_deterministic_v6
             };
-            if !over_budget && !snap.pool_unusable && deterministic_v6.is_none() && !snap.deterministic_host_base_v6.is_empty() {
+            if !over_budget
+                && !snap.pool_unusable
+                && deterministic_v6.is_none()
+                && !snap.deterministic_host_base_v6.is_empty()
+            {
                 DETERMINISTIC_V6_DOWNGRADE_COUNT.fetch_add(1, Ordering::Relaxed);
                 eprintln!(
                     "xpf nat64: rule {:?} requested deterministic NAPT64 mapping (host-base {:?}) but failed to build (bad base / unsupported prefix-len / degenerate block math / pool-size overflow) — falling back to round-robin PAT; subscriber mappings are no longer deterministic",
@@ -1214,7 +1223,9 @@ impl Nat64State {
                 } else if let Ok(net) = a.parse::<ipnet::Ipv6Net>() {
                     Some(PrefixV6::from_net(net))
                 } else if let Ok(addr) = a.parse::<Ipv6Addr>() {
-                    Some(PrefixV6::from_net(ipnet::Ipv6Net::new(addr, 128).expect("host net")))
+                    Some(PrefixV6::from_net(
+                        ipnet::Ipv6Net::new(addr, 128).expect("host net"),
+                    ))
                 } else {
                     None
                 };
@@ -1229,6 +1240,17 @@ impl Nat64State {
             prefixes.push(Nat64Prefix {
                 prefix_bytes,
                 from_zone: snap.from_zone.clone(),
+                // #15932: union — prefer the plural list; fall back to
+                // the singular for pre-#15932 snapshots.
+                from_zones: if snap.from_zones.is_empty() {
+                    if snap.from_zone.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![snap.from_zone.clone()]
+                    }
+                } else {
+                    snap.from_zones.clone()
+                },
                 from_routing_instance: snap.from_routing_instance.clone(),
                 source_prefixes,
                 source_constrained,
@@ -1340,6 +1362,106 @@ impl Nat64State {
     /// use: the translated address must be the subscriber's deterministic
     /// pool address (at its pool index) and the port must lie in the
     /// subscriber's CURRENT block. A missing translated port fails closed.
+    pub(crate) fn nat64_source_translation_still_valid_scoped(
+        &self,
+        src_v6: Ipv6Addr,
+        dst_v6: Ipv6Addr,
+        translated_src: Ipv4Addr,
+        translated_port: Option<u16>,
+        from_zone: &str,
+        routing_instance: &str,
+    ) -> bool {
+        let Some(port) = translated_port else {
+            return false;
+        };
+        let Some((prefix_idx, _)) =
+            self.match_ipv6_dest_scoped(src_v6, dst_v6, from_zone, routing_instance)
+        else {
+            return false;
+        };
+        let Some(prefix) = self.prefixes.get(prefix_idx) else {
+            return false;
+        };
+        let Some(&addr_index) = prefix.pool_index_v4.get(&translated_src) else {
+            return false;
+        };
+        match prefix.deterministic_v6 {
+            Some(params) => prefix.port_allocator.deterministic_v6_tuple_matches(
+                params,
+                src_v6,
+                &prefix.pool_v4,
+                addr_index,
+                translated_src,
+                port,
+            ),
+            None => (NAT64_PORT_LOW..=NAT64_PORT_HIGH).contains(&port),
+        }
+    }
+
+    /// #15178/#15932: provenance-aware form of
+    /// [`Self::nat64_source_translation_still_valid`]. The admitting
+    /// prefix is re-selected with the session's recorded ingress scope
+    /// (zone / routing-instance) and its IPv6 source — the same inputs
+    /// the mint used (`classify_ipv6_packet_scoped`) — instead of the
+    /// first destination-only /96. Two same-/96 rule-sets in different
+    /// scopes with disjoint pools therefore judge a session against its
+    /// own owner. `scope_known == false` (legacy/imported row with no
+    /// recorded NAT scope) keeps the destination-only behaviour so such
+    /// rows are never revoked against an invented empty scope.
+    pub(crate) fn nat64_revalidation_still_valid(
+        &self,
+        src_v6: Ipv6Addr,
+        dst_v6: Ipv6Addr,
+        translated_src: Ipv4Addr,
+        translated_port: Option<u16>,
+        from_zone: &str,
+        routing_instance: &str,
+        scope_known: bool,
+    ) -> bool {
+        if scope_known {
+            // U1 (#15932): scope tightening must revoke. If no live
+            // prefix matches the recorded scope+source any more, the
+            // translation is no longer admitted — for round-robin and
+            // deterministic owners alike. If a scoped owner DOES match
+            // but no longer holds the translated tuple (pool/geometry
+            // edit), that is invalid too.
+            if self
+                .match_ipv6_dest_scoped(src_v6, dst_v6, from_zone, routing_instance)
+                .is_none()
+            {
+                return false;
+            }
+            return self.nat64_source_translation_still_valid_scoped(
+                src_v6,
+                dst_v6,
+                translated_src,
+                translated_port,
+                from_zone,
+                routing_instance,
+            );
+        }
+        self.nat64_source_translation_still_valid(src_v6, dst_v6, translated_src, translated_port)
+    }
+
+    /// #15178: is a stored NAT64 source translation still produced by the
+    /// live deterministic geometry for the session's synthetic v6
+    /// destination? Read-only; never allocates.
+    ///
+    /// The prefix is selected exactly as the forward mint selects it —
+    /// `match_ipv6_dest` on the PRE-translation synthetic destination —
+    /// so a session whose destination matches no live prefix (or whose
+    /// prefix no longer holds the translated address) fails closed, and
+    /// a session is never judged against an unrelated prefix that merely
+    /// shares a pool address.
+    ///
+    /// Round-robin prefixes (`deterministic_v6: None`) carry no geometry
+    /// to invalidate a tuple — pool membership + in-range port stays
+    /// valid (the pre-#15178 behaviour for that mode). A deterministic
+    /// prefix validates through `deterministic_v6_tuple_matches`, the
+    /// same predicate the synced reserve and idle-lease import already
+    /// use: the translated address must be the subscriber's deterministic
+    /// pool address (at its pool index) and the port must lie in the
+    /// subscriber's CURRENT block. A missing translated port fails closed.
     pub(crate) fn nat64_source_translation_still_valid(
         &self,
         src_v6: Ipv6Addr,
@@ -1370,6 +1492,65 @@ impl Nat64State {
             ),
             None => (NAT64_PORT_LOW..=NAT64_PORT_HIGH).contains(&port),
         }
+    }
+
+    /// #15932: scoped sibling of
+    /// [`Self::nat64_deterministic_translation_mismatch`]. Same positive-
+    /// mismatch contract, but the live prefix is the one the session's
+    /// recorded scope+source selects — never the first destination-only
+    /// /96 owned by another zone. With `scope_known == false` it falls
+    /// back to the destination-only predicate (legacy rows keep the
+    /// pre-#15932 exemption instead of being judged against an empty
+    /// scope).
+    pub(crate) fn nat64_deterministic_translation_mismatch_scoped(
+        &self,
+        src_v6: Ipv6Addr,
+        dst_v6: Ipv6Addr,
+        translated_src: Ipv4Addr,
+        translated_port: Option<u16>,
+        from_zone: &str,
+        routing_instance: &str,
+        scope_known: bool,
+    ) -> bool {
+        if !scope_known {
+            return self.nat64_deterministic_translation_mismatch(
+                src_v6,
+                dst_v6,
+                translated_src,
+                translated_port,
+            );
+        }
+        let Some(port) = translated_port else {
+            return false;
+        };
+        let Some((prefix_idx, _)) =
+            self.match_ipv6_dest_scoped(src_v6, dst_v6, from_zone, routing_instance)
+        else {
+            // No scoped owner any more. For a deterministic owner this is
+            // a positive withdrawal (U1); for round-robin owners the
+            // scope check in `nat64_revalidation_still_valid` is the
+            // revoking predicate, so keep this predicate narrow: only
+            // report mismatch when SOME same-/96 prefix exists (i.e. the
+            // rule was tightened away, not merely never present).
+            return self.match_ipv6_dest(dst_v6).is_some();
+        };
+        let Some(prefix) = self.prefixes.get(prefix_idx) else {
+            return false;
+        };
+        let Some(params) = prefix.deterministic_v6 else {
+            return false;
+        };
+        let Some(&addr_index) = prefix.pool_index_v4.get(&translated_src) else {
+            return true;
+        };
+        !prefix.port_allocator.deterministic_v6_tuple_matches(
+            params,
+            src_v6,
+            &prefix.pool_v4,
+            addr_index,
+            translated_src,
+            port,
+        )
     }
 
     /// #15178: positive-mismatch form for session-hit revalidation.
@@ -1461,7 +1642,12 @@ impl Nat64State {
         from_zone: &str,
         routing_instance: &str,
     ) -> bool {
-        if !prefix.from_zone.is_empty() && prefix.from_zone != from_zone {
+        // #15932: zone list is a union — any authored zone admits.
+        if !prefix.from_zones.is_empty() {
+            if !prefix.from_zones.iter().any(|z| z == from_zone) {
+                return false;
+            }
+        } else if !prefix.from_zone.is_empty() && prefix.from_zone != from_zone {
             return false;
         }
         if !prefix.from_routing_instance.is_empty()

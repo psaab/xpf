@@ -427,45 +427,40 @@ func nodeSubtreeHasKey(n *Node, want string) bool {
 
 func compileNAT64(node *Node, sec *SecurityConfig) error {
 	for _, inst := range namedInstances(node.FindChildren("rule-set")) {
-		rs := &NAT64RuleSet{Name: inst.name}
+		base := &NAT64RuleSet{Name: inst.name}
 
-		// #15678: from-scope (zone | routing-instance). Reuse the shared
-		// NAT scope reader so the packed-header shape (`rule-set rs from
-		// zone trust { ... }`) and bracket lists behave exactly as the
-		// source/destination/static rule-sets. The gate
-		// (validateNAT64ScopeStrict) rejects a mixed/repeated from clause;
-		// here every scope is stamped verbatim (last value wins per axis is
-		// never widened silently because strict rejects >1 total).
+		// #15678/#15932: from-scope (zone | routing-instance). Reuse the
+		// shared NAT scope reader so the packed-header shape (`rule-set rs
+		// from zone trust { ... }`) and bracket lists behave exactly as the
+		// source/destination/static rule-sets. Multiple values of one kind
+		// are a legitimate OR list: expand into one rule-set per scope
+		// value below (union). A mixed-kind clause is rejected at strict
+		// commit (#4881-style gate in validateNAT64ScopeStrict via the
+		// typed fields); on the lenient path the expansion preserves the
+		// legacy OR behaviour instead of silently keeping only the last
+		// zone (the pre-#15932 truncation).
 		fromScopes, _ := collectNATScopes(inst.node, false, "nat64")
-		for _, s := range fromScopes {
-			switch s.kind {
-			case "routing-instance":
-				rs.FromRoutingInstance = s.value
-			default: // "zone"
-				rs.FromZone = s.value
-			}
-		}
 
 		// #9792: a packed one-line run reaches this reader on the lenient path
 		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
 		for _, child := range expandResolvingRuns9792(inst.node.Children, nat64RuleSetSchema9792()) {
 			switch child.Name() {
 			case "prefix":
-				rs.Prefix = nodeVal(child)
+				base.Prefix = nodeVal(child)
 			case "source-pool":
-				rs.SourcePool = nodeVal(child)
+				base.SourcePool = nodeVal(child)
 			case "match":
 				for _, m := range child.Children {
 					switch m.Name() {
 					case "source-address":
-						rs.SourceAddresses = append(rs.SourceAddresses, natMatchAddressValues(m)...)
-						if len(rs.SourceAddresses) > 0 {
-							rs.SourceAddress = rs.SourceAddresses[0]
+						base.SourceAddresses = append(base.SourceAddresses, natMatchAddressValues(m)...)
+						if len(base.SourceAddresses) > 0 {
+							base.SourceAddress = base.SourceAddresses[0]
 						}
 					case "source-address-name":
-						rs.SourceAddressNames = append(rs.SourceAddressNames, firewallMatchValues(m)...)
-						if len(rs.SourceAddressNames) > 0 {
-							rs.SourceAddressName = rs.SourceAddressNames[0]
+						base.SourceAddressNames = append(base.SourceAddressNames, firewallMatchValues(m)...)
+						if len(base.SourceAddressNames) > 0 {
+							base.SourceAddressName = base.SourceAddressNames[0]
 						}
 					}
 				}
@@ -473,17 +468,40 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 				for i := 0; i+1 < len(child.Keys); i++ {
 					switch child.Keys[i] {
 					case "source-address":
-						rs.SourceAddresses = append(rs.SourceAddresses, child.Keys[i+1])
-						rs.SourceAddress = rs.SourceAddresses[0]
+						base.SourceAddresses = append(base.SourceAddresses, child.Keys[i+1])
+						base.SourceAddress = base.SourceAddresses[0]
 					case "source-address-name":
-						rs.SourceAddressNames = append(rs.SourceAddressNames, child.Keys[i+1])
-						rs.SourceAddressName = rs.SourceAddressNames[0]
+						base.SourceAddressNames = append(base.SourceAddressNames, child.Keys[i+1])
+						base.SourceAddressName = base.SourceAddressNames[0]
 					}
 				}
 			}
 		}
 
-		sec.NAT.NAT64 = append(sec.NAT.NAT64, rs)
+		if len(fromScopes) == 0 {
+			fromScopes = []natMatchScope{{kind: "zone", value: ""}}
+		}
+		// #15932: union the zone/RI list — one typed rule-set per scope
+		// value, sharing the authored prefix/pool/match (slices are shared
+		// read-only after compile, as in the source-NAT Cartesian product).
+		for _, s := range fromScopes {
+			rs := &NAT64RuleSet{
+				Name:               base.Name,
+				Prefix:             base.Prefix,
+				SourcePool:         base.SourcePool,
+				SourceAddresses:    base.SourceAddresses,
+				SourceAddressNames: base.SourceAddressNames,
+				SourceAddress:      base.SourceAddress,
+				SourceAddressName:  base.SourceAddressName,
+			}
+			switch s.kind {
+			case "routing-instance":
+				rs.FromRoutingInstance = s.value
+			default: // "zone"
+				rs.FromZone = s.value
+			}
+			sec.NAT.NAT64 = append(sec.NAT.NAT64, rs)
+		}
 	}
 	return nil
 }

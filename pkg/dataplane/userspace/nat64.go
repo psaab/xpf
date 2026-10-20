@@ -243,11 +243,29 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			// the wire as an empty (unconstrained) list.
 			sourceAddrs = []string{natUnresolvedAddressNamePrefix + "nat64-source"}
 		}
+		// #15932: union the authored zone list. Expanded rule-sets carry
+		// one FromZone each; a hand-built rule-set may carry only
+		// FromZones — fold both into the plural wire field (deduped,
+		// order-preserved) so the dataplane unions every zone.
+		fromZones := append([]string(nil), rs.FromZones...)
+		if rs.FromZone != "" {
+			seen := false
+			for _, z := range fromZones {
+				if z == rs.FromZone {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				fromZones = append(fromZones, rs.FromZone)
+			}
+		}
 		out = append(out, NAT64RuleSnapshot{
 			Name:                       rs.Name,
 			Prefix:                     config.NormaliseNAT64PrefixForSnapshot(rs.Prefix),
 			PoolAddresses:              poolAddresses,
 			FromZone:                   rs.FromZone,
+			FromZones:                  fromZones,
 			FromRoutingInstance:        rs.FromRoutingInstance,
 			SourceAddresses:            sourceAddrs,
 			SourceConstrained:          authoredConstrained && !wildcardAuthored,

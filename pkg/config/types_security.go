@@ -1053,9 +1053,13 @@ type NATv6v4Config struct {
 // `match source-address` accepts CIDRs / bare hosts and `match
 // source-address-name` accepts address-book names resolved at snapshot
 // build. Empty = match any source. Exactly one from axis may be set
-// (zone XOR routing-instance); a mixed or repeated from clause is rejected
-// at strict commit (never OR-widened). #15930: `any` (or an IPv6 family
-// wildcard, or `::/0`) anywhere in the selector is an explicit
+// (zone XOR routing-instance); a mixed-kind from clause is rejected at
+// strict commit (never OR-widened). Multiple values of the SAME kind
+// are a legitimate list: compileNAT64 unions them into FromZones on
+// the ONE authored rule-set (#15932) — never Cartesian-expanded into
+// separate snapshots, because the dataplane owns one PortAllocator
+// per (prefix, pool) snapshot. #15930: `any` (or an IPv6 family
+// wildcard, or `::/0`) anywhere in the source selector is an explicit
 // match-any that wins over narrower entries — the snapshot builder
 // lowers such a side to `::/0` and preserves any other authored
 // constraint as fail-closed (never-match), never as an empty list.
@@ -1064,8 +1068,14 @@ type NAT64RuleSet struct {
 	Prefix     string // well-known prefix, e.g. "64:ff9b::/96"
 	SourcePool string // IPv4 source pool name for translated packets
 	// FromZone scopes the rule-set to traffic ingressing this security zone.
-	// "" = unscoped. #15678.
+	// "" = unscoped. #15678. Expanded rule-sets carry exactly one zone; a
+	// bracket/repeated `from zone` list becomes one rule-set per zone.
 	FromZone string
+	// FromZones is the authored zone list before compileNAT64 expansion.
+	// Expanded rule-sets leave it empty (their FromZone is authoritative);
+	// validators fall back to it so direct/hand-built rule-sets carrying
+	// only the list are still scope-checked. #15932.
+	FromZones []string
 	// FromRoutingInstance scopes the rule-set to traffic in this routing
 	// instance / VRF. "" = the default instance / unscoped. #15678.
 	FromRoutingInstance string

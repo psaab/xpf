@@ -107,7 +107,7 @@ func TestNAT64ScopeStrictRejects15678(t *testing.T) {
 		{"mixed-from", []string{
 			"set security nat nat64 rule-set rs1 from zone trust",
 			"set security nat nat64 rule-set rs1 from routing-instance blue",
-		}, "exactly one from scope"},
+		}, "mixes 2 scope kinds"},
 		{"undefined-zone", []string{
 			"set security nat nat64 rule-set rs1 from zone nosuchzone",
 		}, "from-zone"},
@@ -162,5 +162,57 @@ func TestNAT64ScopedShadowing15678(t *testing.T) {
 	kb, _ := nat64PrefixOwnerKeyScoped(b)
 	if ka == kb {
 		t.Fatalf("scoped owner keys must differ by zone: %q == %q", ka, kb)
+	}
+}
+
+// #15932: a bracket `from zone [ trust untrust ]` list must UNION —
+// compileNAT64 expands it into one typed rule-set per zone (the
+// pre-fix compiler kept only the last zone). Fail-on-revert: collapsing
+// to one rule-set, or keeping only "untrust", fails below.
+func TestNAT64ZoneListUnions15932(t *testing.T) {
+	cfg, err := compileNAT64Scope(t, nat64ScopeLines(
+		"set security nat nat64 rule-set rs1 from zone [ trust untrust ]",
+	))
+	if err != nil {
+		t.Fatalf("bracket zone list must compile: %v", err)
+	}
+	if len(cfg.Security.NAT.NAT64) != 2 {
+		t.Fatalf("NAT64 rule-sets = %d, want 2 (one per zone)", len(cfg.Security.NAT.NAT64))
+	}
+	zones := map[string]bool{}
+	for _, rs := range cfg.Security.NAT.NAT64 {
+		if rs.Name != "rs1" || rs.Prefix != "64:ff9b::/96" || rs.SourcePool != "p64" {
+			t.Fatalf("expanded member lost identity: %+v", rs)
+		}
+		zones[rs.FromZone] = true
+	}
+	if !zones["trust"] || !zones["untrust"] {
+		t.Fatalf("expanded zones = %v, want trust+untrust", zones)
+	}
+	// Repeated single-value form unions the same way.
+	cfg2, err := compileNAT64Scope(t, nat64ScopeLines(
+		"set security nat nat64 rule-set rs1 from zone trust",
+		"set security nat nat64 rule-set rs1 from zone untrust",
+	))
+	if err != nil {
+		t.Fatalf("repeated zone form must compile: %v", err)
+	}
+	if len(cfg2.Security.NAT.NAT64) != 2 {
+		t.Fatalf("repeated form rule-sets = %d, want 2", len(cfg2.Security.NAT.NAT64))
+	}
+	// An undefined member of the list is still rejected (every value checked).
+	if _, err := compileNAT64Scope(t, nat64ScopeLines(
+		"set security nat nat64 rule-set rs1 from zone [ trust nosuchzone ]",
+	)); err == nil || !strings.Contains(err.Error(), "nosuchzone") {
+		t.Fatalf("undefined list member must reject, got %v", err)
+	}
+	// Union siblings sharing one pool are ONE allocator owner (#5144):
+	// the bracket form above compiled clean, which the owner-key dedupe
+	// guarantees; a mixed zone+RI clause still rejects.
+	if _, err := compileNAT64Scope(t, nat64ScopeLines(
+		"set security nat nat64 rule-set rs1 from zone trust",
+		"set security nat nat64 rule-set rs1 from routing-instance blue",
+	)); err == nil || !strings.Contains(err.Error(), "mixes 2 scope kinds") {
+		t.Fatalf("mixed zone+RI must reject, got %v", err)
 	}
 }
