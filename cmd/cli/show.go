@@ -151,38 +151,54 @@ func (c *ctl) handleShow(args []string) error {
 		return nil
 
 	case "route":
-		if len(args) >= 2 && args[1] == "fib" {
-			return c.showCommand("show route fib")
+		// #15723: exact-arity mirror of pkg/cli handleShowRoute. A dangling
+		// table/instance/protocol selector, an unknown subcommand, and any
+		// unrecognised trailing token must error instead of widening to
+		// showRoutes() (route-all, the full table) or silently dropping the
+		// trailing token. The usage string is duplicated verbatim from
+		// pkg/cli (showRouteUsage); the two binaries cannot share the const
+		// without an import cycle through the CLI package.
+		const showRouteUsage = "usage: show route [<destination> [exact|longer|orlonger]] | show route [terse|detail|summary|fib] | show route table <name> | show route instance <name> | show route protocol <name>"
+		if len(args) == 1 {
+			return c.showRoutes()
 		}
-		if len(args) >= 2 && args[1] == "terse" {
-			return c.showCommand("show route terse")
-		}
-		if len(args) >= 2 && args[1] == "detail" {
-			return c.showCommand("show route detail")
-		}
-		if len(args) >= 2 && args[1] == "summary" {
-			return c.showCommand("show route summary")
-		}
-		if len(args) >= 3 && args[1] == "instance" {
+		switch args[1] {
+		case "fib", "terse", "detail", "summary":
+			if len(args) != 2 {
+				return fmt.Errorf("%s", showRouteUsage)
+			}
+			return c.showCommand("show route " + args[1])
+		case "instance":
+			if len(args) != 3 {
+				return fmt.Errorf("%s", showRouteUsage)
+			}
 			return c.showTextFiltered("route-instance", args[2])
-		}
-		if len(args) >= 3 && args[1] == "table" {
+		case "table":
+			if len(args) != 3 {
+				return fmt.Errorf("%s", showRouteUsage)
+			}
 			return c.showText("route-table:" + args[2])
-		}
-		if len(args) >= 3 && args[1] == "protocol" {
+		case "protocol":
+			if len(args) != 3 {
+				return fmt.Errorf("%s", showRouteUsage)
+			}
 			return c.showText("route-protocol:" + args[2])
 		}
-		if len(args) >= 2 && (strings.Contains(args[1], "/") || strings.Contains(args[1], ".") || strings.Contains(args[1], ":")) {
+		if strings.Contains(args[1], "/") || strings.Contains(args[1], ".") || strings.Contains(args[1], ":") {
 			topic := "route-prefix:" + args[1]
-			if len(args) >= 3 {
+			if len(args) == 3 {
 				switch args[2] {
 				case "exact", "longer", "orlonger":
 					topic += " " + args[2]
+				default:
+					return fmt.Errorf("%s", showRouteUsage)
 				}
+			} else if len(args) > 3 {
+				return fmt.Errorf("%s", showRouteUsage)
 			}
 			return c.showText(topic)
 		}
-		return c.showRoutes()
+		return fmt.Errorf("%s", showRouteUsage)
 
 	case "vrrp":
 		return c.showVRRP()

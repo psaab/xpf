@@ -16,44 +16,76 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// showRouteUsage is the one grammar both `show route` dispatchers (local
+// here, remote in cmd/cli) reject against. Keep the spellings in sync with
+// the cmdtree `show route` children.
+const showRouteUsage = "usage: show route [<destination> [exact|longer|orlonger]] | show route [terse|detail|summary|fib] | show route table <name> | show route instance <name> | show route protocol <name>"
+
 // handleShowRoute dispatches `show route ...` invocations to the
 // per-flavor presenters defined later in this file.
+//
+// #15723: every selector is exact-arity. A dangling table/instance/
+// protocol selector, an unknown subcommand, and any unrecognised trailing
+// token must error instead of falling through to showRoutes() (the full
+// table) or silently dropping the trailing token and running a narrower
+// view. #14687 made Canonicalize fail closed for restricted classes; an
+// unrestricted class reaches here and must not be widened either.
 func (c *CLI) handleShowRoute(args []string) error {
-	if len(args) >= 2 && args[0] == "instance" {
+	if len(args) == 0 {
+		return c.showRoutes()
+	}
+	switch args[0] {
+	case "instance":
+		if len(args) != 2 {
+			return fmt.Errorf("%s", showRouteUsage)
+		}
 		return c.showRoutesForInstance(args[1])
-	}
-	if len(args) >= 2 && args[0] == "table" {
+	case "table":
+		if len(args) != 2 {
+			return fmt.Errorf("%s", showRouteUsage)
+		}
 		return c.showRoutesForVRF(args[1])
-	}
-	if len(args) >= 2 && args[0] == "protocol" {
+	case "protocol":
+		if len(args) != 2 {
+			return fmt.Errorf("%s", showRouteUsage)
+		}
 		return c.showRoutesForProtocol(args[1])
-	}
-	if len(args) >= 1 && args[0] == "terse" {
+	case "terse":
+		if len(args) != 1 {
+			return fmt.Errorf("%s", showRouteUsage)
+		}
 		return c.showRouteTerse()
-	}
-	if len(args) >= 1 && args[0] == "summary" {
+	case "summary":
+		if len(args) != 1 {
+			return fmt.Errorf("%s", showRouteUsage)
+		}
 		return c.showRouteSummary()
-	}
-	if len(args) >= 1 && args[0] == "detail" {
+	case "detail":
+		if len(args) != 1 {
+			return fmt.Errorf("%s", showRouteUsage)
+		}
 		return c.showRouteDetail()
-	}
-	if len(args) >= 1 && args[0] == "fib" {
+	case "fib":
+		if len(args) != 1 {
+			return fmt.Errorf("%s", showRouteUsage)
+		}
 		return c.showHelperFIB()
 	}
-
-	// Treat first arg as prefix filter (e.g. "show route 10.0.1.0/24")
-	// Optional second arg is a modifier: exact, longer, orlonger
-	if len(args) >= 1 && (strings.Contains(args[0], "/") || strings.Contains(args[0], ".") || strings.Contains(args[0], ":")) {
+	if strings.Contains(args[0], "/") || strings.Contains(args[0], ".") || strings.Contains(args[0], ":") {
 		modifier := ""
-		if len(args) >= 2 {
+		if len(args) == 2 {
 			switch args[1] {
 			case "exact", "longer", "orlonger":
 				modifier = args[1]
+			default:
+				return fmt.Errorf("%s", showRouteUsage)
 			}
+		} else if len(args) > 2 {
+			return fmt.Errorf("%s", showRouteUsage)
 		}
 		return c.showRoutesForPrefix(args[0], modifier)
 	}
-	return c.showRoutes()
+	return fmt.Errorf("%s", showRouteUsage)
 }
 
 // handleShowProtocols dispatches `show protocols ...` invocations to the
