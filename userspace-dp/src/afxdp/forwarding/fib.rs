@@ -1477,6 +1477,75 @@ enum ResolvedRouteV6<'a> {
     },
 }
 
+/// #15917: longest-prefix match over one family's connected
+/// prefixes, restricted to interfaces whose routing instance owns
+/// `table`. Returns the winning ifindex, or 0 when no in-table
+/// interface prefix contains `ip`. Ties at the longest length keep
+/// the first encountered entry, never hash order over unrelated
+/// tables: candidates are table-filtered BEFORE the prefix-length
+/// comparison.
+///
+/// This is the ONLY connected-prefix attribution the cluster-
+/// terminal fallback may use. The pre-#15917 global scans of
+/// `connected_*_by_ifindex` took the first prefix-containing
+/// interface in FastMap (hash) order with no table check, so an
+/// overlapping prefix in another VRF could steal the attribution:
+/// the HA gate then saw the wrong RG (restoring DiscardRoute for
+/// a peer-owned WAN) and the #15906 punt-seed consumers read the
+/// wrong zone/owner from the same stamp. Deriving the owning
+/// table from `ifindex_to_routing_instance` via
+/// `connected_route_tables` keeps this in lockstep with how
+/// `populate_interfaces` scoped the transit `connected_v*` rows
+/// (#2388) — one source of truth for an interface's table.
+/// Interfaces absent from that map are the default instance (the
+/// map's documented convention), which `connected_route_tables("")`
+/// maps to inet.0/inet6.0. Runs only on the terminal/miss path,
+/// never per forwarded packet.
+fn connected_lpm_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
+    let mut best: Option<(u8, i32)> = None;
+    for (ifindex, prefixes) in &state.connected_v4_by_ifindex {
+        let instance = state
+            .ifindex_to_routing_instance
+            .get(ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        if crate::afxdp::forwarding_build::connected_route_tables(instance).0 != table {
+            continue;
+        }
+        for prefix in prefixes {
+            if prefix.contains(ip)
+                && best.is_none_or(|(best_len, _)| prefix.prefix_len() > best_len)
+            {
+                best = Some((prefix.prefix_len(), *ifindex));
+            }
+        }
+    }
+    best.map(|(_, ifindex)| ifindex).unwrap_or(0)
+}
+
+/// #15917: v6 twin of `connected_lpm_ifindex_v4`.
+fn connected_lpm_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
+    let mut best: Option<(u8, i32)> = None;
+    for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
+        let instance = state
+            .ifindex_to_routing_instance
+            .get(ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        if crate::afxdp::forwarding_build::connected_route_tables(instance).1 != table {
+            continue;
+        }
+        for prefix in prefixes {
+            if prefix.contains(ip)
+                && best.is_none_or(|(best_len, _)| prefix.prefix_len() > best_len)
+            {
+                best = Some((prefix.prefix_len(), *ifindex));
+            }
+        }
+    }
+    best.map(|(_, ifindex)| ifindex).unwrap_or(0)
+}
+
 /// #15742: the gateway ifindex of the route that WOULD carry `ip`
 /// absent any terminal row: the same live-tier selection
 /// `select_v4_route` performs on non-terminal rows (first row with a
@@ -1487,15 +1556,10 @@ enum ResolvedRouteV6<'a> {
 /// would-be RG. Returns 0 when no forwarding row or connected prefix
 /// matches.
 fn select_source_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
-    // #15742e: consult connected_by_ifindex, not only connected_v4.
-    // A peer-owned WAN prefix is suppressed from connected_v4 (transit)
-    // but remains in by_ifindex; the live split node has no forwarding
-    // default, so this map is the only attribution left.
-    let by_ifindex_connected = state
-        .connected_v4_by_ifindex
-        .iter()
-        .find(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
-        .map(|(ifindex, _)| *ifindex);
+    // #15917: table-scoped, longest-prefix attribution over the
+    // by-ifindex connected prefixes (peer-owned prefixes live only
+    // there). Replaces the global first-match scan.
+    let by_ifindex_connected = connected_lpm_ifindex_v4(state, ip, table);
     let connected = state
         .connected_v4
         .iter()
@@ -1541,16 +1605,19 @@ fn select_source_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) 
             }
         }
     }
+    // #15917: gateway-owner fallback, scoped to this table and
+    // longest-prefix selected (was: first global map hit, so a
+    // gateway covered in another VRF stole the attribution).
     if let Some(routes) = state.routes_v4.get(table) {
-        for route in routes.iter().filter(|r| {
-            r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip)
-        }) {
+        for route in routes
+            .iter()
+            .filter(|r| r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip))
+        {
             for nh in &route.next_hops {
                 if let Some(gw) = nh.next_hop {
-                    for (ifindex, prefixes) in &state.connected_v4_by_ifindex {
-                        if prefixes.iter().any(|prefix| prefix.contains(gw)) {
-                            return *ifindex;
-                        }
+                    let owner = connected_lpm_ifindex_v4(state, gw, table);
+                    if owner > 0 {
+                        return owner;
                     }
                 }
             }
@@ -1561,21 +1628,23 @@ fn select_source_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) 
     // egress is still attributable: the destination's own connected
     // prefix (kept in connected_by_ifindex even when suppressed from
     // transit) names the peer-owned WAN unit. Return it so HA
-    // enforcement can demote; 0 keeps the plain drop.
+    // enforcement can demote; 0 keeps the plain drop. #15917: both
+    // candidates are table-scoped + LPM-selected; the transit-row
+    // candidate keeps priority to preserve #15742e ordering.
     connected
         .map(|conn| conn.ifindex)
-        .or(by_ifindex_connected)
+        .or(if by_ifindex_connected > 0 {
+            Some(by_ifindex_connected)
+        } else {
+            None
+        })
         .unwrap_or(0)
 }
 
 /// #15742: v6 twin of `select_source_ifindex_v4`.
 fn select_source_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> i32 {
-    // #15742e: see the v4 twin.
-    let by_ifindex_connected = state
-        .connected_v6_by_ifindex
-        .iter()
-        .find(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
-        .map(|(ifindex, _)| *ifindex);
+    // #15917: see the v4 twin.
+    let by_ifindex_connected = connected_lpm_ifindex_v6(state, ip, table);
     let connected = state
         .connected_v6
         .iter()
@@ -1618,16 +1687,17 @@ fn select_source_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) 
             }
         }
     }
+    // #15917: see the v4 twin.
     if let Some(routes) = state.routes_v6.get(table) {
-        for route in routes.iter().filter(|r| {
-            r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip)
-        }) {
+        for route in routes
+            .iter()
+            .filter(|r| r.next_table.is_empty() && !r.discard && !r.reject && r.prefix.contains(ip))
+        {
             for nh in &route.next_hops {
                 if let Some(gw) = nh.next_hop {
-                    for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
-                        if prefixes.iter().any(|prefix| prefix.contains(gw)) {
-                            return *ifindex;
-                        }
+                    let owner = connected_lpm_ifindex_v6(state, gw, table);
+                    if owner > 0 {
+                        return owner;
                     }
                 }
             }
@@ -1636,7 +1706,11 @@ fn select_source_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) 
     // #15742e: see the v4 twin.
     connected
         .map(|conn| conn.ifindex)
-        .or(by_ifindex_connected)
+        .or(if by_ifindex_connected > 0 {
+            Some(by_ifindex_connected)
+        } else {
+            None
+        })
         .unwrap_or(0)
 }
 

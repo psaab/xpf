@@ -11092,7 +11092,9 @@ fn v6_ah_policy_parity_with_v4_ah_10729() {
 fn split_rg_live_shape_no_forwarding_default_fabric_redirects_15742() {
     let mut snapshot = nat_snapshot_with_fabric();
     // Live split node: no forwarding default survives HA filtering.
-    snapshot.routes.retain(|r| r.destination != "0.0.0.0/0" && r.destination != "::/0");
+    snapshot
+        .routes
+        .retain(|r| r.destination != "0.0.0.0/0" && r.destination != "::/0");
     for iface in &mut snapshot.interfaces {
         if iface.name == "reth0.80" {
             iface.connected_rg_peer_owned = true;
@@ -11156,6 +11158,384 @@ fn split_rg_live_shape_no_forwarding_default_fabric_redirects_15742() {
             ForwardingDisposition::FabricRedirect,
             "live-shape split target {dst} must fabric-redirect, got {:?}",
             redirected.disposition
+        );
+    }
+}
+
+/// #15917 (O-F4): the terminal fallback's connected-prefix attribution
+/// must be scoped to the lookup's routing table and longest-prefix
+/// selected, never the global first match in `connected_*_by_ifindex`
+/// (a FastMap, so iteration order is hash order).
+///
+/// Fixture: the live split shape of the #15742 test above (no
+/// forwarding default, only the marked cluster discard, WAN
+/// `reth0.80`/RG1 peer-owned with 172.16.80.8/24 +
+/// 2001:559:8585:80::8/64) PLUS an unrelated tenant interface
+/// `reth2.0` (ifindex 31, zone `dmz2`, routing-instance `tenant-x`,
+/// peer-owned RG3) carrying overlapping connected prefixes v4
+/// 172.16.80.1/24 and v6 2001:559:8585:80::1/64. Default-table
+/// lookups for 172.16.80.200 / 2001:559:8585:80::200 must attribute
+/// to ifindex 12 (RG1) and fabric-redirect; pre-fix the global
+/// `.find()` returns whichever ifindex the hash map yields first,
+/// and when that is 31 the HA gate sees the wrong RG/zone and
+/// restores DiscardRoute (or #15906's seed consumers read the wrong
+/// zone/owner from the same stamp). Control: lookups IN
+/// `tenant-x.inet.0` / `tenant-x.inet6.0` for the same destinations
+/// attribute to ifindex 31 through the tenant table's own terminal.
+/// FAIL-ON-REVERT: restore the global first-match scans and the
+/// tenant control steals the peer-owned WAN attribution (observed:
+/// source_ifindex 12 for the tenant-table lookup).
+#[test]
+fn terminal_attribution_table_scoped_lpm_15917() {
+    use crate::{InterfaceSnapshot, ZoneSnapshot};
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot
+        .routes
+        .retain(|r| r.destination != "0.0.0.0/0" && r.destination != "::/0");
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    snapshot.zones.push(ZoneSnapshot {
+        name: "dmz2".to_string(),
+        id: 9,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz2".to_string(),
+        routing_instance: "tenant-x".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 31,
+        redundancy_group: 3,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:02:00:01".to_string(),
+        addresses: vec![
+            InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "172.16.80.1/24".to_string(),
+                scope: 0,
+                ..Default::default()
+            },
+            InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:559:8585:80::1/64".to_string(),
+                scope: 0,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    for (table, family, destination) in [
+        ("inet.0", "inet", "0.0.0.0/0"),
+        ("inet6.0", "inet6", "::/0"),
+        ("tenant-x.inet.0", "inet", "0.0.0.0/0"),
+        ("tenant-x.inet6.0", "inet6", "::/0"),
+    ] {
+        snapshot.routes.push(RouteSnapshot {
+            reject: false,
+            cluster_terminal: true,
+            table: table.to_string(),
+            family: family.to_string(),
+            destination: destination.to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec![],
+            discard: true,
+            next_table: String::new(),
+            preference: 200,
+            rule_priority: 0,
+            mtu: 0,
+        });
+    }
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([
+        (1, inactive_ha_runtime(now_secs)),
+        (2, active_ha_runtime(now_secs)),
+        (3, inactive_ha_runtime(now_secs)),
+    ])));
+    let dst4 = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let dst6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200));
+    for dst in [dst4, dst6] {
+        let raw = lookup_forwarding_resolution(&state, dst).resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "default-table lookup must surface cluster terminal for {dst}"
+        );
+        assert_eq!(
+            raw.source_ifindex, 12,
+            "default-table terminal attribution for {dst} must be the table-local WAN ifindex 12, not the cross-VRF tenant ifindex 31"
+        );
+        let blocked = enforce_ha_resolution(&state, &ha, raw);
+        assert_eq!(
+            blocked.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "peer-owned WAN attribution must survive HA enforcement for {dst}"
+        );
+        let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
+        assert_eq!(
+            redirected.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "default-table split target {dst} must fabric-redirect"
+        );
+    }
+    let dyn_neighbors = Arc::new(ShardedNeighborMap::new());
+    for (dst, table) in [(dst4, "tenant-x.inet.0"), (dst6, "tenant-x.inet6.0")] {
+        let raw = lookup_forwarding_resolution_in_table_with_dynamic(
+            &state,
+            &dyn_neighbors,
+            dst,
+            Some(table),
+        )
+        .resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "tenant-table lookup must surface cluster terminal for {dst} in {table}"
+        );
+        assert_eq!(
+            raw.source_ifindex, 31,
+            "tenant-table terminal attribution for {dst} must be the tenant ifindex 31, not the default-table WAN ifindex 12"
+        );
+        let blocked = enforce_ha_resolution(&state, &ha, raw);
+        assert_eq!(
+            blocked.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "peer-owned RG3 attribution must survive HA enforcement for {dst}"
+        );
+        let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
+        assert_eq!(
+            redirected.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "tenant-table split target {dst} must fabric-redirect"
+        );
+    }
+}
+
+/// #15917 (O-F4): same-table broad/narrow overlap — a narrow
+/// peer-owned connected prefix must beat a broad peer-owned one by
+/// longest-prefix, not by map/insertion order. Fixture (default
+/// table): `reth0.80` (12, RG1 peer-owned) carries 172.16.80.8/24;
+/// `reth3.0` (41, `dmz2`, RG3 peer-owned, transit suppressed)
+/// carries the broad 172.16.0.9/16. Inside the /24 attribution must
+/// be 12 (RG1 inactive -> redirect); inside only the /16 it must be
+/// 41 (RG3 active here -> plain terminal drop). The source_ifindex
+/// assertions are the discriminators.
+#[test]
+fn terminal_attribution_same_table_lpm_15917() {
+    use crate::{InterfaceSnapshot, ZoneSnapshot};
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot
+        .routes
+        .retain(|r| r.destination != "0.0.0.0/0" && r.destination != "::/0");
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    snapshot.zones.push(ZoneSnapshot {
+        name: "dmz2".to_string(),
+        id: 9,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth3.0".to_string(),
+        zone: "dmz2".to_string(),
+        linux_name: "ge-0-0-3".to_string(),
+        ifindex: 41,
+        redundancy_group: 3,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:03:00:01".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "172.16.0.9/16".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([
+        (1, inactive_ha_runtime(now_secs)),
+        (3, active_ha_runtime(now_secs)),
+    ])));
+    let narrow_dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let raw = lookup_forwarding_resolution(&state, narrow_dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ClusterTerminalHAInactive
+    );
+    assert_eq!(
+        raw.source_ifindex, 12,
+        "narrow /24 terminal attribution must beat the broad /16"
+    );
+    let blocked = enforce_ha_resolution(&state, &ha, raw);
+    assert_eq!(
+        redirect_via_fabric_if_needed(&state, blocked, 24, None).disposition,
+        ForwardingDisposition::FabricRedirect,
+        "narrow peer-owned target must fabric-redirect"
+    );
+    let broad_dst = IpAddr::V4(Ipv4Addr::new(172, 16, 90, 200));
+    let raw = lookup_forwarding_resolution(&state, broad_dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ClusterTerminalHAInactive
+    );
+    assert_eq!(
+        raw.source_ifindex, 41,
+        "broad-only terminal attribution must pick the /16 interface"
+    );
+    let blocked = enforce_ha_resolution(&state, &ha, raw);
+    assert_eq!(
+        blocked.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "locally active RG3 attribution must keep the plain terminal drop"
+    );
+}
+
+/// #15917 (O-F4): gateway-owner fallback scoping. With a forwarding
+/// default whose bare gateway is covered by connected prefixes in
+/// TWO tables, the gateway's owner must be the one in the lookup's
+/// table. Fixture: forwarding defaults (pref 5) via 172.16.80.1 /
+/// 2001:559:8585:80::1 with no live member (mirrors the #15742
+/// gateway test above), marked cluster terminals at pref 200, WAN
+/// peer-owned, plus the tenant interface (31, `tenant-x`, RG3
+/// peer-owned) covering the same gateway prefixes. Off-link
+/// destinations 8.8.8.8 / 2001:4860:4860::8888 in the default table
+/// must attribute via the gateway to ifindex 12 — never 31.
+#[test]
+fn terminal_gateway_owner_table_scoped_15917() {
+    use crate::{InterfaceSnapshot, ZoneSnapshot};
+    let mut snapshot = nat_snapshot_with_fabric();
+    for route in &mut snapshot.routes {
+        route.preference = 5;
+    }
+    for route in &mut snapshot.routes {
+        for nh in &mut route.next_hops {
+            if nh.starts_with("172.16.80.1") {
+                *nh = "172.16.80.1".to_string();
+            } else if nh.starts_with("2001:559:8585:80::1") {
+                *nh = "2001:559:8585:80::1".to_string();
+            }
+        }
+    }
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    snapshot.zones.push(ZoneSnapshot {
+        name: "dmz2".to_string(),
+        id: 9,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz2".to_string(),
+        routing_instance: "tenant-x".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 31,
+        redundancy_group: 3,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:02:00:01".to_string(),
+        addresses: vec![
+            InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "172.16.80.1/24".to_string(),
+                scope: 0,
+                ..Default::default()
+            },
+            InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:559:8585:80::1/64".to_string(),
+                scope: 0,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "::/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([
+        (1, inactive_ha_runtime(now_secs)),
+        (3, inactive_ha_runtime(now_secs)),
+    ])));
+    for dst in [
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
+    ] {
+        let raw = lookup_forwarding_resolution(&state, dst).resolution;
+        assert_eq!(
+            raw.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "off-link lookup must surface cluster terminal for {dst}, got {:?}",
+            raw.disposition
+        );
+        assert_eq!(
+            raw.source_ifindex, 12,
+            "gateway-owner attribution for {dst} must be the default-table WAN ifindex 12, not the cross-VRF tenant ifindex 31"
+        );
+        let blocked = enforce_ha_resolution(&state, &ha, raw);
+        assert_eq!(
+            blocked.disposition,
+            ForwardingDisposition::ClusterTerminalHAInactive,
+            "gateway-owner demotion must survive HA enforcement for {dst}"
+        );
+        assert_eq!(
+            redirect_via_fabric_if_needed(&state, blocked, 24, None).disposition,
+            ForwardingDisposition::FabricRedirect,
+            "off-link split target {dst} must fabric-redirect via its gateway owner"
         );
     }
 }
