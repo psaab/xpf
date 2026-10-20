@@ -864,13 +864,25 @@ func (m *Manager) rgProviderWiredForLocked(cfg *config.Config) bool {
 	return m.rgProviderWired
 }
 
-// rgPrimaryNow snapshots the wired provider under m.mu, or nil.
+// rgPrimaryNow snapshots the wired provider under m.mu, or nil. Callers
+// must NOT already hold m.mu; m.mu-held callers use rgPrimaryNowLocked.
 func (m *Manager) rgPrimaryNow() RGPrimaryProvider {
 	if m == nil {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.rgPrimaryNowLocked()
+}
+
+// rgPrimaryNowLocked is rgPrimaryNow for callers already holding m.mu —
+// notably prepareSnapshotForApply's derived-section rebuild, which runs
+// under m.mu on every publish path (#15939). It must never take the lock
+// itself.
+func (m *Manager) rgPrimaryNowLocked() RGPrimaryProvider {
+	if m == nil {
+		return nil
+	}
 	return m.rgPrimaryProvider
 }
 
