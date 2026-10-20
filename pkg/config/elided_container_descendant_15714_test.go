@@ -44,6 +44,35 @@ func render15714(tr *ConfigTree) string {
 	return strings.Join(out, " | ")
 }
 
+// assertSerializedBody15714 checks body survival through the production
+// serializers (15915r): every kept keys-line must appear in FormatSet
+// output, and the Format() hierarchical text must reload to a tree
+// still carrying the body. Raw traversal alone is NOT sufficient — a
+// preserved body node marked IsLeaf is silently omitted by both
+// serializers.
+func assertSerializedBody15714(t *testing.T, tr *ConfigTree, keeps []string) {
+	t.Helper()
+	flat := tr.FormatSet()
+	for _, keep := range keeps {
+		found := false
+		for _, line := range strings.Split(flat, "\n") {
+			if strings.HasSuffix(line, " "+keep) || strings.Contains(line, " "+keep+" ") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("serialized body LOST: %q not in FormatSet %q", keep, flat)
+		}
+	}
+	reloaded := tree15714(t, tr.Format())
+	got := render15714(reloaded)
+	for _, keep := range keeps {
+		if !strings.Contains(got, keep) {
+			t.Errorf("reloaded body LOST: %q missing from %q", keep, got)
+		}
+	}
+}
+
 func TestElidedDescendantDelete15714(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -174,6 +203,11 @@ func TestElidedDescendantDeactivate15714(t *testing.T) {
 						t.Errorf("braced body LOST across toggle round trip: %q missing from %q", keep, got)
 					}
 				}
+				// Re-review (15915r): body survival must hold through
+				// the REAL serializers, not only raw traversal — a
+				// preserved body marked IsLeaf is omitted by
+				// Format/FormatSet and lost on reload.
+				assertSerializedBody15714(t, tr, tc.mustKeep)
 			}
 		})
 	}
@@ -258,6 +292,7 @@ func TestElidedBodySurvivesDeleteOfSiblingPacked15714(t *testing.T) {
 			t.Errorf("braced sibling body LOST on delete: %q missing from %q", keep, got)
 		}
 	}
+	assertSerializedBody15714(t, tr, []string{"then", "source-nat interface"})
 	if strings.Contains(got, "source-address") {
 		t.Errorf("addressed descendant NOT deleted: %q", got)
 	}

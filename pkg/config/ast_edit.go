@@ -1907,7 +1907,16 @@ func braceCompactStatement12508(n *Node, nodeKeys []string, schema *schemaNode, 
 }
 
 // markPackedBodyLeaves restores the parser's leaf flags on schema-expanded
-// nodes before they are inserted into the mutable AST.
+// nodes before they are inserted into the mutable AST. A node that
+// carries ANY children is never marked leaf: the parser only gives
+// IsLeaf to childless statements (`system-services` with its `ssh`
+// child parses as a container), and the serializers (Format,
+// FormatSet, XML/JSON) branch on IsLeaf and emit only the key path for
+// a leaf, silently dropping a leaf-marked node's children (re-review
+// 15915r: a preserved braced body marked leaf vanished from both
+// serializers and was lost on reload). Schema-leaf LIST constructs
+// keep their values on Keys, not in Children, so this costs them
+// nothing; a node with real child statements IS a container.
 func markPackedBodyLeaves(nodes []*Node, parentSchema *schemaNode) {
 	for _, node := range nodes {
 		if node == nil || len(node.Keys) == 0 {
@@ -1918,7 +1927,7 @@ func markPackedBodyLeaves(nodes []*Node, parentSchema *schemaNode) {
 			continue
 		}
 		_, childSchema = consumeNodeKeys(node.Keys, childSchema)
-		node.IsLeaf = len(childSchema.children) == 0 && childSchema.wildcard == nil
+		node.IsLeaf = len(node.Children) == 0 && len(childSchema.children) == 0 && childSchema.wildcard == nil
 		markPackedBodyLeaves(node.Children, childSchema)
 	}
 }
