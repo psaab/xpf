@@ -980,7 +980,16 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         &forward_query,
                         source_nat_static,
                         now_ns,
-                        packet_icmp.or(forward_decision.nat.source_nat_icmp),
+                        // #15934: this arm judges the SYNTHESIZED forward
+                        // decision on a REVERSE (reply) packet, so the
+                        // packet's own selector is the reply's type/code
+                        // (echo-reply (0,0) for an echo-request (8,0)
+                        // flow) and must NOT win over the stored forward
+                        // selector (#14128: source_nat_icmp is forward
+                        // packet identity, preserved by NatDecision::
+                        // reverse). Stored first; the packet is only the
+                        // fallback when no selector was ever stored.
+                        forward_decision.nat.source_nat_icmp.or(packet_icmp),
                     );
                     return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
@@ -1059,6 +1068,13 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     if scope_dependent && identity_absent && forward_metadata.nat_scope_ifindex.is_none() {
         return None;
     }
+    // #15934: this arm judges the FORWARD row (a forward-direction hit, or
+    // a reverse hit whose forward companion IS materialized): the hitting
+    // packet is in the forward direction for the stored-row case and the
+    // live packet selector is authoritative; the stored selector is the
+    // fallback for selector-less packets. The companion-less synthesized
+    // arm above inverts the priority on purpose (stored-first), because
+    // its hitting packet is a reply.
     let (valid, static_nat) = source_nat_translation_still_valid(
         forwarding,
         &forward_decision,
