@@ -1526,6 +1526,7 @@ pub(crate) fn worker_loop(
             &peer_worker_commands,
             loop_now_ns,
             forwarding.pptp_enabled(),
+            forwarding.config_generation,
         );
         // #13075: conntrack-refresh slice + fabric/WG drains (ct_slice.rs).
         run_ct_slice(

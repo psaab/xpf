@@ -18,6 +18,7 @@ pub(super) fn run_pptp_control_drain(
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     loop_now_ns: u64,
     pptp_enabled: bool,
+    view_generation: u64,
 ) {
     // #15950: when the PPTP ALG is disabled, do not install associations
     // from segments buffered before the disable. Purge the inbox so a
@@ -28,7 +29,7 @@ pub(super) fn run_pptp_control_drain(
     // handled because the epoch advances whenever the enabled state is
     // observed after a disabled observation (by any worker sharing this
     // inbox), and steady-enabled polls change nothing.
-    pptp_control.note_enabled_state(pptp_enabled);
+    pptp_control.note_enabled_state(pptp_enabled, view_generation);
     if !pptp_enabled {
         return;
     }

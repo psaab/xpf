@@ -122,6 +122,9 @@ struct InboxInner {
     was_disabled: bool,
     /// Whether any poll has been observed (first-poll seeding).
     seen_poll: bool,
+    /// Newest RuntimeView generation observed; older observations are
+    /// stale snapshots from lagging workers and are ignored entirely.
+    last_gen: u64,
 }
 
 /// A control close still waiting for a bounded worker queue or local table.
@@ -240,11 +243,18 @@ impl PptpControlInbox {
     /// a lagging worker cannot purge current-epoch entries (it only
     /// ever advances the epoch forward, and entries stamped after the
     /// advance carry the new epoch).
-    pub(crate) fn note_enabled_state(&self, enabled: bool) {
+    pub(crate) fn note_enabled_state(&self, enabled: bool, view_generation: u64) {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
+        // Stale-generation observations are no-ops: a lagging worker's
+        // old disabled snapshot must not re-advance the epoch and drop
+        // entries stamped under the current generation.
+        if inner.seen_poll && view_generation < inner.last_gen {
+            return;
+        }
+        inner.last_gen = view_generation;
         if !inner.seen_poll {
             inner.seen_poll = true;
             inner.was_disabled = !enabled;
@@ -1228,29 +1238,47 @@ mod tests_15966r_toggle {
     fn epoch_drain_filtering_15966r() {
         // Steady state: enabled polls/drains never drop current-epoch entries.
         let inbox = PptpControlInbox::default();
-        inbox.note_enabled_state(true);
+        inbox.note_enabled_state(true, 1);
         assert!(inbox.push(seg(1, 1)));
-        for _ in 0..5 { inbox.note_enabled_state(true); }
+        for _ in 0..5 { inbox.note_enabled_state(true, 1); }
         assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 1, "steady-enabled reply must survive to drain");
         // Skipped generation: pre-disable reply stamped epoch N, epoch advances
         // when enabled is observed (no disabled drain needed), drain drops it.
         let inbox = PptpControlInbox::default();
-        inbox.note_enabled_state(true);
+        inbox.note_enabled_state(true, 1);
         assert!(inbox.push(seg(1, 2)));
-        inbox.note_enabled_state(false);
-        inbox.note_enabled_state(true);
+        inbox.note_enabled_state(false, 2);
+        inbox.note_enabled_state(true, 3);
         assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 0, "pre-disable reply must be epoch-ineligible after re-enable");
         // Lagging worker: after the epoch advanced, a NEW reply is stamped with
         // the current epoch; a lagging worker observing enabled again must not
         // drop it (no second purge).
         assert!(inbox.push(seg(2, 3)));
-        inbox.note_enabled_state(true);
-        inbox.note_enabled_state(true);
+        inbox.note_enabled_state(true, 3);
+        inbox.note_enabled_state(true, 3);
         assert_eq!(inbox.take_pending_in_domain(2_000_000_000).len(), 1, "current-epoch reply must survive lagging enabled polls");
         // Two epochs later the same entry would be stale; fresh capture is current.
-        inbox.note_enabled_state(false);
-        inbox.note_enabled_state(true);
+        inbox.note_enabled_state(false, 4);
+        inbox.note_enabled_state(true, 5);
         assert!(inbox.push(seg(3, 4)));
         assert_eq!(inbox.take_pending_in_domain(3_000_000_000).len(), 1);
+    }
+
+    #[test]
+    fn stale_generation_observation_is_noop_15966r4() {
+        // Worker A observes enabled@gen5; worker B then reports its stale
+        // disabled@gen3 snapshot. The stale observation must not advance
+        // the epoch: a current-epoch entry survives.
+        let inbox = PptpControlInbox::default();
+        inbox.note_enabled_state(true, 5);
+        assert!(inbox.push(seg(1, 1)));
+        inbox.note_enabled_state(false, 3);
+        inbox.note_enabled_state(true, 5);
+        assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 1, "stale disabled@gen3 must not drop current-epoch entries");
+        // Control: a NEWER disabled->enabled transition does advance.
+        inbox.note_enabled_state(false, 6);
+        assert!(inbox.push(seg(2, 2)));
+        inbox.note_enabled_state(true, 7);
+        assert_eq!(inbox.take_pending_in_domain(2_000_000_000).len(), 0, "newer-gen transition must make pre-disable entries ineligible");
     }
 }
