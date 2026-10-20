@@ -178,6 +178,10 @@ pub(in crate::afxdp) fn forget_pptp_control_channel(
 fn emit_session_hit_policy_deny_event(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    tx_pipeline: &mut crate::afxdp::worker::WorkerTxPipeline,
+    ingress_ifindex: i32,
+    packet_frame: &[u8],
+    counters: &mut BatchCounters,
     decision: SessionDecision,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
@@ -186,6 +190,35 @@ fn emit_session_hit_policy_deny_event(
     deny: HitPolicyDeny,
     now_ns: u64,
 ) {
+    // #15947 (H30-01): a session-hit `then reject` must answer like every
+    // other deny site. The pre-fix helper hardcoded
+    // reject_reply_enqueued=false with no TX pipeline, so the packet was
+    // silently dropped and the event logged DENY instead of REJECT.
+    // Enqueue FIRST (deny_reply_and_emit's contract), then emit with the
+    // truthful outcome. Also credit the DENYING rule: the verdicts are
+    // evaluated without counting (anti-double-count vs the admitting
+    // rule), but the denying rule itself was never credited — the
+    // codebase's own convention (host_inbound_policy recheck) credits it.
+    let reject_reply_enqueued = reject_reply::enqueue_deny_reply(
+        tx_pipeline,
+        forwarding,
+        event_stream,
+        ingress_ifindex,
+        packet_frame,
+        meta,
+        flow,
+        counters,
+        matches!(deny.result.action, crate::policy::PolicyAction::Reject),
+    );
+    if matches!(
+        deny.result.action,
+        crate::policy::PolicyAction::Deny | crate::policy::PolicyAction::Reject
+    ) && let Some(counter) = forwarding
+        .policy
+        .hit_counter_by_idx(deny.result.policy_counter_idx)
+    {
+        crate::policy::record_policy_hit_counter(counter, meta.pkt_len as u64);
+    }
     emit_policy_deny_event(
         event_stream,
         flow,
@@ -197,7 +230,7 @@ fn emit_session_hit_policy_deny_event(
         deny.result.policy_id,
         deny.result.action,
         resolve_policy_deny_app_id(&forwarding.app_catalog, flow, deny.policy_dst_port),
-        false,
+        reject_reply_enqueued,
         now_ns,
     );
 }
@@ -260,6 +293,106 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
         })
 }
 
+/// #15947 (H28-01): may a SYN-cookie reply (SYN-ACK challenge or
+/// validated-ACK RST) be emitted for this packet's destination?
+///
+/// The screen stages run before session/FIB/HA/policy admission, so
+/// without this gate a screened SYN above threshold elicits a SYN-ACK
+/// (and a validated cookie ACK an ACK-RST) for destinations the
+/// firewall would deny, cannot route, classifies martian, or does not
+/// own (HA-inactive) — an oracle / split-brain response, and a fresh
+/// cookie ISN hijacking an Opening session's retransmitted SYN.
+/// Admission mirrors the session-miss path's own order: an existing
+/// live session admits (the packet follows its session, never a fresh
+/// challenge); otherwise FIB (HA-finalized) + martian classes + the
+/// zone-policy verdict must all admit. Any failure suppresses the
+/// reply — the packet is recycled silently, exactly as a denied SYN
+/// is dropped on the miss path. An unresolvable FIB/policy context
+/// (no flow, no route, unzoned) fails closed for the REPLY only; the
+/// packet itself still takes its ordinary path when this returns
+/// false for the challenge arm's caller to recycle.
+pub(super) fn syn_cookie_reply_admitted(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
+    sessions: &SessionTable,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    now_ns: u64,
+    now_secs: u64,
+) -> bool {
+    let Some(flow) = flow else {
+        return false;
+    };
+    // An existing live session (incl. an Opening handshake's
+    // retransmit) follows its session — never a fresh cookie ISN.
+    if sessions.has_session_hit_at(&flow.forward_key, now_ns) {
+        return false;
+    }
+    let resolution = crate::afxdp::forwarding::enforce_ha_resolution_snapshot(
+        forwarding,
+        ha_state,
+        now_secs,
+        crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, flow.dst_ip)
+            .resolution,
+    );
+    if !matches!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+            | ForwardingDisposition::LocalDelivery
+            | ForwardingDisposition::MissingNeighbor
+            | ForwardingDisposition::FabricRedirect
+    ) {
+        return false;
+    }
+    let fmeta: ForwardPacketMeta = meta.into();
+    if transit_destination_class_drop(
+        forwarding,
+        resolution.disposition,
+        flow.dst_ip,
+        None,
+        flow.forward_key.routing_domain,
+        fmeta,
+        ingress_zone_override,
+    ) || transit_source_class_drop(
+        forwarding,
+        resolution.disposition,
+        flow.src_ip,
+        flow.forward_key.routing_domain,
+        fmeta,
+        ingress_zone_override,
+    ) {
+        return false;
+    }
+    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
+        forwarding,
+        ingress_logical,
+        ingress_zone_override,
+        resolution.egress_ifindex,
+    );
+    if from_zone_id == 0 || to_zone_id == 0 {
+        return false;
+    }
+    let result = crate::policy::evaluate_policy_result_without_counting_at(
+        &forwarding.policy,
+        from_zone_id,
+        to_zone_id,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        None,
+        now_ns,
+    );
+    matches!(result.action, crate::policy::PolicyAction::Permit)
+}
 #[inline]
 pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
     protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
@@ -1276,17 +1409,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(
                             challenge,
                         )) => {
-                            enqueue_syn_cookie_reply(
-                                &mut binding.tx_pipeline,
+                            // #15947 (H28-01): never answer a SYN whose
+                            // destination admission (session/FIB/HA/
+                            // martian/policy) would refuse it — recycle
+                            // silently instead of emitting a SYN-ACK
+                            // oracle / hijacking an Opening retransmit.
+                            if syn_cookie_reply_admitted(
                                 worker_ctx.forwarding,
-                                worker_ctx.event_stream,
-                                binding.ifindex,
-                                packet_frame,
-                                meta,
+                                worker_ctx.ha_state,
+                                sessions,
                                 flow.as_ref(),
-                                SynCookieReply::SynAck(challenge),
-                                telemetry.counters,
-                            );
+                                meta,
+                                ingress_zone_override,
+                                now_ns,
+                                now_secs,
+                            ) {
+                                enqueue_syn_cookie_reply(
+                                    &mut binding.tx_pipeline,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    binding.ifindex,
+                                    packet_frame,
+                                    meta,
+                                    flow.as_ref(),
+                                    SynCookieReply::SynAck(challenge),
+                                    telemetry.counters,
+                                );
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -2085,10 +2234,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // On session hit (flow present), validate closing seq and
                 // note seq for non-closing. Invalid blind RST/FIN is dropped
                 // before resolve mutates close state.
+                // #15947 (H29-02 arm 3): sequence state is noted ONLY for
+                // Owner packets. The pre-fix site ran before the flag-
+                // anomaly gate, foreign-zone authority and the input
+                // filter, so a foreign or filter-dropped segment sharing
+                // the tuple could advance tcp_rcv_nxt monotonically and
+                // deny the real owner's close. The Owner verdict is only
+                // known inside the hit resolution below, so the note is
+                // DEFERRED: capture the parsed values here, replay them
+                // at the authority-confirmed site. Closing verdicts stay
+                // here (read-only — they mutate nothing).
+                let mut pending_tcp_seq_note: Option<(u32, u32, u16, Option<u8>)> = None;
                 if meta.protocol == crate::ip_proto::PROTO_TCP {
-                    if let (Some(fl), Some((seq, ack, win))) = (
+                    if let (Some(fl), Some((seq, ack, win, scale))) = (
                         flow.as_ref(),
-                        crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame),
+                        crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame),
                     ) {
                         if crate::tcp_flags::is_closing(meta.tcp_flags)
                             && !worker_ctx.forwarding.tcp_no_sequence_check
@@ -2100,15 +2260,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 continue;
                             }
                         }
-                        sessions.note_tcp_seq(
-                            &fl.forward_key,
-                            seq,
-                            ack,
-                            win,
-                            tcp_payload_len(packet_frame, meta),
-                            meta.tcp_flags,
-                            worker_ctx.forwarding.tcp_maximum_window,
-                        );
+                        pending_tcp_seq_note = Some((seq, ack, win, scale));
                     }
                 }
                 // ── End flow cache fast path ─────────────────────────
@@ -2485,6 +2637,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_ns,
                                 meta.tcp_flags,
                                 tcp_payload_len(packet_frame, meta),
+                            );
+                        }
+                        // #15947 (H29-02 arm 3): replay the deferred TCP
+                        // sequence note now that this packet is confirmed
+                        // Owner — foreign packets never reach this store.
+                        if foreign_arrival_zone.is_none()
+                            && let Some((seq, ack, win, scale)) = pending_tcp_seq_note
+                        {
+                            sessions.note_tcp_seq_scaled(
+                                &flow.forward_key,
+                                seq,
+                                ack,
+                                win,
+                                scale,
+                                tcp_payload_len(packet_frame, meta),
+                                meta.tcp_flags,
+                                worker_ctx.forwarding.tcp_maximum_window,
                             );
                         }
                         // The zone the filter and host-inbound consumers below
@@ -3104,6 +3273,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             emit_session_hit_policy_deny_event(
                                 worker_ctx.forwarding,
                                 worker_ctx.event_stream,
+                                &mut binding.tx_pipeline,
+                                binding.ifindex,
+                                packet_frame,
+                                telemetry.counters,
                                 resolved.decision,
                                 flow,
                                 meta,
@@ -3168,6 +3341,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         emit_session_hit_policy_deny_event(
                                             worker_ctx.forwarding,
                                             worker_ctx.event_stream,
+                                            &mut binding.tx_pipeline,
+                                            binding.ifindex,
+                                            packet_frame,
+                                            telemetry.counters,
                                             resolved.decision,
                                             flow,
                                             meta,
@@ -3263,6 +3440,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 emit_session_hit_policy_deny_event(
                                     worker_ctx.forwarding,
                                     worker_ctx.event_stream,
+                                    &mut binding.tx_pipeline,
+                                    binding.ifindex,
+                                    packet_frame,
+                                    telemetry.counters,
                                     resolved.decision,
                                     flow,
                                     meta,
@@ -3740,17 +3921,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                                 StageOutcome::Continue(SynCookieAckOutcome::Pass) => {}
                                 StageOutcome::Continue(SynCookieAckOutcome::Validated) => {
-                                    enqueue_syn_cookie_reply(
-                                        &mut binding.tx_pipeline,
+                                    // #15947 (H28-01): a validated cookie
+                                    // ACK earns its ACK-RST only when the
+                                    // destination admission (session/FIB/
+                                    // HA/martian/policy) admits it —
+                                    // otherwise recycle silently.
+                                    if syn_cookie_reply_admitted(
                                         worker_ctx.forwarding,
-                                        worker_ctx.event_stream,
-                                        binding.ifindex,
-                                        packet_frame,
-                                        meta,
+                                        worker_ctx.ha_state,
+                                        sessions,
                                         Some(flow),
-                                        SynCookieReply::AckRst,
-                                        telemetry.counters,
-                                    );
+                                        meta,
+                                        ingress_zone_override,
+                                        now_ns,
+                                        now_secs,
+                                    ) {
+                                        enqueue_syn_cookie_reply(
+                                            &mut binding.tx_pipeline,
+                                            worker_ctx.forwarding,
+                                            worker_ctx.event_stream,
+                                            binding.ifindex,
+                                            packet_frame,
+                                            meta,
+                                            Some(flow),
+                                            SynCookieReply::AckRst,
+                                            telemetry.counters,
+                                        );
+                                    }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
@@ -9500,10 +9697,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         worker_ctx.forwarding.tcp_rst_invalidate_session,
                     ) && let Some(flow) = flow.as_ref()
                     {
-                        binding
-                            .scratch
-                            .scratch_rst_teardowns
-                            .push((flow.forward_key.clone(), decision.nat));
+                        binding.scratch.scratch_rst_teardowns.push((
+                            flow.forward_key.clone(),
+                            decision.nat,
+                            // #15947 (H29-01): the triggering RST's own
+                            // forward is queued below from this same desc;
+                            // record it so the teardown drain exempts it
+                            // from the pending-forward cancel.
+                            Some((flow.forward_key.clone(), desc.addr)),
+                        ));
                     }
                     telemetry.counters.forward_candidate_packets += 1;
                     // #9956 F-051: the session-uncharged share of the tally

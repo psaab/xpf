@@ -247,6 +247,31 @@ fn probe_hit_completes_pending_handshake_like_unfused_14945() {
     }
 }
 
+#[test]
+fn probe_hit_completion_emits_ha_state_update_15947() {
+    // #15947 (H29-04): a completing ACK served by probe_hit must queue a
+    // SessionDeltaKind::Update, exactly as the slow-path lookup does.
+    // Pre-fix probe_hit completed the handshake (established, pending
+    // cleared, wheel pushed) with no Update, leaving the standby to reap
+    // the flow at the opening expiry.
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    assert!(table.probe_hit(&forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    let deltas = table.drain_deltas(16);
+    let updates: Vec<_> = deltas
+        .iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1, "probe_hit completion must emit one HA Update, got {deltas:?}");
+    assert_eq!(updates[0].key, forward);
+}
+
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with
 /// payload progress re-stamps, matching the unfused keepalive.

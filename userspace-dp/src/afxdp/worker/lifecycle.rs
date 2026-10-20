@@ -252,7 +252,7 @@ pub(super) fn poll_binding(
         }
         let mut pending_forwards = core::mem::take(&mut binding.scratch.scratch_forwards);
         let mut rst_teardowns = core::mem::take(&mut binding.scratch.scratch_rst_teardowns);
-        for (forward_key, nat) in rst_teardowns.drain(..) {
+        for (forward_key, nat, trigger) in rst_teardowns.drain(..) {
             // Evict from flow cache so stale entries aren't used after RST.
             // #918: 4-way set-associative cache requires walking the set
             // for the matching key — `invalidate_slot` does that.
@@ -271,6 +271,8 @@ pub(super) fn poll_binding(
                 nat,
                 &mut pending_forwards,
                 shared_recycles,
+                // #15947 (H29-01): exempt the triggering RST's own forward.
+                trigger.as_ref().map(|(key, addr)| (key, *addr)),
             );
         }
         binding.scratch.scratch_rst_teardowns = rst_teardowns;
