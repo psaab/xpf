@@ -338,19 +338,15 @@ pub(in crate::afxdp) fn fabric_for_ingress(
 ///   This rejects broadcast/multicast sprays and frames addressed to a
 ///   third party.
 /// - **V1b — RG binding.** The claimed zone must have at least one
-///   RG-bound member interface (`zone_to_rgs`), and NOT ALL of its bound
-///   RGs may be forwarding-active LOCALLY — at least one must be
-///   peer-active for the stamp to hold. When every RG the zone spans is
-///   primary on the RECEIVER, traffic in that zone ingresses locally —
-///   the peer has no business stamping it (on a single-primary cluster
-///   this rejects every stamp on the primary; the policy teeth are V2's
-///   owner-RG gate regardless). A zone spanning MULTIPLE RGs on a
-///   split-RG node (one locally active, one peer-active) still accepts:
-///   the peer legitimately punts the flows it owns (review-fold — the
-///   NONE-active form over-rejected that legitimate active/active
-///   stamp). A zone with no RG-bound members (`mgmt`/fxp0,
-///   `control`/em0+fab, empty zones) can never be legitimately stamped,
-///   which kills the host-inbound variant's `mgmt` claim.
+///   RG-bound member interface (`zone_to_rgs`). At least one bound RG
+///   not forwarding-active locally proves a peer punt; when EVERY
+///   bound RG is forwarding-active locally the shape is ambiguous
+///   per #15916 (see [`FabricStampDisposition`]): stage 9 no longer
+///   drops it, and the V2 owner-RG gate decides whether the claimed
+///   zone may drive policy. A zone with no RG-bound members
+///   (`mgmt`/fxp0, `control`/em0+fab, empty zones) can never be
+///   legitimately stamped, which kills the host-inbound variant's
+///   `mgmt` claim.
 ///
 /// What this deliberately does NOT try to stop: on a SHARED fabric
 /// segment with a live RG split, an attacker can clone the exact stamp
@@ -364,6 +360,86 @@ pub(in crate::afxdp) fn fabric_for_ingress(
 /// `parse_zone_encoded_fabric_ingress_from_frame`. One 6-byte compare, one
 /// `zone_to_rgs` hash lookup, and one `ha_state` lookup per bound RG
 /// (typically one). No allocation, no atomics.
+/// #15916: stage-9 disposition of a zone-encoded fabric stamp.
+///
+/// - `ProvedPeerPunt` — V1a holds and at least one RG bound to the
+///   claimed zone is NOT forwarding-active locally: the peer owns
+///   part of the claimed zone, so the stamp shape matches a punt
+///   only the peer would send. The claimed zone may drive policy
+///   (subject to the V2 owner-RG gate).
+/// - `AmbiguousLocalZone` — V1a holds and the zone is RG-bound, but
+///   EVERY bound RG is forwarding-active locally. Two byte-identical
+///   senders produce this shape: (a) an L2-adjacent forger on the
+///   fabric segment, and (b) the legitimate peer in the co-moved
+///   placement (all data RGs on the receiver; the peer still holds
+///   a reth member of the same zone) that received the frame on
+///   its member link and punted it to the owner (#15916). No
+///   receiver-only predicate can separate (a) from (b), so the
+///   frame is NOT dropped at stage 9; instead the claimed zone is
+///   withheld from every policy/NAT/host-inbound consumer until
+///   the V2 owner-RG gate proves the packet's own resolution is
+///   locally owned. Session hits keep their recorded authority,
+///   exactly as for a proved punt. This widens the documented
+///   shared-segment clone residual from "live RG split" to "any
+///   placement": a forger whose packet resolves to a locally-owned
+///   egress receives the same adjudication a legitimate co-moved
+///   punt receives — the adjudication the flow would receive had
+///   it ingressed locally in that zone. Direct-attached or MACsec
+///   fabric remains the closure (see `docs/fabric-cross-chassis-fwd.md`).
+/// - `Invalid` — not a fabric ingress, wrong destination MAC, or a
+///   zone with no RG-bound members. Terminal drop at stage 9.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum FabricStampDisposition {
+    ProvedPeerPunt,
+    AmbiguousLocalZone,
+    Invalid,
+}
+
+/// #6458/#15916: classify a zone-encoded fabric-ingress stamp. See
+/// [`FabricStampDisposition`] for the three-way contract.
+///
+/// Hot-path: runs only for frames that already matched the
+/// fabric-ingress + magic + zone-exists gates in
+/// `parse_zone_encoded_fabric_ingress_from_frame`. One 6-byte compare,
+/// one `zone_to_rgs` hash lookup, and one `ha_state` lookup per bound
+/// RG (typically one). No allocation, no atomics.
+pub(in crate::afxdp) fn zone_encoded_fabric_stamp_disposition(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    frame_dst_mac: &[u8],
+    ingress_ifindex: i32,
+    zone_id: u16,
+) -> FabricStampDisposition {
+    let Some(fabric) = fabric_for_ingress(forwarding, ingress_ifindex) else {
+        return FabricStampDisposition::Invalid;
+    };
+    // V1a: the redirect is always unicast to our fabric link's MAC.
+    if frame_dst_mac != fabric.local_mac.as_slice() {
+        return FabricStampDisposition::Invalid;
+    }
+    // V1b: the claimed zone must be RG-bound. An absent/empty entry
+    // means the zone has no RG-bound members and can never be
+    // legitimately stamped.
+    match forwarding.zone_to_rgs.get(&zone_id) {
+        Some(rgs) if !rgs.is_empty() => {
+            if rgs.iter().all(|rg| {
+                ha_state
+                    .get(rg)
+                    .is_some_and(|group| group.is_forwarding_active(now_secs))
+            }) {
+                FabricStampDisposition::AmbiguousLocalZone
+            } else {
+                FabricStampDisposition::ProvedPeerPunt
+            }
+        }
+        _ => FabricStampDisposition::Invalid,
+    }
+}
+
+/// #6458 compatibility wrapper: true only for a proved peer punt.
+/// Callers that must distinguish the #15916 ambiguous shape match on
+/// [`FabricStampDisposition`] instead.
 pub(in crate::afxdp) fn zone_encoded_fabric_stamp_valid(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -372,30 +448,14 @@ pub(in crate::afxdp) fn zone_encoded_fabric_stamp_valid(
     ingress_ifindex: i32,
     zone_id: u16,
 ) -> bool {
-    let Some(fabric) = fabric_for_ingress(forwarding, ingress_ifindex) else {
-        return false;
-    };
-    // V1a: the redirect is always unicast to our fabric link's MAC.
-    if frame_dst_mac != fabric.local_mac.as_slice() {
-        return false;
-    }
-    // V1b: the claimed zone must be RG-bound, and NOT ALL of its RGs may
-    // be forwarding-active locally — at least one must be peer-active
-    // (reject only when EVERY bound RG is locally active: the single-
-    // primary kill with no multi-RG-zone over-rejection). An absent/empty
-    // entry means the zone has no RG-bound members and can never be
-    // legitimately stamped.
-    match forwarding.zone_to_rgs.get(&zone_id) {
-        Some(rgs) => {
-            !rgs.is_empty()
-                && !rgs.iter().all(|rg| {
-                    ha_state
-                        .get(rg)
-                        .is_some_and(|group| group.is_forwarding_active(now_secs))
-                })
-        }
-        None => false,
-    }
+    zone_encoded_fabric_stamp_disposition(
+        forwarding,
+        ha_state,
+        now_secs,
+        frame_dst_mac,
+        ingress_ifindex,
+        zone_id,
+    ) == FabricStampDisposition::ProvedPeerPunt
 }
 
 /// #6458: V2 owner binding for the session-MISS zone-pair computation. A
@@ -428,6 +488,34 @@ pub(in crate::afxdp) fn gate_fabric_zone_override_on_owner_rg(
     } else {
         None
     }
+}
+
+/// #15916: promote an ambiguous stamp's claimed zone to an
+/// adjudicated override iff the packet's own resolution proves
+/// local ownership — the same V2 owner-RG predicate that gates a
+/// proved punt (`gate_fabric_zone_override_on_owner_rg`), applied
+/// to the withheld zone. Returns `None` (zone stays withheld, the
+/// fabric interface's own zone governs) when the owner RG is not
+/// forwarding-active locally, is RG 0, or there is no ambiguous
+/// claim. This is the ONLY promotion path for ambiguous stamps;
+/// every consumer must gate through here (or through
+/// `gate_fabric_zone_override_on_owner_rg` on an override this
+/// helper produced) before the claimed zone may drive policy.
+#[inline]
+pub(in crate::afxdp) fn promote_ambiguous_fabric_zone(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    ambiguous_zone: Option<u16>,
+    resolution: ForwardingResolution,
+) -> Option<u16> {
+    gate_fabric_zone_override_on_owner_rg(
+        forwarding,
+        ha_state,
+        now_secs,
+        ambiguous_zone,
+        resolution,
+    )
 }
 
 /// #6458 (review fold): owner RG of a LOCAL (firewall-owned) address —
@@ -737,8 +825,13 @@ pub(in crate::afxdp) fn fabric_nat_scope_stamp_mac_for_zone(
     }
 }
 
-/// A V2 stamp must identify an interface whose HA redundancy group is peer
-/// active locally, not merely another member of the same zone.
+/// #6458/#15916: is the V2 stamp's exact interface RG NOT
+/// forwarding-active locally (peer-owned, or unknown — mirroring
+/// the sender-side demote polarity in `forwarding/ha.rs`)? A proved
+/// peer punt requires this. The #15916 ambiguous shape (every RG
+/// bound to the claimed zone locally active, which includes this
+/// identity's RG) is handled by the caller via
+/// [`FabricStampDisposition`], not by relaxing this predicate.
 pub(in crate::afxdp) fn fabric_nat_scope_identity_is_peer_owned(
     identity: FabricNatScopeIdentity,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,

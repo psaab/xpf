@@ -2742,6 +2742,14 @@ pub(in crate::afxdp) enum ZoneEncodedFabricStamp {
     Invalid,
     Valid(u16),
     ValidScoped { zone_id: u16, ifindex: i32 },
+    /// #15916: V1a holds and the zone is RG-bound, but every bound RG
+    /// is forwarding-active locally — the co-moved legitimate punt
+    /// and a forged clone are byte-identical here. NOT dropped at
+    /// stage 9; the claimed zone is withheld from policy/NAT/
+    /// host-inbound consumers until the V2 owner-RG gate proves the
+    /// packet's own resolution is locally owned. Carries the local
+    /// logical ifindex for the V2 (scoped) form, `None` for V1.
+    Ambiguous { zone_id: u16, ifindex: Option<i32> },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2792,23 +2800,38 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
         if identity.zone_id == 0 || !forwarding.zone_id_to_name.contains_key(&identity.zone_id) {
             return ZoneEncodedFabricStamp::Invalid;
         }
-        // V2 retains the V1 fabric-link/destination and zone ownership checks,
-        // then binds the claim to its exact interface's peer-owned RG.
-        if zone_encoded_fabric_stamp_valid(
+        // V2 retains the V1 fabric-link/destination checks, then
+        // binds the claim to its exact interface's RG.
+        // #15916: a proved peer punt (zone has a peer-owned RG and
+        // this identity's RG is peer-owned) validates scoped. The
+        // all-locally-active shape is ambiguous — the identity's RG
+        // is locally active by construction there — so it degrades
+        // to `Ambiguous`, never to a scoped validation: the NAT-scope
+        // ifindex stays withheld until the owner-RG gate passes.
+        let disposition = zone_encoded_fabric_stamp_disposition(
             forwarding,
             ha_state,
             now_secs,
             &frame[0..6],
             meta.ingress_ifindex as i32,
             identity.zone_id,
-        ) && fabric_nat_scope_identity_is_peer_owned(identity, ha_state, now_secs)
-        {
-            return ZoneEncodedFabricStamp::ValidScoped {
+        );
+        return match disposition {
+            FabricStampDisposition::Invalid => ZoneEncodedFabricStamp::Invalid,
+            FabricStampDisposition::AmbiguousLocalZone => ZoneEncodedFabricStamp::Ambiguous {
                 zone_id: identity.zone_id,
-                ifindex: identity.ifindex,
-            };
-        }
-        return ZoneEncodedFabricStamp::Invalid;
+                ifindex: Some(identity.ifindex),
+            },
+            FabricStampDisposition::ProvedPeerPunt
+                if fabric_nat_scope_identity_is_peer_owned(identity, ha_state, now_secs) =>
+            {
+                ZoneEncodedFabricStamp::ValidScoped {
+                    zone_id: identity.zone_id,
+                    ifindex: identity.ifindex,
+                }
+            }
+            FabricStampDisposition::ProvedPeerPunt => ZoneEncodedFabricStamp::Invalid,
+        };
     }
     if frame.len() < 10 || frame[6..10] != [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC] {
         return ZoneEncodedFabricStamp::Absent;
@@ -2823,8 +2846,11 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     if id == 0 || !forwarding.zone_id_to_name.contains_key(&id) {
         return ZoneEncodedFabricStamp::Invalid;
     }
-    // #6458: fabric-link identity + RG-ownership validation (V1a/V1b).
-    if zone_encoded_fabric_stamp_valid(
+    // #6458/#15916: fabric-link identity + RG-ownership (V1a/V1b).
+    // Proved peer punt validates; the all-locally-active shape is
+    // ambiguous (co-moved legitimate punt vs forged clone) and is
+    // carried forward for the owner-RG gate, not dropped here.
+    match zone_encoded_fabric_stamp_disposition(
         forwarding,
         ha_state,
         now_secs,
@@ -2832,9 +2858,12 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
         meta.ingress_ifindex as i32,
         id,
     ) {
-        ZoneEncodedFabricStamp::Valid(id)
-    } else {
-        ZoneEncodedFabricStamp::Invalid
+        FabricStampDisposition::ProvedPeerPunt => ZoneEncodedFabricStamp::Valid(id),
+        FabricStampDisposition::AmbiguousLocalZone => ZoneEncodedFabricStamp::Ambiguous {
+            zone_id: id,
+            ifindex: None,
+        },
+        FabricStampDisposition::Invalid => ZoneEncodedFabricStamp::Invalid,
     }
 }
 

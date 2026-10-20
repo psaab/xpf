@@ -1174,13 +1174,18 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
     );
 }
 
-// #6458 fail-on-revert: the claimed zone's RG is forwarding-active LOCALLY
-// — on this node `lan` (RG 2) traffic ingresses directly, so the peer has
-// no business stamping it. This is the single-primary-node case that
-// rejects EVERY stamp on the RG owner. Before the fix the decode returned
-// `Some(lan)` and the attacker picked the ingress zone.
+// #6458/#15916: the claimed zone's RG is forwarding-active LOCALLY.
+// Pre-#15916 this was a stage-9 Invalid (terminal drop), which also
+// killed every legitimate co-moved punt (all data RGs on the
+// receiver). It is now Ambiguous: not dropped at stage 9, but the
+// claimed zone is withheld from policy until the V2 owner-RG gate
+// proves the packet's own resolution is locally owned. The
+// fail-on-revert property moves with it — see
+// `ambiguous_stamp_with_local_owner_is_adjudicated_like_local_ingress_15916`
+// and `co_moved_punt_admitted_when_all_data_rgs_local_15916` in
+// tests_fabric_zone_stamp.rs.
 #[test]
-fn zone_encoded_fabric_stamp_rejected_when_claimed_zone_rg_local_6458() {
+fn zone_encoded_fabric_stamp_ambiguous_when_claimed_zone_rg_local_15916() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = BTreeMap::from([(2, active_ha_runtime(now_secs))]);
@@ -1202,9 +1207,33 @@ fn zone_encoded_fabric_stamp_rejected_when_claimed_zone_rg_local_6458() {
             &ha_state,
             now_secs
         ),
-        ZoneEncodedFabricStamp::Invalid,
-        "stamp claiming a locally-primary zone must be rejected"
+        ZoneEncodedFabricStamp::Ambiguous {
+            zone_id: TEST_LAN_ZONE_ID,
+            ifindex: None
+        },
+        "stamp claiming a locally-primary zone must be ambiguous, not dropped (#15916)"
     );
+    // The disposition helper agrees, and the legacy bool wrapper
+    // (proved-punt only) still reads false for this shape.
+    assert_eq!(
+        zone_encoded_fabric_stamp_disposition(
+            &state,
+            &ha_state,
+            now_secs,
+            &[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+            21,
+            TEST_LAN_ZONE_ID,
+        ),
+        FabricStampDisposition::AmbiguousLocalZone
+    );
+    assert!(!zone_encoded_fabric_stamp_valid(
+        &state,
+        &ha_state,
+        now_secs,
+        &[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        21,
+        TEST_LAN_ZONE_ID,
+    ));
 }
 
 // #6458 fail-on-revert: a zone with NO RG-bound member interfaces
@@ -1277,8 +1306,8 @@ fn zone_encoded_fabric_stamp_honored_for_remote_rg_zone_6458() {
 // `lan`) on a split-RG node: one bound RG locally active, one peer-active.
 // V1b must ACCEPT the legitimate punt stamp (the NONE-active form
 // over-rejected this shape and default-denied active/active new flows).
-// The kill is preserved only when EVERY bound RG is locally active (the
-// single-primary posture for a multi-RG zone).
+// When EVERY bound RG is locally active the stamp is ambiguous
+// per #15916 (co-moved shape), not dropped.
 #[test]
 fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
     let mut state = build_forwarding_state(&nat_snapshot_with_fabric());
@@ -1312,7 +1341,9 @@ fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
         ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
         "multi-RG zone with a peer-active RG must keep the legitimate stamp"
     );
-    // Every bound RG locally active → reject (the kill shape).
+    // Every bound RG locally active → ambiguous (#15916): the
+    // co-moved legitimate punt has exactly this shape, so stage 9
+    // no longer drops it; the owner-RG gate decides downstream.
     let all_local = BTreeMap::from([
         (1, active_ha_runtime(now_secs)),
         (2, active_ha_runtime(now_secs)),
@@ -1325,8 +1356,11 @@ fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
             &all_local,
             now_secs
         ),
-        ZoneEncodedFabricStamp::Invalid,
-        "multi-RG zone with every RG locally active must still reject the stamp"
+        ZoneEncodedFabricStamp::Ambiguous {
+            zone_id: TEST_LAN_ZONE_ID,
+            ifindex: None
+        },
+        "multi-RG zone with every RG locally active must be ambiguous (#15916)"
     );
 }
 

@@ -340,13 +340,15 @@ pub(in crate::afxdp) struct ForwardingState {
     /// Hand-built test states leave this false, so removed-zone purging is
     /// fail-closed unless the maps came from the real forwarding builder.
     pub(in crate::afxdp) zone_set_validated: bool,
-    /// #6458/#13181: zone ID → deduplicated redundancy-group IDs (> 0) from
-    /// admitted snapshot member rows. Ingress parent aliases are excluded, and
-    /// each shared-ifindex row contributes its own RG. A zone without RG-bound
-    /// members is absent. Read on the fabric-ingress zone-stamp validation
-    /// path (`forwarding::fabric::zone_encoded_fabric_stamp_valid`): a stamped
-    /// zone claim is legitimate only when the zone could have been ingressed
-    /// on the PEER and none of its RGs are forwarding-active locally.
+    /// #6458/#13181/#15916: zone ID → deduplicated redundancy-group IDs
+    /// (> 0) from admitted snapshot member rows. Ingress parent aliases
+    /// are excluded, and each shared-ifindex row contributes its own RG.
+    /// A zone without RG-bound members is absent. Read on the
+    /// fabric-ingress zone-stamp validation path
+    /// (`forwarding::fabric::zone_encoded_fabric_stamp_disposition`): a
+    /// stamped zone claim is a proved peer punt only when at least one
+    /// bound RG is not forwarding-active locally; all-locally-active is
+    /// the #15916 ambiguous shape (owner-RG promotion decides).
     pub(in crate::afxdp) zone_to_rgs: FastMap<u16, Vec<i32>>,
     /// #3070: per-zone host-inbound-traffic admission set, keyed by the same
     /// validated zone id as `zone_id_to_name`. A zone is present here only when

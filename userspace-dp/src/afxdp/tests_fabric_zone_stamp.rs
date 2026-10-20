@@ -106,15 +106,26 @@ fn unstamped_fabric_frame_11061(
     )
 }
 
-/// #6458 fail-on-revert, single-primary node: a forged stamp claiming
-/// `lan` arrives on the fabric while lan's RG (2) is forwarding-active
-/// LOCALLY. The stage-9 RG-binding check rejects the stamp, so the new
-/// flow evaluates under the fabric interface's own (unzoned) zone and the
-/// default-deny drops it: NO session, NO forward. Before the fix the
-/// stamped `lan -> wan` permit admitted the flow and installed a session
-/// with a queued forward — both assertions go RED.
+/// #6458/#15916, single-primary node: a forged stamp claiming
+/// `lan` arrives on the fabric while BOTH RGs are forwarding-active
+/// LOCALLY. Pre-#15916 stage 9 dropped it as Invalid. Post-#15916 it
+/// is Ambiguous (byte-identical to a legitimate co-moved punt), so
+/// this cell no longer pins a stage-9 drop — it pins the PROMOTION
+/// boundary: the destination 8.8.8.8 resolves via the WAN egress
+/// (RG 1, locally active), so the owner-RG gate promotes `lan` and
+/// the `lan -> wan` permit admits the flow. That admission is the
+/// documented #15916 residual (a forger whose packet resolves to a
+/// locally-owned egress gets the adjudication a local `lan`
+/// ingress would get); it is NOT a stage-9 bypass. The
+/// no-promotion half of the boundary — a forged/ambiguous stamp
+/// whose resolution is NOT locally owned installs nothing — is
+/// pinned by the RI no-tenant-leak cell
+/// `ambiguous_stamp_on_routing_instance_node_never_falls_back_to_main_15916`
+/// and the session/fragment authority cells below.
+/// Kept under a deny-shaped name history: see git log for the
+/// pre-#15916 `forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458`.
 #[test]
-fn forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458() {
+fn ambiguous_stamp_with_local_owner_is_adjudicated_like_local_ingress_15916() {
     let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // Single-primary placement: BOTH RGs forwarding-active locally.
@@ -134,16 +145,23 @@ fn forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458() {
         true,
     );
 
+    // Post-#15916 the ambiguous stamp IS promoted here (WAN RG 1
+    // is locally active — the packet's own resolution is locally
+    // owned), so the flow is adjudicated exactly as a local `lan`
+    // ingress: session + forward. This is the documented residual,
+    // asserted — not hidden — so a future tightening that can
+    // distinguish the co-moved punt from this clone updates this
+    // cell deliberately.
     assert_eq!(
         sessions.len(),
-        0,
-        "forged zone-encoded stamp must not install a session (RED on revert: \
-         the stamped lan -> wan permit installs one)"
+        2,
+        "ambiguous stamp with locally-owned resolution must be adjudicated \
+         like local ingress (forward + reverse companion)"
     );
-    assert!(
-        binding.scratch.scratch_forwards.is_empty(),
-        "forged zone-encoded stamp must not queue a forward (RED on revert: \
-         the admitted flow forwards toward the WAN gateway)"
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "ambiguous stamp with locally-owned resolution must forward"
     );
 }
 
@@ -914,6 +932,48 @@ fn legitimate_fabric_punted_host_inbound_still_admitted_6458() {
     );
 }
 
+
+/// #15916 co-moved host-inbound: ALL data RGs local. A WAN-side
+/// host's SSH to our reth1.0 address ingressed the PEER on its WAN
+/// member and was punted stamped `wan`. The stamp is Ambiguous
+/// (wan's RG 1 is locally active); the local-delivery resolution's
+/// owner RG (2, LAN) is locally active, so promotion applies and
+/// host-inbound evaluates under `wan` (admits all here): the
+/// host-bound session caches. Pre-#15916 this dropped at stage 9.
+#[test]
+fn co_moved_host_inbound_punt_admitted_when_all_data_rgs_local_15916() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(10, 0, 61, 1),
+        43210,
+        22,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert!(
+        sessions.len() >= 1,
+        "the co-moved host-inbound punt must keep caching its session (#15916)"
+    );
+}
+
 /// #10645: the split-RG host-inbound punt above must evaluate under the
 /// CLAIMED zone (wan), not zone 0. The punt targets reth1.0's 10.0.61.1 —
 /// a /24 interface address, so the pre-fix miss path attributed
@@ -1013,6 +1073,208 @@ fn legitimate_fabric_punted_flow_still_admitted_6458() {
         binding.scratch.scratch_forwards.len(),
         1,
         "the legitimate split-RG fabric punt must keep forwarding"
+    );
+}
+
+/// #15916 regression (the co-moved shape): ALL data RGs on ONE node.
+/// RG1 (wan) and RG2 (lan) are BOTH forwarding-active on the receiver;
+/// the peer owns neither data RG but still holds a reth member of
+/// `lan`, receives the LAN host's frame on that member (LAG hash /
+/// wiring), and punts it across the fabric stamped `lan`. Pre-fix
+/// stage 9 classified the stamp Invalid (`!all(active)` = false for
+/// both V1b and the V2 peer-owned check) and dropped it before any
+/// session lookup — 100% blackhole for every flow that ingressed
+/// the non-owner. Post-fix the stamp is Ambiguous, the packet's own
+/// resolution (WAN egress RG 1, locally active) promotes `lan`, and
+/// the `lan -> wan` permit admits it: session + forward, exactly as
+/// if it had ingressed locally. Covers v4 and v6.
+#[test]
+fn co_moved_punt_admitted_when_all_data_rgs_local_15916() {
+    let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Co-moved: BOTH data RGs forwarding-active locally.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+
+    // v4 leg.
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    // Precondition: stage 9 must NOT drop this stamp.
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16),
+            &forwarding,
+            &ha_state,
+            now_secs,
+        ),
+        ZoneEncodedFabricStamp::Ambiguous {
+            zone_id: TEST_LAN_ZONE_ID,
+            ifindex: None
+        },
+        "co-moved stamp must be Ambiguous at stage 9, not Invalid (#15916)"
+    );
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, _dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16),
+        true,
+    );
+    assert_eq!(
+        batch.invalid_fabric_stamp_drops, 0,
+        "co-moved punt must not count as an invalid-stamp drop"
+    );
+    assert_eq!(
+        sessions.len(),
+        2,
+        "co-moved v4 punt must install its session (forward + reverse companion)"
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "co-moved v4 punt must forward toward the WAN gateway"
+    );
+
+    // v6 leg: same placement, IPv6 LAN host -> IPv6 WAN target.
+    let mut frame6 = build_txn_tcp_syn_frame_v6(
+        "2001:559:8585:ef00::102".parse().expect("v6 src"),
+        "2001:4860:4860::8888".parse().expect("v6 dst"),
+        12345,
+        443,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame6[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame6[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let mut binding6 = fabric_binding();
+    let mut sessions6 = SessionTable::new();
+    let (batch6, _dbg6) = txn_run_descriptor_checked(
+        &mut binding6,
+        &mut sessions6,
+        &forwarding,
+        &ha_state,
+        &frame6,
+        txn_meta_v6(21, frame6.len()),
+        true,
+    );
+    assert_eq!(batch6.invalid_fabric_stamp_drops, 0);
+    assert_eq!(
+        sessions6.len(),
+        2,
+        "co-moved v6 punt must install its session (forward + reverse companion)"
+    );
+    assert_eq!(
+        binding6.scratch.scratch_forwards.len(),
+        1,
+        "co-moved v6 punt must forward toward the WAN gateway"
+    );
+}
+
+/// #15916 on a routing-instance node, promotion-failure half:
+/// the claimed `lan` interface lives in `tenant-a`, whose only
+/// route is the MAIN default (this fixture adds no tenant route),
+/// so in the tenant domain the destination resolves NoRoute and
+/// promotion correctly withholds the zone — the packet is denied
+/// under the fabric interface's zone, NOT installed in MAIN and
+/// NOT forwarded. This pins the RI no-tenant-leak property for
+/// ambiguous stamps: they get exactly the proved-punt treatment
+/// (owner-RG gate + tenant-scoped resolution), never a MAIN
+/// fallback. The tenant-keyed install success for a promoted
+/// ambiguous punt requires a tenant route fixture this snapshot
+/// does not carry; the single-table install is pinned by
+/// `co_moved_punt_admitted_when_all_data_rgs_local_15916`.
+#[test]
+fn ambiguous_stamp_on_routing_instance_node_never_falls_back_to_main_15916() {
+    let snapshot = routing_instance_fabric_snapshot_11061(false);
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    let tenant_domain = crate::session::install_table_identity("tenant-a").0;
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(dbg.rx, 1, "the ambiguous frame must reach the poll body");
+    assert_eq!(
+        batch.invalid_fabric_stamp_drops, 0,
+        "ambiguous is not invalid: no invalid-stamp drop (#15916)"
+    );
+    assert_eq!(batch.unstamped_fabric_ingress_drops, 0);
+    assert_eq!(dbg.policy_deny, 1, "unpromoted ambiguous RI punt must deny");
+    assert_eq!(
+        sessions.len(),
+        0,
+        "an ambiguous RI punt that cannot promote must not install (MAIN leak)"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "an ambiguous RI punt that cannot promote must not forward"
+    );
+    let _ = tenant_domain;
+}
+
+/// #15916: the V2 (scoped) form of the co-moved punt. The peer's
+/// ingress identity names reth1.0 (lan, RG 2); on the receiver RG 2
+/// is locally active, so the pre-fix V2 check
+/// (`fabric_nat_scope_identity_is_peer_owned`) rejected it outright.
+/// Post-fix it is Ambiguous with the scope ifindex WITHHELD: DNAT /
+/// SNAT scope consumers see no peer identity until promotion, and
+/// promotion attaches that scope only after the owner-RG gate succeeds.
+#[test]
+fn co_moved_v2_scoped_stamp_is_ambiguous_without_scope_15916() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Mint a V2 stamp naming the LAN ingress (reth1.0, ifindex 24).
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &mut forwarding,
+        Some(TEST_LAN_ZONE_ID),
+        Some(24),
+    )
+    .expect("V2 producer must mint a scoped stamp for the LAN ingress");
+    let src_mac = redirect.src_mac.expect("V2 source stamp");
+    assert_eq!(&src_mac[..3], &[0x02, 0xbf, 0x73]);
+    let mut frame = vec![0u8; 64];
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&src_mac);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    // Split placement control: RG 2 peer-owned -> scoped validation.
+    let split = BTreeMap::from([(1, active_rg(now_secs))]);
+    match parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &split, now_secs)
+    {
+        ZoneEncodedFabricStamp::ValidScoped { zone_id, ifindex } => {
+            assert_eq!(zone_id, TEST_LAN_ZONE_ID);
+            assert_eq!(ifindex, 24);
+        }
+        other => panic!("split control must validate scoped, got {other:?}"),
+    }
+    // Co-moved: both RGs local -> ambiguous, scope withheld.
+    let co_moved = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            meta,
+            &forwarding,
+            &co_moved,
+            now_secs,
+        ),
+        ZoneEncodedFabricStamp::Ambiguous {
+            zone_id: TEST_LAN_ZONE_ID,
+            ifindex: Some(24)
+        },
+        "co-moved V2 stamp must be Ambiguous (scope withheld), not Invalid/ValidScoped"
     );
 }
 
@@ -1314,6 +1576,13 @@ fn stamped_fabric_frag_frame(zone_id: u16, frag_word: u16, id: u16) -> Vec<u8> {
 /// thing that can distinguish their authorities. If a future edit varies any
 /// of these, the test silently stops being a zone test — the
 /// `differing == 1` assertion in the guard below exists to catch exactly that.
+
+fn stamped_fabric_frag_frame_src(zone_id: u16, frag_word: u16, id: u16, src: Ipv4Addr) -> Vec<u8> {
+    let mut frame = stamped_fabric_frag_frame(zone_id, frag_word, id);
+    frame[26..30].copy_from_slice(&src.octets());
+    frame
+}
+
 fn stamped_fabric_frag_meta() -> UserspaceDpMeta {
     UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -4532,4 +4801,379 @@ fn fabric_stamped_icmpv6_error_gates_nptv6_on_stamped_zone_13647() {
     );
     assert_eq!(icmp_match.original_src, IpAddr::V6(internal_client));
     assert_eq!(icmp_match.original_src_port, echo_id);
+}
+
+/// #15925 B1 regression: in the all-local (co-moved) placement a
+/// session admitted under `lan` must not be ridden as Owner by the
+/// same tuple carrying an ambiguous `dmz` stamp. The raw ambiguous
+/// claim judges session-hit authority exactly like a proved stamp:
+/// mismatched zone -> Foreign/default-deny drop, same zone -> Owner.
+#[test]
+fn ambiguous_dmz_ack_does_not_ride_lan_session_15925() {
+    let forwarding = build_forwarding_state(&frag_stamp_snapshot());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Co-moved/all-local for the zones in this fixture: RG1 and RG2
+    // are both forwarding-active locally, so lan and dmz stamps are
+    // ambiguous rather than proved peer punts.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+
+    let syn = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    let (_b, admitted) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        txn_meta_v4(21, TCP_FLAG_SYN, syn.len() as u16),
+        true,
+    );
+    assert_eq!(
+        admitted.tx, 1,
+        "ambiguous lan SYN must be admitted in co-moved placement"
+    );
+    assert_eq!(sessions.len(), 2);
+
+    let owner_ack = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_ACK);
+    let (_b, owner) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &owner_ack,
+        txn_meta_v4(21, TCP_FLAG_ACK, owner_ack.len() as u16),
+        true,
+    );
+    assert_eq!(owner.session_hit, 1);
+    assert_eq!(
+        owner.tx, 1,
+        "same-zone ambiguous ACK must remain an owner hit"
+    );
+
+    let foreign_ack = stamped_fabric_frame(TEST_DMZ_ZONE_ID, TCP_FLAG_ACK);
+    let (_b, foreign) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &foreign_ack,
+        txn_meta_v4(21, TCP_FLAG_ACK, foreign_ack.len() as u16),
+        true,
+    );
+    assert_eq!(
+        foreign.session_hit, 1,
+        "foreign ambiguous ACK must reach session authority"
+    );
+    assert_eq!(
+        foreign.foreign_authority_drops, 1,
+        "ambiguous dmz ACK must be judged Foreign against the lan session"
+    );
+    assert_eq!(
+        foreign.tx, 0,
+        "ambiguous dmz ACK must not ride the lan session"
+    );
+    assert_eq!(
+        sessions.len(),
+        2,
+        "foreign ambiguous ACK must not revoke the lan session"
+    );
+}
+
+/// #15925 B2 regression: ambiguous fragment claims must remain
+/// distinct association authorities. A first fragment admitted
+/// under ambiguous `lan` installs; an otherwise identical non-first
+/// fragment stamped ambiguous `dmz` must miss, while `lan` hits.
+#[test]
+fn ambiguous_fragment_zones_do_not_share_association_15925() {
+    let forwarding = build_forwarding_state(&frag_stamp_snapshot());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let ident: u16 = 0x5925;
+    let meta = stamped_fabric_frag_meta();
+    for id in [TEST_LAN_ZONE_ID, TEST_DMZ_ZONE_ID] {
+        let frame = stamped_fabric_frag_frame(id, 0x2000, ident);
+        assert!(
+            matches!(
+                parse_zone_encoded_fabric_ingress_from_frame(
+                    &frame,
+                    meta,
+                    &forwarding,
+                    &ha_state,
+                    now_secs
+                ),
+                ZoneEncodedFabricStamp::Ambiguous { .. }
+            ),
+            "precondition: all-local stamp must be ambiguous"
+        );
+    }
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let first = stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2000, ident);
+    let (_b, dbg1) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        meta,
+        true,
+    );
+    assert_eq!(
+        dbg1.nat_applied_snat, 1,
+        "ambiguous lan first fragment must install its association"
+    );
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
+
+    let foreign = stamped_fabric_frag_frame(TEST_DMZ_ZONE_ID, 0x2001, ident);
+    let (_b, foreign_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &foreign,
+        meta,
+        true,
+    );
+    assert_eq!(
+        foreign_dbg.forward, 0,
+        "ambiguous dmz non-first fragment must not inherit lan association"
+    );
+    assert_eq!(foreign_dbg.nat_applied_snat, 0);
+
+    let home = stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2002, ident);
+    let (_b, home_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &home,
+        meta,
+        true,
+    );
+    assert_eq!(
+        home_dbg.forward, 1,
+        "ambiguous lan non-first fragment must still hit"
+    );
+    assert_eq!(home_dbg.nat_applied_snat, 1);
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
+}
+
+
+/// #15925 re-review regression: a V2 (scoped) ambiguous FIRST
+/// fragment that arrives as a session HIT must install its fragment
+/// association under the stamped scope ifindex (reth1.0 = 24), not
+/// the fabric ifindex (21). The session-hit install site previously
+/// passed the raw stage-9 scope (`None` -> fabric logical ifindex)
+/// while the non-first consult passed the promoted ambiguous scope,
+/// so the same-zone tail consulted under a different authority and
+/// missed. Anti-vacuity: (1) a V1-stamped UDP datagram on the
+/// exact same tuple installs the lan session; (2) a V2-stamped first
+/// fragment of a later datagram hits that session and installs the association;
+/// (3) the V2-stamped non-first fragment of that datagram must hit
+/// the association and forward with the inherited SNAT.
+#[test]
+fn v2_ambiguous_first_fragment_installs_and_consults_scoped_15925() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    // Mint the V2 stamp naming the LAN ingress (reth1.0, ifindex 24).
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &mut forwarding,
+        Some(TEST_LAN_ZONE_ID),
+        Some(24),
+    )
+    .expect("V2 producer must mint a scoped stamp for the LAN ingress");
+    let v2_src = redirect.src_mac.expect("V2 source stamp");
+    assert_eq!(&v2_src[..3], &[0x02, 0xbf, 0x73]);
+    let v2_stamp_frame = |mut frame: Vec<u8>| -> Vec<u8> {
+        frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+        frame[6..12].copy_from_slice(&v2_src);
+        frame
+    };
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+
+    // Anti-vacuity: create a real UDP session on the exact fragment tuple.
+    let warm = stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x0000, 0x5924);
+    let (_b, admitted) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &warm,
+        stamped_fabric_frag_meta(),
+        true,
+    );
+    assert_eq!(admitted.tx, 1, "UDP warm-up must install a session");
+    assert_eq!(sessions.len(), 2);
+
+    // (2) V2-stamped FIRST fragment (UDP 10.0.61.102:33333 ->
+    // 8.8.8.8:443, the warm UDP session's tuple): hits the session
+    // and installs the scoped association from the session-hit tail.
+    // This pins the session-hit install path, not the new-flow commit path.
+    let ident: u16 = 0x5926;
+    let meta = stamped_fabric_frag_meta();
+    let first = v2_stamp_frame(stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2000, ident));
+    // Replace the V1 stamp the frag builder wrote with the V2 stamp.
+    assert!(matches!(
+        parse_zone_encoded_fabric_ingress_from_frame(&first, meta, &forwarding, &ha_state, now_secs),
+        ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, ifindex: Some(24) }
+    ), "precondition: V2 all-local stamp must be Ambiguous with scope 24");
+    let (_b, dbg_first) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &first, meta, true);
+    assert_eq!(dbg_first.session_hit, 1, "first fragment must hit the UDP warm-up session");
+    assert_eq!(dbg_first.nat_applied_snat, 1, "V2 ambiguous first fragment must be admitted and SNAT'd");
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 1, "first fragment must install exactly one association");
+
+    // (3) Same-datagram non-first fragment, same V2 stamp: must hit
+    // the association installed above (scoped authority 24 == 24).
+    let tail = v2_stamp_frame(stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2001, ident));
+    let (_b, dbg_tail) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &tail, meta, true);
+    assert_eq!(dbg_tail.forward, 1, "V2 ambiguous non-first fragment must hit its scoped association");
+    assert_eq!(dbg_tail.nat_applied_snat, 1, "and must inherit the SNAT translation");
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
+}
+
+
+/// #15925 re-review (OverlapKey): two ambiguous first fragments
+/// with the same (src, dst, proto, ident) but different claimed
+/// zones (lan vs dmz) are independent datagrams for overlap
+/// purposes. Pre-fold, `OverlapKey.ingress_zone` was built from the
+/// raw override only (`None` for ambiguous), collapsing both to
+/// the fabric zone 0 in the same routing domain, so the second was
+/// rejected as an overlapping duplicate. Post-fold both are
+/// admitted independently under their own zones (lan forwards via
+/// its association; dmz has no permit and installs nothing, but
+/// must NOT be dropped as an overlap of lan's datagram).
+/// Observable discriminator: the dmz packet's drop reason — an
+/// overlap rejection recycles with no session and no policy deny;
+/// independent adjudication reaches the dmz->wan policy (default
+/// deny here only if a dmz->wan policy is absent — this fixture's
+/// policies permit only lan->wan, so dmz is policy-denied).
+#[test]
+fn ambiguous_cross_zone_first_fragments_are_not_overlap_duplicates_15925() {
+    let forwarding = build_forwarding_state(&frag_stamp_snapshot());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let ident: u16 = 0x5927;
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+
+    // Identical pre-NAT reassembly tuple in two claimed
+    // zones. DMZ is policy-denied, so it cannot collide post-translation.
+    let lan_src = Ipv4Addr::new(10, 0, 61, 102);
+    let dmz_src = lan_src;
+    let meta_for = |src: Ipv4Addr| {
+        let mut meta = stamped_fabric_frag_meta();
+        let mut addr = [0u8; 16];
+        addr[..4].copy_from_slice(&src.octets());
+        meta.flow_src_addr = addr;
+        meta
+    };
+
+    let lan_first = stamped_fabric_frag_frame_src(TEST_LAN_ZONE_ID, 0x2000, ident, lan_src);
+    let (_b, lan_dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &lan_first, meta_for(lan_src), true);
+    assert_eq!(lan_dbg.nat_applied_snat, 1, "lan first fragment must be admitted");
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
+
+    // Same L3 reassembly tuple, different claimed zone and UDP port
+    // (so the DMZ packet misses the LAN session). Independent adjudication
+    // under dmz finds no dmz->wan permit: no forward or association.
+    // An OverlapKey zone-0 collapse would instead
+    // recycle it silently before policy (policy_deny stays 0).
+    let mut dmz_first = stamped_fabric_frag_frame_src(TEST_DMZ_ZONE_ID, 0x2000, ident, dmz_src);
+    dmz_first[34..36].copy_from_slice(&33334u16.to_be_bytes());
+    let mut dmz_meta = meta_for(dmz_src);
+    dmz_meta.flow_src_port = 33334;
+    let (_b, dmz_dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &dmz_first, dmz_meta, true);
+    assert_eq!(dmz_dbg.forward, 0, "dmz first fragment must not forward (no dmz->wan permit)");
+    assert_eq!(dmz_dbg.nat_applied_snat, 0);
+    assert_eq!(dmz_dbg.session_miss, 1, "dmz fragment must reach independent session-miss adjudication");
+    assert!(
+        dmz_dbg.policy_deny >= 1,
+        "dmz fragment must be policy-denied under dmz (counters may batch-count), not silently overlap-dropped (deny=0)"
+    );
+    assert_eq!(forwarding.nat64.frag_assoc.len(), 1, "dmz must not install or evict lan's association");
+}
+
+
+/// #15925 (Opus2 qualification): end-to-end poll-descriptor IKE
+/// cell. A REAL Stage-9 ambiguous stamp (all data RGs local) on a
+/// NEW IKE initiation to a locally-owned reth address must reach
+/// the Stage-11 host-inbound gate judged under the CLAIMED zone:
+/// claimed `wan` here admits only ping, so the initiation must be
+/// denied (recycled, no delegation/session) even though the fabric
+/// parent itself is unzoned. The helper-level gate behavior is
+/// pinned separately in poll_stages_tests; this cell proves the
+/// poll loop actually delivers the ambiguous claim to that gate.
+/// Control: the same frame WITHOUT the stamp (plain fabric
+/// arrival) is not judged under `wan`.
+#[test]
+fn ambiguous_ike_poll_descriptor_denies_under_claimed_zone_15925() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    for zone in &mut snapshot.zones {
+        if zone.name == "wan" {
+            zone.host_inbound_system_services = vec!["ping".to_string()];
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+
+    // NEW IKE: UDP 172.16.80.200:40000 -> 10.0.61.1:500 (reth1.0
+    // local address), responder SPI zero, fabric ingress ifindex 21
+    // carrying an ambiguous `wan` stamp.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&0x1122_3344_5566_7788u64.to_be_bytes()); // initiator SPI
+    payload.extend_from_slice(&0u64.to_be_bytes()); // responder SPI = 0 (NEW)
+    payload.extend_from_slice(&[0x00, 0x20, 0x22, 0x08]);
+    payload.extend_from_slice(&0u32.to_be_bytes());
+    payload.extend_from_slice(&28u32.to_be_bytes());
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]); // dst: fabric link MAC
+    let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    frame.extend_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]); // src: wan stamp
+    frame.extend_from_slice(&[0x08, 0x00]);
+    let src = Ipv4Addr::new(172, 16, 80, 200);
+    let dst = Ipv4Addr::new(10, 0, 61, 1);
+    frame.extend_from_slice(&[0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 64, PROTO_UDP, 0, 0]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    let udp_len = (8 + payload.len()) as u16;
+    frame.extend_from_slice(&40000u16.to_be_bytes());
+    frame.extend_from_slice(&500u16.to_be_bytes());
+    frame.extend_from_slice(&udp_len.to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    frame.extend_from_slice(&payload);
+    let total = (frame.len() - 14) as u16;
+    frame[16..18].copy_from_slice(&total.to_be_bytes());
+    let ip_csum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+
+    let mut meta = txn_meta_v4(21, 0, frame.len() as u16);
+    meta.protocol = PROTO_UDP;
+    meta.l4_offset = 34;
+    meta.payload_offset = 42;
+    meta.flow_src_port = 40000;
+    meta.flow_dst_port = 500;
+    meta.flow_src_addr = { let mut a=[0u8;16]; a[..4].copy_from_slice(&src.octets()); a };
+    meta.flow_dst_addr = { let mut a=[0u8;16]; a[..4].copy_from_slice(&dst.octets()); a };
+
+    // Precondition: Stage 9 classifies this as ambiguous wan.
+    assert!(matches!(
+        parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &ha_state, now_secs),
+        ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_WAN_ZONE_ID, .. }
+    ), "precondition: all-local wan stamp must be Ambiguous");
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    assert_eq!(dbg.rx, 1, "IKE descriptor must arrive");
+    assert_eq!(batch.host_inbound_denied_packets, 1, "IKE must be denied at the host-inbound zone gate");
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "ambiguous stamp must not drop at stage 9");
+    assert_eq!(sessions.len(), 0, "denied ambiguous IKE must not install a session");
+    assert!(binding.scratch.scratch_forwards.is_empty(), "denied ambiguous IKE must not forward");
+    assert_eq!(dbg.tx, 0, "denied ambiguous IKE must not transmit/delegate");
+    let _ = dbg;
 }

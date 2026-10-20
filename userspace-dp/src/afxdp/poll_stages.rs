@@ -52,11 +52,22 @@ pub(super) enum SynCookieAckOutcome {
 /// mutates `meta.meta_flags` to set `FABRIC_INGRESS_FLAG`; this
 /// struct carries the decoded zone, optional peer-local NAT scope, fabric
 /// flag, and invalid-stamp terminal signal to the packet loop.
+///
+/// #15916: `ambiguous_zone` carries the claimed zone of an
+/// `AmbiguousLocalZone` stamp (all bound RGs locally active). It is
+/// NOT an override: the packet loop withholds it from every
+/// policy/NAT/host-inbound consumer until the V2 owner-RG gate
+/// proves the packet's own resolution is locally owned, then
+/// promotes it. `packet_fabric_ingress` still holds for such
+/// frames (the session-hit authority and TTL semantics of a fabric
+/// arrival apply), but `ingress_zone_override` stays `None`.
 pub(super) struct FabricIngressOutcome {
     pub(super) ingress_zone_override: Option<u16>,
     pub(super) ingress_nat_scope_ifindex: Option<i32>,
     pub(super) packet_fabric_ingress: bool,
     pub(super) invalid_zone_stamp: bool,
+    pub(super) ambiguous_zone: Option<u16>,
+    pub(super) ambiguous_scope_ifindex: Option<i32>,
 }
 
 /// Stage 5 — ARP / NDP link-layer classification.
@@ -790,14 +801,25 @@ pub(super) fn stage_classify_fabric_ingress(
         worker_ctx.ha_state,
         now_secs,
     );
-    let (ingress_zone_override, ingress_nat_scope_ifindex) = match stamp {
-        ZoneEncodedFabricStamp::Valid(zone) => (Some(zone), None),
-        ZoneEncodedFabricStamp::ValidScoped { zone_id, ifindex } => (Some(zone_id), Some(ifindex)),
-        ZoneEncodedFabricStamp::Absent | ZoneEncodedFabricStamp::Invalid => (None, None),
-    };
+    let (ingress_zone_override, ingress_nat_scope_ifindex, ambiguous_zone, ambiguous_scope_ifindex) =
+        match stamp {
+            ZoneEncodedFabricStamp::Valid(zone) => (Some(zone), None, None, None),
+            ZoneEncodedFabricStamp::ValidScoped { zone_id, ifindex } => {
+                (Some(zone_id), Some(ifindex), None, None)
+            }
+            // #15916: ambiguous stamps are fabric arrivals (session
+            // authority, TTL) but carry no adjudicated zone yet.
+            ZoneEncodedFabricStamp::Ambiguous { zone_id, ifindex } => {
+                (None, None, Some(zone_id), ifindex)
+            }
+            ZoneEncodedFabricStamp::Absent | ZoneEncodedFabricStamp::Invalid => {
+                (None, None, None, None)
+            }
+        };
     meta.fabric_ingress_ifindex = ingress_nat_scope_ifindex.unwrap_or_default() as u32;
     let invalid_zone_stamp = stamp == ZoneEncodedFabricStamp::Invalid;
     let packet_fabric_ingress = ingress_zone_override.is_some()
+        || ambiguous_zone.is_some()
         || ingress_is_fabric_overlay(worker_ctx.forwarding, meta.ingress_ifindex as i32);
     if packet_fabric_ingress {
         meta.meta_flags |= FABRIC_INGRESS_FLAG;
@@ -807,6 +829,8 @@ pub(super) fn stage_classify_fabric_ingress(
         ingress_nat_scope_ifindex,
         packet_fabric_ingress,
         invalid_zone_stamp,
+        ambiguous_zone,
+        ambiguous_scope_ifindex,
     }
 }
 
@@ -1502,6 +1526,29 @@ pub(super) fn ike_host_inbound_gate_context(
     now_secs: u64,
     worker_ctx: &WorkerContext,
 ) -> (i32, u16, Option<u16>) {
+    ike_host_inbound_gate_context_with_ambiguous(
+        flow,
+        meta,
+        ingress_zone_override,
+        None,
+        now_secs,
+        worker_ctx,
+    )
+}
+
+/// #15925: ambiguous stamps retain their claimed zone for host-inbound
+/// adjudication, but only the existing local-address owner-RG predicate may
+/// promote it. A backup or nonlocal destination therefore falls back to the
+/// fabric interface's zone exactly as before.
+#[inline]
+pub(super) fn ike_host_inbound_gate_context_with_ambiguous(
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
+    now_secs: u64,
+    worker_ctx: &WorkerContext,
+) -> (i32, u16, Option<u16>) {
     let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
         worker_ctx.forwarding,
         meta.ingress_ifindex as i32,
@@ -1513,7 +1560,7 @@ pub(super) fn ike_host_inbound_gate_context(
             worker_ctx.forwarding,
             worker_ctx.ha_state,
             now_secs,
-            ingress_zone_override,
+            ingress_zone_override.or(ambiguous_zone),
             flow.dst_ip,
         );
     let (from_zone_id, _to_zone_id) =
@@ -1535,11 +1582,19 @@ fn ike_host_inbound_deny_zone(
     meta: UserspaceDpMeta,
     dst_port: u16,
     ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
     now_secs: u64,
     worker_ctx: &WorkerContext,
 ) -> Option<u16> {
     let (ingress_logical, from_zone_id, _ingress_zone_override) =
-        ike_host_inbound_gate_context(flow, meta, ingress_zone_override, now_secs, worker_ctx);
+        ike_host_inbound_gate_context_with_ambiguous(
+            flow,
+            meta,
+            ingress_zone_override,
+            ambiguous_zone,
+            now_secs,
+            worker_ctx,
+        );
     if crate::afxdp::forwarding::host_inbound_admits_iface_for_destination(
         worker_ctx.forwarding,
         ingress_logical,
@@ -1643,6 +1698,7 @@ pub(super) fn stage_ipsec_passthrough_check(
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    ambiguous_zone: Option<u16>,
     route_override_table: Option<&str>,
     binding_live: &BindingLiveState,
     worker_ctx: &WorkerContext,
@@ -1669,7 +1725,14 @@ pub(super) fn stage_ipsec_passthrough_check(
     // canonical table. A nonzero domain with no registry row has no
     // adjudicable table — fail closed rather than claim in `inet.0`.
     let (ingress_logical, from_zone_id, _gated_override) =
-        ike_host_inbound_gate_context(flow, meta, ingress_zone_override, now_secs, worker_ctx);
+        ike_host_inbound_gate_context_with_ambiguous(
+            flow,
+            meta,
+            ingress_zone_override,
+            ambiguous_zone,
+            now_secs,
+            worker_ctx,
+        );
     let routing_domain = flow.forward_key.routing_domain;
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
     let ingress_table_owned: String;
@@ -1749,6 +1812,7 @@ pub(super) fn stage_ipsec_passthrough_check(
                 meta,
                 dst_port,
                 ingress_zone_override,
+                ambiguous_zone,
                 now_secs,
                 worker_ctx,
             ) {
@@ -1780,6 +1844,7 @@ pub(super) fn stage_ipsec_passthrough_check(
                         meta,
                         dst_port,
                         ingress_zone_override,
+                        ambiguous_zone,
                         now_secs,
                         worker_ctx,
                     )
