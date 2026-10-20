@@ -535,12 +535,13 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
             decision.resolution = if fabric_link_ingress {
                 enforced_resolution
             } else {
-                super::rehome_or_retain_fabric_redirect_15958b(
+                super::rehome_or_retain_fabric_redirect_for_target_15958b(
                     forwarding,
                     resolved.decision.resolution,
                     enforced_resolution,
                     resolved.metadata.egress_zone,
                     destination_owner_active,
+                    Some(resolution_target),
                 )
             };
         } else {
@@ -779,12 +780,13 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         decision.resolution = if fabric_link_ingress {
             enforced_resolution
         } else {
-            super::rehome_or_retain_fabric_redirect_15958b(
+            super::rehome_or_retain_fabric_redirect_for_target_15958b(
                 forwarding,
                 resolved.decision.resolution,
                 enforced_resolution,
                 resolved.metadata.egress_zone,
                 destination_owner_active,
+                Some(resolution_target_for_session(flow, resolved.decision)),
             )
         };
     } else {

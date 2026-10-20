@@ -620,6 +620,69 @@ pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
 /// finds no sendable fabric binding and counts
 /// `fabric_redirect_unsendable_drops` (fail closed) instead of
 /// transmitting to a stale parent or laundering to WAN egress.
+/// #15958b round-4: the egress ifindex of the connected interface
+/// serving `target` (the destination's own LAN interface), by
+/// longest connected prefix across the FIB connected rows and the
+/// by-ifindex ledger. 0 when no connected prefix serves it.
+pub(in crate::afxdp) fn connected_ifindex_for_target(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+) -> i32 {
+    let mut best: Option<(u8, i32)> = None;
+    match target {
+        IpAddr::V4(ip) => {
+            for row in &forwarding.connected_v4 {
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, row.ifindex));
+                    }
+                }
+            }
+            if best.is_none() {
+                for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, *ifindex));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        IpAddr::V6(ip) => {
+            for row in &forwarding.connected_v6 {
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, row.ifindex));
+                    }
+                }
+            }
+            if best.is_none() {
+                for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, *ifindex));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, ifindex)| ifindex).unwrap_or(0)
+}
+
+/// The destination target for a re-home judgment: the post-NAT
+/// destination of the companion (`resolution_target_for_session`
+/// equivalent for callers that already hold the decision + flow
+/// target). Callers pass `target` explicitly so this helper stays
+/// pure resolution logic.
 pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_15958b(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,
@@ -627,11 +690,55 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_15958b(
     destination_zone: u16,
     destination_owner_active: bool,
 ) -> ForwardingResolution {
+    rehome_or_retain_fabric_redirect_for_target_15958b(
+        forwarding,
+        stored,
+        candidate,
+        destination_zone,
+        destination_owner_active,
+        None,
+    )
+}
+
+/// Target-aware re-home (round-4): re-home ONLY when the fresh
+/// candidate genuinely reaches the destination locally —
+/// `ForwardCandidate`, its egress IS the destination's connected
+/// interface (`connected_ifindex_for_target`), and it is not a
+/// fabric egress. During the RG2-active-but-FIB-not-yet-republished
+/// window the fresh candidate is the HA-suppressed WAN default
+/// (egress = WAN gateway, not the connected LAN interface), so the
+/// redirect is retained instead of laundering the reply onto WAN.
+/// When `target` is `None` (legacy callers), fall back to the
+/// owner-active acceptance.
+pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_for_target_15958b(
+    forwarding: &ForwardingState,
+    stored: ForwardingResolution,
+    candidate: ForwardingResolution,
+    destination_zone: u16,
+    destination_owner_active: bool,
+    target: Option<IpAddr>,
+) -> ForwardingResolution {
     if candidate.disposition == ForwardingDisposition::FabricRedirect {
         return candidate;
     }
     if destination_owner_active {
-        return candidate;
+        if let Some(target) = target {
+            let connected_ifindex = connected_ifindex_for_target(forwarding, target);
+            let egress_is_fabric = candidate.egress_ifindex > 0
+                && super::forwarding::ingress_is_fabric(forwarding, candidate.egress_ifindex);
+            if candidate.disposition == ForwardingDisposition::ForwardCandidate
+                && connected_ifindex > 0
+                && candidate.egress_ifindex == connected_ifindex
+                && !egress_is_fabric
+            {
+                return candidate;
+            }
+            // Owner active but the fresh route does not reach the
+            // connected destination (transient FIB lag): retain the
+            // redirect below rather than laundering to WAN.
+        } else {
+            return candidate;
+        }
     }
     if candidate.disposition != ForwardingDisposition::ForwardCandidate {
         return candidate;
