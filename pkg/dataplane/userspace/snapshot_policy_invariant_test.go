@@ -62,6 +62,8 @@ func hardeningPolicyCfg() *config.Config {
 			0: {Number: 0, Addresses: []string{"198.51.100.1/24"}},
 		}},
 	}
+	cfg.System.HostName = "fw-census"
+	cfg.System.DataplaneType = "userspace"
 	return cfg
 }
 
@@ -324,5 +326,41 @@ func TestFullBuilderPopulatesEverySnapshotField(t *testing.T) {
 	// must never be exempt or empty for this config.
 	if len(snap.Policies) == 0 {
 		t.Error("census premise: representative config published no policies")
+	}
+	// Nested census (GLM fold): reflect into Summary so a dropped literal
+	// INSIDE the nested struct (e.g. `PolicyCount: len(policies),` deleted
+	// from the Summary composite literal) also fails CI. The fixture has
+	// no schedulers and is standalone, so those two Summary fields are
+	// legitimately zero; every other field must be populated AND
+	// consistent with the snapshot it summarizes.
+	summaryExempt := map[string]string{
+		"SchedulerCount": "representative config declares no schedulers",
+		"HAEnabled":      "representative config is standalone (no chassis cluster)",
+	}
+	sv := reflect.ValueOf(snap.Summary)
+	st := sv.Type()
+	var summaryMissing []string
+	for i := range st.NumField() {
+		f := st.Field(i)
+		if _, ok := summaryExempt[f.Name]; !ok && sv.Field(i).IsZero() {
+			summaryMissing = append(summaryMissing, f.Name)
+		}
+	}
+	if len(summaryMissing) > 0 {
+		t.Errorf("full builder left Summary fields unpopulated (nested dropped-literal class): %s\n"+
+			"populate the field in the builder, or add it to the Summary exemption list WITH a reason",
+			strings.Join(summaryMissing, ", "))
+	}
+	if snap.Summary.PolicyCount != len(snap.Policies) {
+		t.Errorf("Summary.PolicyCount = %d, want len(Policies) = %d", snap.Summary.PolicyCount, len(snap.Policies))
+	}
+	if snap.Summary.ZoneCount != len(snap.Zones) {
+		t.Errorf("Summary.ZoneCount = %d, want len(Zones) = %d", snap.Summary.ZoneCount, len(snap.Zones))
+	}
+	if snap.Summary.InterfaceCount != len(cfg.Interfaces.Interfaces) {
+		t.Errorf("Summary.InterfaceCount = %d, want %d configured interfaces", snap.Summary.InterfaceCount, len(cfg.Interfaces.Interfaces))
+	}
+	if snap.Summary.HostName != cfg.System.HostName || snap.Summary.DataplaneType != cfg.System.DataplaneType {
+		t.Errorf("Summary identity = %q/%q, want %q/%q from config", snap.Summary.HostName, snap.Summary.DataplaneType, cfg.System.HostName, cfg.System.DataplaneType)
 	}
 }

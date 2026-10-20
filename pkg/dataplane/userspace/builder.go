@@ -371,15 +371,17 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		snap.Summary.ZoneCount = len(snap.Zones)
 		snap.Summary.PolicyCount = len(snap.Policies)
 	}
-	// HARDENING (#15742 follow-up): a full snapshot whose Summary claims
-	// policies the Policies slice does not carry is the exact 670274c712
-	// defect — the helper default-denies all transit while the summary
-	// reports the compiled rule count. Refuse to publish such a snapshot:
-	// a compile ERROR keeps the prior snapshot enforced (fail closed)
-	// instead of installing an empty policy set silently. The check runs
-	// AFTER quarantineCollidingZones, which legitimately drops rules for
-	// quarantined zones and resyncs Summary.PolicyCount, so a quarantined
-	// build whose rules were all scrubbed still passes (count 0 == len 0).
+	// HARDENING (#15742/#15937): a full snapshot whose published policies
+	// disagree with the effective POST-QUARANTINE policy set is the
+	// 670274c712 defect shape — rules vanish between lowering and the
+	// literal, and the helper would install an empty/short policy set
+	// while the commit reports success. Refuse the build (compile ERROR
+	// keeps the prior snapshot enforced, fail closed). The check runs
+	// AFTER quarantineCollidingZones and its Summary resync, and the
+	// ground truth (expectedPolicyCount) applies the same scrub, so a
+	// build whose rules were ALL legitimately quarantined expects zero
+	// and passes (0 == 0 == 0); a raw authored-rule count here would
+	// false-fire on exactly that supported no-brick posture.
 	if err := validateSnapshotPolicyInvariant(snap, cfg); err != nil {
 		return nil, err
 	}

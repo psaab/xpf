@@ -110,3 +110,23 @@ and immediately at every layer, each independently sufficient:
   populated.
 - Helper counter resets on helper restart (process-lifetime counter,
   consistent with the other `*_total` status counters).
+
+## Fold corrections (triple review, bb7c5f5273 + this fold)
+
+- Builder comment at the invariant call site corrected: the ground
+  truth is post-quarantine (`expectedPolicyCount`), not the Summary
+  resync alone; a raw authored count would false-fire on the supported
+  fully-quarantined posture.
+- Census extended into the nested `Summary` struct (SchedulerCount /
+  HAEnabled exempted with reasons; HostName/DataplaneType now seeded in
+  the fixture; PolicyCount/ZoneCount/InterfaceCount/identity asserted
+  consistent). Deleting the nested `PolicyCount: len(policies),` line
+  was mutation-verified to turn the Go hardening set red.
+- Validation counts corrected: Rust `server::tests::apply_snapshot` is
+  22 listed / 22 passing at this head (20 at the first reviewed head;
+  the first revision's "21/21" was wrong). `pkg/api` shows exactly the
+  pre-existing failure set, byte-identical base vs head (the earlier
+  "19 failures" figure is withdrawn — an artifact of counting
+  subtests/output).
+- Traceability: this work is driven by #15937; commits and PR now
+  carry `Refs #15937` alongside `Refs #15742`.
