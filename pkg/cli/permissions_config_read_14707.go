@@ -137,7 +137,10 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 		}
 		if piped {
 			if len(pipe) == 1 && pipe[0] == "compare" {
-				return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
+				// #15942 H2-04: `N <path> | compare` diffs only that
+				// subtree against active; price the path, not the
+				// whole-tree rollback.
+				return config.AuthorizeConfigShowRollbackAtPath(cfg, c.userClass, rbPath, "")
 			}
 			return nil // handler syntax error; renders nothing
 		}
@@ -145,6 +148,14 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			if a == "compare" {
 				return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 			}
+		}
+		// #15942 H2-04: a bare pre-pipe subtree path (`rollback 1
+		// interfaces`) renders that subtree — price it as one. Other
+		// stray tokens are the handler's syntax error and render
+		// nothing, so they need no adjudication here (splitDisplayPipe
+		// already separated them as rbPath; the handler validates).
+		if len(rbPath) > 0 {
+			return config.AuthorizeConfigShowPath(cfg, c.userClass, rbPath, "")
 		}
 		return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 	case "login":

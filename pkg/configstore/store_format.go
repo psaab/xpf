@@ -463,7 +463,7 @@ func forDisplay(t *config.ConfigTree) *config.ConfigTree {
 func (s *Store) ShowActiveRedacted(path []string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return forDisplay(s.active).FormatPath(path)
+	return s.active.FormatPathRedacted(path)
 }
 
 // ShowActiveSetRedacted renders the active config (optional subtree) as flat
@@ -471,7 +471,7 @@ func (s *Store) ShowActiveRedacted(path []string) string {
 func (s *Store) ShowActiveSetRedacted(path []string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return forDisplay(s.active).FormatPathSet(path)
+	return s.active.FormatPathSetRedacted(path)
 }
 
 // ShowActiveJSONRedacted renders the active config (optional subtree) as JSON
@@ -479,7 +479,7 @@ func (s *Store) ShowActiveSetRedacted(path []string) string {
 func (s *Store) ShowActiveJSONRedacted(path []string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return forDisplay(s.active).FormatPathJSON(path)
+	return s.active.FormatPathJSONRedacted(path)
 }
 
 // ShowActiveXMLRedacted renders the active config (optional subtree) as XML
@@ -487,7 +487,7 @@ func (s *Store) ShowActiveJSONRedacted(path []string) string {
 func (s *Store) ShowActiveXMLRedacted(path []string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return forDisplay(s.active).FormatPathXML(path)
+	return s.active.FormatPathXMLRedacted(path)
 }
 
 // ShowActiveInheritanceRedacted renders the active config (optional subtree)
@@ -495,7 +495,7 @@ func (s *Store) ShowActiveXMLRedacted(path []string) string {
 func (s *Store) ShowActiveInheritanceRedacted(path []string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return forDisplay(s.active).FormatPathInheritanceForNode(path, s.nodeID)
+	return s.active.FormatPathInheritanceRedactedForNode(path, s.nodeID)
 }
 
 // ShowCandidateRedacted renders the candidate config (optional subtree) as
@@ -506,7 +506,7 @@ func (s *Store) ShowCandidateRedacted(path []string) string {
 	if s.candidate == nil {
 		return ""
 	}
-	return forDisplay(s.candidate).FormatPath(path)
+	return s.candidate.FormatPathRedacted(path)
 }
 
 // ShowCandidateSetRedacted renders the candidate config (optional subtree) as
@@ -517,7 +517,7 @@ func (s *Store) ShowCandidateSetRedacted(path []string) string {
 	if s.candidate == nil {
 		return ""
 	}
-	return forDisplay(s.candidate).FormatPathSet(path)
+	return s.candidate.FormatPathSetRedacted(path)
 }
 
 // ShowCandidateJSONRedacted renders the candidate config (optional subtree) as
@@ -532,7 +532,7 @@ func (s *Store) ShowCandidateJSONRedacted(path []string) string {
 		}
 		return ""
 	}
-	return forDisplay(s.candidate).FormatPathJSON(path)
+	return s.candidate.FormatPathJSONRedacted(path)
 }
 
 // ShowCandidateXMLRedacted renders the candidate config (optional subtree) as
@@ -547,7 +547,7 @@ func (s *Store) ShowCandidateXMLRedacted(path []string) string {
 		}
 		return ""
 	}
-	return forDisplay(s.candidate).FormatPathXML(path)
+	return s.candidate.FormatPathXMLRedacted(path)
 }
 
 // ShowCandidateInheritanceRedacted renders the candidate config (optional
@@ -558,7 +558,7 @@ func (s *Store) ShowCandidateInheritanceRedacted(path []string) (string, error) 
 	if s.candidate == nil {
 		return "", nil
 	}
-	return forDisplay(s.candidate).FormatPathInheritanceForNode(path, s.nodeID)
+	return s.candidate.FormatPathInheritanceRedactedForNode(path, s.nodeID)
 }
 
 // ShowRollbackRedacted renders rollback slot n (0 = active) as
@@ -576,7 +576,7 @@ func (s *Store) ShowRollbackRedactedPath(n int, path []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return forDisplay(tree).FormatPath(path), nil
+	return tree.FormatPathRedacted(path), nil
 }
 
 // ShowRollbackSetRedacted renders rollback slot n (0 = active) as set
@@ -594,7 +594,7 @@ func (s *Store) ShowRollbackSetRedactedPath(n int, path []string) (string, error
 	if err != nil {
 		return "", err
 	}
-	return forDisplay(tree).FormatPathSet(path), nil
+	return tree.FormatPathSetRedacted(path), nil
 }
 
 // ShowRollbackJSONRedacted renders rollback slot n (0 = active) as JSON
@@ -612,7 +612,7 @@ func (s *Store) ShowRollbackJSONRedactedPath(n int, path []string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	return forDisplay(tree).FormatPathJSON(path), nil
+	return tree.FormatPathJSONRedacted(path), nil
 }
 
 // ShowRollbackXMLRedacted renders rollback slot n (0 = active) as XML
@@ -630,7 +630,7 @@ func (s *Store) ShowRollbackXMLRedactedPath(n int, path []string) (string, error
 	if err != nil {
 		return "", err
 	}
-	return forDisplay(tree).FormatPathXML(path), nil
+	return tree.FormatPathXMLRedacted(path), nil
 }
 
 // ShowRollbackInheritanceRedacted renders rollback slot n (0 = active)
@@ -648,7 +648,7 @@ func (s *Store) ShowRollbackInheritanceRedactedPath(n int, path []string) (strin
 	if err != nil {
 		return "", err
 	}
-	return forDisplay(tree).FormatPathInheritanceForNode(path, s.nodeID)
+	return tree.FormatPathInheritanceRedactedForNode(path, s.nodeID)
 }
 
 // ShowCompareRedacted returns a hierarchical diff with secret values constant-

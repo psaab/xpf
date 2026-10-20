@@ -966,22 +966,47 @@ func (c *CLI) handleShowSystem(args []string) error {
 			isPipeCompare := rbPiped && rbFormat == displayPipeNone && len(rbPipe) == 1 && rbPipe[0] == "compare"
 			isBareCompare := false
 			if !rbPiped {
+				// #15942 H2-04: bare pre-pipe tokens are the subtree
+				// path (`show system rollback 1 interfaces`), as they
+				// already are in front of a display pipe — not a syntax
+				// error. A bare `compare` token keeps its historic
+				// whole-tree meaning and may not combine with a path.
 				for _, a := range args[2:] {
 					if a == "compare" {
 						isBareCompare = true
-					} else {
-						fmt.Printf("syntax error: unexpected token '%s' for rollback (use '| compare' or '| display <format>')\n", a)
+					}
+				}
+				if isBareCompare && len(args[2:]) > 1 {
+					fmt.Printf("syntax error: unexpected token for rollback (use '<path> | compare' or '| display <format>')\n")
+					return nil
+				}
+				// A bare path must start at a real config top-level
+				// stanza; anything else is the historic stray-token
+				// syntax error (V47-02), not a scoped render of an
+				// empty subtree. Valid-but-unmatched DEEPER paths keep
+				// the `configuration path not found` answer below.
+				if !isBareCompare && len(rbPath) > 0 {
+					if !config.IsTopLevelStanza(rbPath[0]) {
+						fmt.Printf("syntax error: unexpected token '%s' for rollback (use '| compare' or '| display <format>')\n", rbPath[0])
 						return nil
 					}
 				}
 			}
 			switch {
 			case isPipeCompare || isBareCompare:
+				// #15942 H2-04: a PIPED compare honours the pre-pipe
+				// subtree path as the display formats do. The BARE
+				// `compare` token is syntax, not a path: it keeps its
+				// historic whole-tree meaning.
+				comparePath := rbPath
+				if isBareCompare {
+					comparePath = nil
+				}
 				var diff string
 				if redact {
-					diff, err = c.store.ShowCompareRollbackActiveRedacted(n)
+					diff, err = c.store.ShowCompareRollbackActiveRedactedAtPath(n, comparePath)
 				} else {
-					diff, err = c.store.ShowCompareRollbackActive(n)
+					diff, err = c.store.ShowCompareRollbackActiveAtPath(n, comparePath)
 				}
 				if err != nil {
 					return err
@@ -1032,16 +1057,22 @@ func (c *CLI) handleShowSystem(args []string) error {
 			case rbPiped:
 				fmt.Printf("syntax error: unknown pipe command '%s'\n", rbPipe[0])
 			default:
+				// #15942 H2-04: bare form, optionally scoped to the
+				// pre-pipe subtree path (rbPath, empty = whole tree).
 				var content string
 				if redact {
-					content, err = c.store.ShowRollbackRedacted(n)
+					content, err = c.store.ShowRollbackRedactedPath(n, rbPath)
 				} else {
-					content, err = c.store.ShowRollback(n)
+					content, err = c.store.ShowRollbackPath(n, rbPath)
 				}
 				if err != nil {
 					return err
 				}
-				fmt.Print(content)
+				if len(rbPath) > 0 && content == "" {
+					fmt.Printf("configuration path not found: %s\n", strings.Join(rbPath, " "))
+				} else {
+					fmt.Print(content)
+				}
 			}
 			return nil
 		}

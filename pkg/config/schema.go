@@ -430,6 +430,15 @@ var setSchema = &schemaNode{children: map[string]*schemaNode{
 	"routing-instances":  schemaRoutingInstances,
 }}
 
+// IsTopLevelStanza reports whether name is a configuration top-level
+// stanza (`system`, `security`, `interfaces`, …). Used to distinguish a
+// scoped config path from a stray token on surfaces that accept an
+// optional path (#15942).
+func IsTopLevelStanza(name string) bool {
+	_, ok := setSchema.children[name]
+	return ok
+}
+
 func init() {
 	// Wire groups wildcard to mirror top-level schema children.
 	// This allows "set groups <name> security ..." etc. to parse correctly.

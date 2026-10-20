@@ -111,6 +111,19 @@ func AuthorizeConfigShowRollback(cfg *Config, class string, displaySuffix string
 	return authorizeShowCommand(cfg, class, "show configuration", displaySuffix)
 }
 
+// AuthorizeConfigShowRollbackAtPath adjudicates a rollback-slot render
+// scoped to path (#15942 H2-04): the render discloses only that
+// subtree, so it is priced as a path read (AuthorizeConfigShowPath),
+// not refused as a whole-tree render and not waved through by a gate
+// that never saw the path. A nil/empty path is the whole-tree rollback
+// (AuthorizeConfigShowRollback).
+func AuthorizeConfigShowRollbackAtPath(cfg *Config, class string, path []string, displaySuffix string) error {
+	if class == "" || len(path) == 0 {
+		return AuthorizeConfigShowRollback(cfg, class, displaySuffix)
+	}
+	return AuthorizeConfigShowPath(cfg, class, path, displaySuffix)
+}
+
 // AuthorizeConfigShowSystemPath adjudicates an operational
 // `show system <subtree>` render of an explicit configuration path
 // (login, root-authentication): *-configuration on the path,

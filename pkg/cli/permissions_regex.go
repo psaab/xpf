@@ -212,10 +212,15 @@ func evaluateCommandRegex(
 	}
 
 	// #9022: match against the full canonical string AND the argument-free
-	// command prefix. `Canonicalize` passes an AcceptsArgs node's trailing
+	// command forms. `Canonicalize` passes an AcceptsArgs node's trailing
 	// tokens through (#8304, deliberately), so an ANCHORED deny such as
 	// `^show log$` stopped matching the moment any argument was appended and
 	// the denied command ran. See EvaluateForms for the per-form rule.
+	//
+	// #15942 H1-01: canonicalForms also strips selector subtrees, so an
+	// anchored deny/allow on the base command (`^show security
+	// policies$`) reaches the selector-bearing spellings the old
+	// leading-keyword walk priced as "show security policies from-zone".
 	//
 	// #9628: the pipe-less command is measured as well. Without it, fixing the
 	// splice would have let `show version | match .` step around
@@ -224,11 +229,30 @@ func evaluateCommandRegex(
 	// #14686: when a pipe is present the evaluation is marked as such, so
 	// an allow that matches only inside pipe filter text cannot satisfy
 	// the allowlist for the bare command.
+	baseForm, fullForm, selectorForms, chainForm := canonicalForms(canon)
+	forms := append([]string{baseForm, fullForm}, selectorForms...)
 	var decision config.LoginRegexDecision
 	if len(pipeWords) > 0 {
-		decision = rules.EvaluateFormsWithPipe(matched, canonicalPrefix(canon), command)
+		decision = rules.EvaluateFormsWithPipe(matched, forms[0], append([]string{command}, forms[1:]...)...)
 	} else {
-		decision = rules.EvaluateForms(matched, canonicalPrefix(canon), command)
+		decision = rules.EvaluateForms(matched, forms[0], append([]string{command}, forms[1:]...)...)
+	}
+	// #14687 distinct-narrower-selector: a completed selector form
+	// whose executed spelling is a distinct, narrower command than
+	// its base (`show security screen ids-option <name>` lists one
+	// profile; the bare denied `show security screen` lists all) is
+	// allowed when no deny names the selector form itself — the base
+	// form's denial prices the broader listing, not this one. The
+	// rescue fires only when the BASE form is the sole deny-decided
+	// spelling: every other addressable spelling (the full canonical
+	// command, the keyword-only full form, each selector prefix, and
+	// the piped form) must carry no deny verdict, and at least one
+	// pipe-less spelling must be affirmatively allowed, so neither a
+	// selector-spelling deny nor an allow smuggled inside pipe filter
+	// text can be stepped around.
+	if !decision.Allowed && chainForm != "" && distinctNarrowerAllowed(rules, matched, command, baseForm, fullForm, selectorForms) {
+		decision = config.LoginRegexDecision{Allowed: true, DecidedBy: config.LoginRegexNeither,
+			Reason: "distinct narrower selector command; no deny names it"}
 	}
 	if decision.Allowed {
 		return nil
@@ -290,29 +314,358 @@ func firstWord(words []string) string {
 	return words[0]
 }
 
-// canonicalPrefix renders the leading KEYWORD run of a canonical command for
-// audit, stopping at the first token that is not a resolved keyword.
+// distinctNarrowerAllowed reports whether the base-form denial is the
+// ONLY deny verdict on the executed command, so the #14687 rescue may
+// re-price the narrower spelling as allowed. It requires the base form
+// itself to be deny-decided and NO other spelling (executed canonical
+// command, full keyword form, selector forms) deny-decided. When an
+// allow rule exists, the rescue additionally requires an AFFIRMATIVE
+// allow-rule match on a pipe-less spelling: for such classes an
+// allowlist miss is the denial being rescued, and only
+// DecidedBy==LoginRegexAllow proves an allow rule actually named a
+// spelling (R28/R29 shape). For deny-only classes there is no
+// allowlist to satisfy: the base denial is a broad-listing price and
+// the narrower command, named by no deny, runs (R09). matched
+// carries pipe text, so it is checked last; a tier deny there vetoes.
+func distinctNarrowerAllowed(rules config.CompiledLoginRegexes, matched, command, baseForm, fullForm string, selectorForms []string) bool {
+	if rules.Evaluate(baseForm).DecidedBy != config.LoginRegexDeny {
+		return false
+	}
+	// The EXECUTED (value-bearing) spelling is the most specific
+	// addressable form: a deny naming it vetoes. (Round-2 fold F1:
+	// R28/R29/R30 — this check was missing, so a deny written against
+	// the executed spelling, e.g. `^show security screen ids-option
+	// prof1$`, was silently overridden.)
+	cmdVerdict := rules.Evaluate(command)
+	if cmdVerdict.DecidedBy == config.LoginRegexDeny {
+		return false
+	}
+	// An ALLOW rule affirms a spelling only via DecidedBy==Allow on a
+	// pipe-less form (R28/R29: a deny-only class must never pass this
+	// gate on evaluateForm's default-allow, so the check is not the
+	// vacuous `Allowed` boolean). But the requirement must not demand
+	// affirmation for classes with NO allow rule at all (R09's
+	// deny-only rescue): detect an allow rule by its participation —
+	// the base form's verdict carries DecidedBy==Allow exactly when an
+	// allow rule matched or an allowlist refused it.
+	affirmed := cmdVerdict.DecidedBy == config.LoginRegexAllow && cmdVerdict.Allowed
+	allowParticipates := false
+	if d := rules.Evaluate(baseForm); d.DecidedBy == config.LoginRegexAllow {
+		allowParticipates = true
+	}
+	for _, form := range append([]string{fullForm}, selectorForms...) {
+		if form == baseForm {
+			continue
+		}
+		d := rules.Evaluate(form)
+		if d.DecidedBy == config.LoginRegexDeny {
+			return false
+		}
+		if d.DecidedBy == config.LoginRegexAllow {
+			// DecidedBy==Allow covers both an allow MATCH
+			// (Allowed=true) and an allowlist MISS
+			// (Allowed=false): either proves an allow rule
+			// governs a pipe-less spelling of this command.
+			allowParticipates = true
+			if d.Allowed {
+				affirmed = true
+			}
+		}
+	}
+	if allowParticipates && !affirmed {
+		return false
+	}
+	// R07 (B4): when a pipe is present AND an allow rule participates,
+	// the affirmation must hold on a PIPE-LESS spelling. A decision
+	// rescued only because `matched` (with pipe text) affirmed would
+	// let `| match interfaces` smuggle an allow written for an
+	// unrelated word past a base deny. R12's deny-only class has no
+	// allow rule to smuggle, so its benign pipe must not block the
+	// rescue.
+	if matched != command && allowParticipates && !affirmed {
+		return false
+	}
+	if matched != command && rules.Evaluate(matched).DecidedBy == config.LoginRegexDeny {
+		return false
+	}
+	return true
+}
+
+// canonicalForms renders the argument-free command forms of a canonical
+// command for regex evaluation and audit (#15942 H1-01).
 //
-// #7172 requires audit output naming "class, canonical command, and deny reason
-// WITHOUT leaking argument values". A canonical command still contains raw
-// value slots — `request system login user <name>` or a ping target — so
-// joining the whole slice would put operator data into a log line.
-func canonicalPrefix(canon []string) string {
-	keep := make([]string, 0, len(canon))
+// Selector keywords (`from-zone <zone>`, `policy-name <name>`, the
+// option keywords of an Options node, the trailing words of an
+// AcceptsArgs node) FILTER the command accumulated so far; they are not
+// subcommands of it. The forms are:
+//
+//   - the BASE form: the plain keyword chain with every selector
+//     subtree removed, so `show security policies from-zone trust`
+//     yields "show security policies" — the spelling an anchored
+//     `^show security policies$` deny/allow is written against;
+//   - the FULL keyword form: base plus completed subcommands under a
+//     value (`show firewall filter <name> family inet` continues past
+//     the dynamic value into the Options children; `show security
+//     zones <name> detail` likewise). Selector keywords and their
+//     subtrees never enter it, so it cannot fabricate a spelling that
+//     aliases a real sibling (`filter FOO effective` yields full form
+//     "show firewall", never "show firewall effective");
+//   - one SELECTOR form per selector keyword: the base keyword chain
+//     plus that keyword (`show firewall filter`, `show security screen
+//     ids-option`) — the documented selector spelling an anchored
+//     deny/allow may be written against, so such a rule still names
+//     the command in both directions; and
+//   - the CHAIN form, reported separately: the parent keyword chain of
+//     a completed selector whose value offers a plain subcommand
+//     (`ids-option <name>` → `detail`), marking a distinct, narrower
+//     executed command for the #14687 rescue.
+//
+// The spellings are alternative forms under EvaluateForms' unanimity,
+// so a rule anchored to any one of them can name the command it
+// intends — and only that command. Without the base form, the old walk
+// kept the first selector keyword ("show security policies from-zone"),
+// which no anchored base rule ever matches: any selector keyword
+// stepped around an anchored deny, and a mandatory-selector command
+// could never satisfy an anchored allow. Plain keyword subcommands are
+// untouched (`show configuration system` stays whole, #9022).
+//
+// #7172 requires audit output naming "class, canonical command, and
+// deny reason WITHOUT leaking argument values". A canonical command
+// still contains raw value slots — `request system login user <name>`
+// or a ping target — so joining the whole slice would put operator data
+// into a log line. canonicalPrefix (the base form) serves that audit.
+func canonicalForms(canon []string) (string, string, []string, string) {
+	base := make([]string, 0, len(canon))
+	full := make([]string, 0, len(canon))
+	var selectors []string
+	selectorOpen := false // inside a selector subtree (full form only)
 	current := cmdtree.OperationalTree
+	// pendingChildren/pendingSelector describe an open value slot: the
+	// next token fills it, and a token after that may resolve as a
+	// child keyword of the slot's node.
+	var pendingChildren map[string]*cmdtree.Node
+	pendingSelector := false
+	// pendingOptions records that the open value slot belongs to an
+	// Options node, whose option keywords filter the accumulated
+	// command rather than extending it.
+	pendingOptions := false
+	awaitValue := false
+	// slotChain is the keyword chain of the PARENT command whose
+	// dynamic value slot the walk most recently filled and which offers
+	// a plain subcommand under the value (`ids-option <name>` under
+	// `screen`, which has a `detail` child). It names a distinct,
+	// narrower executed command (#14687), so the parent chain is the
+	// chain form reported to the rescue. A selector with NO plain
+	// subcommand (`from-zone` on `policies`) merely filters the base
+	// listing and names no distinct command. Under an Options node
+	// (`filter <name>` then `family inet`) the value names data, not a
+	// command, so no chain form is reported either.
+	var slotChain []string
+	slotCompleted := false
+	slotVocab := false
+	slotOptions := false
 	for _, w := range canon {
+		if awaitValue {
+			// w is the value itself: data, never a keyword.
+			awaitValue = false
+			slotCompleted = true
+			continue
+		}
+		if pendingChildren != nil {
+			if node, ok := pendingChildren[w]; ok {
+				if pendingOptions {
+					// An option keyword of the pending Options node
+					// (`effective`, or the typed leaf `family`
+					// after `filter <name>`): it filters THIS
+					// command. Neither extending the full form
+					// with it nor minting a `base + family`
+					// selector form is sound — both would fabricate
+					// a spelling for a command that does not exist.
+					// The command form ends here. (This break must
+					// precede the typed-leaf branch below, whose
+					// selector-form minting applies only to real
+					// selector subtrees.)
+					break
+				}
+				if node.IsTypedLeaf() || (node.RequiresValue && node.HasDynamic()) {
+					// Fresh selector subtree after a value
+					// (from-zone X to-zone Y): judge its keyword as
+					// its own selector form; exclude the subtree
+					// from base and full.
+					selectorOpen = true
+					addSelectorForm(&selectors, append(append([]string(nil), base...), w))
+					pendingChildren = node.Children
+					pendingSelector = true
+					awaitValue = true
+					current = node.Children
+					continue
+				}
+				// (pendingOptions was handled above: an option
+				// keyword ends the command form.)
+				// A completed subcommand under the value: extend the
+				// full keyword chain (and the base too when it is not
+				// inside a selector subtree). Only this arm extends
+				// the full form, so no fabricated spelling arises.
+				full = append(full, w)
+				if !pendingSelector {
+					base = append(base, w)
+				}
+				pendingChildren = nil
+				if node.Options || node.AcceptsArgs || node.Children == nil {
+					break
+				}
+				if node.HasDynamic() {
+					pendingChildren = node.Children
+					pendingSelector = selectorOpen
+					pendingOptions = node.Options
+					awaitValue = true
+					slotChain = append([]string(nil), full...)
+					slotVocab = hasPlainSubcommand(node.Children)
+					slotOptions = node.Options
+					slotCompleted = false
+				} else if hasPlaceholderChild(node) {
+					pendingChildren = node.Children
+					pendingSelector = selectorOpen
+					pendingOptions = node.Options
+					awaitValue = true
+				}
+				current = node.Children
+				continue
+			}
+			// Not a child keyword: the command form ends here.
+			break
+		}
 		node, ok := current[w]
 		if !ok {
 			break
 		}
-		keep = append(keep, w)
+		if node.IsTypedLeaf() || (node.RequiresValue && node.HasDynamic()) {
+			// Selector keyword: excluded from the base and full
+			// forms, but ADDRESSABLE as its own selector form
+			// (`^show firewall filter$`, `^show security screen
+			// ids-option$`), so an anchored rule written against
+			// the selector spelling still names this command.
+			selectorOpen = true
+			addSelectorForm(&selectors, append(append([]string(nil), base...), w))
+			pendingChildren = node.Children
+			pendingSelector = true
+			pendingOptions = node.Options
+			awaitValue = true
+			slotChain = append([]string(nil), full...)
+			slotVocab = hasPlainSubcommand(node.Children)
+			slotOptions = node.Options
+			slotCompleted = false
+			current = node.Children
+			continue
+		}
+		if selectorOpen {
+			full = append(full, w)
+		} else {
+			base = append(base, w)
+			full = append(full, w)
+		}
+		if node.Options && !node.HasDynamic() {
+			// An Options CONTAINER with no value slot of its own
+			// (`hit-count`, the flow-session option set): everything
+			// after it selects within this command. A RequiresValue
+			// dynamic selector (`filter`, `ids-option`) DOES carry
+			// a value slot and falls through to open it below.
+			break
+		}
+		if node.AcceptsArgs {
+			break
+		}
+		if node.HasDynamic() {
+			// A dynamic value slot: the next token is data. A PLACEHOLDER
+			// child (`<destination>` under `show route`) is only a
+			// value slot, never a keyword: a following keyword such
+			// as `table` resolves in the pending arm above as a real
+			// subcommand, it is not swallowed as the value.
+			pendingChildren = node.Children
+			pendingSelector = selectorOpen
+			pendingOptions = node.Options
+			awaitValue = true
+			slotChain = append([]string(nil), full...)
+			slotVocab = hasPlainSubcommand(node.Children)
+			slotOptions = node.Options
+			slotCompleted = false
+			if node.Children == nil {
+				break
+			}
+			current = node.Children
+			continue
+		}
+		if hasPlaceholderChild(node) {
+			// Placeholder-only slot: the next token fills it. Do NOT
+			// open a pending-keyword walk, or a real sibling keyword
+			// (e.g. `table` beside `<destination>`) would be eaten
+			// as the placeholder's value.
+			awaitValue = true
+			if node.Children == nil {
+				break
+			}
+			current = node.Children
+			continue
+		}
 		if node.Children == nil {
 			break
 		}
 		current = node.Children
 	}
-	if len(keep) == 0 {
-		return "<unresolved>"
+	if len(base) == 0 {
+		return "<unresolved>", "<unresolved>", nil, ""
 	}
-	return strings.Join(keep, " ")
+	baseStr := strings.Join(base, " ")
+	fullStr := strings.Join(full, " ")
+	if fullStr == "" {
+		fullStr = baseStr
+	}
+	chainForm := ""
+	if slotCompleted && slotVocab && !slotOptions && len(slotChain) > 0 {
+		chainForm = strings.Join(slotChain, " ")
+	}
+	return baseStr, fullStr, selectors, chainForm
+}
+
+func addSelectorForm(forms *[]string, tokens []string) {
+	form := strings.Join(tokens, " ")
+	for _, existing := range *forms {
+		if existing == form {
+			return
+		}
+	}
+	*forms = append(*forms, form)
+}
+
+// hasPlainSubcommand reports whether a value slot's node offers a plain
+// subcommand keyword under the value (`detail` under `ids-option <name>`),
+// as opposed to only further selector keywords (`to-zone` under
+// `from-zone <zone>`). Only the former makes the completed selector a
+// distinct, narrower command (#14687); the latter merely continues
+// filtering the same listing (#15942).
+func hasPlainSubcommand(children map[string]*cmdtree.Node) bool {
+	for _, child := range children {
+		if child == nil || child.IsTypedLeaf() || (child.RequiresValue && child.HasDynamic()) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// hasPlaceholderChild reports whether node has a placeholder child
+// (`<host>`) whose value the next canonical token would fill.
+func hasPlaceholderChild(node *cmdtree.Node) bool {
+	for name := range node.Children {
+		if strings.HasPrefix(name, "<") {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalPrefix is the base (selector-free) form of canon, for audit.
+func canonicalPrefix(canon []string) string {
+	base, _, _, _ := canonicalForms(canon)
+	return base
 }
