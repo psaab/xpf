@@ -988,6 +988,10 @@ type compileOpts struct {
 	// independently omits the keyless-auth interface rather than
 	// activating it unauthenticated.
 	lenientOSPFAuthKeyPresence14397 bool
+	// lenientOSPFMD5DuplicateKey15935 downgrades a same-ID OSPF MD5
+	// restatement with a different key to a warning on tolerant load /
+	// peer-sync (#15935); the first key wins deterministically.
+	lenientOSPFMD5DuplicateKey15935 bool
 	// lenientISISMetric11823 downgrades an invalid compiled IS-IS interface
 	// metric to a warning on tolerant load / peer-sync; the FRR renderer
 	// independently omits out-of-domain values.
@@ -3666,6 +3670,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingExportRef:                true,
 		lenientFRRAuthValues:                   true,
 		lenientOSPFMD5KeyID11794:               true,
+		lenientOSPFMD5DuplicateKey15935:        true,
 		lenientOSPFAuthKeyPresence14397:        true,
 		lenientISISMetric11823:                 true,
 		lenientBGPPrefixLimit11793:             true,

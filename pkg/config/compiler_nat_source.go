@@ -889,6 +889,8 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 							continue
 						}
 						var toks []string
+						complete := false
+						lastModifier := ""
 						for _, sib := range children[i+1:] {
 							if sib.Name() == "range" {
 								break
@@ -905,14 +907,22 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 							// <hi>`), regardless of whether the
 							// endpoints validate — an invalid range
 							// is still a complete authored range
-							// that the next endpoint group replaces.
 							if len(toks) == 4 && toks[0] == "low" && toks[2] == "high" ||
 								len(toks) == 1 ||
 								len(toks) == 3 && toks[1] == "to" {
 								setPortRange(toks)
 								toks = nil
+								complete = true
 							}
 							if sib.Name() == "no-translation" || sib.Name() == "deterministic" || sib.Name() == "random-allocation" || sib.Name() == "no-random-allocation" {
+								// #15935: the children loop already applied
+								// this modifier (no-translation clears the
+								// range, random-allocation sets its flag).
+								// Remember it so the tail handling below
+								// re-applies it AFTER a flushed range —
+								// authored order — instead of stamping the
+								// range last and clearing the modifier.
+								lastModifier = sib.Name()
 								continue
 							}
 							toks = append(toks, sib.Keys...)
@@ -920,7 +930,22 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 								toks = append(toks, gc.Keys...)
 							}
 						}
-						setPortRange(toks)
+						// #15935: a trailing modifier flushed a COMPLETE
+						// range above (toks reset, complete=true); applying
+						// setPortRange(nil) here would fabricate an
+						// "<empty>" invalid spec, zero the valid range, and
+						// clear PortNoTranslation. Only an incomplete or
+						// absent tail is a genuinely empty range.
+						if toks != nil || !complete {
+							setPortRange(toks)
+						} else if lastModifier == "no-translation" {
+							// Modifier ordered after the range: it
+							// supersedes it (children-loop semantics).
+							pool.PortNoTranslation = true
+							pool.PortLow = 0
+							pool.PortHigh = 0
+							pool.PortRangeInvalidSpec = ""
+						}
 					}
 				}
 			case "persistent-nat":

@@ -767,6 +767,11 @@ type OSPFInterface struct {
 	// AuthMD5Keys retains every configured key ID during rollover. AuthKey and
 	// AuthKeyID remain the legacy single-key view for existing consumers.
 	AuthMD5Keys []OSPFMD5Key12186
+	// AuthMD5KeyConflictIDs (#15935) records key-ids restated with a
+	// different non-empty key in another fragment (compiler-detected
+	// conflicting duplicate). Strict compile rejects; lenient warns and
+	// the first key wins. Not serialised: compile-time diagnostic only.
+	AuthMD5KeyConflictIDs []int `json:"-"`
 }
 
 // BGPConfig holds BGP routing configuration.

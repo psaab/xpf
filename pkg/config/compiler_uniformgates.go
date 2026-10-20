@@ -218,6 +218,16 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
+	// #15935: same-ID OSPF MD5 restated with a different key. Appended
+	// beside #14397 so it cannot steal established first-error priority.
+	if err := validateOSPFMD5DuplicateKeys15935(cfg); err != nil {
+		if opts.lenientOSPFMD5DuplicateKey15935 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("OSPF MD5 duplicate key-id (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #11823 follows existing routing gates to preserve strict first-error
 	// priority. Tolerant loads retain invalid values with a warning; the FRR
 	// renderer omits out-of-domain metrics.

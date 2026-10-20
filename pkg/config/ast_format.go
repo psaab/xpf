@@ -908,6 +908,13 @@ func diffNodes(b *strings.Builder, oldNodes, newNodes []*Node, editPath []string
 				childPath := append(append([]string{}, editPath...), strings.Fields(o.KeyPath())...)
 				sections = append(sections, section{oldNode: o, newNode: n, childPath: childPath})
 			case !o.IsLeaf && !n.IsLeaf && o.Inactive == n.Inactive:
+				// #15935: not annotation-changing (handled above) but
+				// still a changed paired container. Recurse so its
+				// changed descendants render; dropping this arm
+				// suppressed an unrelated sibling change whenever
+				// another block forced the annotation fallback.
+				childPath := append(append([]string{}, editPath...), strings.Fields(o.KeyPath())...)
+				sections = append(sections, section{oldNode: o, newNode: n, childPath: childPath})
 			default:
 				addOwn(func(sb *strings.Builder) {
 					formatPrefixed(sb, "-", indent, o)
