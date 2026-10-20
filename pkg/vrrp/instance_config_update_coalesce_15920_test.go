@@ -136,6 +136,16 @@ func TestVRRPMaster_CoalescedPriorityThenGARPOnly_AdvertisesImmediately(t *testi
 // change.
 func TestVRRPMaster_CoalescedIntervalChangeThenRevert_PreservesAdvertTimer(t *testing.T) {
 	vi := newMaster15689(t, 60000)
+	// #15929/#15961: seed the wire cadence a running MASTER at a
+	// 60000ms cfg would ACTUALLY have on the wire: sendAdvert records
+	// the NORMALIZED snapshot (60000 caps to 40950, 4095cs). Seeding
+	// the raw 60000 here would fake a value production can never
+	// record (review-caught test-only-green). The change-then-revert
+	// nets old==new AND, in normalized space, wire==new, so silence
+	// is correct.
+	vi.mu.Lock()
+	vi.wireAdvertIntervalMS = 40950
+	vi.mu.Unlock()
 	adverts := captureAdverts15920(t)
 
 	masterDown := time.NewTimer(time.Hour)
@@ -563,15 +573,21 @@ func TestVRRPMaster_TimerAppliesIntermediateThenRevert_ReArmsAdvertTimer(t *test
 	prev := sendPacketFn
 	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
 		intervals = append(intervals, int(pkt.MaxAdvertInt))
-		if len(intervals) == 1 {
-			// Manager commits the growth while the timer case is
-			// between sendAdvert and advertTimer.Reset — the Reset
-			// therefore arms 60000ms and noteTimerApplied re-baselines.
-			vi.updateConfig(grown)
-		}
 		return nil
 	}
 	t.Cleanup(func() { sendPacketFn = prev })
+	// Commit the growth AFTER the timer advert is emitted — the
+	// trailing Reset then arms 60000ms and re-baselines (the mid-send
+	// pipeline interleaving is a different case; see file history).
+	grownDone := false
+	prevDone := sendPacketDone
+	sendPacketDone = func(_ *vrrpInstance) {
+		if !grownDone {
+			grownDone = true
+			vi.updateConfig(grown)
+		}
+	}
+	t.Cleanup(func() { sendPacketDone = prevDone })
 
 	masterDown := time.NewTimer(time.Hour)
 	t.Cleanup(func() { masterDown.Stop() })
@@ -588,13 +604,17 @@ func TestVRRPMaster_TimerAppliesIntermediateThenRevert_ReArmsAdvertTimer(t *test
 		t.Fatalf("timer advert MaxAdvertInt = %v, want [10] (100ms)", intervals)
 	}
 
-	// Revert before the queued config token is consumed.
+	// Revert before the queued config token is consumed. The wire
+	// already carries 100ms (the timer advert just sent it) and the
+	// revert returns to exactly that cadence: the consumer owes the
+	// RE-ARM to 100ms (armed was 60000ms), not a second advert.
+	// This replaces the pre-#15929 [10 10] expectation.
 	vi.updateConfig(base)
 	if stop := vi.stepMaster(masterDown, advert); stop {
 		t.Fatal("stepMaster returned stop=true on config update")
 	}
-	if len(intervals) != 2 || intervals[1] != 10 {
-		t.Fatalf("adverts = %v, want [10 10]: revert after intermediate timer arm must emit a correction advert at final cfg", intervals)
+	if len(intervals) != 1 || intervals[0] != 10 {
+		t.Fatalf("adverts = %v cs, want [10]: revert to the cadence already on the wire needs no second advert", intervals)
 	}
 	select {
 	case <-advert.C:
@@ -603,13 +623,20 @@ func TestVRRPMaster_TimerAppliesIntermediateThenRevert_ReArmsAdvertTimer(t *test
 	}
 }
 
-// TestVRRPMaster_TimerAppliesIntermediateNoRevert_NoCorrectionAdvert
-// is the negative control for the re-baselining: the timer case applies
-// the intermediate (and final) cfg, and NO revert follows. The pending
-// consumption must stay silent — re-baselining old* to the applied cfg
-// makes old==new — rather than emitting a redundant correction advert
-// or touching the correctly armed timer.
-func TestVRRPMaster_TimerAppliesIntermediateNoRevert_NoCorrectionAdvert(t *testing.T) {
+// TestVRRPMaster_TimerAppliesIntermediateNoRevert_WireCorrectionAdvert
+// is #15929 gap 1's restatement of the old negative control. The timer
+// case applies the intermediate (and final) growth cfg locally, and NO
+// revert follows — but the only advert the peer ever saw still carried
+// the OLD 100ms cadence, so the consumption MUST emit exactly one
+// correction advert carrying the grown cadence (the peer times the
+// master out on the cadence it LEARNED, not on our local arm), then
+// leave the correctly armed timer untouched. The original #15920
+// control asserted silence here; #15929 showed silence manufactures
+// a dual-MASTER window (peer expiry ~0.3s into a 60s silence), so the
+// expectation is superseded WITH its mechanism recorded — see
+// TestVRRPMasterTwoInstance_IntervalGrowthDuringSend_* for the peer-
+// side proof.
+func TestVRRPMaster_TimerAppliesIntermediateNoRevert_WireCorrectionAdvert(t *testing.T) {
 	vi := newMaster15689(t, 100)
 	grown := Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: true, AdvertiseInterval: 60000}
 
@@ -617,12 +644,22 @@ func TestVRRPMaster_TimerAppliesIntermediateNoRevert_NoCorrectionAdvert(t *testi
 	prev := sendPacketFn
 	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
 		intervals = append(intervals, int(pkt.MaxAdvertInt))
-		if len(intervals) == 1 {
-			vi.updateConfig(grown)
-		}
 		return nil
 	}
 	t.Cleanup(func() { sendPacketFn = prev })
+	// Commit the growth AFTER the timer advert is fully emitted
+	// (sendPacketDone): the trailing arm then applies 60000ms while
+	// the wire still says 100ms — the honest gap-1 interleaving. A
+	// mid-sendPacketFn commit would be pipeline noise, not this case.
+	grownDone := false
+	prevDone := sendPacketDone
+	sendPacketDone = func(_ *vrrpInstance) {
+		if !grownDone {
+			grownDone = true
+			vi.updateConfig(grown)
+		}
+	}
+	t.Cleanup(func() { sendPacketDone = prevDone })
 
 	masterDown := time.NewTimer(time.Hour)
 	t.Cleanup(func() { masterDown.Stop() })
@@ -633,15 +670,21 @@ func TestVRRPMaster_TimerAppliesIntermediateNoRevert_NoCorrectionAdvert(t *testi
 	if stop := vi.stepMaster(masterDown, advert); stop {
 		t.Fatal("stepMaster returned stop=true on advert timer")
 	}
-	// Consume the queued token: timer already armed at final cfg.
+	// Consume the queued token: the wire owes the peer the grown
+	// cadence, so exactly one correction advert (4095cs, the 12-bit
+	// ceiling for 60000ms) must follow.
 	if stop := vi.stepMaster(masterDown, advert); stop {
 		t.Fatal("stepMaster returned stop=true on config update")
 	}
-	if len(intervals) != 1 {
-		t.Fatalf("adverts = %v, want exactly the one timer advert; config consumption must not re-advertise an already-applied cfg", intervals)
+	if len(intervals) != 2 || intervals[0] != 10 || intervals[1] != 4095 {
+		t.Fatalf("adverts = %v cs, want [10 4095]: arm-applied growth must correct on the wire exactly once", intervals)
 	}
 	if !advert.Stop() {
-		t.Fatal("advertTimer disturbed by config consumption although it was already armed at final cfg")
+		select {
+		case <-advert.C:
+		default:
+			t.Fatal("advertTimer neither pending nor fired after config consumption although it was already armed at final cfg")
+		}
 	}
 }
 
@@ -793,18 +836,19 @@ func TestVRRPMaster_IntervalShrinkPlusVIPEdit_ConfigStillReArms(t *testing.T) {
 	default:
 		t.Fatal("VIP-set announce sent no advert")
 	}
-	// ...but it must not have baselined the pending record: consuming
-	// the token re-advertises and re-arms the still-60s timer.
+	// ...but it must not have baselined the pending record's ARM:
+	// consuming the token still re-arms the still-60s timer at 100ms.
+	// The announce already put 100ms on the wire, so the consumer owes
+	// NO second advert (#15929: distinguish the wire cadence from the
+	// armed cadence — this used to assert a duplicate correction
+	// advert, now only the re-arm is owed).
 	if stop := vi.stepMaster(masterDown, advert); stop {
 		t.Fatal("stepMaster returned stop=true on config update")
 	}
 	select {
 	case cs := <-adverts:
-		if cs != 10 {
-			t.Fatalf("correction advert MaxAdvertInt = %d cs, want 10", cs)
-		}
+		t.Fatalf("unexpected second advert (MaxAdvertInt %d cs): the VIP announce already carried 100ms", cs)
 	default:
-		t.Fatal("no correction advert: VIP announce falsely baselined the interval shrink")
 	}
 	select {
 	case <-advert.C:
@@ -849,12 +893,21 @@ func TestVRRPMaster_ConfigHandlerArmBetweenUpdates_ThenRevert(t *testing.T) {
 	prev := sendPacketFn
 	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
 		intervals = append(intervals, int(pkt.MaxAdvertInt))
-		if len(intervals) == 1 {
-			vi.updateConfig(toB) // commit B mid-consumer
-		}
 		return nil
 	}
 	t.Cleanup(func() { sendPacketFn = prev })
+	// Commit B after the consumer's correction advert is emitted, so
+	// the trailing arm (at B) is the last word — the mid-send pipeline
+	// variant is a different interleaving.
+	bDone := false
+	prevDone := sendPacketDone
+	sendPacketDone = func(_ *vrrpInstance) {
+		if !bDone {
+			bDone = true
+			vi.updateConfig(toB)
+		}
+	}
+	t.Cleanup(func() { sendPacketDone = prevDone })
 
 	masterDown := time.NewTimer(time.Hour)
 	t.Cleanup(func() { masterDown.Stop() })
@@ -877,13 +930,18 @@ func TestVRRPMaster_ConfigHandlerArmBetweenUpdates_ThenRevert(t *testing.T) {
 	if !mid.valid || mid.oldAdvertiseMS != 10000 || mid.newAdvertiseMS != 10000 {
 		t.Fatalf("pending after consumer arm = %+v, want old==new==10000 (baseline = armed B)", mid)
 	}
-	// Revert B by re-committing A's 100ms before consuming it.
+	// Revert B by re-committing A's 100ms before consuming it. The
+	// wire already carries 100ms (the first correction send at A's
+	// cadence) and the timer is armed at B's 10000ms: the consumer
+	// owes the RE-ARM to 100ms, not a second advert. This replaces the
+	// pre-#15929 [10 10] expectation (which predates the wire/arm
+	// distinction): the peer's learned cadence never changed.
 	vi.updateConfig(toA)
 	if stop := vi.stepMaster(masterDown, advert); stop {
 		t.Fatal("stepMaster returned stop=true on revert consumption")
 	}
-	if len(intervals) != 2 || intervals[1] != 10 {
-		t.Fatalf("adverts = %v cs, want [10 10]: revert to A after consumer armed at B must correct a second time", intervals)
+	if len(intervals) != 1 || intervals[0] != 10 {
+		t.Fatalf("adverts = %v cs, want [10]: the wire already carries A's 100ms; only the re-arm was owed", intervals)
 	}
 	select {
 	case <-advert.C:
