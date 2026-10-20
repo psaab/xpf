@@ -301,3 +301,84 @@ fn pending_prebuilt_tx_no_binding_counts_15941() {
         .collect();
     assert_eq!(reasons, vec!["missing_egress_binding"]);
 }
+
+/// #15954 site 5 (non-fabric Prebuilt enqueue-error): a Prebuilt frame
+/// whose local enqueue fails (driven by the #2208 `FORCE_ENQUEUE_ERR`
+/// fault injection — the only way this arm is reachable today) must
+/// count a forward build failure and ring `forward_build_failed`, not
+/// recycle silently. Removing that site's increment turns this RED;
+/// the fabric twin keeps its own counter and is asserted 0 here.
+#[test]
+fn pending_prebuilt_enqueue_error_counts_15954() {
+    struct ForceEnqueueErrGuard;
+    impl Drop for ForceEnqueueErrGuard {
+        fn drop(&mut self) {
+            super::cos::FORCE_ENQUEUE_ERR.with(|c| c.set(false));
+        }
+    }
+    let _guard = ForceEnqueueErrGuard;
+    super::cos::FORCE_ENQUEUE_ERR.with(|c| c.set(true));
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    let forwarding = test_forwarding_with_egress_mtu(1500);
+    let mut request =
+        test_live_forward_request_for_frame(64, test_forwarding_decision_to_bound_ifindex(22));
+    request.frame = PendingForwardFrame::Prebuilt(vec![0u8; 64]);
+    let mut pending = vec![request];
+    let mut post_recycles = Vec::new();
+    let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let ingress_ident = bindings[0].identity();
+    let ingress_live = &*bindings[0].live as *const BindingLiveState;
+    let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
+        Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = BTreeMap::new();
+    let mut dbg = DebugPollCounters::default();
+    let mut counters = BatchCounters::default();
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    enqueue_pending_forwards(
+        left,
+        0,
+        ingress,
+        right,
+        &binding_lookup,
+        &mirror_targets,
+        &mut pending,
+        &mut post_recycles,
+        1,
+        &forwarding,
+        None,
+        &ingress_ident,
+        unsafe { &*ingress_live },
+        None,
+        &local_tunnel_deliveries,
+        &recent_exceptions,
+        &mut dbg,
+        &mut counters,
+        0,
+        &worker_commands_by_id,
+    );
+    assert_eq!(
+        counters.forward_build_failures, 1,
+        "#15954 prebuilt enqueue-error site must increment forward_build_failures"
+    );
+    assert_eq!(
+        bindings[0]
+            .live
+            .fabric_redirect_unsendable_drops
+            .load(Ordering::Relaxed),
+        0,
+        "non-fabric prebuilt enqueue error must not pollute the fabric counter"
+    );
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|e| e.reason().to_string())
+        .collect();
+    assert_eq!(reasons, vec!["forward_build_failed"]);
+}
