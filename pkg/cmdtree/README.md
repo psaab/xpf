@@ -286,6 +286,34 @@ The local and remote dispatchers error on the same dangling selectors
 instead of widening, so an unrestricted class gets a usage error rather
 than a silent dump.
 
+## An option may appear once, and a pending value may not be skipped (#15719)
+
+Under an `Options` node each option keyword may resolve once (by node
+identity, so `eff` and `effective` collide): loop dispatchers keep the
+last value or ignore a duplicate flag, so a repeated keyword in the
+judged string names a different command from the one that runs — e.g.
+`show firewall filter secret effective effective` rendered `secret`
+effective once while an anchored deny on the single form missed, and
+`show security flow session zone guest zone untrust` executed with
+`untrust` while the gate judged both zones. The downstream parsers
+agree: `parseSessionFilterMode` and the `show firewall filter`
+dispatcher reject duplicate option keywords outright, like
+`ParsePingOptions` and `ParseCoSNameTypeArgs` already did.
+
+Symmetrically, while a value slot is pending — a typed leaf, a
+`RequiresValue` dynamic, an unfilled placeholder at the current level,
+or a dynamic slot whose next token is an exact/seen option keyword —
+the next word must fill that slot first. Resolving it as a child
+keyword (`show security policies from-zone to-zone`,
+`show route table table`), as the next option (`... zone sort-by`), or
+as a multi-token subtree's missing child (a line ending at `sort-by`)
+is refused. A dynamic node's own value may still be a keyword
+abbreviation (`opts zone fl` keeps `fl` as the value), an optional
+dynamic's child keywords stay bare-form vocabulary (`show interfaces
+queue <name>`, `show security zones trust detail`), and a placeholder
+with children keeps its lawful child spellings (`show route
+10.0.0.0/8 exact`, `... flows limit 10` / `flows all`).
+
 ## Typed leaves
 
 A `Node` with `ValueType != ValueAny` is a typed leaf: it expects exactly

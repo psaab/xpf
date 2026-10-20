@@ -121,7 +121,37 @@ func (c *CLI) parseSessionFilterMode(args []string, clearMode bool) sessionFilte
 		*i++
 		return args[*i], true
 	}
+	// #15719: a repeated option keyword overwrites the earlier value
+	// (last-wins), so the executed filter differs from any single-
+	// occurrence command the RBAC gate judged. Reject duplicates like
+	// ParsePingOptions / ParseCoSNameTypeArgs. `nat` and `nat-only` are
+	// distinct keywords writing the same flag; each may appear once.
+	seenOpt := map[string]bool{}
+	markSeen := func(kw string) {
+		if seenOpt[kw] {
+			f.setParseErr(fmt.Errorf("duplicate session filter %q", kw))
+		}
+		seenOpt[kw] = true
+	}
+	// isKeyword reports whether tok is a session-filter keyword (the
+	// switch arms below); only keywords are duplicate-tracked — a
+	// value token that happens to spell a keyword (zone named
+	// "zone") is data, consumed via takeValue and never re-enters
+	// the loop head.
+	isKeyword := func(tok string) bool {
+		switch tok {
+		case "zone", "protocol", "source-prefix", "destination-prefix",
+			"source-port", "destination-port", "nat", "nat-only",
+			"interface", "source-nat-pool", "application", "summary",
+			"brief", "sort-by":
+			return true
+		}
+		return false
+	}
 	for i := 0; i < len(args); i++ {
+		if isKeyword(args[i]) {
+			markSeen(args[i])
+		}
 		switch args[i] {
 		case "zone":
 			if v, ok := takeValue(&i, "zone"); ok {

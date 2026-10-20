@@ -74,6 +74,18 @@ const (
 // the bare `ping`/`traceroute` command paths stay complete: the RPC/REST
 // authorization tables charge those argument-free paths, and their typed
 // RPCs carry the target in a field, not in the command string.
+//
+// REPEATED OPTIONS AND MID-WALK VALUE-SKIPS (#15719). An option keyword
+// under an Options node may appear once: loop dispatchers keep the last
+// (or ignore a duplicate flag), so a repeated keyword in the judged
+// string names a different command from the one that runs — the
+// #14688 repeated-key class. Symmetrically, a word that would resolve
+// as a child keyword (or as the next option) while a value slot is
+// pending must fill that slot first — resolving it as a keyword skips
+// the value the dispatcher is waiting for, the mid-walk form of
+// #14687's dangling value. Child-keyword values stay refused even when
+// they are not keywords elsewhere (e.g. `sort-by` needs its child), and
+// a line may not end inside a multi-token option subtree.
 func Canonicalize(tree map[string]*Node, words []string) ([]string, CanonicalizeResult) {
 	if len(words) == 0 {
 		return words, CanonicalOK
@@ -104,19 +116,112 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 	var valueParent *Node
 	var valueParentChildren map[string]*Node
 	lastWasValue := false
+	// #15719: seenOptions tracks option keywords already resolved under
+	// the active Options node (by node identity, so abbreviated and full
+	// spellings collide); optionsNode is that node. A fresh Options node
+	// resets the set.
+	seenOptions := map[*Node]bool{}
+	var optionsNode *Node
+	// #15719: optionSubtree is an Options child with Children (e.g.
+	// sort-by) that the walk has entered but not completed.
+	var optionSubtree *Node
+	// #15719: currentPlaceholder is the placeholder node whose value
+	// slot is pending via placeholderMandatory (nil otherwise).
+	var currentPlaceholder *Node
+	// #15719: inOptionsWalk stays true once an Options node is entered:
+	// the walk only descends from there into that node's options, their
+	// values, or a multi-token option subtree.
+	inOptionsWalk := false
+	// #15719: phName/phLevel/parentLevel identify the keyword and
+	// levels holding the pending placeholder; slotKeywordName/
+	// parentLevel identify the keyword that opened the pending slot.
+	phName := ""
+	var phLevel map[string]*Node
+	slotKeywordName := ""
+	var parentLevel map[string]*Node
 
 	for wi, w := range words {
-		name, node, matches, ok := resolveTreeWord(current, w)
 		dynamicPending := currentNode != nil && currentNode.HasDynamic() && !dynamicFilled
-		if !ok && options != nil && !parentTyped && !dynamicPending {
-			// #9505: the previous option is complete, so a word that is not
-			// one of its children may be the next option. Only a node that
-			// declares Options gets this; everywhere else a leaf still ends
-			// the walk (#8289).
-			var optionMatches []string
-			name, node, optionMatches, ok = resolveTreeWord(options, w)
-			if len(optionMatches) > len(matches) {
-				matches = optionMatches
+		// #15719 acceptance: a pending slot is a typed leaf, an unfilled
+		// placeholder at this level, or a RequiresValue dynamic. While
+		// one is pending w must be consumed by that slot first; a word
+		// that IS a child/option/self keyword is refused outright
+		// rather than eaten as a value the dispatcher keys differently.
+		// Optional dynamics (zones/interfaces/queue) are NOT pending:
+		// their child keywords are bare-form vocabulary. A dynamic
+		// node's own value may still be a keyword (opts zone fl).
+		requiresPending := currentNode != nil && currentNode.RequiresValue && dynamicPending
+		placeholderPending := false
+		if currentPlaceholder != nil && !filled[currentPlaceholder] && phLevel != nil && currentNode != optionsNode {
+			if ph := findPlaceholder(current); ph != nil && ph == currentPlaceholder {
+				placeholderPending = true
+			}
+		}
+		// A dynamic slot (any dynamic, incl. optional zone/interface)
+		// also gates an option-keyword token at the Options root: the
+		// dispatcher would take that token as the next option only if
+		// the value were present, so `zone sort-by` / `zone zone`
+		// (zone already seen) skip zone's value. A non-keyword token
+		// or a keyword that is not an option (fl) stays the value.
+		atOptionsRootPre := optionsNode != nil && inOptionsWalk
+		dynamicOptionGate := false
+		if dynamicPending && atOptionsRootPre && options != nil {
+			if _, on, _, oo := resolveTreeWord(options, w); oo && (seenOptions[on] || options[w] == on) {
+				dynamicOptionGate = true
+			}
+		}
+		pendingValue := (parentTyped || requiresPending || placeholderPending || dynamicOptionGate) && !lastWasValue
+		atOptionsRoot := optionsNode != nil && inOptionsWalk
+		var name string
+		var node *Node
+		var matches []string
+		var ok bool
+		inGate := pendingValue && !(currentNode != nil && currentNode.AcceptsArgs)
+		if inGate {
+			_, _, _, childOK := resolveTreeWord(current, w)
+			placeholderChild := false
+			if placeholderPending && len(currentPlaceholder.Children) > 0 {
+				_, _, _, po := resolveTreeWord(currentPlaceholder.Children, w)
+				placeholderChild = po
+			}
+			optionResolves := false
+			if atOptionsRoot && currentNode == optionsNode && options != nil {
+				_, _, _, oo := resolveTreeWord(options, w)
+				optionResolves = oo
+			}
+			selfKeyword := false
+			if slotKeywordName != "" && parentLevel != nil {
+				if cn, _, _, cok := resolveTreeWord(parentLevel, w); cok && cn == slotKeywordName {
+					selfKeyword = true
+				}
+			}
+			phSelfKeyword := placeholderPending && phName != "" && w == phName
+			if placeholderChild || optionResolves || selfKeyword || phSelfKeyword || dynamicOptionGate ||
+				(childOK && (parentTyped || requiresPending || currentNode == optionSubtree)) {
+				return words, CanonicalUnknown
+			}
+			// Not a skip: resolve w as a keyword here so the value
+			// arms below do not eat a real keyword as a placeholder
+			// or dynamic value (route's <destination> eating `table`).
+			name, node, matches, ok = resolveTreeWord(current, w)
+		} else if dynamicPending && !(currentNode != nil && currentNode.ModifierOnly && !currentNode.RequiresValue) {
+			// Pending dynamic value: do not resolve w as a keyword at
+			// all, unless it is a child keyword of this dynamic node
+			// (interfaces queue/detail: bare-form vocabulary). The
+			// !ok arms below consume other words as the one value
+			// (opts zone fl: fl abbreviates flag but is zone's value).
+			if _, _, _, cok := resolveTreeWord(current, w); cok {
+				name, node, matches, ok = resolveTreeWord(current, w)
+			}
+		} else {
+			name, node, matches, ok = resolveTreeWord(current, w)
+			if !ok && options != nil && currentNode != optionSubtree {
+				// #9505 resume; #15719: never inside a subtree.
+				var optionMatches []string
+				name, node, optionMatches, ok = resolveTreeWord(options, w)
+				if len(optionMatches) > len(matches) {
+					matches = optionMatches
+				}
 			}
 		}
 		if lastWasValue && valueParent != nil {
@@ -134,6 +239,7 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 			// consume it — those keep the raw word.
 			if parentTyped {
 				parentTyped = false
+				slotKeywordName = ""
 				continue
 			}
 			// #8304: AcceptsArgs is honoured HERE and not in the completion
@@ -153,6 +259,7 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 				dynamicFilled = true
 				valueParent = currentNode
 				lastWasValue = true
+				slotKeywordName = ""
 				continue
 			}
 			// #9505: the same rule for a placeholder. A childless one never
@@ -169,9 +276,17 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 					current = ph.Children
 					dynamicFilled = false
 					placeholderMandatory = false
+					currentPlaceholder = nil
+					phName = ""
+					phLevel = nil
+					slotKeywordName = ""
 				} else {
 					filled[ph] = true
 					placeholderMandatory = false
+					currentPlaceholder = nil
+					phName = ""
+					phLevel = nil
+					slotKeywordName = ""
 				}
 				continue
 			}
@@ -199,8 +314,35 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 			}
 			seenFilterKeys[name]++
 		}
+		// #15719: a keyword resolved at the Options root (the Options
+		// node itself, or a completed option resuming via the option
+		// map) may appear once. A subtree child completes its option.
+		wasSubtreeChild := optionSubtree != nil && currentNode == optionSubtree
+		atRoot := optionsNode != nil && inOptionsWalk && !wasSubtreeChild
+		if atRoot {
+			if seenOptions[node] {
+				return words, CanonicalUnknown
+			}
+			seenOptions[node] = true
+			// Entering the Options node itself also marks it, so a later
+			// stray repeat of its name cannot be gated as an option; only
+			// real options open a subtree.
+			if len(node.Children) > 0 && !node.HasDynamic() && !node.IsTypedLeaf() && node != optionsNode {
+				optionSubtree = node
+			}
+		}
+		if wasSubtreeChild {
+			optionSubtree = nil
+		}
 		out[wi] = name
 		lastWasValue = false
+		// #15719: this keyword opens a value slot when typed or a
+		// RequiresValue dynamic.
+		slotKeywordName = ""
+		if node.IsTypedLeaf() || (node.RequiresValue && node.HasDynamic()) {
+			slotKeywordName = name
+			parentLevel = current
+		}
 		currentNode = node
 		parentTyped = node.IsTypedLeaf()
 		dynamicFilled = false
@@ -211,14 +353,41 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 			valueParent = node
 			valueParentChildren = node.Children
 		}
+		parentLevel = current
 		if node.Options {
 			options = node.Children
+			optionsNode = node
+			seenOptions = map[*Node]bool{node: true}
+			optionSubtree = nil
+			inOptionsWalk = true
 			placeholderMandatory = false
+			currentPlaceholder = findPlaceholder(node.Children)
+			if currentPlaceholder != nil {
+				phName = name
+				phLevel = node.Children
+				slotKeywordName = name
+				parentLevel = current
+			} else {
+				phName = ""
+				phLevel = nil
+			}
 		} else if wi > 0 {
-			if ph := findPlaceholder(node.Children); ph != nil && ph.Children == nil && !filled[ph] {
-				placeholderMandatory = true
+			if ph := findPlaceholder(node.Children); ph != nil && !filled[ph] {
+				currentPlaceholder = ph
+				phName = name
+				phLevel = node.Children
+				if ph.Children == nil {
+					placeholderMandatory = true
+				} else {
+					placeholderMandatory = false
+				}
 			} else {
 				placeholderMandatory = false
+				if findPlaceholder(current) != currentPlaceholder {
+					currentPlaceholder = nil
+					phName = ""
+					phLevel = nil
+				}
 			}
 		}
 		// #8289: descend UNCONDITIONALLY, including to a leaf's nil child map.
@@ -248,6 +417,11 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 		// that, per this function's own contract.
 		current = node.Children
 	}
+	// #15719: refuse a line that ends inside a multi-token option
+	// subtree (e.g. `sort-by` with no child keyword).
+	if optionSubtree != nil {
+		return words, CanonicalUnknown
+	}
 	// #14687: refuse a line that ends while a value slot is still pending.
 	if parentTyped {
 		return words, CanonicalUnknown
@@ -255,13 +429,13 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 	if currentNode != nil && currentNode.RequiresValue && currentNode.HasDynamic() && !dynamicFilled {
 		return words, CanonicalUnknown
 	}
-	// An unfilled childless placeholder under a non-root keyword node is a
-	// mandatory positional value (`show chassis cluster data-plane flows`
-	// with no limit). Placeholders with children are not tracked (ending at
-	// `show route`, whose <destination> has children, is the bare list-all
-	// command), under an Options node a placeholder is optional (`show
-	// security log <count>`), and the root-level ping/traceroute targets are
-	// excluded for the argument-free RPC/REST command paths (see header).
+	// An unfilled CHILDLESS placeholder under a non-root keyword node
+	// is a mandatory positional value (`show chassis cluster
+	// data-plane flows` with no limit). A placeholder WITH children
+	// ending bare is the list-all form (`show route`) and stays
+	// complete (#14687); #15719 only gates its child-keyword values
+	// mid-walk. Under an Options node a placeholder is optional, and
+	// root-level ping/traceroute targets are excluded (see header).
 	if placeholderMandatory {
 		return words, CanonicalUnknown
 	}
