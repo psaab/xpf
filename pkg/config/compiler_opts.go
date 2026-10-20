@@ -658,6 +658,16 @@ type compileOpts struct {
 	// lenientLoginPackedStatements.
 	lenientLoginClassShadowsBuiltin bool
 
+	// lenientLoginClassRegex15712 (#15712) downgrades the login-class regex
+	// gate (validateLoginClassRegexes15712: POSIX-ERE validation + conflicting
+	// same-leaf duplicate across #8436-merged class blocks) from a hard error
+	// to warnings on tolerant load / peer-sync. An already-persisted config
+	// with an invalid pattern or overwritten deny still boots (#1960); the
+	// last-authored value is kept (what the overwrite already installed) and
+	// enforcement fails closed on an invalid pattern at use time. Commit /
+	// commit-check stay strict. Same doctrine as lenientAPIAuthDuplicateScalar.
+	lenientLoginClassRegex15712 bool
+
 	// lenientIPsecProposalProtocol (#4298, V-2) downgrades the IPsec
 	// proposal `protocol ah` reject (validateIPsecProposalProtocolStrict)
 	// from a hard error to a warning on the tolerant load / peer-sync paths.
@@ -3613,6 +3623,7 @@ func lenientCompileOpts() compileOpts {
 		lenientChassisRGStatementArity:         true,
 		lenientLoginPackedStatements:           true,
 		lenientLoginClassShadowsBuiltin:        true,
+		lenientLoginClassRegex15712:            true,
 		lenientIPsecProposalProtocol:           true,
 		lenientIPsecProposalAlgorithms:         true,
 		lenientIPsecManualKey:                  true,
