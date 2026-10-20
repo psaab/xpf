@@ -419,6 +419,12 @@ type xpfCollector struct {
 	// renamed.
 	userspaceZoneIDCollision *prometheus.Desc
 
+	// HARDENING (#15742 follow-up): helper-refused snapshot policy-count
+	// mismatches (counter) and the last APPLIED snapshot's policy count
+	// (gauge), from ProcessStatus.
+	userspaceSnapshotPolicyMismatch  *prometheus.Desc
+	userspaceLastSnapshotPolicyCount *prometheus.Desc
+
 	// #1827: services ip-monitoring observability. #1844 adds the
 	// unresolved interface-typed next-hop gauge (preferred routes of
 	// FAILED policies skipped from the overlay for lack of a
@@ -1310,6 +1316,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.journalPermsDegraded
 	ch <- c.userspacePolicyContentRejected
 	ch <- c.userspaceZoneIDCollision
+	ch <- c.userspaceSnapshotPolicyMismatch
+	ch <- c.userspaceLastSnapshotPolicyCount
 	ch <- c.routeListenerMarks
 	ch <- c.routeListenerRepublishes
 	ch <- c.ipmonPolicyFailed

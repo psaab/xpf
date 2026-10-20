@@ -272,6 +272,18 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	if snap != nil && snap.Config != nil && !m.rgProviderWiredForLocked(snap.Config) {
 		return errRGProviderNotWired
 	}
+	// HARDENING (#15742 follow-up): refuse a snapshot whose published
+	// policies disagree with EITHER its self-declared Summary.PolicyCount
+	// OR the manager's stamped expectation from the last full Compile —
+	// the 670274c712 defect class, caught here for EVERY builder path
+	// (partial-republish clones and hand-built publishers bypass the
+	// builder invariant), including the both-fields-zeroed shape. Same
+	// refusal class as errRGProviderNotWired above: nothing reaches the
+	// helper, so no generation is burned and no retry debt is adopted
+	// (isKnownUnsentFailure matches errSnapshotPolicyMismatch).
+	if sendErr := m.validateSnapshotForSend(snap); sendErr != nil {
+		return sendErr
+	}
 	if stampErr := stampSnapshotContentDigest(snap); stampErr != nil {
 		// Nothing was sent, so the helper's state is known to be unchanged.
 		return stampErr
@@ -286,9 +298,34 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	if preHeartbeat {
 		m.sendSchedulerHeartbeatLocked()
 	}
+	// #15937: ClearPolicies is single-use. It rides this send (whichever
+	// round trip ultimately lands the content) and is spent on the way
+	// out — success, refusal, or lost response alike — so the retained
+	// snapshot and its future partial clones can never replay the
+	// authorization. A re-mark happens only when publish provenance is
+	// re-established (full Compile, or status observation proving the
+	// helper already holds the cleared set).
+	spendClear := snap.ClearPolicies
+	defer func() {
+		if spendClear {
+			snap.ClearPolicies = false
+		}
+	}()
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
 	if err == nil {
 		m.recordSchedulerSnapshotAppliedLocked(snap)
+		// #15937 round-5: SINGLE CHOKE for stamp accounting. Every
+		// publisher funnels through here and this is where acceptance
+		// is KNOWN (nil round trip), so a full-build snapshot that
+		// lands through ANY first-acceptance path (Compile, overlay,
+		// scheduler, link-refresh, capture, worker-arm, deferred
+		// sync — including a latch-preserving partial carrying the
+		// retained full build) commits the stamp HERE. No publisher
+		// can clear retry debt / the pending latch without passing
+		// this point. Partials (fullBuild=false) never move it.
+		if snap.fullBuild {
+			m.commitExpectedPolicyCountFromLandedSnapshot(snap)
+		}
 		return nil
 	}
 	if !isSnapshotContentConflict(err) {
@@ -311,6 +348,9 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
 	if err == nil {
 		m.recordSchedulerSnapshotAppliedLocked(snap)
+		if snap.fullBuild {
+			m.commitExpectedPolicyCountFromLandedSnapshot(snap)
+		}
 	}
 	if isSnapshotContentConflict(err) && m.generation < snap.Generation {
 		// A second conflict proves the helper holds this generation too. It is not

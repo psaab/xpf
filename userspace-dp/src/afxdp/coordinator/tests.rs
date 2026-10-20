@@ -10251,6 +10251,7 @@ fn refresh_status_reclaims_dead_worker_holders_6979() {
         afxdp: coordinator,
         state_writer: std::sync::Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
     crate::server::helpers::status::refresh_status(&mut state);
 
@@ -12122,6 +12123,7 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
         afxdp: coordinator,
         state_writer: std::sync::Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
 
     // TICK 1 — the production path builds the floor.

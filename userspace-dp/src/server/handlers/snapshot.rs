@@ -33,6 +33,68 @@ pub(super) fn apply(
         );
         return;
     }
+    // HARDENING (#15742 follow-up): refuse a snapshot whose summary claims
+    // policies the policy section does not carry — policy_count>0 with an
+    // empty policies vec is the exact 670274c712 shape (Go full builder
+    // dropped `Policies: policies`; helper installed empty -> default-deny
+    // silently). Refuse the WHOLE apply before any mutation, keeping prior
+    // policies (and every other section) enforced, count it on the
+    // dedicated mismatch counter, and log ERROR with both counts. The wire
+    // already carries summary.policy_count, so no protocol bump is needed.
+    // Placed after the version gate (a mixed-version payload's summary
+    // cannot be trusted) and before the monotonicity/content gates (a
+    // same-generation identical-content retry of a mismatched snapshot
+    // must count as a mismatch, not a content conflict).
+    if snapshot.summary.policy_count != snapshot.policies.len() {
+        guard.snapshot_policy_mismatch_total =
+            guard.snapshot_policy_mismatch_total.saturating_add(1);
+        guard.status.snapshot_policy_mismatch_total = guard.snapshot_policy_mismatch_total;
+        response.ok = false;
+        response.error = format!(
+            "snapshot policy count mismatch: summary.policy_count={} but policies carries {} rules; refusing apply (keeping prior policies)",
+            snapshot.summary.policy_count,
+            snapshot.policies.len()
+        );
+        eprintln!(
+            "ERROR: apply_snapshot refused (snapshot policy mismatch): policy_count={} policies_len={} generation={} total={}",
+            snapshot.summary.policy_count,
+            snapshot.policies.len(),
+            snapshot.generation,
+            guard.snapshot_policy_mismatch_total
+        );
+        return;
+    }
+    // HARDENING (#15742 follow-up, joint-omission arm): an empty policy
+    // install over a NON-EMPTY installed set is refused even when the
+    // transmitted counts agree (both zeroed), UNLESS the snapshot
+    // carries the #15937 authorized-clear marker (`clear_policies`),
+    // which only the Go full-Compile path sets and the Go send site
+    // spends (zeroes) after the send, so partial-publisher clones of
+    // the retained snapshot can never replay it. There is no other
+    // full-clear signal on the wire; silently emptying enforcement
+    // mid-stream is never legitimate on a partial publish. First apply
+    // (no installed snapshot) is unaffected: fresh boot may start empty.
+    let installed_policies = guard
+        .snapshot
+        .as_ref()
+        .map_or(0, |installed| installed.policies.len());
+    if snapshot.policies.is_empty() && installed_policies > 0 && !snapshot.clear_policies {
+        guard.snapshot_policy_mismatch_total =
+            guard.snapshot_policy_mismatch_total.saturating_add(1);
+        guard.status.snapshot_policy_mismatch_total = guard.snapshot_policy_mismatch_total;
+        response.ok = false;
+        response.error = format!(
+            "snapshot policy count mismatch: apply carries 0 policies over {} installed (no full-clear signal on the wire); refusing apply (keeping prior policies)",
+            installed_policies
+        );
+        eprintln!(
+            "ERROR: apply_snapshot refused (snapshot policy mismatch): policies_len=0 installed_policies={} generation={} total={}",
+            installed_policies,
+            snapshot.generation,
+            guard.snapshot_policy_mismatch_total
+        );
+        return;
+    }
     // #5169: monotonicity gate for the FULL apply_snapshot path, mirroring the
     // #3767 H5 rollback guard on `bump_fib` below. Flow-cache validation is
     // EQUALITY based on the (config_generation, fib_generation) PAIR — an entry
@@ -189,7 +251,9 @@ pub(super) fn apply(
     let prev_last_snapshot_generation = guard.status.last_snapshot_generation;
     let prev_last_fib_generation = guard.status.last_fib_generation;
     let prev_last_snapshot_at = guard.status.last_snapshot_at;
+    let prev_last_snapshot_policy_count = guard.status.last_snapshot_policy_count;
     guard.status.last_snapshot_generation = snapshot.generation;
+    guard.status.last_snapshot_policy_count = snapshot.summary.policy_count as u64;
     guard.status.last_fib_generation = snapshot.fib_generation;
     guard.status.last_snapshot_at = Some(snapshot.generated_at);
     let prev_capabilities =
@@ -285,6 +349,7 @@ pub(super) fn apply(
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
+                guard.status.last_snapshot_policy_count = prev_last_snapshot_policy_count;
                 guard.status.capabilities = prev_capabilities;
                 response.ok = false;
                 if let crate::afxdp::ReconcileError::WorkerSpawn(stage)
@@ -365,6 +430,7 @@ pub(super) fn apply(
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
+                guard.status.last_snapshot_policy_count = prev_last_snapshot_policy_count;
                 guard.status.capabilities = prev_capabilities;
                 response.ok = false;
                 response.error = format!("snapshot integrity error: {}", err);
@@ -418,6 +484,7 @@ pub(super) fn apply(
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
+                guard.status.last_snapshot_policy_count = prev_last_snapshot_policy_count;
                 guard.status.capabilities = prev_capabilities;
                 response.ok = false;
                 response.error = format!("snapshot integrity error: {}", err);
@@ -455,6 +522,7 @@ pub(super) fn apply(
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
+                guard.status.last_snapshot_policy_count = prev_last_snapshot_policy_count;
                 guard.status.capabilities = prev_capabilities;
                 response.ok = false;
                 response.error = format!("binding plan refused: {reason}");
@@ -538,6 +606,7 @@ pub(super) fn apply(
                 guard.status.last_snapshot_generation = prev_last_snapshot_generation;
                 guard.status.last_fib_generation = prev_last_fib_generation;
                 guard.status.last_snapshot_at = prev_last_snapshot_at;
+                guard.status.last_snapshot_policy_count = prev_last_snapshot_policy_count;
                 guard.status.capabilities = prev_capabilities;
                 response.ok = false;
                 let verb = match &err {
@@ -569,6 +638,7 @@ pub(super) fn apply(
             guard.status.last_snapshot_generation = prev_last_snapshot_generation;
             guard.status.last_fib_generation = prev_last_fib_generation;
             guard.status.last_snapshot_at = prev_last_snapshot_at;
+            guard.status.last_snapshot_policy_count = prev_last_snapshot_policy_count;
             guard.status.capabilities = prev_capabilities;
             response.ok = false;
             response.error = format!("snapshot integrity error: {}", err);

@@ -974,8 +974,20 @@ type ConfigSnapshot struct {
 	// not originate an ICMPv6 Time Exceeded for a packet that arrived
 	// with hop limit 0. Additive/omitempty: an old helper ignores it
 	// (pre-#15707 behaviour), an old Go binary leaves it false.
-	NoIPv6RejectZeroHopLimit bool                 `json:"no_ipv6_reject_zero_hop_limit,omitempty"`
-	Policies                 []PolicyRuleSnapshot `json:"policies,omitempty"`
+	NoIPv6RejectZeroHopLimit bool `json:"no_ipv6_reject_zero_hop_limit,omitempty"`
+	// ClearPolicies (#15937 authorized clear): set ONLY by Manager.Compile
+	// on a full build (never by partial publishers, which clone the
+	// retained snapshot and must not inherit a spent authorization — see
+	// clearPoliciesSpendAtBuild sites). Tells a competent helper that
+	// this empty Policies set is the full Compile's deliberate clear-all,
+	// authorizing the installed-set gate's empty install. Partial
+	// publishers clone before Compile stamps the new snapshot and the
+	// marker is consumed (zeroed) by the send site after each send, so a
+	// clone can never carry a live authorization. Additive/omitempty +
+	// serde(default), no protocol bump: old helpers ignore it (their
+	// installed-set gate simply does not exist), old Go sends false.
+	ClearPolicies bool                 `json:"clear_policies,omitempty"`
+	Policies      []PolicyRuleSnapshot `json:"policies,omitempty"`
 	// PolicyRematchExtensive enables the conditional retain/rebind rotation arm.
 	PolicyRematchExtensive bool                         `json:"policy_rematch_extensive,omitempty"`
 	PolicyRenameAncestry   []PolicyRenameAncestry       `json:"policy_rename_ancestry,omitempty"`
@@ -1097,6 +1109,16 @@ type ConfigSnapshot struct {
 	// whose flow-cache and session-policy decisions were made for the old
 	// content leaves those decisions fresh.
 	ContentDigest string `json:"content_digest,omitempty"`
+	// fullBuild (#15937) marks a snapshot produced by the full builder in
+	// THIS Manager incarnation (set at the build site, re-affirmed by
+	// Manager.Compile). The send-site stamp arm exempts full builds —
+	// they are ground truth, already validated by the builder invariant —
+	// and enforces the stamp only on partial-publisher clones. Unexported:
+	// never on the wire, never in the content hash; a retained clone
+	// keeps it only while it still IS the last full build's struct, and
+	// partial publishers that rebuild policy sections re-derive content
+	// under the stamp instead. See snapshot_policy_invariant.go.
+	fullBuild bool
 	// zoneIDCollisions is the manager-facing (#3719) record of every security
 	// zone the snapshot builder QUARANTINED because its StableZoneID collided
 	// with an earlier-sorting zone. It is unexported so it never rides the wire

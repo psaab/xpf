@@ -110,6 +110,10 @@ func (m *Manager) syncSnapshotLocked() error {
 		// gated this branch), so it IS the applied snapshot.
 		m.commitPolicySchedulerActiveStateFromSnapshotLocked(m.lastSnapshot)
 		m.markAppliedSnapshotLocked()
+		// #15937 round-4: the helper provably holds the retained build —
+		// the stamp follows its reported policy count even when the
+		// original Compile returned a tail error or lost its response.
+		m.reconcileExpectedPolicyCountFromStatusLocked()
 		if hashOK {
 			m.lastSnapshotHash = hash
 		}
@@ -195,6 +199,23 @@ func (m *Manager) syncSnapshotLocked() error {
 		// success, ctrl pinned at 0). Idempotent.
 		m.ensureStatusLoopLocked()
 	}
+	// #15937: re-mark a retained clear from its OWN provenance — it is a
+	// full build (retained.fullBuild) carrying an empty policy set — in
+	// BOTH landing states (round-4):
+	//   - landed: status proves the cleared set is installed (count 0 at
+	//     a generation >= retained); the retry is an idempotent
+	//     landing-confirmation;
+	//   - NOT landed: status still reports the old non-empty set (or an
+	//     older generation); the retained snapshot IS the Compile's own
+	//     clear attempt in retry debt, so re-authorizing ITS retry is
+	//     restoring the original authorization, not minting a new one.
+	// A retained snapshot WITHOUT full-build provenance (partial that
+	// became retained another way) never re-marks here: provenance for
+	// a genuinely new clear comes only from Manager.Compile, and
+	// partial clones had both bits stripped at clone time.
+	if len(retained.Policies) == 0 && retained.fullBuild {
+		retained.ClearPolicies = true
+	}
 	// Content-hash dedup: skip the control socket publish if the snapshot's
 	// forwarding-relevant content hasn't changed since the last publish.
 	// This eliminates redundant publishes during route convergence where
@@ -276,6 +297,10 @@ func (m *Manager) syncSnapshotLocked() error {
 	// state only after the successful request; all failure returns above retain
 	// the prior applied/show cache.
 	m.commitPolicySchedulerActiveStateFromSnapshotLocked(m.lastSnapshot)
+	// #15937 round-5: stamp accounting for this acceptance already ran
+	// at the send-site choke (the publish above funnels through it);
+	// the status reconciler in the catch-up remains the backstop for
+	// landings no response ever confirmed.
 	// #1197 v5 (Codex code-review v4 #1): rebuild listener
 	// caches AFTER successful publish on the deferred-publish
 	// path too. Compile() defers when XSK is starting up; this

@@ -1808,6 +1808,7 @@ fn apply_snapshot_same_plan_clearing_defer_workers_reconcile_abort_fails_closed_
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     let state_file = format!(
         "{}/xpf-defer-workers-reconcile-{}.json",
@@ -1942,6 +1943,7 @@ fn apply_snapshot_rejects_unsupported_protocol_version() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     let running = Arc::new(AtomicBool::new(true));
     let state_file = format!(
@@ -1994,6 +1996,7 @@ fn apply_snapshot_rejects_v35_typed_snat_before_apply_11064() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     let response = apply_snapshot_for_test(
         state.clone(),
@@ -2154,6 +2157,7 @@ fn apply_snapshot_same_plan_preserves_persistent_snat_lease_state() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
 
     let initial = apply_snapshot_for_test(state.clone(), persistent_snat_apply_snapshot(1));
@@ -5351,6 +5355,7 @@ fn apply_snapshot_rejects_a_newer_protocol_version_too() {
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     }));
     let running = Arc::new(AtomicBool::new(true));
     let state_file = format!(

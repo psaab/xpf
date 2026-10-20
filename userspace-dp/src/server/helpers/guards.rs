@@ -138,6 +138,7 @@ mod guards_tests_9900 {
             afxdp: crate::afxdp::Coordinator::new(),
             state_writer: Arc::new(crate::state_writer::StateWriter::new()),
             quarantined_after_panic: false,
+            snapshot_policy_mismatch_total: 0,
         }))
     }
 

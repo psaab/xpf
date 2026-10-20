@@ -371,6 +371,23 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		snap.Summary.ZoneCount = len(snap.Zones)
 		snap.Summary.PolicyCount = len(snap.Policies)
 	}
+	// HARDENING (#15742/#15937): a full snapshot whose published policies
+	// disagree with the effective POST-QUARANTINE policy set is the
+	// 670274c712 defect shape — rules vanish between lowering and the
+	// literal, and the helper would install an empty/short policy set
+	// while the commit reports success. Refuse the build (compile ERROR
+	// keeps the prior snapshot enforced, fail closed). The check runs
+	// AFTER quarantineCollidingZones and its Summary resync, and the
+	// ground truth (expectedPolicyCount) applies the same scrub, so a
+	// build whose rules were ALL legitimately quarantined expects zero
+	// and passes (0 == 0 == 0); a raw authored-rule count here would
+	// false-fire on exactly that supported no-brick posture.
+	if err := validateSnapshotPolicyInvariant(snap, cfg); err != nil {
+		return nil, err
+	}
+	// #15937: this struct is a full build — the send-site stamp arm
+	// exempts it (builder invariant above is its ground-truth check).
+	snap.fullBuild = true
 	// #7717: report (do NOT foreclose) a NAT pool overlapping an interface-mode
 	// SNAT egress address that is only knowable at snapshot build — a DHCP or
 	// netlink-learned address the commit-time gate cannot see. Quarantining the

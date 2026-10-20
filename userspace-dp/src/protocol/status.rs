@@ -333,6 +333,17 @@ pub(crate) struct ProcessStatus {
     /// `Packets dropped` component. Additive/defaulted for older helpers.
     #[serde(rename = "policy_revoked_sessions_total", default)]
     pub policy_revoked_sessions_total: u64,
+    /// HARDENING (#15742 follow-up): cumulative snapshot applies REFUSED
+    /// because summary.policy_count disagreed with the policies the
+    /// snapshot carried (policy_count>0 with empty policies is the
+    /// 670274c712 shape). Sticky in ServerState, projected by
+    /// refresh_status; additive/defaulted for older daemons.
+    #[serde(rename = "snapshot_policy_mismatch_total", default)]
+    pub snapshot_policy_mismatch_total: u64,
+    /// Policy count of the last APPLIED snapshot (its summary), echoed
+    /// so the daemon status surface shows what the helper enforces.
+    #[serde(rename = "last_snapshot_policy_count", default)]
+    pub last_snapshot_policy_count: u64,
     /// #11503: cumulative transit packets denied because the ingress interface
     /// had no security zone. Kept separate from aggregate policy denies and
     /// the egress twin.

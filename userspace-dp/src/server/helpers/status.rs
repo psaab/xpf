@@ -22,6 +22,9 @@ use std::sync::atomic::Ordering;
 
 pub(crate) fn refresh_status(state: &mut ServerState) {
     state.afxdp.refresh_bindings(&mut state.status.bindings);
+    // HARDENING (#15742 follow-up): project the sticky mismatch counter
+    // (owned by ServerState so this rebuild cannot zero it).
+    state.status.snapshot_policy_mismatch_total = state.snapshot_policy_mismatch_total;
     // #1866 Change 2: WG control-thread self-heal. Tombstone-only +
     // snapshot-coherent (see Coordinator::reconcile_wg_control_liveness)
     // and gated on should_run_afxdp so a disarmed/stopped helper never

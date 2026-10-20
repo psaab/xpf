@@ -343,6 +343,7 @@ func isKnownUnsentFailure(err error) bool {
 	// Bare sentinels match directly; wrapped path errors match through the
 	// knownUnsentError cause chain. Both forms exclude adoption.
 	if errors.Is(err, errSnapshotDigest) ||
+		errors.Is(err, errSnapshotPolicyMismatch) ||
 		errors.Is(err, errRGProviderNotWired) ||
 		errors.Is(err, errControlSocketNotConfigured) ||
 		errors.Is(err, errControlRequestEncode) ||

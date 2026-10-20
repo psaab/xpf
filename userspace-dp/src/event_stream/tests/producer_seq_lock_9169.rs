@@ -258,6 +258,7 @@ fn refresh_status_publishes_the_producer_seq_lock_pair_9169() {
         afxdp: coordinator,
         state_writer: Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
     assert_eq!(
         state

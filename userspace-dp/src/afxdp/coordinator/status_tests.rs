@@ -662,6 +662,7 @@ fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
         afxdp: coordinator,
         state_writer: Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
     assert_eq!(state.status.policy_revoked_sessions_total, 0);
 
@@ -687,6 +688,7 @@ fn refresh_status_stamps_zone_and_flood_layout_versions_when_quiet_14619() {
         afxdp: coordinator,
         state_writer: Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
     assert!(state.afxdp.zone_traffic_counters().is_empty());
     assert!(state.afxdp.zone_flood_counters().is_empty());
@@ -774,6 +776,7 @@ fn process_status_exports_nat64_over_budget_and_deterministic_downgrade_counters
         afxdp: coordinator,
         state_writer: Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
     crate::server::helpers::status::refresh_status(&mut state);
 
@@ -856,6 +859,7 @@ fn unzoned_policy_denial_counters_reach_status_and_policy_snapshot_11503() {
         afxdp: coordinator,
         state_writer: Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
     crate::server::helpers::status::refresh_status(&mut state);
 
@@ -913,6 +917,7 @@ fn refresh_status_projects_delegated_slow_path_status_10069() {
         afxdp: coordinator,
         state_writer: Arc::new(crate::state_writer::StateWriter::new()),
         quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
     };
 
     crate::server::helpers::status::refresh_status(&mut state);

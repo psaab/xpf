@@ -392,8 +392,24 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	snap.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
 	snap.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
 	snap.ColdPathSampleMask = m.coldPathSampleMask
+	// HARDENING (#15742/#15937): set the authorized-clear marker on THIS
+	// full build when it empties the policy set, and re-affirm full-build
+	// provenance. Only full Compile marks (partials clone the retained
+	// snapshot; the send site spends the marker after the send, and the
+	// metadata strip clears both bits, so clones never inherit either).
+	// The expected-count stamp is deliberately NOT committed here: it
+	// moves ONLY once the helper provably holds the build (below), so a
+	// refused Compile cannot poison partials sized for the retained set.
+	snap.ClearPolicies = len(snap.Policies) == 0
+	snap.fullBuild = true
 	m.mu.Unlock()
 	compiled, applyErr := m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
+	// #15937 round-5: no stamp commit here. Acceptance accounting lives
+	// at the single send-site choke (requestApplySnapshotPreparedLocked
+	// commits for fullBuild snapshots on a nil round trip), which also
+	// covers tail-error accepts (the apply landed before the tail
+	// failed) and every alternate first-acceptance publisher. Committing
+	// here as well would double-own the invariant.
 	if replayInFlight {
 		m.mu.Lock()
 		if applyErr == nil {

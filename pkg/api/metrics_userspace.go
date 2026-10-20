@@ -93,6 +93,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 	c.emitWireguardTelemetry(ch, status)
 	c.emitPolicyContentRejected(ch, status)
 	c.emitZoneIDCollision(ch, status)
+	c.emitSnapshotPolicyMismatch(ch, status)
 	c.emitRejectObservability(ch, status)
 	c.emitFabricSkipCounters(ch, status)
 	c.emitLearnedRouteImportCapped(ch, status)
@@ -234,6 +235,20 @@ func (c *xpfCollector) emitZoneIDCollision(ch chan<- prometheus.Metric, status d
 		v = 1.0
 	}
 	c.emitConstMetric(ch, c.userspaceZoneIDCollision, prometheus.GaugeValue, v)
+}
+
+// emitSnapshotPolicyMismatch exposes the HARDENING (#15742 follow-up)
+// helper-refusal counter and the last-applied policy-count gauge. Both
+// are emitted unconditionally so 0 is a real "no mismatch / no policies"
+// signal, not an absent series.
+func (c *xpfCollector) emitSnapshotPolicyMismatch(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	// Nil-Desc safe: literal-constructed test collectors that never ran
+	// descriptor init skip the samples (mirrors emitInvalidLabelValues).
+	if c.userspaceSnapshotPolicyMismatch == nil || c.userspaceLastSnapshotPolicyCount == nil {
+		return
+	}
+	c.emitConstMetric(ch, c.userspaceSnapshotPolicyMismatch, prometheus.CounterValue, float64(status.SnapshotPolicyMismatchTotal))
+	c.emitConstMetric(ch, c.userspaceLastSnapshotPolicyCount, prometheus.GaugeValue, float64(status.LastSnapshotPolicyCount))
 }
 
 // emitWireguardTelemetry exposes the #1865 per-WG-tunnel telemetry

@@ -336,6 +336,17 @@ type ProcessStatus struct {
 	// Counts revoked SESSIONS, not dropped packets; exported separately from
 	// packet-drop totals. Omit on older helpers for wire compatibility.
 	PolicyRevokedSessionsTotal uint64 `json:"policy_revoked_sessions_total,omitempty"`
+	// HARDENING (#15742 follow-up): cumulative snapshot applies the helper
+	// REFUSED because Summary.PolicyCount disagreed with the policies the
+	// snapshot carried (policy_count>0 with an empty policy set is the
+	// 670274c712 shape). Reported by the helper in status; the Go builder
+	// and send-site gates refuse earlier, so a nonzero value means a
+	// producer bypassed both. Additive/omitempty: older helpers omit it.
+	SnapshotPolicyMismatchTotal uint64 `json:"snapshot_policy_mismatch_total,omitempty"`
+	// LastSnapshotPolicyCount is the policy_count of the helper's last
+	// APPLIED snapshot (its Summary, echoed in status). 0 from older
+	// helpers and before the first apply.
+	LastSnapshotPolicyCount uint64 `json:"last_snapshot_policy_count,omitempty"`
 	// #11503: ingress and egress packets denied because their respective
 	// interfaces had no security zone. Separate totals preserve cause direction.
 	UnzonedIngressDeniedTotal uint64 `json:"unzoned_ingress_denied_total,omitempty"`

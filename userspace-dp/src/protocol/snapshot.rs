@@ -737,6 +737,14 @@ pub(crate) struct ConfigSnapshot {
     /// decodes to false, the pre-#15707 reject behaviour.
     #[serde(rename = "no_ipv6_reject_zero_hop_limit", default, skip_serializing_if = "crate::protocol::bool_is_false")]
     pub no_ipv6_reject_zero_hop_limit: bool,
+    /// #15937 authorized clear: set ONLY by the Go full-Compile path on
+    /// a full build; partial publishers clone the retained snapshot and
+    /// the marker is consumed by the send site after each send, so a
+    /// competent helper treats `clear_policies && policies.is_empty()`
+    /// as the deliberate clear-all authorization. Additive via serde
+    /// default, no protocol bump.
+    #[serde(rename = "clear_policies", default, skip_serializing_if = "crate::protocol::bool_is_false")]
+    pub clear_policies: bool,
     #[serde(default)]
     pub policies: Vec<PolicyRuleSnapshot>,
     #[serde(rename = "policy_rematch_extensive", default)]

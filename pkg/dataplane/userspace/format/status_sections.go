@@ -393,6 +393,13 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  Ring entries:              %d\n", status.RingEntries)
 	fmt.Fprintf(b, "  Last snapshot generation:  %d\n", status.LastSnapshotGeneration)
 	fmt.Fprintf(b, "  Last FIB generation:       %d\n", status.LastFIBGeneration)
+	// HARDENING (#15742 follow-up): the last APPLIED snapshot's policy
+	// count, beside its generation — an operator can see at a glance
+	// whether the helper enforces the compiled rule set.
+	fmt.Fprintf(b, "  Last snapshot policies:    %d\n", status.LastSnapshotPolicyCount)
+	if status.SnapshotPolicyMismatchTotal > 0 {
+		fmt.Fprintf(b, "  Snapshot policy mismatches: %d (helper refused; prior policies kept)\n", status.SnapshotPolicyMismatchTotal)
+	}
 	if !status.LastSnapshotAt.IsZero() {
 		fmt.Fprintf(b, "  Last snapshot age:         %s\n", formatStatusAge(now.Sub(status.LastSnapshotAt)))
 	}
