@@ -250,16 +250,6 @@ impl PersistentPermissions {
             PersistentNatPermit::TargetHostPort => self.scope(egress_scope).is_some_and(|s| s.remotes.contains(&(flow.dst_ip, flow.dst_port))) || self.total_remotes() < MAX_PERSISTENT_PERMITTED_REMOTES,
         }
     }
-    fn record(&mut self, permit: PersistentNatPermit, flow: SourceNatFlowKey, egress_scope: u32) -> bool {
-        if !self.can_record(permit, flow, egress_scope) { return false; }
-        let scope = self.scopes.entry(egress_scope).or_default();
-        match permit {
-            PersistentNatPermit::AnyRemoteHost => scope.any_remote = true,
-            PersistentNatPermit::TargetHost => { scope.remotes.insert((flow.dst_ip, 0)); }
-            PersistentNatPermit::TargetHostPort => { scope.remotes.insert((flow.dst_ip, flow.dst_port)); }
-        }
-        true
-    }
     fn record_with_zones(&mut self, permit: PersistentNatPermit, flow: SourceNatFlowKey, egress_scope: u32, mint_from_zone: Option<&str>) -> bool {
         if !self.can_record(permit, flow, egress_scope) { return false; }
         let scope = self.scopes.entry(egress_scope).or_default();
@@ -1285,37 +1275,6 @@ impl PortAllocatorLiveState {
         Some(lease)
     }
 
-    fn record_persistent_permission(
-        &mut self,
-        key: PersistentSourceKey,
-        permit: PersistentNatPermit,
-        flow: SourceNatFlowKey,
-        egress_scope: u32,
-    ) -> bool {
-        // #14322: an address-only lease's owner index is derived from its
-        // stored grants; a grant recorded after mint must add its owner keys
-        // or contention checks would miss the new exact/host identity.
-        let lease = self.persistent_by_source.get(&key).copied();
-        let before = lease.map(|l| self.persistent_address_only_owner_keys(&key, &l)).unwrap_or_default();
-        let recorded = self
-            .persistent_permissions
-            .entry(key)
-            .or_default()
-            .record(permit, flow, egress_scope);
-        if recorded {
-            if let Some(l) = lease {
-                if l.address_only && !l.revoked {
-                    let after = self.persistent_address_only_owner_keys(&key, &l);
-                    for owner_key in after {
-                        if !before.contains(&owner_key) {
-                            self.increment_persistent_address_only_owner(owner_key);
-                        }
-                    }
-                }
-            }
-        }
-        recorded
-    }
     fn record_persistent_permission_with_zones(
         &mut self,
         key: PersistentSourceKey,
@@ -2580,22 +2539,13 @@ impl PortAllocator {
         let Some(keys) = live.persistent_by_translated.get(&reverse) else {
             return PersistentInbound::Miss;
         };
-        // #15936: candidate internal zones for the authored fallback. The
-        // exact arrival_scope already encodes the caller's pair; the
-        // fallback additionally tries every zone name this allocator's
-        // leases could have been minted from — but bucket keys are hashes
-        // of (authored fields, packet_from, packet_to), so without the
-        // name we cannot re-fold. The caller therefore supplies the
-        // internal zone when it knows it (revalidation); the pre-routing
-        // reader does not, and instead the fallback below checks whether
-        // the lease holds ANY bucket that this rule's authored identity
-        // could own: authored fields are part of every bucket key, and
-        // two rules differing in any authored field fold differently for
-        // EVERY packet pair, so a bucket belonging to a sibling can never
-        // collide with this rule's authored identity test — realised by
-        // re-folding with each distinct packet_from the lease's buckets
-        // imply is impossible; instead we use the stored-bucket test in
-        // `permits_authored_any_from`.
+        // #15936: the exact arrival_scope encodes the caller's pair. When it
+        // does not grant, the loop below falls through to the provenance
+        // re-fold (`permits_authored_any_from`): each bucket records its mint
+        // from_zone, so this rule's buckets re-fold and reproduce their keys
+        // without the caller ever knowing the internal zone. Buckets of a
+        // sibling rule re-fold differently for every pair (authored fields
+        // are folded verbatim), so they never reproduce and never admit.
         let mut matched = None;
         let mut saw_lease = false;
         for key in keys {
@@ -2610,26 +2560,33 @@ impl PortAllocator {
                 continue;
             }
             let permissions = live.persistent_permissions.get(key);
-            // Fast path: exact bucket the caller derived.
-            let (has, permitted) = if permissions.is_some_and(|p| p.has_scope(arrival_scope)) {
-                (
-                    true,
-                    permissions.is_some_and(|p| p.permits(arrival_scope, remote_ip, remote_port)),
-                )
+            // Admission is ANY granting bucket, never first-bucket-terminal:
+            // the exact caller's-pair bucket is tried first, but a hit there
+            // that does not grant this remote must not shadow a granting
+            // bucket minted under another internal pair for the same rule
+            // (e.g. trust->wan and wan->wan mints on one global lease, the
+            // reader spelling (wan,wan)). The provenance re-fold recovers
+            // those; it only runs for non-zone rules, whose authored
+            // from_zone does not pin the pair. Zone-authored rules keep the
+            // exact bucket as the whole answer.
+            let exact_permitted = permissions.is_some_and(|p| p.permits(arrival_scope, remote_ip, remote_port));
+            let (has, permitted) = if exact_permitted {
+                (true, true)
             } else if rule.from_zone.is_empty() {
-                // #15936 fallback: non-zone rule, caller hashed (wan,wan).
-                // Admit only via a bucket this rule authored — see
-                // permits_authored_any_from. Zone-authored rules never
-                // take this path: their authored from_zone already pins
-                // the mint pair, so an absent exact bucket is a true Miss.
                 match permissions.and_then(|p| {
                     p.permits_authored_any_from(rule, ingress_zone, remote_ip, remote_port)
                 }) {
                     Some(permitted) => (true, permitted),
-                    None => (false, false),
+                    None => (
+                        permissions.is_some_and(|p| p.has_scope(arrival_scope)),
+                        false,
+                    ),
                 }
             } else {
-                (false, false)
+                (
+                    permissions.is_some_and(|p| p.has_scope(arrival_scope)),
+                    false,
+                )
             };
             if !has {
                 continue;

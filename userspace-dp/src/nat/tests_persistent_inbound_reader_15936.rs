@@ -164,6 +164,42 @@ fn outbound(
     }
 }
 
+fn outbound_pair(
+    rules: &[SourceNatRule],
+    from_zone: &str,
+    to_zone: &str,
+    dst_ip: IpAddr,
+    dst_port: u16,
+    now_ns: u64,
+) -> TranslatedTuple {
+    let mut counter = None;
+    match match_source_nat_result_for_tuple(
+        &InterfaceNatAllocators::default(),
+        rules,
+        &NatScopeCtx::default(),
+        from_zone,
+        to_zone,
+        "10.0.0.5".parse().expect("src"),
+        dst_ip,
+        Some(PROTO_TCP),
+        40_000,
+        dst_port,
+        None,
+        None,
+        now_ns,
+        false,
+        false,
+        NatHolder::Untracked,
+        &mut counter,
+    ) {
+        SourceNatLookup::Matched(decision) => TranslatedTuple {
+            ip: decision.rewrite_src.expect("pool rewrite"),
+            port: decision.rewrite_src_port.expect("pool port rewrite"),
+        },
+        other => panic!("outbound {from_zone}->{to_zone} must translate, got {other:?}"),
+    }
+}
+
 /// Production inbound spelling at poll_descriptor/mod.rs (#15936): for a
 /// non-zone rule the packet_from is substituted with the ARRIVAL zone, so
 /// the pair hashed is (wan, wan) — NOT the admitted (trust, wan).
@@ -307,5 +343,52 @@ fn inbound_reader_does_not_merge_sibling_grants_15936() {
         inbound_as_production(&rules[1], strict_translated, permissive_dst, 443, now),
         PersistentInbound::Denied,
         "permissive flow destination must not become a strict-rule grant (#15936)"
+    );
+}
+
+/// Exact-bucket shadowing (review fold): one GLOBAL rule, one shared
+/// lease, two mints — A trust->wan grants remote A, B wan->wan grants
+/// remote B. The reader spells (wan,wan), so B's bucket is the EXACT
+/// bucket; it exists but does not grant A. Pre-fold the reader stopped
+/// at that exact bucket and Denied A without trying the provenance
+/// re-fold. Admission must be ANY granting bucket: A (via the
+/// (trust,wan) provenance bucket) and B (via the exact bucket) both
+/// admit; a third remote neither granted still denies.
+#[test]
+fn inbound_reader_exact_bucket_does_not_shadow_provenance_grant_15936() {
+    let rules = global_rule();
+    let remote_a: IpAddr = "198.51.100.20".parse().expect("remote A");
+    let remote_b: IpAddr = "198.51.100.30".parse().expect("remote B");
+    let remote_c: IpAddr = "203.0.113.99".parse().expect("remote C");
+    let now = 1_000;
+    // A: mint under (trust,wan); B: mint under (wan,wan) — same source,
+    // same global rule, so both grants land on ONE lease (#9389).
+    let translated_a = outbound_pair(&rules, "trust", "wan", remote_a, 443, now);
+    let translated_b = outbound_pair(&rules, "wan", "wan", remote_b, 443, now);
+    assert_eq!(
+        translated_a, translated_b,
+        "fixture: both mints must share one lease/translated tuple"
+    );
+    // B via the exact (wan,wan) bucket.
+    assert!(
+        matches!(
+            inbound_as_production(&rules[0], translated_b, remote_b, 443, now),
+            PersistentInbound::Permitted { .. }
+        ),
+        "exact (wan,wan) bucket must admit its own remote (#15936 control)"
+    );
+    // A via the provenance re-fold — the cell that was shadowed pre-fold.
+    assert!(
+        matches!(
+            inbound_as_production(&rules[0], translated_a, remote_a, 443, now),
+            PersistentInbound::Permitted { .. }
+        ),
+        "exact bucket that does not grant A must fall through to the (trust,wan) provenance grant, not Deny (#15936)"
+    );
+    // Neither bucket grants C.
+    assert_eq!(
+        inbound_as_production(&rules[0], translated_a, remote_c, 9_999, now),
+        PersistentInbound::Denied,
+        "a remote neither mint granted must still deny (#15936)"
     );
 }

@@ -15,12 +15,15 @@ import (
 // first swallowed sibling token — so the discard in
 // applyFusedRouteTail15777 (no `metric` case, returns immediately) has
 // no strict-commit consequence. The lenient/tolerant compiler still
-// discards the tail silently; that path backs Store.Load/SyncApply of
+// discards the tail; that path backs Store.Load/SyncApply of
 // already-persisted config, so this file also pins the tolerant
 // behaviour explicitly rather than leaving it implicit: the route
-// compiles, `metric` draws the #10707 advisory, and the swallowed
-// clause does NOT take effect (documented residual, strict gate is the
-// operator-facing protection).
+// compiles and the swallowed clause does NOT take effect (documented
+// residual, strict gate is the operator-facing protection). The
+// fused next-hop spelling draws NO #10707 advisory leniently (the
+// packed-tail walker absorbs the tail as next-hop values); the
+// route-level spelling (`route … metric 5 next-hop …`) does — both
+// pinned below.
 
 func TestFusedMetricSwallowsTailRejectedStrict15936(t *testing.T) {
 	cases := []struct {
@@ -50,10 +53,11 @@ func TestFusedMetricSwallowsTailRejectedStrict15936(t *testing.T) {
 }
 
 // Tolerant-load pin: the same spelling compiles leniently (no-brick,
-// #1960), draws the #10707 advisory for `metric`, and the swallowed
-// clause does not take effect. This documents the residual precisely:
-// only already-persisted config reaches this path, and the advisory
-// makes the dropped clause visible in warnings.
+// #1960), and the swallowed clause does not take effect. This documents
+// the residual precisely: only already-persisted config reaches this
+// path. The fused next-hop spelling draws no #10707 advisory (its tail
+// is absorbed as next-hop values, measured warnings=[]); the
+// route-level spelling does draw it — both asserted, not assumed.
 func TestFusedMetricTailLenientDocumented15936(t *testing.T) {
 	src := "routing-options { static { route 10.85.0.0/16 { next-hop 10.0.0.1 metric 5 no-install; } } }"
 	cfg, err := CompileConfigLenient(hierTree(t, src))
@@ -66,6 +70,18 @@ func TestFusedMetricTailLenientDocumented15936(t *testing.T) {
 	}
 	if len(r.NextHops) != 1 || r.NextHops[0].Address != "10.0.0.1" {
 		t.Fatalf("lenient: NextHops = %+v, want only 10.0.0.1 (fused tokens must not become gateways)", r.NextHops)
+	}
+	if has10707For(cfg.Warnings, "metric") {
+		t.Fatalf("lenient fused next-hop spelling must draw no #10707 for metric (tail absorbed as values), warnings=%v", cfg.Warnings)
+	}
+	// Route-level spelling: `metric` sits on the route leaf, so the
+	// packed-tail walker does see it and draws the #10707 advisory.
+	rl, err := CompileConfigLenient(hierTree(t, "routing-options { static { route 10.0.0.0/24 metric 5 next-hop 10.0.0.1; } }"))
+	if err != nil {
+		t.Fatalf("lenient route-level compile: %v", err)
+	}
+	if !has10707For(rl.Warnings, "metric") {
+		t.Fatalf("lenient route-level metric must draw #10707, warnings=%v", rl.Warnings)
 	}
 	// Controls: the supported fused tails without metric DO take effect
 	// leniently, proving the discard is specific to the metric head.
