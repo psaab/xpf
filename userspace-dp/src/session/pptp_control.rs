@@ -113,6 +113,10 @@ struct InboxInner {
     last_call_install_retry_ns: u64,
     /// #15966r: true once the current disabled period has purged.
     disabled_purged: bool,
+    /// Edge state: true after the first enabled poll is seen.
+    enabled_seen: bool,
+    /// Previous poll was disabled (edge detector for enable transition).
+    was_disabled: bool,
 }
 
 /// A control close still waiting for a bounded worker queue or local table.
@@ -231,23 +235,43 @@ impl PptpControlInbox {
             return false;
         }
         inner.disabled_purged = true;
+        inner.was_disabled = true;
         inner.pending.clear();
         inner.pending_call_installs.clear();
         true
     }
 
-    /// On the enable transition, drop every segment buffered before the
-    /// enable (they arrived while disabled or during a generation the
-    /// worker never observed as disabled) and rearm the disabled purge.
-    /// Called before any enabled drain processes buffered segments.
-    pub(crate) fn note_enabled(&self) {
+    /// Combined poll gate, called once per worker poll with the current
+    /// enabled bit. Returns true when this poll is the disabled->enabled
+    /// transition, in which case pre-enable buffered segments have been
+    /// dropped. Steady polls (enabled->enabled or disabled->disabled)
+    /// never drop buffers, so CallReplies queued between enabled polls
+    /// survive to the next drain. The first poll ever observed only
+    /// seeds the edge state. A disabled poll purges once per period via
+    /// purge_once_per_disable; if no disabled poll ran (generation
+    /// skipped), the transition detected here still drops the buffer.
+    pub(crate) fn note_poll(&self, enabled: bool) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        inner.pending.clear();
-        inner.pending_call_installs.clear();
-        inner.disabled_purged = false;
+        if !inner.enabled_seen {
+            inner.enabled_seen = true;
+            inner.was_disabled = !enabled;
+            inner.disabled_purged = false;
+            return false;
+        }
+        if enabled && inner.was_disabled {
+            inner.pending.clear();
+            inner.pending_call_installs.clear();
+            inner.was_disabled = false;
+            inner.disabled_purged = false;
+            return true;
+        }
+        if !enabled {
+            inner.was_disabled = true;
+        }
+        false
     }
 
     /// #15950: drop every buffered segment (ALG disabled). Returns count.
@@ -1206,15 +1230,28 @@ mod tests_15966r_toggle {
         let seg = PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 1, payload: vec![1,2,3] };
         assert!(inbox.push(seg));
         // Worker never observed disabled generation; enable transition must drop it.
-        inbox.note_enabled();
+        assert!(inbox.note_poll(false) == false);
+        assert!(inbox.note_poll(true), "enable transition must report");
         assert_eq!(inbox.pending_len(), 0, "pre-enable buffered segments must be dropped on enable");
         // Disabled purge fires once, rearmed by enable.
         assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 2, payload: vec![4] }));
         assert!(inbox.purge_once_per_disable());
         assert_eq!(inbox.pending_len(), 0);
         assert!(!inbox.purge_once_per_disable(), "second disabled poll must not re-purge (flag)");
-        inbox.note_enabled();
+        inbox.note_poll(true);
         assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 3, payload: vec![5] }));
         assert!(inbox.purge_once_per_disable(), "enable must rearm disabled purge");
+        // Steady-enabled: multiple enabled polls must NOT drop queued replies.
+        inbox.note_poll(true);
+        assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 4, payload: vec![9,9,9] }));
+        for _ in 0..5 { assert!(!inbox.note_poll(true), "steady enabled poll must be a no-op"); }
+        assert_eq!(inbox.pending_len(), 1, "CallReply queued between enabled polls must survive");
+        // Generation-skip: disabled state seeded by note_poll(false) without purge, then enable drops.
+        let inbox2 = PptpControlInbox::default();
+        inbox2.note_poll(true);
+        assert!(inbox2.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 5, payload: vec![7] }));
+        inbox2.note_poll(false);
+        assert!(inbox2.note_poll(true));
+        assert_eq!(inbox2.pending_len(), 0, "skipped-generation pre-enable buffer must drop on transition");
     }
 }

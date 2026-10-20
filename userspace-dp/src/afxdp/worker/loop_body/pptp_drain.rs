@@ -25,10 +25,13 @@ pub(super) fn run_pptp_control_drain(
     if !pptp_enabled {
         // First disabled poll purges immediately (no interval window in
         // which a re-enable could resurrect pre-disable segments).
+        pptp_control.note_poll(false);
         pptp_control.purge_once_per_disable();
         return;
     }
-    pptp_control.note_enabled();
+    // Edge-triggered: drops pre-enable buffers only on the
+    // disabled->enabled transition; steady-enabled polls are no-ops.
+    pptp_control.note_poll(true);
     crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
         &pptp_control,
         &mut sessions,
