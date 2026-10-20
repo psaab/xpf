@@ -4511,6 +4511,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             resolution.egress_ifindex,
                         );
+                        // #15742h: cluster-terminal zeroes egress; derive
+                        // the would-be egress zone from source_ifindex so
+                        // policy/seed adjudication sees lan->wan, not lan->0.
+                        let to_zone_id = if to_zone_id == 0
+                            && resolution.disposition
+                                == ForwardingDisposition::ClusterTerminalHAInactive
+                            && resolution.source_ifindex > 0
+                        {
+                            worker_ctx.forwarding.egress_zone_id(resolution.source_ifindex)
+                        } else {
+                            to_zone_id
+                        };
                         admission_to_zone = to_zone_id;
                         // Borrow zone names as &str for string-typed downstream
                         // callers (static_nat, match_source_nat_for_flow, debug
@@ -7148,11 +7160,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // rewrites the disposition to FabricRedirect; the
                             // seed install runs after the redirect below.
                             let seed_pre_disposition = decision.resolution.disposition;
-                            let owner_rg_id =
-                                owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
+                            // #15742h: a cluster-terminal resolution zeroes
+                            // its egress, so owner/zone attribution must read
+                            // the would-be egress stamped on source_ifindex
+                            // (mirrors the tail safety net). Reading the
+                            // zeroed egress yielded RG 0 and egress-zone 0,
+                            // so the punt seed was never minted live and the
+                            // peer's return hit wan->lan default-deny.
+                            let terminal_source = if seed_pre_disposition
+                                == ForwardingDisposition::ClusterTerminalHAInactive
+                            {
+                                decision.resolution.source_ifindex
+                            } else {
+                                0
+                            };
+                            let owner_rg_id = if terminal_source > 0 {
+                                owner_rg_for_flow(worker_ctx.forwarding, terminal_source)
+                            } else {
+                                owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution)
+                            };
                             if owner_rg_id > 0 {
                                 flow_cache_owner_rg_id = owner_rg_id;
                             }
+                            let seed_to_zone_id = if terminal_source > 0 && to_zone_id == 0 {
+                                worker_ctx.forwarding.egress_zone_id(terminal_source)
+                            } else {
+                                to_zone_id
+                            };
                             // New flow to inactive RG: fabric-redirect to the peer
                             // that owns the egress RG.  Use from_zone_arc directly
                             // (always in scope) rather than going through the debug
@@ -7183,14 +7217,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 packet_fabric_ingress,
                                 decision.nat,
                             ) {
-                                let seed_owner_rg = owner_rg_for_resolution(
-                                    worker_ctx.forwarding,
-                                    decision.resolution,
-                                );
+                                let seed_owner_rg = owner_rg_id;
                                 if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                     worker_ctx.forwarding,
                                     from_zone_id,
-                                    to_zone_id,
+                                    seed_to_zone_id,
                                     seed_owner_rg,
                                     meta.ingress_ifindex,
                                     meta.ingress_vlan_id,
@@ -8249,9 +8280,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #12865: the adjudicated egress zone survives
                         // only in base_resolution; capture it before the
                         // redirect swaps in the fabric transport parent.
-                        let flowless_intended_to_zone = worker_ctx
-                            .forwarding
-                            .egress_zone_id(base_resolution.egress_ifindex);
+                        // #15742h: a cluster-terminal base zeroes its
+                        // egress; the would-be egress zone lives on
+                        // source_ifindex (as in the tail safety net).
+                        let flowless_intended_to_zone = if base_resolution.disposition
+                            == ForwardingDisposition::ClusterTerminalHAInactive
+                            && base_resolution.source_ifindex > 0
+                        {
+                            worker_ctx
+                                .forwarding
+                                .egress_zone_id(base_resolution.source_ifindex)
+                        } else {
+                            worker_ctx
+                                .forwarding
+                                .egress_zone_id(base_resolution.egress_ifindex)
+                        };
                         let redirected = resolve_fabric_redirect_for_ingress_identity(
                             worker_ctx.forwarding,
                             ingress_zone_id,
