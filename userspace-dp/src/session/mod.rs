@@ -3608,12 +3608,19 @@ impl SessionTable {
     /// Emit the HA Update withheld by
     /// [`Self::probe_hit_deferring_state_update`] after TX admission.
     pub fn emit_probe_hit_state_update(&mut self, key: &SessionKey) {
-        if let Some((matched_key, class_before, handshake_before)) =
-            self.pending_probe_state_update.take()
+        // Round-3: an intervening admitted flow must not discard another
+        // flow's deferred transition. Only consume the pending record when
+        // it belongs to this key; a mismatching admission leaves it for
+        // its own retransmitted/admitted completing packet.
+        let pending_matches = self
+            .pending_probe_state_update
+            .as_ref()
+            .is_some_and(|(matched_key, _, _)| matched_key == key);
+        if pending_matches
+            && let Some((matched_key, class_before, handshake_before)) =
+                self.pending_probe_state_update.take()
         {
-            if matched_key == *key {
-                self.emit_session_state_update(&matched_key, class_before, handshake_before);
-            }
+            self.emit_session_state_update(&matched_key, class_before, handshake_before);
         }
     }
 
@@ -3726,6 +3733,17 @@ impl SessionTable {
                     handshake_state_before,
                 );
             } else {
+                // Never silently overwrite another flow's deferred
+                // transition. Publish the older pending completion inline
+                // before replacing the slot; this is unreachable in the
+                // normal one-completing-packet-at-a-time cache path, but
+                // losing an HA Update permanently is the worse failure.
+                if let Some((old_key, old_class, old_handshake)) =
+                    self.pending_probe_state_update.take()
+                    && old_key != matched_key
+                {
+                    self.emit_session_state_update(&old_key, old_class, old_handshake);
+                }
                 self.pending_probe_state_update =
                     Some((matched_key.clone(), close_class_before, handshake_state_before));
             }

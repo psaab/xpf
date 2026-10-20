@@ -310,6 +310,33 @@ fn probe_hit_deferring_state_update_waits_for_admission_15947() {
     assert_eq!(updates[0].key, forward);
 }
 
+#[test]
+fn deferred_probe_update_survives_intervening_flow_15947() {
+    // A dropped completing ACK for A leaves one deferred pending record.
+    // Admitting unrelated B must not take/discard A's record; A's later
+    // admitted retransmission can still publish exactly one A Update.
+    let mut a = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut a, &forward, now, TCP_SYN);
+    assert!(a.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    let _ = a.drain_deltas(16);
+    assert!(a.probe_hit_deferring_state_update(&forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    assert!(a.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update));
+
+    let other = SessionKey {
+        src_port: 23456,
+        ..key_v4()
+    };
+    // Different-key emit is a no-op and leaves A's record intact.
+    a.emit_probe_hit_state_update(&other);
+    assert!(a.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update));
+    a.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = a.drain_deltas(16).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].key, forward);
+}
+
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with
 /// payload progress re-stamps, matching the unfused keepalive.

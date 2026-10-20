@@ -725,7 +725,9 @@ fn enqueue_copy_fallback_frame(
                     }
                     crate::afxdp::cos::redirect_pool::recycle(frame);
                 }
-                return (true, true);
+                // Oversized is undeliverable by construction: recycle
+                // and drop WITHOUT slow-path reinject (base contract).
+                return (true, false);
             }
             let mut enqueued = 0usize;
             // WireGuard commits are held until every fragment is accepted

@@ -138,6 +138,7 @@ pub(super) fn enqueue_local_request_to_target_or_owner(
             return owner_live.try_enqueue_tx_owned(req);
         }
     }
+    target_binding.tx_pipeline.pending_tx_local.push_back(req);
     bound_pending_tx_local(target_binding);
     Ok(())
 }
