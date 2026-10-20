@@ -24,7 +24,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
     enable_test_flow_fair(queue);
 
     let req_a = TxRequest {
-        bytes: vec![0; 1500],
+        bytes: vec![0; 1500].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -37,7 +37,7 @@ fn cos_queue_push_and_pop_track_flow_bucket_bytes() {
         enqueue_ns: 0,
     };
     let req_b = TxRequest {
-        bytes: vec![0; 1500],
+        bytes: vec![0; 1500].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

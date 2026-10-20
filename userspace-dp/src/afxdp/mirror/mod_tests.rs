@@ -31,7 +31,7 @@ fn test_cos_interface(default_queue: u8) -> CoSInterfaceConfig {
 
 fn test_tx_request(payload: u8, egress_ifindex: i32) -> TxRequest {
     TxRequest {
-        bytes: vec![payload; 64],
+        bytes: vec![payload; 64].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -1186,7 +1186,7 @@ fn live_mirror_owner_drops_before_consuming_tx_frame_reserve() {
         .truncate(MIRROR_TX_FRAME_RESERVE);
     let free_before = binding.tx_pipeline.free_tx_frames.len();
     let mut pending = VecDeque::from([TxRequest {
-        bytes: vec![0xdd; 64],
+        bytes: vec![0xdd; 64].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

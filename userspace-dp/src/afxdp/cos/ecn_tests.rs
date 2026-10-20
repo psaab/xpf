@@ -177,7 +177,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
     let tos = ECN_ECT_0;
     let bytes = build_ipv4_test_packet(tos);
     let mut req = TxRequest {
-        bytes,
+        bytes: bytes.into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -196,7 +196,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
     let tclass = ECN_ECT_1;
     let bytes = build_ipv6_test_packet(tclass);
     let mut req = TxRequest {
-        bytes,
+        bytes: bytes.into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET6 as u8,
         expected_protocol: PROTO_TCP,
@@ -217,7 +217,7 @@ fn maybe_mark_ecn_ce_dispatches_by_ethertype() {
     // driven by the parsed L2 ethertype, not by
     // `expected_addr_family` — that field is metadata only.
     let mut req = TxRequest {
-        bytes: vec![0u8; 64],
+        bytes: vec![0u8; 64].into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: PROTO_TCP,
@@ -258,7 +258,7 @@ fn maybe_mark_ecn_ce_handles_single_vlan_tagged_frame() {
     assert_eq!(ethernet_l3(&tagged), Some(EthernetL3::Ipv4(18)));
 
     let mut req = TxRequest {
-        bytes: tagged,
+        bytes: tagged.into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -296,7 +296,7 @@ fn maybe_mark_ecn_ce_rejects_unknown_ethertype() {
             b[12] = 0x12;
             b[13] = 0x34;
             b
-        },
+        }.into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -343,7 +343,7 @@ fn ethernet_l3_rejects_qinq_until_explicitly_supported() {
 
     // And the marker refuses such a frame — no ECN bits are flipped.
     let mut req = TxRequest {
-        bytes: qinq,
+        bytes: qinq.into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,

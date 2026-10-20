@@ -124,7 +124,7 @@ fn enqueue_pending_forwards_counts_prebuilt_fabric_redirect_no_binding() {
     let mut decision = test_forwarding_decision_to_bound_ifindex(4242);
     decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
     let mut request = test_live_forward_request_for_frame(64, decision);
-    request.frame = PendingForwardFrame::Prebuilt(vec![0u8; 64]);
+    request.frame = PendingForwardFrame::Prebuilt(vec![0u8; 64].into());
     let mut pending = vec![request];
 
     let mut post_recycles = Vec::new();

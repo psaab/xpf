@@ -3414,12 +3414,20 @@ fn write_v6_to_v4_translate(
     //     the correct checksum and the generic recompute re-affirms it.
     //   * Complete UDP datagrams with a zero v6 checksum: no trustworthy
     //     baseline exists, so the full recompute generates a valid checksum.
-    let nonfrag_incremental = frag_info.is_none()
-        && (ipv4_protocol == PROTO_TCP
-            || (ipv4_protocol == PROTO_UDP && out.get(26..28) != Some(&[0, 0][..])));
-    let frag_incremental = frag_info.is_some()
-        && (ipv4_protocol == PROTO_TCP
-            || (ipv4_protocol == PROTO_UDP && out.get(26..28) != Some(&[0, 0][..])));
+    // #15956: bound both checksum-field reads by the written prefix
+    // (`out[..ipv4_total_len]`: header + verbatim L4 copy) explicitly,
+    // twin of the v4->v6 read in `write_v4_to_v6_translate`.
+    let (nonfrag_incremental, frag_incremental) = {
+        let written_out = &out[..ipv4_total_len];
+        (
+            frag_info.is_none()
+                && (ipv4_protocol == PROTO_TCP
+                    || (ipv4_protocol == PROTO_UDP && written_out.get(26..28) != Some(&[0, 0][..]))),
+            frag_info.is_some()
+                && (ipv4_protocol == PROTO_TCP
+                    || (ipv4_protocol == PROTO_UDP && written_out.get(26..28) != Some(&[0, 0][..]))),
+        )
+    };
     if frag_incremental || nonfrag_incremental {
         let mut v6_addrs = [0u8; 32];
         v6_addrs.copy_from_slice(&packet[8..40]);
@@ -3802,8 +3810,19 @@ fn write_v4_to_v6_translate(
             )?;
         }
     } else {
+        // #15956: bound the checksum-field read by the WRITTEN prefix
+        // explicitly. `dst[..l4_written]` is exactly what the header
+        // writes plus the verbatim L4 copy above initialized; a UDP
+        // datagram too short to contain the field (copied < 8 bytes)
+        // yields no baseline here and falls to the full recompute,
+        // which itself fails closed on the short L4 — the read never
+        // consults bytes past the copy.
+        let l4_written = l4_off + l4_len;
         let udp_no_baseline = next_header == PROTO_UDP
-            && dst.get(l4_off + 6..l4_off + 8) == Some(&[0, 0][..]);
+            && dst
+                .get(..l4_written)
+                .and_then(|written| written.get(l4_off + 6..l4_off + 8))
+                == Some(&[0, 0][..]);
         if matches!(next_header, PROTO_TCP | PROTO_UDP) && !udp_no_baseline {
             let mut v6_addrs = [0u8; 32];
             v6_addrs[..16].copy_from_slice(&src_v6.octets());

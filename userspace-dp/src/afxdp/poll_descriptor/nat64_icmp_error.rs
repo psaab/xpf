@@ -146,7 +146,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             };
             let mut rewritten_frame =
                 crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
-            rewritten_frame.resize(capacity, 0);
+            crate::afxdp::cos::redirect_pool::extend_pooled_for_build(&mut rewritten_frame, capacity);
             let Some(written) = crate::nat64::build_nat64_v4_to_v6_icmp_error_frame_into(
                 &mut rewritten_frame,
                 packet_frame,
@@ -249,7 +249,7 @@ pub(super) fn try_translate_nat64_icmp_error(
             };
             let mut rewritten_frame =
                 crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
-            rewritten_frame.resize(capacity, 0);
+            crate::afxdp::cos::redirect_pool::extend_pooled_for_build(&mut rewritten_frame, capacity);
             let Some(written) = crate::nat64::build_nat64_v6_to_v4_icmp_error_frame_into(
                 &mut rewritten_frame,
                 packet_frame,

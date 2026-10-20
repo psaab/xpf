@@ -179,7 +179,7 @@ pub(super) fn enqueue_syn_cookie_reply(
     }
 
     tx_pipeline.pending_tx_local.push_back(TxRequest {
-        bytes,
+        bytes: bytes.into(),
         expected_ports: None,
         expected_addr_family: meta.addr_family,
         expected_protocol: meta.protocol,

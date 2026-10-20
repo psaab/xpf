@@ -798,7 +798,7 @@ fn prepare_local_request_for_cos_preserves_mirror_tx_frame_reserve() {
         .collect::<VecDeque<_>>();
     let original_free = free_tx_frames.clone();
     let req = TxRequest {
-        bytes: vec![1, 2, 3, 4],
+        bytes: vec![1, 2, 3, 4].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -825,7 +825,7 @@ fn prepare_local_request_for_cos_materializes_prepared_frame() {
     let area = MmapArea::new(4096).expect("mmap");
     let mut free_tx_frames = VecDeque::from([128]);
     let req = TxRequest {
-        bytes: vec![0xde, 0xad, 0xbe, 0xef],
+        bytes: vec![0xde, 0xad, 0xbe, 0xef].into(),
         expected_ports: Some((1111, 2222)),
         expected_addr_family: libc::AF_INET6 as u8,
         expected_protocol: PROTO_TCP,
@@ -866,7 +866,7 @@ fn prepare_local_request_for_cos_falls_back_when_no_free_tx_frame_exists() {
     let area = MmapArea::new(4096).expect("mmap");
     let mut free_tx_frames = VecDeque::new();
     let req = TxRequest {
-        bytes: vec![1, 2, 3, 4],
+        bytes: vec![1, 2, 3, 4].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: PROTO_TCP,
@@ -1275,7 +1275,7 @@ fn demote_failure_preserves_mqfq_frontier_across_buckets_9066() {
     cos_queue_push_back(
         queue,
         CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![0u8; 1500],
+            bytes: vec![0u8; 1500].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,

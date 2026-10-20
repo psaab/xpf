@@ -400,7 +400,7 @@ fn submit_local_publishes_committed_vtime_on_settle() {
     );
 
     let items = VecDeque::from([TxRequest {
-        bytes: vec![0u8; 128],
+        bytes: vec![0u8; 128].into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,

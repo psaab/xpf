@@ -4286,7 +4286,7 @@ fn n9162_capture(binding: &BindingWorker, sessions_delta: i64) -> N9162Outcome {
     let (prebuilt, target_ifindex, flow_key_none) = match binding.scratch.scratch_forwards.first() {
         Some(fwd) => (
             match &fwd.frame {
-                PendingForwardFrame::Prebuilt(bytes) => Some(bytes.clone()),
+                PendingForwardFrame::Prebuilt(bytes) => Some(bytes.buf.clone()),
                 _ => None,
             },
             fwd.target_ifindex,

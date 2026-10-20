@@ -44,7 +44,7 @@ fn cos_queue_rejects_prepared_once_local_items_enter_queue() {
     cos_queue_push_back(
         &mut root.queues[0],
         CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![0; 1500],
+            bytes: vec![0; 1500].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET6 as u8,
             expected_protocol: PROTO_TCP,
@@ -86,7 +86,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![1],
+            bytes: vec![1].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -102,7 +102,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![2],
+            bytes: vec![2].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -334,7 +334,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![9],
+            bytes: vec![9].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,

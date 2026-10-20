@@ -433,7 +433,7 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
         return MirrorCloneResult::NoFrame;
     }
     let req = TxRequest {
-        bytes: frame,
+        bytes: frame.into(),
         expected_ports: None,
         expected_addr_family: meta.addr_family,
         expected_protocol: meta.protocol,

@@ -2,7 +2,7 @@ use super::*;
 
 fn dummy_tx_request() -> TxRequest {
     TxRequest {
-        bytes: Vec::new(),
+        bytes: Vec::new().into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,

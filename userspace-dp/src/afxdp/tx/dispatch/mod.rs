@@ -551,7 +551,7 @@ pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
         .tx_pipeline
         .pending_tx_local
         .push_back(TxRequest {
-            bytes: ptb_bytes,
+            bytes: ptb_bytes.into(),
             expected_ports: None,
             expected_addr_family: meta.addr_family,
             expected_protocol: meta.protocol,
@@ -1453,7 +1453,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                             .tx_pipeline
                             .pending_tx_local
                             .push_back(TxRequest {
-                                bytes: frame,
+                                bytes: frame.into(),
                                 expected_ports,
                                 expected_addr_family: request.meta.addr_family,
                                 expected_protocol: request.meta.protocol,

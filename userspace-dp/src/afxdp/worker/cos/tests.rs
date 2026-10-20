@@ -25,7 +25,7 @@ const SHARED_EXACT_RATE: u64 = COS_SHARED_EXACT_MIN_RATE_BYTES;
 
 fn test_tx_request(ifindex: i32) -> TxRequest {
     TxRequest {
-        bytes: vec![0; 128],
+        bytes: vec![0; 128].into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,

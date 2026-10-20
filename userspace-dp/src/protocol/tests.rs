@@ -3316,8 +3316,8 @@ fn process_status_replay_evictions_wire_key_2382() {
 #[test]
 fn cos_queue_status_lease_claim_flow_roundtrip_1863() {
     let status = CoSQueueStatus {
-        lease_v8_worker_requested_bytes: vec![100, 0, 250],
-        lease_v8_worker_granted_bytes: vec![90, 0, 200],
+        lease_v8_worker_requested_bytes: vec![100, 0, 250].into(),
+        lease_v8_worker_granted_bytes: vec![90, 0, 200].into(),
         ..Default::default()
     };
     let value: serde_json::Value = serde_json::to_value(&status).expect("serialize CoSQueueStatus");

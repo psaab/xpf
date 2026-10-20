@@ -2621,3 +2621,387 @@ fn nat64_14305_slow_path_nonfirst_non_ip_family_fails_closed() {
         "#14305: v4 non-first fragment with non-IP meta family must fail closed"
     );
 }
+
+// #15956: reused-buffer NAT64 builds publish spare capacity instead of
+// zero-filling it (`extend_pooled_for_build`). The builders' contract is
+// that every byte in `0..written` is initialized by the translator, so a
+// buffer poisoned with 0xEE beyond the written length MUST produce
+// byte-identical output to the zero-filled build (modulo the
+// process-global fragment Identification). If a translator ever read an
+// unwritten `dst` byte, 0xEE would leak into the published prefix here.
+// The pool is thread-local and tests in this binary run serialized by
+// the harness invocation; each cell clears it first for isolation.
+#[test]
+fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
+    use crate::afxdp::cos::redirect_pool;
+    redirect_pool::clear_for_test();
+
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+
+    // Forward (v6->v4, first fragment) via the production wrapper: this
+    // exercises the frame/mod.rs spare-capacity site end to end.
+    let frame = build_ipv6_tcp_syn_with_mss(client, synthetic, 5000, 443, 1460);
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
+    let mut want = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("zero-filled forward build");
+    // Poison the pool: recycle a 0xEE-filled buffer at the build capacity,
+    // then rebuild. The published prefix must not contain the poison. The
+    // IPv4 Identification (frame bytes 18..20) and its header checksum
+    // (24..26) are process-global `next_frag_id()` output for this
+    // fragmentable size, so they legitimately differ between two builds;
+    // mask them exactly like the existing differential test does.
+    let capacity = frame.len() + 4;
+    redirect_pool::recycle_vec(vec![0xEEu8; capacity]);
+    let mut got = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("spare-capacity forward build");
+    want[18..20].fill(0);
+    want[24..26].fill(0);
+    got[18..20].fill(0);
+    got[24..26].fill(0);
+    assert_eq!(got, want, "#15956: forward build leaked unwritten spare-capacity bytes");
+    assert!(!got.contains(&0xEE), "#15956: poison byte in forward output");
+
+    // Reverse (v4->v6) via the production wrapper (frame/mod.rs third site).
+    let fwd = Nat64State::forward_decision(pool, server, 40001);
+    let rev = fwd.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443);
+    let rdecision = icmp_test_decision(rev);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let reply = build_ipv4_tcp_frame(server, pool, 443, 40001, 1, 1, 0x10);
+    let want_rev = build_nat64_forwarded_frame(
+        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
+    )
+    .expect("zero-filled reverse build");
+    redirect_pool::recycle_vec(vec![0xEEu8; reply.len() + 44]);
+    let got_rev = build_nat64_forwarded_frame(
+        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
+    )
+    .expect("spare-capacity reverse build");
+    assert_eq!(got_rev, want_rev, "#15956: reverse build leaked unwritten spare-capacity bytes");
+}
+
+// #15956 measurement (not a gate): production-path NAT64 build ns/pkt at
+// 64/512/1460B payloads, through `build_nat64_forwarded_frame`. Run with:
+//   cargo test --release nat64_15956_build_bench -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore = "MEASUREMENT #15956: NAT64 build ns/pkt; prints numbers, asserts nothing"]
+fn nat64_15956_build_bench() {
+    use std::time::Instant;
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
+    let rev = Nat64State::forward_decision(pool, server, 40001)
+        .reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443);
+    let rdecision = icmp_test_decision(rev);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    for payload_len in [64usize, 512, 1460] {
+        let mut frame = Vec::new();
+        write_eth_header(&mut frame, [0xaa; 6], [0xbb; 6], 0, 0x86dd);
+        let plen = (20 + payload_len) as u16;
+        frame.extend_from_slice(&[0x60, 0, 0, 0, (plen >> 8) as u8, plen as u8, PROTO_TCP, 64]);
+        frame.extend_from_slice(&client.octets());
+        frame.extend_from_slice(&synthetic.octets());
+        frame.extend_from_slice(&12345u16.to_be_bytes());
+        frame.extend_from_slice(&80u16.to_be_bytes());
+        frame.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0]);
+        frame.extend_from_slice(&vec![0x5au8; payload_len]);
+        recompute_l4_checksum_ipv6(&mut frame[14..], 40, PROTO_TCP).expect("v6 sum");
+        let iters = 50_000u32;
+        for _ in 0..1000 {
+            let _ = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default());
+        }
+        let t0 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default()).expect("build");
+            sink = sink.wrapping_add(out.len());
+            std::hint::black_box(&out);
+            crate::afxdp::cos::redirect_pool::recycle(out);
+        }
+        eprintln!("15956-BENCH v6to4 payload={payload_len} frame={} ns/pkt={:.1} sink={sink}", frame.len(), t0.elapsed().as_nanos() as f64 / iters as f64);
+
+        let mut frame4 = Vec::new();
+        write_eth_header(&mut frame4, [0xaa; 6], [0xbb; 6], 0, 0x0800);
+        let total = (20 + 20 + payload_len) as u16;
+        frame4.extend_from_slice(&[0x45, 0, (total >> 8) as u8, total as u8, 0, 1, 0x40, 0, 64, PROTO_TCP, 0, 0]);
+        frame4.extend_from_slice(&server.octets());
+        frame4.extend_from_slice(&pool.octets());
+        let cs = checksum16(&frame4[14..34]);
+        frame4[24..26].copy_from_slice(&cs.to_be_bytes());
+        frame4.extend_from_slice(&443u16.to_be_bytes());
+        frame4.extend_from_slice(&40001u16.to_be_bytes());
+        frame4.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 0x50, 0x10, 0x20, 0x00, 0, 0, 0, 0]);
+        frame4.extend_from_slice(&vec![0x5au8; payload_len]);
+        recompute_l4_checksum_ipv4(&mut frame4[14..], 20, PROTO_TCP, false).expect("v4 sum");
+        for _ in 0..1000 {
+            let _ = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default());
+        }
+        let t0 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            let out = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default()).expect("rbuild");
+            sink = sink.wrapping_add(out.len());
+            std::hint::black_box(&out);
+            crate::afxdp::cos::redirect_pool::recycle(out);
+        }
+        eprintln!("15956-BENCH v4to6 payload={payload_len} frame={} ns/pkt={:.1} sink={sink}", frame4.len(), t0.elapsed().as_nanos() as f64 / iters as f64);
+    }
+}
+
+// #15956 interleaved A/B (measurement, not a gate): same `_into` builder,
+// same reused pooled buffer; the ONLY difference is how the build window
+// is published — `resize(capacity, 0)` zero-fill (before) vs
+// `extend_pooled_for_build` spare-capacity publish (after). Arms are
+// interleaved per round so host drift hits both. Run with:
+//   cargo test --release nat64_15956_resize_ab_bench -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore = "MEASUREMENT #15956: resize vs spare-capacity A/B; prints numbers, asserts nothing"]
+fn nat64_15956_resize_ab_bench() {
+    use crate::afxdp::cos::redirect_pool;
+    use std::time::Instant;
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    for payload_len in [64usize, 512, 1460] {
+        let mut frame = Vec::new();
+        write_eth_header(&mut frame, [0xaa; 6], [0xbb; 6], 0, 0x86dd);
+        let plen = (20 + payload_len) as u16;
+        frame.extend_from_slice(&[0x60, 0, 0, 0, (plen >> 8) as u8, plen as u8, PROTO_TCP, 64]);
+        frame.extend_from_slice(&client.octets());
+        frame.extend_from_slice(&synthetic.octets());
+        frame.extend_from_slice(&12345u16.to_be_bytes());
+        frame.extend_from_slice(&80u16.to_be_bytes());
+        frame.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0]);
+        frame.extend_from_slice(&vec![0x5au8; payload_len]);
+        recompute_l4_checksum_ipv6(&mut frame[14..], 40, PROTO_TCP).expect("v6 sum");
+        let cap = frame.len() + 4;
+        let run = |extend: bool, iters: u32| -> f64 {
+            let t0 = Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..iters {
+                let mut out = redirect_pool::checkout_with_capacity(cap);
+                if extend {
+                    redirect_pool::extend_pooled_for_build(&mut out, cap);
+                } else {
+                    out.resize(cap, 0);
+                }
+                let w = crate::nat64::build_nat64_v6_to_v4_frame_into(&mut out, &frame, pool, server, [0x11; 6], [0x22; 6], 0, false).expect("into");
+                sink = sink.wrapping_add(w);
+                out.truncate(w);
+                std::hint::black_box(&out);
+                redirect_pool::recycle(out);
+            }
+            std::hint::black_box(sink);
+            t0.elapsed().as_nanos() as f64 / iters as f64
+        };
+        // Warm both arms, then interleave ABBA rounds so host drift
+        // (frequency scaling, noisy neighbours on this shared host) hits
+        // both arms symmetrically; report trimmed medians.
+        for _ in 0..2000 { run(false, 1); run(true, 1); }
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for _ in 0..9 {
+            a.push(run(false, 20_000));
+            b.push(run(true, 20_000));
+            b.push(run(true, 20_000));
+            a.push(run(false, 20_000));
+        }
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        eprintln!(
+            "15956-AB payload={payload_len} frame={} resize_ns={:.1} extend_ns={:.1} delta_ns={:.1} a={:?} b={:?}",
+            frame.len(), a[a.len()/2], b[b.len()/2], a[a.len()/2]-b[b.len()/2],
+            a.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>(),
+            b.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>()
+        );
+    }
+}
+
+// #15956 fix (triple review): cold + growth checkout cells. A cold
+// checkout's spare capacity was never written by anyone; publishing it
+// with set_len without the checkout-time delta zero-fill would expose
+// uninitialized bytes. These cells pin: (a) cold build (empty pool)
+// produces correct output; (b) a pre-sized DIRTY pooled buffer (0xEE,
+// simulating allocator memory that happens to contain a pattern) is
+// treated as initialized extent = its published length only — the delta
+// past it is zero-filled at checkout, proven by the growth counter and
+// by output equality; (c) a second, larger build on the same buffer
+// pays exactly one more delta zero-fill, and a same-size rebuild pays
+// none (amortized, not per-packet whole-window).
+#[test]
+fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
+    use crate::afxdp::cos::redirect_pool;
+    redirect_pool::clear_for_test();
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 0);
+
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let pool_ip = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let frame = build_ipv6_tcp_syn_with_mss(client, synthetic, 5000, 443, 1460);
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool_ip, server, 40001));
+
+    // (a) Cold: empty pool -> fresh allocation. Exactly one delta
+    // zero-fill (the whole window), correct output.
+    let cold = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("cold build");
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "cold checkout pays one full delta");
+    let cold_bytes = cold.clone();
+    redirect_pool::recycle(cold);
+
+    // Warm same-size rebuild: recycle restored the extent to the
+    // filled window (max with published length), so no re-fill.
+    let warm = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("warm build");
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "same-size rebuild pays NO re-fill: recycle restored max(extent, published) = the filled window");
+    assert_eq!(warm[34..], cold_bytes[34..], "cold and warm builds agree past the frag-ID header");
+    redirect_pool::recycle(warm);
+
+    // (b) Growth with a dirty pre-sized buffer: recycle a 0xEE buffer
+    // whose published length (10) is far below the build capacity. The
+    // delta past 10 must be zero-filled at checkout (counter -> 2),
+    // and the build must equal the cold build past the frag-ID header.
+    redirect_pool::clear_for_test();
+    let dirty = vec![0xEEu8; 10];
+    redirect_pool::recycle_vec(dirty);
+    let grown = build_nat64_forwarded_frame(
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
+    )
+    .expect("growth build over dirty buffer");
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "growth checkout pays one delta");
+    assert!(!grown.contains(&0xEE), "growth build leaked dirty spare bytes");
+    assert_eq!(grown[34..], cold_bytes[34..], "growth build matches cold build past frag-ID header");
+}
+
+// #15956 fix (triple review): reverse-UDP failure-path read cell.
+// The v4->v6 translator's checksum phase reads the UDP checksum field
+// at `dst[l4_off+6..l4_off+8]`. That field is INSIDE the written prefix
+// (verbatim L4 copy at 3598 precedes it), so the read is bounded by
+// `written` — this cell proves it stays so under a poisoned dst: a
+// truncated reverse UDP packet (L4 shorter than 8 bytes) must fail
+// closed (None) rather than consult poison past the copied bytes, and
+// a well-formed zero-checksum reverse UDP datagram must generate a
+// valid checksum identical to the zero-filled build.
+#[test]
+fn nat64_15956_reverse_udp_checksum_read_bounded_by_written() {
+    let snat = Ipv4Addr::new(198, 51, 100, 1);
+    let dst4 = Ipv4Addr::new(198, 51, 100, 50);
+    let src6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    let dst6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+
+    let build_v4_udp = |udp_payload: &[u8], csum_zero: bool| -> Vec<u8> {
+        let udp_len = 8 + udp_payload.len();
+        let total = 20 + udp_len;
+        let mut pkt = vec![0u8; total];
+        pkt[0] = 0x45;
+        pkt[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        pkt[6..8].copy_from_slice(&0x4000u16.to_be_bytes());
+        pkt[8] = 64;
+        pkt[9] = PROTO_UDP;
+        pkt[12..16].copy_from_slice(&dst4.octets());
+        pkt[16..20].copy_from_slice(&snat.octets());
+        let s = checksum16(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&s.to_be_bytes());
+        pkt[20..22].copy_from_slice(&53u16.to_be_bytes());
+        pkt[22..24].copy_from_slice(&12345u16.to_be_bytes());
+        pkt[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        pkt[28..28 + udp_payload.len()].copy_from_slice(udp_payload);
+        if !csum_zero {
+            let sum = checksum16_ipv4(dst4, snat, PROTO_UDP, &pkt[20..]);
+            pkt[26..28].copy_from_slice(&sum.to_be_bytes());
+        }
+        let mut frame = vec![0xaau8; 12];
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        frame.extend_from_slice(&pkt);
+        frame
+    };
+
+    // Well-formed zero-checksum UDP: translator must generate a valid
+    // v6 checksum; poisoned dst must match the allocating reference.
+    let frame = build_v4_udp(b"dns-answer", true);
+    let want = crate::nat64::build_nat64_v4_to_v6_frame(&frame, src6, dst6, [0x11; 6], [0x22; 6], 0)
+        .expect("ref zero-csum udp");
+    assert_ne!(&want[14 + 40 + 6..14 + 40 + 8], &[0, 0], "generated UDP checksum must be non-zero");
+    let mut dst = vec![0xEEu8; frame.len() + 44];
+    let n = crate::nat64::build_nat64_v4_to_v6_frame_into(&mut dst, &frame, src6, dst6, [0x11; 6], [0x22; 6], 0)
+        .expect("into zero-csum udp");
+    assert_eq!(&dst[..n], &want[..], "zero-csum reverse UDP diverged under poison");
+    let s6 = Ipv6Addr::from(<[u8; 16]>::try_from(&dst[14 + 8..14 + 24]).unwrap());
+    let d6 = Ipv6Addr::from(<[u8; 16]>::try_from(&dst[14 + 24..14 + 40]).unwrap());
+    assert_eq!(checksum16_ipv6(s6, d6, PROTO_UDP, &dst[14 + 40..n]), 0, "generated checksum verifies");
+
+    // Truncated UDP: the frame RETAINS bytes past the declared L4
+    // (a 6-byte payload follows in the slice), but the IPv4 total
+    // length declares only 4 L4 bytes — ports only, no checksum
+    // field inside the copied prefix. The bounded read
+    // (`dst[..l4_written]`) finds no field, takes the full recompute,
+    // and the recompute fails closed on the 4-byte L4. Were the read
+    // NOT bounded by written, it would consult the retained payload
+    // bytes at l4_off+6 (here non-zero 'dn' of the DNS answer) as a
+    // checksum baseline and could succeed incrementally.
+    let mut short = build_v4_udp(b"dns-answer", false);
+    short[14 + 2..14 + 4].copy_from_slice(&24u16.to_be_bytes());
+    let s = checksum16(&short[14..34]);
+    short[14 + 10..14 + 12].copy_from_slice(&s.to_be_bytes());
+    let mut dst = vec![0xEEu8; short.len() + 44];
+    assert!(
+        crate::nat64::build_nat64_v4_to_v6_frame_into(&mut dst, &short, src6, dst6, [0x11; 6], [0x22; 6], 0).is_none(),
+        "truncated reverse UDP must fail closed via the bounded read, not read past written"
+    );
+    // Direct translator cell: same packet at the L3 _into level.
+    let short_l3 = &short[14..];
+    let mut l3dst = vec![0xEEu8; short_l3.len() + 40];
+    assert!(
+        crate::nat64::write_v4_to_v6_into(&mut l3dst, short_l3, src6, dst6).is_none(),
+        "truncated reverse UDP L3 translate must fail closed"
+    );
+}
+
+
+// #15956 fold (Opus3/Codex3): cross-thread extent migration. The extent
+// now lives IN the PooledBuffer wrapper, so checkout -> move to another
+// thread -> recycle there must preserve it (the owner thread's pool
+// gains the buffer with its full filled window, and its next same-size
+// checkout pays no delta fill). With the deleted ptr-keyed TLS map this
+// cell failed: the extent stayed on the source thread.
+#[test]
+fn nat64_15956_extent_migrates_with_buffer_across_threads() {
+    use crate::afxdp::cos::redirect_pool;
+    redirect_pool::clear_for_test();
+    // Build into a checked-out wrapper on THIS thread, publish at
+    // capacity via extend, truncate to a shorter written length.
+    let cap = 128usize;
+    let mut w = redirect_pool::checkout_with_capacity(cap);
+    redirect_pool::extend_pooled_for_build(&mut w, cap);
+    w.buf[..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    w.buf.truncate(8);
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "cold fill once");
+    // Move the WRAPPER to another thread and recycle it there.
+    let handle = std::thread::spawn(move || {
+        redirect_pool::recycle(w);
+        // The owner thread's pool now holds the buffer WITH extent=cap:
+        // its same-size checkout pays no new delta fill.
+        let mut w2 = redirect_pool::checkout_with_capacity(cap);
+        let fills_after = redirect_pool::growth_zerofills_for_test();
+        redirect_pool::extend_pooled_for_build(&mut w2, cap);
+        (fills_after, w2.initialized(), w2.len())
+    });
+    let (fills, init, len) = handle.join().expect("owner thread");
+    assert_eq!(fills, 0, "owner-thread pool started empty: no counter on that thread");
+    assert_eq!(init, cap, "extent migrated with the wrapper across threads");
+    assert_eq!(len, cap, "extended on owner thread without re-fill");
+    let _ = fills;
+}

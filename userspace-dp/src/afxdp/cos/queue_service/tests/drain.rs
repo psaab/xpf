@@ -377,7 +377,7 @@ fn tx_retry_status_lock_free_4971() {
     );
 
     let items = VecDeque::from([TxRequest {
-        bytes: vec![0u8; 128],
+        bytes: vec![0u8; 128].into(),
         expected_ports: None,
         expected_addr_family: 0,
         expected_protocol: 0,
@@ -437,7 +437,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![1, 2, 3, 4],
+            bytes: vec![1, 2, 3, 4].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -453,7 +453,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![5, 6, 7, 8],
+            bytes: vec![5, 6, 7, 8].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -536,7 +536,7 @@ fn drain_exact_local_fifo_drops_mirror_clone_before_tx_reserve() {
     cos_queue_push_back(
         &mut root.queues[0],
         CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![1, 2, 3, 4],
+            bytes: vec![1, 2, 3, 4].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -599,7 +599,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![1],
+            bytes: vec![1].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -615,7 +615,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![2],
+            bytes: vec![2].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -680,7 +680,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![1],
+            bytes: vec![1].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -696,7 +696,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![2],
+            bytes: vec![2].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -712,7 +712,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
         .hot
         .items
         .push_back(CoSPendingTxItem::Local(TxRequest {
-            bytes: vec![3],
+            bytes: vec![3].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,

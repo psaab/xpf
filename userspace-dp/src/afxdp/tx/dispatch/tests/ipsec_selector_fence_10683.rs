@@ -244,7 +244,7 @@ fn pending_prebuilt_tx_no_binding_counts_15941() {
     let forwarding = test_forwarding_with_egress_mtu(1500);
     let mut request =
         test_live_forward_request_for_frame(64, test_forwarding_decision_to_bound_ifindex(4242));
-    request.frame = PendingForwardFrame::Prebuilt(vec![0u8; 64]);
+    request.frame = PendingForwardFrame::Prebuilt(vec![0u8; 64].into());
     let mut pending = vec![request];
     let mut post_recycles = Vec::new();
     let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);
@@ -325,7 +325,7 @@ fn pending_prebuilt_enqueue_error_counts_15954() {
     let forwarding = test_forwarding_with_egress_mtu(1500);
     let mut request =
         test_live_forward_request_for_frame(64, test_forwarding_decision_to_bound_ifindex(22));
-    request.frame = PendingForwardFrame::Prebuilt(vec![0u8; 64]);
+    request.frame = PendingForwardFrame::Prebuilt(vec![0u8; 64].into());
     let mut pending = vec![request];
     let mut post_recycles = Vec::new();
     let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);

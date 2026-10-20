@@ -12,7 +12,7 @@ fn t7_local_scratch_entry(offset: u64, len: usize) -> (u64, TxRequest) {
     (
         offset,
         TxRequest {
-            bytes: vec![0u8; len],
+            bytes: vec![0u8; len].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -137,7 +137,7 @@ fn submit_local_bumps_owner_tx_packets_and_bytes() {
     // in a single transmit_batch call (TX_BATCH_SIZE == 64).
     let items: VecDeque<TxRequest> = (0..3)
         .map(|_| TxRequest {
-            bytes: vec![0u8; 100],
+            bytes: vec![0u8; 100].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -423,7 +423,7 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
     // shipped set {A, B}.
     let items: VecDeque<TxRequest> = VecDeque::from([
         TxRequest {
-            bytes: vec![0u8; 200],
+            bytes: vec![0u8; 200].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -436,7 +436,7 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
             enqueue_ns: now_ns,
         },
         TxRequest {
-            bytes: vec![0u8; 100],
+            bytes: vec![0u8; 100].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,
@@ -449,7 +449,7 @@ fn mirror_interior_drop_preserves_sidecar_attribution_5157() {
             enqueue_ns: now_ns,
         },
         TxRequest {
-            bytes: vec![0u8; 150],
+            bytes: vec![0u8; 150].into(),
             expected_ports: None,
             expected_addr_family: libc::AF_INET as u8,
             expected_protocol: PROTO_TCP,

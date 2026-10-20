@@ -17,7 +17,7 @@ use super::*;
 
 fn test_tx_request_for_inbox(payload: u8) -> TxRequest {
     TxRequest {
-        bytes: vec![payload; 16],
+        bytes: vec![payload; 16].into(),
         expected_ports: None,
         expected_addr_family: libc::AF_INET as u8,
         expected_protocol: 6,
