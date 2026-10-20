@@ -41,4 +41,11 @@ func TestVlanQualifiedRefAdminDisabled15934(t *testing.T) {
 	if hostInboundInterfaceAdminDisabled(cfg, "ge-0/0/0.abc") {
 		t.Errorf("malformed unit ref must stay enabled/inert")
 	}
+	// Signed / out-of-range VLAN qualifiers are NOT stripped: the ref
+	// stays malformed and inert even against a disabled unit.
+	for _, ref := range []string{"ge-0/0/0.100:-1", "ge-0/0/0.100:+12", "ge-0/0/0.100:4095", "ge-0/0/0.100:"} {
+		if hostInboundInterfaceAdminDisabled(cfg, ref) {
+			t.Errorf("malformed qualifier ref %q must stay enabled/inert", ref)
+		}
+	}
 }

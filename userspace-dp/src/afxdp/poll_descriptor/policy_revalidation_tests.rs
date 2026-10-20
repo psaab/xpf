@@ -5324,44 +5324,64 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
     assert!(run(rr).is_none(), "#15178 control: round-robin NAT64 survives");
 }
 
-/// #15934 (ledger residual of #15791; triple-review fold): the
-/// forward_query (reverse-hit, companion-synthesized) arm judges the
-/// SYNTHESIZED forward decision on a REVERSE (reply) packet. The reply's
-/// own selector must therefore NOT win over the stored forward selector
-/// (#14128: `source_nat_icmp` is forward packet identity, preserved by
-/// `NatDecision::reverse`). Realistic shape: an echo-request (8,0) flow's
-/// echo-reply (0,0) arrives on a node without the forward row; the DNAT
-/// rule is type-constrained to (8,0). Stored-first must keep the
-/// session; the round-1 packet-first composition revoked it. With NO
-/// stored selector the packet remains the fallback (same-type reply
-/// (8,0) survives, wrong/none still fail closed).
+/// #15934 (ledger residual of #15791; triple-review rounds 2-3): the
+/// ICMP selector fed to FORWARD-rule revalidation must represent the
+/// ORIGINAL forward packet. Composition is keyed on HIT DIRECTION:
+///
+/// - reverse-direction hits (companion-less OR with a materialized
+///   forward companion) compose stored-first: the arriving packet is a
+///   reply (echo-reply (0,0)) and must not override the stored forward
+///   selector (echo-request (8,0), #14128);
+/// - a reverse hit judging a DNAT rewrite with NO stored selector has
+///   no forward provenance (DNAT-only flows mint none — only a source
+///   rewrite records one): it declines on NAT-selector grounds (keep)
+///   instead of revoking under the unchanged type-8 rule or laundering
+///   a replacement type-0 rule with the same rewrite;
+/// - forward-direction hits keep packet-first (live packet wins,
+///   stored is the fallback), unchanged from round 1.
 #[test]
-fn companionless_reverse_icmp_dnat_stored_selector_wins_15934() {
-    fn build(stored: Option<(u8, u8)>) -> (
-        SessionKey,
-        SessionDecision,
-        SessionMetadata,
-        SessionOrigin,
-        crate::afxdp::ForwardingState,
-    ) {
-        let (
-            mut forward_key,
-            _,
-            mut forward_decision,
-            _forward_metadata,
-            _,
-            mut reverse_metadata,
-            origin,
-            _,
-        ) = reverse_snat_case_13652();
-        forward_key.protocol = libc::IPPROTO_ICMP as u8;
-        forward_key.src_port = 0x1234;
-        forward_key.dst_port = 0;
-        forward_decision.nat = NatDecision {
+fn reverse_hits_judge_forward_selector_by_direction_15934() {
+    // Forward fixture: ICMP DNAT (+ optional stored selector) external
+    // dst -> internal 10.0.0.10 under a type-8-constrained DNAT rule.
+    fn forwarding_with(rule_type: Option<u8>) -> crate::afxdp::ForwardingState {
+        let rule = crate::protocol::DestinationNATRuleSnapshot {
+            name: "icmp-ping-forward".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            pool_address: "10.0.0.10".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: rule_type,
+            match_icmp_code: rule_type.map(|_| 0),
+            ..Default::default()
+        };
+        let mut configured = imported_snat_forwarding(false);
+        if rule_type.is_some() || true {
+            configured.dnat_table = crate::nat::DnatTable::from_snapshots(
+                &[rule],
+                &crate::nat::NatCounterStore::default(),
+            );
+        }
+        configured
+    }
+    fn nat(stored: Option<(u8, u8)>) -> NatDecision {
+        NatDecision {
             rewrite_dst: Some("10.0.0.10".parse().expect("server address")),
             source_nat_icmp: stored,
             ..NatDecision::default()
-        };
+        }
+    }
+    // One reverse-hit driver over an explicitly built forward/reverse
+    // pair. `companion` installs BOTH rows (forward row materialized,
+    // made stale by the caller bumping the generation); otherwise only
+    // the reverse row exists and the arm synthesizes the forward row.
+    #[allow(clippy::too_many_arguments)]
+    fn reverse_hit(
+        configured: &crate::afxdp::ForwardingState,
+        stored: Option<(u8, u8)>,
+        companion: bool,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> Option<PolicyRevocation> {
+        let forward_key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+        let forward_decision = decision_14315(nat(stored));
         let reverse_key = crate::session::reverse_session_key(&forward_key, forward_decision.nat);
         let reverse_decision = SessionDecision {
             nat: forward_decision.nat.reverse(
@@ -5372,64 +5392,58 @@ fn companionless_reverse_icmp_dnat_stored_selector_wins_15934() {
             ),
             ..forward_decision
         };
+        let mut forward_metadata = meta_14315(2, 1);
+        // Non-fabric with a real ingress identity so the judged rows are
+        // not swallowed by the #15176 absent-scope keep before the
+        // selector composition is reached.
+        forward_metadata.fabric_ingress = false;
+        forward_metadata.ingress_ifindex = 11;
+        let mut reverse_metadata = forward_metadata.clone();
         reverse_metadata.is_reverse = true;
+        reverse_metadata.ingress_zone = forward_metadata.egress_zone;
+        reverse_metadata.egress_zone = forward_metadata.ingress_zone;
         reverse_metadata.forward_ingress_vlan_id = Some(0);
-        let rule = crate::protocol::DestinationNATRuleSnapshot {
-            name: "icmp-ping-forward".to_string(),
-            destination_address: forward_key.dst_ip.to_string(),
-            pool_address: "10.0.0.10".to_string(),
-            protocol: "icmp".to_string(),
-            match_icmp_type: Some(8),
-            match_icmp_code: Some(0),
-            ..Default::default()
-        };
-        let mut configured = imported_snat_forwarding(false);
-        configured.dnat_table = crate::nat::DnatTable::from_snapshots(
-            &[rule],
-            &crate::nat::NatCounterStore::default(),
-        );
-        (reverse_key, reverse_decision, reverse_metadata, origin, configured)
-    }
-
-    fn hit(
-        case: &(
-            SessionKey,
-            SessionDecision,
-            SessionMetadata,
-            SessionOrigin,
-            crate::afxdp::ForwardingState,
-        ),
-        packet_icmp: Option<(u8, u8)>,
-    ) -> Option<PolicyRevocation> {
-        let (reverse_key, reverse_decision, reverse_metadata, origin, configured) = case;
-        let flow = SessionFlow {
-            src_ip: reverse_key.src_ip,
-            dst_ip: reverse_key.dst_ip,
-            forward_key: reverse_key.clone(),
-        };
         let mut sessions = SessionTable::new();
         sessions.set_forwarding_revalidation_gen(1, 1);
+        if companion {
+            assert!(sessions.install_with_protocol_with_origin(
+                forward_key.clone(),
+                forward_decision,
+                forward_metadata,
+                SessionOrigin::ForwardFlow,
+                1_000_000,
+                forward_key.protocol,
+                0x02,
+            ));
+            // Stale at the next boundary so the primary arm judges it.
+            sessions.set_forwarding_revalidation_gen(2, 2);
+        }
         assert!(sessions.install_with_protocol_with_origin(
             reverse_key.clone(),
-            *reverse_decision,
+            reverse_decision,
             reverse_metadata.clone(),
             SessionOrigin::ReverseFlow,
             1_000_000,
             reverse_key.protocol,
             0x10,
         ));
+        let flow = SessionFlow {
+            src_ip: reverse_key.src_ip,
+            dst_ip: reverse_key.dst_ip,
+            forward_key: reverse_key.clone(),
+        };
         let mut observed_metadata = reverse_metadata.clone_without_policy_counter();
         observed_metadata.ingress_ifindex = 12;
         source_nat_revocation_on_session_hit_with_ingress(
             configured,
             &mut sessions,
-            reverse_key,
+            &reverse_key,
             &observed_metadata,
             12,
             200,
-            *reverse_decision,
+            reverse_decision,
             &flow,
-            *origin,
+            SessionOrigin::ReverseFlow,
             None,
             None,
             1_000_000_000,
@@ -5437,25 +5451,139 @@ fn companionless_reverse_icmp_dnat_stored_selector_wins_15934() {
         )
     }
 
-    // (a) Realistic reply: stored forward (8,0), hitting packet is the
-    // echo-REPLY (0,0). Must NOT revoke. RED under packet-first.
-    let stored_case = build(Some((8, 0)));
+    let type8 = forwarding_with(Some(8));
+    // (1) Companion-PRESENT reverse hit: reply (0,0) + stored (8,0)
+    // must NOT revoke. RED under the round-2 primary packet-first.
     assert!(
-        hit(&stored_case, Some((0, 0))).is_none(),
-        "echo-reply (0,0) must not revoke an echo-request (8,0) DNAT session; stored wins (#15934)"
+        reverse_hit(&type8, Some((8, 0)), true, Some((0, 0))).is_none(),
+        "companion-present reverse reply must judge by the stored forward selector (#15934)"
     );
-    // (b) Stored-None fallback: the packet is the only selector.
-    let none_case = build(None);
+    // (2) Companion-less reverse hit, same stored shape (round-2 cell).
     assert!(
-        hit(&none_case, Some((8, 0))).is_none(),
-        "stored-None: packet (8,0) fallback must validate (#15934)"
+        reverse_hit(&type8, Some((8, 0)), false, Some((0, 0))).is_none(),
+        "companion-less reverse reply must judge by the stored forward selector (#15934)"
+    );
+    // (3) DNAT-only reply: stored None + reply (0,0) under the
+    // UNCHANGED type-8 rule must NOT revoke (absent provenance ->
+    // decline), companion-less and companion-present.
+    assert!(
+        reverse_hit(&type8, None, false, Some((0, 0))).is_none(),
+        "DNAT-only echo reply must survive: no forward provenance to judge by (#15934)"
     );
     assert!(
-        hit(&none_case, None).is_some(),
-        "stored-None + no packet selector must fail closed (#15934)"
+        reverse_hit(&type8, None, true, Some((0, 0))).is_none(),
+        "DNAT-only echo reply (companion present) must survive (#15934)"
     );
+    // (4) Anti-laundering: DNAT-only reply under a REPLACEMENT type-0
+    // rule with the same rewrite must NOT be validated BY the reply
+    // either — decline keeps it, but crucially the keep comes from
+    // absent provenance, not from matching type 0. Pinned indirectly:
+    // with stored provenance (8,0), the same replacement type-0 rule
+    // MUST revoke (judged, not laundered).
+    let type0 = forwarding_with(Some(0));
     assert!(
-        hit(&none_case, Some((13, 0))).is_some(),
-        "stored-None + wrong packet type must fail closed (#15934)"
+        reverse_hit(&type0, Some((8, 0)), false, Some((0, 0))).is_some(),
+        "stored (8,0) against a replacement type-0 rule must revoke, not launder (#15934)"
+    );
+    // (5) Withdrawn-rule control with stored provenance still revokes.
+    let withdrawn = imported_snat_forwarding(false);
+    assert!(
+        reverse_hit(&withdrawn, Some((8, 0)), false, Some((0, 0))).is_some(),
+        "withdrawn DNAT rule must still revoke when provenance exists (#15934)"
+    );
+}
+
+/// #15934 control: a FORWARD-direction hit keeps packet-first — the
+/// live forward packet's selector is authoritative and the stored
+/// selector is only the fallback.
+#[test]
+fn forward_hit_keeps_packet_first_selector_15934() {
+    let forward_key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    // Stored selector is stale/wrong (13,0); the live forward packet
+    // carries the rule's (8,0). Packet-first must validate.
+    let decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.10".parse().expect("server address")),
+        source_nat_icmp: Some((13, 0)),
+        ..NatDecision::default()
+    });
+    let mut metadata = meta_14315(2, 1);
+    metadata.fabric_ingress = false;
+    metadata.ingress_ifindex = 11;
+    let rule = crate::protocol::DestinationNATRuleSnapshot {
+        name: "icmp-ping-forward".to_string(),
+        destination_address: "198.51.100.9".to_string(),
+        pool_address: "10.0.0.10".to_string(),
+        protocol: "icmp".to_string(),
+        match_icmp_type: Some(8),
+        match_icmp_code: Some(0),
+        ..Default::default()
+    };
+    let mut configured = imported_snat_forwarding(false);
+    configured.dnat_table =
+        crate::nat::DnatTable::from_snapshots(&[rule], &crate::nat::NatCounterStore::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        forward_key.protocol,
+        0x02,
+    ));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    let flow = SessionFlow {
+        src_ip: forward_key.src_ip,
+        dst_ip: forward_key.dst_ip,
+        forward_key: forward_key.clone(),
+    };
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &configured,
+            &mut sessions,
+            &forward_key,
+            &metadata,
+            decision,
+            &flow,
+            SessionOrigin::ForwardFlow,
+            None,
+            None,
+            1_000_000_000,
+            Some((8, 0)),
+        )
+        .is_none(),
+        "forward hit: live packet selector (8,0) must win over stored (13,0) (#15934)"
+    );
+    // Wrong live type on a forward hit revokes even though a stored
+    // selector exists (packet is authoritative in this direction).
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        forward_key.protocol,
+        0x02,
+    ));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &configured,
+            &mut sessions,
+            &forward_key,
+            &metadata,
+            decision,
+            &flow,
+            SessionOrigin::ForwardFlow,
+            None,
+            None,
+            1_000_000_000,
+            Some((13, 0)),
+        )
+        .is_some(),
+        "forward hit: live packet (13,0) must revoke against the type-8 rule (#15934)"
     );
 }

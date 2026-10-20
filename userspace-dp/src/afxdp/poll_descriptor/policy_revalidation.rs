@@ -819,6 +819,36 @@ pub(super) fn source_nat_revocation_on_session_hit(
     )
 }
 
+/// #15934: the ICMP selector fed to FORWARD-rule revalidation must
+/// represent the ORIGINAL forward packet, never the currently arriving
+/// packet when that packet travels in the reverse direction. Composition
+/// is therefore keyed on HIT DIRECTION, not on which call site or session
+/// branch judges the row:
+///
+/// - forward-direction hit: the live packet IS a forward packet, so its
+///   selector is authoritative (`packet.or(stored)`);
+/// - reverse-direction hit: the live packet is a REPLY (echo-reply (0,0)
+///   for an echo-request (8,0) flow), so the stored forward selector
+///   wins (`stored.or(packet)`, #14128 — `NatDecision::reverse`
+///   preserves it as forward packet identity).
+///
+/// A reverse hit whose judged forward decision carries NO stored
+/// selector has no forward provenance at all: DNAT-only flows mint none
+/// (only a source-NAT rewrite records one), and a reply cannot supply
+/// the request's type. Callers decline to revoke on selector grounds
+/// there instead of judging the forward rule by the reply's type.
+fn forward_selector_for_hit(
+    is_reverse_hit: bool,
+    packet_icmp: Option<(u8, u8)>,
+    stored: Option<(u8, u8)>,
+) -> Option<(u8, u8)> {
+    if is_reverse_hit {
+        stored.or(packet_icmp)
+    } else {
+        packet_icmp.or(stored)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     forwarding: &ForwardingState,
@@ -969,6 +999,27 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                     {
                         return None;
                     }
+                    // #15934: DNAT-only echo flows record no forward
+                    // selector, and the arriving reply cannot supply the
+                    // request's type — revoking on selector grounds
+                    // would kill every such session at the first
+                    // revalidation boundary, while judging by the reply
+                    // could also LAUNDER a replacement rule of the
+                    // reply's type with the same rewrite. Decline to
+                    // revoke on NAT-selector grounds (keep), the same
+                    // absent-provenance shape as the #15176 scope keep
+                    // above. Sessions WITH stored provenance are judged
+                    // normally, so a withdrawn rule still revokes.
+                    let stored_forward_icmp = forward_decision.nat.source_nat_icmp;
+                    if stored_forward_icmp.is_none()
+                        && forward_decision.nat.rewrite_dst.is_some()
+                        && matches!(
+                            forward_query.protocol,
+                            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+                        )
+                    {
+                        return None;
+                    }
                     std::mem::swap(
                         &mut forward_metadata.ingress_zone,
                         &mut forward_metadata.egress_zone,
@@ -980,16 +1031,13 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         &forward_query,
                         source_nat_static,
                         now_ns,
-                        // #15934: this arm judges the SYNTHESIZED forward
-                        // decision on a REVERSE (reply) packet, so the
-                        // packet's own selector is the reply's type/code
-                        // (echo-reply (0,0) for an echo-request (8,0)
-                        // flow) and must NOT win over the stored forward
-                        // selector (#14128: source_nat_icmp is forward
-                        // packet identity, preserved by NatDecision::
-                        // reverse). Stored first; the packet is only the
-                        // fallback when no selector was ever stored.
-                        forward_decision.nat.source_nat_icmp.or(packet_icmp),
+                        // #15934: reverse-direction hit — the stored
+                        // forward selector wins over the reply's own
+                        // type/code (see forward_selector_for_hit).
+                        // With no stored selector there is no forward
+                        // provenance (DNAT-only flows mint none): decline
+                        // below rather than judge by the reply's type.
+                        forward_selector_for_hit(true, packet_icmp, stored_forward_icmp),
                     );
                     return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
@@ -1068,13 +1116,24 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     if scope_dependent && identity_absent && forward_metadata.nat_scope_ifindex.is_none() {
         return None;
     }
-    // #15934: this arm judges the FORWARD row (a forward-direction hit, or
-    // a reverse hit whose forward companion IS materialized): the hitting
-    // packet is in the forward direction for the stored-row case and the
-    // live packet selector is authoritative; the stored selector is the
-    // fallback for selector-less packets. The companion-less synthesized
-    // arm above inverts the priority on purpose (stored-first), because
-    // its hitting packet is a reply.
+    // #15934: selector priority follows HIT DIRECTION (see
+    // forward_selector_for_hit), not session-branch shape: a reverse hit
+    // that reaches this arm because its forward companion IS materialized
+    // still arrives as a reply, so the stored forward selector wins; a
+    // forward hit's live packet selector is authoritative. The
+    // absent-provenance decline below mirrors the companion-less arm:
+    // a reverse ICMP hit judging a DNAT rewrite with no stored selector
+    // cannot be selector-judged at all.
+    if metadata.is_reverse
+        && forward_decision.nat.source_nat_icmp.is_none()
+        && forward_decision.nat.rewrite_dst.is_some()
+        && matches!(
+            forward_key.protocol,
+            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+        )
+    {
+        return None;
+    }
     let (valid, static_nat) = source_nat_translation_still_valid(
         forwarding,
         &forward_decision,
@@ -1082,7 +1141,11 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         &forward_key,
         stored_static,
         now_ns,
-        packet_icmp.or(forward_decision.nat.source_nat_icmp),
+        forward_selector_for_hit(
+            metadata.is_reverse,
+            packet_icmp,
+            forward_decision.nat.source_nat_icmp,
+        ),
     );
     if valid {
         if let Some(canonical_key) = canonical_key.as_ref() {

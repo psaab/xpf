@@ -446,8 +446,10 @@ fn lookup_forwarding_resolution_without_nat_local_inner(
     )
 }
 
-/// #9951: identify the exact inter-VRF leak selected by the immutable FIB
-/// walk. This deliberately does not re-run neighbor/ECMP/HA resolution:
+/// #9951: identify the first precedence-ordered leak incarnation that
+/// owns this destination for ABA/revocation stamping (NOT necessarily
+/// the leak that carried any given packet — see the #15934 note below).
+/// This deliberately does not re-run neighbor/ECMP/HA resolution:
 /// those mutable inputs can change between the session lookup and provenance
 /// stamping, which must never turn a valid leak match into an unstamped one.
 /// The first matching leak whose target table has a route is the same

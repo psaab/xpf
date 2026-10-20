@@ -41,7 +41,11 @@ func hostInboundInterfaceAdminDisabled(cfg *config.Config, ref string) bool {
 	// unit identity: strip it before splitting.
 	splitRef := ref
 	if i := strings.LastIndexByte(splitRef, ':'); i >= 0 {
-		if _, err := strconv.Atoi(splitRef[i+1:]); err == nil {
+		// Only a canonical VLAN qualifier (decimal digits, 0..=4094) is
+		// stripped; signed or out-of-range suffixes (":-1", ":+12",
+		// ":4095") stay part of the ref and remain inert, exactly as a
+		// non-numeric suffix does.
+		if vid, err := strconv.Atoi(splitRef[i+1:]); err == nil && vid >= 0 && vid <= 4094 && strconv.Itoa(vid) == splitRef[i+1:] {
 			splitRef = splitRef[:i]
 		}
 	}
