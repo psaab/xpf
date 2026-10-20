@@ -1094,6 +1094,14 @@ impl Coordinator {
     }
 
     pub(crate) fn stop_inner(&mut self, clear_synced_state: bool) {
+        // #15966r7: worker-set rebuild resets the PPTP epoch tracker.
+        // Advance the epoch so any view published before this stop (e.g. a
+        // candidate that fails bring-up) can never share an epoch with the
+        // recovery publish, and clear the flip tracker so the recovery
+        // publish re-seeds from its own enabled bit. Fresh replies stamped
+        // under the recovery epoch are therefore never dropped as stale.
+        self.pptp_epoch_counter = self.pptp_epoch_counter.saturating_add(1);
+        self.pptp_last_enabled = None;
         // #10516: stop and join the XFRM-SA monitor before workers and
         // forwarding state are reset. The monitor owns the only snapshot
         // writer, so joining is the no-mutation-after-stop fence.

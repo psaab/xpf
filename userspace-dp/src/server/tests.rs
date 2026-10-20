@@ -9371,6 +9371,14 @@ fn pptp_drain_guard_does_not_accept_a_mention_7699() {
         "the guard accepts a PROSE mention of the drain, so a comment naming \
          the function would report the dispatch as wired (#7699)"
     );
+    // Epoch wiring census: the publisher stamp must exist in the
+    // coordinator publish path, or deleting it leaves every cell green
+    // while workers drain with epoch 0 forever.
+    let coord_src = include_str!("../afxdp/coordinator/mod.rs");
+    assert!(
+        coord_src.contains("self.forwarding.pptp_epoch = self.pptp_epoch_counter;"),
+        "coordinator must stamp pptp_epoch at publish_runtime_view"
+    );
     assert!(
         pptp_drain_line(REAL, PPTP_DRAIN_NEEDLE).is_some(),
         "the guard does not match even a body that plainly contains the real \

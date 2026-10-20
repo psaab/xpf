@@ -204,10 +204,13 @@ impl PptpControlInbox {
             return Vec::new();
         }
         inner.last_drain_ns = now_ns;
-        // Drain drops entries buffered under an older enable-epoch than
-        // the draining worker's current view epoch.
+        // When the draining view is enabled, only entries stamped with
+        // that view's exact epoch are eligible: strictly older entries
+        // predate a disable/re-enable, and newer entries were captured
+        // under a view this worker has not adopted yet (a stale enabled
+        // view must not install them after a later publish).
         let all = std::mem::take(&mut inner.pending);
-        all.into_iter().filter(|(_, seg)| seg.epoch >= current_epoch).collect()
+        all.into_iter().filter(|(_, seg)| seg.epoch == current_epoch).collect()
     }
 
     pub(crate) fn dropped_count(&self) -> u64 {
@@ -484,7 +487,7 @@ impl PptpControlInbox {
         inner
             .pending_call_installs
             .iter()
-            .filter(|pending| pending.epoch >= current_epoch)
+            .filter(|pending| pending.epoch == current_epoch)
             .cloned()
             .collect()
     }
@@ -1217,9 +1220,37 @@ mod tests_15966r_toggle {
         // Current-epoch entry under that same view survives (no second purge).
         assert!(inbox.push(seg(7, 3, 3)));
         assert_eq!(inbox.take_pending_in_domain(3_000_000_000, 7).len(), 1, "current-epoch entry must survive lagging drains");
-        // Stale view consistency: a worker still on epoch 5 uses ITS epoch;
-        // an epoch-5 entry is eligible for it (no cross-worker inference).
-        assert!(inbox.push(seg(5, 4, 4)));
-        assert_eq!(inbox.take_pending_in_domain(4_000_000_000, 5).len(), 1, "stale view drains consistently under its own epoch");
+        // Exact-epoch rule: an entry stamped under a NEWER epoch (9) is
+        // not eligible under a stale epoch-5 view — after the publisher
+        // has moved on, the stale enabled view must not install it.
+        assert!(inbox.push(seg(9, 4, 4)));
+        assert_eq!(inbox.take_pending_in_domain(4_000_000_000, 5).len(), 0, "future-epoch entry must drop under a stale view");
+        // And the equal-epoch entry under that same stale view was kept
+        // above at its own drain; strictly-older under current drops:
+        assert!(inbox.push(seg(5, 5, 5)));
+        assert_eq!(inbox.take_pending_in_domain(5_000_000_000, 7).len(), 0, "strictly-older entry must drop under current view");
+    }
+}
+
+#[cfg(test)]
+mod tests_generation_regression {
+    use super::*;
+    fn seg(epoch: u64, ns: u64, b: u8) -> PendingControlSegment {
+        PendingControlSegment { epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: ns, payload: vec![b] }
+    }
+    #[test]
+    fn generation_regression_freeze_must_not_drop_fresh_reply() {
+        // Candidate view epoch G=5 published pre-spawn; rollback republishes
+        // recovery view. Because stop_inner advanced the publisher epoch,
+        // the recovery view is stamped G+1=6 (simulated here by draining
+        // under epoch 6), and a FRESH reply captured under the recovery
+        // view (epoch 6) must install — a tracker frozen at G would have
+        // dropped it as future/stale.
+        let inbox = PptpControlInbox::default();
+        assert!(inbox.push(seg(6, 1, 1)));
+        assert_eq!(inbox.take_pending_in_domain(1_000_000_000, 6).len(), 1, "fresh reply under recovery epoch must not be dropped");
+        // Old candidate-epoch entries (5) under recovery (6) still drop.
+        assert!(inbox.push(seg(5, 2, 2)));
+        assert_eq!(inbox.take_pending_in_domain(2_000_000_000, 6).len(), 0);
     }
 }

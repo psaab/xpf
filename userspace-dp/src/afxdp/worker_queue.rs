@@ -1005,8 +1005,8 @@ pub(crate) mod tests;
 #[path = "pptp_broadcast.rs"]
 pub(in crate::afxdp) mod pptp_broadcast;
 #[cfg(test)]
-pub(in crate::afxdp) use pptp_broadcast::{drain_pptp_control_inbox, drain_pptp_control_inbox_at_epoch};
+pub(in crate::afxdp) use pptp_broadcast::drain_pptp_control_inbox;
 pub(in crate::afxdp) use pptp_broadcast::{
     broadcast_pptp_call_forget, broadcast_pptp_forget, broadcast_pptp_install,
-    drain_pptp_control_inbox_for_worker,
+    drain_pptp_control_inbox_at_epoch, drain_pptp_control_inbox_for_worker,
 };
