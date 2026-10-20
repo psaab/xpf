@@ -691,6 +691,27 @@ fn term_extra_from_meta_tcp_keeps_l4_present_and_tcp_flags() {
     );
 }
 
+#[test]
+fn term_extra_from_meta_fragment_sentinel_sets_is_fragment_and_drops_l4_present_15947() {
+    // #15947 (H27-03): protocol 255 (SHIM_PROTO_FRAGMENT_NO_L4) on the
+    // meta-only path must report is_fragment=true and l4_present=false.
+    // Pre-fix it reported is_fragment:false / l4_present:true while also
+    // setting native_fragment_sentinel — a fragment for one field and
+    // not for the other two, so `is-fragment` terms never fired and the
+    // fragment port guard stayed unarmed.
+    let meta: ForwardPacketMeta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        ..UserspaceDpMeta::default()
+    }
+    .into();
+    let extra = term_match_extra_from_meta(meta);
+    assert!(extra.native_fragment_sentinel);
+    assert!(extra.is_fragment, "sentinel meta must report is_fragment");
+    assert!(!extra.l4_present, "sentinel meta has no L4 header");
+    assert_eq!(extra.fragment_protocol, None);
+}
+
 
 #[test]
 fn apply_nat_ipv4_non_first_fragment_rewrites_ip_only() {

@@ -1869,6 +1869,58 @@ fn extract_screen_info_ipv4_lsrr_detected() {
 }
 
 #[test]
+fn truncated_or_malformed_ipv4_lsrr_ssrr_option_fails_closed_as_ip_malformed_15947() {
+    // #15947 (H28-02): the LSRR/SSRR arm must validate its own length
+    // and keep walking — truncated / undersized / overrunning
+    // source-route options and a malformed TLV after a well-formed
+    // LSRR all fail closed as ip-malformed. Pre-fix each returned Ok.
+    fn run(opts: &[u8], ihl_words: u8) -> Result<ScreenPacketInfo, ScreenParseError> {
+        let hdr_len = (ihl_words as usize) * 4;
+        let mut frame = vec![0u8; 14 + hdr_len + 20];
+        let ip = 14;
+        frame[ip] = 0x40 | ihl_words;
+        frame[ip + 2..ip + 4].copy_from_slice(&((hdr_len + 20) as u16).to_be_bytes());
+        frame[ip + 9] = 6;
+        frame[ip + 20..ip + 20 + opts.len()].copy_from_slice(opts);
+        extract_screen_info(
+            &frame,
+            libc::AF_INET as u8,
+            6,
+            0x02,
+            (hdr_len + 20) as u16,
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)),
+            12345,
+            80,
+            14,
+        )
+    }
+    // Truncated 1-byte LSRR at opt_end-1 (no length byte).
+    assert_eq!(
+        run(&[1, 1, 1, 131], 6).expect_err("truncated LSRR must fail closed"),
+        ScreenParseError::TruncatedIpv4Header
+    );
+    // LSRR/SSRR with opt_len 0/1/2, and overrunning opt_end.
+    for opts in [&[131u8, 0][..], &[131, 1][..], &[131, 2][..], &[137, 2][..], &[131, 8][..], &[137, 9][..]] {
+        assert_eq!(
+            run(opts, 6).expect_err("malformed source-route option must fail closed"),
+            ScreenParseError::TruncatedIpv4Header,
+            "opts {opts:?}"
+        );
+    }
+    // Garbage after a well-formed LSRR: the walk must reach it.
+    let mut frame_opts = vec![131u8, 7, 4, 0, 0, 0, 0, 0x44, 0x01, 0, 0, 0];
+    assert_eq!(
+        run(&frame_opts, 8).expect_err("malformed TLV after LSRR must fail closed"),
+        ScreenParseError::TruncatedIpv4Header
+    );
+    frame_opts[8] = 131;
+    // Control: well-formed LSRR alone still parses and trips.
+    let info = run(&[131, 7, 4, 0, 0, 0, 0, 0], 7).expect("well-formed LSRR parses");
+    assert!(info.saw_ipv4_source_route);
+}
+
+#[test]
 fn extract_screen_info_ipv4_malformed_option_before_lsrr_fails_closed() {
     // #4543 (ps-027 S-03): a MALFORMED option placed BEFORE an LSRR must
     // NOT let the source-route option evade the screen. The kind==LSRR

@@ -1450,15 +1450,27 @@ pub(in crate::afxdp) fn term_match_extra_from_meta(
     // `l4_present` is safe and fails the icmp-type/code terms closed. For TCP/
     // UDP it stays true so authoritative `tcp_flags` matching is preserved.
     let is_icmp = matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6);
+    // #15947 (H27-03): the native fragment sentinel (protocol 255) means
+    // this packet IS a non-first fragment with no L4 header — the frame
+    // twin derives is_fragment/l4_present from that same fact. The pre-fix
+    // meta builder set native_fragment_sentinel while hardcoding
+    // is_fragment:false and l4_present:true, so an `is-fragment` term
+    // never fired and the #7174 fragment port guard stayed unarmed on
+    // meta-only TX classification. Derive all three from one bool;
+    // fragment_protocol stays None (no frame to recover it from), which
+    // makes protocol-constrained terms fail closed in the matcher.
+    let native_fragment_sentinel =
+        meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
     crate::filter::TermMatchExtra {
         tcp_flags: meta.tcp_flags,
-        is_fragment: false,
+        is_fragment: native_fragment_sentinel,
         icmp_type: 0,
         icmp_code: 0,
         // FALSE for ICMP/ICMPv6 (type/code genuinely unknown — fail
-        // icmp-type/code terms closed); TRUE otherwise so the shim-stamped
-        // tcp_flags still drives tcp-flags matching on synthetic/local TX.
-        l4_present: !is_icmp,
+        // icmp-type/code terms closed) and for the fragment sentinel (no
+        // L4 bytes exist); TRUE otherwise so the shim-stamped tcp_flags
+        // still drives tcp-flags matching on synthetic/local TX.
+        l4_present: !is_icmp && !native_fragment_sentinel,
         // #3077: no contiguous frame on this meta-only path, so there are no L3
         // bytes to read. A flex-constrained term fails closed here (the
         // flow-cache declines for such filters, so this path never carries one).
@@ -1466,8 +1478,8 @@ pub(in crate::afxdp) fn term_match_extra_from_meta(
         // #3232: likewise no L4 bytes on the meta-only path — a layer-4 flex
         // term fails closed.
         flex_l4: None,
-        // #7992: these callers DO have real ports.
-        native_fragment_sentinel: meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        // #7992: these callers DO have real ports (non-sentinel packets).
+        native_fragment_sentinel,
         fragment_protocol: None,
         ports_unknown: false,
     }
