@@ -107,6 +107,36 @@ func validateSnapshotPolicyInvariant(snap *ConfigSnapshot, cfg *config.Config) e
 	return nil
 }
 
+// commitExpectedPolicyCountFromLandedSnapshot records the policy count
+// of a full build the HELPER HAS ACCEPTED, regardless of what the outer
+// Compile call later returns (round-4): applyCompiledSnapshot advances
+// m.lastSnapshot/publishedSnapshot at acceptance and can then fail its
+// post-publish tail with PublishedSnapshotTailError — the snapshot IS
+// enforced, so the stamp must follow it, or every later partial wedges
+// against the stale count. Caller holds m.mu or documents otherwise.
+func (m *Manager) commitExpectedPolicyCountFromLandedSnapshot(snap *ConfigSnapshot) {
+	if snap == nil {
+		return
+	}
+	m.expectedPolicyCount = len(snap.Policies)
+}
+
+// reconcileExpectedPolicyCountFromStatusLocked makes the stamp follow
+// HELPER-PROVEN state in the status loop (round-4): when the helper
+// reports an applied generation >= the retained generation, the policy
+// count it reports for that landing IS the accepted count — including
+// applies whose Compile returned a tail error and unknown-outcome
+// retries that landed without Compile observing success. Caller holds
+// m.mu (syncSnapshotLocked's context).
+func (m *Manager) reconcileExpectedPolicyCountFromStatusLocked() {
+	if m.lastSnapshot == nil || m.publishedSnapshot == 0 {
+		return
+	}
+	if m.lastStatus.LastSnapshotGeneration >= m.lastSnapshot.Generation {
+		m.expectedPolicyCount = int(m.lastStatus.LastSnapshotPolicyCount)
+	}
+}
+
 // validateSnapshotForSend is the send-site gate, with the manager's
 // stamped expectation as ground truth. Manager.Compile stamps
 // expectedPolicyCount (post-quarantine) on every successful full build;

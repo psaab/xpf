@@ -278,6 +278,14 @@ func (e *PublishedSnapshotTailError) Error() string {
 
 func (e *PublishedSnapshotTailError) Unwrap() error { return e.err }
 
+// isPublishedSnapshotTailError reports whether err proves the full
+// snapshot was ACCEPTED by the helper before a post-publish tail step
+// failed (round-4 stamp accounting: the helper holds the new count).
+func isPublishedSnapshotTailError(err error) bool {
+	var tailErr *PublishedSnapshotTailError
+	return errors.As(err, &tailErr)
+}
+
 func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
 	// #15919: a clustered snapshot built before the daemon wires the RG
 	// provider carries no ownership evidence for its RG>0 connected
@@ -393,28 +401,28 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	snap.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
 	snap.ColdPathSampleMask = m.coldPathSampleMask
 	// HARDENING (#15742/#15937): set the authorized-clear marker on THIS
-	// full build when it empties the policy set. Only full Compile marks
-	// (partials clone the retained snapshot; the send site spends the
-	// marker after the send, so clones never inherit a live mark). The
-	// expected-count stamp is deliberately NOT committed here: it moves
-	// ONLY after a successful apply (below), so a refused Compile cannot
-	// poison partial publishes sized for the retained set.
+	// full build when it empties the policy set, and re-affirm full-build
+	// provenance. Only full Compile marks (partials clone the retained
+	// snapshot; the send site spends the marker after the send, and the
+	// metadata strip clears both bits, so clones never inherit either).
+	// The expected-count stamp is deliberately NOT committed here: it
+	// moves ONLY once the helper provably holds the build (below), so a
+	// refused Compile cannot poison partials sized for the retained set.
 	snap.ClearPolicies = len(snap.Policies) == 0
-	builtPolicyCount := len(snap.Policies)
+	snap.fullBuild = true
 	m.mu.Unlock()
 	compiled, applyErr := m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
-	if applyErr == nil {
-		// Commit the expectation only once the helper accepted the full
-		// build; known rejections restore/keep the prior stamp implicitly
-		// (it was never moved). Unknown-outcome applies do not commit:
-		// the retry-debt republication carries its provenance marker
-		// re-established from status, and its own send is gated by the
-		// PRIOR stamp (== its policy count only if it equals the retained
-		// expectation; a changed-count unknown outcome stays refused
-		// until a successful apply re-stamps — fail closed, converges on
-		// the debt republication once status proves what landed).
+	if applyErr == nil || isPublishedSnapshotTailError(applyErr) {
+		// Commit on HELPER ACCEPTANCE, not outer-call success (round-4):
+		// a PublishedSnapshotTailError means the snapshot IS enforced
+		// (applyCompiledSnapshot already advanced lastSnapshot/
+		// publishedSnapshot), so the stamp follows it or every later
+		// partial wedges against the stale count. Definite refusals and
+		// unknown outcomes do NOT commit here — the status-loop
+		// reconciler (syncSnapshotLocked) commits from helper-proven
+		// state when the landing is observed.
 		m.mu.Lock()
-		m.expectedPolicyCount = builtPolicyCount
+		m.commitExpectedPolicyCountFromLandedSnapshot(snap)
 		m.mu.Unlock()
 	}
 	if replayInFlight {

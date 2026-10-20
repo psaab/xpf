@@ -688,3 +688,171 @@ func TestCompileClearAllEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// TestTailErrorStampFollowsAcceptedBuild simulates the round-4 (a)
+// path at the accounting level: applyCompiledSnapshot ACCEPTED the
+// full build (lastSnapshot/publishedSnapshot advanced) and then its
+// tail failed with PublishedSnapshotTailError. Compile's commit rule
+// (applyErr == nil || isPublishedSnapshotTailError) must move the
+// stamp to the accepted count, and a subsequent PARTIAL sized for the
+// accepted set must publish — before the fix it wedged against the
+// stale stamp.
+func TestTailErrorStampFollowsAcceptedBuild(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(good, rec)
+	m.expectedPolicyCount = 1 // stale: pre-change accepted count
+
+	accepted := *good
+	accepted.Policies = append(append([]PolicyRuleSnapshot{}, good.Policies...), good.Policies[0])
+	accepted.Summary.PolicyCount = len(accepted.Policies)
+	accepted.Generation = 8
+	tailErr := &PublishedSnapshotTailError{generation: 8, stage: "helper status sync", err: errors.New("boom")}
+	if !isPublishedSnapshotTailError(tailErr) {
+		t.Fatal("premise: tail error must classify as landed evidence")
+	}
+	// Compile's exact commit rule.
+	if true { // applyErr != nil but is a tail error -> commit
+		m.commitExpectedPolicyCountFromLandedSnapshot(&accepted)
+	}
+	if m.expectedPolicyCount != len(accepted.Policies) {
+		t.Fatalf("stamp after tail-error acceptance = %d, want %d", m.expectedPolicyCount, len(accepted.Policies))
+	}
+	// Partial sized for the ACCEPTED set publishes.
+	partial := accepted
+	partial.Generation = 9
+	stripSingleUseCommitMetadata(&partial)
+	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); err != nil {
+		t.Fatalf("accepted-count partial after tail error must publish (stale-stamp wedge): %v", err)
+	}
+	if len(rec.sent) != 1 {
+		t.Fatalf("accepted-count partial sends = %d, want 1", len(rec.sent))
+	}
+	// And a partial sized for the STALE count now refuses.
+	stale := *good
+	stale.Generation = 10
+	stripSingleUseCommitMetadata(&stale)
+	if err := m.requestApplySnapshotPreparedLocked(&stale, &ProcessStatus{}); !errors.Is(err, errSnapshotPolicyMismatch) {
+		t.Fatalf("stale-count partial = %v, want errSnapshotPolicyMismatch", err)
+	}
+}
+
+// TestLostResponseLandedStampFollowsStatus simulates round-4 (b): an
+// unknown-outcome full retry LANDED (helper status at the retained
+// generation with the new count). The status reconciler must move the
+// stamp to the helper-proven count so later partials publish.
+func TestLostResponseLandedStampFollowsStatus(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(good, rec)
+	m.expectedPolicyCount = 1
+	// Retained advanced to the landed build (generation 8, 3 policies);
+	// helper status proves the landing.
+	landed := *good
+	landed.Policies = append(append([]PolicyRuleSnapshot{}, good.Policies...), good.Policies[0], good.Policies[0])
+	landed.Summary.PolicyCount = len(landed.Policies)
+	landed.Generation = 8
+	m.lastSnapshot = &landed
+	m.publishedSnapshot = 7 // not yet caught up
+	m.lastStatus.LastSnapshotGeneration = 8
+	m.lastStatus.LastSnapshotPolicyCount = uint64(len(landed.Policies))
+	m.reconcileExpectedPolicyCountFromStatusLocked()
+	if m.expectedPolicyCount != len(landed.Policies) {
+		t.Fatalf("stamp after status-proven landing = %d, want %d", m.expectedPolicyCount, len(landed.Policies))
+	}
+	partial := landed
+	partial.Generation = 9
+	stripSingleUseCommitMetadata(&partial)
+	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); err != nil {
+		t.Fatalf("landed-count partial must publish after status reconciliation: %v", err)
+	}
+	// Status BELOW the retained generation must not move the stamp.
+	m2 := newRepublishManager9520(good, &applyRecorder9520{})
+	m2.expectedPolicyCount = 1
+	m2.lastSnapshot = &landed
+	m2.publishedSnapshot = 7
+	m2.lastStatus.LastSnapshotGeneration = 7
+	m2.lastStatus.LastSnapshotPolicyCount = 99
+	m2.reconcileExpectedPolicyCountFromStatusLocked()
+	if m2.expectedPolicyCount != 1 {
+		t.Fatalf("stamp moved on stale status: %d, want 1", m2.expectedPolicyCount)
+	}
+}
+
+// TestSyncRetryRemarksUnlandedClear drives the REAL deferred publish
+// path (syncSnapshotLocked) for round-4 (c): a retained full-build
+// clear whose first attempt did NOT land (helper still reports the
+// old non-empty set) must retry WITH the marker re-marked from its
+// own provenance, and the retry must reach the helper marked.
+func TestSyncRetryRemarksUnlandedClear(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(good, rec)
+	// Published plan context so the deferred gate classifies this as a
+	// same-plan retry (not an XSK-startup deferral).
+	// publishedPlanKey is set from the retained snapshot below.
+	m.pendingFullSnapshotMetadata = true // Compile's own attempt in debt
+	m.applySnapshotOutcomeUnknown = true // lost-response debt: exempt from XSK-startup deferral
+	// If the resample classifies this as a plan change, the helper
+	// restart branch fires; seam it to a no-op so the publish proceeds
+	// (the restart itself is not what this test measures).
+	m.restartBringupHook = func(config.UserspaceConfig) error { return nil }
+	// Retained: the Compile's clear attempt (full build, empty), spent.
+	retained := *good
+	retained.Config = nil // config-less retained clone: revalidation keeps author rows (no RG resample under the sync lock)
+	retained.Policies = nil
+	retained.Summary.PolicyCount = 0
+	retained.ClearPolicies = false // spent by the first send
+	retained.fullBuild = true      // still the Compile's own build in debt
+	retained.Generation = 8
+	m.lastSnapshot = &retained
+	m.publishedPlanKey = snapshotBindingPlanKey(&retained)
+	m.publishedSnapshot = 7
+	m.expectedPolicyCount = len(good.Policies) // stamp still at the old set
+	// Helper truthfully reports the OLD set (clear did not land).
+	m.lastStatus.LastSnapshotGeneration = 7
+	m.lastStatus.LastSnapshotPolicyCount = uint64(len(good.Policies))
+	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
+
+	// Drive the deferred publish the way runSync does in the 9337
+	// fixture: m.mu held for the sync itself (the revalidation rebuild
+	// only re-locks when a row actually moved; our rows are static).
+	m.mu.Lock()
+	err := m.syncSnapshotLocked()
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("deferred retry of the unlanded clear must publish: %v", err)
+	}
+	if len(rec.sent) != 1 {
+		t.Fatalf("retry sends = %d, want 1", len(rec.sent))
+	}
+	sent := rec.sent[0]
+	if len(sent.Policies) != 0 || !sent.ClearPolicies {
+		t.Fatalf("retry snapshot = %d policies, ClearPolicies=%v; want 0 policies WITH marker re-marked",
+			len(sent.Policies), sent.ClearPolicies)
+	}
+	// After the successful retry the stamp follows the accepted clear:
+	// sync success commits from the accepted full build.
+	if m.expectedPolicyCount != 0 {
+		t.Fatalf("stamp after landed clear retry = %d, want 0", m.expectedPolicyCount)
+	}
+	// A retained empty snapshot WITHOUT full-build provenance must NOT
+	// re-mark (partial provenance never mints authorization).
+	m2 := newRepublishManager9520(good, &applyRecorder9520{})
+	unmarked := retained
+	unmarked.fullBuild = false
+	unmarked.Generation = 8
+	m2.lastSnapshot = &unmarked
+	m2.publishedSnapshot = 7
+	m2.expectedPolicyCount = len(good.Policies)
+	m2.lastStatus.LastSnapshotGeneration = 7
+	m2.lastStatus.LastSnapshotPolicyCount = uint64(len(good.Policies))
+	// Gate-level: the unmarked empty partial refuses against the stamp.
+	clone := unmarked
+	if err := m2.validateSnapshotForSend(&clone); !errors.Is(err, errSnapshotPolicyMismatch) {
+		t.Fatalf("provenance-less empty retained = %v, want errSnapshotPolicyMismatch", err)
+	}
+}

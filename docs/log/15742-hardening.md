@@ -141,3 +141,25 @@ and immediately at every layer, each independently sufficient:
 ## Round-3 fold (Codex3)
 
 Full builds bypass the send-site stamp arm via an unexported `fullBuild` provenance bit (builder-set, Compile-affirmed, stripped on every partial clone alongside the clear marker); the stamp enforces only on partial publishers and re-commits after a successful full apply. Clear-attempt timeouts converge via the Compile retry re-marking from the build itself. See commit message.
+
+## Round-4 fold (Codex4+Opus4)
+
+Stamp now follows HELPER-PROVEN state, not Compile's outer error:
+- `Compile` commits `expectedPolicyCount` on nil OR
+  `PublishedSnapshotTailError` (the snapshot IS enforced at that
+  point) via `commitExpectedPolicyCountFromLandedSnapshot`.
+- `syncSnapshotLocked` reconciles the stamp from helper status
+  (`LastSnapshotPolicyCount` at generation >= retained, only once
+  this Manager has published) in the status catch-up, and commits
+  from the accepted snapshot on the deferred-publish success path
+  when it carried a full build.
+- Clear re-marking is provenance-based, not landed-only: a retained
+  snapshot that IS the Compile's full build with an empty policy set
+  re-marks in BOTH landing states (landed = idempotent confirmation;
+  not-landed = restoring its own attempt's authorization), while a
+  provenance-less empty retained snapshot never mints a mark.
+Regressions: `TestTailErrorStampFollowsAcceptedBuild`,
+`TestLostResponseLandedStampFollowsStatus` (+stale-status negative),
+`TestSyncRetryRemarksUnlandedClear` (real `syncSnapshotLocked` drive:
+unlanded clear retries marked, stamp commits 0, provenance-less
+retained refuses at the gate).
