@@ -52,14 +52,32 @@ const MAX_POOLED_BUFFERS: usize = 1024;
 thread_local! {
     static POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
     /// #15956: per-buffer initialized extent as a parallel stack to
-    /// `POOL` (same push/pop discipline, same thread): the length the
-    /// buffer last published, whose bytes are known written. Spare
+    /// `POOL` (same push/pop discipline, same thread): restored by
+    /// `recycle` as `max(flight window, published length)`, whose
+    /// bytes are known written. Spare
     /// capacity beyond it may hold arbitrary prior contents or be
     /// genuinely uninitialized on a cold/grown allocation;
     /// `checkout_with_capacity` zero-fills only that delta, never the
     /// already-initialized window the builder is about to overwrite.
     static POOL_INITIALIZED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static POOL_GROWTH_ZEROFILLS: Cell<u64> = const { Cell::new(0) };
+    /// #15956: extent made initialized by the checkout currently in
+    /// flight, keyed by the buffer's allocation pointer. The paired
+    /// stack alone loses it: `checkout_with_capacity` pops the prior
+    /// extent, delta-fills to the requested window, and the buffer
+    /// then travels (TxRequest queues, settle) before `recycle` — the
+    /// window must travel with it, and the pointer is the only
+    /// identity that does. Inserted at checkout (after any realloc,
+    /// so the pointer is the live allocation), consumed and removed
+    /// by `recycle`; an entry leaked by a drop-without-recycle is
+    /// overwritten by the next checkout of any buffer that reuses
+    /// the address before it can be consumed, because consumption
+    /// only happens in `recycle` and every recycled buffer was first
+    /// checked out (which inserts its own entry). Foreign buffers
+    /// recycled without checkout (tests) find no entry and record
+    /// exactly their published length.
+    static POOL_FLIGHT_EXTENTS: RefCell<rustc_hash::FxHashMap<usize, usize>> =
+        const { RefCell::new(rustc_hash::FxHashMap::with_hasher(rustc_hash::FxBuildHasher)) };
 }
 
 /// Check out a buffer holding a fresh copy of `src`. Reuses a pooled
@@ -97,10 +115,11 @@ pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
         // buffer's recorded extent, once, here at checkout — so spare
         // capacity a later `extend_pooled_for_build` publishes is
         // always initialized, cold and warm alike. Cost is paid only
-        // when the requested window exceeds every length this buffer
-        // has previously published (growth), never per packet at a
-        // steady size: `recycle` returns the buffer with extent =
-        // its published length, and a same-size rebuild covers it.
+        // when the requested window exceeds the extent this buffer
+        // carries back from its last flight (`recycle` restores
+        // `max(extent, published_len)`, so a successful build's whole
+        // filled window survives its truncate to `written`): at a
+        // steady size the delta is empty, never per-packet.
         if capacity > init_len {
             POOL_GROWTH_ZEROFILLS.with(|c| c.set(c.get() + 1));
             let spare = buf.spare_capacity_mut();
@@ -108,6 +127,14 @@ pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
                 slot.write(0);
             }
         }
+        // The whole requested window is now initialized (prior extent
+        // plus the delta just filled; the realloc above preserved the
+        // prior prefix). Record it as this buffer's flight extent so
+        // `recycle` can restore `max(extent, published_len)` instead
+        // of forgetting the filled window at truncate.
+        POOL_FLIGHT_EXTENTS.with(|m| {
+            m.borrow_mut().insert(buf.as_ptr() as usize, capacity);
+        });
         buf
     })
 }
@@ -176,13 +203,20 @@ pub(in crate::afxdp) fn extend_pooled_for_build(buf: &mut Vec<u8>, capacity: usi
 pub(in crate::afxdp) fn recycle(buf: Vec<u8>) {
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
+        let flight = POOL_FLIGHT_EXTENTS.with(|m| m.borrow_mut().remove(&(buf.as_ptr() as usize)));
         if pool.len() < MAX_POOLED_BUFFERS {
-            // The buffer's published length is exactly the extent known
-            // initialized: build buffers were truncated to `written`
-            // (every published byte builder-written), copy buffers were
-            // filled by `extend_from_slice`. Bytes past `len` may be
-            // stale, so the paired extent is `len`, never capacity.
-            let init_len = buf.len().min(buf.capacity());
+            // Successful publish: the checkout filled the whole window
+            // and the builder overwrote `0..written`, so the buffer
+            // returns initialized up to `max(flight_window, len)` even
+            // though it was truncated to `written` — same-size reuse
+            // then pays no re-fill. A recycle with no flight entry
+            // (foreign buffer, or a checkout that never published a
+            // build window) keeps exactly its published length: bytes
+            // past `len` may be stale, never capacity.
+            let init_len = flight
+                .map(|w| w.max(buf.len()))
+                .unwrap_or(buf.len())
+                .min(buf.capacity());
             POOL_INITIALIZED.with(|i| i.borrow_mut().push(init_len));
             pool.push(buf);
         }
@@ -193,6 +227,7 @@ pub(in crate::afxdp) fn recycle(buf: Vec<u8>) {
 pub(in crate::afxdp) fn clear_for_test() {
     POOL.with(|pool| pool.borrow_mut().clear());
     POOL_INITIALIZED.with(|i| i.borrow_mut().clear());
+    POOL_FLIGHT_EXTENTS.with(|m| m.borrow_mut().clear());
     POOL_GROWTH_ZEROFILLS.with(|c| c.set(0));
 }
 

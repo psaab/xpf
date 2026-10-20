@@ -2857,16 +2857,17 @@ fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
     )
     .expect("cold build");
     assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "cold checkout pays one full delta");
-    redirect_pool::recycle(cold.clone());
+    let cold_bytes = cold.clone();
+    redirect_pool::recycle(cold);
 
-    // Warm same-size rebuild: extent covers the published length, so
-    // the only fill is the small window delta (capacity vs written).
+    // Warm same-size rebuild: recycle restored the extent to the
+    // filled window (max with published length), so no re-fill.
     let warm = build_nat64_forwarded_frame(
         &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
     )
     .expect("warm build");
-    assert_eq!(redirect_pool::growth_zerofills_for_test(), 2, "warm rebuild zero-fills only the capacity-minus-written delta (~eth shrink, never whole window)");
-    assert_eq!(warm[34..], cold[34..], "cold and warm builds agree past the frag-ID header");
+    assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "same-size rebuild pays NO re-fill: recycle restored max(extent, published) = the filled window");
+    assert_eq!(warm[34..], cold_bytes[34..], "cold and warm builds agree past the frag-ID header");
     redirect_pool::recycle(warm);
 
     // (b) Growth with a dirty pre-sized buffer: recycle a 0xEE buffer
@@ -2882,7 +2883,7 @@ fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
     .expect("growth build over dirty buffer");
     assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "growth checkout pays one delta");
     assert!(!grown.contains(&0xEE), "growth build leaked dirty spare bytes");
-    assert_eq!(grown[34..], cold[34..], "growth build matches cold build past frag-ID header");
+    assert_eq!(grown[34..], cold_bytes[34..], "growth build matches cold build past frag-ID header");
 }
 
 // #15956 fix (triple review): reverse-UDP failure-path read cell.
@@ -2942,18 +2943,30 @@ fn nat64_15956_reverse_udp_checksum_read_bounded_by_written() {
     let d6 = Ipv6Addr::from(<[u8; 16]>::try_from(&dst[14 + 24..14 + 40]).unwrap());
     assert_eq!(checksum16_ipv6(s6, d6, PROTO_UDP, &dst[14 + 40..n]), 0, "generated checksum verifies");
 
-    // Truncated UDP (total_len claims only 4 L4 bytes): the checksum
-    // field at l4_off+6 is beyond the copied prefix. Must fail closed,
-    // never read the poison as a checksum baseline.
-    let mut short = build_v4_udp(b"", false);
-    // Shrink the IPv4 total length to 20+4 (ports only, no csum field).
+    // Truncated UDP: the frame RETAINS bytes past the declared L4
+    // (a 6-byte payload follows in the slice), but the IPv4 total
+    // length declares only 4 L4 bytes — ports only, no checksum
+    // field inside the copied prefix. The bounded read
+    // (`dst[..l4_written]`) finds no field, takes the full recompute,
+    // and the recompute fails closed on the 4-byte L4. Were the read
+    // NOT bounded by written, it would consult the retained payload
+    // bytes at l4_off+6 (here non-zero 'dn' of the DNS answer) as a
+    // checksum baseline and could succeed incrementally.
+    let mut short = build_v4_udp(b"dns-answer", false);
     short[14 + 2..14 + 4].copy_from_slice(&24u16.to_be_bytes());
-    short.truncate(14 + 24);
     let s = checksum16(&short[14..34]);
     short[14 + 10..14 + 12].copy_from_slice(&s.to_be_bytes());
     let mut dst = vec![0xEEu8; short.len() + 44];
     assert!(
         crate::nat64::build_nat64_v4_to_v6_frame_into(&mut dst, &short, src6, dst6, [0x11; 6], [0x22; 6], 0).is_none(),
-        "truncated reverse UDP must fail closed, not read past written"
+        "truncated reverse UDP must fail closed via the bounded read, not read past written"
+    );
+    // Direct translator cell: same packet at the L3 _into level.
+    let short_l3 = &short[14..];
+    let mut l3dst = vec![0xEEu8; short_l3.len() + 40];
+    assert!(
+        crate::nat64::write_v4_to_v6_into(&mut l3dst, short_l3, src6, dst6).is_none(),
+        "truncated reverse UDP L3 translate must fail closed"
     );
 }
+
