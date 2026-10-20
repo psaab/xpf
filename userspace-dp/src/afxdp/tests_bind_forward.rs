@@ -450,7 +450,6 @@ fn build_live_forward_request_threads_nat64_reverse_info_5606() {
     );
 }
 
-
 // #15246 (A65-02): on a NON-fabric (LAN) ingress a host can put any
 // `02:bf:73:<id>` V2 stamp in its Ethernet source MAC. The forward-request
 // builder used to preserve any such stamp that parsed as a same-zone V2
@@ -643,8 +642,6 @@ fn lan_ingress_unstamped_gets_real_identity_stamp_15246() {
         "#15246 control: an unstamped LAN punt keeps the real-identity stamp"
     );
 }
-
-
 
 #[test]
 fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
@@ -962,6 +959,8 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
         counters.filter_reject_sent, 1,
         "#3608: output-filter `then reject` must enqueue exactly one active reply (RED on revert: silent drop leaves this 0)"
     );
+    // #15941: the transit output-filter drop is named, not just the reply.
+    assert_eq!(counters.transit_output_filter_drops, 1);
     assert_eq!(
         tx_pipeline.pending_tx_local.len(),
         1,
@@ -2011,7 +2010,7 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
 #[test]
 fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
     use crate::afxdp::bpf_map::{
-        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+        clear_session_map_writes, session_map_writes, SteeringMap, RECORDER_ONLY_MAP_FD,
     };
     let mut coordinator = Coordinator::new();
     // Active owner RG 1 so allow_replace_local=false, as in production
@@ -2583,18 +2582,26 @@ fn static_nat_v6_dnat_and_snat() {
     // Add v6 addresses to interfaces
     snapshot.interfaces[0]
         .addresses
-        .push(InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00::1/64".to_string(), scope: 0, ..Default::default() });
+        .push(InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "fd00::1/64".to_string(),
+            scope: 0,
+            ..Default::default()
+        });
     snapshot.interfaces[1]
         .addresses
-        .push(InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8::1/64".to_string(), scope: 0, ..Default::default() });
+        .push(InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:db8::1/64".to_string(),
+            scope: 0,
+            ..Default::default()
+        });
     let state = build_forwarding_state(&snapshot);
 
     // External v6 IP should be in local_v6
-    assert!(
-        state
-            .local_v6
-            .contains(&"2001:db8::10".parse::<Ipv6Addr>().unwrap())
-    );
+    assert!(state
+        .local_v6
+        .contains(&"2001:db8::10".parse::<Ipv6Addr>().unwrap()));
 
     // DNAT match
     let dnat = state
@@ -2662,11 +2669,9 @@ fn post_dnat_source_nat_matches_translated_destination() {
     });
 
     let state = build_forwarding_state(&snapshot);
-    assert!(
-        state
-            .local_v4
-            .contains(&"172.16.80.8".parse::<Ipv4Addr>().unwrap())
-    );
+    assert!(state
+        .local_v4
+        .contains(&"172.16.80.8".parse::<Ipv4Addr>().unwrap()));
 
     let flow = SessionFlow {
         src_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)),
@@ -2967,8 +2972,8 @@ fn subnet_directed_broadcast_is_never_locally_delivered_8061() {
                 family: "inet".into(),
                 address: "192.168.1.1/24".into(),
                 scope: 0,
-            ..Default::default()
-        }],
+                ..Default::default()
+            }],
             ..Default::default()
         }],
         ..Default::default()
@@ -3198,5 +3203,82 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
         "and the replica is a FORWARD entry, so the refresh's only skip \
          (`metadata.is_reverse`) does not exclude it — if this ever becomes \
          true the mechanism above changes and this cell must be re-derived"
+    );
+}
+
+/// #15941 revert-guard: a slow-path (descriptor poll) forward whose egress
+/// output filter discards it must increment BOTH named counters and ring
+/// `transit_output_filter_drop`. This drives the full poll descriptor, so
+/// deleting the poll build-None counter/ring site turns this RED (the
+/// direct builder cell alone cannot).
+#[test]
+fn poll_output_filter_build_none_counts_and_rings_15941() {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules.clear();
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 12 {
+            iface.filter_output_v4 = "wan-drop-15941".to_string();
+        }
+    }
+    snapshot.filters.push(crate::FirewallFilterSnapshot {
+        name: "wan-drop-15941".to_string(),
+        family: "inet".to_string(),
+        terms: vec![crate::FirewallTermSnapshot {
+            name: "drop-web".to_string(),
+            protocols: vec!["tcp".to_string()],
+            destination_ports: vec!["443".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let src = Ipv4Addr::new(10, 0, 61, 100);
+    let dst = Ipv4Addr::new(172, 16, 80, 200);
+    let frame = build_txn_tcp_syn_frame_v4(src, dst, 40000, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
+    let mut meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    meta.flow_src_addr[..4].copy_from_slice(&src.octets());
+    meta.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+    meta.flow_src_port = 40000;
+    meta.flow_dst_port = 443;
+    let (batch, dbg, reasons) = txn_run_descriptor_capturing_exceptions(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "packet must reach the poll forward build"
+    );
+    assert_eq!(dbg.tx, 0, "output-discarded forward must not transmit");
+    assert_eq!(
+        batch.transit_output_filter_drops, 1,
+        "#15941 poll build-None must count the output-filter drop"
+    );
+    assert_eq!(
+        batch.forward_build_failures, 1,
+        "#15941 poll build-None must count the build failure"
+    );
+    assert!(
+        reasons.iter().any(|r| r == "transit_output_filter_drop"),
+        "#15941 poll build-None must ring transit_output_filter_drop: {reasons:?}"
     );
 }

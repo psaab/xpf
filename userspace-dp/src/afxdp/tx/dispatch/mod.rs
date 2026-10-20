@@ -644,23 +644,23 @@ fn enqueue_copy_fallback_frame(
     let mut build_failed = false;
     let mut fallback_to_slow_path = false;
     let built_frames = if is_nat64 {
-        let (v4_egress_mtu, v6_egress_mtu) =
-            if request.meta.addr_family as i32 == libc::AF_INET6 {
-                (
-                    nat64_v4_egress_mtu_with_dynamic(
-                        source_frame,
-                        request.meta,
-                        &request.decision,
-                        forwarding,
-                        inputs.dynamic_neighbors,
-                    ),
-                    0,
-                )
-            } else {
-                let l3 = frame_l3_offset(source_frame)
-                    .unwrap_or(request.meta.l3_offset as usize);
-                let input_df = source_frame.get(l3 + 6).is_some_and(|b| b & 0x40 != 0);
-                (0, if input_df {
+        let (v4_egress_mtu, v6_egress_mtu) = if request.meta.addr_family as i32 == libc::AF_INET6 {
+            (
+                nat64_v4_egress_mtu_with_dynamic(
+                    source_frame,
+                    request.meta,
+                    &request.decision,
+                    forwarding,
+                    inputs.dynamic_neighbors,
+                ),
+                0,
+            )
+        } else {
+            let l3 = frame_l3_offset(source_frame).unwrap_or(request.meta.l3_offset as usize);
+            let input_df = source_frame.get(l3 + 6).is_some_and(|b| b & 0x40 != 0);
+            (
+                0,
+                if input_df {
                     0
                 } else {
                     nat64_v6_egress_mtu_with_dynamic(
@@ -670,8 +670,9 @@ fn enqueue_copy_fallback_frame(
                         forwarding,
                         inputs.dynamic_neighbors,
                     )
-                })
-            };
+                },
+            )
+        };
         crate::afxdp::frame::build_nat64_forwarded_frames_with_commit_and_dynamic(
             source_frame,
             request.meta,
@@ -973,7 +974,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 })
         {
             dbg.policy_deny += 1;
-            counters.touched = true;
+            counters.record_transit_ipsec_fence_drop();
+            record_exception(
+                recent_exceptions,
+                ingress_ident,
+                "transit_ipsec_selector_fence",
+                request.desc.len,
+                Some(request.meta.into()),
+                None,
+                forwarding,
+            );
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
@@ -999,7 +1009,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 })
         {
             dbg.policy_deny += 1;
-            counters.touched = true;
+            counters.record_transit_source_martian_drop();
+            record_exception(
+                recent_exceptions,
+                ingress_ident,
+                "transit_source_martian",
+                request.desc.len,
+                Some(request.meta.into()),
+                None,
+                forwarding,
+            );
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
@@ -1025,6 +1044,15 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 })
         {
             counters.record_martian_drop();
+            record_exception(
+                recent_exceptions,
+                ingress_ident,
+                "transit_destination_martian",
+                request.desc.len,
+                Some(request.meta.into()),
+                None,
+                forwarding,
+            );
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
@@ -1062,8 +1090,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             // local enqueue fails — drop it fail-closed AND count it on
             // `fabric_redirect_unsendable_drops`, the same observability
             // invariant as the desc-frame no-binding / build-failure
-            // paths. (Non-FabricRedirect Prebuilt drops keep their prior
-            // silent recycle+continue.)
+            // paths. (Non-FabricRedirect Prebuilt no-binding drops count as
+            // missing-egress-binding below.)
             let prebuilt_is_fabric_redirect =
                 request.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
             let Some(target_binding) = resolve_pending_forward_target_binding(
@@ -1084,6 +1112,17 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                         recent_exceptions,
                         ingress_ident,
                         "fabric_redirect_no_binding",
+                        request.desc.len,
+                        Some(request.meta.into()),
+                        None,
+                        forwarding,
+                    );
+                } else {
+                    counters.record_no_egress_binding_drop();
+                    record_exception(
+                        recent_exceptions,
+                        ingress_ident,
+                        "missing_egress_binding",
                         request.desc.len,
                         Some(request.meta.into()),
                         None,
@@ -1132,6 +1171,20 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                         recent_exceptions,
                         ingress_ident,
                         "fabric_redirect_build_failed",
+                        request.desc.len,
+                        Some(request.meta.into()),
+                        None,
+                        forwarding,
+                    );
+                } else {
+                    // #15941: non-fabric Prebuilt enqueue failure (today
+                    // reachable only via test fault injection; count it
+                    // like the dispatch build-failure family regardless).
+                    counters.record_forward_build_failure();
+                    record_exception(
+                        recent_exceptions,
+                        ingress_ident,
+                        "forward_build_failed",
                         request.desc.len,
                         Some(request.meta.into()),
                         None,
@@ -1190,6 +1243,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 {
                     frame
                 } else {
+                    counters.record_forward_build_failure();
+                    record_exception(
+                        recent_exceptions,
+                        ingress_ident,
+                        "forward_live_slice_failed",
+                        request.desc.len,
+                        Some(request.meta.into()),
+                        None,
+                        forwarding,
+                    );
                     recycle_ingress_frame(ingress_binding, source_offset, now_ns);
                     continue;
                 }
@@ -1243,6 +1306,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 continue;
             }
             dbg.no_egress_binding += 1;
+            counters.record_no_egress_binding_drop();
             if cfg!(feature = "debug-log") && dbg.no_egress_binding <= 3 {
                 debug_log!(
                     "DBG NO_EGRESS_BINDING: target_ifindex={} ingress_if={} ingress_q={}",

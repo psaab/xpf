@@ -51,13 +51,12 @@ mod tx_inbox;
 // `profile::Owner|Peer` precedent and to avoid E0364 (documented in
 // `userspace-dp/src/afxdp/tx/mod.rs:38`).
 pub(in crate::afxdp) use debug_state::{
-    advance_debug_state_publish_counter, flush_v_min_scratches_into,
-    idle_debug_state_publish_due, update_binding_debug_state,
-    update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
+    advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
+    update_binding_debug_state, update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
     IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
 };
 pub(in crate::afxdp) use latency::{
-    DRAIN_HIST_BUCKETS, TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS, bucket_index_for_ns,
+    bucket_index_for_ns, DRAIN_HIST_BUCKETS, TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
 };
 // Only `binding_state/tests/latency_buckets.rs` consumes this
 // re-export (via the `use super::*;` chain); gate on `cfg(test)` so
@@ -66,7 +65,7 @@ pub(in crate::afxdp) use latency::{
 #[cfg(test)]
 pub(in crate::afxdp) use latency::REDIRECT_SAMPLE_MASK;
 pub(in crate::afxdp) use profile::{OwnerProfileOwnerWrites, OwnerProfilePeerWrites};
-pub(in crate::afxdp) use tx_inbox::{PENDING_TX_INBOX_HARD_CAP, PendingTxAdmission};
+pub(in crate::afxdp) use tx_inbox::{PendingTxAdmission, PENDING_TX_INBOX_HARD_CAP};
 // #6304: the admission-attempt test instrument. Same `cfg(test)` treatment as
 // `REDIRECT_SAMPLE_MASK` above — it has no production consumer, so gating the
 // re-export keeps production builds warning-free. Consumed by
@@ -161,6 +160,15 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// descriptor still references the outer UMEM frame while `meta`
     /// already describes the inner packet; replay would mis-parse it.
     pub(super) pmech_decap_hold_refused: AtomicU64,
+    /// #15941: terminal transit drops exported per binding (see
+    /// BatchCounters). `transit_output_filter_drops` mirrors the generated-
+    /// reply `*_output_filter_drops` family for transit forwards.
+    pub(super) transit_output_filter_drops: AtomicU64,
+    pub(super) transit_source_martian_drops: AtomicU64,
+    pub(super) transit_ipsec_fence_drops: AtomicU64,
+    pub(super) transit_l2_group_drops: AtomicU64,
+    pub(super) forward_build_failures: AtomicU64,
+    pub(super) no_egress_binding_drops: AtomicU64,
     pub(super) neighbor_miss_packets: AtomicU64,
     pub(super) discard_route_packets: AtomicU64,
     pub(super) next_table_packets: AtomicU64,
@@ -1059,9 +1067,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #15243 adds one unconditional u64 pmech_decap_hold_refused counter before
 // both sentinels; offsets advance by 8 bytes while size grows a 64-byte
 // alignment unit (the previous unit was full).
+// #15941 adds six unconditional u64 transit-drop counters before both
+// sentinels; offsets advance by 48 bytes, size unchanged.
 const _: [(); 2688] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2496] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2625] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2544] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2673] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1099,6 +1109,12 @@ impl BindingLiveState {
             unknown_vlan_dropped: AtomicU64::new(0),
             dst_mac_dropped: AtomicU64::new(0),
             pmech_decap_hold_refused: AtomicU64::new(0),
+            transit_output_filter_drops: AtomicU64::new(0),
+            transit_source_martian_drops: AtomicU64::new(0),
+            transit_ipsec_fence_drops: AtomicU64::new(0),
+            transit_l2_group_drops: AtomicU64::new(0),
+            forward_build_failures: AtomicU64::new(0),
+            no_egress_binding_drops: AtomicU64::new(0),
             neighbor_miss_packets: AtomicU64::new(0),
             discard_route_packets: AtomicU64::new(0),
             next_table_packets: AtomicU64::new(0),
@@ -1294,7 +1310,6 @@ impl BindingLiveState {
         }
     }
 
-
     pub(super) fn set_bound(&self, socket_fd: c_int) {
         self.bound.store(true, Ordering::Relaxed);
         self.socket_fd.store(socket_fd, Ordering::Relaxed);
@@ -1474,11 +1489,9 @@ impl BindingLiveState {
     /// allow-list and dropped fail-closed. Called from BOTH refusal sites
     /// via `slow_path_admit`, like `record_next_table_unsupported_drop`.
     pub(in crate::afxdp) fn record_table_unavailable_drop(&self) {
-        self.table_unavailable_drops
-            .fetch_add(1, Ordering::Relaxed);
+        self.table_unavailable_drops.fetch_add(1, Ordering::Relaxed);
     }
 }
-
 
 #[cfg(test)]
 mod tests;

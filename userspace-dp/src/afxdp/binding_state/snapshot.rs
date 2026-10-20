@@ -79,6 +79,12 @@ impl BindingLiveState {
             unknown_vlan_dropped: self.unknown_vlan_dropped.load(Ordering::Relaxed),
             dst_mac_dropped: self.dst_mac_dropped.load(Ordering::Relaxed),
             pmech_decap_hold_refused: self.pmech_decap_hold_refused.load(Ordering::Relaxed),
+            transit_output_filter_drops: self.transit_output_filter_drops.load(Ordering::Relaxed),
+            transit_source_martian_drops: self.transit_source_martian_drops.load(Ordering::Relaxed),
+            transit_ipsec_fence_drops: self.transit_ipsec_fence_drops.load(Ordering::Relaxed),
+            transit_l2_group_drops: self.transit_l2_group_drops.load(Ordering::Relaxed),
+            forward_build_failures: self.forward_build_failures.load(Ordering::Relaxed),
+            no_egress_binding_drops: self.no_egress_binding_drops.load(Ordering::Relaxed),
             neighbor_miss_packets: self.neighbor_miss_packets.load(Ordering::Relaxed),
             discard_route_packets: self.discard_route_packets.load(Ordering::Relaxed),
             next_table_packets: self.next_table_packets.load(Ordering::Relaxed),
@@ -110,23 +116,31 @@ impl BindingLiveState {
             session_delta_high_water: self.session_delta_high_water.load(Ordering::Relaxed),
             session_delta_drained: self.session_delta_drained.load(Ordering::Relaxed),
             policy_denied_packets: self.policy_denied_packets.load(Ordering::Relaxed),
-            host_inbound_denied_packets: self
-                .host_inbound_denied_packets
-                .load(Ordering::Relaxed),
+            host_inbound_denied_packets: self.host_inbound_denied_packets.load(Ordering::Relaxed),
             screen_drops: self.screen_drops.load(Ordering::Relaxed),
             // #3343: snapshot each per-reason screen-drop atomic.
             screen_reason_drops: std::array::from_fn(|i| {
                 self.screen_reason_drops[i].load(Ordering::Relaxed)
             }),
-            screen_substituted_default_drops: self.screen_substituted_default_drops.load(Ordering::Relaxed),
+            screen_substituted_default_drops: self
+                .screen_substituted_default_drops
+                .load(Ordering::Relaxed),
             screen_syn_flood_dst_drops: self.screen_syn_flood_dst_drops.load(Ordering::Relaxed),
             screen_syn_flood_src_drops: self.screen_syn_flood_src_drops.load(Ordering::Relaxed),
-            screen_syn_flood_alarm_events: self.screen_syn_flood_alarm_events.load(Ordering::Relaxed),
-            screen_alarm_without_drop_events: self.screen_alarm_without_drop_events.load(Ordering::Relaxed),
+            screen_syn_flood_alarm_events: self
+                .screen_syn_flood_alarm_events
+                .load(Ordering::Relaxed),
+            screen_alarm_without_drop_events: self
+                .screen_alarm_without_drop_events
+                .load(Ordering::Relaxed),
             screen_missing_profile_warns: self.screen_missing_profile_warns.load(Ordering::Relaxed),
             screen_inert_profile_warns: self.screen_inert_profile_warns.load(Ordering::Relaxed),
-            screen_scan_sweep_skipped_pressure: self.screen_scan_sweep_skipped_pressure.load(Ordering::Relaxed),
-            screen_scan_sweep_evicted_pressure: self.screen_scan_sweep_evicted_pressure.load(Ordering::Relaxed),
+            screen_scan_sweep_skipped_pressure: self
+                .screen_scan_sweep_skipped_pressure
+                .load(Ordering::Relaxed),
+            screen_scan_sweep_evicted_pressure: self
+                .screen_scan_sweep_evicted_pressure
+                .load(Ordering::Relaxed),
             syn_cookie_challenges: self.syn_cookie_challenges.load(Ordering::Relaxed),
             syn_cookie_secret_unavailable: self
                 .syn_cookie_secret_unavailable
@@ -138,7 +152,9 @@ impl BindingLiveState {
                 .load(Ordering::Relaxed),
             syn_cookie_ack_valid: self.syn_cookie_ack_valid.load(Ordering::Relaxed),
             syn_cookie_ack_invalid: self.syn_cookie_ack_invalid.load(Ordering::Relaxed),
-            syn_cookie_active_budget_drops: self.syn_cookie_active_budget_drops.load(Ordering::Relaxed),
+            syn_cookie_active_budget_drops: self
+                .syn_cookie_active_budget_drops
+                .load(Ordering::Relaxed),
             syn_cookie_bypass: self.syn_cookie_bypass.load(Ordering::Relaxed),
             policy_reject_sent: self.policy_reject_sent.load(Ordering::Relaxed),
             filter_reject_sent: self.filter_reject_sent.load(Ordering::Relaxed),

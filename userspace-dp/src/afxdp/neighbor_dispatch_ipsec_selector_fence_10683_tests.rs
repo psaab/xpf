@@ -150,10 +150,28 @@ fn retry_pending_neighbor_rechecks_selector_after_nat_10683() {
         &mut debug_counters,
     );
 
-    assert!(bindings[0].pending_neigh.is_empty(), "resolved entry is consumed");
-    assert_eq!(bindings[0].tx_pipeline.pending_fill_frames.front(), Some(&0));
+    assert!(
+        bindings[0].pending_neigh.is_empty(),
+        "resolved entry is consumed"
+    );
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_fill_frames.front(),
+        Some(&0)
+    );
     assert!(bindings[1].tx_pipeline.pending_tx_prepared.is_empty());
-    assert!(counters.touched, "selector-fence drop is visible to batch accounting");
+    assert!(
+        counters.touched,
+        "selector-fence drop is visible to batch accounting"
+    );
+    // #15941 revert-guard: post-NAT retry fence must count + ring.
+    assert_eq!(counters.transit_ipsec_fence_drops, 1);
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    assert_eq!(reasons, vec!["transit_ipsec_selector_fence"]);
     assert_eq!(
         bindings[0]
             .live

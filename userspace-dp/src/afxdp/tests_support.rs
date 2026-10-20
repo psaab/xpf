@@ -1686,6 +1686,7 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path(
         None,
         -1,
         -1,
+    None,
     )
 }
 
@@ -1727,7 +1728,58 @@ pub(super) fn txn_run_descriptor_with_event_stream(
         Some(event_stream),
         -1,
         -1,
+    None,
     )
+}
+
+/// #15941: descriptor driver that returns the exception-ring reasons
+/// recorded during the poll, so a cell can assert ring attribution at
+/// the production poll call site (the stock drivers own and drop the ring).
+pub(super) fn txn_run_descriptor_capturing_exceptions(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (BatchCounters, DebugPollCounters, Vec<String>) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let ring = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        None,
+        None,
+        None,
+        None,
+        123_000_000_000,
+        123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        None,
+        None,
+        -1,
+        -1,
+        Some(&ring),
+    );
+    let reasons = ring
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|event| event.reason().to_string())
+        .collect();
+    (batch, dbg, reasons)
 }
 
 pub(super) fn txn_run_descriptor_with_shared_nat(
@@ -1767,6 +1819,7 @@ pub(super) fn txn_run_descriptor_with_shared_nat(
         None,
         -1,
         -1,
+    None,
     )
 }
 
@@ -1814,6 +1867,7 @@ pub(super) fn txn_run_descriptor_at(
         None,
         -1,
         -1,
+    None,
     )
 }
 
@@ -1852,6 +1906,7 @@ pub(super) fn txn_run_descriptor_with_validation(
         None,
         -1,
         -1,
+    None,
     )
 }
 
@@ -1891,6 +1946,7 @@ pub(super) fn txn_run_descriptor_with_conntrack_fds(
         None,
         conntrack_v4_fd,
         conntrack_v6_fd,
+    None,
     )
 }
 
@@ -1932,6 +1988,7 @@ pub(super) fn txn_run_descriptor_with_screen_state(
         None,
         -1,
         -1,
+    None,
     )
 }
 
@@ -1987,6 +2044,7 @@ pub(super) fn txn_run_descriptor_with_screen_state_capturing_events(
         Some(&event_handle),
         -1,
         -1,
+    None,
     );
     (batch, debug, event_handle, event_rx)
 }
@@ -2029,6 +2087,7 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
         None,
         -1,
         -1,
+    None,
     )
 }
 
@@ -2053,6 +2112,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     conntrack_v4_fd: std::os::raw::c_int,
     conntrack_v6_fd: std::os::raw::c_int,
+    exceptions_out: Option<&Arc<Mutex<ExceptionEventRing>>>,
 ) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -2092,7 +2152,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         shared_owner_rg_indexes_override.unwrap_or(&default_shared_owner_rg_indexes);
     let default_ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
     let ike_exchanges = ike_exchanges.unwrap_or(&default_ike_exchanges);
-    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let recent_exceptions = exceptions_out.cloned().unwrap_or_else(|| Arc::new(Mutex::new(ExceptionEventRing::new())));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
     let dnat_fds = DnatTableFds::default();

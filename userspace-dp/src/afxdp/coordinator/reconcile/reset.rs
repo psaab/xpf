@@ -35,6 +35,12 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.unknown_vlan_dropped = 0;
         binding.dst_mac_dropped = 0;
         binding.pmech_decap_hold_refused = 0;
+        binding.transit_output_filter_drops = 0;
+        binding.transit_source_martian_drops = 0;
+        binding.transit_ipsec_fence_drops = 0;
+        binding.transit_l2_group_drops = 0;
+        binding.forward_build_failures = 0;
+        binding.no_egress_binding_drops = 0;
         binding.neighbor_miss_packets = 0;
         binding.discard_route_packets = 0;
         binding.next_table_packets = 0;
@@ -142,6 +148,28 @@ mod reset_9956_tests {
         );
     }
     #[test]
+    fn reset_binding_counters_clears_transit_drops_15941() {
+        let mut binding = BindingStatus::default();
+        binding.transit_output_filter_drops = 1;
+        binding.transit_source_martian_drops = 2;
+        binding.transit_ipsec_fence_drops = 3;
+        binding.transit_l2_group_drops = 4;
+        binding.forward_build_failures = 5;
+        binding.no_egress_binding_drops = 6;
+        reset_binding_counters(std::slice::from_mut(&mut binding));
+        assert_eq!(
+            (
+                binding.transit_output_filter_drops,
+                binding.transit_source_martian_drops,
+                binding.transit_ipsec_fence_drops,
+                binding.transit_l2_group_drops,
+                binding.forward_build_failures,
+                binding.no_egress_binding_drops
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+    }
+    #[test]
     fn reset_binding_counters_clears_named_pre_l3_10498() {
         let mut binding = BindingStatus::default();
         binding.umem_slice_dropped = 1;
@@ -158,5 +186,4 @@ mod reset_9956_tests {
             "reset_binding_counters must clear named pre-L3 drops"
         );
     }
-
 }

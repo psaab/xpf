@@ -92,7 +92,6 @@ fn kernel_rx_ring_full_round_trip_to_status_15285() {
     );
 }
 
-
 #[test]
 fn fabric_trust_boundary_counters_round_trip_to_status_11061() {
     let mut batch = crate::afxdp::BatchCounters::default();
@@ -328,4 +327,66 @@ fn hugepage_backing_round_trips_live_to_status_to_zero_10729() {
     let value = serde_json::to_value(status).expect("serialize BindingStatus");
     assert_eq!(value["hugepage_backed"], true);
     assert_eq!(value["umem_fallback_bytes_total"], 7);
+}
+
+#[test]
+fn transit_drop_counters_round_trip_batch_to_status_to_reset_15941() {
+    let mut batch = crate::afxdp::BatchCounters::default();
+    batch.record_transit_output_filter_drop();
+    batch.record_transit_output_filter_drop();
+    batch.record_transit_source_martian_drop();
+    batch.record_transit_ipsec_fence_drop();
+    batch.record_transit_l2_group_drop();
+    batch.record_forward_build_failure();
+    batch.record_no_egress_binding_drop();
+    let live = crate::afxdp::binding_state::BindingLiveState::new();
+    batch.flush(&live);
+    assert_eq!(
+        batch.transit_output_filter_drops, 0,
+        "flush must zero batch"
+    );
+    let snap = live.snapshot();
+    assert_eq!(
+        (
+            snap.transit_output_filter_drops,
+            snap.transit_source_martian_drops,
+            snap.transit_ipsec_fence_drops,
+            snap.transit_l2_group_drops,
+            snap.forward_build_failures,
+            snap.no_egress_binding_drops
+        ),
+        (2, 1, 1, 1, 1, 1),
+        "#15941 snapshot must carry transit drops live -> snapshot"
+    );
+    let mut status = crate::protocol::BindingStatus::default();
+    copy_live_snapshot(&mut status, snap);
+    assert_eq!(
+        (
+            status.transit_output_filter_drops,
+            status.transit_source_martian_drops,
+            status.transit_ipsec_fence_drops,
+            status.transit_l2_group_drops,
+            status.forward_build_failures,
+            status.no_egress_binding_drops
+        ),
+        (2, 1, 1, 1, 1, 1),
+        "#15941 copy must carry transit drops snapshot -> status"
+    );
+    let wire = serde_json::to_value(&status).expect("serialize BindingStatus");
+    assert_eq!(wire["transit_output_filter_drops"], 2);
+    assert_eq!(wire["transit_source_martian_drops"], 1);
+    assert_eq!(wire["no_egress_binding_drops"], 1);
+    zero_unbound_slot(&mut status);
+    assert_eq!(
+        (
+            status.transit_output_filter_drops,
+            status.transit_source_martian_drops,
+            status.transit_ipsec_fence_drops,
+            status.transit_l2_group_drops,
+            status.forward_build_failures,
+            status.no_egress_binding_drops
+        ),
+        (0, 0, 0, 0, 0, 0),
+        "#15941 unbound slot must clear transit drops"
+    );
 }

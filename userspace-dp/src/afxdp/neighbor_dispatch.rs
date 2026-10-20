@@ -505,7 +505,16 @@ pub(super) fn retry_pending_neigh(
                 )
             })
         {
-            counters.touched = true;
+            counters.record_transit_source_martian_drop();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "transit_source_martian",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
@@ -553,6 +562,17 @@ pub(super) fn retry_pending_neigh(
         decision.resolution.disposition = ForwardingDisposition::ForwardCandidate;
         let expected_ports = None;
         let Some(source_frame) = area.slice(pkt.desc.addr as usize, pkt.desc.len as usize) else {
+            // #15941 (B4 twin): held descriptor no longer addressable.
+            counters.record_forward_build_failure();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "forward_live_slice_failed",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
@@ -665,7 +685,16 @@ pub(super) fn retry_pending_neigh(
                 )
             })
         {
-            counters.touched = true;
+            counters.record_transit_ipsec_fence_drop();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "transit_ipsec_selector_fence",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
@@ -884,6 +913,17 @@ pub(super) fn retry_pending_neigh(
                 }),
                 event_stream,
             );
+            // #15941: ring attribution for the deferred output-filter drop
+            // (counted in apply_cos_drop_side_effects above).
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "transit_output_filter_drop",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
@@ -898,6 +938,16 @@ pub(super) fn retry_pending_neigh(
             ingress_queue,
             target_ifindex,
         ) else {
+            counters.record_no_egress_binding_drop();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "missing_egress_binding",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
@@ -1038,6 +1088,19 @@ pub(super) fn retry_pending_neigh(
             expected_ports,
             selected_tcp_mss,
         ) else {
+            // #15941: deferred in-place rewrite declined (TTL/hop <= 1,
+            // L2 plan, malformed frame) — the immediate twin funnels to
+            // the counted build-failure handler; name it here too.
+            counters.record_forward_build_failure();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "forward_build_failed",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
@@ -1129,10 +1192,31 @@ pub(super) fn retry_pending_neigh(
                 binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             } else {
                 // The rewritten extent is not addressable in our own area --
-                // recycle rather than submit anything.
+                // recycle rather than submit anything. #15941 (B4 twin).
+                counters.record_forward_build_failure();
+                record_exception(
+                    recent_exceptions,
+                    &binding.identity(),
+                    "forward_live_slice_failed",
+                    pkt.meta.pkt_len as u32,
+                    Some(pkt.meta),
+                    None,
+                    forwarding,
+                );
                 binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             }
         } else {
+            // #15941: target binding vanished between lookup and use.
+            counters.record_no_egress_binding_drop();
+            record_exception(
+                recent_exceptions,
+                &binding.identity(),
+                "missing_egress_binding",
+                pkt.meta.pkt_len as u32,
+                Some(pkt.meta),
+                None,
+                forwarding,
+            );
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
         }
         if forwarded {

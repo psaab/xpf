@@ -6,6 +6,7 @@
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
+use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::test_zone_ids::*;
@@ -18,11 +19,15 @@ use crate::{
     InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
-use super::tests_support::*;
 
 #[test]
 fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
-    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let mut area = MmapArea::new(4096).expect("mmap");
     area.slice_mut(0, frame.len())
         .expect("slice")
@@ -48,20 +53,25 @@ fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 6,
-        tx_ifindex: 6,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 6,
+            tx_ifindex: 6,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     maybe_reinject_slow_path(
         &binding,
@@ -85,7 +95,6 @@ fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
     assert_eq!(live.slow_path_drops.load(Ordering::Relaxed), 0);
     assert!(recent_exceptions.lock().expect("exceptions").is_empty());
 }
-
 
 // #1913: the slow-path eligibility predicate is the single source of
 // truth for which dispositions may be reinjected to the kernel slow
@@ -114,7 +123,6 @@ fn slow_path_eligibility_predicate_allow_list() {
     assert!(!FabricRedirect.is_slow_path_eligible());
 }
 
-
 // #1913: the filtered wrapper must drop (no enqueue, no exception,
 // no drop-counter bump) for every should-drop disposition. Exercises
 // the shared predicate via maybe_reinject_slow_path with a valid frame
@@ -127,7 +135,12 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
         ForwardingDisposition::HAInactive,
         ForwardingDisposition::DiscardRoute,
     ] {
-        let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let frame = build_icmp_echo_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(1, 1, 1, 1),
+            64,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
         let mut area = MmapArea::new(4096).expect("mmap");
         area.slice_mut(0, frame.len())
             .expect("slice")
@@ -153,15 +166,25 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
             protocol: PROTO_ICMP,
             ..UserspaceDpMeta::default()
         };
-        let decision = SessionDecision { resolution: ForwardingResolution { source_ifindex: 0, disposition,
-        local_ifindex: 0,
-        egress_ifindex: 6,
-        tx_ifindex: 6,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                source_ifindex: 0,
+                disposition,
+                local_ifindex: 0,
+                egress_ifindex: 6,
+                tx_ifindex: 6,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
 
         maybe_reinject_slow_path(
             &binding,
@@ -198,7 +221,6 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
     }
 }
 
-
 #[test]
 fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
     let area = MmapArea::new(128).expect("mmap");
@@ -222,20 +244,25 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::NoRoute,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::NoRoute,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     // Addr beyond the registered UMEM length forces an extract failure.
     maybe_reinject_slow_path(
@@ -263,10 +290,14 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
     assert_eq!(last.packet_length, 96);
 }
 
-
 #[test]
 fn maybe_reinject_slow_path_from_frame_records_unavailable() {
-    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
     let binding = BindingIdentity {
         slot: 7,
@@ -287,20 +318,25 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::NoRoute,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::NoRoute,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     maybe_reinject_slow_path_from_frame(
         &binding,
@@ -389,15 +425,20 @@ fn route_identity_is_dropped_before_any_slow_path_outlet_11326() {
             ..UserspaceDpMeta::default()
         };
         let decision = SessionDecision {
-            resolution: ForwardingResolution { source_ifindex: 0, disposition,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 },
+            resolution: ForwardingResolution {
+                source_ifindex: 0,
+                disposition,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
             nat: NatDecision::default(),
             install_table_domain: table_domain,
             install_table_check: table_check,
@@ -441,10 +482,14 @@ fn route_identity_is_dropped_before_any_slow_path_outlet_11326() {
     }
 }
 
-
 #[test]
 fn handle_forward_build_failure_records_build_and_slow_path_failures() {
-    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -464,20 +509,25 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::NoRoute,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::NoRoute,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -498,6 +548,11 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
     );
 
     assert_eq!(dbg.build_fail, 1);
+    assert_eq!(
+        live.forward_build_failures.load(Ordering::Relaxed),
+        1,
+        "#15941 exported mirror"
+    );
     assert_eq!(live.slow_path_packets.load(Ordering::Relaxed), 0);
     assert_eq!(live.slow_path_drops.load(Ordering::Relaxed), 1);
     let reasons: Vec<String> = recent_exceptions
@@ -591,17 +646,18 @@ fn stamped_route_identity_build_failure_does_not_reinject_11326() {
         .collect();
     assert_eq!(
         reasons,
-        vec![
-            "forward_build_failed",
-            "slow_path_ingress_identity_lost"
-        ]
+        vec!["forward_build_failed", "slow_path_ingress_identity_lost"]
     );
 }
 
-
 #[test]
 fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
-    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -621,20 +677,25 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -666,7 +727,6 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
     assert_eq!(reasons, vec!["forward_build_failed"]);
 }
 
-
 /// #1946: a FabricRedirect frame whose forward-frame build/enqueue failed
 /// must NOT be raw-reinjected to the local kernel slow path (a
 /// cross-chassis L2 redirect is not kernel-FIB routable — wrong-path /
@@ -676,7 +736,12 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
 /// `fallback_to_slow_path == true`.
 #[test]
 fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
-    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -696,20 +761,25 @@ fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::FabricRedirect,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -754,7 +824,6 @@ fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
     );
 }
 
-
 /// #1946 regression guard: the FabricRedirect gate in
 /// `handle_forward_build_failure` must be disposition-specific.
 /// `ForwardCandidate` IS a route the kernel FIB may legitimately serve,
@@ -763,7 +832,12 @@ fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
 /// proving the gate let it through.
 #[test]
 fn handle_forward_build_failure_still_reinjects_forward_candidate() {
-    let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let binding = BindingIdentity {
         slot: 7,
         queue_id: 0,
@@ -783,20 +857,25 @@ fn handle_forward_build_failure_still_reinjects_forward_candidate() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -837,7 +916,6 @@ fn handle_forward_build_failure_still_reinjects_forward_candidate() {
     );
 }
 
-
 #[test]
 fn slow_path_accept_is_categorized_by_reason_and_disposition() {
     let live = BindingLiveState::new();
@@ -861,7 +939,6 @@ fn slow_path_accept_is_categorized_by_reason_and_disposition() {
 // #1187: regression tests for DispositionCounters hot/cold accounting modes.
 // Hot callers must accumulate in BatchCounters and only write to
 // BindingLiveState on flush(). Cold callers must write immediately.
-
 
 #[test]
 fn disposition_counters_hot_accumulates_in_batch_not_live() {
@@ -931,7 +1008,6 @@ fn disposition_counters_hot_accumulates_in_batch_not_live() {
     assert!(!counters.touched, "touched flag must clear after flush");
 }
 
-
 #[test]
 fn disposition_counters_cold_writes_live_immediately() {
     let live = BindingLiveState::new();
@@ -980,13 +1056,15 @@ fn disposition_counters_cold_writes_live_immediately() {
     );
 }
 
-
 #[test]
 fn noroute_martian_dst_bumps_both_route_miss_and_martian() {
     let mut counters = BatchCounters::default();
     // IPv4 multicast destination that missed the FIB -> NoRoute.
     record_noroute_with_dst(&mut counters, IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)));
-    assert_eq!(counters.route_miss_packets, 1, "NoRoute must bump route_miss");
+    assert_eq!(
+        counters.route_miss_packets, 1,
+        "NoRoute must bump route_miss"
+    );
     assert_eq!(
         counters.martian_dropped, 1,
         "a martian destination must ALSO bump martian_dropped"
@@ -1001,7 +1079,6 @@ fn noroute_martian_dst_bumps_both_route_miss_and_martian() {
     assert_eq!(counters6.martian_dropped, 1);
 }
 
-
 #[test]
 fn noroute_nonmartian_dst_bumps_route_miss_only() {
     let mut counters = BatchCounters::default();
@@ -1013,7 +1090,6 @@ fn noroute_nonmartian_dst_bumps_route_miss_only() {
         "an ordinary route miss must not be classified as martian"
     );
 }
-
 
 #[test]
 fn is_martian_dst_classifies_all_families() {
@@ -1037,7 +1113,6 @@ fn is_martian_dst_classifies_all_families() {
         "v6 unicast"
     );
 }
-
 
 #[test]
 fn disposition_counters_hot_screen_drops_accumulate_in_batch() {
@@ -1065,7 +1140,6 @@ fn disposition_counters_hot_screen_drops_accumulate_in_batch() {
         "live must receive count after flush"
     );
 }
-
 
 // #4477: source-NAT allocation failures accumulate in the per-poll batch, flush
 // into the live atomic, and surface through snapshot() so the Go control plane
@@ -1104,7 +1178,6 @@ fn nat_alloc_fail_flushes_and_snapshots() {
         "snapshot must surface nat_alloc_fail for the wire bridge"
     );
 }
-
 
 // #3343: record_screen_drop bumps BOTH the aggregate and the matching
 // per-reason ordinal, and the per-reason slots flush element-wise into the
@@ -1150,8 +1223,14 @@ fn record_screen_drop_populates_per_reason_counters() {
         counters.screen_reason_drops[syn_flood], 0,
         "batch per-reason slot clears after flush"
     );
-    assert_eq!(live.screen_reason_drops[syn_flood].load(Ordering::Relaxed), 2);
-    assert_eq!(live.screen_reason_drops[port_scan].load(Ordering::Relaxed), 1);
+    assert_eq!(
+        live.screen_reason_drops[syn_flood].load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        live.screen_reason_drops[port_scan].load(Ordering::Relaxed),
+        1
+    );
     assert_eq!(
         live.screen_reason_drops[session_limit].load(Ordering::Relaxed),
         2
@@ -1270,8 +1349,6 @@ fn syn_cookie_counters_hot_path_accumulate_in_batch() {
 // still forwards, is NOT flow-cached, and self-heals below cap), I6
 // (refused seed is recycled, not buffered), I14 (NAT64 refusal drops).
 
-
-
 // #6664: NextTableUnsupported is DROPPED by the filtered wrapper and counted,
 // while a NoRoute whose policy result is Permit still DELEGATES. Both halves
 // are asserted in one test against the same harness because the failure this
@@ -1305,7 +1382,12 @@ fn next_table_unsupported_is_dropped_and_counted_permit_no_route_still_delegates
         },
     ] {
         let disposition = case.disposition;
-        let frame = build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(1, 1, 1, 1), 64, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let frame = build_icmp_echo_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(1, 1, 1, 1),
+            64,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
         let mut area = MmapArea::new(4096).expect("mmap");
         area.slice_mut(0, frame.len())
             .expect("slice")
@@ -1334,15 +1416,25 @@ fn next_table_unsupported_is_dropped_and_counted_permit_no_route_still_delegates
         // egress_ifindex 0 mirrors what the FIB actually builds for both of
         // these dispositions (there is no egress interface), so the harness
         // is not quietly kinder to them than production is.
-        let decision = SessionDecision { resolution: ForwardingResolution { source_ifindex: 0, disposition,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                source_ifindex: 0,
+                disposition,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
 
         maybe_reinject_slow_path(
             &binding,
@@ -1570,9 +1662,8 @@ fn reinject_outlet_selection_records_on_matching_status() {
 #[test]
 fn reinject_outlet_declared_per_production_site_9637() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let read = |rel: &str| {
-        std::fs::read_to_string(root.join(rel)).expect("read reinject call site")
-    };
+    let read =
+        |rel: &str| std::fs::read_to_string(root.join(rel)).expect("read reinject call site");
     let fc_src = read("src/afxdp/tx/dispatch/slow_path.rs");
     let fc_start = fc_src
         .find("if fallback_to_slow_path {")
@@ -1657,10 +1748,38 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
         expect_trusted: bool,
     }
     let cases = [
-        Case { name: "gated-LocalDelivery-trusted-ACCEPT-control", disposition: LocalDelivery, authorized: true, frame_len: 96, force_trusted_live: Some(64), expect_trusted: true },
-        Case { name: "NoRoute-delegated", disposition: NoRoute, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
-        Case { name: "ForwardCandidate-delegated-D4b", disposition: ForwardCandidate, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
-        Case { name: "synthetic-LocalDelivery-delegated-NAT-T", disposition: LocalDelivery, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
+        Case {
+            name: "gated-LocalDelivery-trusted-ACCEPT-control",
+            disposition: LocalDelivery,
+            authorized: true,
+            frame_len: 96,
+            force_trusted_live: Some(64),
+            expect_trusted: true,
+        },
+        Case {
+            name: "NoRoute-delegated",
+            disposition: NoRoute,
+            authorized: false,
+            frame_len: 2048,
+            force_trusted_live: None,
+            expect_trusted: false,
+        },
+        Case {
+            name: "ForwardCandidate-delegated-D4b",
+            disposition: ForwardCandidate,
+            authorized: false,
+            frame_len: 2048,
+            force_trusted_live: None,
+            expect_trusted: false,
+        },
+        Case {
+            name: "synthetic-LocalDelivery-delegated-NAT-T",
+            disposition: LocalDelivery,
+            authorized: false,
+            frame_len: 2048,
+            force_trusted_live: None,
+            expect_trusted: false,
+        },
     ];
     for c in cases {
         let r = std::sync::Arc::new(SlowPathReinjector::new_without_worker(1500));
@@ -1731,10 +1850,22 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
             r.delegated_status().dropped_packets,
         );
         if c.expect_trusted {
-            assert_eq!(got_trusted, 1, "{}: trusted outlet must record the refusal", c.name);
-            assert_eq!(got_delegated, 0, "{}: delegated outlet must stay quiet", c.name);
+            assert_eq!(
+                got_trusted, 1,
+                "{}: trusted outlet must record the refusal",
+                c.name
+            );
+            assert_eq!(
+                got_delegated, 0,
+                "{}: delegated outlet must stay quiet",
+                c.name
+            );
         } else {
-            assert_eq!(got_delegated, 1, "{}: delegated outlet must record the refusal", c.name);
+            assert_eq!(
+                got_delegated, 1,
+                "{}: delegated outlet must record the refusal",
+                c.name
+            );
             assert_eq!(got_trusted, 0, "{}: trusted outlet must stay quiet", c.name);
         }
     }
@@ -1898,10 +2029,8 @@ fn build_stage11_esp_udp_v6_frame_10516(spi: u32) -> Vec<u8> {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // destination filled below
         0x02, 0x11, 0x22, 0x33, 0x44, 0x55, // peer source
         0x86, 0xdd, // IPv6
-        0x60, 0x00, 0x00, 0x00,
-        0x00, 0x14, // UDP header + 12-byte ESP-in-UDP payload
-        PROTO_UDP,
-        64,
+        0x60, 0x00, 0x00, 0x00, 0x00, 0x14, // UDP header + 12-byte ESP-in-UDP payload
+        PROTO_UDP, 64,
     ];
     frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_LAN_MAC);
     frame.extend_from_slice(&src.octets());
@@ -2045,12 +2174,13 @@ fn run_stage11_frame_poll_on_snapshot_with_options_and_park_witness_10516(
             );
         }
     }
-    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(
+        1500,
+    ));
     if stale {
         forwarding.ipsec_sa.mark_stale();
     }
-    let mut binding =
-        BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
     binding.interface = Arc::<str>::from(match meta.ingress_ifindex {
         6 => "ge-0-0-1",
         12 => "reth0.80",
@@ -2145,9 +2275,10 @@ fn run_stage11_frame_poll_with_seeded_ike_10516(
     }
     let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
     ike_exchanges.seed(ike_key, 123_000_000_000);
-    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
-    let mut binding =
-        BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(
+        1500,
+    ));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
     binding.interface = Arc::<str>::from(match meta.ingress_ifindex {
         6 => "ge-0-0-1",
         12 => "reth0.80",
@@ -2243,7 +2374,9 @@ fn run_stage11_frame_poll_removed_10516(
     run_stage11_frame_poll_with_options_10516(frame, meta, Some(sa_key), false, true)
 }
 
-fn run_stage11_esp_udp_poll_10516(with_sa: bool) -> (
+fn run_stage11_esp_udp_poll_10516(
+    with_sa: bool,
+) -> (
     crate::slowpath::SlowPathStatus,
     crate::slowpath::SlowPathStatus,
     crate::afxdp::forwarding::IpsecSaCounterSnapshot,
@@ -2472,48 +2605,35 @@ fn stage11_raw_ipsec_is_not_claimed_on_real_poll_10516() {
         (
             "v4 ESP",
             v4_esp,
-            raw_v4_meta_10516(
-                &build_stage11_raw_v4_frame_10516(PROTO_ESP),
-                PROTO_ESP,
-            ),
+            raw_v4_meta_10516(&build_stage11_raw_v4_frame_10516(PROTO_ESP), PROTO_ESP),
             false,
             false,
         ),
         (
             "v4 AH",
             v4_ah,
-            raw_v4_meta_10516(
-                &build_stage11_raw_v4_frame_10516(PROTO_AH),
-                PROTO_AH,
-            ),
+            raw_v4_meta_10516(&build_stage11_raw_v4_frame_10516(PROTO_AH), PROTO_AH),
             false,
             false,
         ),
         (
             "v6 ESP",
             v6_esp,
-            raw_v6_meta_10516(
-                &build_stage11_raw_v6_frame_10516(PROTO_ESP),
-                PROTO_ESP,
-            ),
+            raw_v6_meta_10516(&build_stage11_raw_v6_frame_10516(PROTO_ESP), PROTO_ESP),
             false,
             false,
         ),
         (
             "v4 ESP non-first fragment",
             v4_esp_fragment,
-            raw_v4_non_first_meta_10516(
-                &build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP),
-            ),
+            raw_v4_non_first_meta_10516(&build_stage11_raw_v4_non_first_frame_10516(PROTO_ESP)),
             true,
             true,
         ),
         (
             "v4 AH non-first fragment",
             v4_ah_fragment,
-            raw_v4_non_first_meta_10516(
-                &build_stage11_raw_v4_non_first_frame_10516(PROTO_AH),
-            ),
+            raw_v4_non_first_meta_10516(&build_stage11_raw_v4_non_first_frame_10516(PROTO_AH)),
             true,
             true,
         ),
@@ -2735,18 +2855,14 @@ fn stage11_ike_new_and_established_bypass_stale_sa_gate_10516() {
     let dst = Ipv4Addr::new(10, 0, 61, 1);
     let initiator_spi = 0x1122_3344_5566_7788;
 
-    let new_frame = build_stage11_ike_v4_frame_10516(
-        src,
-        dst,
-        40_000,
-        500,
-        initiator_spi,
-        0,
-    );
+    let new_frame = build_stage11_ike_v4_frame_10516(src, dst, 40_000, 500, initiator_spi, 0);
     let new_meta = stage11_ipv4_udp_meta_10516(&new_frame, src, dst, 24, 40_000, 500);
     let (_, new_delegated, new_counters, new_recycled, new_queues, _forwarded) =
         run_stage11_frame_poll_with_options_10516(&new_frame, new_meta, None, true, false);
-    assert_eq!(new_delegated.queued_packets, 1, "admitted NEW-IKE must delegate");
+    assert_eq!(
+        new_delegated.queued_packets, 1,
+        "admitted NEW-IKE must delegate"
+    );
     assert_eq!(new_counters.sa_miss_dropped_packets, 0);
     assert_eq!(new_counters.sa_snapshot_stale_deny, 0);
     assert_eq!(new_recycled, 1);
@@ -2916,8 +3032,7 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
     let src = Ipv4Addr::new(10, 0, 61, 102);
     let dst = Ipv4Addr::new(10, 0, 61, 1);
     let initiator_spi: u64 = 0x1122_3344_5566_7788;
-    let new_frame =
-        build_stage11_ike_v4_frame_10516(src, dst, 40_000, 500, initiator_spi, 0);
+    let new_frame = build_stage11_ike_v4_frame_10516(src, dst, 40_000, 500, initiator_spi, 0);
     let new_meta = stage11_ipv4_udp_meta_10516(&new_frame, src, dst, 24, 40_000, 500);
     let (new_trusted, new_delegated, _, _, new_queues, _forwarded) =
         run_stage11_frame_poll_with_options_10516(&new_frame, new_meta, None, true, false);
@@ -2939,19 +3054,14 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
         crate::test_zone_ids::TEST_LAN_ZONE_ID,
         0,
     );
-    let (
-        established_trusted,
-        established_delegated,
-        _,
-        _,
-        established_queues,
-    ) = run_stage11_frame_poll_with_seeded_ike_10516(
-        &nat_snapshot(),
-        &established_frame,
-        established_meta,
-        true,
-        established_key,
-    );
+    let (established_trusted, established_delegated, _, _, established_queues) =
+        run_stage11_frame_poll_with_seeded_ike_10516(
+            &nat_snapshot(),
+            &established_frame,
+            established_meta,
+            true,
+            established_key,
+        );
 
     let external_src = Ipv4Addr::new(198, 51, 100, 10);
     let external_dst = Ipv4Addr::new(203, 0, 113, 10);
@@ -2977,9 +3087,12 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
         external_ownership.owns_ipsec_local_destination(IpAddr::V4(external_dst)),
         "the external static-NAT target must resolve to a firewall interface"
     );
-    let external_key =
-        ipsec_sa_key(IpAddr::V4(external_dst), external_spi, IpAddr::V4(external_src))
-            .expect("same-family external SA fixture");
+    let external_key = ipsec_sa_key(
+        IpAddr::V4(external_dst),
+        external_spi,
+        IpAddr::V4(external_src),
+    )
+    .expect("same-family external SA fixture");
     let (external_trusted, external_delegated, _, _, external_queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
             &external_snapshot,
@@ -3006,8 +3119,14 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
             external_queues,
         ),
     ] {
-        assert_eq!(trusted.queued_packets, 0, "{label}: positive cell minted q0");
-        assert_eq!(delegated.queued_packets, 1, "{label}: positive cell did not delegate");
+        assert_eq!(
+            trusted.queued_packets, 0,
+            "{label}: positive cell minted q0"
+        );
+        assert_eq!(
+            delegated.queued_packets, 1,
+            "{label}: positive cell did not delegate"
+        );
         assert!(
             !queues.is_empty() && queues.iter().all(|delegated| *delegated),
             "{label}: positive cell minted an adjudicated q0 outlet: {queues:?}"
@@ -3254,7 +3373,11 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         dbg.missing_neigh >= 1,
         "{case_name}: FIXTURE must take the MissingNeighbor arm"
     );
-    assert_eq!(sessions.len(), 1, "{case_name}: permitted MISS flow seeds one session");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "{case_name}: permitted MISS flow seeds one session"
+    );
     assert_eq!(
         binding.pending_neigh.len(),
         1,
@@ -3280,11 +3403,7 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         "{case_name}: no slow-path copy while parked (#10311 untranslated egress)"
     );
     // ── The parked copy and the seed carry the pending translation. ──
-    let parked = binding
-        .pending_neigh
-        .values()
-        .next()
-        .expect("parked entry");
+    let parked = binding.pending_neigh.values().next().expect("parked entry");
     let nat = &parked.decision.nat;
     assert_eq!(nat.rewrite_dst, None, "{case_name}: no DNAT in this flow");
     match case {
@@ -3315,7 +3434,9 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
                     );
                     assert_ne!(
                         translated,
-                        "2001:559:8585:ef00::102".parse::<std::net::Ipv6Addr>().unwrap(),
+                        "2001:559:8585:ef00::102"
+                            .parse::<std::net::Ipv6Addr>()
+                            .unwrap(),
                         "{case_name}: parked source differs from the original"
                     );
                 }
@@ -3327,7 +3448,11 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         .iter()
         .filter(|e| e.origin == SessionOrigin::MissingNeighborSeed)
         .collect();
-    assert_eq!(seeds.len(), 1, "{case_name}: exactly one MissingNeighborSeed publish");
+    assert_eq!(
+        seeds.len(),
+        1,
+        "{case_name}: exactly one MissingNeighborSeed publish"
+    );
     assert_eq!(
         seeds[0].decision.nat, parked.decision.nat,
         "{case_name}: the seed carries the same pending translation"
@@ -3336,11 +3461,7 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
     assert_eq!(
         pending_key.1,
         if v6 {
-            IpAddr::V6(
-                "2001:559:8585:80::1"
-                    .parse::<std::net::Ipv6Addr>()
-                    .unwrap(),
-            )
+            IpAddr::V6("2001:559:8585:80::1".parse::<std::net::Ipv6Addr>().unwrap())
         } else {
             IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))
         },
@@ -3351,23 +3472,15 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
     // different UMEM, so production's cross-UMEM pending_tx_local copy path
     // is exercised rather than a prepared offset alias.
     let next_hop = if v6 {
-        IpAddr::V6(
-            "2001:559:8585:80::1"
-                .parse::<std::net::Ipv6Addr>()
-                .unwrap(),
-        )
+        IpAddr::V6("2001:559:8585:80::1".parse::<std::net::Ipv6Addr>().unwrap())
     } else {
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))
     };
     assert_eq!(
-        pending_key.0,
-        12,
+        pending_key.0, 12,
         "{case_name}: pending key uses the route's egress ifindex"
     );
-    let mut bindings = vec![
-        binding,
-        BindingWorker::new_for_mirror_test(1, 0, 11, 0),
-    ];
+    let mut bindings = vec![binding, BindingWorker::new_for_mirror_test(1, 0, 11, 0)];
     bindings[1].interface = Arc::<str>::from("ge-0-0-0.80");
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     learn_dynamic_neighbor(
@@ -3428,14 +3541,22 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         "{case_name}: exactly one translated replay reaches the egress queue \
          (prepared={}, fill={}, table_unavailable={}, tx_submit_errors={}, cross_umem={})",
         bindings[1].tx_pipeline.pending_tx_prepared.len(),
-        bindings[1].live.debug_pending_fill_frames.load(Ordering::Relaxed),
-        bindings[1].live.table_unavailable_packets.load(Ordering::Relaxed),
-        bindings[1].live.tx_submit_error_drops.load(Ordering::Relaxed),
+        bindings[1]
+            .live
+            .debug_pending_fill_frames
+            .load(Ordering::Relaxed),
+        bindings[1]
+            .live
+            .table_unavailable_packets
+            .load(Ordering::Relaxed),
+        bindings[1]
+            .live
+            .tx_submit_error_drops
+            .load(Ordering::Relaxed),
         bindings[1].tx_counters.neighbor_retry_cross_umem_copies
     );
     assert_eq!(
-        bindings[1].tx_counters.neighbor_retry_cross_umem_copies,
-        1,
+        bindings[1].tx_counters.neighbor_retry_cross_umem_copies, 1,
         "{case_name}: replay uses exactly one cross-UMEM copy"
     );
     let replay = bindings[1]
@@ -3649,9 +3770,10 @@ fn run_stage11_ike_poll_10525(
         "premise: the DNAT-to-self VIP must be XFRM-local so Stage 11 claims the IKE pre-NAT"
     );
     forwarding.ipsec_sa.publish_empty_dump_for_test();
-    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
-    let mut binding =
-        BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(
+        1500,
+    ));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
     binding.interface = Arc::<str>::from(match meta.ingress_ifindex {
         6 => "ge-0-0-1",
         12 => "reth0.80",
@@ -4471,7 +4593,12 @@ fn t8_v6_dnat_to_self_ike_application_any_deny_drops_10585() {
     let gre_dst = "2001:db8:1058::1".parse::<Ipv6Addr>().unwrap();
     for interface in gre_snapshot.interfaces.iter_mut() {
         if interface.ifindex == 77 {
-            interface.addresses.push(InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8:1058::1/128".to_string(), scope: 0, ..Default::default() });
+            interface.addresses.push(InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8:1058::1/128".to_string(),
+                scope: 0,
+                ..Default::default()
+            });
         }
         if interface.ifindex == 11 && interface.parent_ifindex == 0 {
             // The outer frame is untagged (VID 0): select native VLAN 80 on

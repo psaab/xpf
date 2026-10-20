@@ -197,13 +197,11 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // #11066 added the flow-backed NoRoute-NAT-fence counter before both sentinels.
 // #13285 adds nine worker-local screen counter atomics before them; the
 // published size/offsets are now 2624/2432/2561 in both builds.
-// #14668 adds one unconditional DNS illegal-reply counter before them;
-// offsets are now 2480/2609, size unchanged.
+// #14668 adds one unconditional DNS illegal-reply counter before them.
+// #15941 adds six unconditional transit-drop counters before them;
+// offsets are now 2544/2673, size unchanged (2688).
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
-    assert_eq!(
-        std::mem::size_of::<BindingLiveState>(),
-        2624,
-    );
+    assert_eq!(std::mem::size_of::<BindingLiveState>(), 2688,);
     assert_eq!(
         std::mem::align_of::<BindingLiveState>(),
         64,
@@ -211,12 +209,12 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-2480,
+        2544,
         "#14668 must keep pinned admission-counter layout consistent"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2609,
+        2673,
         "#14668 must keep pinned final-field offset consistent"
     );
 }

@@ -6,9 +6,9 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
-use crate::NeighborSnapshot;
 use crate::session::{SessionMetadata, SessionOrigin};
 use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
+use crate::NeighborSnapshot;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const TRANSIT_V4_DST: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 200);
@@ -50,7 +50,9 @@ fn forwarding_10689() -> ForwardingState {
 fn run_v4_source_10689(source: Ipv4Addr) {
     let forwarding = forwarding_10689();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST)).resolution.disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST))
+            .resolution
+            .disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must have a live transit route independent of source class"
     );
@@ -98,7 +100,9 @@ fn run_v4_flowless_source_10689(source: Ipv4Addr, missing_neighbor: bool) {
         ForwardingDisposition::ForwardCandidate
     };
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST)).resolution.disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST))
+            .resolution
+            .disposition,
         expected,
         "fragment fixture must reach the intended transit disposition"
     );
@@ -143,7 +147,9 @@ fn transit_drops_flowless_ipv4_unspecified_before_missing_neighbor_10689() {
 fn run_v6_source_10689(source: Ipv6Addr) {
     let forwarding = forwarding_10689();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V6(TRANSIT_V6_DST)).resolution.disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V6(TRANSIT_V6_DST))
+            .resolution
+            .disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must have a live transit route independent of source class"
     );
@@ -151,13 +157,7 @@ fn run_v6_source_10689(source: Ipv6Addr) {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v6(
-        source,
-        TRANSIT_V6_DST,
-        54321,
-        443,
-        TEST_LAN_MAC,
-    );
+    let frame = build_txn_tcp_syn_frame_v6(source, TRANSIT_V6_DST, 54321, 443, TEST_LAN_MAC);
     let mut meta = txn_meta_v6(24, frame.len());
     meta.flow_src_addr = source.octets();
     meta.flow_dst_addr = TRANSIT_V6_DST.octets();
@@ -184,14 +184,35 @@ fn assert_martian_source_drop_10689(
     assert_eq!(debug.rx, 1, "descriptor must reach the poll path");
     assert_eq!(batch.metadata_packets, 1, "metadata must parse");
     assert_eq!(batch.validated_packets, 1, "packet must pass validation");
-    assert_eq!(batch.screen_drops, 0, "RED cell must not pass via another screen");
-    assert_eq!(debug.no_route, 0, "test must not pass through a missing route");
+    assert_eq!(
+        batch.screen_drops, 0,
+        "RED cell must not pass via another screen"
+    );
+    assert_eq!(
+        debug.no_route, 0,
+        "test must not pass through a missing route"
+    );
     assert_eq!(debug.policy_deny, 0, "nat_snapshot has an any/any permit");
+    assert_eq!(
+        batch.transit_source_martian_drops, 1,
+        "#15941 poll source gate named counter"
+    );
     assert_eq!(debug.tx, 0, "martian source must not be transmitted");
     assert_eq!(debug.forward, 0, "martian source must not forward");
-    assert_eq!(batch.session_creates, 0, "no forward/reverse pair may be created");
-    assert_eq!(sessions.len(), 0, "no forward or reverse session may remain");
-    assert_eq!(binding.pending_neigh.len(), 0, "martian must not enter neighbor retry");
+    assert_eq!(
+        batch.session_creates, 0,
+        "no forward/reverse pair may be created"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "no forward or reverse session may remain"
+    );
+    assert_eq!(
+        binding.pending_neigh.len(),
+        0,
+        "martian must not enter neighbor retry"
+    );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "martian must not queue a forward"
@@ -220,7 +241,10 @@ v6_martian_source_cell_10689!(
     transit_drops_ipv6_multicast_source_10689,
     "ff02::1".parse().unwrap()
 );
-v6_martian_source_cell_10689!(transit_drops_ipv6_loopback_source_10689, Ipv6Addr::LOCALHOST);
+v6_martian_source_cell_10689!(
+    transit_drops_ipv6_loopback_source_10689,
+    Ipv6Addr::LOCALHOST
+);
 v6_martian_source_cell_10689!(
     transit_drops_ipv6_unspecified_source_10689,
     Ipv6Addr::UNSPECIFIED
@@ -234,7 +258,10 @@ v4_martian_source_cell_10689!(
     transit_drops_ipv4_this_network_source_10689,
     Ipv4Addr::new(0, 0, 0, 1)
 );
-v4_martian_source_cell_10689!(transit_drops_ipv4_loopback_source_10689, Ipv4Addr::LOCALHOST);
+v4_martian_source_cell_10689!(
+    transit_drops_ipv4_loopback_source_10689,
+    Ipv4Addr::LOCALHOST
+);
 v4_martian_source_cell_10689!(
     transit_drops_ipv4_link_local_source_10689,
     Ipv4Addr::new(169, 254, 1, 2)
@@ -272,7 +299,10 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
         routing_domain: 0,
     };
     let resolution = lookup_forwarding_resolution(&forwarding, IpAddr::V4(destination)).resolution;
-    assert_eq!(resolution.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
     let mut sessions = SessionTable::new();
     assert!(sessions.install_with_protocol_with_origin(
         forward_key,
@@ -311,14 +341,8 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
 
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
-    let frame = build_txn_tcp_syn_frame_v4(
-        source,
-        destination,
-        54321,
-        443,
-        TCP_FLAG_SYN,
-        TEST_LAN_MAC,
-    );
+    let frame =
+        build_txn_tcp_syn_frame_v4(source, destination, 54321, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
     let mut meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     meta.flow_src_addr[..4].copy_from_slice(&source.octets());
     meta.flow_dst_addr[..4].copy_from_slice(&destination.octets());
@@ -343,7 +367,11 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
     assert_eq!(debug.tx, 0, "martian source session hit must not transmit");
     assert_eq!(debug.forward, 0);
     assert_eq!(batch.session_creates, 0);
-    assert_eq!(sessions.len(), 1, "drop must not remove unrelated conntrack state");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "drop must not remove unrelated conntrack state"
+    );
 }
 
 #[test]
@@ -367,7 +395,9 @@ fn transit_martian_source_gate_covers_flowless_ipv6_fragment_10689() {
 
     let forwarding = forwarding_10689();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V6(destination)).resolution.disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V6(destination))
+            .resolution
+            .disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must have a live transit route independent of source class"
     );
@@ -421,7 +451,10 @@ fn ordinary_unicast_sources_still_transit_under_any_permit_10689() {
         meta_v4,
         true,
     );
-    assert_eq!(debug_v4.tx, 1, "ordinary IPv4 unicast source still forwards");
+    assert_eq!(
+        debug_v4.tx, 1,
+        "ordinary IPv4 unicast source still forwards"
+    );
     assert_eq!(debug_v4.forward, 1);
     assert_eq!(batch_v4.session_creates, 2);
     assert_eq!(sessions_v4.len(), 2);
@@ -429,13 +462,7 @@ fn ordinary_unicast_sources_still_transit_under_any_permit_10689() {
     let mut binding_v6 = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding_v6.interface = Arc::<str>::from("reth1.0");
     let mut sessions_v6 = SessionTable::new();
-    let frame_v6 = build_txn_tcp_syn_frame_v6(
-        LAN_V6_SRC,
-        TRANSIT_V6_DST,
-        54321,
-        443,
-        TEST_LAN_MAC,
-    );
+    let frame_v6 = build_txn_tcp_syn_frame_v6(LAN_V6_SRC, TRANSIT_V6_DST, 54321, 443, TEST_LAN_MAC);
     let mut meta_v6 = txn_meta_v6(24, frame_v6.len());
     meta_v6.flow_src_addr = LAN_V6_SRC.octets();
     meta_v6.flow_dst_addr = TRANSIT_V6_DST.octets();
@@ -450,7 +477,10 @@ fn ordinary_unicast_sources_still_transit_under_any_permit_10689() {
         meta_v6,
         true,
     );
-    assert_eq!(debug_v6.tx, 1, "ordinary IPv6 unicast source still forwards");
+    assert_eq!(
+        debug_v6.tx, 1,
+        "ordinary IPv6 unicast source still forwards"
+    );
     assert_eq!(debug_v6.forward, 1);
     assert_eq!(batch_v6.session_creates, 2);
     assert_eq!(sessions_v6.len(), 2);
@@ -508,11 +538,15 @@ fn directed_broadcast_source_martian_is_routing_domain_scoped_11074() {
             ..Default::default()
         },
     ]);
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, cluster_terminal: false, table: "blue.inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "0.0.0.0/0".to_string(),
-    next_hops: vec!["172.16.81.1@blue-out".to_string()],
-    ..Default::default() });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "blue.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hops: vec!["172.16.81.1@blue-out".to_string()],
+        ..Default::default()
+    });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "blue-out".to_string(),
         ifindex: 126,
@@ -546,11 +580,7 @@ fn directed_broadcast_source_martian_is_routing_domain_scoped_11074() {
         "red's /24 directed broadcast must not be indexed in blue"
     );
     assert!(
-        !crate::afxdp::frame::transit_src_is_martian(
-            &forwarding,
-            IpAddr::V4(source),
-            blue_domain
-        ),
+        !crate::afxdp::frame::transit_src_is_martian(&forwarding, IpAddr::V4(source), blue_domain),
         "the blue-domain martian predicate must accept the /16 host source"
     );
     let blue_resolution =
@@ -567,18 +597,10 @@ fn directed_broadcast_source_martian_is_routing_domain_scoped_11074() {
         "the blue route and neighbor must provide a usable transit path"
     );
     assert!(
-        crate::afxdp::frame::transit_src_is_martian(
-            &forwarding,
-            IpAddr::V4(source),
-            red_domain
-        ),
+        crate::afxdp::frame::transit_src_is_martian(&forwarding, IpAddr::V4(source), red_domain),
         "the same source is a directed broadcast in red"
     );
-    let meta = crate::afxdp::types::ForwardPacketMeta::from(txn_meta_v4(
-        125,
-        TCP_FLAG_SYN,
-        64,
-    ));
+    let meta = crate::afxdp::types::ForwardPacketMeta::from(txn_meta_v4(125, TCP_FLAG_SYN, 64));
     assert!(
         !crate::afxdp::poll_descriptor::transit_source_class_drop(
             &forwarding,

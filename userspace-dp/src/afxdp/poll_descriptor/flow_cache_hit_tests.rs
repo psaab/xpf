@@ -35,8 +35,8 @@ use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
 use crate::test_zone_ids::*;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// PHYSICAL AF_XDP bind port this worker owns.
 const PHYS_INGRESS_IFINDEX: i32 = 6;
@@ -802,6 +802,24 @@ impl LiveCallSiteFixture {
     /// therefore never consulted on a VLAN-tagged frame — measured: it leaves
     /// `pending_tx_local` empty and looks exactly like the reject branch not
     /// running at all.
+    /// #15941: install a bindless selector fence matching the stock
+    /// test tuple (10.0.1.0/24 <-> 172.16.50.0/24) so the cached-hit
+    /// fence arm can fire.
+    fn with_selector_fence(mut self) -> Self {
+        let snapshot = crate::protocol::ConfigSnapshot {
+            bindless_selector_fence_enabled: true,
+            bindless_selector_rows: vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+                local_ts: "10.0.1.0/24".to_string(),
+                remote_ts: "172.16.50.0/24".to_string(),
+            }],
+            ..Default::default()
+        };
+        self.forwarding.bindless_ipsec_selector_fence =
+            crate::afxdp::ipsec_selector_fence::BindlessIpsecSelectorFence::from_snapshot(&snapshot)
+                .expect("valid selector snapshot");
+        self
+    }
+
     fn with_ingress_primary_v4(mut self) -> Self {
         self.forwarding.egress.insert(
             LOGICAL_INGRESS_IFINDEX,
@@ -3825,6 +3843,10 @@ fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
     assert_eq!(run.dbg_forward, 0);
     assert_eq!(run.dbg_tx, 0);
     assert_eq!(
+        run.counters.transit_source_martian_drops, 1,
+        "#15941 source-martian named counter"
+    );
+    assert_eq!(
         run.sessions.len(),
         1,
         "the gate must preserve the live session"
@@ -5284,4 +5306,61 @@ fn transit_cross_binding_foreign_umem_keeps_pending_forward_14945() {
         "#14945: a foreign-UMEM transit hit keeps the PendingForwardRequest path"
     );
     assert_eq!(run.target_tx_counters.pending_in_place_tx_packets, 0);
+}
+
+/// #15941 revert-guard: the cached-descriptor output-filter drop
+/// (`flow_cache_hit.rs` cached drop arm) must increment
+/// `transit_output_filter_drops`. A pure `then discard` (reject=false)
+/// keeps it off the reject-reply path so the counter is the only trace.
+#[test]
+fn cached_output_filter_discard_counts_transit_drop_15941() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_udp_v4_frame();
+    let meta = udp_test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.key = udp_test_key();
+    entry.descriptor.tx_selection.drop = true;
+    entry.descriptor.tx_selection.reject = false;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            flow: Some(SessionFlow {
+                src_ip: udp_test_key().src_ip,
+                dst_ip: udp_test_key().dst_ip,
+                forward_key: udp_test_key(),
+            }),
+            ..StageSeed::default()
+        },
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1, "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(
+        run.counters.transit_output_filter_drops, 1,
+        "#15941 cached drop site must increment the named counter"
+    );
+    assert!(run.scratch.scratch_forwards.is_empty());
+    assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
+}
+
+/// #15941 revert-guard: the cached-hit IPsec selector fence
+/// (`flow_cache_hit.rs` fence arm) must increment
+/// `transit_ipsec_fence_drops`.
+#[test]
+fn cached_selector_fence_counts_transit_fence_drop_15941() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_selector_fence();
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let run = run_stage(&fixture, &frame, 0);
+    assert_eq!(run.flow_cache_tallies.0, 1, "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(
+        run.counters.transit_ipsec_fence_drops, 1,
+        "#15941 cached-hit fence site must increment the named counter"
+    );
+    assert_eq!(run.dbg_tx, 0, "fenced hit must not transmit");
+    assert!(run.scratch.scratch_forwards.is_empty());
 }

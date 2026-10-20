@@ -12,10 +12,10 @@ mod lifecycle;
 /// window. Re-exported so the decision's figure is nameable from outside the
 /// module that computes it.
 pub(crate) use lifecycle::REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS;
-use lifecycle::poll_binding;
 /// #8586: the flat (whole-`bindings`) flow-cache eviction the worker loop's
 /// reconcile uses; the split-borrow sibling stays private to `poll_binding`.
 pub(in crate::afxdp) use lifecycle::invalidate_flow_cache_slots_for_keys;
+use lifecycle::poll_binding;
 
 // #959 Phase 1: per-worker debug counters live in worker/telemetry.rs.
 mod telemetry;
@@ -49,7 +49,7 @@ pub(crate) use timers::WorkerTimers;
 // #959 Phase 7: per-binding TX pipeline state lives in
 // worker/tx_pipeline.rs.
 mod tx_pipeline;
-pub(crate) use tx_pipeline::{tx_submit_sidecar_len, WorkerTxPipeline};
+pub(crate) use tx_pipeline::{WorkerTxPipeline, tx_submit_sidecar_len};
 
 // #959 Phase 8: per-binding registration / identity metadata lives
 // in worker/bind_meta.rs.
@@ -91,12 +91,12 @@ use cos::{
 // `coordinator/mod.rs`, `afxdp/mod.rs`) keep working unchanged.
 mod loop_body;
 pub(crate) use loop_body::worker_loop;
-pub(in crate::afxdp) use loop_body::{
-    retry_deferred_conntrack_deletes, retry_deferred_pressure_sheds,
-};
 #[cfg(test)]
 pub(in crate::afxdp) use loop_body::{
     production_rotation_purge_for_test, production_sweep_for_test,
+};
+pub(in crate::afxdp) use loop_body::{
+    retry_deferred_conntrack_deletes, retry_deferred_pressure_sheds,
 };
 
 // #9412: the synced session entry and its install mapping live in their own file.
@@ -110,7 +110,7 @@ pub(crate) use synced_entry::SyncedSessionEntry;
 // same locals at entry, so the hot loop body is unchanged.
 mod launch;
 pub(crate) use launch::{
-    WorkerControlChannels, WorkerCoSState, WorkerLaunchPlan, WorkerNeighbors,
+    WorkerCoSState, WorkerControlChannels, WorkerLaunchPlan, WorkerNeighbors,
     WorkerPublishedTelemetry, WorkerSharedDataplane, WorkerSharedSessions,
 };
 
@@ -184,8 +184,7 @@ pub(crate) struct BindingWorker {
     /// distinct unresolved next-hops per worker (not total packets). Same
     /// `neg_neigh_cache` / `resolver_enqueue_throttle`. Worker-owned, no
     /// cross-core sync; lazy allocation.
-    pub(crate) pending_neigh:
-        super::types::FastMap<(i32, std::net::IpAddr), PendingNeighPacket>,
+    pub(crate) pending_neigh: super::types::FastMap<(i32, std::net::IpAddr), PendingNeighPacket>,
     /// #15096: this binding's effective pending-neighbor cap —
     /// `pending_neigh_cap_for_rx_fill(rx_fill_frames)` computed once at
     /// bind time from the binding's own RX fill pool (total frames minus
@@ -593,8 +592,7 @@ impl BindingWorker {
                 // Rust round-1 MED-1: Box<[u64]> — allocate-once, never
                 // grow. `vec![...].into_boxed_slice()` produces an
                 // exactly-sized heap allocation with no spare capacity.
-                tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; tx_submit_sidecar_len]
-                    .into_boxed_slice(),
+                tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; tx_submit_sidecar_len].into_boxed_slice(),
             },
             cos: WorkerCos {
                 cos_fast_interfaces: FastMap::default(),
@@ -1288,7 +1286,10 @@ fn fallback_shared_group_to_private(
 #[inline]
 // #1881: pub(in crate::afxdp) so the GRE local-origin loop
 // (afxdp/tunnel.rs) shares the same per-tick refresh helper.
-pub(in crate::afxdp) fn load_arc_if_changed<T>(cached: &Arc<T>, shared: &ArcSwap<T>) -> Option<Arc<T>> {
+pub(in crate::afxdp) fn load_arc_if_changed<T>(
+    cached: &Arc<T>,
+    shared: &ArcSwap<T>,
+) -> Option<Arc<T>> {
     let guard = shared.load();
     if Arc::ptr_eq(cached, &*guard) {
         None
@@ -1494,6 +1495,13 @@ pub(crate) struct BindingLiveSnapshot {
     /// #15243 (A60-01): native GRE/WG-decapsulated reverse packets refused
     /// at the PMech hold site (recycled, not held).
     pub(crate) pmech_decap_hold_refused: u64,
+    /// #15941: terminal transit drops snapshotted from BindingLiveState.
+    pub(crate) transit_output_filter_drops: u64,
+    pub(crate) transit_source_martian_drops: u64,
+    pub(crate) transit_ipsec_fence_drops: u64,
+    pub(crate) transit_l2_group_drops: u64,
+    pub(crate) forward_build_failures: u64,
+    pub(crate) no_egress_binding_drops: u64,
     pub(crate) neighbor_miss_packets: u64,
     pub(crate) discard_route_packets: u64,
     pub(crate) next_table_packets: u64,

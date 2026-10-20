@@ -316,6 +316,57 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"it. Summed across bindings and emitted unconditionally (#15243).",
 		nil, nil,
 	)
+	c.userspaceTransitOutputFilterDrops = prometheus.NewDesc(
+		"xpf_userspace_transit_output_filter_drops_total",
+		"Transit forwards dropped by an egress output firewall filter "+
+			"terminal discard/reject or three-color policer (cos.drop at "+
+			"the forward-request build, cached-descriptor drop, reversed "+
+			"embedded-ICMP egress classification, or deferred neighbor "+
+			"retry). Mirrors the generated-reply "+
+			"*_output_filter_drops family for transit. Summed across "+
+			"bindings and emitted unconditionally (#15941).",
+		nil, nil,
+	)
+	c.userspaceTransitSourceMartianDrops = prometheus.NewDesc(
+		"xpf_userspace_transit_source_martian_dropped_total",
+		"Transit packets dropped because their SOURCE is a martian "+
+			"address (#11074 source-class refusals at poll gates, cached/"+
+			"session hits, and the final-TX recheck). Split from the "+
+			"destination martian_dropped total. Summed across bindings "+
+			"and emitted unconditionally (#15941).",
+		nil, nil,
+	)
+	c.userspaceTransitIPSecFenceDrops = prometheus.NewDesc(
+		"xpf_userspace_transit_ipsec_fence_drops_total",
+		"Transit packets dropped by the #10683 bindless IPsec selector "+
+			"fence (poll gates and final-TX recheck). Summed across "+
+			"bindings and emitted unconditionally (#15941).",
+		nil, nil,
+	)
+	c.userspaceTransitL2GroupDrops = prometheus.NewDesc(
+		"xpf_userspace_transit_l2_group_drops_total",
+		"Transit packets dropped by the #10691 L2-group unicast-IP "+
+			"refusal (IP-unicast frame received as Ethernet group "+
+			"delivery). Summed across bindings and emitted "+
+			"unconditionally (#15941).",
+		nil, nil,
+	)
+	c.userspaceForwardBuildFailures = prometheus.NewDesc(
+		"xpf_userspace_forward_build_failures_total",
+		"Forward build failures (release-visible counterpart, a superset, of the debug "+
+			"build_fail tally: build-None exits and dispatch build "+
+			"failures). Summed across bindings and emitted "+
+			"unconditionally (#15941).",
+		nil, nil,
+	)
+	c.userspaceNoEgressBindingDrops = prometheus.NewDesc(
+		"xpf_userspace_no_egress_binding_drops_total",
+		"Forward requests dropped because no XSK binding exists for "+
+			"the target interface (release-visible counterpart, a superset, of the debug "+
+			"no_egress_binding tally). Summed across bindings and "+
+			"emitted unconditionally (#15941).",
+		nil, nil,
+	)
 	c.userspaceEmbeddedQuoteSubminimalRefused = prometheus.NewDesc(
 		"xpf_userspace_embedded_quote_subminimal_refused_total",
 		"#9901 (F-077): embedded ICMP error quotes refused by the 8-byte "+

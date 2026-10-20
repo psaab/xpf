@@ -55,21 +55,28 @@ type statusSummaryAggregates struct {
 	invalidFabricStampDrops     uint64
 	unstampedFabricIngressDrops uint64
 	ambiguousFabricZoneDrops    uint64
-	neighborMisses              uint64
-	exceptionPackets            uint64
-	flowCacheHits               uint64
-	flowCacheMisses             uint64
-	flowCacheEvictions          uint64
-	sessionHits                 uint64
-	sessionMisses               uint64
-	sessionCreates              uint64
-	sessionExpires              uint64
-	sessionDeltaPending         uint64
-	sessionDeltaGenerated       uint64
-	sessionDeltaDropped         uint64
-	sessionDeltaDrained         uint64
-	policyDeniedPackets         uint64
-	screenDrops                 uint64
+	// #15941: terminal transit drops, summed across bindings.
+	transitOutputFilterDrops  uint64
+	transitSourceMartianDrops uint64
+	transitIPSecFenceDrops    uint64
+	transitL2GroupDrops       uint64
+	forwardBuildFailures      uint64
+	noEgressBindingDrops      uint64
+	neighborMisses            uint64
+	exceptionPackets          uint64
+	flowCacheHits             uint64
+	flowCacheMisses           uint64
+	flowCacheEvictions        uint64
+	sessionHits               uint64
+	sessionMisses             uint64
+	sessionCreates            uint64
+	sessionExpires            uint64
+	sessionDeltaPending       uint64
+	sessionDeltaGenerated     uint64
+	sessionDeltaDropped       uint64
+	sessionDeltaDrained       uint64
+	policyDeniedPackets       uint64
+	screenDrops               uint64
 
 	synCookieChallenges        uint64
 	synCookieSecretUnavailable uint64
@@ -234,6 +241,12 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.invalidFabricStampDrops += binding.InvalidFabricStampDrops
 		agg.unstampedFabricIngressDrops += binding.UnstampedFabricIngressDrops
 		agg.ambiguousFabricZoneDrops += binding.AmbiguousFabricZoneDrops
+		agg.transitOutputFilterDrops += binding.TransitOutputFilterDrops
+		agg.transitSourceMartianDrops += binding.TransitSourceMartianDrops
+		agg.transitIPSecFenceDrops += binding.TransitIPSecFenceDrops
+		agg.transitL2GroupDrops += binding.TransitL2GroupDrops
+		agg.forwardBuildFailures += binding.ForwardBuildFailures
+		agg.noEgressBindingDrops += binding.NoEgressBindingDrops
 		agg.neighborMisses += binding.NeighborMissPackets
 		agg.exceptionPackets += binding.ExceptionPackets
 		agg.flowCacheHits += binding.FlowCacheHits
@@ -497,6 +510,12 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  DNS illegal-reply drops:   %d\n", agg.dnsIllegalReplyDropped)
 	fmt.Fprintf(b, "  IPv6 ext-header drops:     %d\n", agg.ipv6ExtHeaderDropped)
 	fmt.Fprintf(b, "  V4-mapped IPv6 drops:    %d\n", agg.v4MappedIPv6Dropped)
+	fmt.Fprintf(b, "  Transit output-filter drops: %d\n", agg.transitOutputFilterDrops)
+	fmt.Fprintf(b, "  Transit source-martian drops: %d\n", agg.transitSourceMartianDrops)
+	fmt.Fprintf(b, "  Transit IPsec-fence drops:  %d\n", agg.transitIPSecFenceDrops)
+	fmt.Fprintf(b, "  Transit L2-group drops:     %d\n", agg.transitL2GroupDrops)
+	fmt.Fprintf(b, "  Forward build failures:     %d\n", agg.forwardBuildFailures)
+	fmt.Fprintf(b, "  No-egress-binding drops:    %d\n", agg.noEgressBindingDrops)
 	fmt.Fprintf(b, "  Invalid fabric-stamp drops: %d\n", agg.invalidFabricStampDrops)
 	fmt.Fprintf(b, "  Unstamped fabric-ingress drops: %d\n", agg.unstampedFabricIngressDrops)
 	fmt.Fprintf(b, "  Ambiguous fabric-zone drops: %d\n", agg.ambiguousFabricZoneDrops)

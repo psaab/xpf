@@ -1,9 +1,8 @@
 use super::*;
 use crate::afxdp::test_fixtures::{nat_snapshot, nat_snapshot_with_fabric};
 use crate::afxdp::tests_support::{
-    gre_to_self_snapshot,
-    TEST_LAN_MAC, build_txn_tcp_syn_frame_v4, build_txn_tcp_syn_frame_v6, txn_ha_state,
-    txn_meta_v4, txn_meta_v6, txn_run_descriptor,
+    build_txn_tcp_syn_frame_v4, build_txn_tcp_syn_frame_v6, gre_to_self_snapshot, txn_ha_state,
+    txn_meta_v4, txn_meta_v6, txn_run_descriptor, TEST_LAN_MAC,
 };
 
 const CLIENT: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
@@ -20,14 +19,7 @@ fn run_lan_transit_10691(
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v4(
-        CLIENT,
-        SERVER,
-        40_000,
-        443,
-        TCP_FLAG_SYN,
-        dst_mac,
-    );
+    let frame = build_txn_tcp_syn_frame_v4(CLIENT, SERVER, 40_000, 443, TCP_FLAG_SYN, dst_mac);
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (batch, dbg) = txn_run_descriptor(
         &mut binding,
@@ -49,13 +41,7 @@ fn run_lan_transit_v6_10691(
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v6(
-        CLIENT_V6,
-        SERVER_V6,
-        40_000,
-        443,
-        dst_mac,
-    );
+    let frame = build_txn_tcp_syn_frame_v6(CLIENT_V6, SERVER_V6, 40_000, 443, dst_mac);
     let meta = txn_meta_v6(24, frame.len());
     let (batch, dbg) = txn_run_descriptor(
         &mut binding,
@@ -98,19 +84,28 @@ fn non_host_l2_group_unicast_ipv4_drops_before_direct_forward_10691() {
         run_lan_transit_10691(&snapshot, &ha_state, TEST_LAN_MAC);
     assert_eq!(host_batch.validated_packets, 1);
     assert_eq!(host_dbg.tx, 1, "PACKET_HOST control must transit");
-    assert_eq!(host_sessions, 2, "control installs forward/reverse sessions");
+    assert_eq!(
+        host_sessions, 2,
+        "control installs forward/reverse sessions"
+    );
 
     for (label, dst_mac) in [
         ("broadcast", [0xff; 6]),
         ("multicast", [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]),
     ] {
-        let (batch, dbg, sessions, recycled) =
-            run_lan_transit_10691(&snapshot, &ha_state, dst_mac);
+        let (batch, dbg, sessions, recycled) = run_lan_transit_10691(&snapshot, &ha_state, dst_mac);
         assert_eq!(batch.validated_packets, 1, "{label} fixture must arrive");
         assert_eq!(batch.dst_mac_dropped, 0, "{label} reaches L3 disposition");
+        assert_eq!(
+            batch.transit_l2_group_drops, 1,
+            "#15941 L2-group named counter"
+        );
         assert_eq!(dbg.tx, 0, "{label} unicast-IP transit must not transmit");
         assert_eq!(dbg.forward, 0, "{label} must not enter forward accounting");
-        assert_eq!(sessions, 0, "{label} must not install forward/reverse sessions");
+        assert_eq!(
+            sessions, 0,
+            "{label} must not install forward/reverse sessions"
+        );
         assert_eq!(recycled, vec![128], "{label} must recycle its input frame");
     }
 }
@@ -147,12 +142,14 @@ fn non_host_l2_group_unicast_ipv6_drops_before_direct_forward_10691() {
 fn non_host_l2_group_unicast_ip_drops_before_fabric_redirect_10691() {
     let snapshot = nat_snapshot_with_fabric();
     let ha_state = peer_owns_wan_rg_10691();
-    let (batch, dbg, sessions, recycled) =
-        run_lan_transit_10691(&snapshot, &ha_state, [0xff; 6]);
+    let (batch, dbg, sessions, recycled) = run_lan_transit_10691(&snapshot, &ha_state, [0xff; 6]);
     assert_eq!(batch.validated_packets, 1, "fixture must arrive");
     assert_eq!(batch.dst_mac_dropped, 0, "frame reaches L3 disposition");
     assert_eq!(dbg.tx, 0, "non-PACKET_HOST must not be fabric-relayed");
-    assert_eq!(dbg.forward, 0, "dropped copy must not enter forward accounting");
+    assert_eq!(
+        dbg.forward, 0,
+        "dropped copy must not enter forward accounting"
+    );
     assert_eq!(sessions, 0, "dropped copy must not install a session");
     assert_eq!(recycled, vec![128], "dropped frame must be recycled");
 }
@@ -171,14 +168,7 @@ fn non_host_l2_group_unicast_ip_drops_on_cached_hit_10691() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let make_frame = |dst_mac, tcp_flags| {
-        build_txn_tcp_syn_frame_v4(
-            CLIENT,
-            SERVER,
-            40_000,
-            443,
-            tcp_flags,
-            dst_mac,
-        )
+        build_txn_tcp_syn_frame_v4(CLIENT, SERVER, 40_000, 443, tcp_flags, dst_mac)
     };
 
     let syn = make_frame(TEST_LAN_MAC, TCP_FLAG_SYN);
@@ -229,7 +219,14 @@ fn non_host_l2_group_unicast_ip_drops_on_cached_hit_10691() {
         binding.flow.flow_cache.hits, 1,
         "the group ACK must reach the established-flow cache hit path"
     );
-    assert_eq!(group_dbg.tx, 0, "flow-cache hit must not forward non-PACKET_HOST");
+    assert_eq!(
+        group_batch.transit_l2_group_drops, 1,
+        "#15941 cached-hit L2 site must increment the named counter"
+    );
+    assert_eq!(
+        group_dbg.tx, 0,
+        "flow-cache hit must not forward non-PACKET_HOST"
+    );
     assert_eq!(group_dbg.forward, 0);
     assert_eq!(sessions.len(), 2, "dropped copy must not create sessions");
     assert_eq!(binding.scratch.scratch_recycle, vec![128]);
@@ -242,14 +239,8 @@ fn non_host_l2_group_unicast_ip_drops_on_session_hit_10691() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let host_frame = build_txn_tcp_syn_frame_v4(
-        CLIENT,
-        SERVER,
-        40_000,
-        443,
-        TCP_FLAG_SYN,
-        TEST_LAN_MAC,
-    );
+    let host_frame =
+        build_txn_tcp_syn_frame_v4(CLIENT, SERVER, 40_000, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
     let host_meta = txn_meta_v4(24, TCP_FLAG_SYN, host_frame.len() as u16);
     let (host_batch, host_dbg) = txn_run_descriptor(
         &mut binding,
@@ -260,17 +251,14 @@ fn non_host_l2_group_unicast_ip_drops_on_session_hit_10691() {
         host_meta,
     );
     assert_eq!(host_batch.validated_packets, 1);
-    assert_eq!(host_dbg.tx, 1, "PACKET_HOST control must establish the session");
+    assert_eq!(
+        host_dbg.tx, 1,
+        "PACKET_HOST control must establish the session"
+    );
     assert_eq!(sessions.len(), 2);
 
-    let group_frame = build_txn_tcp_syn_frame_v4(
-        CLIENT,
-        SERVER,
-        40_000,
-        443,
-        TCP_FLAG_SYN,
-        [0xff; 6],
-    );
+    let group_frame =
+        build_txn_tcp_syn_frame_v4(CLIENT, SERVER, 40_000, 443, TCP_FLAG_SYN, [0xff; 6]);
     let group_meta = txn_meta_v4(24, TCP_FLAG_SYN, group_frame.len() as u16);
     let (group_batch, group_dbg) = txn_run_descriptor(
         &mut binding,
@@ -282,7 +270,14 @@ fn non_host_l2_group_unicast_ip_drops_on_session_hit_10691() {
     );
     assert_eq!(group_batch.validated_packets, 1);
     assert_eq!(group_batch.dst_mac_dropped, 0);
-    assert_eq!(group_dbg.tx, 0, "session hit must not forward non-PACKET_HOST");
+    assert_eq!(
+        group_batch.transit_l2_group_drops, 1,
+        "#15941 session-hit L2 site must increment the named counter"
+    );
+    assert_eq!(
+        group_dbg.tx, 0,
+        "session hit must not forward non-PACKET_HOST"
+    );
     assert_eq!(sessions.len(), 2, "dropped copy must not mutate sessions");
     assert_eq!(binding.scratch.scratch_recycle, vec![128]);
 }
@@ -292,14 +287,7 @@ fn l2_group_classifier_only_matches_unicast_ip_destination_10691() {
     let forwarding = build_forwarding_state(&nat_snapshot());
     let meta_for = |frame: &[u8]| txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let make_frame = |destination| {
-        build_txn_tcp_syn_frame_v4(
-            CLIENT,
-            destination,
-            40_000,
-            443,
-            TCP_FLAG_SYN,
-            [0xff; 6],
-        )
+        build_txn_tcp_syn_frame_v4(CLIENT, destination, 40_000, 443, TCP_FLAG_SYN, [0xff; 6])
     };
 
     let unicast = make_frame(SERVER);
@@ -330,13 +318,7 @@ fn l2_group_classifier_only_matches_unicast_ip_destination_10691() {
         meta_for(&directed_broadcast),
     ));
 
-    let frame_v6 = build_txn_tcp_syn_frame_v6(
-        CLIENT_V6,
-        SERVER_V6,
-        40_000,
-        443,
-        [0xff; 6],
-    );
+    let frame_v6 = build_txn_tcp_syn_frame_v6(CLIENT_V6, SERVER_V6, 40_000, 443, [0xff; 6]);
     assert!(ingress_l2_group_unicast_ip(
         &forwarding,
         &frame_v6,
@@ -367,14 +349,7 @@ fn non_host_l2_group_unicast_missing_neighbor_drops_before_replay_10966() {
     let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 24, 0)];
     bindings[0].interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v4(
-        CLIENT,
-        dst,
-        40_000,
-        443,
-        TCP_FLAG_SYN,
-        [0xff; 6],
-    );
+    let frame = build_txn_tcp_syn_frame_v4(CLIENT, dst, 40_000, 443, TCP_FLAG_SYN, [0xff; 6]);
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (batch, dbg) = txn_run_descriptor(
         &mut bindings[0],
