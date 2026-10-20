@@ -1174,6 +1174,24 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 		allSiblings := editorRepeatedSiblingSchema12714(siblingSchema)
 		if !allSiblings {
 			if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 {
+				// #15714: the elided node starts with an enclosing named
+				// container and path targets a descendant packed inside it
+				// (interface ge-0/0/0.0 passive). Whole-node removal would
+				// delete the container and its braced body with it. Brace
+				// the node into its container hierarchy and let the normal
+				// descent remove only the descendant; otherwise the whole
+				// node IS the addressed statement and is removed.
+				if step, childSchema := elidedContainerDescendant15714(*current, path[i:], schema, idx); step > 0 {
+					n := (*current)[idx]
+					head := append([]string(nil), n.Keys[:step]...)
+					saved := &Node{Keys: append([]string(nil), n.Keys...), KeysQuoted: append([]bool(nil), n.KeysQuoted...), KeysBracketed: append([]bool(nil), n.KeysBracketed...), BracketedClosed: n.BracketedClosed, IsLeaf: n.IsLeaf, Children: n.Children}
+					braceCompactStatement12508(n, head, childSchema, sliceBoolElided15714(n.KeysQuoted, step), sliceBoolElided15714(n.KeysBracketed, step))
+					if err := deletePath(&n.Children, path, grouped, childSchema, i+step); err != nil {
+						restoreBracedElided15714(n, saved)
+						return err
+					}
+					return nil
+				}
 				*current = append((*current)[:idx], (*current)[idx+1:]...)
 				return nil
 			}
@@ -1392,10 +1410,28 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 	if schema != nil {
 		childSchema := schemaChildFor(schema, path[i])
 		if !editorRepeatedSiblingSchema12714(childSchema) {
-			if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 &&
-				len((*current)[idx].Keys) == len(path)-i {
-				(*current)[idx].Inactive = inactive
-				return nil
+			if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 {
+				// #15714: a descendant address inside a container-headed
+				// elided node (deactivate ... interface ge-0/0/0.0 passive
+				// on `interface ge-0/0/0.0 passive;`) must toggle only
+				// the descendant, never the enclosing container node, and
+				// never its braced body with it. Brace first, then let
+				// the normal descent toggle the descendant.
+				if step, cs := elidedContainerDescendant15714(*current, path[i:], schema, idx); step > 0 {
+					n := (*current)[idx]
+					head := append([]string(nil), n.Keys[:step]...)
+					saved := &Node{Keys: append([]string(nil), n.Keys...), KeysQuoted: append([]bool(nil), n.KeysQuoted...), KeysBracketed: append([]bool(nil), n.KeysBracketed...), BracketedClosed: n.BracketedClosed, IsLeaf: n.IsLeaf, Children: n.Children}
+					braceCompactStatement12508(n, head, cs, sliceBoolElided15714(n.KeysQuoted, step), sliceBoolElided15714(n.KeysBracketed, step))
+					if err := setInactiveAtPath(&n.Children, path, grouped, cs, i+step, inactive); err != nil {
+						restoreBracedElided15714(n, saved)
+						return err
+					}
+					return nil
+				}
+				if len((*current)[idx].Keys) == len(path)-i {
+					(*current)[idx].Inactive = inactive
+					return nil
+				}
 			}
 		}
 	}
@@ -1847,10 +1883,14 @@ func editableStatement12508(n *Node, nodeKeys []string, schema *schemaNode) bool
 // braceCompactStatement12508 rewrites a compact single-statement leaf such as
 // `filter input A;` into its braced form in place, expanding packed tails
 // through the container schema so nested paths become real AST containers.
-// The node keeps its sibling position and inactive marker.
+// The node keeps its sibling position and inactive marker. Any authored
+// braced body (n.Children) is carried into the expansion: packedBodyChildren
+// attaches it under the deepest packed statement or as a sibling root
+// (#14415), so bracing a mixed packed+braced node never drops authored
+// configuration (triple-review 15915 B1).
 func braceCompactStatement12508(n *Node, nodeKeys []string, schema *schemaNode, quoted, bracketed []bool, closed ...bool) {
 	oldKeys, oldQuoted, oldBracketed := n.Keys, n.KeysQuoted, n.KeysBracketed
-	packed := &Node{Keys: oldKeys}
+	packed := &Node{Keys: oldKeys, Children: n.Children}
 	if len(oldQuoted) == len(oldKeys) {
 		packed.setKeysQuoted(oldQuoted)
 	}
@@ -1867,7 +1907,16 @@ func braceCompactStatement12508(n *Node, nodeKeys []string, schema *schemaNode, 
 }
 
 // markPackedBodyLeaves restores the parser's leaf flags on schema-expanded
-// nodes before they are inserted into the mutable AST.
+// nodes before they are inserted into the mutable AST. A node that
+// carries ANY children is never marked leaf: the parser only gives
+// IsLeaf to childless statements (`system-services` with its `ssh`
+// child parses as a container), and the serializers (Format,
+// FormatSet, XML/JSON) branch on IsLeaf and emit only the key path for
+// a leaf, silently dropping a leaf-marked node's children (re-review
+// 15915r: a preserved braced body marked leaf vanished from both
+// serializers and was lost on reload). Schema-leaf LIST constructs
+// keep their values on Keys, not in Children, so this costs them
+// nothing; a node with real child statements IS a container.
 func markPackedBodyLeaves(nodes []*Node, parentSchema *schemaNode) {
 	for _, node := range nodes {
 		if node == nil || len(node.Keys) == 0 {
@@ -1878,9 +1927,40 @@ func markPackedBodyLeaves(nodes []*Node, parentSchema *schemaNode) {
 			continue
 		}
 		_, childSchema = consumeNodeKeys(node.Keys, childSchema)
-		node.IsLeaf = len(childSchema.children) == 0 && childSchema.wildcard == nil
+		node.IsLeaf = len(node.Children) == 0 && len(childSchema.children) == 0 && childSchema.wildcard == nil
 		markPackedBodyLeaves(node.Children, childSchema)
 	}
+}
+
+// sliceBoolElided15714 returns the first n entries of a provenance mask,
+// or nil when the mask does not cover the head keys (#15714). A nil result
+// is the unknown-provenance shape: braceCompactStatement12508 stores it as
+// unknown rather than asserting every head key was bare.
+func sliceBoolElided15714(mask []bool, n int) []bool {
+	if len(mask) < n {
+		return nil
+	}
+	return append([]bool(nil), mask[:n]...)
+}
+
+// restoreBracedElided15714 re-elides a node from its saved pre-brace
+// shape when a braced descendant edit fails, so the operator's original
+// compact spelling survives a no-op error (#15714). Both #15714 call
+// sites restore on ANY error from the braced descent: those errors mean
+// the addressed edit did not commit, so leaving the re-spelled shape
+// would be a silent rewrite on a refused edit (triple-review 15915 M3;
+// the previous refusal-class-only gate kept only ErrPathNotFound /
+// "path not found"-prefixed errors restored).
+func restoreBracedElided15714(n *Node, saved *Node) {
+	if n == nil || saved == nil {
+		return
+	}
+	n.Keys = append([]string(nil), saved.Keys...)
+	n.KeysQuoted = append([]bool(nil), saved.KeysQuoted...)
+	n.KeysBracketed = append([]bool(nil), saved.KeysBracketed...)
+	n.BracketedClosed = saved.BracketedClosed
+	n.IsLeaf = saved.IsLeaf
+	n.Children = saved.Children
 }
 
 // deleteInterfaceFilterSampling12508 removes the compiler-visible binding

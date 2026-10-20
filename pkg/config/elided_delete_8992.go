@@ -115,6 +115,185 @@ func findElidedNodeForPath(nodes []*Node, path []string, root *schemaNode) int {
 	return -1
 }
 
+// elidedContainerDescendant15714 reports whether the elided node idx, whose
+// Keys begin with path and encode exactly one statement, starts with a
+// schema container step that consumes fewer keys than path addresses
+// (#15714). That is the shape where path is a proper descendant inside the
+// node's own keys: path [interface ge-0/0/0.0 passive] on
+// `interface ge-0/0/0.0 passive;` at the ospf area level, where the first
+// step (interface + its name) consumes 2 keys and path still has passive
+// left. Returns the first step's key count and schema, or 0/nil when the
+// node is not such a container-headed descendant target:
+//
+//   - path is longer than the node (the node cannot contain it);
+//     equality is NOT excluded: `security-zone trust
+//     host-inbound-traffic { ... }` has Keys exactly equal to the
+//     host-inbound-traffic address plus a braced body to preserve;
+//   - the first schema step already exhausts path (path ends at the
+//     container head -- again the node's own statement);
+//   - the first step is a leaf or has nothing to hold children: there is
+//     no proven enclosing container to preserve, so the normal walk must
+//     adjudicate rather than this helper inventing one.
+//
+// elidedChainHasNamedContainer15714 reports whether walking keys from root
+// passes through a schema step that carries an instance name/value
+// (args > 0) and can hold children -- a named container inside the packed
+// chain whose descendants must be preserved (#15714).
+func elidedChainHasNamedContainer15714(keys []string, root *schemaNode) bool {
+	cur := root
+	for i := 0; i < len(keys); {
+		child := resolveSchemaChild(cur, keys[i])
+		if child == nil {
+			return false
+		}
+		used := 1 + effectiveArgs15752(child, keys[i:], cur)
+		if child.compoundKey && i+used < len(keys) {
+			if sub := resolveSchemaChild(child, keys[i+used]); sub != nil {
+				used++
+				child = sub
+			}
+		}
+		if child.args > 0 && (len(child.children) > 0 || child.wildcard != nil) {
+			return true
+		}
+		if used <= 0 {
+			return false
+		}
+		i += used
+		cur = child
+	}
+	return false
+}
+
+func elidedContainerDescendant15714(nodes []*Node, path []string, root *schemaNode, idx int) (int, *schemaNode) {
+	if idx < 0 || idx >= len(nodes) || root == nil || len(path) == 0 {
+		return 0, nil
+	}
+	n := nodes[idx]
+	// Keys may EQUAL path: the node is exactly the addressed statement's
+	// keys plus its braced body (`security-zone trust host-inbound-traffic
+	// { ... }`), which is still a descendant target. Only a node SHORTER
+	// than path cannot contain it.
+	if n == nil || len(n.Keys) < len(path) {
+		return 0, nil
+	}
+	// Walk path as a chain of schema steps from root, consuming one
+	// statement-head at a time (keyword + declared args + compound-key
+	// token, the consumeNodeKeys rule). The head container is the deepest
+	// step that ends strictly before path ends: every earlier step is an
+	// ancestor the elided node's own first step also opens, and the node
+	// itself starts with that first step. Taking the FIRST step (per the
+	// issue's stepLen wording) splits `unit 0 family inet ...` at `unit 0`
+	// and re-enters the descent inside the unit, which is exactly where
+	// family -- including the #12661 repeated-family handling -- lives.
+	//
+	// The split is only proven when the first step resolves and
+	// declares something to hold children; a step into a leaf or an
+	// unmodelled token means the normal walk must adjudicate.
+	if len(n.Keys) < 1 {
+		return 0, nil
+	}
+	first := resolveSchemaChild(root, n.Keys[0])
+	if first == nil || (len(first.children) == 0 && first.wildcard == nil) {
+		return 0, nil
+	}
+	// A packed LEAF at the schema root is one flat statement: the walk
+	// has consumed nothing above this call and the node's first step is
+	// a root keyword, so bracing it would only re-spell the statement
+	// the whole-node handling below already owns (fully packed
+	// `chassis cluster strict-session-auth;`, and likewise the first
+	// level of any fully packed line, which the enclosing descent
+	// reaches level by level). Only a node WITH a braced body can hide
+	// a descendant beside its packed tail at the root.
+	if root == setSchema && n.IsLeaf && len(n.Keys) == len(path) {
+		// At the schema root the packed statement is the whole node
+		// UNLESS its chain passes through a NAMED container below
+		// the root keyword (protocols ospf area <id> interface
+		// <name> passive;): there the address names a descendant of
+		// that named container, and the recursive braced descent --
+		// not this root call -- is what preserves it. Returning 0
+		// here lets deletePath brace level by level via the normal
+		// container descent once the root container exists; for a
+		// short chain (chassis cluster strict-session-auth;) the
+		// whole-node removal below is the #8997 meaning.
+		if !elidedChainHasNamedContainer15714(n.Keys, root) {
+			return 0, nil
+		}
+	}
+	step := 1 + effectiveArgs15752(first, n.Keys, root)
+	child := first
+	if child.compoundKey && step < len(n.Keys) {
+		if sub := resolveSchemaChild(child, n.Keys[step]); sub != nil {
+			step++
+			child = sub
+		}
+	}
+	if step <= 0 || step >= len(path) {
+		return 0, nil
+	}
+	// A descendant target only exists when the addressed remainder names
+	// something under the head container. `cluster strict-session-auth`
+	// under chassis: cluster(1) + strict-session-auth is a DIRECT child
+	// leaf of cluster, so the remainder is consumed ENTIRELY as that
+	// leaf's identity -- the addressed statement IS the whole node and
+	// bracing would strand it. Descendant means path continues PAST a
+	// complete child statement of the head: interface ... passive.
+	// The remainder must begin with a child statement of the head and
+	// continue PAST that statement's identity; otherwise the address is
+	// the statement itself (cluster strict-session-auth) or something the
+	// head does not declare (which the normal walk must adjudicate).
+	cur, rest, consumed := child, path[step:], 0
+	for {
+		sub := resolveSchemaChild(cur, rest[0])
+		if sub == nil {
+			return 0, nil
+		}
+		used := 1 + effectiveArgs15752(sub, rest, cur)
+		if sub.compoundKey && used < len(rest) {
+			if s2 := resolveSchemaChild(sub, rest[used]); s2 != nil {
+				used++
+				sub = s2
+			}
+		}
+		if used >= len(rest) {
+			// Path ends exactly at this statement's identity. It is
+			// still a descendant when the walk already consumed a
+			// complete statement to get here (protocols ospf area ...
+			// interface ... passive), when the head step carries a
+			// name/value (interface ge-0/0/0.0, neighbor 10.0.0.2,
+			// unit 0), or when this statement can hold a body
+			// (host-inbound-traffic with its braced body). The shape
+			// that is NOT a descendant is an unnamed head whose first
+			// child leaf ends the address: cluster strict-session-auth
+			// IS the whole node, and toggling/deleting it whole is
+			// the existing #8992/#13535 meaning.
+			if consumed >= 1 || len(sub.children) > 0 || sub.wildcard != nil {
+				return step, child
+			}
+			// Below the schema root, an UNNAMED head (step == 1)
+			// whose remainder is one direct leaf child is the whole
+			// node: chassis-level `cluster strict-session-auth;`
+			// (#8997/#13535, including beside a braced sibling). A
+			// named head below the root (unit 0, neighbor ...) or
+			// any head carrying a braced body addresses a
+			// descendant; at the schema root only the braced-body
+			// shape does (the fully packed line is the whole node).
+			if root != setSchema {
+				if step > 1 || len(n.Children) > 0 {
+					return step, child
+				}
+				return 0, nil
+			}
+			if len(n.Children) > 0 {
+				return step, child
+			}
+			return 0, nil
+		}
+		consumed++
+		cur, rest = sub, rest[used:]
+	}
+}
+
 // elidedPathIsMultiLeafValues reports whether path, resolved from root, lands
 // on a MULTI leaf -- in which case a node carrying extra trailing keys is a
 // value LIST, not a packed run of statements.
