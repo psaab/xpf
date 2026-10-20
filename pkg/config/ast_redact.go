@@ -115,6 +115,11 @@ func FormatCompareRedactedAtPath(oldTree, newTree *ConfigTree, path []string) st
 		width = newWidth
 	}
 	parentPrefix := append([]string(nil), path[:len(path)-width]...)
+	// #15942 (fold): a DESCENDANT scope's parent prefix is rendered as
+	// output context ([edit …] header, set-line prefixes), so it must
+	// not reprint secret identity tokens the scope passed THROUGH
+	// (`snmp community public authorization` must not print `public`).
+	parentPrefix = maskSecretPathComponents15942(parentPrefix)
 	var b strings.Builder
 	diffNodes(&b, fingerprintMatches15942(oldMatches, parentPrefix), fingerprintMatches15942(newMatches, parentPrefix), parentPrefix)
 	return maskCompareFingerprints(b.String())
@@ -174,7 +179,9 @@ func (t *ConfigTree) FormatPathSetRedacted(path []string) string {
 	// caller's tokens. Feed it an ephemeral parent chain whose matched
 	// terminal nodes are the already-masked clones; joining the set lines
 	// with the original prefix restores the exact requested spelling.
-	parentPrefix := append([]string(nil), path[:len(path)-width]...)
+	// The set-line prefix is output, not navigation: mask any secret
+	// identity component it names (see FormatCompareRedactedAtPath).
+	parentPrefix := maskSecretPathComponents15942(append([]string(nil), path[:len(path)-width]...))
 	var b strings.Builder
 	for _, n := range matches {
 		prefix, prefixQuote, prefixGroup := appendNodeKeysGrouped(parentPrefix, nil, nil, n)
@@ -204,7 +211,7 @@ func (t *ConfigTree) FormatPathJSONRedacted(path []string) string {
 	}
 	parentPath := ""
 	if len(path) > 0 {
-		parentPath = strings.Join(path[:len(path)-width], " ")
+		parentPath = strings.Join(maskSecretPathComponents15942(append([]string(nil), path[:len(path)-width]...)), " ")
 	}
 	data, err := marshalScopedJSON15942(matches, parentPath)
 	if err != nil {
@@ -239,9 +246,6 @@ func (t *ConfigTree) FormatPathInheritanceRedactedForNode(path []string, nodeID 
 	if len(path) == 0 {
 		return t.RedactedClone().FormatPathInheritanceForNode(path, nodeID)
 	}
-	if _, width := navigatePathWidth(t.Children, path); width == 0 {
-		_ = width
-	}
 	expanded, err := t.expandForInheritance(nodeID)
 	if err != nil {
 		return "", err
@@ -251,8 +255,11 @@ func (t *ConfigTree) FormatPathInheritanceRedactedForNode(path []string, nodeID 
 		return "", nil
 	}
 	clones := cloneNodes(matches)
-	base := append([]string(nil), path[:len(path)-width]...)
-	redactMatches15942(clones, base)
+	// Mask with the node's own flattened key path as context, not the
+	// consumed width: an expanded node's Keys can carry identity tokens
+	// beyond the path width the caller supplied.
+	_ = width
+	redactMatches15942(clones, nil)
 	var b strings.Builder
 	for _, n := range clones {
 		if n.Annotation != "" {
@@ -268,8 +275,6 @@ func (t *ConfigTree) FormatPathInheritanceRedactedForNode(path []string, nodeID 
 	}
 	return b.String(), nil
 }
-
-const xmlHeader15942 = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
 
 func renderScopedHierarchical15942(b *strings.Builder, n *Node) {
 	if n.Annotation != "" {
@@ -320,6 +325,30 @@ func (t *ConfigTree) redactedScopedMatches(path []string) ([]*Node, int) {
 // Tokens at or above base (idx < len(base)) belong to ancestor nodes
 // outside the match and keep their authored spelling — that is what
 // leaves the caller's navigation path intact on the clone.
+// maskSecretPathComponents15942 returns path with every token that is
+// a secret identity at its position replaced by SecretDataPlaceholder.
+// The judgement reuses secretIndices/urlLeafIndices on the path itself,
+// so this masks exactly the tokens the tree redactor would mask at
+// that flattened position (`public` in `snmp community public …`, a
+// credential-bearing archive-sites URL) and nothing else.
+func maskSecretPathComponents15942(path []string) []string {
+	if len(path) == 0 {
+		return path
+	}
+	out := append([]string(nil), path...)
+	for _, idx := range secretIndices(out) {
+		if idx >= 0 && idx < len(out) {
+			out[idx] = SecretDataPlaceholder
+		}
+	}
+	for _, idx := range urlLeafIndices(out) {
+		if idx >= 0 && idx < len(out) {
+			out[idx] = RedactURL(out[idx])
+		}
+	}
+	return out
+}
+
 func redactMatches15942(matches []*Node, base []string) {
 	for _, n := range matches {
 		full := append(append([]string(nil), base...), n.Keys...)

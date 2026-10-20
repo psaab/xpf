@@ -994,14 +994,19 @@ func (c *CLI) handleShowSystem(args []string) error {
 			}
 			switch {
 			case isPipeCompare || isBareCompare:
-				// #15942 H2-04: the pre-pipe subtree path scopes the
-				// compare as it already scopes the display formats;
-				// dropping it rendered (and disclosed) the whole tree.
+				// #15942 H2-04: a PIPED compare honours the pre-pipe
+				// subtree path as the display formats do. The BARE
+				// `compare` token is syntax, not a path: it keeps its
+				// historic whole-tree meaning.
+				comparePath := rbPath
+				if isBareCompare {
+					comparePath = nil
+				}
 				var diff string
 				if redact {
-					diff, err = c.store.ShowCompareRollbackActiveRedactedAtPath(n, rbPath)
+					diff, err = c.store.ShowCompareRollbackActiveRedactedAtPath(n, comparePath)
 				} else {
-					diff, err = c.store.ShowCompareRollbackActiveAtPath(n, rbPath)
+					diff, err = c.store.ShowCompareRollbackActiveAtPath(n, comparePath)
 				}
 				if err != nil {
 					return err
