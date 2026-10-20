@@ -440,7 +440,13 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
         ingress_queue_id: worker_ctx.ident.queue_id,
         desc,
         frame: PendingForwardFrame::Prebuilt(rewritten_frame),
-        meta: meta.into(),
+        // #15947 (H26-02): the queued frame is the TRANSLATED wire frame,
+        // so the request meta must describe it (family/protocol/DSCP/offsets
+        // from wire_forward_meta), not the ingress packet — dispatch stamps
+        // expected_* and mirror-classifies from this meta. Ingress identity
+        // (ifindex/VLAN/PCP) was already carried onto wire_forward_meta
+        // above, so mirror config resolution still keys on the ingress unit.
+        meta: wire_forward_meta,
         decision: icmp_decision,
         apply_nat_on_fabric: false,
         expected_ports: None,

@@ -434,13 +434,42 @@ pub(super) fn build_local_time_exceeded_request(
         );
     }
 
+    // #15947 (H26-02): describe the GENERATED Time-Exceeded frame, not
+    // the expired transit packet: same family (the builders never
+    // translate), but the reply's own protocol (ICMP/ICMPv6) and its
+    // wire DSCP. The pre-fix ingress meta made dispatch stamp the
+    // transit packet's family/protocol and mirror-classify the reply
+    // as if it were that packet. Computed before the frame moves into
+    // the request below.
+    let wire_meta = {
+        let mut wire_meta: ForwardPacketMeta = meta.into();
+        wire_meta.protocol = match wire_meta.addr_family as i32 {
+            libc::AF_INET => crate::ip_proto::PROTO_ICMP,
+            libc::AF_INET6 => crate::ip_proto::PROTO_ICMPV6,
+            _ => wire_meta.protocol,
+        };
+        wire_meta.dscp = {
+            let l3 = crate::afxdp::frame::frame_l3_offset(&prebuilt_frame)
+                .unwrap_or(wire_meta.l3_offset as usize);
+            match wire_meta.addr_family as i32 {
+                libc::AF_INET => prebuilt_frame.get(l3 + 1).map(|tos| tos >> 2).unwrap_or(0),
+                libc::AF_INET6 => prebuilt_frame
+                    .get(l3..l3 + 2)
+                    .map(|b| (((b[0] & 0x0f) << 2) | (b[1] >> 6)) & 0x3f)
+                    .unwrap_or(0),
+                _ => 0,
+            }
+        };
+        wire_meta
+    };
+
     Some(PendingForwardRequest {
         target_ifindex,
         target_binding_index: None,
         ingress_queue_id: ingress_ident.queue_id,
         desc,
         frame: PendingForwardFrame::Prebuilt(prebuilt_frame.into()),
-        meta: meta.into(),
+        meta: wire_meta,
         decision: SessionDecision { resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -457,7 +486,12 @@ pub(super) fn build_local_time_exceeded_request(
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
         apply_nat_on_fabric: false,
         expected_ports: None,
-        flow_key: Some(flow.forward_key.clone()),
+        // #15947 (H26-02): a locally generated reply is not the transit
+        // session's packet — carrying the transit flow_key would give it
+        // session authority in dispatch (mirror classification, CoS bucket)
+        // and let an RST-teardown cancel match it. Keep it flowless, the
+        // same invariant #5690 sets for embedded-ICMP reversals.
+        flow_key: None,
         nat64_reverse: None,
         overlap_admissions: None,
         cos_queue_id: verdict.cos_queue_id,
