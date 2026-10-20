@@ -94,7 +94,7 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up_resolution);
             // #15958b (fold): same shared zone-egress rule as refresh.
             let resolution = if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-                let dest_rg = super::super::connected_owner_rg_for_target(forwarding, resolution_target);
+                let dest_rg = super::super::connected_owner_rg_for_target_in_table(forwarding, resolution_target, install_table_name_for_session(forwarding, decision, resolution_target));
                 // Unknown owner (dest_rg==0) is NOT peer-ownership: keep the candidate (no redirect).
             let destination_owner_active = dest_rg == 0 || (dest_rg > 0
                     && ha_state
@@ -106,13 +106,14 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                     metadata.fabric_ingress,
                     metadata.ingress_zone,
                 );
-                let resolution2 = super::super::rehome_or_retain_fabric_redirect_for_target_15958b(
+                let resolution2 = super::super::rehome_or_retain_fabric_redirect_scoped_15958b(
                 forwarding,
                 decision.resolution,
                 enforced_resolution,
                 metadata.egress_zone,
                 destination_owner_active,
                 Some(resolution_target),
+                install_table_name_for_session(forwarding, decision, resolution_target),
             );
             resolution2
             } else {
