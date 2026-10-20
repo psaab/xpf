@@ -491,12 +491,13 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
         // destination owner (dest_rg == 0) is not peer-ownership:
         // keep the candidate.
         if dest_rg > 0 {
-            let redirected = super::rehome_or_retain_fabric_redirect_15958b(
+            let redirected = super::rehome_or_retain_fabric_redirect_for_target_15958b(
                 forwarding,
                 resolved,
                 resolved,
                 ingress_zone,
                 destination_owner_active,
+                Some(target_ip),
             );
             if redirected.disposition == ForwardingDisposition::FabricRedirect {
                 return redirected;
