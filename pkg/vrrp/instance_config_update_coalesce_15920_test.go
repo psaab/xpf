@@ -1064,3 +1064,165 @@ func TestVRRPMaster_ForcedResignSafetyArmThenRevert_BackupReArms(t *testing.T) {
 		t.Fatal("cfg-derived safety timer stayed on intermediate 40950ms horizon after 100ms revert")
 	}
 }
+
+// --- #15927: in-window revert after the hold snapshot; priority commit
+// during the consumer's send ---
+
+// TestVRRPBackup_HoldSnapshotRevertInWindow_ConsumerDisarms is the
+// GLM round-3 accumulated in-window-revert interleaving (#15927):
+// hold=60s; commit A 60->1 (record 60->1, token queued, unconsumed —
+// the run loop is in the masterDownTimer.C case); stepBackup snapshots
+// hold=1s; revert commit B 1->60 lands before armPreemptHold takes
+// vi.mu (record accumulates to 60->60); armPreemptHold arms the hold
+// at the 1s snapshot. Its note MUST write oldHoldSec := snapSec (1s)
+// unconditionally, so the record reads 1->60 and the config consumer
+// DISARMS the 1s hold. On master the conditional note skipped when
+// newHoldSec(60) != snapSec(1), the record stayed 60->60, and the
+// consumer preserved the 1s hold — takeover ~59s early against the
+// live lower-priority master.
+//
+// Determinism: the snapshot -> commit-B -> arm gap is driven directly
+// (preemptHoldDuration snapshot, then updateConfig, then
+// armPreemptHold with the snapshot), mirroring the committed
+// fresh-variant test's accepted seam; cfg is unchanged between commit
+// A and the snapshot, so the snapshot is exactly 1s.
+func TestVRRPBackup_HoldSnapshotRevertInWindow_ConsumerDisarms(t *testing.T) {
+	vi := newHoldTestInstance(t, 200, 60)
+	vi.mu.Lock()
+	vi.lastMasterPriority = 100
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+
+	// Commit A: 60 -> 1. Record 60->1, token queued unconsumed.
+	vi.updateConfig(Instance{
+		Interface:         "eth0",
+		GroupID:           101,
+		Priority:          200,
+		Preempt:           true,
+		PreemptHoldTime:   1,
+		AdvertiseInterval: 30,
+	})
+
+	// stepBackup's snapshot at the masterDownTimer fire: hold=1s.
+	snapshot := vi.preemptHoldDuration()
+	if snapshot != time.Second {
+		t.Fatalf("snapshot hold = %v, want 1s", snapshot)
+	}
+
+	// Revert commit B: 1 -> 60 lands before the arm. The accumulated
+	// record nets to 60->60 — exactly the state that defeats a
+	// conditional note.
+	vi.updateConfig(Instance{
+		Interface:         "eth0",
+		GroupID:           101,
+		Priority:          200,
+		Preempt:           true,
+		PreemptHoldTime:   60,
+		AdvertiseInterval: 30,
+	})
+
+	// The arm uses the 1s snapshot, not the reverted 60s cfg.
+	masterDown := time.NewTimer(time.Hour)
+	t.Cleanup(func() { masterDown.Stop() })
+	preemptHold := time.NewTimer(time.Hour)
+	t.Cleanup(func() { preemptHold.Stop() })
+	vi.armPreemptHold(masterDown, preemptHold, snapshot)
+
+	vi.mu.RLock()
+	armedAfterArm := vi.preemptHoldArmed
+	p := vi.pendingConfigChange
+	vi.mu.RUnlock()
+	if !armedAfterArm {
+		t.Fatal("hold not armed by armPreemptHold")
+	}
+	if !p.valid || p.oldHoldSec != 1 || p.newHoldSec != 60 {
+		t.Fatalf("pending hold after arm = %d->%d (valid=%v), want 1->60: the unconditional note must baseline to the 1s snapshot despite the netted 60->60 accumulated record", p.oldHoldSec, p.newHoldSec, p.valid)
+	}
+
+	// Consume the queued token: the consumer must disarm the 1s hold
+	// (preempt premise still holds, so only the hold-time delta can).
+	vi.mu.Lock()
+	vi.lastMasterSeen = time.Now()
+	vi.mu.Unlock()
+	masterDownLong := time.NewTimer(time.Hour)
+	defer masterDownLong.Stop()
+	advert := time.NewTimer(time.Hour)
+	defer advert.Stop()
+	vi.stepBackup(masterDownLong, advert, preemptHold)
+
+	vi.mu.RLock()
+	armed := vi.preemptHoldArmed
+	vi.mu.RUnlock()
+	if armed {
+		t.Fatal("preemptHoldArmed = true: 1s hold armed at the snapshot survived the 1->60 in-window revert; promotion would fire ~59s early against the live lower master")
+	}
+	if vi.getState() != StateBackup {
+		t.Errorf("state = %s, want BACKUP", vi.getState())
+	}
+}
+
+// TestVRRPMaster_PriorityOnlyCommitDuringConsumerSend_StillCorrects is
+// the GLM round-3 F2 minor (#15927): MASTER consumes a record with an
+// interval delta; during the correction sendAdvert, the manager
+// commits a priority-only change (200->100) whose wire advert still
+// carried 200 (the priority is evaluated before the commit lands).
+// The trailing armAdvertTimer must NOT erase that pending priority
+// delta by baselining oldEffectivePrio to the new priority: the next
+// consumption must emit a correction advert carrying 100. On master
+// the arm's note set oldEff:=100, netting the priority-only record to
+// no-change, and the wire kept 200 until the next periodic fire (up to
+// one full interval). At this fix the arm notes only the interval it
+// consumed, and the post-send priority note baselines to the SENT
+// priority (200), so the record keeps the 200->100 delta.
+func TestVRRPMaster_PriorityOnlyCommitDuringConsumerSend_StillCorrects(t *testing.T) {
+	vi := newMaster15689(t, 10000)
+	base := Instance{Interface: "eth0", GroupID: 101, Priority: 200, Preempt: true, AdvertiseInterval: 10000}
+	shrunk := base
+	shrunk.AdvertiseInterval = 100
+	prioOnly := base
+	prioOnly.Priority = 100 // priority-only relative to base
+
+	var prios []int
+	prev := sendPacketFn
+	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
+		prios = append(prios, int(pkt.Priority))
+		if len(prios) == 1 {
+			// Priority-only commit lands during the consumer's
+			// correction send: the wire advert above still
+			// carries 200. (It also carries the 100ms interval,
+			// so the pending record's new interval becomes
+			// 10000; only the priority delta is under test.)
+			vi.updateConfig(prioOnly)
+		}
+		return nil
+	}
+	t.Cleanup(func() { sendPacketFn = prev })
+
+	masterDown := time.NewTimer(time.Hour)
+	t.Cleanup(func() { masterDown.Stop() })
+	advert := time.NewTimer(time.Hour)
+	t.Cleanup(func() { advert.Stop() })
+
+	vi.updateConfig(shrunk)
+	if stop := vi.stepMaster(masterDown, advert); stop {
+		t.Fatal("stepMaster returned stop=true on first consumption")
+	}
+	if len(prios) != 1 || prios[0] != 200 {
+		t.Fatalf("first correction advert priorities = %v, want [200]", prios)
+	}
+	// The priority-only record created by the mid-send commit must
+	// keep its 200->100 delta across the trailing arm: old stays the
+	// SENT 200, new is the committed 100.
+	vi.mu.RLock()
+	mid := vi.pendingConfigChange
+	vi.mu.RUnlock()
+	if !mid.valid || mid.oldEffectivePrio != 200 || mid.newEffectivePrio != 100 {
+		t.Fatalf("pending priority after consumer arm = %d->%d (valid=%v), want 200->100: the trailing arm erased the priority-only commit that landed during sendAdvert", mid.oldEffectivePrio, mid.newEffectivePrio, mid.valid)
+	}
+	if stop := vi.stepMaster(masterDown, advert); stop {
+		t.Fatal("stepMaster returned stop=true on second consumption")
+	}
+	if len(prios) != 2 || prios[1] != 100 {
+		t.Fatalf("advert priorities = %v, want [200 100]: priority-only commit during the consumer send must still emit a correction advert", prios)
+	}
+}

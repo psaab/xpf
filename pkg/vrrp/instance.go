@@ -514,8 +514,8 @@ func (vi *vrrpInstance) takePendingConfigChange() configChange15689 {
 	return c
 }
 
-// Pending-record re-baselining (#15920 reviews, rounds 1-2). Several
-// config updates can coalesce ahead of the capacity-one
+// Pending-record re-baselining (#15920 reviews, rounds 1-2; #15927).
+// Several config updates can coalesce ahead of the capacity-one
 // configUpdatedCh token, and a timer/RX/transition event serviced in
 // between arms timers from whatever cfg is current at that moment —
 // e.g. MASTER's advertTimer.C re-arms at an intermediate
@@ -542,60 +542,95 @@ func (vi *vrrpInstance) takePendingConfigChange() configChange15689 {
 // send a packet without arming (updateVIPs announce) must NOT note.
 // Sending the packet itself stays outside the lock (wire I/O); its
 // encoding is independently snapshotted under vi.mu in sendAdvert.
+//
+// Which fields an arm may note is narrower still: only the fields
+// the arm's duration actually consumed. An advert-timer arm consumes
+// AdvertiseInterval (via armIntervalAppliedLocked); it does NOT put
+// the current effective priority on the wire. If it also baselined
+// oldEffectivePrio := current, a priority-only commit landing during
+// the preceding sendAdvert — whose wire advert still carried the
+// pre-commit priority — would net old==new against the record its
+// own commit created, and the consumer would suppress the correction
+// advert (#15927). Priority is baselined only by
+// noteAdvertPriorityLocked from a send that actually carried it:
+// sendAdvert snapshots the priority under its lock, and the caller
+// notes exactly that sent value after the send returns.
 
-// noteAdvertBaselineLocked records oldAdvertiseMS/oldEffectivePrio
-// from the cfg snapshot an advert/master-down arm just used. Caller
-// MUST hold vi.mu (the arm helpers above do); a no-op unless a config
-// change is pending.
-func (vi *vrrpInstance) noteAdvertBaselineLocked() {
+// armIntervalAppliedLocked records that the interval dimension the
+// caller just armed a timer from — the locked AdvertiseInterval —
+// is now live, by advancing oldAdvertiseMS to it. It deliberately
+// does NOT touch oldEffectivePrio: arming a timer does not put a
+// priority on the wire (#15927). Caller MUST hold vi.mu; a no-op
+// unless a config change is pending.
+func (vi *vrrpInstance) armIntervalAppliedLocked() {
 	if !vi.pendingConfigChange.valid {
 		return
 	}
 	vi.pendingConfigChange.oldAdvertiseMS = vi.cfg.AdvertiseInterval
-	vi.pendingConfigChange.oldEffectivePrio = vi.effectivePriorityLocked()
 }
 
-// noteHoldBaselineLocked is noteAdvertBaselineLocked for
-// PreemptHoldTime: oldHoldSec := the cfg value whose duration an
-// arm/disarm decision just used.
-func (vi *vrrpInstance) noteHoldBaselineLocked() {
+// noteAdvertPriorityLocked records the effective priority a wire
+// advert just carried, advancing oldEffectivePrio to the SENT
+// value. That value is whatever sendAdvert snapshotted (via
+// getPriority/peer resign paths) at send time; it is passed in,
+// never re-read from cfg, so a priority commit landing DURING the
+// send keeps its delta (old stays the sent priority, new stays the
+// committed one) and the consumer still emits the correction. The
+// unconditional write also repairs a stale baseline left by an
+// interval-only arm that ran after the commit. A no-op unless a
+// config change is pending.
+func (vi *vrrpInstance) noteAdvertPriorityLocked(sentPriority int) {
 	if !vi.pendingConfigChange.valid {
 		return
 	}
-	vi.pendingConfigChange.oldHoldSec = vi.cfg.PreemptHoldTime
+	vi.pendingConfigChange.oldEffectivePrio = sentPriority
 }
 
 // armAdvertTimer resets advertTimer at the current cfg interval and
-// atomically re-baselines the pending record to that same cfg
-// (snapshot + Reset + note under ONE vi.mu hold), so a manager commit
-// cannot interleave between the cfg the arm used and the baseline
-// recorded for it. Holding vi.mu across Timer.Reset is safe: Reset
-// never calls back into the instance, and several existing paths
-// already Stop/Reset timers in the same critical-section style
-// (becomeBackup, config handlers); a manager commit blocked on the
-// lock simply takes effect — and is recorded — after this arm.
+// atomically records that interval as applied (snapshot + Reset +
+// interval note under ONE vi.mu hold), so a manager commit cannot
+// interleave between the cfg the arm used and the baseline recorded
+// for it. It notes ONLY the interval (#15927): no priority is put on
+// the wire by this arm, so it must not baseline oldEffectivePrio —
+// a priority commit landing during the preceding sendAdvert keeps
+// its delta for the consumer's correction. Holding vi.mu across
+// Timer.Reset is safe: Reset never calls back into the instance, and
+// several existing paths already Stop/Reset timers in the same
+// critical-section style (becomeBackup, config handlers); a manager
+// commit blocked on the lock simply takes effect — and is recorded —
+// after this arm.
 func (vi *vrrpInstance) armAdvertTimer(advertTimer *time.Timer) {
 	vi.mu.Lock()
 	d := advertIntervalFromMS(vi.cfg.AdvertiseInterval)
 	advertTimer.Reset(d)
-	vi.noteAdvertBaselineLocked()
+	vi.armIntervalAppliedLocked()
+	vi.mu.Unlock()
+}
+
+// noteAdvertPriority notes the effective priority a wire advert just
+// carried, taking vi.mu itself (sendAdvert has already returned, so
+// no lock is held). The sent value is passed in, never re-read: see
+// noteAdvertPriorityLocked.
+func (vi *vrrpInstance) noteAdvertPriority(sentPriority int) {
+	vi.mu.Lock()
+	vi.noteAdvertPriorityLocked(sentPriority)
 	vi.mu.Unlock()
 }
 
 // armMasterDownTimer resets masterDownTimer at masterDownInterval()
-// and atomically re-baselines the pending record's advert fields to
-// the cfg snapshot the duration was derived from (same lock discipline
-// as armAdvertTimer). The computation replicates masterDownInterval()
-// under the already-held lock — getPriority() takes RLock, so it
-// cannot be called here; the skew priority is computed exactly as
-// prioritySnapshot does (0/255 pass through; track-down subtracts
-// TrackPriorityCost clamped to [1,254]). getPriority()'s
-// pending-resignation detour returns that same effective priority
-// from the cfg fields read here, so the durations agree. With a
-// learned master interval the duration is the peer's cadence, not
-// local cfg; baselining then is vacuous for the config consumer (it
-// never re-arms a learned-master timer on local interval changes) but
-// harmless.
+// and atomically records the armed interval as applied (same lock
+// discipline as armAdvertTimer; priority is not noted — see
+// armAdvertTimer, #15927). The computation replicates
+// masterDownInterval() under the already-held lock — getPriority()
+// takes RLock, so it cannot be called here; the skew priority is
+// computed exactly as prioritySnapshot does (0/255 pass through;
+// track-down subtracts TrackPriorityCost clamped to [1,254]).
+// getPriority()'s pending-resignation detour returns that same
+// effective priority from the cfg fields read here, so the durations
+// agree. With a learned master interval the duration is the peer's
+// cadence, not local cfg; baselining then is vacuous for the config
+// consumer (it never re-arms a learned-master timer on local
+// interval changes) but harmless.
 func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 	vi.mu.Lock()
 	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
@@ -610,7 +645,7 @@ func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 	}
 	skew := time.Duration(256-p) * advert / 256
 	masterDownTimer.Reset(3*advert + skew)
-	vi.noteAdvertBaselineLocked()
+	vi.armIntervalAppliedLocked()
 	vi.mu.Unlock()
 }
 
@@ -619,8 +654,8 @@ func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 // extension beyond the plain master-down arm (a just-resigned node at
 // short intervals must not re-elect itself before the peer starts
 // advertising), but the 3x input is still cfg-derived, so the arm
-// follows the same snapshot -> Reset -> note invariant under ONE
-// vi.mu hold (Codex3): a manager commit landing during the
+// follows the same snapshot -> Reset -> interval note invariant under
+// ONE vi.mu hold (Codex3): a manager commit landing during the
 // priority-0 sends is the cfg this arm uses and the baseline it
 // records, so a later revert reads as a change and the BACKUP config
 // consumer re-arms instead of retaining an intermediate horizon.
@@ -642,7 +677,7 @@ func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
 		safety = 500 * time.Millisecond
 	}
 	masterDownTimer.Reset(safety)
-	vi.noteAdvertBaselineLocked()
+	vi.armIntervalAppliedLocked()
 	vi.mu.Unlock()
 }
 
@@ -1091,7 +1126,9 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 	case pkt := <-vi.rxCh:
 		vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
 	case <-advertTimer.C:
-		vi.sendAdvert(vi.getPriority())
+		sentPriority := vi.getPriority()
+		vi.sendAdvert(sentPriority)
+		vi.noteAdvertPriority(sentPriority)
 		vi.armAdvertTimer(advertTimer)
 	case <-vi.configUpdatedCh:
 		// Day-2 in-place update while MASTER (#15689). Consuming the
@@ -1105,7 +1142,9 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 		// (GARPCount/track) leave the running advert timer untouched.
 		change := vi.takePendingConfigChange()
 		if !change.valid || change.oldAdvertiseMS != change.newAdvertiseMS || change.oldEffectivePrio != change.newEffectivePrio {
-			vi.sendAdvert(vi.getPriority())
+			sentPriority := vi.getPriority()
+			vi.sendAdvert(sentPriority)
+			vi.noteAdvertPriority(sentPriority)
 			stopAndDrainTimer(advertTimer)
 			vi.armAdvertTimer(advertTimer)
 		}
