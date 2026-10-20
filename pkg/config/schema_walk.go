@@ -254,64 +254,64 @@ func collectSchemaRefs(tree *ConfigTree) *schemaRefs {
 	if tree == nil {
 		return refs
 	}
+	// collectCoS records forwarding-class names under EVERY sibling
+	// `class-of-service` block of node (#15717: singular FindChild missed
+	// classes defined in a second sibling block).
 	var collectCoS func(node *Node)
 	collectCoS = func(node *Node) {
-		fcNode := node.FindChild("forwarding-classes")
-		if fcNode == nil {
-			return
-		}
-		for _, queueNode := range fcNode.FindChildren("queue") {
-			if len(queueNode.Keys) < 3 {
-				continue
+		for _, cosNode := range node.FindChildren("class-of-service") {
+			for _, fcNode := range cosNode.FindChildren("forwarding-classes") {
+				for _, queueNode := range fcNode.FindChildren("queue") {
+					if len(queueNode.Keys) < 3 {
+						continue
+					}
+					if _, err := strconv.Atoi(queueNode.Keys[1]); err != nil {
+						continue
+					}
+					refs.forwardingClasses[queueNode.Keys[2]] = struct{}{}
+				}
 			}
-			if _, err := strconv.Atoi(queueNode.Keys[1]); err != nil {
-				continue
-			}
-			refs.forwardingClasses[queueNode.Keys[2]] = struct{}{}
 		}
 	}
-	// collectLoginClasses records custom `login class <name>` names under a
-	// `system` node (#4304 S-2). Mirrors the compiler's namedInstances over
-	// every sibling `system login` block: each class name is the leading Keys
-	// arg.
-	collectLoginClasses := func(sysNode *Node) {
-		for _, loginNode := range sysNode.FindChildren("login") {
-			for _, classNode := range loginNode.FindChildren("class") {
-				if len(classNode.Keys) >= 2 && classNode.Keys[1] != "" {
-					refs.loginClasses[classNode.Keys[1]] = struct{}{}
-					continue
-				}
-				// Hierarchical shape: `class { noc-admin { ... } }` — the name
-				// is a child of the bare `class` node.
-				for _, c := range classNode.Children {
-					if len(c.Keys) > 0 && c.Keys[0] != "" {
-						refs.loginClasses[c.Keys[0]] = struct{}{}
+	// collectLoginClasses records custom `login class <name>` names under
+	// EVERY sibling `system` block of parent (#4304 S-2; #15717: singular
+	// FindChild("system") missed classes in a second sibling `system`
+	// block). Mirrors the compiler's namedInstances over every sibling
+	// `system login` block: each class name is the leading Keys arg.
+	collectLoginClasses := func(parent *Node) {
+		for _, sysNode := range parent.FindChildren("system") {
+			for _, loginNode := range sysNode.FindChildren("login") {
+				for _, classNode := range loginNode.FindChildren("class") {
+					if len(classNode.Keys) >= 2 && classNode.Keys[1] != "" {
+						refs.loginClasses[classNode.Keys[1]] = struct{}{}
+						continue
+					}
+					// Hierarchical shape: `class { noc-admin { ... } }` — the name
+					// is a child of the bare `class` node.
+					for _, c := range classNode.Children {
+						if len(c.Keys) > 0 && c.Keys[0] != "" {
+							refs.loginClasses[c.Keys[0]] = struct{}{}
+						}
 					}
 				}
 			}
 		}
 	}
+	// A synthetic parent lets the top level share the sibling-aware
+	// collectors: tree.Children are the siblings of a virtual root.
+	root := &Node{Children: tree.Children}
+	collectCoS(root)
+	collectLoginClasses(root)
 	for _, top := range tree.Children {
-		if top == nil || len(top.Keys) == 0 {
+		if top == nil || len(top.Keys) == 0 || top.Name() != "groups" {
 			continue
 		}
-		switch top.Name() {
-		case "class-of-service":
-			collectCoS(top)
-		case "system":
-			collectLoginClasses(top)
-		case "groups":
-			for _, group := range top.Children {
-				if group == nil {
-					continue
-				}
-				if cos := group.FindChild("class-of-service"); cos != nil {
-					collectCoS(cos)
-				}
-				if sys := group.FindChild("system"); sys != nil {
-					collectLoginClasses(sys)
-				}
+		for _, group := range top.Children {
+			if group == nil {
+				continue
 			}
+			collectCoS(group)
+			collectLoginClasses(group)
 		}
 	}
 	return refs

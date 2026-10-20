@@ -56,7 +56,10 @@ func TestLoginClassInSecondLoginBlockValidates13536(t *testing.T) {
 
 // TestLoginClassUndefinedAcrossLoginBlocksStillRejected13536 proves the fix
 // did not go fail-open: a class defined in NEITHER login block is still
-// rejected.
+// rejected. Since #15717 the post-compile gate rejects it during
+// CompileConfig itself, before SchemaValidate is even reached; the
+// SchemaValidate assertion is kept (via the lenient compile, which
+// downgrades the new gate) to prove the original tree gate still bites.
 func TestLoginClassUndefinedAcrossLoginBlocksStillRejected13536(t *testing.T) {
 	src := "system {\n" +
 		"  login { class noc-first { permissions view; } }\n" +
@@ -66,7 +69,10 @@ func TestLoginClassUndefinedAcrossLoginBlocksStillRejected13536(t *testing.T) {
 	if len(parseErrs) > 0 {
 		t.Fatalf("parse: %v", parseErrs)
 	}
-	c, err := CompileConfig(tree)
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("CompileConfig accepted an undefined login class (fail-open regression, #15717 gate)")
+	}
+	c, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

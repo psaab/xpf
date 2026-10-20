@@ -2191,8 +2191,19 @@ type compileOpts struct {
 	// tolerant loads warn and record the rule-sets in
 	// cfg.LenientNATUndefinedZoneRuleSets so dataplane compileNAT skips
 	// them instead of aborting every apply.
-	lenientNATUndefinedZone bool
+	lenientNATUndefinedZone  bool
 	lenientNATUndefinedScope bool // #15278 tolerant downgrade
+	// lenientLoginUserClassRef (#15717) downgrades the post-compile
+	// login-class gate (validateLoginUserClassReferencesStrict) to a
+	// warning on tolerant load / peer-sync (#1960 no-brick). Strict
+	// commit rejects a `system login user <n> class <c>` whose class is
+	// neither built-in nor defined in the effective (post-expansion)
+	// config — e.g. defined only in an un-applied group, which the
+	// permissive schema-refs union (#1319 PR 3) lets through. Tolerant
+	// loads keep the user stanza and warn: the runtime already denies
+	// an unknown class at every authorization check, so behaviour is
+	// unchanged and the box still boots.
+	lenientLoginUserClassRef bool
 	// lenientNATMatchAddressLiterals (#7145) downgrades the NAT match-address
 	// literal gate (validateNATMatchAddressLiteralsStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3754,6 +3765,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDestNATAddresses:                true,
 		lenientNATUndefinedZone:                true,
 		lenientNATUndefinedScope:               true,
+		lenientLoginUserClassRef:               true,
 		lenientNATMatchAddressLiterals:         true,
 		lenientRPMSourceAddress:                true,
 		lenientRPMLinkLocalZone:                true,
