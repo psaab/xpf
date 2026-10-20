@@ -1257,46 +1257,16 @@ impl DnatTable {
         ))
     }
 
-    /// #15934: selector-optional variant of `lookup_with_counter_scoped`
-    /// for session revalidation. Matches destination rules IGNORING
-    /// their ICMP type/code constraints and returns EVERY distinct
-    /// translated destination (deduped, tier order preserved), so the
-    /// caller can require rewrite_dst/port equality with the stored
-    /// translation — geometry decides among simultaneously-typed rules
-    /// (e.g. type-8 -> A and type-0 -> B) instead of an enumerated
-    /// candidate stopping at the first type match. Never used on the
-    /// admission path; produces no counters side effects beyond the
-    /// same read-only outcome mapping as the ordinary lookup.
-    #[allow(clippy::too_many_arguments)]
-    /// #15934: the selector-optional WINNER outcome for this tuple
-    /// (normal tier chain, ICMP type/code ignored). Revalidation uses
-    /// it to honour `destination-nat off` shadowing: an Exempt/Poisoned
-    /// winner must not be validated through the geometry collection.
-    #[allow(clippy::too_many_arguments)]
-    
-    /// #15934: is there a selector-optional NON-Translate winner
-    /// (Exempt/Poisoned, e.g. a typed `destination-nat off`) whose tier
-    /// is at least as specific as the best selector-optional Translate
-    /// winner for this tuple? Such an off rule shadows the translate
-    /// under the normal winner semantics for at least one concrete
-    /// selector, so revalidation must not validate a selector-less
-    /// session through the geometry collection past it. Compared via
-    /// the same tier chain: compute both winners with the waiver and
-    /// report whether a non-Translate outcome wins any tier that a
-    /// Translate does not win earlier. Simplified sound approximation:
-    /// the strict (selector-applied) winner under the STORED-side
-    /// request types is unknowable, so any selector-optional
-    /// non-Translate winner in an earlier-or-equal tier to the first
-    /// Translate tier counts as a shadow.
-    #[allow(clippy::too_many_arguments)]
-    
     /// #15934: the selector-RELAXED tier-walk outcome for revalidation:
-    /// first tier (exact -> wildcard-port -> PROTO_ANY -> prefix-LPM,
-    /// normal order) with any eligible entry decides; returns
-    /// Some(true) iff some entry AT the deciding tier translates to
-    /// `want_dst`/`want_dst_port`, Some(false) if the deciding tier's
-    /// entries are all non-Translate (off/poisoned) or translate
-    /// elsewhere, None if no tier decides. Streaming: no allocation.
+    /// tiers in normal order (exact -> wildcard-port -> PROTO_ANY ->
+    /// prefix-LPM); the first tier with any eligible entry decides.
+    /// Within the deciding group, entries scan in config order:
+    /// Translate entries co-win until the first non-Translate
+    /// (off/Exempt/Poisoned ends the scan), and a non-Translate group
+    /// WINNER revokes outright. Returns Some(true) iff a Translate
+    /// before any non-Translate reproduces `want_dst`/`want_dst_port`,
+    /// Some(false) when the deciding tier does not, None when no tier
+    /// decides. Streaming: no allocation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tier_walk_reproduces_ignoring_icmp_selector_scoped(
         &self,
@@ -1428,6 +1398,12 @@ impl DnatTable {
             ) else {
                 continue;
             };
+            // GLM7: mirror the exact leg — a non-Translate WINNER
+            // claims the group outright; later Translate slots at
+            // the same (tier, length) do not co-win past it.
+            if !matches!(winner.entry.to_outcome(), DnatOutcome::Translate(..)) {
+                return Some(false);
+            }
             let winner_tier = winner.entry.scope_tier();
             let winner_len = winner.prefix_len();
             // Config-order first-match ordering within the group:

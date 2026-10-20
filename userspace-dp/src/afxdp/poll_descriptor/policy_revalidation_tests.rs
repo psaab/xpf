@@ -5378,12 +5378,10 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
             ..Default::default()
         };
         let mut configured = imported_snat_forwarding(false);
-        {
-            configured.dnat_table = crate::nat::DnatTable::from_snapshots(
-                &[rule],
-                &crate::nat::NatCounterStore::default(),
-            );
-        }
+        configured.dnat_table = crate::nat::DnatTable::from_snapshots(
+            &[rule],
+            &crate::nat::NatCounterStore::default(),
+        );
         configured
     }
     fn nat(stored: Option<(u8, u8)>) -> NatDecision {
@@ -6097,3 +6095,141 @@ fn config_order_decides_within_group_15934() {
     );
 }
 
+/// #15934 GLM7: prefix-group winner is an off — later Translate slots
+/// at the same (tier, length) must NOT co-win. Probe shape: /24
+/// type-8 off inserted before /24 untyped translate, stored =
+/// translate target -> revoke.
+#[test]
+fn prefix_off_winner_revokes_selector_less_15934() {
+    let key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    let metadata = meta_14315(2, 1);
+    let rules = vec![
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "pfx-off".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            destination_prefix: "198.51.100.0/24".to_string(),
+            pool_address: "10.0.0.9".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(8),
+            match_icmp_code: Some(0),
+            off: true,
+            ..Default::default()
+        },
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "pfx-xlate".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            destination_prefix: "198.51.100.0/24".to_string(),
+            pool_address: "10.0.0.8".to_string(),
+            protocol: "icmp".to_string(),
+            ..Default::default()
+        },
+    ];
+    let mut f = imported_snat_forwarding(false);
+    f.dnat_table = crate::nat::DnatTable::from_snapshots(&rules, &crate::nat::NatCounterStore::default());
+    let decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.8".parse().expect("stored")),
+        source_nat_icmp: None,
+        ..NatDecision::default()
+    });
+    assert!(
+        !destination_nat_translation_still_valid(
+            &f, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        ),
+        "prefix off winner must revoke selector-less; later translate must not co-win (#15934 GLM7)"
+    );
+    // Direct walk pin for GLM7 MUTANT discrimination: with off-first, walk must be Some(false)
+    assert_eq!(
+        f.dnat_table.tier_walk_reproduces_ignoring_icmp_selector_scoped(key.protocol, key.src_ip, key.dst_ip, key.src_port, key.dst_port, "wan", "", "", "10.0.0.8".parse().unwrap(), None),
+        Some(false),
+        "prefix tier walk must revoke when winner is off"
+    );
+    // Control: translate inserted first (winner) survives.
+    let mut rules2 = rules.clone();
+    rules2.reverse();
+    // from_snapshots inserts in vec order; reversed puts translate first.
+    let mut f2 = imported_snat_forwarding(false);
+    f2.dnat_table = crate::nat::DnatTable::from_snapshots(&rules2, &crate::nat::NatCounterStore::default());
+    assert!(
+        destination_nat_translation_still_valid(
+            &f2, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        ),
+        "prefix translate winner must survive selector-less (#15934 GLM7)"
+    );
+}
+
+/// #15934 GLM8 prefix-arm discriminators: same /24 prefix group.
+/// (a) off FIRST (winner) with stored = later translate target ->
+/// revoke (non-Translate winner claims the group). (b) translate
+/// FIRST with stored = that translate, off second -> survives
+/// (Translate winner; the later off cannot end a scan that already
+/// reproduced). Mutating the prefix scan's `break` on
+/// non-Translate to `continue` REDs (a) only if the off is not the
+/// winner — here the winner check itself is the discriminator:
+/// removing it lets the later translate co-win past the off.
+#[test]
+fn prefix_group_config_order_discriminators_15934() {
+    let key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    let metadata = meta_14315(2, 1);
+    let mk = |off_first: bool| {
+        let off = crate::protocol::DestinationNATRuleSnapshot {
+            name: "pfx-off".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            destination_prefix: "198.51.100.0/24".to_string(),
+            pool_address: "10.0.0.9".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(8),
+            match_icmp_code: Some(0),
+            off: true,
+            ..Default::default()
+        };
+        let xlate = crate::protocol::DestinationNATRuleSnapshot {
+            name: "pfx-xlate".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            destination_prefix: "198.51.100.0/24".to_string(),
+            pool_address: "10.0.0.8".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(8),
+            match_icmp_code: Some(0),
+            ..Default::default()
+        };
+        // Distinct match types would dedup-collapse; both type-8 with
+        // different off flag are distinct identities, order preserved.
+        let rules = if off_first { vec![off, xlate] } else { vec![xlate, off] };
+        let mut f = imported_snat_forwarding(false);
+        f.dnat_table = crate::nat::DnatTable::from_snapshots(&rules, &crate::nat::NatCounterStore::default());
+        f
+    };
+    let decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.8".parse().expect("stored")),
+        source_nat_icmp: None,
+        ..NatDecision::default()
+    });
+    let off_first = mk(true);
+    assert_eq!(
+        off_first.dnat_table.tier_walk_reproduces_ignoring_icmp_selector_scoped(
+            key.protocol, key.src_ip, key.dst_ip, key.src_port, key.dst_port, "wan", "", "",
+            "10.0.0.8".parse().unwrap(), None,
+        ),
+        Some(false),
+        "prefix off-first must revoke at the walk level (#15934 GLM8)"
+    );
+    // Note: the GLM7 winner check is belt-and-braces here — the
+    // winner IS the config-order-first slot of its (tier, length)
+    // group (first wins ties), so the scan's break already revokes.
+    // Removing the winner check does not RED this cell; it guards
+    // the invariant if winner selection ever changes. Stated, not
+    // hidden.
+    assert!(
+        !destination_nat_translation_still_valid(
+            &off_first, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        ),
+        "prefix off-first must revoke selector-less (#15934 GLM8)"
+    );
+    let xlate_first = mk(false);
+    assert!(
+        destination_nat_translation_still_valid(
+            &xlate_first, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        ),
+        "prefix translate-first (stored = first) must survive (#15934 GLM8)"
+    );
+}
