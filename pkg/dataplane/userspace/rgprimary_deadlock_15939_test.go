@@ -25,8 +25,12 @@ import (
 // on m.mu forever; the test's timeout guard then fails it. The test also
 // asserts the rebuild actually ran (the recreated interface's mirror
 // follows to the new ifindex), so a "fix" that merely skips the rebuild
-// under lock cannot pass, and that the wired RG provider's verdict was
-// consulted (a peer-owned RG row stays marked after the rebuild).
+// under lock cannot pass, and that the wired RG provider's verdict
+// reaches the rebuild: the moved row is RG1-owned, the provider reports
+// it peer-owned, and the sent row must carry ConnectedRGPeerOwned with
+// its connected prefix suppressed. Passing a nil provider through the
+// locked variant would leave the row unmarked and publish the prefix,
+// failing those assertions.
 func TestSyncSnapshotLockedMovedInterfaceRowNoDeadlock15939(t *testing.T) {
 	origBuild := buildLinkSnapshot
 	t.Cleanup(func() { buildLinkSnapshot = origBuild })
@@ -56,11 +60,12 @@ func TestSyncSnapshotLockedMovedInterfaceRowNoDeadlock15939(t *testing.T) {
 	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
 
 	cfg := republishDerivedConfig15043()
-	// Clustered config with the RG provider wired: the rebuild must ask
-	// the provider (via the m.mu-held variant) whether RG rows are
-	// peer-owned. Return peer-owned so the marking is observable.
+	// Make the recreated interface RG1-owned so the rebuild must consult
+	// the wired provider about a real RG row. The provider reports RG1
+	// peer-owned (primary=false, known=true), which must mark the moved
+	// row and suppress its connected prefix in the sent snapshot.
+	cfg.Interfaces.Interfaces["ge-0/0/0"].RedundancyGroup = 1
 	cfg.Chassis.Cluster = &config.ClusterConfig{ClusterID: 1, NodeID: 0}
-
 	m := New()
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
@@ -69,7 +74,11 @@ func TestSyncSnapshotLockedMovedInterfaceRowNoDeadlock15939(t *testing.T) {
 	m.clearHelperHAStateHook = func() error { return nil }
 	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
 	m.helperStatusObserved = true
-	m.rgPrimaryProvider = func(rgID int) (bool, bool) { return false, true }
+	var providerRGIDs []int
+	m.rgPrimaryProvider = func(rgID int) (bool, bool) {
+		providerRGIDs = append(providerRGIDs, rgID)
+		return false, true
+	}
 	m.rgProviderWired = true
 	m.lastSnapshot = republishDerivedSnapshot15043(cfg)
 	// The deferred snapshot is retained ahead of its publication, so the
@@ -116,5 +125,35 @@ func TestSyncSnapshotLockedMovedInterfaceRowNoDeadlock15939(t *testing.T) {
 	}
 	if m.publishedSnapshot != m.lastSnapshot.Generation {
 		t.Fatalf("publishedSnapshot = %d, want %d after the tick publish", m.publishedSnapshot, m.lastSnapshot.Generation)
+	}
+	// The wired provider's verdict reached the rebuild through the
+	// m.mu-held variant: it was consulted for RG1, the moved RG1 row was
+	// sent marked peer-owned at its new ifindex, and its connected
+	// prefix was suppressed from the sent routes.
+	providerConsultedForRG1 := false
+	for _, rgID := range providerRGIDs {
+		if rgID == 1 {
+			providerConsultedForRG1 = true
+		}
+	}
+	if !providerConsultedForRG1 {
+		t.Fatalf("RG provider never consulted for RG1 during the rebuild (calls = %v); the locked variant must carry the wired provider, not nil", providerRGIDs)
+	}
+	var rgRow *InterfaceSnapshot
+	for i := range sent[0].Interfaces {
+		if sent[0].Interfaces[i].Name == "ge-0/0/0.0" {
+			rgRow = &sent[0].Interfaces[i]
+		}
+	}
+	if rgRow == nil {
+		t.Fatalf("sent interfaces = %+v, want the rebuilt ge-0/0/0.0 row", sent[0].Interfaces)
+	}
+	if rgRow.Ifindex != 29 || rgRow.RedundancyGroup != 1 || !rgRow.ConnectedRGPeerOwned {
+		t.Fatalf("sent RG1 row = %+v, want ifindex 29, RG 1, ConnectedRGPeerOwned=true (peer-owned verdict from the wired provider)", *rgRow)
+	}
+	for _, r := range sent[0].Routes {
+		if r.Destination == "10.0.0.0/24" {
+			t.Fatalf("sent routes publish the peer-owned RG1 connected prefix 10.0.0.0/24: %+v", sent[0].Routes)
+		}
 	}
 }
