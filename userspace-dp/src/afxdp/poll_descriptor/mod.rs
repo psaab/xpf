@@ -5308,20 +5308,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     )
                                 };
                             if admitted {
-                                enqueue_syn_cookie_reply(
-                                    &mut binding.tx_pipeline,
-                                    worker_ctx.forwarding,
-                                    worker_ctx.event_stream,
-                                    binding.ifindex,
-                                    packet_frame,
-                                    meta,
-                                    Some(flow),
-                                    SynCookieReply::SynAck(challenge),
-                                    telemetry.counters,
-                                );
+                                // Defer emission until SNAT allocation and
+                                // the post-SNAT fence recheck have run;
+                                // restore the challenge for that site.
+                                deferred_syn_cookie_challenge = Some(challenge);
+                            } else {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
                             }
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
                         }
                         // because its host gates run on the normal path.
                         if validated_syn_cookie_ack {
@@ -6547,6 +6541,61 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     telemetry.dbg.policy_deny += 1;
                                     telemetry.counters.record_transit_ipsec_fence_drop();
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                                // Confirmation fold (Opus6/post-SNAT): if a
+                                // cookie challenge is pending, this is its
+                                // first moment with the POST-allocation NAT
+                                // decision. Reaching here means the post-SNAT
+                                // fence did NOT drop (it continues above);
+                                // now decide the reply and consume the
+                                // descriptor before session installation.
+                                if let Some(challenge) =
+                                    deferred_syn_cookie_challenge.take()
+                                {
+                                    let admitted = if decision.resolution.disposition
+                                        == ForwardingDisposition::LocalDelivery
+                                    {
+                                        syn_cookie_host_admission(
+                                            worker_ctx.forwarding,
+                                            flow,
+                                            packet_frame,
+                                            meta,
+                                            ingress_zone_override,
+                                            effective_resolution_target,
+                                            policy_dst_port,
+                                            now_ns,
+                                        )
+                                    } else {
+                                        syn_cookie_final_admission_with_fence(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.ha_state,
+                                            flow,
+                                            meta,
+                                            ingress_zone_override,
+                                            decision.resolution,
+                                            effective_resolution_target,
+                                            policy_dst_port,
+                                            l2_group_unicast_ip
+                                                && owned_packet_frame.is_none(),
+                                            now_ns,
+                                            now_secs,
+                                        )
+                                    };
+                                    if admitted {
+                                        enqueue_syn_cookie_reply(
+                                            &mut binding.tx_pipeline,
+                                            worker_ctx.forwarding,
+                                            worker_ctx.event_stream,
+                                            binding.ifindex,
+                                            packet_frame,
+                                            meta,
+                                            Some(flow),
+                                            SynCookieReply::SynAck(challenge),
+                                            telemetry.counters,
+                                        );
+                                    }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }

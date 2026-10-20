@@ -13581,10 +13581,21 @@ fn g11332_send_syn(
     screen: &mut ScreenState,
     source: Ipv4Addr,
 ) -> BatchCounters {
+    g11332_send_syn_with_port(binding, sessions, forwarding, screen, source, 49152)
+}
+
+fn g11332_send_syn_with_port(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    screen: &mut ScreenState,
+    source: Ipv4Addr,
+    src_port: u16,
+) -> BatchCounters {
     let frame = build_txn_tcp_syn_frame_v4(
         source,
         Ipv4Addr::new(198, 51, 100, 20),
-        49152,
+        src_port,
         443,
         0x02,
         crate::afxdp::tests_support::TEST_LAN_MAC,
@@ -13729,21 +13740,32 @@ fn filtered_syns_do_not_charge_screens_or_receive_syn_cookies_11332() {
 
     // The same destination's sketch starts with the first filter-admitted SYN:
     // it passes, and only the next admitted SYN triggers the configured cookie.
-    let first_permitted = g11332_send_syn(
+    // GLM4 stale-cell fix: the cell previously reused the SAME tuple
+    // (192.0.2.10:49152 -> 198.51.100.20:443) for both permitted SYNs.
+    // The first admitted SYN installs an Opening session; the second
+    // is a same-tuple retransmit hitting the live-session prescreen,
+    // which DELIBERATELY suppresses a fresh cookie (never a second
+    // cookie ISN to an Opening session) while screen still counts the
+    // challenge. Drive distinct permitted tuples for this cell's
+    // original first/next intent; the retransmit suppression is
+    // asserted explicitly in challenge_suppressed_for_opening_retransmit.
+    let first_permitted = g11332_send_syn_with_port(
         &mut binding,
         &mut sessions,
         &forwarding,
         &mut screen,
         permitted_source,
+        49153,
     );
     assert_eq!(first_permitted.syn_cookie_challenges, 0);
     assert!(binding.tx_pipeline.pending_tx_local.is_empty());
-    let second_permitted = g11332_send_syn(
+    let second_permitted = g11332_send_syn_with_port(
         &mut binding,
         &mut sessions,
         &forwarding,
         &mut screen,
         permitted_source,
+        49154,
     );
     assert_eq!(second_permitted.syn_cookie_challenges, 1);
     assert_eq!(second_permitted.syn_cookie_syn_ack_sent, 1);
@@ -13761,6 +13783,86 @@ fn filtered_syns_do_not_charge_screens_or_receive_syn_cookies_11332() {
     // #14656: counters are coalesced per-thread in every build; flush before asserting.
 }
 
+#[test]
+fn challenge_suppressed_for_opening_retransmit_15947() {
+    // Production semantics (deliberate/fail-safe): a same-tuple
+    // retransmitted SYN that hits a live Opening session is counted
+    // by the screen stage but must NOT receive a second cookie
+    // SYN-ACK (no fresh cookie ISN for an in-progress handshake).
+    let (forwarding, mut screen) = g11332_runtime(None);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let source = Ipv4Addr::new(192, 0, 2, 10);
+    let first = g11332_send_syn(&mut binding, &mut sessions, &forwarding, &mut screen, source);
+    assert_eq!(first.syn_cookie_challenges, 0);
+    let second = g11332_send_syn(&mut binding, &mut sessions, &forwarding, &mut screen, source);
+    assert_eq!(second.syn_cookie_challenges, 1, "screen counts the challenge decision");
+    assert_eq!(second.syn_cookie_syn_ack_sent, 0, "Opening retransmit gets no second cookie");
+    assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+}
+
+
+#[test]
+fn post_snat_fence_suppresses_cookie_challenge_15947() {
+    // Opus6: a threshold-triggered SYN whose POST-SNAT tuple matches the
+    // bindless selector fence must receive no SYN-ACK. Fixture: one-port
+    // pool SNAT 203.0.113.10 and selector 9.9.9.0/24 <-> 203.0.113.0/24,
+    // so only the translated tuple (203.0.113.10 -> 9.9.9.9) matches.
+    let (forwarding, mut screen) = {
+        let forwarding = build_forwarding_state(&{
+            let mut snapshot = nat_snapshot();
+            snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+                name: "one-port-pool".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_addresses: vec!["203.0.113.10".to_string()],
+                port_low: 5000,
+                port_high: 5000,
+                ..Default::default()
+            }];
+            snapshot.bindless_selector_fence_enabled = true;
+            snapshot.bindless_selector_rows = vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+                local_ts: "9.9.9.0/24".to_string(),
+                remote_ts: "203.0.113.0/24".to_string(),
+            }];
+            snapshot
+        });
+        let mut profiles = FxHashMap::default();
+        profiles.insert(
+            "lan".to_string(),
+            crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() },
+        );
+        let mut screen = ScreenState::new();
+        screen.update_profiles(profiles);
+        screen.update_syn_cookie_master_key(Some([0x42; 16]));
+        (forwarding, screen)
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    // Source must be in the lan connected subnet for this fixture's FIB.
+    let src = Ipv4Addr::new(10, 0, 61, 103);
+    let dst = Ipv4Addr::new(9, 9, 9, 9);
+    for (idx, port) in [49160u16, 49161].iter().enumerate() {
+        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let meta = {
+            let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
+            m.flow_src_addr[..4].copy_from_slice(&src.octets());
+            m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+            m.flow_src_port = *port;
+            m
+        };
+        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, meta, &mut screen);
+        assert_eq!(
+            batch.syn_cookie_syn_ack_sent, 0,
+            "post-SNAT fence SYN {idx} must not receive a SYN-ACK",
+        );
+        assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    }
+    assert_eq!(sessions.len(), 0, "fenced SYNs must not install sessions");
+}
 #[test]
 fn pbr_discard_is_applied_before_screen_sketches_11332() {
     let denied_source = Ipv4Addr::new(203, 0, 113, 11);
