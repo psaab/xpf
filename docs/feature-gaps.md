@@ -511,7 +511,7 @@ so the three cannot drift into describing the same ALG differently.
 **PPTP (#7699), stated precisely because "Missing" is no longer accurate and
 "Done" would be a claim the box cannot honour.**
 
-What EXISTS: the TCP/1723 control-channel parser (Outgoing-Call-Reply and
+What EXISTS: the TCP/1723 control-channel parser (Outgoing/Incoming-Call-Reply, Call-Clear, Stop-Control and
 Call-Disconnect-Notify), the per-call association table with a locally derived
 direction-symmetric handle, cross-worker publication of learned calls and
 per-call CDN teardown of both call-id aliases, control-channel FIN/RST cleanup,

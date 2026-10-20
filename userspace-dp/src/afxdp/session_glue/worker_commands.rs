@@ -76,6 +76,9 @@ pub(in crate::afxdp) struct WorkerCommandResults {
     pub transition_debt_pending: bool,
     /// #11360: imported-session repair debt remains latched for a future pass.
     pub session_import_repair_pending: bool,
+    /// #15950: PPTP control channels whose sessions were deleted this tick;
+    /// the worker loop purges their buffered inbox segments.
+    pub deleted_pptp_control_channels: Vec<crate::session::pptp::ControlChannelId>,
 }
 
 impl WorkerCommandResults {
@@ -97,6 +100,7 @@ impl WorkerCommandResults {
             commands_backlogged: false,
             transition_debt_pending: false,
             session_import_repair_pending: false,
+            deleted_pptp_control_channels: Vec::new(),
         }
     }
 }
@@ -140,6 +144,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
     // bursts are control-plane paced and the common no-delete tick pays
     // no allocation (same policy as `cancelled_keys`).
     let mut deleted_synced_keys: Vec<SessionKey> = Vec::new();
+    let mut deleted_pptp_control_channels: Vec<crate::session::pptp::ControlChannelId> = Vec::new();
     // #10612: keys refused by the stale-replay fence this tick (see the
     // `UpsertSynced` arm); drained by the worker loop into shared-map
     // evictions. Not pre-sized — drops are control-plane paced and the
@@ -454,9 +459,12 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
             WorkerCommand::InstallPptpAssociation(call) => {
-                let _ = sessions
-                    .pptp_mut()
-                    .install_synced_association(call, now_ns);
+                // #15950: disabled ALG must not install HA-imported calls.
+                if forwarding.pptp_enabled() {
+                    let _ = sessions
+                        .pptp_mut()
+                        .install_synced_association(call, now_ns);
+                }
             }
             WorkerCommand::UpsertSynced(entry) => {
                 // pre-purge snapshot re-published post-purge (backlog, late
@@ -757,6 +765,14 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
     } else {
         worker_queue::has_transition_debt(worker_id)
     };
+    // #15950: derive deleted PPTP channels from the deleted keys.
+    for k in &deleted_synced_keys {
+        if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(k) {
+            if !deleted_pptp_control_channels.contains(&ch) {
+                deleted_pptp_control_channels.push(ch);
+            }
+        }
+    }
     WorkerCommandResults {
         cancelled_keys,
         deleted_synced_keys,
@@ -770,6 +786,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
         commands_backlogged,
         transition_debt_pending,
         session_import_repair_pending,
+        deleted_pptp_control_channels,
     }
 }
 

@@ -49,6 +49,10 @@ use std::sync::{Arc, Mutex, RwLock};
 pub(crate) struct PeerConfig {
     /// Optional outbound endpoint. `None` means responder-only.
     pub(crate) endpoint: Option<SocketAddr>,
+    /// #15950: authored DNS hostname when `endpoint` is None because the
+    /// name has not resolved yet. Identity-bearing for live-endpoint
+    /// carry: a rename must drop the old name's resolved address.
+    pub(crate) endpoint_host: Option<String>,
     /// Optional keepalive interval in seconds (per WG: 0 = off).
     /// Consumed by the #1888 S5 timer pass (`WgEngine::timer_pass` T8 —
     /// see wg/timers.rs).
@@ -68,8 +72,18 @@ impl PeerConfig {
         persistent_keepalive: u16,
         preshared_key: [u8; 32],
     ) -> Self {
+        Self::with_host(endpoint, None, persistent_keepalive, preshared_key)
+    }
+
+    pub(crate) fn with_host(
+        endpoint: Option<SocketAddr>,
+        endpoint_host: Option<String>,
+        persistent_keepalive: u16,
+        preshared_key: [u8; 32],
+    ) -> Self {
         Self {
             endpoint,
+            endpoint_host,
             persistent_keepalive,
             preshared_key: zeroize::Zeroizing::new(preshared_key),
         }

@@ -1312,9 +1312,16 @@ pub(crate) fn worker_loop(
             commands_backlogged,
             transition_debt_pending: transition_debt_pending_now,
             session_import_repair_pending: session_import_repair_pending_now,
+            deleted_pptp_control_channels,
         } = command_results;
         transition_debt_pending = transition_debt_pending_now;
         session_import_repair_pending = session_import_repair_pending_now;
+        // #15950: a deleted PPTP control session must not leave buffered
+        // segments that a later drain would install as associations.
+        for ch in &deleted_pptp_control_channels {
+            pptp_control.forget_channel(*ch);
+            pptp_control.forget_call_installs_for_channel(*ch, loop_now_ns);
+        }
         if !session_import_repairs.is_empty() {
             crate::afxdp::session_glue::apply_session_import_repairs(
                 &session_import_repairs,
@@ -1518,6 +1525,7 @@ pub(crate) fn worker_loop(
             &commands,
             &peer_worker_commands,
             loop_now_ns,
+            forwarding.pptp_enabled(),
         );
         // #13075: conntrack-refresh slice + fabric/WG drains (ct_slice.rs).
         run_ct_slice(

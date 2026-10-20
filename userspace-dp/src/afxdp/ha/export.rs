@@ -161,14 +161,17 @@ impl crate::afxdp::Coordinator {
         let mut ack_atomics = Vec::with_capacity(self.workers.records().len());
         let mut export_buffers = Vec::with_capacity(self.workers.records().len());
         let mut shed = 0u32;
-        for rec in self.workers.records().values() {
+        let mut refused: Vec<u32> = Vec::new();
+        for (worker_id, rec) in self.workers.records().iter() {
             if rec.shed_if_dead(1) {
                 shed += 1;
                 continue;
             }
             let handle = &rec.handle;
             let mut pending = worker_queue::lock_recover(&handle.commands);
-            worker_queue::push_bounded(
+            // #15950: check push_bounded — waiting for an ack to a command
+            // that was never queued would burn the full 15s timeout.
+            let queued = worker_queue::push_bounded(
                 &mut pending,
                 WorkerCommand::ExportOwnerRGSessions {
                     sequence,
@@ -176,8 +179,20 @@ impl crate::afxdp::Coordinator {
                 },
             );
             drop(pending);
+            if !queued {
+                refused.push(*worker_id);
+                continue;
+            }
             ack_atomics.push(handle.session_export_ack.clone());
             export_buffers.push(rec.export_buffer.clone());
+        }
+        if !refused.is_empty() {
+            // Do not open a window: its ack can never arrive. Already-queued
+            // commands carry this sequence; a later retry uses a new one,
+            // and buffers skip foreign tokens.
+            return Err(format!(
+                "owner-RG export refused: worker queue full for worker(s) {refused:?}; command never queued"
+            ));
         }
         let incarnation = self.sessions.export_incarnation();
         let dropped_at_begin = export_buffers.iter().map(|b| b.export_dropped()).collect();

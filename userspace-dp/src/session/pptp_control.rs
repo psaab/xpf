@@ -215,6 +215,18 @@ impl PptpControlInbox {
         }
     }
 
+    /// #15950: drop every buffered segment (ALG disabled). Returns count.
+    pub(crate) fn purge_pending(&self) -> usize {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let n = inner.pending.len();
+        inner.pending.clear();
+        inner.pending_call_installs.clear();
+        n
+    }
+
     /// Drop buffered segments from a control channel that has closed.
     ///
     /// A Reply may be admitted into the interval-gated inbox just before FIN
@@ -521,6 +533,15 @@ const MSG_TYPE_CONTROL: u16 = 1;
 /// ID` is the sender's own, and `Peer's Call ID` echoes the requester's. An
 /// Outgoing-Call-Request alone names one side and cannot pair a call.
 const CTRL_OUTGOING_CALL_REPLY: u16 = 8;
+/// RFC 2637 §2.10 Control Message Type 10 — Incoming-Call-Reply (PAC-initiated
+/// calls; mirror of §2.8 with the same Call ID / Peer's Call ID / Result
+/// offsets, total length 24).
+const CTRL_INCOMING_CALL_REPLY: u16 = 10;
+/// RFC 2637 §2.12 Control Message Type 12 — Call-Clear-Request (Call ID only).
+const CTRL_CALL_CLEAR_REQUEST: u16 = 12;
+/// RFC 2637 §2.3/§2.4 Control Message Types 3/4 — Stop-Control-Connection.
+const CTRL_STOP_CONTROL_REQUEST: u16 = 3;
+const CTRL_STOP_CONTROL_REPLY: u16 = 4;
 /// RFC 2637 §2.13 Control Message Type 13 — Call-Disconnect-Notify.
 const CTRL_CALL_DISCONNECT_NOTIFY: u16 = 13;
 /// Total length of a Call-Disconnect-Notify, including its 12-byte header and
@@ -528,6 +549,13 @@ const CTRL_CALL_DISCONNECT_NOTIFY: u16 = 13;
 const CALL_DISCONNECT_NOTIFY_LEN: usize = 148;
 /// Total length of an Outgoing-Call-Reply, header included (RFC 2637 §2.8).
 const OUTGOING_CALL_REPLY_LEN: usize = 32;
+/// Total length of an Incoming-Call-Reply, header included (RFC 2637 §2.10).
+const INCOMING_CALL_REPLY_LEN: usize = 24;
+/// Total length of a Call-Clear-Request, header included (RFC 2637 §2.12).
+const CALL_CLEAR_REQUEST_LEN: usize = 16;
+/// Minimum lengths of Stop-Control-Connection Request/Reply (§2.3/§2.4).
+const STOP_CONTROL_REQUEST_LEN: usize = 16;
+const STOP_CONTROL_REPLY_LEN: usize = 16;
 /// RFC 2637 §2.8 Result Code 1 — Connected. Any other value is a call that did
 /// NOT come up, and learning an association for it would install state for a
 /// call that does not exist.
@@ -539,7 +567,7 @@ const RESULT_CONNECTED: u8 = 1;
 /// different and two of them are not errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ControlParse {
-    /// A complete, successful Outgoing-Call-Reply naming both call ids.
+    /// A complete, successful Outgoing/Incoming-Call-Reply naming both ids.
     ///
     /// `call_id` belongs to the SENDER of this segment; `peer_call_id` to its
     /// destination. That asymmetry is the whole reason the pair must be learned
@@ -547,6 +575,10 @@ pub(crate) enum ControlParse {
     CallReply { call_id: u16, peer_call_id: u16 },
     /// A complete Call-Disconnect-Notify naming the PAC-allocated call id.
     CallDisconnect { call_id: u16 },
+    /// A complete Call-Clear-Request naming the call id to forget (§2.12).
+    CallClear { call_id: u16 },
+    /// A Stop-Control-Connection Request/Reply: tear down the whole channel.
+    StopControl,
     /// A well-formed control message this stage does not learn from — a
     /// different message type, or a reply whose Result Code says the call did
     /// not connect.
@@ -584,26 +616,45 @@ pub(crate) fn parse_control_segment(payload: &[u8]) -> ControlParse {
         if declared_len != CALL_DISCONNECT_NOTIFY_LEN {
             return ControlParse::Ignored;
         }
-        // The CDN carries a fixed 128-byte statistics tail; do not remove
-        // state from a partial message.
         if payload.len() < CALL_DISCONNECT_NOTIFY_LEN {
             return ControlParse::Truncated;
         }
-        // RFC 2637 §2.13: this is the Call ID assigned by the PAC that sent
-        // the segment, so the association table is queried under `src`.
         let call_id = u16::from_be_bytes([payload[12], payload[13]]);
         return ControlParse::CallDisconnect { call_id };
     }
-    if ctrl_type != CTRL_OUTGOING_CALL_REPLY {
+    if ctrl_type == CTRL_CALL_CLEAR_REQUEST {
+        if declared_len != CALL_CLEAR_REQUEST_LEN {
+            return ControlParse::Ignored;
+        }
+        if payload.len() < CALL_CLEAR_REQUEST_LEN {
+            return ControlParse::Truncated;
+        }
+        let call_id = u16::from_be_bytes([payload[12], payload[13]]);
+        return ControlParse::CallClear { call_id };
+    }
+    if ctrl_type == CTRL_STOP_CONTROL_REQUEST || ctrl_type == CTRL_STOP_CONTROL_REPLY {
+        let want = if ctrl_type == CTRL_STOP_CONTROL_REQUEST {
+            STOP_CONTROL_REQUEST_LEN
+        } else {
+            STOP_CONTROL_REPLY_LEN
+        };
+        if declared_len < want {
+            return ControlParse::Ignored;
+        }
+        if payload.len() < want {
+            return ControlParse::Truncated;
+        }
+        return ControlParse::StopControl;
+    }
+    let want_len = match ctrl_type {
+        CTRL_OUTGOING_CALL_REPLY => OUTGOING_CALL_REPLY_LEN,
+        CTRL_INCOMING_CALL_REPLY => INCOMING_CALL_REPLY_LEN,
+        _ => return ControlParse::Ignored,
+    };
+    if declared_len != want_len {
         return ControlParse::Ignored;
     }
-    // A reply that claims a length other than the RFC's is not one we will read
-    // fields out of by offset.
-    if declared_len != OUTGOING_CALL_REPLY_LEN {
-        return ControlParse::Ignored;
-    }
-    // The single-segment bound. Checked against what we ACTUALLY have.
-    if payload.len() < OUTGOING_CALL_REPLY_LEN {
+    if payload.len() < want_len {
         return ControlParse::Truncated;
     }
     let call_id = u16::from_be_bytes([payload[12], payload[13]]);
@@ -650,6 +701,8 @@ pub(crate) fn learn_from_control_segment_in_domain(
             peer_call_id,
         )),
         ControlParse::CallDisconnect { .. }
+        | ControlParse::CallClear { .. }
+        | ControlParse::StopControl
         | ControlParse::Ignored
         | ControlParse::Truncated
         | ControlParse::NotControl => None,
@@ -1080,5 +1133,22 @@ mod routing_domain_inbox_13681_tests {
         let pending = inbox.take_pending_in_domain(1);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, 100_002);
+    }
+}
+
+#[cfg(test)]
+mod tests_15950_parse {
+    use super::*;
+    fn msg(len:u16, ty:u16, body:&[u8])->Vec<u8>{let mut m=Vec::new(); m.extend_from_slice(&len.to_be_bytes()); m.extend_from_slice(&1u16.to_be_bytes()); m.extend_from_slice(&MAGIC_COOKIE.to_be_bytes()); m.extend_from_slice(&ty.to_be_bytes()); m.extend_from_slice(&0u16.to_be_bytes()); m.extend_from_slice(body); m}
+    #[test]
+    fn incoming_reply_and_teardowns_parse_15950(){
+        // Incoming-Call-Reply len24: CallID, PeerCallID, Result=1, rest
+        let mut body=Vec::new(); body.extend_from_slice(&0xAAAAu16.to_be_bytes()); body.extend_from_slice(&0xBBBBu16.to_be_bytes()); body.push(1); body.extend_from_slice(&[0;7]);
+        assert_eq!(parse_control_segment(&msg(24,10,&body)), ControlParse::CallReply{call_id:0xAAAA, peer_call_id:0xBBBB});
+        let mut bad=body.clone(); bad[4]=2; assert_eq!(parse_control_segment(&msg(24,10,&bad)), ControlParse::Ignored);
+        let mut body=Vec::new(); body.extend_from_slice(&0x1234u16.to_be_bytes()); body.extend_from_slice(&[0;2]);
+        assert_eq!(parse_control_segment(&msg(16,12,&body)), ControlParse::CallClear{call_id:0x1234});
+        assert_eq!(parse_control_segment(&msg(16,3,&body)), ControlParse::StopControl);
+        assert_eq!(parse_control_segment(&msg(16,4,&body)), ControlParse::StopControl);
     }
 }

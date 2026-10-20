@@ -312,7 +312,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // local control binding; a handle mismatch (pair decodes to a
         // different handle than the key names) is not re-derived — that
         // disagreement was already refused at HA import.
-        if let crate::session::TunnelDiscriminator::Pptp(handle) = key.discriminator {
+        if forwarding.pptp_enabled()
+            && let crate::session::TunnelDiscriminator::Pptp(handle) = key.discriminator
+        {
             if let Some(call) = crate::session::pptp::PptpCall::from_wire_call_ids_in_domain(
                 key.routing_domain,
                 pptp_call_ids,

@@ -364,6 +364,7 @@ fn established_initiator_engine(
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: Some(peer_ep),
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![peer_cidr.parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -375,6 +376,7 @@ fn established_initiator_engine(
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -427,6 +429,7 @@ fn established_pair(
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: Some(peer_ep),
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![peer_cidr.parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -438,6 +441,7 @@ fn established_pair(
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1184,6 +1188,7 @@ fn two_peer_config_engine() -> WgEngine {
             WgPeerConfig {
                 pubkey: a_pub,
                 endpoint: Some("203.0.113.7:51820".parse().unwrap()),
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.123.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -1191,6 +1196,7 @@ fn two_peer_config_engine() -> WgEngine {
             WgPeerConfig {
                 pubkey: b_pub,
                 endpoint: Some("198.51.100.7:51820".parse().unwrap()),
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.200.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),

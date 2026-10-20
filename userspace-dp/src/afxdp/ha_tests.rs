@@ -12620,3 +12620,24 @@ fn policy_deferred_redirects_release_coordinator_claim_14840() {
          (pre-fix only the worker holder was executed, leaving it Remaining)"
     );
 }
+
+#[test]
+fn kick_export_refused_worker_fails_fast_15950() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    {
+        let mut q = commands.lock().unwrap();
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            assert!(crate::afxdp::worker_queue::push_bounded(&mut q, WorkerCommand::DeleteSynced(test_key())));
+        }
+    }
+    let handle = test_worker_handle(commands.clone());
+    coordinator.workers.register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let err = coordinator.kick_owner_rg_export(&[1], 0, false).err().expect("full queue must fail fast, not open a 15s window");
+    assert!(err.contains("refused"), "{err}");
+    // no window opened: a fresh kick with drained queue would work — assert busy check is not stuck by checking error is refused not busy on retry after drain
+    commands.lock().unwrap().clear();
+    let wait = coordinator.kick_owner_rg_export(&[1], 0, false).expect("retry after drain must kick");
+    // ack it
+    let _ = wait;
+}

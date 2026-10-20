@@ -201,6 +201,7 @@ fn poll_loop_fixture() -> (
             peers: vec![crate::afxdp::wg::WgPeerConfig {
                 pubkey: [9u8; 32],
                 endpoint: None, // responder-only: no bring-up sends
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![],
                 preshared_key: [0u8; 32].into(),
@@ -543,6 +544,7 @@ fn wg_tun_origin_egress_uses_per_peer_outer_mtu_5291() {
                 crate::afxdp::wg::WgPeerConfig {
                     pubkey: pk_a,
                     endpoint: Some(ep_a),
+                    endpoint_host: None,
                     persistent_keepalive: 0,
                     allowed_ips: vec!["10.71.0.0/24".parse().unwrap()],
                     preshared_key: [0u8; 32].into(),
@@ -550,6 +552,7 @@ fn wg_tun_origin_egress_uses_per_peer_outer_mtu_5291() {
                 crate::afxdp::wg::WgPeerConfig {
                     pubkey: pk_b,
                     endpoint: Some(ep_b),
+                    endpoint_host: None,
                     persistent_keepalive: 0,
                     allowed_ips: vec!["10.72.0.0/24".parse().unwrap()],
                     preshared_key: [0u8; 32].into(),
@@ -703,6 +706,7 @@ fn keepalive_engine(keepalive_secs: u16) -> std::sync::Arc<crate::afxdp::wg::WgE
             peers: vec![crate::afxdp::wg::WgPeerConfig {
                 pubkey: [9u8; 32],
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: keepalive_secs,
                 allowed_ips: vec![],
                 preshared_key: [0u8; 32].into(),
@@ -1961,6 +1965,7 @@ fn established_initiator_with_endpoint_10038(
         peers: vec![crate::afxdp::wg::WgPeerConfig {
             pubkey: resp_pub,
             endpoint: Some(endpoint),
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: allowed,
             preshared_key: [0u8; 32].into(),
@@ -1973,6 +1978,7 @@ fn established_initiator_with_endpoint_10038(
         peers: vec![crate::afxdp::wg::WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -2264,6 +2270,7 @@ fn wg_tun_burst_skips_publish_without_session_10038() {
             peers: vec![crate::afxdp::wg::WgPeerConfig {
                 pubkey: pk,
                 endpoint: Some("127.0.0.1:9".parse().unwrap()),
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec!["10.123.0.0/24".parse().unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -2881,6 +2888,7 @@ fn wg14675_engine(peers: Vec<([u8; 32], Option<SocketAddr>)>) -> crate::afxdp::w
             .map(|(pubkey, endpoint)| crate::afxdp::wg::WgPeerConfig {
                 pubkey,
                 endpoint,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![],
                 preshared_key: [0u8; 32].into(),
@@ -2896,6 +2904,7 @@ fn wg14675_peer_cfg(
     crate::afxdp::wg::WgPeerConfig {
         pubkey,
         endpoint,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![],
         preshared_key: [0u8; 32].into(),

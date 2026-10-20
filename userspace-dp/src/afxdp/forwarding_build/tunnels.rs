@@ -260,7 +260,10 @@ impl WgRowIdentity {
 /// Order-sensitive equality of two runtime peer slices (#1434). Compares
 /// every identity-bearing field INCLUDING the preshared key, so a PSK
 /// rotation forces an engine rebuild (the new key takes effect on the
-/// next handshake).
+/// next handshake). #15950: `endpoint_host` is identity too — a hostname
+/// peer has `endpoint=None`, so without it a hostname-only change (or
+/// host -> None responder-only transition) is invisible and the stale
+/// engine/live endpoint is reused.
 pub(in crate::afxdp) fn wg_peers_eq(a: &[WgRuntimePeer], b: &[WgRuntimePeer]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -269,6 +272,7 @@ pub(in crate::afxdp) fn wg_peers_eq(a: &[WgRuntimePeer], b: &[WgRuntimePeer]) ->
         x.pubkey == y.pubkey
             && x.allowed_ips == y.allowed_ips
             && x.endpoint == y.endpoint
+            && x.endpoint_host == y.endpoint_host
             && x.keepalive_secs == y.keepalive_secs
             && *x.preshared_key == *y.preshared_key
     })

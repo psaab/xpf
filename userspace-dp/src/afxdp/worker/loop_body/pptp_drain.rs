@@ -17,22 +17,15 @@ pub(super) fn run_pptp_control_drain(
     commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     loop_now_ns: u64,
+    pptp_enabled: bool,
 ) {
-    // #7699: drain the PPTP control inbox — parse the TCP/1723 segments the
-    // data path copied out, install the associations locally and publish
-    // them to the sibling workers.
-    //
-    // PLACEMENT: adjacent to the association EXPIRY it is the counterpart
-    // of, and on the same clock. This is per-iteration work only in the
-    // sense that the CALL is; `take_pending` holds the drain-interval gate
-    // ITSELF and returns an empty vec otherwise, so the body below runs
-    // once per interval. The gate is deliberately not written here: this
-    // loop runs at packet rate, and a call-site gate is one edit from
-    // becoming per-poll work — which is exactly what #8399 shipped when the
-    // association expiry landed above `expire_stale_entries_ha`'s gate
-    // instead of below it. `worker_loop_drains_the_pptp_control_inbox_7699`
-    // enforces both halves of that, including the absence of the interval
-    // constant from this file — so do not name it here even in a comment.
+    // #15950: when the PPTP ALG is disabled, do not install associations
+    // from segments buffered before the disable. Purge the inbox so a
+    // later re-enable cannot resurrect pre-disable calls either.
+    if !pptp_enabled {
+        pptp_control.purge_pending();
+        return;
+    }
     crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
         &pptp_control,
         &mut sessions,

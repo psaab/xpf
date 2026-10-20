@@ -123,6 +123,7 @@ fn reconcile_refuses_degenerate_peer_14373() {
             WgPeerConfig {
                 pubkey: [0u8; 32],
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -130,6 +131,7 @@ fn reconcile_refuses_degenerate_peer_14373() {
             WgPeerConfig {
                 pubkey: small_order_u1,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -137,6 +139,7 @@ fn reconcile_refuses_degenerate_peer_14373() {
             WgPeerConfig {
                 pubkey: [0xabu8; 32],
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.2.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -144,6 +147,7 @@ fn reconcile_refuses_degenerate_peer_14373() {
             WgPeerConfig {
                 pubkey: peer_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.3.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -169,6 +173,7 @@ fn reconcile_refuses_degenerate_peer_14373() {
     engine.reconcile_peers(&[WgPeerConfig {
         pubkey: peer_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.0.3.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -263,6 +268,7 @@ fn reconcile_refuses_bit255_twin_peers_15132() {
             WgPeerConfig {
                 pubkey: twin,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str(&format!("10.32.{}.0/24", i)).unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -272,6 +278,7 @@ fn reconcile_refuses_bit255_twin_peers_15132() {
     configs.push(WgPeerConfig {
         pubkey: peer_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.32.100.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -279,6 +286,7 @@ fn reconcile_refuses_bit255_twin_peers_15132() {
     configs.push(WgPeerConfig {
         pubkey: valid_twin,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.32.101.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -384,6 +392,7 @@ fn install_session_same_peer_same_local_index_is_collision() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -395,6 +404,7 @@ fn install_session_same_peer_same_local_index_is_collision() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -434,6 +444,7 @@ fn install_session_fresh_index_rekey_preserves_previous_demux() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -445,6 +456,7 @@ fn install_session_fresh_index_rekey_preserves_previous_demux() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -477,6 +489,7 @@ fn install_session_second_rekey_evicts_dropped_session() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -488,6 +501,7 @@ fn install_session_second_rekey_evicts_dropped_session() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -524,6 +538,7 @@ fn install_session_rejects_local_index_collision_across_peers() {
             WgPeerConfig {
                 pubkey: peer_a_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -531,6 +546,7 @@ fn install_session_rejects_local_index_collision_across_peers() {
             WgPeerConfig {
                 pubkey: peer_b_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -543,6 +559,7 @@ fn install_session_rejects_local_index_collision_across_peers() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -554,6 +571,7 @@ fn install_session_rejects_local_index_collision_across_peers() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -584,6 +602,7 @@ fn encap_rejects_after_message_limit() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -595,6 +614,7 @@ fn encap_rejects_after_message_limit() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -647,6 +667,7 @@ fn reconcile_peers_drains_dropped_peer_sessions_from_demux() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -658,6 +679,7 @@ fn reconcile_peers_drains_dropped_peer_sessions_from_demux() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -707,6 +729,7 @@ fn reconcile_peers_leaves_kept_peer_sessions_intact() {
             WgPeerConfig {
                 pubkey: peer_a_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -714,6 +737,7 @@ fn reconcile_peers_leaves_kept_peer_sessions_intact() {
             WgPeerConfig {
                 pubkey: peer_b_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -726,6 +750,7 @@ fn reconcile_peers_leaves_kept_peer_sessions_intact() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -737,6 +762,7 @@ fn reconcile_peers_leaves_kept_peer_sessions_intact() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -750,6 +776,7 @@ fn reconcile_peers_leaves_kept_peer_sessions_intact() {
     engine.reconcile_peers(&[WgPeerConfig {
         pubkey: peer_b_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -785,6 +812,7 @@ fn reconcile_peers_drains_dropped_peer_cookie_gen() {
             WgPeerConfig {
                 pubkey: peer_a_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -792,6 +820,7 @@ fn reconcile_peers_drains_dropped_peer_cookie_gen() {
             WgPeerConfig {
                 pubkey: peer_b_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -811,6 +840,7 @@ fn reconcile_peers_drains_dropped_peer_cookie_gen() {
     engine.reconcile_peers(&[WgPeerConfig {
         pubkey: peer_b_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -858,6 +888,7 @@ fn reconcile_peers_snapshot_is_atomic_under_concurrent_load() {
         peers: vec![WgPeerConfig {
             pubkey: peer_a_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -868,6 +899,7 @@ fn reconcile_peers_snapshot_is_atomic_under_concurrent_load() {
         WgPeerConfig {
             pubkey: peer_b_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -875,6 +907,7 @@ fn reconcile_peers_snapshot_is_atomic_under_concurrent_load() {
         WgPeerConfig {
             pubkey: peer_c_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.2.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -883,6 +916,7 @@ fn reconcile_peers_snapshot_is_atomic_under_concurrent_load() {
     let config_orig = vec![WgPeerConfig {
         pubkey: peer_a_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -1160,6 +1194,7 @@ fn reconcile_churn_completes_a_cycle_even_when_already_stopped_6633() {
     let cfg = vec![WgPeerConfig {
         pubkey: peer_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -1346,6 +1381,7 @@ fn orphan_demux_sweep_does_not_self_deadlock_6952() {
     let cfg_with_peer = vec![WgPeerConfig {
         pubkey: peer_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -1361,6 +1397,7 @@ fn orphan_demux_sweep_does_not_self_deadlock_6952() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1433,6 +1470,7 @@ fn install_session_serializes_with_reconcile_removal() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1444,6 +1482,7 @@ fn install_session_serializes_with_reconcile_removal() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1452,6 +1491,7 @@ fn install_session_serializes_with_reconcile_removal() {
     let cfg_with_peer = vec![WgPeerConfig {
         pubkey: peer_pub,
         endpoint: None,
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -1629,6 +1669,7 @@ fn encap_padded_plaintext_overflow_leaves_counter_and_buffer_untouched() {
         peers: vec![WgPeerConfig {
             pubkey: peer_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1640,6 +1681,7 @@ fn encap_padded_plaintext_overflow_leaves_counter_and_buffer_untouched() {
         peers: vec![WgPeerConfig {
             pubkey: [0u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1701,6 +1743,7 @@ fn peer_for_dest_lpm_selects_owning_peer() {
             WgPeerConfig {
                 pubkey: a_pub,
                 endpoint: Some(a_ep),
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.1.0.0/16").unwrap()],
                 preshared_key: [0u8; 32].into(),
@@ -1708,6 +1751,7 @@ fn peer_for_dest_lpm_selects_owning_peer() {
             WgPeerConfig {
                 pubkey: b_pub,
                 endpoint: Some(b_ep),
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 // A more-specific /24 inside A would still resolve to B for
                 // that /24 (global LPM), proving longest-prefix wins.
@@ -1774,6 +1818,7 @@ fn peer_for_dest_prefers_live_roamed_and_resolved_endpoint_13664() {
     let a_roamed: std::net::SocketAddr = "198.51.100.77:33445".parse().unwrap();
     let a_ddns: std::net::SocketAddr = "192.0.2.9:51820".parse().unwrap();
     let cfg = |endpoint: Option<std::net::SocketAddr>| WgPeerConfig {
+    endpoint_host: None,
         pubkey: a_pub,
         endpoint,
         persistent_keepalive: 0,
@@ -1847,6 +1892,7 @@ fn peer_for_dest_prefers_live_roamed_and_resolved_endpoint_13664() {
         peers: vec![WgPeerConfig {
             pubkey: b_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.2.0.0/16").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -1876,6 +1922,7 @@ fn per_peer_psk_handshake_roundtrip() {
             peers: vec![WgPeerConfig {
                 pubkey: peer_pub,
                 endpoint: None,
+                endpoint_host: None,
                 persistent_keepalive: 0,
                 allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
                 preshared_key: peer_psk.into(),
@@ -1940,6 +1987,7 @@ fn wg_config_secret_carriers_are_zeroizing() {
         peers: vec![WgPeerConfig {
             pubkey: [2u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [3u8; 32].into(),
@@ -1974,6 +2022,7 @@ fn under_load_fixture() -> (WgEngine, [u8; 32], [u8; super::super::WG_MSG_INIT_L
         peers: vec![WgPeerConfig {
             pubkey: [0x99u8; 32],
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2311,6 +2360,7 @@ fn initiator_consume_completes_handshake_under_load() {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2322,6 +2372,7 @@ fn initiator_consume_completes_handshake_under_load() {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
             preshared_key: [0u8; 32].into(),
@@ -2447,6 +2498,7 @@ fn admit_9908_engine_pair() -> (WgEngine, WgEngine, [u8; 32], [u8; 32]) {
         peers: vec![WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -2458,6 +2510,7 @@ fn admit_9908_engine_pair() -> (WgEngine, WgEngine, [u8; 32], [u8; 32]) {
         peers: vec![WgPeerConfig {
             pubkey: init_pub,
             endpoint: None,
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![],
             preshared_key: [0u8; 32].into(),
@@ -2732,6 +2785,7 @@ fn peer_for_dest_at_1024_peer_scale_15250() {
     peers.push(WgPeerConfig {
         pubkey: pub0,
         endpoint: Some("192.0.2.1:51820".parse().unwrap()),
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
         preshared_key: [0u8; 32].into(),
@@ -2742,6 +2796,7 @@ fn peer_for_dest_at_1024_peer_scale_15250() {
         peers.push(WgPeerConfig {
             pubkey: pk,
             endpoint: Some(format!("192.0.2.{}:51820", (i % 250) + 1).parse().unwrap()),
+            endpoint_host: None,
             persistent_keepalive: 0,
             allowed_ips: vec![
                 format!("10.{}.{}.0/24", (i >> 8) & 0xff, i & 0xff)
@@ -2756,6 +2811,7 @@ fn peer_for_dest_at_1024_peer_scale_15250() {
     peers.push(WgPeerConfig {
         pubkey: pub_v6,
         endpoint: Some("[2001:db8::1]:51820".parse().unwrap()),
+        endpoint_host: None,
         persistent_keepalive: 0,
         allowed_ips: vec!["2001:db8::/32".parse().unwrap()],
         preshared_key: [0u8; 32].into(),

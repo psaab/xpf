@@ -242,7 +242,7 @@ pub(super) fn bring_up_workers(
         // any aux threads, defaults the just-published runtime, and clears
         // the sizing counters, so status cannot report a phantom fleet.
         // It also stops the SA monitor; the explicit stop above is gone.
-        coord.stop_inner(false);
+        coord.stop_preserving_forwarding();
         let stage = ReconcileStage::IpsecSaNotReady;
         coord.last_reconcile_stage = stage.clone();
         return Err(WorkerBringUpError::IpsecSaNotReady(stage));
@@ -283,7 +283,7 @@ pub(super) fn bring_up_workers(
                 "xpf-userspace-dp: worker bring-up FAILED ({stage}); a queue set has no \
                  XSK-bound worker after teardown — failing reconcile closed"
             );
-            coord.stop_inner(false);
+            coord.stop_preserving_forwarding();
             coord.last_reconcile_stage = stage.clone();
             return Err(WorkerBringUpError::Spawn(stage));
         }
@@ -316,7 +316,7 @@ pub(super) fn bring_up_workers(
                 // `stop_inner` no longer writes `last_reconcile_stage`, so the
                 // typed bind-incomplete identity is recorded once, after the
                 // teardown, and survives.
-                coord.stop_inner(false);
+                coord.stop_preserving_forwarding();
                 record_bind_failure_causes(coord, &stage);
                 // #8558: `stop_inner` above emptied `workers.live`, which is
                 // what makes `refresh_bindings` route every slot through

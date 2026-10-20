@@ -824,6 +824,19 @@ impl Coordinator {
     ///
     /// The event stream is NOT torn down (same as `stop`): it must
     /// survive XSK bind/unbind cycles.
+    /// #15950: bring-up failure rollback that stops workers (so none forward
+    /// the rejected snapshot) but preserves forwarding/validation, like
+    /// stop_for_link_cycle, so a retry builds with previous = the new
+    /// generation (allocator/WG/counter carry) instead of a default.
+    pub(crate) fn stop_preserving_forwarding(&mut self) {
+        let preserved_forwarding = std::mem::take(&mut self.forwarding);
+        let preserved_validation = self.validation;
+        self.stop_inner(false);
+        self.forwarding = preserved_forwarding;
+        self.validation = preserved_validation;
+        self.publish_runtime_view();
+    }
+
     pub fn stop_for_link_cycle(&mut self) {
         let preserved_forwarding = std::mem::take(&mut self.forwarding);
         let preserved_validation = self.validation;

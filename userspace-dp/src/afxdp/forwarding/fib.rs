@@ -790,13 +790,19 @@ fn local_delivery_resolution_v4_suppressing(
     // Duplicate host addresses can be shared by interfaces in one table.
     // Pick the lowest ifindex explicitly so local-delivery ownership does not
     // depend on interface snapshot / connected-route insertion order.
-    let local_ifindex = state
+    // #15950: peer-owned rows are suppressed from connected_v4 (transit
+    // must not be attracted), but host attribution must still find them.
+    // Fall back to the by-ifindex LPM (#15917) which retains them.
+    let mut local_ifindex = state
         .connected_v4
         .iter()
         .filter(|entry| entry.table == table && entry.host == ip)
         .map(|entry| entry.ifindex)
         .min()
         .unwrap_or(0);
+    if local_ifindex == 0 {
+        local_ifindex = connected_lpm_ifindex_v4(state, ip, table);
+    }
     if local_ifindex == 0 {
         LOCAL_DELIVERY_IFINDEX0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -842,27 +848,22 @@ fn local_delivery_resolution_v6_suppressing(
     let local_ifindex = if local_v6_owned_by_table_suppressing(state, ip, table, suppress_nat_local)
         || interface_nat_owner
     {
-        // #10645: match the row's unmasked HOST address (see the v4 arm).
-        // As with v4, make duplicate-host ownership deterministic rather than
-        // depending on interface snapshot order.
-        state
+        // #15950: fall back to by-ifindex LPM for peer-owned hosts (see v4).
+        let mut idx = state
             .connected_v6
             .iter()
             .filter(|entry| entry.table == table && entry.host == ip)
             .map(|entry| entry.ifindex)
             .min()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if idx == 0 {
+            idx = connected_lpm_ifindex_v6(state, ip, table);
+        }
+        idx
     } else {
-        // #10692: Linux puts the subnet-router anycast address of an assigned
-        // connected prefix in table local, ahead of the ordinary connected
-        // route. Mirror that priority for the prefix network address, but only
-        // where an anycast IID exists. RFC 6164 removes subnet-router anycast
-        // on /127 point-to-point links; /128 has no host bits, and /0's `::`
-        // is the unspecified address rather than an assignable subnet anycast.
-        // `connected_v6` is longest-prefix-first and table-scoped (#2388), so
-        // the first matching row supplies the owning interface without
-        // allocating or crossing VRF boundaries.
-        state
+        // #10692: subnet-router anycast (see below); peer-owned prefixes
+        // live only in the by-ifindex table, so consult it too.
+        let mut found = state
             .connected_v6
             .iter()
             .find(|entry| {
@@ -870,7 +871,27 @@ fn local_delivery_resolution_v6_suppressing(
                     && (1..127).contains(&entry.prefix.prefix_len())
                     && entry.prefix.addr() == ip
             })
-            .map(|entry| entry.ifindex)?
+            .map(|entry| entry.ifindex);
+        if found.is_none() {
+            let lpm = connected_lpm_ifindex_v6(state, ip, table);
+            if lpm != 0 && (1..127).contains(&{
+                // only accept when ip is the prefix network address
+                let mut len_ok = false;
+                for (ifindex, prefixes) in &state.connected_v6_by_ifindex {
+                    if *ifindex == lpm {
+                        for p in prefixes {
+                            if p.addr() == ip && (1..127).contains(&p.prefix_len()) {
+                                len_ok = true;
+                            }
+                        }
+                    }
+                }
+                if len_ok { 64u8 } else { 0u8 }
+            }) {
+                found = Some(lpm);
+            }
+        }
+        found?
     };
     if local_ifindex == 0 {
         LOCAL_DELIVERY_IFINDEX0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

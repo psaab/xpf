@@ -233,13 +233,17 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
     let tuple: Option<(&[u8], &[u8], u8, u16, u16)> = match inner.first().map(|b| b >> 4) {
         Some(4) if inner.len() >= 20 => {
             let ihl = usize::from(inner[0] & 0x0f).saturating_mul(4);
-            if inner.len() < ihl {
+            if ihl < 20 || inner.len() < ihl {
                 None
             } else {
                 let proto = inner[9];
+                // #15950: non-first fragments carry payload, not ports, at
+                // ihl..ihl+4. Hashing those bytes steers fragments of one
+                // datagram to different workers. Use tuple-only (0,0).
+                let frag_offset = u16::from_be_bytes([inner[6] & 0x1f, inner[7]]);
                 let (src_port, dst_port) = match proto {
                     crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP
-                        if inner.len() >= ihl + 4 =>
+                        if frag_offset == 0 && inner.len() >= ihl + 4 =>
                     {
                         (
                             u16::from_be_bytes([inner[ihl], inner[ihl + 1]]),
@@ -252,15 +256,57 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
             }
         }
         Some(6) if inner.len() >= 40 => {
-            let proto = inner[6];
+            // #15950: walk the extension chain to the final header; a
+            // Fragment header (44) means only offset 0 carries ports.
+            let mut proto = inner[6];
+            let mut off = 40usize;
+            let mut frag_offset: u16 = 1;
+            loop {
+                match proto {
+                    0 | 43 | 60 if inner.len() >= off + 2 => {
+                        let next = inner[off];
+                        let ext_len = (usize::from(inner[off + 1]) + 1) * 8;
+                        if inner.len() < off + ext_len {
+                            proto = 255;
+                            break;
+                        }
+                        proto = next;
+                        off += ext_len;
+                    }
+                    44 if inner.len() >= off + 8 => {
+                        proto = inner[off];
+                        frag_offset = (u16::from_be_bytes([inner[off + 2], inner[off + 3]]) >> 3) & 0x1fff;
+                        off += 8;
+                        break;
+                    }
+                    51 if inner.len() >= off + 2 => {
+                        let next = inner[off];
+                        let ext_len = (usize::from(inner[off + 1]) + 2) * 4;
+                        if inner.len() < off + ext_len {
+                            proto = 255;
+                            break;
+                        }
+                        proto = next;
+                        off += ext_len;
+                    }
+                    _ => break,
+                }
+            }
             let (src_port, dst_port) = match proto {
-                crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP if inner.len() >= 44 => (
-                    u16::from_be_bytes([inner[40], inner[41]]),
-                    u16::from_be_bytes([inner[42], inner[43]]),
-                ),
+                crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP
+                    if frag_offset == 0 && inner.len() >= off + 4 =>
+                {
+                    (
+                        u16::from_be_bytes([inner[off], inner[off + 1]]),
+                        u16::from_be_bytes([inner[off + 2], inner[off + 3]]),
+                    )
+                }
                 _ => (0, 0),
             };
-            Some((&inner[8..24], &inner[24..40], proto, src_port, dst_port))
+            // Keep hashing the original next-header byte (inner[6]) so
+            // unfragmented traffic hashes exactly as before; only the
+            // port extraction above is fragment/ext-header aware.
+            Some((&inner[8..24], &inner[24..40], inner[6], src_port, dst_port))
         }
         _ => None,
     };
@@ -1306,5 +1352,22 @@ mod tests {
             "released lock admits"
         );
         assert_eq!(queue.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests_15950_hash {
+    use super::*;
+    fn v4(frag:u16, first:bool)->Vec<u8>{let mut p=vec![0u8;40]; p[0]=0x45; p[2..4].copy_from_slice(&40u16.to_be_bytes()); if !first { p[6]=((frag>>8)&0x1f) as u8; p[7]=(frag&0xff) as u8; } p[8]=64; p[9]=17; p[12..16].copy_from_slice(&[10,0,0,1]); p[16..20].copy_from_slice(&[10,0,0,2]); p[20..22].copy_from_slice(&1234u16.to_be_bytes()); p[22..24].copy_from_slice(&53u16.to_be_bytes()); if !first { p[20]=0xde; p[21]=0xad; p[22]=0xbe; p[23]=0xef; } p}
+    #[test]
+    fn fragments_hash_together_15950(){
+        let mut other=v4(0,true); other[15]=99; assert_ne!(wg_uncovered_flow_hash(&v4(0,true)), wg_uncovered_flow_hash(&other), "control sanity");
+        // first fragment ports differ from tuple-only? compare non-first vs payload-mutated non-first
+        let a=v4(185,false); let mut b=v4(185,false); b[20]=1; b[21]=2; b[22]=3; b[23]=4;
+        assert_eq!(wg_uncovered_flow_hash(&a), wg_uncovered_flow_hash(&b), "non-first fragments must not hash payload as ports");
+        // v6 fragment header
+        let mut p=vec![0u8;48]; p[0]=0x60; p[6]=44; p[8..24].copy_from_slice(&[0x20,0x01,0xd,0xb8,0,0,0,0,0,0,0,0,0,0,0,1]); p[24..40].copy_from_slice(&[0x20,0x01,0xd,0xb8,0,0,0,0,0,0,0,0,0,0,0,2]); p[40]=17; p[42..44].copy_from_slice(&((185u16<<3).to_be_bytes())); p[44]=0xde;
+        let mut q=p.clone(); q[44]=0x11; q[45]=0x22; q[46]=0x33; q[47]=0x44;
+        assert_eq!(wg_uncovered_flow_hash(&p), wg_uncovered_flow_hash(&q), "v6 non-first must not hash payload");
     }
 }

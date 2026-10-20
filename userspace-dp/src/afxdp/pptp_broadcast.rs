@@ -328,16 +328,14 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
                     learned += 1;
                 }
             }
-            crate::session::pptp_control::ControlParse::CallDisconnect { call_id } => {
+            crate::session::pptp_control::ControlParse::CallDisconnect { call_id }
+            | crate::session::pptp_control::ControlParse::CallClear { call_id } => {
                 let disconnect = crate::session::pptp::PptpCallDisconnect {
                     allocator: seg.src,
                     call_id,
                     control,
                     disconnected_ns: seg.captured_ns,
                 };
-                // Serialize this worker's own time-fenced forget with its
-                // queued installs. Applying it directly while an earlier
-                // install is queued would let that install resurrect the call.
                 let self_worker_queue_id =
                     self_worker_commands.map(|queue| Arc::as_ptr(queue) as usize);
                 let mut unsent_self = Vec::new();
@@ -359,6 +357,37 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
                 let mut unsent = broadcast_pptp_call_forget(peer_worker_commands, disconnect);
                 unsent.extend(unsent_self);
                 inbox.record_call_forget(disconnect, unsent);
+            }
+            crate::session::pptp_control::ControlParse::StopControl => {
+                // #15950: Stop-Control tears down every call on this channel,
+                // reusing the channel-forget machinery (local + broadcast +
+                // buffered-segment purge via forget_pptp_control_channel's
+                // inbox half is not reachable here, so purge directly).
+                inbox.forget_channel(control);
+                inbox.forget_call_installs_for_channel(control, seg.captured_ns);
+                let _ = sessions.pptp_mut().forget_control_channel_learned_by(control, seg.captured_ns);
+                for queue in peer_worker_commands {
+                    let mut pending = lock_recover(queue);
+                    let _ = push_bounded(
+                        &mut pending,
+                        WorkerCommand::ForgetPptpControlChannel {
+                            control,
+                            closed_ns: seg.captured_ns,
+                        },
+                    );
+                }
+                if let Some(queue) = self_worker_commands {
+                    let mut pending = lock_recover(queue);
+                    if !pending.is_empty() {
+                        let _ = push_bounded(
+                            &mut pending,
+                            WorkerCommand::ForgetPptpControlChannel {
+                                control,
+                                closed_ns: seg.captured_ns,
+                            },
+                        );
+                    }
+                }
             }
             crate::session::pptp_control::ControlParse::Ignored
             | crate::session::pptp_control::ControlParse::Truncated

@@ -618,6 +618,21 @@ pub(in crate::afxdp::icmp_embed) fn resolve_quoted_pptp_discriminator_in_domain(
     quoted_call_id: Option<u16>,
     quoted_dst: IpAddr,
 ) -> TunnelDiscriminator {
+    resolve_quoted_pptp_discriminator_gated(sessions, routing_domain, quoted, quoted_call_id, quoted_dst, true)
+}
+
+pub(in crate::afxdp::icmp_embed) fn resolve_quoted_pptp_discriminator_gated(
+    sessions: &SessionTable,
+    routing_domain: u32,
+    quoted: TunnelDiscriminator,
+    quoted_call_id: Option<u16>,
+    quoted_dst: IpAddr,
+    pptp_enabled: bool,
+) -> TunnelDiscriminator {
+    // #15950: a disabled PPTP ALG must not resolve quoted call ids.
+    if !pptp_enabled {
+        return quoted;
+    }
     if !matches!(quoted, TunnelDiscriminator::Unparseable) {
         return quoted;
     }
