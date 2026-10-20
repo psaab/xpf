@@ -173,6 +173,7 @@ type vrrpInstance struct {
 	//
 	// A timer can also be (re)armed from an intermediate cfg before the
 	// token is consumed (advertTimer.C, masterDownTimer.C arming a
+<<<<<<< Updated upstream
 	// preempt hold, handleBackupRx, transitions). The arm helpers
 	// (armAdvertTimer/armMasterDownTimer/armMasterDownSafetyTimer/
 	// armPreemptHold) re-baseline
@@ -180,6 +181,13 @@ type vrrpInstance struct {
 	// atomically with the arm, so a later revert that nets old==new
 	// can only suppress the config handler's correction when the live
 	// timers genuinely are armed under the final cfg.
+=======
+	// preempt hold, handleBackupRx, transitions). noteTimerApplied
+	// re-baselines the pending record's old* fields to that cfg at each
+	// such arm, so a later revert that nets old==new can only suppress
+	// the config handler's correction when the live timers genuinely
+	// are armed under the final cfg.
+>>>>>>> Stashed changes
 	pendingConfigChange configChange15689
 
 	trackDown bool // tracked interface (cfg.TrackInterface) is down (#1814); guarded by mu
@@ -514,6 +522,7 @@ func (vi *vrrpInstance) takePendingConfigChange() configChange15689 {
 	return c
 }
 
+<<<<<<< Updated upstream
 // Pending-record re-baselining (#15920 reviews, rounds 1-2; #15927).
 // Several config updates can coalesce ahead of the capacity-one
 // configUpdatedCh token, and a timer/RX/transition event serviced in
@@ -679,6 +688,43 @@ func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
 	masterDownTimer.Reset(safety)
 	vi.armIntervalAppliedLocked()
 	vi.mu.Unlock()
+=======
+// noteTimerApplied re-baselines the pending config-change record after
+// the run loop (re)armed a timer from the current cfg (#15920 review).
+// Several config updates can coalesce ahead of the capacity-one
+// configUpdatedCh token, and a timer/RX/transition event serviced in
+// between arms timers from whatever cfg is current at that moment —
+// e.g. MASTER's advertTimer.C sends an advert and re-arms at an
+// intermediate AdvertiseInterval, or BACKUP's masterDownTimer.C arms a
+// preempt hold at an intermediate PreemptHoldTime. If a later update
+// then reverts the field to its pre-first-update value, the accumulated
+// record would read old==new and the config handler would suppress its
+// correction, even though the live timer is armed at the intermediate
+// value. Re-baselining old* := current cfg at every such arm keeps
+// old* meaning "the values the live timers were last armed under":
+// a genuine no-op sequence stays a no-op (timers untouched), while a
+// revert after an intermediate arm reads as a real change against the
+// intermediate arm and the handler re-arms/disarms accordingly. Every
+// caller already runs on the run-loop goroutine, so no new lock
+// ordering is introduced; the record is only mutated for the matching
+// timer when a change is actually pending.
+func (vi *vrrpInstance) noteTimerApplied(advert, hold bool) {
+	if !advert && !hold {
+		return
+	}
+	vi.mu.Lock()
+	defer vi.mu.Unlock()
+	if !vi.pendingConfigChange.valid {
+		return
+	}
+	if advert {
+		vi.pendingConfigChange.oldAdvertiseMS = vi.cfg.AdvertiseInterval
+		vi.pendingConfigChange.oldEffectivePrio = vi.effectivePriorityLocked()
+	}
+	if hold {
+		vi.pendingConfigChange.oldHoldSec = vi.cfg.PreemptHoldTime
+	}
+>>>>>>> Stashed changes
 }
 
 // updateConfig updates priority, preempt, interface-tracking,
@@ -839,7 +885,12 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 					"key", vi.key())
 				vi.disarmPreemptHold(preemptHoldTimer)
 				if vi.becomeMaster() {
+<<<<<<< Updated upstream
 					vi.armAdvertTimer(advertTimer)
+=======
+					advertTimer.Reset(vi.advertInterval())
+					vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 				} else {
 					vi.rearmForRetry(masterDownTimer)
 				}
@@ -869,7 +920,12 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 			return false
 		}
 		if vi.becomeMaster() {
+<<<<<<< Updated upstream
 			vi.armAdvertTimer(advertTimer)
+=======
+			advertTimer.Reset(vi.advertInterval())
+			vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 		} else {
 			vi.rearmForRetry(masterDownTimer)
 		}
@@ -897,7 +953,12 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 			slog.Info("vrrp: preempt hold-time elapsed, taking over",
 				"key", vi.key())
 			if vi.becomeMaster() {
+<<<<<<< Updated upstream
 				vi.armAdvertTimer(advertTimer)
+=======
+				advertTimer.Reset(vi.advertInterval())
+				vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 				masterDownTimer.Stop()
 			} else {
 				vi.rearmForRetry(masterDownTimer)
@@ -983,7 +1044,12 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 		vi.mu.Unlock()
 		if force || vi.shouldPreemptObservedMaster() {
 			if vi.becomeMaster() {
+<<<<<<< Updated upstream
 				vi.armAdvertTimer(advertTimer)
+=======
+				advertTimer.Reset(vi.advertInterval())
+				vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 				masterDownTimer.Stop()
 				// A coordinated/forced promotion supersedes any pending
 				// preempt hold-time countdown (#2850).
@@ -1126,10 +1192,16 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 	case pkt := <-vi.rxCh:
 		vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
 	case <-advertTimer.C:
+<<<<<<< Updated upstream
 		sentPriority := vi.getPriority()
 		vi.sendAdvert(sentPriority)
 		vi.noteAdvertPriority(sentPriority)
 		vi.armAdvertTimer(advertTimer)
+=======
+		vi.sendAdvert(vi.getPriority())
+		advertTimer.Reset(vi.advertInterval())
+		vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 	case <-vi.configUpdatedCh:
 		// Day-2 in-place update while MASTER (#15689). Consuming the
 		// token here is what stops it leaking into a future BACKUP

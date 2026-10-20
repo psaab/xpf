@@ -3817,6 +3817,21 @@ pub(super) fn build_icmpv6_te_frame_pptp(
 /// The single-binding `txn_run_descriptor*` family cannot express this:
 /// their lookup sees only the ingress binding, so a cross-binding (and
 /// cross-UMEM) LAN egress is unresolvable there.
+
+/// #15958b: (ifindex, ip) -> MAC for every static neighbor in the
+/// forwarding snapshot's neighbor table (the production static
+/// neighbor source frame building consults alongside dynamic
+/// neighbors). Test-harness only.
+pub(super) fn production_static_neighbors_15958b(
+    forwarding: &ForwardingState,
+) -> Vec<((i32, IpAddr), [u8; 6])> {
+    let mut out = Vec::new();
+    for ((ifindex, ip), entry) in forwarding.neighbors.iter() {
+        out.push(((*ifindex, *ip), entry.mac));
+    }
+    out
+}
+
 pub(super) fn txn_run_multi_binding_15958(
     bindings: &mut Vec<BindingWorker>,
     ingress_index: usize,
@@ -3857,7 +3872,15 @@ pub(super) fn txn_run_multi_binding_15958(
 
     let binding_lookup = WorkerBindingLookup::from_bindings(bindings);
     let mirror_targets = MirrorTargetMap::default();
-    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    // #15958b Codex8 harness fix: serve snapshot static neighbors
+    // via the dynamic map (see production_static_neighbors_15958b).
+    let dynamic_neighbors = {
+        let map = ShardedNeighborMap::default();
+        for ((ifindex, ip), mac) in production_static_neighbors_15958b(forwarding) {
+            map.insert((ifindex, ip), NeighborEntry { mac });
+        }
+        Arc::new(map)
+    };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -3934,7 +3957,6 @@ pub(super) fn txn_run_multi_binding_15958(
         &mut telemetry,
     );
     assert_descriptor_arrived_10646(&batch, &dbg);
-
     let mut pending_forwards = core::mem::take(&mut binding.scratch.scratch_forwards);
     let mut post_recycles = core::mem::take(&mut binding.scratch.scratch_post_recycles);
     let mut enqueue_dbg = DebugPollCounters::default();

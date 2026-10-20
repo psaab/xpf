@@ -271,8 +271,12 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 		// post-Reset re-read. Priority is not noted (#15927): this
 		// arm puts nothing on the wire.
 		masterDownTimer.Reset(time.Millisecond)
+<<<<<<< Updated upstream
 		vi.armIntervalAppliedLocked()
 		vi.mu.Unlock()
+=======
+		vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 		return
 	}
 
@@ -291,7 +295,12 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 	// legitimate masterDownTimer expiry where it would wrongly skip the
 	// hold once.
 	if !vi.getPreempt() || int(pkt.Priority) >= pri {
+<<<<<<< Updated upstream
 		vi.armMasterDownTimer(masterDownTimer)
+=======
+		masterDownTimer.Reset(vi.masterDownInterval())
+		vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 		vi.disarmPreemptHold(preemptHoldTimer)
 		vi.mu.Lock()
 		vi.skipNextPreemptHold = false
@@ -311,8 +320,13 @@ func (vi *vrrpInstance) handleMasterRx(pkt *VRRPPacket, masterDownTimer, advertT
 	if pkt.Priority == 0 {
 		// Peer resigning — send immediate advert and stay Master.
 		vi.sendAdvert(pri)
+<<<<<<< Updated upstream
 		vi.noteAdvertPriority(pri)
 		vi.armAdvertTimer(advertTimer)
+=======
+		advertTimer.Reset(vi.advertInterval())
+		vi.noteTimerApplied(true, false)
+>>>>>>> Stashed changes
 		return
 	}
 
