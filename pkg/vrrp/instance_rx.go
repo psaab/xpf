@@ -266,9 +266,11 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 		vi.disarmPreemptHold(preemptHoldTimer)
 		vi.mu.Lock()
 		vi.skipNextPreemptHold = true
-		vi.mu.Unlock()
+		// 1ms one-shot arm, not cfg-derived; note from THIS lock hold
+		// (cfg as of the arm) rather than a post-Reset re-read.
 		masterDownTimer.Reset(time.Millisecond)
-		vi.noteTimerApplied(true, false)
+		vi.noteAdvertBaselineLocked()
+		vi.mu.Unlock()
 		return
 	}
 
@@ -287,8 +289,7 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 	// legitimate masterDownTimer expiry where it would wrongly skip the
 	// hold once.
 	if !vi.getPreempt() || int(pkt.Priority) >= pri {
-		masterDownTimer.Reset(vi.masterDownInterval())
-		vi.noteTimerApplied(true, false)
+		vi.armMasterDownTimer(masterDownTimer)
 		vi.disarmPreemptHold(preemptHoldTimer)
 		vi.mu.Lock()
 		vi.skipNextPreemptHold = false
@@ -308,8 +309,7 @@ func (vi *vrrpInstance) handleMasterRx(pkt *VRRPPacket, masterDownTimer, advertT
 	if pkt.Priority == 0 {
 		// Peer resigning — send immediate advert and stay Master.
 		vi.sendAdvert(pri)
-		advertTimer.Reset(vi.advertInterval())
-		vi.noteTimerApplied(true, false)
+		vi.armAdvertTimer(advertTimer)
 		return
 	}
 

@@ -87,10 +87,11 @@ default RETH ownership/failover path.
   the run loop wakes still re-arms/disarms on time, while a
   change-then-revert nets to no change. The baseline is the cfg the live
   timers were last armed under, not merely the pre-first-update cfg:
-  every run-loop path that (re)arms a timer from current cfg (periodic
-  advert, RX handlers, transitions, preempt-hold arm/disarm) re-baselines
-  the pending record (`noteTimerApplied`), so a revert after an
-  intermediate arm still reads as a change and is corrected. The next failover's
+  every run-loop arm from cfg snapshots, resets, and re-baselines under
+  one lock hold (`armAdvertTimer`/`armMasterDownTimer`/`armPreemptHold`),
+  while paths that only send (VIP-set announce) never re-baseline — so a
+  revert after an intermediate arm still reads as a change and is
+  corrected. The next failover's
   `sendGARP` re-reads `cfg.GARPCount`. Before #5087 the stale value
   persisted until an unrelated restart.
   **Ifindex drift (#2294):** before the no-change / in-place branch, a

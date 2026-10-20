@@ -193,8 +193,7 @@ func (vi *vrrpInstance) becomeMaster() bool {
 // Used by the run-loop's becomeMaster call sites (#5082).
 func (vi *vrrpInstance) rearmForRetry(masterDownTimer *time.Timer) {
 	stopAndDrainTimer(masterDownTimer)
-	masterDownTimer.Reset(vi.masterDownInterval())
-	vi.noteTimerApplied(true, false)
+	vi.armMasterDownTimer(masterDownTimer)
 }
 
 // becomeBackup transitions to Backup state after removing the VIPs. Holding
@@ -213,8 +212,7 @@ func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) e
 	vi.applyPendingResign()
 	vi.surfaceStaleVIP(removeErr, "becomeBackup")
 	advertTimer.Stop()
-	masterDownTimer.Reset(vi.masterDownInterval())
-	vi.noteTimerApplied(true, false)
+	vi.armMasterDownTimer(masterDownTimer)
 	// A MASTER stepping down to a worthy higher/tie-break master begins a
 	// fresh BACKUP tenure with no pending resign decision — clear the
 	// one-shot preempt-hold bypass so a stale flag from an earlier resign
