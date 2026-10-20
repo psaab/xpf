@@ -1025,6 +1025,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     ingress_nat_scope_ifindex,
                     packet_fabric_ingress,
                     invalid_zone_stamp,
+                    ambiguous_zone,
+                    ambiguous_scope_ifindex,
                 } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
                 // #12865: the admission-resolved destination zone, captured
                 // at each gated zone-pair computation before any fabric
@@ -1063,7 +1065,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let absent_fabric_ingress_suspect = worker_ctx.forwarding.has_routing_domains
                     && !worker_ctx.forwarding.allow_unstamped_fabric_ingress
                     && (fabric_link_ingress || packet_fabric_ingress)
-                    && ingress_zone_override.is_none();
+                    && ingress_zone_override.is_none()
+                    && ambiguous_zone.is_none();
                 // #10670: preserve the validated #6458 stamp for session-hit
                 // authority. New-flow policy uses a separate RG-gated copy;
                 // a session hit must still judge the peer's claimed arrival
@@ -1162,6 +1165,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // the unencoded case temporarily remains domain 0 until the
                 // narrow established-reverse exception below proves a unique
                 // owner from the reverse index.
+                // #15916: an ambiguous stamp is a fabric arrival whose
+                // claimed zone is not yet adjudicated, but its routing
+                // domain is a pure function of that zone
+                // (`zone_routing_domain`, with the ambiguous-band
+                // fallback for contested zones) — keying the flow in
+                // domain 0 here would install the session in MAIN and
+                // leak the tenant. Use the ambiguous zone for DOMAIN
+                // ONLY; it never reaches a policy/NAT consumer
+                // unpromoted (every such site gates through the
+                // owner-RG promotion below).
                 if let Some(flow) = flow.as_mut() {
                     flow.forward_key.routing_domain =
                         crate::afxdp::forwarding::ingress_routing_domain(
@@ -1169,7 +1182,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             meta.ingress_ifindex as i32,
                             meta.ingress_vlan_id,
                             if packet_fabric_ingress {
-                                ingress_zone_override
+                                ingress_zone_override.or(ambiguous_zone)
                             } else {
                                 None
                             },
@@ -4491,7 +4504,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding,
                             worker_ctx.ha_state,
                             now_secs,
-                            ingress_zone_override,
+                            ingress_zone_override.or_else(|| {
+                                // #15916: an ambiguous stamp's claimed
+                                // zone is promoted only by this same
+                                // owner-RG proof on the packet's own
+                                // resolution.
+                                promote_ambiguous_fabric_zone(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.ha_state,
+                                    now_secs,
+                                    ambiguous_zone,
+                                    resolution,
+                                )
+                            }),
                             resolution,
                         );
                         // #14663 leg 3b: the fabric ingress scope is only
@@ -4504,7 +4529,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // NAT scope identity is only authoritative when its
                         // zone survived the same owner-RG gate used for policy.
                         let ingress_nat_scope_ifindex =
-                            ingress_nat_scope_ifindex.filter(|_| ingress_zone_override.is_some());
+                            ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex).filter(|_| ingress_zone_override.is_some());
                         let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
                             worker_ctx.forwarding,
                             ingress_logical,
@@ -8377,7 +8402,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         worker_ctx.forwarding,
                         worker_ctx.ha_state,
                         now_secs,
-                        ingress_zone_override,
+                        ingress_zone_override.or_else(|| {
+                            // #15916: promote the ambiguous claimed
+                            // zone only on this packet's owner-RG proof.
+                            promote_ambiguous_fabric_zone(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
+                                ambiguous_zone,
+                                final_resolution,
+                            )
+                        }),
                         final_resolution,
                     );
                     // #14663 leg 3b: rejected fabric stamp must not steer BA.
@@ -8385,7 +8420,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         meta.fabric_ingress_ifindex = 0;
                     }
                     let ingress_nat_scope_ifindex =
-                        ingress_nat_scope_ifindex.filter(|_| ingress_zone_override.is_some());
+                        ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex).filter(|_| ingress_zone_override.is_some());
 
                     // (3) Zone security policy — only for TRANSIT
                     //     (ForwardCandidate). Local delivery (host-inbound) is
@@ -10095,7 +10130,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
                                     now_secs,
-                                    ingress_zone_override,
+                                    ingress_zone_override.or_else(|| {
+                                        // #15916: ambiguous-zone promotion
+                                        // on the decision's owner-RG proof.
+                                        promote_ambiguous_fabric_zone(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.ha_state,
+                                            now_secs,
+                                            ambiguous_zone,
+                                            decision.resolution,
+                                        )
+                                    }),
                                     decision.resolution,
                                 );
                                 // #14663 leg 3b: rejected fabric stamp must not steer BA.

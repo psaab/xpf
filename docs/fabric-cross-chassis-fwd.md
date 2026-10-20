@@ -946,15 +946,21 @@ pre-existing gates (fabric ingress, magic, id != 0, zone exists):
   are rejected.
 - **V1b — RG binding.** The claimed zone must have at least one RG-bound
   member interface (new `ForwardingState.zone_to_rgs`, built from
-  `ifindex_to_zone_id` x `EgressInterface.redundancy_group`), and NONE of
-  its bound RGs may be forwarding-active LOCALLY. A legitimate stamp means
-  "this packet ingressed the PEER in this zone"; when the claimed zone's
-  RG is primary on the RECEIVER the traffic ingresses locally and the peer
-  has no business stamping it. Zones with no RG-bound members (`mgmt`,
-  `control`, empty zones) can never be legitimately stamped — this kills
-  the host-inbound variant. Evaluated once at stage 9
+  `ifindex_to_zone_id` x `EgressInterface.redundancy_group`). At least
+  one bound RG not forwarding-active locally PROVES a peer punt.
+  When EVERY bound RG is forwarding-active locally the stamp is
+  **ambiguous** (#15916): the co-moved legitimate punt (all data RGs
+  on the receiver; the peer received the frame on its reth member
+  of the same zone and punted it to the owner) is byte-identical to
+  a forged clone, so stage 9 no longer drops it — the claimed zone
+  is withheld from every policy/NAT/host-inbound consumer until the
+  V2 owner-RG gate proves the packet's own resolution is locally
+  owned (`FabricStampDisposition::AmbiguousLocalZone` →
+  `promote_ambiguous_fabric_zone`). Zones with no RG-bound members
+  (`mgmt`, `control`, empty zones) can never be legitimately stamped
+  — this kills the host-inbound variant. Evaluated once at stage 9
   (`stage_classify_fabric_ingress`), so screens / SYN cookie / IKE
-  admission consume only validated zones.
+  admission consume only validated or owner-promoted zones.
 - **Owner-RG binding (the #6458 V2 gate).** At every session-MISS
   zone-pair computation (flow-backed, flowless transit,
   flowless local-delivery, and the MissingNeighbor arm) the validated override
@@ -976,13 +982,18 @@ If two distinct configured identities collide, the builder omits that ID and
 falls back to V1 rather than choosing one scope.
 
 The receiver first applies the existing V1 fabric-link/destination and zone
-ownership checks, then requires the V2 ID to exist locally and its exact
-interface redundancy group to be peer-owned. A valid V2 stamp supplies the
-peer's logical interface for DNAT and SNAT interface/RI scope. DNAT uses the
-validated ingress identity directly; SNAT uses it only when the existing
-owner-RG gate retains the stamped zone. V1 remains accepted for compatibility,
-but has no recoverable peer interface/RI identity and therefore keeps the
-legacy local-fabric scope behavior.
+ownership checks, then requires the V2 ID to exist locally and — for a
+proved peer punt — its exact interface redundancy group to be peer-owned.
+A valid V2 stamp supplies the peer's logical interface for DNAT and SNAT
+interface/RI scope. DNAT uses the validated ingress identity directly;
+SNAT uses it only when the existing owner-RG gate retains the stamped
+zone. V1 remains accepted for compatibility, but has no recoverable peer
+interface/RI identity and therefore keeps the legacy local-fabric scope
+behavior. In the #15916 ambiguous shape (the identity's RG is locally
+active because every bound RG is) the V2 stamp degrades to
+`Ambiguous` with the scope ifindex WITHHELD: no DNAT/SNAT scope
+consumer sees the peer identity, and promotion (owner-RG gate) carries
+zone only, exactly like V1.
 
 This deterministic ID is a scope selector, not authentication: the shared-L2
 forgery residual described below still applies.
@@ -990,16 +1001,19 @@ forgery residual described below still applies.
 
 ### Resulting posture
 
-- **Single-primary cluster (the normal mode):** the primary rejects every
-  stamp (V1b: every zone's RGs are ALL local); the backup rejects every
-  stamp for new-flow purposes (V2: no owner RG is locally active, and
-  transit resolutions are HAInactive there anyway) — INCLUDING the
-  Stage-11 IKE host-inbound gate, which applies the same V2 owner binding
-  resolved from the packet's local destination address
-  (`gate_fabric_zone_override_on_local_owner_rg`, review fold: a forged
-  stamped NEW IKE initiation to the backup's reth address is denied and
-  never seeds the #6471 live-exchange table). Both nodes fail closed; the
-  host-inbound and transit variants are dead on both.
+- **Single-primary cluster (the normal mode), pre-#15916:** the primary
+  rejected every stamp at stage 9 (V1b: every zone's RGs are ALL local);
+  the backup rejected every stamp for new-flow purposes (V2: no owner RG
+  is locally active). **Post-#15916:** the primary's stamps are
+  Ambiguous, not rejected — a stamp whose packet resolves to a
+  locally-owned egress is promoted and adjudicated exactly as a local
+  ingress in the claimed zone (this is what lets the co-moved
+  legitimate punt through; it is also the widened residual below).
+  The backup is unchanged: no owner RG is locally active, so nothing
+  promotes, and the Stage-11 IKE host-inbound gate (same V2 owner
+  binding resolved from the packet's local destination address,
+  `gate_fabric_zone_override_on_local_owner_rg`) still denies a forged
+  stamped NEW IKE initiation to the backup's reth address.
 - **Split-RG active/active:** exactly the stamp shapes matching the live
   RG split (claimed-zone RG remote + resolution-owner RG local) are
   honored — the legitimate punt keeps working (pinned by
@@ -1008,39 +1022,49 @@ forgery residual described below still applies.
   spanning MULTIPLE RGs keeps the stamp whenever at least one bound RG is
   peer-active (the V1b NONE-active form over-rejected that shape; the
   `zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458` pin
-  covers it).
-- **A rejected stamp** degrades the frame to today's UNSTAMPED
-  fabric-frame posture (the fabric interface's own zone governs policy,
-  screens, and host-inbound) — never below it. The subsequent default-deny
-  is accounted on the normal policy-deny paths; a dedicated reject counter
-  is deferred (it needs proto + Go status plumbing).
+  covers it). When every bound RG is locally active (co-moved), the
+  stamp is Ambiguous and promotion decides (pinned by
+  `co_moved_punt_admitted_when_all_data_rgs_local_15916`, v4+v6, and
+  `co_moved_v2_scoped_stamp_is_ambiguous_without_scope_15916`).
+- **A rejected (Invalid) stamp** is dropped at stage 9 before session
+  lookup (`invalid_fabric_stamp_drops`). An ambiguous stamp that
+  fails promotion degrades to the UNSTAMPED fabric-frame posture (the
+  fabric interface's own zone governs policy, screens, and
+  host-inbound) — never below it.
 
 ### Residual (accepted, documented)
 
-On a SHARED fabric segment with a live RG split, an attacker can clone the
-exact stamp shape of a currently-legitimate punt (remote-RG zone, unicast
-dst) — byte-identical to the real thing at L2, so no receiver-side check
-can reject it without also rejecting the legitimate flow. Full closure on
-a shared segment requires a cryptographic boundary: run the fabric
-direct-attached (the Junos requirement) or under MACsec. This is the same
-trust-domain boundary #4107 draws for the fabric CONTROL plane; the data
-path now fails closed everywhere EXCEPT this documented clone case.
+On a SHARED fabric segment, an attacker can clone the exact stamp
+shape of a currently-legitimate punt (unicast dst to the fabric MAC,
+configured zone) — byte-identical to the real thing at L2, so no
+receiver-side check can reject it without also rejecting the
+legitimate flow. Pre-#15916 this clone worked only during a live RG
+split (the claimed zone needed a peer-active RG). Post-#15916 it
+works in ANY placement, including single-primary: the ambiguous
+stamp is promoted whenever the forged packet's own resolution is
+locally owned, and the flow is then adjudicated exactly as a local
+ingress in the claimed zone — no more, no less. The forger gains
+only zone attribution the packet would have received had it
+ingressed locally in that zone; flows whose resolution is not
+locally owned promote nothing. Full closure on a shared segment
+requires a cryptographic boundary: run the fabric direct-attached
+(the Junos requirement) or under MACsec. This is the same
+trust-domain boundary #4107 draws for the fabric CONTROL plane.
 
 RED-on-revert coverage: `forwarding/tests.rs`
 (`zone_encoded_fabric_stamp_rejected_on_non_unicast_dst_6458`,
-`_rejected_when_claimed_zone_rg_local_6458`,
+`zone_encoded_fabric_stamp_ambiguous_when_claimed_zone_rg_local_15916`,
 `_rejected_for_zone_without_rg_members_6458`,
 `gate_fabric_zone_override_on_owner_rg_6458`,
 `zone_to_rgs_built_from_member_redundancy_groups_6458`) and the poll-loop
 end-to-end pins in `afxdp/tests_fabric_zone_stamp.rs`
-(`forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458` — RED
-when the V1b check is neutralized;
+(`ambiguous_stamp_with_local_owner_is_adjudicated_like_local_ingress_15916`
+— the documented-residual admission, asserted;
+`co_moved_punt_admitted_when_all_data_rgs_local_15916` — RED when the
+ambiguous disposition is reverted to a stage-9 drop;
 `forged_fabric_stamp_denied_for_host_inbound_when_owner_rg_remote_6458` —
 RED when the V2 gate is neutralized), plus the split-RG preservation pins
 named above.
-
-## The cluster-peer return fast path is removed (#6478)
-
 The sections above describing `cluster_peer_return_fast_path` and its
 #4439/#4453/#4414 guard set are HISTORICAL. The fast path adopted
 session-less fabric-ingress TCP SYN-ACK / ACK / ICMP echo-reply forms
@@ -1291,11 +1315,12 @@ that the repository has measured one.
   `bpu-hb0`). L2-adjacent therefore means a THIRD speaker on that domain:
   compromised host/hypervisor, shared-VLAN misprovision, co-tenant on
   shared switching.
-- Single-primary steady state (the normal mode) is closed regardless of
-  segment sharing: V1b rejects every stamp on the primary and V2 degrades
-  every stamp on the backup (#6458 section above). The residual needs a
-  shared segment AND a live RG split AND L2 position — F-073 cohort
-  severity Low.
+- Single-primary steady state post-#15916: the backup still degrades
+  every stamp (no locally-active owner RG, nothing promotes), but the
+  primary promotes an ambiguous stamp whose packet resolves to a
+  locally-owned egress (see the #6458 section above). The residual
+  therefore needs only a shared segment AND L2 position — no live RG
+  split. Direct-attached / MACsec fabric remains the closure.
 
 ### Why not asymmetric signatures
 
