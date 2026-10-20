@@ -458,6 +458,26 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
             .resolution
         });
     let owner_rg_id = owner_rg_for_resolution(forwarding, resolved);
+    // #15958b: a fabric-ingress (punt-origin) forward whose LAN target
+    // resolves via a gateway/default route on an RG this node does not
+    // own for the LAN (the connected LAN prefix is HA-suppressed on
+    // the punt origin, so the FIB answers with the WAN gateway route)
+    // must still redirect the reply to the LAN owner. The gateway
+    // route's owner is the WAN RG (locally active), so the
+    // owner-inactive test below never fires and the reply is emitted
+    // on the WAN egress instead of the fabric. Detect that shape:
+    // fabric ingress + a ForwardCandidate whose egress zone differs
+    // from the ingress (LAN) zone the reply must reach. The reply
+    // target zone is the session ingress zone; if the resolved egress
+    // zone is not it, the route does not reach the LAN owner.
+    if fabric_ingress
+        && resolved.disposition == ForwardingDisposition::ForwardCandidate
+        && forwarding.egress_zone_id(resolved.egress_ifindex) != ingress_zone
+        && let Some(redirect) =
+            super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
+    {
+        return redirect;
+    }
     if fabric_ingress
         && owner_rg_id > 0
         && !matches!(

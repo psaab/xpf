@@ -5493,3 +5493,222 @@ fn split_rg_fabric_return_scoped_tcp_egresses_lan_15958() {
         "scoped LAN egress dst IP must be the LAN host"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #15958b PIVOT (HuntFreshGLM round 6): the return dies on the PUNT
+// ORIGIN (fw0), not fw1. fw0 holds both halves locally created: the
+// forward LAN->WAN flow (fabric_ingress=false, admitted on fw0's LAN,
+// punted via fabric) and its reverse companion, whose resolution must
+// be FabricRedirect toward the LAN owner (fw1, RG2 active there,
+// INACTIVE on fw0). Drive the WAN-side reverse hit (plain WAN ingress,
+// no fabric stamp) through poll -> FabricRedirect decision -> enqueue
+// -> fabric TX submit and assert a frame is emitted on the fabric
+// binding (ifindex 4). Instrument every TX-submit exit.
+// ---------------------------------------------------------------------------
+
+fn fw0_forwarding_15958b() -> ForwardingState {
+    let raw = include_str!("testdata_15742h/snap-split-fw0.json");
+    let v: serde_json::Value = serde_json::from_str(raw).expect("json");
+    let snapshot: crate::ConfigSnapshot =
+        serde_json::from_value(v["snapshot"].clone()).expect("decode fw0 snapshot");
+    build_forwarding_state(&snapshot)
+}
+
+fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+    let lan_host = Ipv4Addr::new(10, 0, 61, 102);
+    let wan_host = Ipv4Addr::new(172, 16, 80, 200);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let now_secs = now_ns / 1_000_000_000;
+    // fw0 split state: RG1 (WAN) active locally, RG2 (LAN) peer-owned.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    // Forward resolution as admitted on fw0: LAN host -> WAN via reth0.80
+    // (egress 14 / tx binding 6), SNAT to 172.16.80.8. The forward flow
+    // itself is punted to fw0 from fw1 in live, but on fw0 the stored
+    // forward decision is the local WAN egress (fabric_ingress=false:
+    // fw0 created/admitted it when the punt transited).
+    let forward_resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(wan_host)),
+        neighbor_mac: Some([0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]),
+        tx_vlan_id: 80,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let dyn_neigh = Arc::new(ShardedNeighborMap::default());
+    let mut sessions = SessionTable::new();
+    for (protocol, src_port, dst_port, tcp_flags) in [
+        (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
+        (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
+    ] {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol,
+                src_ip: IpAddr::V4(lan_host),
+                dst_ip: IpAddr::V4(wan_host),
+                src_port,
+                dst_port,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+            decision: SessionDecision {
+                resolution: forward_resolution,
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(snat_ip)),
+                    rewrite_src_port: None,
+                    source_nat_icmp: (protocol == PROTO_ICMP).then_some((8, 0)),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: SessionMetadata {
+                ingress_zone: 21230,
+                egress_zone: 13098,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 5,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: Some(0),
+                owner_rg_id: 1,
+                fabric_ingress: true,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            source_nat_static: Some(false),
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol,
+            tcp_flags,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+        };
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
+        )
+        .expect("production reverse synthesis must produce a companion");
+        assert_eq!(reverse.decision.resolution.disposition, ForwardingDisposition::FabricRedirect, "fw0 reverse companion must redirect to LAN owner, got {:?}", reverse.decision.resolution);
+        assert!(sessions.install_with_protocol_with_origin(
+            entry.key.clone(), entry.decision, entry.metadata.clone(),
+            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
+        ), "fw0 forward install must succeed");
+        sessions.set_source_nat_static(&entry.key, Some(false));
+        assert!(sessions.install_with_protocol_with_origin(
+            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
+            reverse.origin, now_ns, protocol, tcp_flags,
+        ), "fw0 reverse companion install must succeed");
+        sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
+    }
+    sessions
+}
+
+fn wan_lan_bindings_fw0_15958b() -> Vec<BindingWorker> {
+    // ingress = WAN binding (ifindex 6, reth0 parent ge-0-0-2),
+    // fabric = ifindex 4 (ge-0-0-0), LAN = ifindex 5 (ge-0-0-1).
+    let mut wan = BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+    wan.interface = Arc::<str>::from("ge-0-0-2");
+    let mut fabric = BindingWorker::new_for_mirror_test(1, 0, 4, 0);
+    fabric.interface = Arc::<str>::from("ge-0-0-0");
+    let mut lan = BindingWorker::new_for_mirror_test(2, 0, 5, 0);
+    lan.interface = Arc::<str>::from("ge-0-0-1");
+    vec![wan, fabric, lan]
+}
+
+#[test]
+fn split_rg_punt_origin_wan_reverse_icmp_fabric_tx_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    // WAN-side ICMP echo-reply: 172.16.80.200 -> SNAT 172.16.80.8, plain
+    // WAN ingress (dst MAC = WAN interface MAC, no fabric stamp).
+    let mut frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        64,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+    );
+    frame[34] = 0;
+    frame[36..38].copy_from_slice(&[0, 0]);
+    let csum = checksum16(&frame[34..42]);
+    frame[36..38].copy_from_slice(&csum.to_be_bytes());
+    let mut meta = txn_meta_v4(14, 0, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 0x1234;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    let (batch, dbg, egress) = txn_run_multi_binding_15958(
+        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+    );
+    for (i, b) in bindings.iter().enumerate() {
+    }
+    if let Some(e) = &egress {
+    } else {
+    }
+    assert_eq!(batch.forward_candidate_packets, 1);
+    assert_eq!(batch.session_hits, 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1, "fabric TX");
+    assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX return");
+    assert_eq!(bindings[1].live.fabric_redirect_unsendable_drops.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let egress = egress.expect("fw0 WAN reverse hit must emit a fabric TX frame toward fw1");
+    assert_eq!(&egress[0..6], &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60], "peer fabric MAC");
+    // Fabric frame: dst = peer fabric MAC, src carries zone stamp or fabric MAC.
+    assert_eq!(&egress[30..34], &[10, 0, 61, 102], "fabric frame must carry LAN host dst IP after DNAT reversal");
+}
+
+#[test]
+fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443, 12345, TCP_FLAG_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+    );
+    let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_TCP;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    for pkt in 0..2 {
+        let (batch, dbg, egress) = txn_run_multi_binding_15958(
+            &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+        );
+        for (i, b) in bindings.iter().enumerate() {
+        }
+        if let Some(e) = &egress {
+        }
+        assert!(egress.is_some(), "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX");
+        assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX TCP return");
+    }
+}

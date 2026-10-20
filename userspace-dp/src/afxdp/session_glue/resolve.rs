@@ -501,12 +501,31 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
             ingress_ifindex,
             ha_startup_grace_until_secs,
         );
-        decision.resolution = redirect_session_via_fabric_if_needed(
-            forwarding,
-            enforced_resolution,
-            fabric_link_ingress,
-            resolved.metadata.ingress_zone,
-        );
+        // #15958b: a stored FabricRedirect companion must not be
+        // re-resolved onto a gateway/default route. On the punt origin
+        // the connected LAN prefix is HA-suppressed, so the FIB lookup
+        // above answers the LAN target with the WAN gateway route
+        // (ForwardCandidate egressing in the WAN zone, owner =
+        // locally-active WAN RG); HA enforcement keeps it and the
+        // reply leaves on the WAN egress instead of the fabric. When
+        // the stored decision was FabricRedirect and the re-resolved
+        // candidate egresses in a different zone than the companion's
+        // destination (egress) zone, the route does not reach the LAN
+        // owner: retain the redirect.
+        if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+            && enforced_resolution.disposition == ForwardingDisposition::ForwardCandidate
+            && forwarding.egress_zone_id(enforced_resolution.egress_ifindex)
+                != resolved.metadata.egress_zone
+        {
+            decision.resolution = resolved.decision.resolution;
+        } else {
+            decision.resolution = redirect_session_via_fabric_if_needed(
+                forwarding,
+                enforced_resolution,
+                fabric_link_ingress,
+                resolved.metadata.ingress_zone,
+            );
+        }
         // #9752: a terminal outcome arms this worker's purge walk (D8).
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);
@@ -718,12 +737,21 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         ingress_ifindex,
         ha_startup_grace_until_secs,
     );
-    decision.resolution = redirect_session_via_fabric_if_needed(
-        forwarding,
-        enforced_resolution,
-        fabric_link_ingress,
-        resolved.metadata.ingress_zone,
-    );
+    // #15958b: same retained-redirect guard as the hit arm above.
+    if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+        && enforced_resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && forwarding.egress_zone_id(enforced_resolution.egress_ifindex)
+            != resolved.metadata.egress_zone
+    {
+        decision.resolution = resolved.decision.resolution;
+    } else {
+        decision.resolution = redirect_session_via_fabric_if_needed(
+            forwarding,
+            enforced_resolution,
+            fabric_link_ingress,
+            resolved.metadata.ingress_zone,
+        );
+    }
     // #9752: terminal observation arms the purge walk (D8; reverse arm).
     if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
         flag_install_table_purge(worker_id);
