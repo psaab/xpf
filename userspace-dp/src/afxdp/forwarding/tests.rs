@@ -11539,3 +11539,125 @@ fn terminal_gateway_owner_table_scoped_15917() {
         );
     }
 }
+
+/// #15917 fold (triple-review): equal-length same-table tie. Two
+/// interfaces in the SAME (default) table carry the SAME connected
+/// prefix; attribution must pick the lowest ifindex
+/// deterministically (the #10645 `.min()` precedent), never
+/// FastMap iteration order.
+///
+/// HA-consistent fixture: whether an interface's connected transit
+/// is suppressed is decided by the Go-side peer-owned marking
+/// (`connected_rg_peer_owned`), which mirrors live RG ownership —
+/// so RG state and marking move together here exactly as they do
+/// on a real node. Both candidates are RETHs in the default table:
+/// `reth0.80` (ifindex 42, RG1) with 172.16.80.8/24 and an added
+/// `reth9.80` (ifindex 17, RG3) with the SAME 172.16.80.9/24
+/// network. The added interface is inserted LAST (snapshot order)
+/// and has the LOWER ifindex, so insertion order and the required
+/// answer disagree; hash order is unspecified. With RG1 peer-owned
+/// (suppressed) and RG3 active (also suppressed is wrong for an
+/// active RG — see below), the lookup must still reach the
+/// terminal row and stamp source_ifindex 17.
+///
+/// Marking detail: an ACTIVE RG's connected prefixes are NOT
+/// suppressed on a real node (the owner forwards locally), which
+/// would resolve 172.16.80.200 via the connected route, not the
+/// terminal. To exercise the terminal tie, both rows carry the
+/// peer-owned marking the Go builder would emit when BOTH RGs are
+/// peer-owned — e.g. mid-failover on the node that owns neither —
+/// and the HA map marks both inactive. The discriminator is then
+/// purely `source_ifindex`: pre-fold (strict `>`) the winner was
+/// whichever ifindex the hash map yielded first.
+#[test]
+fn terminal_attribution_equal_prefix_tie_lowest_ifindex_15917() {
+    use crate::{InterfaceSnapshot, ZoneSnapshot};
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot
+        .routes
+        .retain(|r| r.destination != "0.0.0.0/0" && r.destination != "::/0");
+    // Move the base WAN unit to ifindex 42 / RG1 (peer-owned) so
+    // the added same-prefix interface can hold the lower ifindex.
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.ifindex = 42;
+            iface.connected_rg_peer_owned = true;
+        }
+        // Keep the fabric/neighbor rows coherent with the renumber:
+        // neighbors key on the snapshot ifindex.
+    }
+    for neighbor in &mut snapshot.neighbors {
+        if neighbor.ifindex == 12 {
+            neighbor.ifindex = 42;
+        }
+    }
+    snapshot.zones.push(ZoneSnapshot {
+        name: "dmz2".to_string(),
+        id: 9,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    // Same default table, SAME /24 network, LOWER ifindex (17),
+    // inserted last. RG3, peer-owned marking like the WAN's.
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth9.80".to_string(),
+        zone: "dmz2".to_string(),
+        linux_name: "ge-0-0-9.80".to_string(),
+        ifindex: 17,
+        redundancy_group: 3,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:09:80:09".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "172.16.80.9/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Both candidate RGs peer-owned, mirroring the markings above.
+    let ha = Arc::new(ArcSwap::from_pointee(BTreeMap::from([
+        (1, inactive_ha_runtime(now_secs)),
+        (3, inactive_ha_runtime(now_secs)),
+    ])));
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let raw = lookup_forwarding_resolution(&state, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ClusterTerminalHAInactive,
+        "tie lookup must surface the cluster terminal, got {:?}",
+        raw.disposition
+    );
+    assert_eq!(
+        raw.source_ifindex, 17,
+        "equal-length same-table tie must pick the lowest ifindex (17), not hash/insertion order"
+    );
+    let blocked = enforce_ha_resolution(&state, &ha, raw);
+    assert_eq!(
+        blocked.disposition,
+        ForwardingDisposition::ClusterTerminalHAInactive,
+        "tie winner is peer-owned, so the demotion must survive HA enforcement"
+    );
+    assert_eq!(
+        redirect_via_fabric_if_needed(&state, blocked, 42, None).disposition,
+        ForwardingDisposition::FabricRedirect,
+        "tie-winner peer-owned target must fabric-redirect"
+    );
+}

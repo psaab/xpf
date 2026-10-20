@@ -1480,10 +1480,10 @@ enum ResolvedRouteV6<'a> {
 /// #15917: longest-prefix match over one family's connected
 /// prefixes, restricted to interfaces whose routing instance owns
 /// `table`. Returns the winning ifindex, or 0 when no in-table
-/// interface prefix contains `ip`. Ties at the longest length keep
-/// the first encountered entry, never hash order over unrelated
-/// tables: candidates are table-filtered BEFORE the prefix-length
-/// comparison.
+/// interface prefix contains the address. Equal-length ties pick
+/// the LOWEST ifindex — the #10645 local-delivery precedent
+/// (`local_*_ifindex` uses `.min()`) — so the result never depends
+/// on FastMap iteration (hash) order or snapshot insertion order.
 ///
 /// This is the ONLY connected-prefix attribution the cluster-
 /// terminal fallback may use. The pre-#15917 global scans of
@@ -1493,14 +1493,46 @@ enum ResolvedRouteV6<'a> {
 /// the HA gate then saw the wrong RG (restoring DiscardRoute for
 /// a peer-owned WAN) and the #15906 punt-seed consumers read the
 /// wrong zone/owner from the same stamp. Deriving the owning
-/// table from `ifindex_to_routing_instance` via
-/// `connected_route_tables` keeps this in lockstep with how
+/// table from `ifindex_to_routing_instance` (compared via the
+/// allocation-free `instance_owns_table_*` twins of
+/// `connected_route_tables`) keeps this in lockstep with how
 /// `populate_interfaces` scoped the transit `connected_v*` rows
 /// (#2388) — one source of truth for an interface's table.
 /// Interfaces absent from that map are the default instance (the
-/// map's documented convention), which `connected_route_tables("")`
-/// maps to inet.0/inet6.0. Runs only on the terminal/miss path,
-/// never per forwarded packet.
+/// map's documented convention). Runs only on the terminal/miss
+/// path, never per forwarded packet.
+
+/// #15917: does `instance` ("" = default) own the v4 `table`?
+/// Spells `connected_route_tables(instance).0 == table` without
+/// allocating the canonical pair: the default instance owns only
+/// `inet.0`; a named instance owns only `<instance>.inet.0`.
+/// `connected_route_tables` remains the build-time spelling
+/// authority; this is its allocation-free lookup-time twin, kept
+/// next to its only consumers (Opus perf fold on PR #15926).
+fn instance_owns_table_v4(instance: &str, table: &str) -> bool {
+    if instance.is_empty() {
+        table == DEFAULT_V4_TABLE
+    } else {
+        table.len() == instance.len() + ".inet.0".len()
+            && table.starts_with(instance)
+            && table[instance.len()..] == *".inet.0"
+    }
+}
+
+/// #15917: v6 twin of `instance_owns_table_v4`.
+fn instance_owns_table_v6(instance: &str, table: &str) -> bool {
+    if instance.is_empty() {
+        table == DEFAULT_V6_TABLE
+    } else {
+        table.len() == instance.len() + ".inet6.0".len()
+            && table.starts_with(instance)
+            && table[instance.len()..] == *".inet6.0"
+    }
+}
+
+/// #15917: v4 connected-prefix LPM attribution for `table` (see
+/// the note above). Longest prefix wins; equal lengths pick the
+/// lowest ifindex (#10645 precedent).
 fn connected_lpm_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> i32 {
     let mut best: Option<(u8, i32)> = None;
     for (ifindex, prefixes) in &state.connected_v4_by_ifindex {
@@ -1509,14 +1541,22 @@ fn connected_lpm_ifindex_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) 
             .get(ifindex)
             .map(String::as_str)
             .unwrap_or("");
-        if crate::afxdp::forwarding_build::connected_route_tables(instance).0 != table {
+        if !instance_owns_table_v4(instance, table) {
             continue;
         }
         for prefix in prefixes {
-            if prefix.contains(ip)
-                && best.is_none_or(|(best_len, _)| prefix.prefix_len() > best_len)
-            {
-                best = Some((prefix.prefix_len(), *ifindex));
+            if prefix.contains(ip) {
+                let candidate = (prefix.prefix_len(), *ifindex);
+                best = Some(match best {
+                    None => candidate,
+                    Some((best_len, best_ifindex))
+                        if candidate.0 > best_len
+                            || (candidate.0 == best_len && candidate.1 < best_ifindex) =>
+                    {
+                        candidate
+                    }
+                    Some(current) => current,
+                });
             }
         }
     }
@@ -1532,14 +1572,22 @@ fn connected_lpm_ifindex_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) 
             .get(ifindex)
             .map(String::as_str)
             .unwrap_or("");
-        if crate::afxdp::forwarding_build::connected_route_tables(instance).1 != table {
+        if !instance_owns_table_v6(instance, table) {
             continue;
         }
         for prefix in prefixes {
-            if prefix.contains(ip)
-                && best.is_none_or(|(best_len, _)| prefix.prefix_len() > best_len)
-            {
-                best = Some((prefix.prefix_len(), *ifindex));
+            if prefix.contains(ip) {
+                let candidate = (prefix.prefix_len(), *ifindex);
+                best = Some(match best {
+                    None => candidate,
+                    Some((best_len, best_ifindex))
+                        if candidate.0 > best_len
+                            || (candidate.0 == best_len && candidate.1 < best_ifindex) =>
+                    {
+                        candidate
+                    }
+                    Some(current) => current,
+                });
             }
         }
     }
