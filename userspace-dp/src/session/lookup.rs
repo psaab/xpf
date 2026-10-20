@@ -26,46 +26,43 @@ pub enum SeqVerdict {
 impl SessionTable {
     /// Note seq/window for the entry matching `key` (this packet's direction).
     pub fn note_tcp_seq(&mut self, key: &SessionKey, seq: u32, ack: u32, window: u16, payload_len: u32, tcp_flags: u8, max_window: u32) {
+        self.note_tcp_seq_scaled(key, seq, ack, window, None, payload_len, tcp_flags, max_window);
+    }
+    /// #15947 (H29-02): note with the WSOPT scale parsed from a SYN.
+    pub fn note_tcp_seq_scaled(&mut self, key: &SessionKey, seq: u32, ack: u32, window: u16, window_scale: Option<u8>, payload_len: u32, tcp_flags: u8, max_window: u32) {
         if let Some(entry) = self.entry_by_key_mut(key) {
-            entry.note_tcp_seq(seq, ack, window, payload_len, tcp_flags, max_window);
+            entry.note_tcp_seq_scaled(seq, ack, window, window_scale, payload_len, tcp_flags, max_window);
         }
     }
-    /// Validate RST/FIN seq: the sender's next seq is tracked on the
-    /// companion entry (reverse of `key`). Unknown if no companion/state.
+    /// Validate RST/FIN seq against the RECEIVER's advertised window.
+    ///
+    /// #15947 (H29-02): the pre-fix verdict discarded the companion key
+    /// (`let _ = companion_key;`) and checked the sender's seq against
+    /// the SENDER entry's own advertised window — direction-confused.
+    /// The receiver for a packet on `key` is the companion entry: its
+    /// `tcp_rcv_wnd` is the window the receiver advertised (for traffic
+    /// toward the sender), and the sender entry's `tcp_rcv_nxt` is the
+    /// next seq the receiver expects. A closing seq is valid when it
+    /// lies in [rcv_nxt - receiver_wnd, rcv_nxt] (the already-sent range
+    /// the receiver will accept, RFC 5961) or equals rcv_nxt exactly.
+    /// Unknown when either half has no sequence state yet.
     pub fn tcp_closing_seq_verdict(&self, key: &SessionKey, seq: u32) -> SeqVerdict {
-        // The entry for `key` itself is in the sender's direction: its
-        // tcp_rcv_nxt is the sender's next seq, tcp_rcv_wnd is sender's
-        // advertised window. Receiver window is companion's, but next-seq
-        // expectation is sender's own — an RST seq must be in receiver's
-        // window [companion_rcv_nxt - wnd, companion_rcv_nxt). We have no
-        // stored receiver rcv_nxt on companion for this direction's incoming
-        // stream except sender entry itself: incoming RST arrives on the
-        // reverse entry whose own stream is opposite. So validate against
-        // the matching entry's peer expectation stored as: the RST's seq
-        // should equal/behind the seq the receiver has seen from sender,
-        // which is tracked on the RECEIVER entry as its observed peer nxt.
-        // Our per-entry tracking stores sender nxt on sender entry; receiver
-        // entry's companion lookup gives sender entry.
         let Some(entry) = self.entry_by_key(key) else { return SeqVerdict::Unknown };
-        let nat = entry.decision.nat;
-        let companion_key = reverse_session_key(key, nat);
-        // companion is receiver; its window toward sender is not directly
-        // stored, but sender entry's tcp_rcv_wnd is sender's advertised
-        // window (receiver's send window). For RST validation Junos checks
-        // seq in receiver's receive window: [receiver_rcv_nxt, +wnd) where
-        // receiver_rcv_nxt == sender's next seq (what receiver expects).
-        // That expectation IS sender entry's tcp_rcv_nxt if sender entry is
-        // looked up — here `entry` IS sender-direction if packet direction
-        // matches key direction. In poll, key is packet's forward_key as
-        // resolved (canonical direction varies). Use entry itself:
-        let _ = companion_key;
         if !entry.tcp_seq_seen {
             return SeqVerdict::Unknown;
         }
-        // Receiver expects sender seq == tcp_rcv_nxt (next unsent). Valid
-        // RST seq is within [rcv_nxt - wnd, rcv_nxt] (already-sent range)
-        // or exactly rcv_nxt per RFC 5961; use window behind nxt plus nxt.
-        let wnd = entry.tcp_rcv_wnd.max(1);
+        let nat = entry.decision.nat;
+        let companion_key = reverse_session_key(key, nat);
+        // The companion entry advertises the receive window governing
+        // this direction. When no companion is tracked (half-open or
+        // already reaped), fall back to the sender entry's own window —
+        // the pre-fix behaviour — rather than failing open.
+        let receiver_wnd = self
+            .entry_by_key(&companion_key)
+            .filter(|companion| companion.tcp_seq_seen)
+            .map(|companion| companion.tcp_rcv_wnd)
+            .unwrap_or(entry.tcp_rcv_wnd);
+        let wnd = receiver_wnd.max(1);
         let behind = entry.tcp_rcv_nxt.wrapping_sub(seq);
         if behind < wnd || seq == entry.tcp_rcv_nxt {
             SeqVerdict::Valid

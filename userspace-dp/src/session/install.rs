@@ -705,6 +705,7 @@ impl SessionTable {
                 tcp_rcv_nxt: 0,
                 tcp_rcv_wnd: 0,
                 tcp_seq_seen: false,
+                tcp_window_scale: None,
                 last_icmp_error_tat: 0,
             },
         };
@@ -1094,6 +1095,7 @@ impl SessionTable {
                 tcp_rcv_nxt: 0,
                 tcp_rcv_wnd: 0,
                 tcp_seq_seen: false,
+                tcp_window_scale: None,
                 // #9901 (F-077): a re-imported copy starts with a FULL error
                 last_icmp_error_tat: 0,
             },
