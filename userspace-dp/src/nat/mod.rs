@@ -213,6 +213,9 @@ mod tests_persistent_nonzone_15133;
 #[cfg(test)]
 #[path = "tests_synced_persistent_zones_15676.rs"]
 mod tests_synced_persistent_zones_15676;
+#[cfg(test)]
+#[path = "tests_persistent_inbound_reader_15936.rs"]
+mod tests_persistent_inbound_reader_15936;
 // #9874: authored-but-empty source-NAT match poison (fail-closed drop).
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]

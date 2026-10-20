@@ -898,7 +898,7 @@ fn match_source_nat_result_for_tuple_inner(
                     // lease consumes no round-robin choice. The per-flow reverse-identity
                     // token is still minted for the #5269 collision guard.
                     let reserved = if rule.persistent_nat {
-                        rule.pool_allocator.reserve_address_only_persistent(
+                        rule.pool_allocator.reserve_address_only_persistent_with_zones(
                             flow,
                             PoolAddressFamily::V4(&rule.pool_addresses_v4),
                             0,
@@ -906,7 +906,7 @@ fn match_source_nat_result_for_tuple_inner(
                             rule.persistent_nat_permit,
                             rule.persistent_nat_timeout_ns,
                             now_ns,
-                            holder, flow_egress_scope,
+                            holder, flow_egress_scope, Some(from_zone),
                 )
                     } else {
                         // #6226: probe the WHOLE pool from the round-robin start
@@ -949,7 +949,7 @@ fn match_source_nat_result_for_tuple_inner(
                         }
                     }
                 }
-                let translated = match rule.pool_allocator.allocate_translation(
+                let translated = match rule.pool_allocator.allocate_translation_with_zones(
                     flow,
                     PoolAddressFamily::V4(&rule.pool_addresses_v4),
                     0,
@@ -958,7 +958,7 @@ fn match_source_nat_result_for_tuple_inner(
                     rule.persistent_nat_permit,
                     rule.persistent_nat_timeout_ns,
                     now_ns,
-                    holder, flow_egress_scope,
+                    holder, flow_egress_scope, Some(from_zone),
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {
@@ -1036,7 +1036,7 @@ fn match_source_nat_result_for_tuple_inner(
                     // permit scope (the lease selects the address itself; its
                     // fresh-lease selection owns the sole `address_index` call).
                     let reserved = if rule.persistent_nat {
-                        rule.pool_allocator.reserve_address_only_persistent(
+                        rule.pool_allocator.reserve_address_only_persistent_with_zones(
                             flow,
                             PoolAddressFamily::V6(&rule.pool_addresses_v6),
                             v6_offset,
@@ -1044,7 +1044,7 @@ fn match_source_nat_result_for_tuple_inner(
                             rule.persistent_nat_permit,
                             rule.persistent_nat_timeout_ns,
                             now_ns,
-                            holder, flow_egress_scope,
+                            holder, flow_egress_scope, Some(from_zone),
                 )
                     } else {
                         // #6226: probe the WHOLE pool from the round-robin start
@@ -1086,7 +1086,7 @@ fn match_source_nat_result_for_tuple_inner(
                         }
                     }
                 }
-                let translated = match rule.pool_allocator.allocate_translation(
+                let translated = match rule.pool_allocator.allocate_translation_with_zones(
                     flow,
                     PoolAddressFamily::V6(&rule.pool_addresses_v6),
                     v6_offset,
@@ -1095,7 +1095,7 @@ fn match_source_nat_result_for_tuple_inner(
                     rule.persistent_nat_permit,
                     rule.persistent_nat_timeout_ns,
                     now_ns,
-                    holder, flow_egress_scope,
+                    holder, flow_egress_scope, Some(from_zone),
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {

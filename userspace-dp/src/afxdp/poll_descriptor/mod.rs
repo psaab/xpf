@@ -3881,27 +3881,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 if !pool_contains_target {
                                     continue;
                                 }
-                                // #14322/#15133: the lease this rule minted
-                                // is scoped to ITS normalized effective scope
-                                // (authored scope fields, empty zones replaced
-                                // by the packet's resolved zones). Keying by
-                                // the rule — never by `rule.from_zone` alone —
-                                // keeps an interface-, routing-instance- or
-                                // global-scoped sibling that shares the pool
-                                // from authorizing (or denying) inbound on
-                                // this rule's lease: the empty-zone spelling
-                                // used to collapse to UNSCOPED, where any
-                                // grant bucket admits. The packet pair is the
-                                // original flow's (internal ingress zone,
-                                // arrival zone): for a zone-authored rule the
-                                // internal side IS `rule.from_zone`; for a
-                                // non-zone rule the mint folded the packet's
-                                // resolved zones, and on this pre-routing
-                                // path the arrival fabric's resolved zone is
-                                // the only zone identity available for both
-                                // sides — the interface/RI authored fields,
-                                // not the zone pair, separate non-zone
-                                // siblings.
+                                // #14322/#15133/#15936: the lease this rule
+                                // minted is scoped to ITS normalized effective
+                                // scope (authored scope fields, empty zones
+                                // replaced by the packet's resolved zones).
+                                // Keying by the rule — never by
+                                // `rule.from_zone` alone — keeps an interface-,
+                                // routing-instance- or global-scoped sibling
+                                // that shares the pool from authorizing (or
+                                // denying) inbound on this rule's lease: the
+                                // empty-zone spelling used to collapse to
+                                // UNSCOPED, where any grant bucket admits.
+                                // The packet pair is the original flow's
+                                // (internal ingress zone, arrival zone): for a
+                                // zone-authored rule the internal side IS
+                                // `rule.from_zone`. For a non-zone rule this
+                                // pre-routing reader knows only the arrival
+                                // zone, so it spells (arrival, arrival) and
+                                // the allocator's #15936 authored fallback
+                                // recovers the grant via the mint provenance
+                                // recorded on the bucket — never UNSCOPED.
                                 let arrival_scope = crate::nat::NatScopeCtx {
                                     ingress_ifname: ingress_ifname_dnat,
                                     ingress_routing_instance: ingress_ri_dnat,
