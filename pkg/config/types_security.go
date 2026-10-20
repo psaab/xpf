@@ -1054,7 +1054,11 @@ type NATv6v4Config struct {
 // source-address-name` accepts address-book names resolved at snapshot
 // build. Empty = match any source. Exactly one from axis may be set
 // (zone XOR routing-instance); a mixed or repeated from clause is rejected
-// at strict commit (never OR-widened).
+// at strict commit (never OR-widened). #15930: `any` (or an IPv6 family
+// wildcard, or `::/0`) anywhere in the selector is an explicit
+// match-any that wins over narrower entries — the snapshot builder
+// lowers such a side to `::/0` and preserves any other authored
+// constraint as fail-closed (never-match), never as an empty list.
 type NAT64RuleSet struct {
 	Name       string
 	Prefix     string // well-known prefix, e.g. "64:ff9b::/96"

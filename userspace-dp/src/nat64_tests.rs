@@ -9478,3 +9478,85 @@ fn nat64_scoped_unparseable_source_fails_closed_15678() {
         "an all-unparseable source list must match nothing, never widen to any"
     );
 }
+
+// #15930: the Go builder's poisoned-name wire shape — the never-match
+// sentinel, constrained — must classify NoPrefixMatch for every source,
+// and the explicit flag alone (empty list) must do the same. Reverting
+// the flag OR-ing makes the second case widen to MatchReady.
+#[test]
+fn nat64_15930_sentinel_and_flag_fail_closed() {
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let mut snap = scoped_snap("", "", vec!["unresolved-address-name:clients".to_string()]);
+    snap.source_constrained = true;
+    let state = Nat64State::from_snapshots(&[snap]);
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(src, dst, "", ""),
+        Nat64Match::NoPrefixMatch,
+        "poisoned-name sentinel must match nothing, never widen to any"
+    );
+    let mut flagged = scoped_snap("", "", vec![]);
+    flagged.source_constrained = true;
+    let state = Nat64State::from_snapshots(&[flagged]);
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(src, dst, "", ""),
+        Nat64Match::NoPrefixMatch,
+        "source_constrained with an empty list must match nothing"
+    );
+}
+
+// #15930: `any` (and its family spellings, plus the Go-lowered `::/0`)
+// must match any source — the same verdict as an omitted selector.
+// Reverting the wildcard normalisation makes `any` match nothing.
+#[test]
+fn nat64_15930_any_matches_any_source() {
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    for token in ["any", "any6", "any-ipv6", "::/0"] {
+        let state = Nat64State::from_snapshots(&[scoped_snap("", "", vec![token.to_string()])]);
+        for src in ["2001:db8::1", "2001:db8:ffff::99"] {
+            let src: Ipv6Addr = src.parse().unwrap();
+            assert!(
+                matches!(
+                    state.classify_ipv6_packet_scoped(src, dst, "", ""),
+                    Nat64Match::MatchReady { .. }
+                ),
+                "source-address {token} must match source {src}"
+            );
+        }
+    }
+    // Constrained control still refuses outside sources.
+    let state = Nat64State::from_snapshots(&[scoped_snap(
+        "",
+        "",
+        vec!["2001:db8:1::/48".to_string()],
+    )]);
+    let outside: Ipv6Addr = "2001:db8:2::5".parse().unwrap();
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(outside, dst, "", ""),
+        Nat64Match::NoPrefixMatch,
+        "constrained control must still refuse outside sources"
+    );
+}
+
+// #15930 (review fold): a wildcard token beside a narrower literal in
+// the SAME list still wins — the side matches any source. Reverting
+// the Rust wildcard normalisation to first-token-only makes the
+// any-last case match nothing outside the narrow prefix.
+#[test]
+fn nat64_15930_mixed_any_wins() {
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let outside: Ipv6Addr = "2001:db8:2::5".parse().unwrap();
+    for sources in [
+        vec!["any".to_string(), "2001:db8:1::/48".to_string()],
+        vec!["2001:db8:1::/48".to_string(), "any".to_string()],
+    ] {
+        let state = Nat64State::from_snapshots(&[scoped_snap("", "", sources.clone())]);
+        assert!(
+            matches!(
+                state.classify_ipv6_packet_scoped(outside, dst, "", ""),
+                Nat64Match::MatchReady { .. }
+            ),
+            "mixed selector {sources:?} must match any source"
+        );
+    }
+}

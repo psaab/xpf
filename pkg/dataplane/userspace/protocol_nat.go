@@ -360,9 +360,26 @@ type NAT64RuleSnapshot struct {
 	// match any source. An old helper ignoring these fields would match
 	// every scope/source — the defect — so the v60 protocol bump fences
 	// the pairing instead of degrading silently.
+	// #15930: the builder NEVER emits an empty list for an authored
+	// constraint: a poisoned or empty-resolving name ships the
+	// never-match `unresolved-address-name:` sentinel (non-empty, so
+	// Rust keeps source_constrained=true over zero prefixes and matches
+	// NOTHING), and an explicit `any` wildcard ships as `::/0` so it
+	// matches any source like an omitted selector. The source_constrained
+	// wire flag below carries the same distinction explicitly, so it
+	// survives even if a future encoding drops the sentinel.
 	FromZone            string   `json:"from_zone,omitempty"`
 	FromRoutingInstance string   `json:"from_routing_instance,omitempty"`
 	SourceAddresses     []string `json:"source_addresses,omitempty"`
+	// SourceConstrained (#15930) records that the operator authored a
+	// source restriction (`match source-address[-name]`), independent of
+	// how many prefixes survived resolution. Rust ORs it with the
+	// non-empty-list derivation: constrained + zero parseable prefixes =
+	// match NOTHING (fail-closed), never widened to any-source. An old
+	// helper ignoring it still fails closed via the sentinel above; a
+	// new helper receiving an old snapshot (flag absent) derives the
+	// flag from the list exactly as before.
+	SourceConstrained bool `json:"source_constrained,omitempty"`
 	// NoV6FragHeader mirrors the global `security nat natv6v4
 	// no-v6-frag-header` knob. When set, it is an explicit local override that
 	// keeps header-less IPv6->IPv4 outputs fragmentable (DF=0) regardless of

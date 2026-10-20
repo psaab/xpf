@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"log/slog"
 	"net"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -156,14 +157,91 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 				}
 			}
 		}
-		// #15678: resolve `match source-address-name` into prefixes (feed-aware,
-		// like SNAT). A poisoned closure clears the side; the raw authored
-		// entries stay non-empty, so the Rust matcher fails closed.
-		sourceAddrs := append([]string(nil), rs.SourceAddresses...)
-		if resolved, poisoned := appendNATAddressNamesPoisoned(cfg, feedOverlay, sourceAddrs, rs.SourceAddressNames); poisoned != "" {
-			sourceAddrs = sourceAddrs[:0]
+		// #15930: preserve authored source constrainedness end-to-end.
+		// Junos list semantics: a v6-covering wildcard token (`any`,
+		// `any6`, `any-ipv6`, or `::/0` itself) ANYWHERE in the authored
+		// selector — literals or resolved names — makes the whole side
+		// match-any: the union already covers every source, so the
+		// wildcard wins and the side lowers to the canonical `::/0`.
+		// Stripping it beside narrower entries would narrow the
+		// authored scope, the exact inversion this fix removes. The
+		// match-any shortcut applies only when NO name poisoned: an
+		// authored-but-unusable name must stay fail-closed (never-match)
+		// rather than be silently dropped beside a wildcard it was
+		// unioned with — poison wins over wildcard. Poisoning includes
+		// a dns-name whose resolution yielded zero answers (empty
+		// UsableValues poisons the closure), so `any` beside such a
+		// name stays never-match. The only empty-without-poison shape
+		// is a present-empty fail-mode-drop feed, which keeps the
+		// never-match sentinel via appendNATAddressNamesPoisoned.
+		authoredConstrained := len(rs.SourceAddresses) > 0 || len(rs.SourceAddressNames) > 0
+		wildcardAuthored := false
+		sourceAddrs := make([]string, 0, len(rs.SourceAddresses))
+		for _, a := range rs.SourceAddresses {
+			if a == "::/0" {
+				wildcardAuthored = true
+				continue
+			}
+			if _, v6, isWildcard := config.PolicyAddressWildcardFamilies(a); isWildcard {
+				if v6 {
+					wildcardAuthored = true
+				} else {
+					// An IPv4-only wildcard can never match an IPv6
+					// NAT64 source; keep it as a never-match entry rather
+					// than silently widening to any IPv6 source. It does
+					// not make the side match-any.
+					sourceAddrs = append(sourceAddrs, a)
+				}
+				continue
+			}
+			sourceAddrs = append(sourceAddrs, a)
+		}
+		// #15930 (round-2 fold): a wildcard keyword in the NAME slot is
+		// classified BEFORE any book lookup, exactly as the strict gate
+		// exempts it (compiler_validate_strict_nat.go) and as every
+		// policy resolver asks IsPolicyAddressWildcardKeyword first
+		// (#9523). `source-address-name any` therefore means the same
+		// wildcard ::/0, never an undefined-book sentinel; an IPv4-only
+		// keyword name stays a never-match entry. A book object named
+		// `any` cannot capture the keyword.
+		realNames := make([]string, 0, len(rs.SourceAddressNames))
+		for _, n := range rs.SourceAddressNames {
+			if _, v6, isWildcard := config.PolicyAddressWildcardFamilies(n); isWildcard {
+				if v6 {
+					wildcardAuthored = true
+				} else {
+					sourceAddrs = append(sourceAddrs, n)
+				}
+				continue
+			}
+			realNames = append(realNames, n)
+		}
+		if resolved, poisoned := appendNATAddressNamesPoisoned(cfg, feedOverlay, sourceAddrs, realNames); poisoned != "" {
+			slog.Warn("userspace snapshot: NAT64 rule-set has poisoned source address-name closure; shipping fail-closed",
+				"rule-set", rs.Name, "address_name", poisoned)
+			sourceAddrs = []string{natUnresolvedAddressNamePrefix + poisoned}
+			wildcardAuthored = false
 		} else {
 			sourceAddrs = resolved
+			for _, a := range sourceAddrs {
+				if a == "::/0" {
+					wildcardAuthored = true
+					break
+				}
+			}
+		}
+		if wildcardAuthored {
+			// Explicit match-any wins over every narrower authored
+			// entry. Ship the canonical `::/0` so the wire token parses
+			// in every helper vintage; emitting `any` verbatim made
+			// Rust keep source_constrained=true over zero parseable
+			// prefixes and match NOTHING — the authored scope inverted.
+			sourceAddrs = []string{"::/0"}
+		}
+		if authoredConstrained && len(sourceAddrs) == 0 && !wildcardAuthored {
+			// Defence in depth: an authored constraint must never reach
+			// the wire as an empty (unconstrained) list.
+			sourceAddrs = []string{natUnresolvedAddressNamePrefix + "nat64-source"}
 		}
 		out = append(out, NAT64RuleSnapshot{
 			Name:                       rs.Name,
@@ -172,6 +250,7 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			FromZone:                   rs.FromZone,
 			FromRoutingInstance:        rs.FromRoutingInstance,
 			SourceAddresses:            sourceAddrs,
+			SourceConstrained:          authoredConstrained && !wildcardAuthored,
 			NoV6FragHeader:             noV6FragHeader,
 			DeterministicBlockSize:     detBlockSize,
 			DeterministicBlocksPerIP:   detBlocksPerIP,
