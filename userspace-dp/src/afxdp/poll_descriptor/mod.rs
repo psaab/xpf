@@ -1335,7 +1335,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding,
                             meta,
                             if packet_fabric_ingress {
-                                ingress_zone_override
+                                ingress_zone_override.or(ambiguous_zone)
                             } else {
                                 None
                             },
@@ -3617,7 +3617,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.forwarding,
                                 meta,
                                 frag_authority_zone_override,
-                                ingress_nat_scope_ifindex,
+                                ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex),
                             );
                             let frag_session_key = &resolved.key;
                             let frag_session_id = resolved.session_id;
