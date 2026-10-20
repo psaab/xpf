@@ -421,8 +421,10 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 				if unit.DHCP {
 					fmt.Fprintln(&buf, "    DHCPv4: enabled")
 					if s.dhcp != nil {
-						if lease := s.dhcp.LeaseFor(physName, dhcp.AFInet); lease != nil {
-							fmt.Fprintf(&buf, "      Address: %s, Gateway: %s\n", lease.Address, lease.Gateway)
+						if key, ok := cfg.DHCPLeaseKey(physName, li.unitNum); ok {
+							if lease := s.dhcp.LeaseFor(key, dhcp.AFInet); lease != nil {
+								fmt.Fprintf(&buf, "      Address: %s, Gateway: %s\n", lease.Address, lease.Gateway)
+							}
 						}
 					}
 				}
@@ -433,8 +435,10 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 					}
 					fmt.Fprintf(&buf, "    DHCPv6: enabled%s\n", duidInfo)
 					if s.dhcp != nil {
-						if lease := s.dhcp.LeaseFor(physName, dhcp.AFInet6); lease != nil {
-							fmt.Fprintf(&buf, "      Address: %s, Gateway: %s\n", lease.Address, lease.Gateway)
+						if key, ok := cfg.DHCPLeaseKey(physName, li.unitNum); ok {
+							if lease := s.dhcp.LeaseFor(key, dhcp.AFInet6); lease != nil {
+								fmt.Fprintf(&buf, "      Address: %s, Gateway: %s\n", lease.Address, lease.Gateway)
+							}
 						}
 					}
 				}

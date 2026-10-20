@@ -13,11 +13,18 @@ import (
 // dhcpLease returns the current DHCP lease for a managed interface, if any.
 // Consumed by `show interfaces` presenters when rendering DHCP-assigned
 // addresses; returns nil when no DHCP client is wired or no lease exists.
-func (c *CLI) dhcpLease(ifaceName string, af dhcp.AddressFamily) *dhcp.Lease {
-	if c.dhcp == nil {
+// The lease is resolved via cfg.DHCPLeaseKey(physName, unitNum) — the
+// daemon's actual key (LinuxIfName + ".VlanID" when > 0) — so Junos
+// slash names and VLAN-tagged units match (#15724).
+func (c *CLI) dhcpLease(cfg *config.Config, physName string, unitNum int, af dhcp.AddressFamily) *dhcp.Lease {
+	if c.dhcp == nil || cfg == nil {
 		return nil
 	}
-	return c.dhcp.LeaseFor(ifaceName, af)
+	key, ok := cfg.DHCPLeaseKey(physName, unitNum)
+	if !ok {
+		return nil
+	}
+	return c.dhcp.LeaseFor(key, af)
 }
 
 // rethMemberLinkState returns the admin/link ("up"/"down") state for a reth's
