@@ -823,7 +823,11 @@ unimplemented), and `dns-name <fqdn> [ipv4-only|ipv6-only]` is modelled in
 `Address.DNSName`/`DNSFamily` with the current resolution in
 `Address.DNSAddresses` — refreshed at apply time and periodically by the
 daemon (`RefreshDNSAddressBooks`); an unresolvable name matches nothing
-(fail-closed). These expansions live in `Address.ExpandedPrefixes` /
+(fail-closed). `RefreshDNSAddressBooks` mutates its argument in place, so
+the daemon's periodic tick resolves into a `CloneForDNSRefresh` private
+copy and publishes it under the apply lock — never into the published
+active config (#15933).
+These expansions live in `Address.ExpandedPrefixes` /
 `DNSAddresses` and are returned by `Address.UsableValues()`, which every
 resolver (policy, NAT, junos-host, userspace book table) now consumes so a
 multi-prefix entry publishes all of its prefixes. Any other form keyword —

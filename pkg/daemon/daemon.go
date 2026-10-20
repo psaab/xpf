@@ -1073,6 +1073,14 @@ type Daemon struct {
 	// exercise the semaphore contract through the real applyConfig
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
+	// lastDNSRefreshBase / lastDNSRefreshAnswers record the DNS-answer
+	// snapshot most recently published by the periodic dns-name refresher
+	// (#15933). The refresher never mutates the store's published
+	// generation, so without this a changed answer would be re-detected
+	// (and re-applied) every tick. Keyed by base *Config identity: a new
+	// generation starts fresh. Written only on successful publication.
+	lastDNSRefreshBase    *config.Config
+	lastDNSRefreshAnswers map[string][]string
 	// buildRuntimeDataPlaneForTest replaces dataplane construction in the
 	// startup fixture. It is nil in production and exists so the setup path
 	// can be exercised without arming a host dataplane.
