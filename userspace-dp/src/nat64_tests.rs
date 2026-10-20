@@ -9613,6 +9613,7 @@ fn nat64_15930_mixed_any_wins() {
             "mixed selector {sources:?} must match any source"
         );
     }
+}
 
 #[test]
 fn nat64_zone_list_unions_15932() {
