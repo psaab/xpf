@@ -455,53 +455,90 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
     forwarding: &ForwardingState,
     target: IpAddr,
 ) -> i32 {
-    let ifindexes: Vec<i32> = match target {
-        IpAddr::V4(ip) => forwarding
-            .connected_v4_by_ifindex
-            .iter()
-            .filter(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
-            .map(|(ifindex, _)| *ifindex)
-            .collect(),
-        IpAddr::V6(ip) => forwarding
-            .connected_v6_by_ifindex
-            .iter()
-            .filter(|(_, prefixes)| prefixes.iter().any(|prefix| prefix.contains(ip)))
-            .map(|(ifindex, _)| *ifindex)
-            .collect(),
-    };
-    // Longest-prefix wins when prefixes nest: re-scan by prefix length.
+    // Source 1: connected_* rows (the FIB's own connected route
+    // structs: prefix + ifindex) — longest prefix wins.
     let mut best: Option<(u8, i32)> = None;
-    for ifindex in ifindexes {
-        let len = match target {
-            IpAddr::V4(ip) => forwarding
-                .connected_v4_by_ifindex
-                .get(&ifindex)
-                .and_then(|prefixes| {
-                    prefixes
-                        .iter()
-                        .filter(|prefix| prefix.contains(ip))
-                        .map(|prefix| prefix.prefix_len())
-                        .max()
-                })
-                .unwrap_or(0),
-            IpAddr::V6(ip) => forwarding
-                .connected_v6_by_ifindex
-                .get(&ifindex)
-                .and_then(|prefixes| {
-                    prefixes
-                        .iter()
-                        .filter(|prefix| prefix.contains(ip))
-                        .map(|prefix| prefix.prefix_len())
-                        .max()
-                })
-                .unwrap_or(0),
-        };
-        let rg = owner_rg_for_flow(forwarding, ifindex);
-        if best.is_none_or(|(best_len, _)| len >= best_len) {
-            best = Some((len, rg));
+    match target {
+        IpAddr::V4(ip) => {
+            for row in &forwarding.connected_v4 {
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, owner_rg_for_flow(forwarding, row.ifindex)));
+                    }
+                }
+            }
+            if best.is_none() {
+                for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, owner_rg_for_flow(forwarding, *ifindex)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        IpAddr::V6(ip) => {
+            for row in &forwarding.connected_v6 {
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, owner_rg_for_flow(forwarding, row.ifindex)));
+                    }
+                }
+            }
+            if best.is_none() {
+                for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, owner_rg_for_flow(forwarding, *ifindex)));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-    best.map(|(_, rg)| rg).unwrap_or(0)
+    if let Some((_, rg)) = best {
+        return rg;
+    }
+    // Source 2: the interface-NAT local table (an interface address
+    // IS its own connected /32) and the local-address sets: the
+    // target is this node's own interface address; its owner is that
+    // interface's RG.
+    match target {
+        IpAddr::V4(ip) => {
+            if let Some(by_table) = forwarding.interface_nat_v4.get(&ip) {
+                for ifindex in by_table.values() {
+                    let rg = owner_rg_for_flow(forwarding, *ifindex);
+                    if rg > 0 {
+                        return rg;
+                    }
+                }
+            }
+            if forwarding.local_v4.contains(&ip) {
+                // Owning interface unknown from the set alone; fall
+                // through to unknown (0) rather than guessing an RG.
+                return 0;
+            }
+        }
+        IpAddr::V6(ip) => {
+            if let Some(by_table) = forwarding.interface_nat_v6.get(&ip) {
+                for ifindex in by_table.values() {
+                    let rg = owner_rg_for_flow(forwarding, *ifindex);
+                    if rg > 0 {
+                        return rg;
+                    }
+                }
+            }
+        }
+    }
+    0
 }
 
 /// #15958b: shared zone-egress redirect rule for a fabric-ingress
@@ -524,15 +561,11 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
 ///   proof of peer ownership. Callers pass
 ///   `destination_owner_active` computed from that per-address RG.
 ///
-/// Composition (round-2): callers run
-/// `redirect_session_via_fabric_if_needed` FIRST for the HAInactive
-/// family; this helper only converts a surviving ForwardCandidate
-/// and never preempts the HAInactive -> FabricRedirect ordering.
-/// When no fabric redirect can be resolved (no peer/link), the
-/// candidate is NOT silently converted to WAN egress by callers
-/// that held a stored FabricRedirect: they retain the stored
-/// disposition so TX fails closed on
-/// `fabric_redirect_unsendable_drops` instead of losing the marker.
+/// Composition: callers run `redirect_session_via_fabric_if_needed`
+/// FIRST for the HAInactive family; this helper only converts a
+/// surviving ForwardCandidate. Stored-FabricRedirect retention,
+/// failback re-homing and current-peer retargeting live in
+/// `rehome_or_retain_fabric_redirect_15958b`.
 pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
     forwarding: &ForwardingState,
     candidate: ForwardingResolution,
@@ -546,6 +579,23 @@ pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
     if candidate.disposition != ForwardingDisposition::ForwardCandidate {
         return candidate;
     }
+    // GLM2: the destination zone must be KNOWN from a source other
+    // than this helper's own egress_zone_id read (the candidate's
+    // egress row): a destination zone with no interface/connected
+    // row is UNKNOWN, and absence of evidence is not peer-ownership
+    // — keep the candidate rather than hijack a locally-owned
+    // in-zone reverse to FabricRedirect. Known = some egress row
+    // carries the zone, or some connected prefix is served from it.
+    let destination_zone_known = forwarding.egress.iter().any(|(ifindex, _)| {
+        forwarding.egress_zone_id(*ifindex) == destination_zone
+    }) || forwarding
+        .connected_v4_by_ifindex
+        .keys()
+        .chain(forwarding.connected_v6_by_ifindex.keys())
+        .any(|ifindex| forwarding.egress_zone_id(*ifindex) == destination_zone);
+    if !destination_zone_known {
+        return candidate;
+    }
     if forwarding.egress_zone_id(candidate.egress_ifindex) == destination_zone {
         return candidate;
     }
@@ -553,24 +603,63 @@ pub(in crate::afxdp) fn fabric_redirect_for_zone_egress_15958b(
         .unwrap_or(candidate)
 }
 
-/// #15958b round-2 (item 2): when the shared rule cannot produce a
-/// redirect (no peer fabric/link resolvable) but the stored decision
-/// was FabricRedirect, retain the stored resolution instead of the
-/// WAN candidate. TX then fails closed: the dispatcher finds no
-/// sendable fabric target (or the stored target binding is absent)
-/// and counts `fabric_redirect_unsendable_drops`, rather than the
-/// marker being laundered away and the frame leaving on the WAN
-/// egress. When a redirect WAS resolved, keep it.
-pub(in crate::afxdp) fn retain_stored_fabric_redirect_15958b(
+/// #15958b round-3: re-home-or-retain decision for a stored
+/// FabricRedirect companion, applied per packet (hit) and per HA
+/// transition (refresh/demote), AFTER the HAInactive composition.
+///
+/// Order (item 1): if the destination address's RG is locally
+/// forwarding-active NOW, the candidate wins — the companion
+/// re-homes to local forwarding and the retained marker must not
+/// defeat failback. This check runs before retention, per packet.
+///
+/// Otherwise (item 2): the redirect is re-resolved against the
+/// CURRENT fabric list, so a replaced peer (new parent/MAC) is the
+/// target — never the stored stale parent binding. If no redirect
+/// is resolvable (peer identity unresolved/down), return a
+/// FabricRedirect marker with zeroed egress/tx: the dispatcher
+/// finds no sendable fabric binding and counts
+/// `fabric_redirect_unsendable_drops` (fail closed) instead of
+/// transmitting to a stale parent or laundering to WAN egress.
+pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_15958b(
+    forwarding: &ForwardingState,
     stored: ForwardingResolution,
-    resolved: ForwardingResolution,
+    candidate: ForwardingResolution,
+    destination_zone: u16,
+    destination_owner_active: bool,
 ) -> ForwardingResolution {
-    if stored.disposition == ForwardingDisposition::FabricRedirect
-        && resolved.disposition == ForwardingDisposition::ForwardCandidate
-    {
-        stored
-    } else {
-        resolved
+    if candidate.disposition == ForwardingDisposition::FabricRedirect {
+        return candidate;
+    }
+    if destination_owner_active {
+        return candidate;
+    }
+    if candidate.disposition != ForwardingDisposition::ForwardCandidate {
+        return candidate;
+    }
+    let destination_zone_known = forwarding.egress.iter().any(|(ifindex, _)| {
+        forwarding.egress_zone_id(*ifindex) == destination_zone
+    }) || forwarding
+        .connected_v4_by_ifindex
+        .keys()
+        .chain(forwarding.connected_v6_by_ifindex.keys())
+        .any(|ifindex| forwarding.egress_zone_id(*ifindex) == destination_zone);
+    if !destination_zone_known {
+        return candidate;
+    }
+    match super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
+        forwarding,
+        destination_zone,
+    ) {
+        Some(current_redirect) => current_redirect,
+        None => ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            neighbor_mac: None,
+            src_mac: None,
+            next_hop: None,
+            ..stored
+        },
     }
 }
 

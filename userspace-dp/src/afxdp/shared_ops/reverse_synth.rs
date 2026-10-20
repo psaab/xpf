@@ -479,20 +479,33 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
             ha_state.get(&dest_rg),
             Some(group) if group.is_forwarding_active(now_secs)
         );
-    if fabric_ingress && !destination_owner_active {
-        let redirected = super::fabric_redirect_for_zone_egress_15958b(
-            forwarding,
-            resolved,
-            ingress_zone,
-            false,
-            destination_owner_active,
-        );
-        if redirected.disposition == ForwardingDisposition::FabricRedirect {
-            return redirected;
+    if fabric_ingress
+        && !destination_owner_active
+        && dest_rg > 0
+        && forwarding.egress_zone_id(resolved.egress_ifindex) != ingress_zone
+    {
+        // Round-3 item 3: even with NO fabric peer resolved, store
+        // FabricRedirect intent (zeroed egress) rather than the WAN
+        // candidate — packets drop fail-closed until a hit/refresh
+        // re-resolution finds the peer; never emit on WAN. Unknown
+        // destination owner (dest_rg == 0) is not peer-ownership:
+        // keep the candidate.
+        if dest_rg > 0 {
+            let redirected = super::rehome_or_retain_fabric_redirect_15958b(
+                forwarding,
+                resolved,
+                resolved,
+                ingress_zone,
+                destination_owner_active,
+            );
+            if redirected.disposition == ForwardingDisposition::FabricRedirect {
+                return redirected;
+            }
         }
     }
     if fabric_ingress
         && owner_rg_id > 0
+        && !destination_owner_active
         && !matches!(
             ha_state.get(&owner_rg_id),
             Some(group) if group.is_forwarding_active(now_secs)
@@ -503,6 +516,12 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
         return redirect;
     }
     let enforced = enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolved);
+    if enforced.disposition == ForwardingDisposition::HAInactive
+        && destination_owner_active
+        && resolved.disposition == ForwardingDisposition::ForwardCandidate
+    {
+        return resolved;
+    }
     if allow_unseeded_tunnel_local
         && enforced.disposition == ForwardingDisposition::HAInactive
         && owner_rg_is_unseeded(forwarding, ha_state, resolved)
