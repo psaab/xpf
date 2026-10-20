@@ -50,6 +50,14 @@ func TestSelectorSpellingAddressable15973(t *testing.T) {
 		{"deny:^show firewall effective$", "show firewall filter FOO effective", "", false, "fabricated full form must not trigger sibling deny (GLM B3 mirror)"},
 		// #14687 narrower command: base deny alone does not veto it…
 		{"deny:^show security screen$", "show security screen ids-option prof1", "", false, "distinct narrower selector survives base-only deny"},
+		{"deny:^show security screen$", "show security screen ids-option prof1", "match x", false, "benign pipe does not block the deny-only rescue (GLM R12)"},
+		// Round-2 F1: a deny naming the EXECUTED spelling vetoes.
+		{"allow+deny:^show security screen ids-option$|^show security screen$|^show security screen ids-option prof1$", "show security screen ids-option prof1", "", true, "executed-spelling deny vetoes with allow present (GLM R28)"},
+		{"allow+deny:^show security screen ids-option$|^show security screen$|^show security screen ids-option prof1 detail$", "show security screen ids-option prof1 detail", "", true, "executed-spelling deny vetoes detail (GLM R29)"},
+		{"deny:^show security screen$|^show security screen ids-option prof1$", "show security screen ids-option prof1", "", true, "executed-spelling deny vetoes deny-only (GLM R30)"},
+		// Round-2 F2: the typed-leaf option `family` mints no form.
+		{"allow:^show firewall family$", "show firewall filter FOO family inet", "", true, "typed-leaf option fabricates no allow form (GLM R18)"},
+		{"deny:^show firewall family$", "show firewall filter FOO family inet", "", false, "typed-leaf option fabricates no deny form (GLM R19)"},
 		// …but a deny on its full keyword form does (Opus exact check).
 		{"deny:^show security screen$|^show security screen detail$", "show security screen ids-option prof1 detail", "", true, "full-form deny vetoes the rescue"},
 		// Codex/9628: a deny on the executed pipe-less command is not rescued.

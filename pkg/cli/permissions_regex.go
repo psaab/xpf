@@ -317,27 +317,72 @@ func firstWord(words []string) string {
 // distinctNarrowerAllowed reports whether the base-form denial is the
 // ONLY deny verdict on the executed command, so the #14687 rescue may
 // re-price the narrower spelling as allowed. It requires the base form
-// itself to be deny-decided and at least one pipe-less spelling to be
-// affirmatively allowed; any deny-decided or unallowed pipe-less
-// spelling vetoes. matched carries pipe text, so it is checked last
-// and only through its pipe-less core.
+// itself to be deny-decided and NO other spelling (executed canonical
+// command, full keyword form, selector forms) deny-decided. When an
+// allow rule exists, the rescue additionally requires an AFFIRMATIVE
+// allow-rule match on a pipe-less spelling: for such classes an
+// allowlist miss is the denial being rescued, and only
+// DecidedBy==LoginRegexAllow proves an allow rule actually named a
+// spelling (R28/R29 shape). For deny-only classes there is no
+// allowlist to satisfy: the base denial is a broad-listing price and
+// the narrower command, named by no deny, runs (R09). matched
+// carries pipe text, so it is checked last; a tier deny there vetoes.
 func distinctNarrowerAllowed(rules config.CompiledLoginRegexes, matched, command, baseForm, fullForm string, selectorForms []string) bool {
 	if rules.Evaluate(baseForm).DecidedBy != config.LoginRegexDeny {
 		return false
 	}
-	allowed := rules.Evaluate(command).Allowed
+	// The EXECUTED (value-bearing) spelling is the most specific
+	// addressable form: a deny naming it vetoes. (Round-2 fold F1:
+	// R28/R29/R30 — this check was missing, so a deny written against
+	// the executed spelling, e.g. `^show security screen ids-option
+	// prof1$`, was silently overridden.)
+	cmdVerdict := rules.Evaluate(command)
+	if cmdVerdict.DecidedBy == config.LoginRegexDeny {
+		return false
+	}
+	// An ALLOW rule affirms a spelling only via DecidedBy==Allow on a
+	// pipe-less form (R28/R29: a deny-only class must never pass this
+	// gate on evaluateForm's default-allow, so the check is not the
+	// vacuous `Allowed` boolean). But the requirement must not demand
+	// affirmation for classes with NO allow rule at all (R09's
+	// deny-only rescue): detect an allow rule by its participation —
+	// the base form's verdict carries DecidedBy==Allow exactly when an
+	// allow rule matched or an allowlist refused it.
+	affirmed := cmdVerdict.DecidedBy == config.LoginRegexAllow && cmdVerdict.Allowed
+	allowParticipates := false
+	if d := rules.Evaluate(baseForm); d.DecidedBy == config.LoginRegexAllow {
+		allowParticipates = true
+	}
 	for _, form := range append([]string{fullForm}, selectorForms...) {
 		if form == baseForm {
 			continue
 		}
-		if !allowed && rules.Evaluate(form).Allowed {
-			allowed = true
-		}
-		if rules.Evaluate(form).DecidedBy == config.LoginRegexDeny {
+		d := rules.Evaluate(form)
+		if d.DecidedBy == config.LoginRegexDeny {
 			return false
 		}
+		if d.DecidedBy == config.LoginRegexAllow {
+			// DecidedBy==Allow covers both an allow MATCH
+			// (Allowed=true) and an allowlist MISS
+			// (Allowed=false): either proves an allow rule
+			// governs a pipe-less spelling of this command.
+			allowParticipates = true
+			if d.Allowed {
+				affirmed = true
+			}
+		}
 	}
-	if !allowed {
+	if allowParticipates && !affirmed {
+		return false
+	}
+	// R07 (B4): when a pipe is present AND an allow rule participates,
+	// the affirmation must hold on a PIPE-LESS spelling. A decision
+	// rescued only because `matched` (with pipe text) affirmed would
+	// let `| match interfaces` smuggle an allow written for an
+	// unrelated word past a base deny. R12's deny-only class has no
+	// allow rule to smuggle, so its benign pipe must not block the
+	// rescue.
+	if matched != command && allowParticipates && !affirmed {
 		return false
 	}
 	if matched != command && rules.Evaluate(matched).DecidedBy == config.LoginRegexDeny {
@@ -428,6 +473,20 @@ func canonicalForms(canon []string) (string, string, []string, string) {
 		}
 		if pendingChildren != nil {
 			if node, ok := pendingChildren[w]; ok {
+				if pendingOptions {
+					// An option keyword of the pending Options node
+					// (`effective`, or the typed leaf `family`
+					// after `filter <name>`): it filters THIS
+					// command. Neither extending the full form
+					// with it nor minting a `base + family`
+					// selector form is sound — both would fabricate
+					// a spelling for a command that does not exist.
+					// The command form ends here. (This break must
+					// precede the typed-leaf branch below, whose
+					// selector-form minting applies only to real
+					// selector subtrees.)
+					break
+				}
 				if node.IsTypedLeaf() || (node.RequiresValue && node.HasDynamic()) {
 					// Fresh selector subtree after a value
 					// (from-zone X to-zone Y): judge its keyword as
@@ -441,16 +500,8 @@ func canonicalForms(canon []string) (string, string, []string, string) {
 					current = node.Children
 					continue
 				}
-				if pendingOptions {
-					// An option keyword of the pending Options node
-					// (`effective` / `family inet` after `filter
-					// <name>`): it filters THIS command. Extending
-					// the full form with it while the selector
-					// keyword and value are dropped would fabricate
-					// a spelling aliasing a real sibling (`show
-					// firewall effective`). The command form ends.
-					break
-				}
+				// (pendingOptions was handled above: an option
+				// keyword ends the command form.)
 				// A completed subcommand under the value: extend the
 				// full keyword chain (and the base too when it is not
 				// inside a selector subtree). Only this arm extends
