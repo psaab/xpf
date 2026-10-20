@@ -606,6 +606,27 @@ pub(super) fn stage_flow_cache_hit(
         );
         if cached_descriptor.tx_selection.drop || policer_action.drop {
             telemetry.counters.record_transit_output_filter_drop();
+            if cached_descriptor.tx_selection.drop {
+                // #15958 (F1): a cached `then discard`/`then reject` verdict
+                // is the cache-served form of the slow path's builder-None
+                // exit, which records `forward_build_failures` + a
+                // `transit_output_filter_drop` ring entry (see the twin in
+                // `poll_descriptor/mod.rs`). Mirror it here — and in the
+                // cache-fallback builder's `else` below — so the drop is
+                // never silent on either cache exit. Policer-only drops keep
+                // their existing attribution and are not build failures.
+                telemetry.counters.record_forward_build_failure();
+                telemetry.dbg.build_fail += 1;
+                record_exception(
+                    worker_ctx.recent_exceptions,
+                    &worker_ctx.ident,
+                    "transit_output_filter_drop",
+                    desc.len,
+                    Some(meta),
+                    None,
+                    worker_ctx.forwarding,
+                );
+            }
             scratch.scratch_recycle.push(desc.addr);
             return FlowCacheOutcome::Consumed;
         }
@@ -1007,6 +1028,27 @@ pub(super) fn stage_flow_cache_hit(
                     telemetry.dbg.tx += 1;
                     scratch.scratch_forwards.push(request);
                     recycle_now = false;
+                } else {
+                    // #15958 (F1): the cache-fallback builder returning None
+                    // (the precomputed `cos.drop` verdict, carried on
+                    // `cached_precomputed_tx_selection`) previously recycled
+                    // silently — no counter, no ring entry — unlike its
+                    // slow-path twin (`poll_descriptor/mod.rs`, which records
+                    // `forward_build_failures` + a `transit_output_filter_drop`
+                    // exception). Mirror that twin here so a cache-served
+                    // build failure is operator-visible with the same
+                    // attribution.
+                    telemetry.counters.record_forward_build_failure();
+                    telemetry.dbg.build_fail += 1;
+                    record_exception(
+                        worker_ctx.recent_exceptions,
+                        &worker_ctx.ident,
+                        "transit_output_filter_drop",
+                        desc.len,
+                        Some(meta),
+                        None,
+                        worker_ctx.forwarding,
+                    );
                 }
             }
         }

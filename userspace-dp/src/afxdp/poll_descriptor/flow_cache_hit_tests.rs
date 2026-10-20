@@ -5364,3 +5364,48 @@ fn cached_selector_fence_counts_transit_fence_drop_15941() {
     assert_eq!(run.dbg_tx, 0, "fenced hit must not transmit");
     assert!(run.scratch.scratch_forwards.is_empty());
 }
+/// #15958 (F1) revert-guard: a cached `drop: true` verdict (the
+/// cache-served form of the slow path's builder-None exit, also carried
+/// into the cache-fallback builder's precomputed selection) must record
+/// `forward_build_failures` AND a `transit_output_filter_drop` ring
+/// entry, mirroring the slow-path twin — previously these exits recycled
+/// silently. The inline path is suppressed via a foreign-UMEM
+/// cross-binding target so no in-place rewrite can mask the drop.
+#[test]
+fn cached_fallback_build_none_counts_forward_build_failure_15958() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut entry = transit_entry();
+    entry.descriptor.tx_selection.drop = true;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            cross_umem_shared: Some(false),
+            ..StageSeed::default()
+        },
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1, "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(
+        run.counters.forward_build_failures, 1,
+        "F1: cache-fallback build-None must count as a forward build failure"
+    );
+    let reasons: Vec<String> = fixture
+        .recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["transit_output_filter_drop"],
+        "F1: cache-fallback build-None must ring transit_output_filter_drop"
+    );
+    assert!(run.scratch.scratch_forwards.is_empty());
+}
