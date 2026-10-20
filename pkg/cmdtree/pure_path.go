@@ -27,7 +27,22 @@ func EveryWordIsAKeyword(tree map[string]*Node, words []string) bool {
 		}
 		node, ok := current[w]
 		if !ok {
-			return false
+			// #15721: a <placeholder> slot with children (the BGP neighbor
+			// IP) consumes this word as operator data; its children are
+			// still keyword-checked, so `show protocols bgp neighbor
+			// received-routes` (route keyword, no IP) stays rejected while
+			// the keywords after a real IP resolve. A childless placeholder
+			// consumes the word as its value, so only a line ending there
+			// can still be a keyword prefix.
+			ph := findPlaceholder(current)
+			if ph == nil {
+				return false
+			}
+			if ph.Children == nil {
+				return i == len(words)-1
+			}
+			current = ph.Children
+			continue
 		}
 		if node.Children == nil {
 			// A leaf: any further word would be an argument or a second

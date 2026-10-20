@@ -267,6 +267,79 @@ func sourceNATPoolNames(cfg *config.Config) []string {
 	return names
 }
 
+// zoneNames returns the configured security-zone names for the
+// from-zone/to-zone selector completers (#15721).
+func zoneNames(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		names = append(names, name)
+	}
+	return names
+}
+
+// destNATPoolNames returns the configured destination-NAT pool names for
+// the `show security nat destination pool <name>` completer (#15721).
+func destNATPoolNames(cfg *config.Config) []string {
+	if cfg == nil || cfg.Security.NAT.Destination == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Security.NAT.Destination.Pools))
+	for name := range cfg.Security.NAT.Destination.Pools {
+		names = append(names, name)
+	}
+	return names
+}
+
+// interfaceNames returns the configured interface names for the
+// ingress-interface selector completer (#15721).
+func interfaceNames(cfg *config.Config) []string {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for name := range cfg.Interfaces.Interfaces {
+		names = append(names, name)
+	}
+	return names
+}
+
+// policySelectorChildren is the selector grammar shared by
+// `show security match-policies` and `test policy` (#15721). It mirrors
+// policymatch.ParseSelectorArgs: every value-taking selector takes exactly
+// one value, in any order (Options), and non-first-fragment is valueless.
+// A fresh map per call site keeps the two subtrees independent.
+func policySelectorChildren() map[string]*Node {
+	return map[string]*Node{
+		"from-zone":          {Desc: "Source security zone", RequiresValue: true, DynamicFn: zoneNames},
+		"to-zone":            {Desc: "Destination security zone", RequiresValue: true, DynamicFn: zoneNames},
+		"source-ip":          {Desc: "Source IP address", ValueType: ValueIPAddress},
+		"destination-ip":     {Desc: "Destination IP address", ValueType: ValueIPAddress},
+		"source-port":        {Desc: "Source port (1..65535)", ValueType: ValueInteger},
+		"destination-port":   {Desc: "Destination port (1..65535)", ValueType: ValueInteger},
+		"protocol":           {Desc: "IP protocol (tcp, udp, icmp, or number)", ValueType: ValueIdentifier},
+		"icmp-type":          {Desc: "ICMP type (0..255)", ValueType: ValueInteger},
+		"icmp-code":          {Desc: "ICMP code (0..255)", ValueType: ValueInteger},
+		"ingress-interface":  {Desc: "Ingress interface name", RequiresValue: true, DynamicFn: interfaceNames},
+		"non-first-fragment": {Desc: "Simulate non-first IPv4 fragment"},
+	}
+}
+
+// bgpNeighborNode is the `show [protocols] bgp neighbor [<ip>
+// [received-routes|advertised-routes]]` subtree (#15721). The <ip>
+// placeholder carries the route keywords so the bare form stays complete
+// while a route keyword without an IP is refused.
+func bgpNeighborNode() *Node {
+	return &Node{Desc: "Show BGP neighbor details", Children: map[string]*Node{
+		"<ip>": {Desc: "Neighbor IP address", Children: map[string]*Node{
+			"received-routes":   {Desc: "Show routes received from neighbor"},
+			"advertised-routes": {Desc: "Show routes advertised to neighbor"},
+		}},
+	}}
+}
+
 func routingInstanceNames(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
@@ -532,11 +605,24 @@ var OperationalTree = map[string]*Node{
 				"terse":  {Desc: "Display terse output", ModifierOnly: true},
 			}},
 			"policies": {Desc: "Show security firewall policies", Children: map[string]*Node{
-				"global":      {Desc: "Show global security policy information"},
-				"policy-name": {Desc: "Show policy matching a specific name"},
+				"global": {Desc: "Show global security policy information"},
+				// #15721: Junos `policy-name <name>` spelling. The local and
+				// remote dispatchers reject it today (parsePolicyShowQuery),
+				// so this models canonicalization/completion only — no
+				// dispatcher behaviour changes.
+				"policy-name": {Desc: "Filter by policy name", ValueType: ValueIdentifier},
 				"brief":       {Desc: "Show brief policy summary"},
 				"detail":      {Desc: "Show detailed policy information"},
-				"hit-count":   {Desc: "Show policy hit counters [from-zone X to-zone Y]"},
+				// #15721: hit-count admits the same from-zone/to-zone pair
+				// as the bare policies view, in any order (parsePolicyShowQuery
+				// is position-independent), so it is an Options node; its own
+				// keyword stays completable after a selector for the
+				// `from-zone X to-zone Y hit-count` spelling.
+				"hit-count": {Desc: "Show policy hit counters [from-zone X to-zone Y]", Options: true, Children: map[string]*Node{
+					"from-zone": {Desc: "Source zone", RequiresValue: true, DynamicFn: zoneNames},
+					"to-zone":   {Desc: "Destination zone", RequiresValue: true, DynamicFn: zoneNames},
+					"hit-count": {Desc: "Show policy hit counters [from-zone X to-zone Y]"},
+				}},
 				"from-zone": {Desc: "Filter by source zone", RequiresValue: true, DynamicFn: func(cfg *config.Config) []string {
 					if cfg == nil {
 						return nil
@@ -557,6 +643,10 @@ var OperationalTree = map[string]*Node{
 						}
 						return names
 					}, Children: map[string]*Node{
+						// #15721: parsePolicyShowQuery reads the view keyword
+						// at any position, so `from-zone X to-zone Y hit-count`
+						// selects the hit-count view like the leading form.
+						"hit-count": {Desc: "Show policy hit counters [from-zone X to-zone Y]"},
 						"policy": {Desc: "Filter by policy name", RequiresValue: true, ContextDynamicFn: func(cfg *config.Config, words []string) []string {
 							if cfg == nil {
 								return nil
@@ -669,7 +759,7 @@ var OperationalTree = map[string]*Node{
 			"nat": {Desc: "Show Network Address Translation information", Children: map[string]*Node{
 				"source": {Desc: "Show source NAT", Children: map[string]*Node{
 					"summary": {Desc: "Show source NAT summary"},
-					"pool":    {Desc: "Show source NAT pools"},
+					"pool":    {Desc: "Show source NAT pools", DynamicFn: sourceNATPoolNames},
 					"persistent-nat-table": {Desc: "Show persistent NAT bindings", Children: map[string]*Node{
 						"detail": {Desc: "Show detailed persistent NAT bindings"},
 					}},
@@ -703,7 +793,7 @@ var OperationalTree = map[string]*Node{
 				}},
 				"destination": {Desc: "Show destination NAT", Children: map[string]*Node{
 					"summary": {Desc: "Show destination NAT summary"},
-					"pool":    {Desc: "Show destination NAT pools"},
+					"pool":    {Desc: "Show destination NAT pools", DynamicFn: destNATPoolNames},
 					"rule": {Desc: "Show destination NAT rules", Children: map[string]*Node{
 						"detail": {Desc: "Show detailed destination NAT rules"},
 						"all":    {Desc: "Show all destination NAT rules"},
@@ -756,7 +846,7 @@ var OperationalTree = map[string]*Node{
 				"detail":     {Desc: "Show per-reason drop counters and handshake activity"},
 				"public-key": {Desc: "Show local public key per tunnel (give this to the peer)"},
 			}},
-			"match-policies": {Desc: "Match 5-tuple against policies"},
+			"match-policies": {Desc: "Match 5-tuple against policies", Options: true, Children: policySelectorChildren()},
 		}},
 		"services": {Desc: "Show services information", Children: map[string]*Node{
 			"rpm": {Desc: "Show RPM probe results", Children: map[string]*Node{
@@ -808,12 +898,9 @@ var OperationalTree = map[string]*Node{
 				"routes":    {Desc: "Show OSPF routes"},
 			}},
 			"bgp": {Desc: "Show BGP information", Children: map[string]*Node{
-				"summary": {Desc: "Show BGP peer summary"},
-				"routes":  {Desc: "Show BGP routes"},
-				"neighbor": {Desc: "Show BGP neighbor details", Children: map[string]*Node{
-					"received-routes":   {Desc: "Show received routes from neighbor"},
-					"advertised-routes": {Desc: "Show advertised routes to neighbor"},
-				}},
+				"summary":  {Desc: "Show BGP peer summary"},
+				"routes":   {Desc: "Show BGP routes"},
+				"neighbor": bgpNeighborNode(),
 			}},
 			"bfd": {Desc: "Show BFD status", Children: map[string]*Node{
 				"peers": {Desc: "Show BFD peer status"},
@@ -831,12 +918,9 @@ var OperationalTree = map[string]*Node{
 			}},
 		}},
 		"bgp": {Desc: "Show BGP information (alias for show protocols bgp)", Children: map[string]*Node{
-			"summary": {Desc: "Show BGP peer summary"},
-			"routes":  {Desc: "Show BGP routes"},
-			"neighbor": {Desc: "Show BGP neighbor details", Children: map[string]*Node{
-				"received-routes":   {Desc: "Show received routes from neighbor"},
-				"advertised-routes": {Desc: "Show advertised routes to neighbor"},
-			}},
+			"summary":  {Desc: "Show BGP peer summary"},
+			"routes":   {Desc: "Show BGP routes"},
+			"neighbor": bgpNeighborNode(),
 		}},
 		"arp": {Desc: "Show system ARP table entries", Children: map[string]*Node{
 			"no-resolve": {Desc: "Don't attempt to resolve addresses"},
@@ -1278,42 +1362,7 @@ var OperationalTree = map[string]*Node{
 		}},
 	}},
 	"test": {Desc: "Perform diagnostic testing", Children: map[string]*Node{
-		"policy": {Desc: "Test security policy lookup", Children: map[string]*Node{
-			"from-zone": {Desc: "Source zone", DynamicFn: func(cfg *config.Config) []string {
-				if cfg == nil {
-					return nil
-				}
-				names := make([]string, 0, len(cfg.Security.Zones))
-				for name := range cfg.Security.Zones {
-					names = append(names, name)
-				}
-				return names
-			}, Children: map[string]*Node{
-				"to-zone": {Desc: "Destination zone", DynamicFn: func(cfg *config.Config) []string {
-					if cfg == nil {
-						return nil
-					}
-					names := make([]string, 0, len(cfg.Security.Zones))
-					for name := range cfg.Security.Zones {
-						names = append(names, name)
-					}
-					return names
-				}, Children: map[string]*Node{
-					"source-ip": {Desc: "Source IP address", Children: map[string]*Node{
-						"destination-ip": {Desc: "Destination IP address", Children: map[string]*Node{
-							"source-port": {Desc: "Source port number", Children: map[string]*Node{
-								"destination-port": {Desc: "Destination port number", Children: map[string]*Node{
-									"protocol": {Desc: "IP protocol (tcp, udp)"},
-								}},
-							}},
-							"destination-port": {Desc: "Destination port number", Children: map[string]*Node{
-								"protocol": {Desc: "IP protocol (tcp, udp)"},
-							}},
-						}},
-					}},
-				}},
-			}},
-		}},
+		"policy": {Desc: "Test security policy lookup", Options: true, Children: policySelectorChildren()},
 		// #9505: testRouting loops over destination/instance in any order.
 		"routing": {Desc: "Test route lookup", Options: true, Children: map[string]*Node{
 			"destination": {Desc: "Destination IP or prefix to look up", ValueType: ValueCIDR},
