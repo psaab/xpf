@@ -163,10 +163,18 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	// gate-disarming, 1 unmeasurable, 1 unreachable by a pair rule. See #8719.
 	// `system` cannot reach 0 under pair scoping, so a count driving toward
 	// zero will point at an exclusion set rather than at work.
+	// #15710: `system no-redirects` is a valueless flag leaf (no body),
+	// so admitting it cannot strand a body; without it the compact
+	// spelling `system no-redirects;` packed the flag onto the system
+	// node's Keys and compileSystem's child walk never saw it, leaving
+	// NoRedirects=false while the braced spelling set it. This makes
+	// the pair admitted, so TestUnadmittedTopLevelPairsAreAdjudicated8925
+	// must drop its `system no-redirects` no-body registration.
 	switch containerKeyword + " " + head {
 	case
 		"dataplane control-socket",
 		"system domain-name",
+		"system no-redirects",
 		"ssh protocol-version":
 		return true
 	}
@@ -806,6 +814,14 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"coalescence rx-usecs",
 		"coalescence tx-usecs",
 		"configuration archive-sites",
+		// #15710: valueless flag leaf. Without this pair the compact
+		// spelling `archival { configuration transfer-on-commit; }`
+		// (tail packed onto the configuration node) compiled
+		// TransferOnCommit=false while the braced spelling set it.
+		// The compiler also reads it via packedBodyChildren, so both
+		// paths agree; admitting the fold keeps validation's view
+		// identical too.
+		"configuration transfer-on-commit",
 		"configuration transfer-interval",
 		"dataplane binary",
 		"dataplane claim-host-tunables",

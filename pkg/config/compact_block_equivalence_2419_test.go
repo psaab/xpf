@@ -692,6 +692,12 @@ var filedFixed = map[string]string{
 	// instrument keeps checking them in both directions.
 	"protocols router-advertisement interface xpfarg managed-configuration":        "#14420",
 	"protocols router-advertisement interface xpfarg other-stateful-configuration": "#14420",
+	// #15710: compact `configuration transfer-on-commit` and
+	// `system no-redirects` now compile via packedBodyChildren /
+	// compactNormalizeInScope admission. Moved here rather than
+	// deleted so the census keeps checking them in both directions.
+	"system archival configuration transfer-on-commit": "#15710",
+	"system no-redirects":                              "#15710",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:

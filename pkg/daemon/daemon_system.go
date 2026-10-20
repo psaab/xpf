@@ -1206,8 +1206,7 @@ func (d *Daemon) applyKernelTuning(cfg *config.Config) {
 	// existing interfaces. Apply the posture to every current sysctl
 	// interface, and remember it so transit-gate ip_forward writes can
 	// re-assert it after Linux resets the IPv4 defaults.
-	noRedirectsActive.Store(cfg.System.NoRedirects)
-	applyNoRedirectsPosture()
+	reconcileNoRedirects(cfg.System.NoRedirects)
 
 	// system { internet-options { no-ipv6-reject-zero-hop-limit; } }
 	// #15707: this knob suppresses the ICMPv6 Time Exceeded a hop-limit=0

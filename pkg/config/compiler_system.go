@@ -604,13 +604,28 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					MaxArchives: 10,
 				}
 			}
-			if cfgNode := child.FindChild("configuration"); cfgNode != nil {
+			// #15710: iterate EVERY `configuration` child, not just the
+			// first. Two `configuration` blocks under one `archival`
+			// (or a packed second block the FindChild-only read missed)
+			// must merge: transfer-on-commit is sticky-true, archive
+			// sites append, and transfer-interval is last-wins across
+			// all blocks. Each block's body is expanded via
+			// packedBodyChildren so the compact spelling
+			// `configuration transfer-on-commit` (tail packed onto the
+			// configuration node's Keys, no children) reads the same
+			// as the braced spelling.
+			for _, origCfgNode := range child.FindChildren("configuration") {
+				cfgNode := origCfgNode
 				// #8939: split a packed run. `archival configuration
 				// transfer-on-commit transfer-interval 30` is ONE child node
 				// carrying both on its Keys, so the first FindChild matched and
 				// the interval was dropped — an archive that uploads on commit
 				// but never on a schedule, or the reverse.
-				if expanded := expandFlatRun(cfgNode.Children, archivalConfigurationSchema8939()); len(expanded) != len(cfgNode.Children) {
+				if expanded := packedBodyChildren(cfgNode, archivalConfigurationSchema8939()); len(expanded) != len(cfgNode.Children) || (len(expanded) > 0 && len(cfgNode.Children) == 0) {
+					clone := *cfgNode
+					clone.Children = expanded
+					cfgNode = &clone
+				} else if expanded := expandFlatRun(cfgNode.Children, archivalConfigurationSchema8939()); len(expanded) != len(cfgNode.Children) {
 					clone := *cfgNode
 					clone.Children = expanded
 					cfgNode = &clone
@@ -618,7 +633,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				if cfgNode.FindChild("transfer-on-commit") != nil {
 					sys.Archival.TransferOnCommit = true
 				}
-				if tiNode := cfgNode.FindChild("transfer-interval"); tiNode != nil {
+				for _, tiNode := range cfgNode.FindChildren("transfer-interval") {
 					if v := nodeVal(tiNode); v != "" {
 						if n, ok := parseIntLeaf(&cfg.Warnings, "system archival configuration transfer-interval", v); ok {
 							sys.Archival.TransferInterval = n

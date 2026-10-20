@@ -1309,7 +1309,6 @@ func TestUnadmittedTopLevelPairsAreAdjudicated8925(t *testing.T) {
 		"forwarding-options allow-dataplane-sleep": reasonNoBody,
 		"system dataplane-type":                    reasonNoBody,
 		"system host-name":                         reasonNoBody,
-		"system no-redirects":                      reasonNoBody,
 		"system processes":                         reasonNoBody,
 		"system login":                             reasonLoud,
 		"system services":                          reason6966,
