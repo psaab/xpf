@@ -1076,10 +1076,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     return SyncedReserveOutcome::Refused;
                 }
                 if rule.persistent_nat {
-                    rule.pool_allocator.record_synced_persistent_permission(
+                    rule.pool_allocator.record_synced_persistent_permission_with_zones(
                         flow,
                         rule.persistent_nat_permit,
                         flow_egress_scope,
+                        Some(eff_from_zone),
                     );
                 }
                 return SyncedReserveOutcome::Reserved;
@@ -1233,10 +1234,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 return SyncedReserveOutcome::Refused;
             }
             if rule.persistent_nat {
-                rule.pool_allocator.record_synced_persistent_permission(
+                rule.pool_allocator.record_synced_persistent_permission_with_zones(
                     flow,
                     rule.persistent_nat_permit,
                     flow_egress_scope,
+                    Some(eff_from_zone),
                 );
             }
             return SyncedReserveOutcome::Reserved;

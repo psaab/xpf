@@ -1498,8 +1498,8 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     // depending on whether it still has live flows when the sync happens.
     ("allocate_translation_locked", "local PAT mint"),
     (
-        "reserve_address_only_persistent",
-        "local address-only mint (#6041)",
+        "reserve_address_only_persistent_with_zones",
+        "local address-only mint (#6041; #15936 zones twin carries the mint from_zone provenance, same #8121/#8132 standby routes)",
     ),
     // REBUILT ON THE STANDBY from a synced SESSION — the population with live
     // flows. Two arms because the port-bearing and address-only reserves are

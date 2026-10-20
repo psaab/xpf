@@ -224,6 +224,13 @@ pub(super) fn persistent_egress_scope_reencode_for_peer(_scope: u32) -> Option<u
 pub(super) struct PersistentPermissionScope {
     pub(super) any_remote: bool,
     pub(super) remotes: FxHashSet<(IpAddr, u16)>,
+    /// #15936: packet from_zone the mint folded into this bucket's key,
+    /// recorded verbatim so the non-zone inbound reader — which knows
+    /// only the arrival zone and cannot invert the bucket hash — can
+    /// verify a held bucket belongs to its rule by re-folding with
+    /// (recorded_from, arrival). None for legacy/imported buckets
+    /// (idle-lease sync, NAT64 BIBs); those never take the fallback.
+    pub(super) mint_from_zone: Option<String>,
 }
 
 /// Grants bucketed by egress scope, with the 1024-remote cap across all buckets.
@@ -253,6 +260,19 @@ impl PersistentPermissions {
         }
         true
     }
+    fn record_with_zones(&mut self, permit: PersistentNatPermit, flow: SourceNatFlowKey, egress_scope: u32, mint_from_zone: Option<&str>) -> bool {
+        if !self.can_record(permit, flow, egress_scope) { return false; }
+        let scope = self.scopes.entry(egress_scope).or_default();
+        if scope.mint_from_zone.is_none() {
+            scope.mint_from_zone = mint_from_zone.map(str::to_string);
+        }
+        match permit {
+            PersistentNatPermit::AnyRemoteHost => scope.any_remote = true,
+            PersistentNatPermit::TargetHost => { scope.remotes.insert((flow.dst_ip, 0)); }
+            PersistentNatPermit::TargetHostPort => { scope.remotes.insert((flow.dst_ip, flow.dst_port)); }
+        }
+        true
+    }
     pub(super) fn permits(&self, egress_scope: u32, remote_ip: IpAddr, remote_port: u16) -> bool {
         let granted = |s: &PersistentPermissionScope| s.any_remote || s.remotes.contains(&(remote_ip, 0)) || s.remotes.contains(&(remote_ip, remote_port));
         if egress_scope != PERSISTENT_NAT_EGRESS_UNSCOPED {
@@ -267,6 +287,46 @@ impl PersistentPermissions {
     /// every inbound packet on a shared lease.
     pub(super) fn has_scope(&self, egress_scope: u32) -> bool {
         egress_scope == PERSISTENT_NAT_EGRESS_UNSCOPED || self.scopes.contains_key(&egress_scope)
+    }
+    /// #15936: admission for the non-zone inbound reader, which knows only
+    /// the arrival zone and therefore hashed (arrival, arrival) — a bucket
+    /// the mint (internal, arrival) never wrote. The mint pair cannot be
+    /// re-derived from a hash, so each bucket records its mint packet pair
+    /// (`PersistentPermissionScope::mint_from_zone`) at record time and this
+    /// check re-folds THIS rule with that recorded pair: a held bucket
+    /// belongs to the rule iff the re-fold reproduces the bucket key.
+    /// Legacy/imported buckets carry no provenance and never match, and
+    /// a sibling whose authored fields differ re-folds differently for
+    /// every pair, so its buckets never match either — the fallback never
+    /// widens to UNSCOPED/any-bucket. Returns Some(permitted) when such a
+    /// bucket exists, None when the lease holds no bucket for this rule
+    /// (caller treats it as a Miss so the minting sibling decides).
+    pub(super) fn permits_authored_any_from(
+        &self,
+        rule: &super::source::SourceNatRule,
+        arrival_zone: &str,
+        remote_ip: IpAddr,
+        remote_port: u16,
+    ) -> Option<bool> {
+        let mut saw = false;
+        let mut permitted = false;
+        for (bucket, scope) in &self.scopes {
+            let Some(mint_from) = &scope.mint_from_zone else {
+                continue;
+            };
+            let key = rule.persistent_rule_scope(mint_from, arrival_zone, arrival_zone, &super::NatScopeCtx::default());
+            if key != *bucket {
+                continue;
+            }
+            saw = true;
+            if scope.any_remote
+                || scope.remotes.contains(&(remote_ip, 0))
+                || scope.remotes.contains(&(remote_ip, remote_port))
+            {
+                permitted = true;
+            }
+        }
+        saw.then_some(permitted)
     }
     #[cfg(test)]
     pub(super) fn any_remote(&self) -> bool { self.scopes.values().any(|s| s.any_remote) }
@@ -1242,6 +1302,35 @@ impl PortAllocatorLiveState {
             .entry(key)
             .or_default()
             .record(permit, flow, egress_scope);
+        if recorded {
+            if let Some(l) = lease {
+                if l.address_only && !l.revoked {
+                    let after = self.persistent_address_only_owner_keys(&key, &l);
+                    for owner_key in after {
+                        if !before.contains(&owner_key) {
+                            self.increment_persistent_address_only_owner(owner_key);
+                        }
+                    }
+                }
+            }
+        }
+        recorded
+    }
+    fn record_persistent_permission_with_zones(
+        &mut self,
+        key: PersistentSourceKey,
+        permit: PersistentNatPermit,
+        flow: SourceNatFlowKey,
+        egress_scope: u32,
+        mint_from_zone: Option<&str>,
+    ) -> bool {
+        let lease = self.persistent_by_source.get(&key).copied();
+        let before = lease.map(|l| self.persistent_address_only_owner_keys(&key, &l)).unwrap_or_default();
+        let recorded = self
+            .persistent_permissions
+            .entry(key)
+            .or_default()
+            .record_with_zones(permit, flow, egress_scope, mint_from_zone);
         if recorded {
             if let Some(l) = lease {
                 if l.address_only && !l.revoked {
@@ -2456,7 +2545,7 @@ impl PortAllocator {
             ingress_zone,
             scope,
         );
-        self.persistent_inbound_lookup_scoped(
+        self.persistent_inbound_lookup_scoped_for_rule(
             protocol,
             translated_ip,
             translated_port,
@@ -2464,9 +2553,108 @@ impl PortAllocator {
             remote_port,
             now_ns,
             arrival_scope,
+            rule,
+            ingress_zone,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn persistent_inbound_lookup_scoped_for_rule(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+        arrival_scope: u32,
+        rule: &super::source::SourceNatRule,
+        ingress_zone: &str,
+    ) -> PersistentInbound {
+        let reverse = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip,
+            translated_port,
+        };
+        let live = self.lock_live();
+        let Some(keys) = live.persistent_by_translated.get(&reverse) else {
+            return PersistentInbound::Miss;
+        };
+        // #15936: candidate internal zones for the authored fallback. The
+        // exact arrival_scope already encodes the caller's pair; the
+        // fallback additionally tries every zone name this allocator's
+        // leases could have been minted from — but bucket keys are hashes
+        // of (authored fields, packet_from, packet_to), so without the
+        // name we cannot re-fold. The caller therefore supplies the
+        // internal zone when it knows it (revalidation); the pre-routing
+        // reader does not, and instead the fallback below checks whether
+        // the lease holds ANY bucket that this rule's authored identity
+        // could own: authored fields are part of every bucket key, and
+        // two rules differing in any authored field fold differently for
+        // EVERY packet pair, so a bucket belonging to a sibling can never
+        // collide with this rule's authored identity test — realised by
+        // re-folding with each distinct packet_from the lease's buckets
+        // imply is impossible; instead we use the stored-bucket test in
+        // `permits_authored_any_from`.
+        let mut matched = None;
+        let mut saw_lease = false;
+        for key in keys {
+            let Some(lease) = live.persistent_by_source.get(key) else {
+                continue;
+            };
+            if lease.revoked
+                || (lease.active_flows == 0
+                    && lease.inbound_flows == 0
+                    && lease.expires_at_ns <= now_ns)
+            {
+                continue;
+            }
+            let permissions = live.persistent_permissions.get(key);
+            // Fast path: exact bucket the caller derived.
+            let (has, permitted) = if permissions.is_some_and(|p| p.has_scope(arrival_scope)) {
+                (
+                    true,
+                    permissions.is_some_and(|p| p.permits(arrival_scope, remote_ip, remote_port)),
+                )
+            } else if rule.from_zone.is_empty() {
+                // #15936 fallback: non-zone rule, caller hashed (wan,wan).
+                // Admit only via a bucket this rule authored — see
+                // permits_authored_any_from. Zone-authored rules never
+                // take this path: their authored from_zone already pins
+                // the mint pair, so an absent exact bucket is a true Miss.
+                match permissions.and_then(|p| {
+                    p.permits_authored_any_from(rule, ingress_zone, remote_ip, remote_port)
+                }) {
+                    Some(permitted) => (true, permitted),
+                    None => (false, false),
+                }
+            } else {
+                (false, false)
+            };
+            if !has {
+                continue;
+            }
+            saw_lease = true;
+            if !permitted {
+                continue;
+            }
+            let candidate = PersistentInbound::Permitted {
+                internal_ip: key.src_ip,
+                internal_port: key.src_port,
+                address_only: lease.address_only,
+                lease_key: Some(*key),
+            };
+            if matched.is_some_and(|previous| previous != candidate) {
+                return PersistentInbound::Denied;
+            }
+            matched = Some(candidate);
+        }
+        match matched {
+            Some(c) => c,
+            None if saw_lease => PersistentInbound::Denied,
+            None => PersistentInbound::Miss,
+        }
+    }
     fn persistent_inbound_lookup_scoped(
         &self,
         protocol: u8,
@@ -2608,10 +2796,20 @@ impl PortAllocator {
         permit: PersistentNatPermit,
         egress_scope: u32,
     ) {
+        self.record_synced_persistent_permission_with_zones(flow, permit, egress_scope, None)
+    }
+
+    pub(super) fn record_synced_persistent_permission_with_zones(
+        &self,
+        flow: SourceNatFlowKey,
+        permit: PersistentNatPermit,
+        egress_scope: u32,
+        mint_from_zone: Option<&str>,
+    ) {
         let key = flow.persistent_source_key(permit);
         let mut live = self.lock_live();
         if live.persistent_by_source.contains_key(&key) {
-            live.record_persistent_permission(key, permit, flow, egress_scope);
+            live.record_persistent_permission_with_zones(key, permit, flow, egress_scope, mint_from_zone);
         }
     }
     /// Atomically capture a flow's complete incumbent snapshot and retain the
@@ -3193,7 +3391,25 @@ impl PortAllocator {
         holder: NatHolder,
         egress_scope: u32,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
-        let out = self.allocate_translation_inner(
+        self.allocate_translation_with_zones(flow, family_addresses, family_offset, address_persistent, persistent_nat, persistent_nat_permit, persistent_nat_timeout_ns, now_ns, holder, egress_scope, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn allocate_translation_with_zones(
+        &self,
+        flow: SourceNatFlowKey,
+        family_addresses: PoolAddressFamily<'_>,
+        family_offset: usize,
+        address_persistent: bool,
+        persistent_nat: bool,
+        persistent_nat_permit: super::source::PersistentNatPermit,
+        persistent_nat_timeout_ns: u64,
+        now_ns: u64,
+        holder: NatHolder,
+        egress_scope: u32,
+        mint_from_zone: Option<&str>,
+    ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
+        let out = self.allocate_translation_inner_with_zones(
             flow,
             family_addresses,
             family_offset,
@@ -3202,6 +3418,7 @@ impl PortAllocator {
             persistent_nat_permit,
             persistent_nat_timeout_ns,
             now_ns,
+            mint_from_zone,
             holder,
             egress_scope,
         );
@@ -3216,7 +3433,7 @@ impl PortAllocator {
         out
     }
 
-    fn allocate_translation_inner(
+    fn allocate_translation_inner_with_zones(
         &self,
         flow: SourceNatFlowKey,
         family_addresses: PoolAddressFamily<'_>,
@@ -3226,6 +3443,7 @@ impl PortAllocator {
         persistent_nat_permit: super::source::PersistentNatPermit,
         persistent_nat_timeout_ns: u64,
         now_ns: u64,
+        mint_from_zone: Option<&str>,
         // #6522: the worker performing this LOCAL allocation, so the record
         // it inserts already names its own holder before any sibling replica
         // reserves against it. `NatHolder::Untracked` reproduces the
@@ -3388,6 +3606,7 @@ impl PortAllocator {
             now_ns,
             holder,
             egress_scope,
+            mint_from_zone,
         )
     }
 
@@ -3414,6 +3633,7 @@ impl PortAllocator {
         // and the read-only fragment probe pass.
         holder: NatHolder,
         egress_scope: u32,
+        mint_from_zone: Option<&str>,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let family_len = family_addresses.len();
         let mut live = self.lock_live();
@@ -3458,7 +3678,7 @@ impl PortAllocator {
                 holder,
             ) {
                 LeaseReuse::Reused(translated) => {
-                    live.record_persistent_permission(key, persistent_nat_permit, flow, egress_scope);
+                    live.record_persistent_permission_with_zones(key, persistent_nat_permit, flow, egress_scope, mint_from_zone);
                     return Ok(translated);
                 }
                 LeaseReuse::NoLease => {}
@@ -3562,7 +3782,7 @@ impl PortAllocator {
                             revoked: false,
                         },
                     );
-                    live.record_persistent_permission(key, persistent_nat_permit, flow, egress_scope);
+                    live.record_persistent_permission_with_zones(key, persistent_nat_permit, flow, egress_scope, mint_from_zone);
                 }
                 live.live_by_flow.insert(
                     flow,
@@ -6445,6 +6665,23 @@ impl PortAllocator {
         holder: NatHolder,
         egress_scope: u32,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
+        self.reserve_address_only_persistent_with_zones(flow, family_addresses, family_offset, address_persistent, persistent_nat_permit, persistent_nat_timeout_ns, now_ns, holder, egress_scope, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reserve_address_only_persistent_with_zones(
+        &self,
+        flow: SourceNatFlowKey,
+        family_addresses: PoolAddressFamily<'_>,
+        family_offset: usize,
+        address_persistent: bool,
+        persistent_nat_permit: super::source::PersistentNatPermit,
+        persistent_nat_timeout_ns: u64,
+        now_ns: u64,
+        holder: NatHolder,
+        egress_scope: u32,
+        mint_from_zone: Option<&str>,
+    ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let family_len = family_addresses.len();
         if family_len == 0 {
             return Err(super::source::SourceNatFailureReason::WrongAddressFamily);
@@ -6775,7 +7012,7 @@ impl PortAllocator {
         }
 
         if !live_mode_mismatch {
-            live.record_persistent_permission(key, persistent_nat_permit, flow, egress_scope);
+            live.record_persistent_permission_with_zones(key, persistent_nat_permit, flow, egress_scope, mint_from_zone);
         }
         live.live_by_flow.insert(
             flow,
