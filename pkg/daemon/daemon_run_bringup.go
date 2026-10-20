@@ -634,6 +634,23 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 				}
 			}
 		}
+		// #15919: wire the cluster RG-ownership source at construction,
+		// before the first apply below. Previously it was wired only
+		// inside applyDataplaneAndHACore, so any snapshot built before
+		// that point (boot applies, link-refresh / overlay publishes
+		// racing the first wiring) ran with a nil provider and the
+		// connected-prefix predicate failed closed, suppressing a
+		// clustered PRIMARY's own RG>0 prefixes. d.cluster was built in
+		// initManagers, which precedes this phase. The apply-time wiring
+		// in applyDataplaneAndHACore stays as the refresh (it also
+		// clears the provider when the cluster manager is gone).
+		if rt != nil && d.cluster != nil {
+			if adapter, ok := rt.(interface{ Manager() *dpuserspace.Manager }); ok {
+				if mgr := adapter.Manager(); mgr != nil {
+					mgr.SetRGPrimaryProvider(d.cluster.LocalGroupPrimary)
+				}
+			}
+		}
 		// #1922 Item 2: in bootstrap mode, do NOT arm the dataplane
 		// (AF_XDP attach) and do NOT run the boot-time applyConfig
 		// (interface/FRR/routing takeover). The backend object stays
