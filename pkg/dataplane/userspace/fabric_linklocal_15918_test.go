@@ -186,3 +186,52 @@ func TestFabricPeerConstraintNonCanonicalIPv6_15918(t *testing.T) {
 		t.Fatalf("constraint after clear via expanded spelling = %v, want nil (stale entry)", got)
 	}
 }
+
+// Re-review fold (#15923r): IPv4-mapped IPv6. The daemon registers via
+// net.ParseIP(peer).String(), which renders ::ffff:10.99.14.2 dotted
+// (10.99.14.2); netip without Unmap kept the mapped spelling, so lookup
+// missed, the constraint was lost, and a sole decoy was reachable.
+func TestFabricPeerConstraintMappedIPv6_15918(t *testing.T) {
+	local := mustMAC7443(t, localMAC_15918)
+	known := mustMAC7443(t, peerMAC_15918)
+	const mapped = "::ffff:10.99.14.2"
+	const dotted = "10.99.14.2"
+
+	// Premise: the daemon's registration string really is the dotted form.
+	if got := net.ParseIP(mapped).String(); got != dotted {
+		t.Fatalf("premise: net.ParseIP(%q).String() = %q, want %q", mapped, got, dotted)
+	}
+
+	// Register mapped (as configured text reaches Register), lookup dotted
+	// (as the daemon registration produced) — and vice versa. Both must hit.
+	RegisterFabricPeerMACConstraint(mapped, known)
+	t.Cleanup(func() { RegisterFabricPeerMACConstraint(mapped, nil) })
+	if got := fabricPeerMACConstraint(dotted); got == nil || got.String() != peerMAC_15918 {
+		t.Fatalf("constraint lookup dotted after mapped register = %v, want %s (mapped key not unmapped)", got, peerMAC_15918)
+	}
+	RegisterFabricPeerMACConstraint(dotted, known)
+	if got := fabricPeerMACConstraint(mapped); got == nil || got.String() != peerMAC_15918 {
+		t.Fatalf("constraint lookup mapped after dotted register = %v, want %s", got, peerMAC_15918)
+	}
+
+	// Decoy refused / known resolves through the real resolver using the
+	// mapped configured peer spelling.
+	stubFabricNeighList(t, map[int][]netlink.Neigh{
+		parentIfindex7443: {neigh15918(t, "fe80::dec0", decoyMAC_15918)},
+	}, nil)
+	if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, mapped, local, fabricPeerMACConstraint(mapped)); got != "" {
+		t.Fatalf("buildFabricPeerMAC mapped peer + sole decoy = %q, want \"\" (decoy accepted via dropped mapped constraint)", got)
+	}
+	stubFabricNeighList(t, map[int][]netlink.Neigh{
+		parentIfindex7443: {neigh15918(t, "fe80::b", peerMAC_15918)},
+	}, nil)
+	if got := buildFabricPeerMAC(overlayIfindex7443, parentIfindex7443, mapped, local, fabricPeerMACConstraint(mapped)); got != peerMAC_15918 {
+		t.Fatalf("buildFabricPeerMAC mapped peer + known LL = %q, want %q", got, peerMAC_15918)
+	}
+
+	// Clear via dotted prunes the mapped-registered entry.
+	RegisterFabricPeerMACConstraint(dotted, nil)
+	if got := fabricPeerMACConstraint(mapped); got != nil {
+		t.Fatalf("constraint after clear via dotted = %v, want nil", got)
+	}
+}

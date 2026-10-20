@@ -476,11 +476,17 @@ var (
 )
 
 // fabricPeerKey is the single canonical key for a configured fabric peer
-// address. Parseable addresses canonicalize via netip (zone preserved);
-// unparseable text keys verbatim so register/clear/lookup still agree.
+// address. Parseable addresses canonicalize via netip with Unmap, so every
+// spelling of one address — expanded/compressed IPv6, and IPv4-mapped
+// ::ffff:a.b.c.d vs dotted a.b.c.d — collapses to one key. Unmap matters
+// because the daemon registers via net.IP.String(), which renders a
+// mapped address dotted, while netip.Addr.String() retains the mapped
+// form; without it that spelling lost the constraint again (#15923
+// re-review). Zone is preserved by String on the unmapped address.
+// Unparseable text keys verbatim so register/clear/lookup still agree.
 func fabricPeerKey(peer string) string {
 	if addr, err := netip.ParseAddr(peer); err == nil {
-		return addr.String()
+		return addr.Unmap().String()
 	}
 	return peer
 }
