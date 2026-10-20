@@ -1360,20 +1360,25 @@ impl DnatTable {
                 // eligible entry of the best tier decides whether the
                 // group translates at all. Only if that winner is a
                 // Translate do co-winners' geometries decide.
-                let winner = entries
-                    .iter()
-                    .find(|entry| eligible(entry) && entry.scope_tier() == best_tier)
-                    .expect("best tier has an eligible entry");
-                if !matches!(winner.to_outcome(), DnatOutcome::Translate(..)) {
-                    return Some(false);
-                }
+                // Config-order first-match ordering (Codex7): scan
+                // the deciding group in config order. A non-Translate
+                // entry owns/revokes the group outright (later
+                // translates do NOT co-win past it). Translates
+                // co-win until the first non-Translate: validate iff
+                // some Translate before any off/Exempt reproduces
+                // the stored geometry.
                 let mut reproduces_any = false;
                 for entry in entries {
                     if !eligible(entry) || entry.scope_tier() != best_tier {
                         continue;
                     }
-                    if matches!(entry.to_outcome(), DnatOutcome::Translate(..)) && reproduces(entry) {
-                        reproduces_any = true;
+                    match entry.to_outcome() {
+                        DnatOutcome::Translate(..) => {
+                            if reproduces(entry) {
+                                reproduces_any = true;
+                            }
+                        }
+                        DnatOutcome::Exempt | DnatOutcome::Poisoned(_) => break,
                     }
                 }
                 return Some(reproduces_any);
@@ -1425,6 +1430,9 @@ impl DnatTable {
             };
             let winner_tier = winner.entry.scope_tier();
             let winner_len = winner.prefix_len();
+            // Config-order first-match ordering within the group:
+            // a non-Translate slot ends the scan (revokes); Translate
+            // slots co-win until it.
             let mut any_translate_reproduces = false;
             for slot in slots {
                 if (!slot.entry.from_zone.is_empty() && slot.entry.from_zone.as_ref() != ingress_zone)
@@ -1437,18 +1445,21 @@ impl DnatTable {
                 {
                     continue;
                 }
-                if matches!(slot.entry.to_outcome(), DnatOutcome::Translate(..)) {
-                    let rewrite_dst_port = if protocol_has_l4_ports
-                        && slot.entry.value.new_dst_port != 0
-                        && slot.entry.value.new_dst_port != dst_port
-                    {
-                        Some(slot.entry.value.new_dst_port)
-                    } else {
-                        None
-                    };
-                    if slot.entry.value.new_dst_ip == want_dst && rewrite_dst_port == want_dst_port {
-                        any_translate_reproduces = true;
+                match slot.entry.to_outcome() {
+                    DnatOutcome::Translate(..) => {
+                        let rewrite_dst_port = if protocol_has_l4_ports
+                            && slot.entry.value.new_dst_port != 0
+                            && slot.entry.value.new_dst_port != dst_port
+                        {
+                            Some(slot.entry.value.new_dst_port)
+                        } else {
+                            None
+                        };
+                        if slot.entry.value.new_dst_ip == want_dst && rewrite_dst_port == want_dst_port {
+                            any_translate_reproduces = true;
+                        }
                     }
+                    DnatOutcome::Exempt | DnatOutcome::Poisoned(_) => break,
                 }
             }
             return Some(any_translate_reproduces);

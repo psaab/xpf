@@ -5378,7 +5378,7 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
             ..Default::default()
         };
         let mut configured = imported_snat_forwarding(false);
-        if rule_type.is_some() || true {
+        {
             configured.dnat_table = crate::nat::DnatTable::from_snapshots(
                 &[rule],
                 &crate::nat::NatCounterStore::default(),
@@ -5962,3 +5962,138 @@ fn tier_walk_single_verdict_15934() {
     assert!(valid(&nested, "10.0.0.25"), "deciding /25 geometry must survive (#15934)");
     assert!(!valid(&nested, "10.0.0.24"), "non-deciding /24 geometry must revoke: /25 tier decided (#15934)");
 }
+
+/// #15934 R6-1 discriminator: typed rules 8->A and 13->B coexist; the
+/// arriving reply selector is (0,0) — it matches NEITHER rule. The
+/// selector-relaxed deciding group contains both co-winners, so
+/// geometry decides: stored A survives, stored B survives, stored C
+/// revokes. A single-winner (config-order-first) relaxed mutant
+/// REDs the stored-B assertion; strict (waiver-off) judgement revokes
+/// both because the reply type matches no rule.
+#[test]
+fn reply_matching_neither_type_decides_by_geometry_15934() {
+    let key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    let metadata = meta_14315(2, 1);
+    let rules = vec![
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "echo8".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            pool_address: "10.0.0.8".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(8),
+            match_icmp_code: Some(0),
+            ..Default::default()
+        },
+        crate::protocol::DestinationNATRuleSnapshot {
+            name: "ts13".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            pool_address: "10.0.0.13".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(13),
+            match_icmp_code: Some(0),
+            ..Default::default()
+        },
+    ];
+    let mut f = imported_snat_forwarding(false);
+    f.dnat_table = crate::nat::DnatTable::from_snapshots(&rules, &crate::nat::NatCounterStore::default());
+    let valid = |stored: &str, waiver: bool| {
+        let decision = decision_14315(NatDecision {
+            rewrite_dst: Some(stored.parse().expect("stored")),
+            source_nat_icmp: None,
+            ..NatDecision::default()
+        });
+        destination_nat_translation_still_valid(
+            &f, &decision, &metadata, &key, NOW_14315, Some((0, 0)), waiver,
+        )
+    };
+    assert!(valid("10.0.0.8", true), "stored A (type-8) must survive a reply matching neither type (#15934)");
+    assert!(valid("10.0.0.13", true), "stored B (type-13) must survive: co-winner geometry decides (#15934)");
+    assert!(!valid("10.0.0.10", true), "stored C (no rule) must revoke (#15934)");
+    assert!(!valid("10.0.0.8", false), "strict reply (0,0) matches neither rule: must fail closed");
+    assert!(!valid("10.0.0.13", false), "strict reply (0,0) matches neither rule: must fail closed");
+}
+
+/// #15934 Codex7: within the deciding group, CONFIG ORDER decides.
+/// An off before the translate (same prefix/group) revokes outright —
+/// later translates do not co-win past it. Translate first (stored =
+/// first) then a later off survives: translates co-win until the
+/// first non-Translate, which only ends the scan.
+#[test]
+fn config_order_decides_within_group_15934() {
+    let key = key_14315(libc::IPPROTO_ICMP as u8, "203.0.113.50", "198.51.100.9", 0x1234, 0);
+    let metadata = meta_14315(2, 1);
+    let valid = |f: &crate::afxdp::ForwardingState, stored: &str| {
+        let decision = decision_14315(NatDecision {
+            rewrite_dst: Some(stored.parse().expect("stored")),
+            source_nat_icmp: None,
+            ..NatDecision::default()
+        });
+        destination_nat_translation_still_valid(
+            f, &decision, &metadata, &key, NOW_14315, Some((0, 0)), true,
+        )
+    };
+    let mk = |rules: Vec<crate::protocol::DestinationNATRuleSnapshot>| {
+        let mut f = imported_snat_forwarding(false);
+        f.dnat_table = crate::nat::DnatTable::from_snapshots(&rules, &crate::nat::NatCounterStore::default());
+        f
+    };
+    // Exact-host rules (no prefix): all three share one entries key.
+    // NOTE: insert_entry dedup keys on (icmp type, off, value) — an
+    // identical typed translate pair collapses last-wins, so a true
+    // 3-slot same-type sandwich is not constructible; the off's
+    // distinct type keeps all three slots, and values differ.
+    let rule = |name: &str, pool: &str, off: bool| crate::protocol::DestinationNATRuleSnapshot {
+        name: name.to_string(),
+        destination_address: "198.51.100.9".to_string(),
+        pool_address: pool.to_string(),
+        protocol: "icmp".to_string(),
+        match_icmp_type: Some(8),
+        match_icmp_code: Some(0),
+        off,
+        ..Default::default()
+    };
+    // off BEFORE translate, same prefix: stored = translate target
+    // still revokes (off owns the group).
+    let off_first = mk(vec![rule("off", "10.0.0.8", true), rule("xlate", "10.0.0.8", false)]);
+    assert!(
+        !valid(&off_first, "10.0.0.8"),
+        "off before translate in the deciding group must revoke (#15934 Codex7)"
+    );
+    // translate BEFORE off, stored = first translate: survives.
+    let xlate_first = mk(vec![rule("xlate", "10.0.0.8", false), rule("off", "10.0.0.9", true)]);
+    assert!(
+        valid(&xlate_first, "10.0.0.8"),
+        "translate-then-off with stored=first must survive (#15934 Codex7)"
+    );
+    // translate A, off, translate B (stored=B): the off ends the scan
+    // before B, so B does NOT co-win — revokes.
+    // Dedup note: exact-key inserts replace an identical (type, off)
+    // predecessor (value is NOT part of the identity), so a literal
+    // A/off/B same-type stack collapses. Distinct types keep all
+    // three groups; the scan still encounters A, then off, then B in
+    // that relative order only if inserts retained them — use ports
+    // to keep B distinct while staying in the same dst bucket: B
+    // carries destination_port 0 as well, so instead model the
+    // sandwich at the tier-walk level via two keys is impossible;
+    // keep the two-entry forms below and the A/off ordering cells.
+    let sandwiched = mk(vec![
+        rule("a", "10.0.0.8", false),
+        {
+            let mut r = rule("off", "10.0.0.9", true);
+            r.match_icmp_type = Some(13);
+            r
+        },
+        rule("b", "10.0.0.10", false),
+    ]);
+    // Insert dedup (type+off identity, value excluded) collapses B
+    // INTO A's slot (last-wins replacement), so the table is
+    // [translate->10.0.0.10, off13]: the off comes AFTER the only
+    // translate and cannot end its scan early. Both geometries
+    // therefore behave as translate-then-off; a true A/off/B stack
+    // is not representable in this table shape.
+    assert!(
+        valid(&sandwiched, "10.0.0.10"),
+        "dedup-collapsed translate (B's value in A's slot) precedes the off: survives (#15934)"
+    );
+}
+
