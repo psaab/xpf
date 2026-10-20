@@ -297,13 +297,10 @@ func (m *Manager) syncSnapshotLocked() error {
 	// state only after the successful request; all failure returns above retain
 	// the prior applied/show cache.
 	m.commitPolicySchedulerActiveStateFromSnapshotLocked(m.lastSnapshot)
-	// #15937 round-4: this publish IS the acceptance — if it carried a
-	// full build (incl. an unknown-outcome Compile's retry), the stamp
-	// follows the accepted count now; the status reconciler covers
-	// landings this Manager never observes a response for.
-	if retained.fullBuild {
-		m.commitExpectedPolicyCountFromLandedSnapshot(m.lastSnapshot)
-	}
+	// #15937 round-5: stamp accounting for this acceptance already ran
+	// at the send-site choke (the publish above funnels through it);
+	// the status reconciler in the catch-up remains the backstop for
+	// landings no response ever confirmed.
 	// #1197 v5 (Codex code-review v4 #1): rebuild listener
 	// caches AFTER successful publish on the deferred-publish
 	// path too. Compile() defers when XSK is starting up; this

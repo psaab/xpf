@@ -163,3 +163,21 @@ Regressions: `TestTailErrorStampFollowsAcceptedBuild`,
 `TestSyncRetryRemarksUnlandedClear` (real `syncSnapshotLocked` drive:
 unlanded clear retries marked, stamp commits 0, provenance-less
 retained refuses at the gate).
+
+## Round-5 fold (Codex5+Opus5)
+
+Acceptance accounting is centralized at a SINGLE CHOKE — the
+send-site success arms of `requestApplySnapshotPreparedLocked`:
+every publisher funnels through it, acceptance is known there (nil
+round trip), and a `fullBuild` snapshot landing through ANY first-
+acceptance path (Compile, overlay, scheduler, link-refresh,
+capture, worker-arm, deferred sync — including a latch-preserving
+partial carrying the retained full build) commits the stamp there.
+The round-4 patchwork (Compile's applyErr-based commit and the
+deferred-success manual commit) is DELETED; the helper now has one
+production callsite family. The status reconciler remains as the
+backstop for landings no response ever confirmed. Mutation-proven:
+neutering the choke commits turns the overlay-first, clear-e2e,
+count-change-e2e and deferred-clear tests RED; the old direct-helper
+tests (tail/status) are retained as unit pins but no longer carry
+the lifecycle claim — the e2e/overlay tests do.

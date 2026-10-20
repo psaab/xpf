@@ -412,19 +412,12 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	snap.fullBuild = true
 	m.mu.Unlock()
 	compiled, applyErr := m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
-	if applyErr == nil || isPublishedSnapshotTailError(applyErr) {
-		// Commit on HELPER ACCEPTANCE, not outer-call success (round-4):
-		// a PublishedSnapshotTailError means the snapshot IS enforced
-		// (applyCompiledSnapshot already advanced lastSnapshot/
-		// publishedSnapshot), so the stamp follows it or every later
-		// partial wedges against the stale count. Definite refusals and
-		// unknown outcomes do NOT commit here — the status-loop
-		// reconciler (syncSnapshotLocked) commits from helper-proven
-		// state when the landing is observed.
-		m.mu.Lock()
-		m.commitExpectedPolicyCountFromLandedSnapshot(snap)
-		m.mu.Unlock()
-	}
+	// #15937 round-5: no stamp commit here. Acceptance accounting lives
+	// at the single send-site choke (requestApplySnapshotPreparedLocked
+	// commits for fullBuild snapshots on a nil round trip), which also
+	// covers tail-error accepts (the apply landed before the tail
+	// failed) and every alternate first-acceptance publisher. Committing
+	// here as well would double-own the invariant.
 	if replayInFlight {
 		m.mu.Lock()
 		if applyErr == nil {

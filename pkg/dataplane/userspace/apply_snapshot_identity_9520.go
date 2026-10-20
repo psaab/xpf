@@ -313,6 +313,18 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
 	if err == nil {
 		m.recordSchedulerSnapshotAppliedLocked(snap)
+		// #15937 round-5: SINGLE CHOKE for stamp accounting. Every
+		// publisher funnels through here and this is where acceptance
+		// is KNOWN (nil round trip), so a full-build snapshot that
+		// lands through ANY first-acceptance path (Compile, overlay,
+		// scheduler, link-refresh, capture, worker-arm, deferred
+		// sync — including a latch-preserving partial carrying the
+		// retained full build) commits the stamp HERE. No publisher
+		// can clear retry debt / the pending latch without passing
+		// this point. Partials (fullBuild=false) never move it.
+		if snap.fullBuild {
+			m.commitExpectedPolicyCountFromLandedSnapshot(snap)
+		}
 		return nil
 	}
 	if !isSnapshotContentConflict(err) {
@@ -335,6 +347,9 @@ func (m *Manager) requestApplySnapshotPreparedLocked(snap *ConfigSnapshot, statu
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
 	if err == nil {
 		m.recordSchedulerSnapshotAppliedLocked(snap)
+		if snap.fullBuild {
+			m.commitExpectedPolicyCountFromLandedSnapshot(snap)
+		}
 	}
 	if isSnapshotContentConflict(err) && m.generation < snap.Generation {
 		// A second conflict proves the helper holds this generation too. It is not

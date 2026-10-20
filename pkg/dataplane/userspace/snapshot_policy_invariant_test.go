@@ -401,6 +401,15 @@ func TestCompileClearAllCommitsStampAndMarker(t *testing.T) {
 	if clearSnap.ClearPolicies {
 		t.Fatal("marker must be SPENT after the send (retained clones must not inherit it)")
 	}
+	// Round-5 choke: the successful marked send IS an acceptance, so the
+	// stamp already committed to 0 at the send site. Restamp to the
+	// retained-set count to model the state this test's second half
+	// measures (a partial arriving while the stamp still expects the
+	// old set — e.g. before any accepted clear).
+	if m.expectedPolicyCount != 0 {
+		t.Fatalf("stamp after accepted marked send = %d, want 0 (send-site choke)", m.expectedPolicyCount)
+	}
+	m.expectedPolicyCount = len(good.Policies)
 	// A partial both-zeroed clone of the now-retained snapshot (marker
 	// spent) against the still-non-zero stamp must refuse: the stamp
 	// only moves after a successful full-Compile apply (see
@@ -854,5 +863,64 @@ func TestSyncRetryRemarksUnlandedClear(t *testing.T) {
 	clone := unmarked
 	if err := m2.validateSnapshotForSend(&clone); !errors.Is(err, errSnapshotPolicyMismatch) {
 		t.Fatalf("provenance-less empty retained = %v, want errSnapshotPolicyMismatch", err)
+	}
+}
+
+// TestOverlayFirstAcceptanceCommitsStamp reproduces the round-5
+// blocker interleaving: a full Compile's response is LOST (unknown
+// outcome, retained full build in debt, latch set, stamp stale), and
+// a route-overlay publication carrying the retained full build is the
+// FIRST accepted publish. The send-site choke must commit the stamp
+// at that acceptance — before the fix the stamp stayed stale and the
+// next valid partial refused forever with no status-loop repair.
+func TestOverlayFirstAcceptanceCommitsStamp(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(good, rec)
+	m.expectedPolicyCount = 1 // prior accepted count N
+
+	// Retained: the lost-response full build (count M=2 policies on the
+	// wire, generation 8), latch still pending its first acceptance.
+	retained := *good
+	retained.Policies = append(append([]PolicyRuleSnapshot{}, good.Policies...), good.Policies[0])
+	retained.Summary.PolicyCount = len(retained.Policies)
+	retained.Generation = 8
+	m.lastSnapshot = &retained
+	m.publishedSnapshot = 7
+	m.pendingFullSnapshotMetadata = true
+	m.applySnapshotOutcomeUnknown = true
+
+	// Overlay clone under the latch: strip SKIPPED (first-acceptance
+	// path), so it carries fullBuild=true — exactly the production
+	// interleaving. It sends through the funnel and is accepted.
+	overlay := retained
+	overlay.Neighbors = nil
+	if err := m.requestApplySnapshotPreparedLocked(&overlay, &ProcessStatus{}); err != nil {
+		t.Fatalf("overlay first-acceptance must publish: %v", err)
+	}
+	if len(rec.sent) != 1 {
+		t.Fatalf("overlay sends = %d, want 1", len(rec.sent))
+	}
+	if m.expectedPolicyCount != len(retained.Policies) {
+		t.Fatalf("stamp after overlay first-acceptance = %d, want %d (send-site choke must commit)",
+			m.expectedPolicyCount, len(retained.Policies))
+	}
+	// Latch cleared by the acceptance accounting the publisher performs;
+	// simulate the publisher's post-success latch clear.
+	m.pendingFullSnapshotMetadata = false
+	// Subsequent stripped partial sized for the ACCEPTED set publishes.
+	partial := retained
+	partial.Generation = 9
+	stripSingleUseCommitMetadata(&partial)
+	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); err != nil {
+		t.Fatalf("accepted-count partial after overlay acceptance must publish: %v", err)
+	}
+	// And a stale-count partial refuses.
+	stale := *good
+	stale.Generation = 10
+	stripSingleUseCommitMetadata(&stale)
+	if err := m.requestApplySnapshotPreparedLocked(&stale, &ProcessStatus{}); !errors.Is(err, errSnapshotPolicyMismatch) {
+		t.Fatalf("stale-count partial = %v, want errSnapshotPolicyMismatch", err)
 	}
 }
