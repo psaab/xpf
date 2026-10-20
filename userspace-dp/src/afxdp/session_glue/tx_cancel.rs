@@ -36,7 +36,8 @@ peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
 forward_key: &SessionKey,
 nat: NatDecision,
 pending_forwards: &mut Vec<PendingForwardRequest>,
-shared_recycles: &mut Vec<(u32, u64)>,) {
+shared_recycles: &mut Vec<(u32, u64)>,
+keep_triggers: &[(SessionKey, u64)],) {
     let reverse_key = reverse_session_key(forward_key, nat);
     let forward_session_id = sessions.session_id_for(forward_key);
     let reverse_session_id = sessions.session_id_for(&reverse_key);
@@ -92,7 +93,18 @@ shared_recycles: &mut Vec<(u32, u64)>,) {
     release_coordinator_session_rows(current.bpf_maps.session_map.handle(), &reverse_key);
     replicate_session_delete(peer_worker_commands, forward_key);
     replicate_session_delete(peer_worker_commands, &reverse_key);
-    cancel_pending_forwards(current, pending_forwards, forward_key, &reverse_key);
+    // #15947 (H29-01): cancel every pending forward for this flow EXCEPT
+    // the triggering RST's own request (identified by flow key + desc
+    // addr) — the pre-fix cancel recycled the RST itself, so with
+    // rst-invalidate-session on, the RST that tore the session down
+    // never reached the wire.
+    cancel_pending_forwards_except(
+        current,
+        pending_forwards,
+        forward_key,
+        &reverse_key,
+        keep_triggers,
+    );
     cancel_queued_flow(
         left,
         current,
@@ -203,18 +215,37 @@ pub(in crate::afxdp) fn cancel_pending_forwards(binding: &mut BindingWorker,
 pending_forwards: &mut Vec<PendingForwardRequest>,
 forward_key: &SessionKey,
 reverse_key: &SessionKey,) {
-    let mut kept = Vec::with_capacity(pending_forwards.len());
-    for req in pending_forwards.drain(..) {
-        if pending_forward_matches_flow(&req, forward_key, reverse_key) {
+    cancel_pending_forwards_except(binding, pending_forwards, forward_key, reverse_key, &[]);
+}
+
+/// #15947 (H29-01): like `cancel_pending_forwards`, but requests
+/// identified by `keeps` ((flow key, desc.addr) of this batch's
+/// triggering RSTs) are retained so they still reach TX after the
+/// teardown. This scans in place instead of allocating a fresh kept
+/// vector for every reset drain.
+pub(in crate::afxdp) fn cancel_pending_forwards_except(
+    binding: &mut BindingWorker,
+    pending_forwards: &mut Vec<PendingForwardRequest>,
+    forward_key: &SessionKey,
+    reverse_key: &SessionKey,
+    keeps: &[(SessionKey, u64)],
+) {
+    let mut index = 0;
+    while index < pending_forwards.len() {
+        let req = &pending_forwards[index];
+        let is_trigger = keeps.iter().any(|(key, addr)| {
+            req.flow_key.as_ref() == Some(key) && req.desc.addr == *addr
+        });
+        if pending_forward_matches_flow(req, forward_key, reverse_key) && !is_trigger {
+            let req = pending_forwards.remove(index);
             binding
                 .tx_pipeline
                 .pending_fill_frames
                 .push_back(req.desc.addr);
-            continue;
+        } else {
+            index += 1;
         }
-        kept.push(req);
     }
-    *pending_forwards = kept;
 }
 
 pub(in crate::afxdp) fn recycle_cancelled_prepared(binding: &mut BindingWorker,

@@ -978,25 +978,34 @@ fn established_foreign_and_owner_icmp_denies_emit_policy_events_without_session_
             after_metadata.egress_zone, before_metadata.egress_zone,
             "{name}: egress zone"
         );
+        // #15947 adjudication (H30-01 vs H30-03 foreign deny-counter
+        // conflict, resolved for CREDIT): a matched Deny/Reject is a rule
+        // hit and charges its denying rule exactly once — the same
+        // convention as the session-miss path (PolicyHitCount::Count),
+        // the #15664 junos-host re-check, and the flow-cache cached-deny
+        // replay. `without_counting` suppresses only the ADMITTING rule's
+        // double-charge; it never exempted the denying rule. This cell
+        // previously asserted zero for all deny counters, encoding the
+        // H30-01 defect; the expectations below are the migrated ones.
         assert_eq!(
             rule_hits(&fw, "lan-icmp-permit"),
             before_permit_hits,
-            "{name}: permit hit counter"
+            "{name}: admitting permit hit counter must not charge a denied hit"
         );
         assert_eq!(
             rule_hits(&fw, "dmz-icmp-deny"),
-            before_foreign_deny_hits,
-            "{name}: foreign deny hit counter"
+            before_foreign_deny_hits + u64::from(name == "foreign"),
+            "{name}: foreign deny charges dmz-icmp-deny exactly once (#15947)"
         );
         assert_eq!(
             rule_hits(&fw, "wan-icmp-deny"),
-            before_reverse_deny_hits,
-            "{name}: reverse deny hit counter"
+            before_reverse_deny_hits + u64::from(name == "owner-reverse"),
+            "{name}: owner-reverse deny charges wan-icmp-deny exactly once (#15947)"
         );
         assert_eq!(
             fw.policy.default_counter.test_packet_count(),
-            before_default_hits,
-            "{name}: default-policy hit counter"
+            before_default_hits + u64::from(name == "owner-forward"),
+            "{name}: owner-forward default deny charges the default counter exactly once (#15947)"
         );
 
         let event = event_rx
@@ -1045,6 +1054,44 @@ fn established_foreign_and_owner_icmp_denies_emit_policy_events_without_session_
             event_rx.try_recv().is_err(),
             "{name}: exactly one denial event per packet"
         );
+    }
+}
+
+#[test]
+fn foreign_session_hit_deny_credits_denying_rule_once_15947() {
+    // Dedicated H30-01 deny-credit cell (foreign arm): an established hit
+    // denied by the ARRIVAL zone's rule charges that denying rule exactly
+    // once per denied packet, and never charges the admitting permit.
+    // Two denied foreign hits charge +2; the session is untouched.
+    let fw = icmp_hit_forwarding();
+    let (key, mut sessions) = established_icmp_hit(false, Some((7, 9)), None);
+    let permit0 = rule_hits(&fw, "lan-icmp-permit");
+    let deny0 = rule_hits(&fw, "dmz-icmp-deny");
+    for round in 1..=2u64 {
+        let (_batch, dbg, _handle, _rx) =
+            drive_icmp_hit_with_events(&fw, &mut sessions, DMZ_IFINDEX, 8);
+        assert_eq!(dbg.session_hit, 1, "round {round}: established hit");
+        assert_eq!(dbg.tx, 0, "round {round}: denied packet not transmitted");
+        assert_eq!(
+            dbg.foreign_authority_drops, 1,
+            "round {round}: foreign authority drop"
+        );
+        assert_eq!(
+            rule_hits(&fw, "dmz-icmp-deny"),
+            deny0 + round,
+            "round {round}: denying rule charged exactly once per denied hit"
+        );
+        assert_eq!(
+            rule_hits(&fw, "lan-icmp-permit"),
+            permit0,
+            "round {round}: admitting permit never charged for a denied hit"
+        );
+        assert_eq!(
+            session_count(&sessions),
+            1,
+            "round {round}: session untouched"
+        );
+        let _ = &key;
     }
 }
 

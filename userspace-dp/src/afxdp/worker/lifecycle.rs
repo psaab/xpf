@@ -252,7 +252,16 @@ pub(super) fn poll_binding(
         }
         let mut pending_forwards = core::mem::take(&mut binding.scratch.scratch_forwards);
         let mut rst_teardowns = core::mem::take(&mut binding.scratch.scratch_rst_teardowns);
-        for (forward_key, nat) in rst_teardowns.drain(..) {
+        // #15947 (H29-01): two accepted RSTs for one session in the same
+        // batch must not cross-cancel. Collect every triggering request's
+        // (flow key, desc.addr) exception BEFORE any teardown mutates
+        // pending_forwards; each teardown then keeps that batch's entire
+        // trigger set (duplicates are harmless), rather than only its own.
+        let rst_trigger_keeps: Vec<(SessionKey, u64)> = rst_teardowns
+            .iter()
+            .filter_map(|(_, _, trigger)| trigger.clone())
+            .collect();
+        for (forward_key, nat, _trigger) in rst_teardowns.drain(..) {
             // Evict from flow cache so stale entries aren't used after RST.
             // #918: 4-way set-associative cache requires walking the set
             // for the matching key — `invalidate_slot` does that.
@@ -271,9 +280,9 @@ pub(super) fn poll_binding(
                 nat,
                 &mut pending_forwards,
                 shared_recycles,
+                &rst_trigger_keeps,
             );
         }
-        binding.scratch.scratch_rst_teardowns = rst_teardowns;
         // #7212: evict the flow-cache slots backing every session this pass
         // REVOKED against a changed static interface INPUT filter.
         //

@@ -434,13 +434,45 @@ pub(super) fn build_local_time_exceeded_request(
         );
     }
 
+    // #15947 (H26-02): the request meta must describe the generated
+    // Time-Exceeded frame, not the trigger packet whose TTL expired. The
+    // frame was built above, so parse its actual wire identity (router ->
+    // original sender, ICMP/ICMPv6, no ports, generated length/offsets)
+    // and then carry only the ingress binding identity needed to resolve
+    // the mirror. Parsing failures fail closed: do not queue a reply whose
+    // mirror metadata is knowingly stale.
+    let Some((generated_flow, generated_meta)) =
+        crate::afxdp::poll_descriptor::queued_embedded_icmp_identity(&prebuilt_frame)
+    else {
+        return None;
+    };
+    let mut wire_meta: ForwardPacketMeta = generated_meta.into();
+    // `UserspaceDpMeta::default()` in the identity helper intentionally
+    // leaves addresses zero; mirror filtering reads them from this
+    // ForwardPacketMeta when flow_key is None, so stamp the parsed
+    // generated source/destination explicitly.
+    match generated_flow.src_ip {
+        IpAddr::V4(ip) => wire_meta.flow_src_addr[..4].copy_from_slice(&ip.octets()),
+        IpAddr::V6(ip) => wire_meta.flow_src_addr.copy_from_slice(&ip.octets()),
+    }
+    match generated_flow.dst_ip {
+        IpAddr::V4(ip) => wire_meta.flow_dst_addr[..4].copy_from_slice(&ip.octets()),
+        IpAddr::V6(ip) => wire_meta.flow_dst_addr.copy_from_slice(&ip.octets()),
+    }
+    wire_meta.ingress_ifindex = meta.ingress_ifindex;
+    wire_meta.ingress_vlan_id = meta.ingress_vlan_id;
+    wire_meta.ingress_pcp = meta.ingress_pcp;
+    wire_meta.ingress_vlan_present = meta.ingress_vlan_present;
+    wire_meta.fabric_ingress_ifindex = meta.fabric_ingress_ifindex;
+    wire_meta.meta_flags = meta.meta_flags;
+
     Some(PendingForwardRequest {
         target_ifindex,
         target_binding_index: None,
         ingress_queue_id: ingress_ident.queue_id,
         desc,
         frame: PendingForwardFrame::Prebuilt(prebuilt_frame.into()),
-        meta: meta.into(),
+        meta: wire_meta,
         decision: SessionDecision { resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
@@ -457,7 +489,12 @@ pub(super) fn build_local_time_exceeded_request(
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
         apply_nat_on_fabric: false,
         expected_ports: None,
-        flow_key: Some(flow.forward_key.clone()),
+        // #15947 (H26-02): a locally generated reply is not the transit
+        // session's packet — carrying the transit flow_key would give it
+        // session authority in dispatch (mirror classification, CoS bucket)
+        // and let an RST-teardown cancel match it. Keep it flowless, the
+        // same invariant #5690 sets for embedded-ICMP reversals.
+        flow_key: None,
         nat64_reverse: None,
         overlap_admissions: None,
         cos_queue_id: verdict.cos_queue_id,

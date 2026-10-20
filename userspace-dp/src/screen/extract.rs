@@ -265,7 +265,26 @@ pub(crate) fn extract_screen_info(
                 }
                 if kind == IPOPT_LSRR || kind == IPOPT_SSRR {
                     info.saw_ipv4_source_route = true;
-                    break;
+                    // #15947 (H28-02): validate the source-route option's
+                    // own length and keep walking instead of breaking:
+                    // the pre-fix break returned Ok for a truncated LSRR
+                    // (no length byte), an LSRR with opt_len < 3 or
+                    // overrunning opt_end, and never walked a malformed
+                    // TLV placed after a well-formed LSRR — so with the
+                    // source-route screen disabled the malformed header
+                    // forwarded unscreened, breaking the #4543 contract
+                    // that ip-malformed drops regardless of that setting.
+                    // LSRR/SSRR are length-prefixed (kind, len, pointer,
+                    // route data), so the minimum well-formed length is 3.
+                    if pos + 1 >= opt_end {
+                        return Err(ScreenParseError::TruncatedIpv4Header);
+                    }
+                    let opt_len = frame[pos + 1] as usize;
+                    if opt_len < 3 || pos + opt_len > opt_end {
+                        return Err(ScreenParseError::TruncatedIpv4Header);
+                    }
+                    pos += opt_len;
+                    continue;
                 }
                 // Length-prefixed option: byte at pos+1 is the total
                 // option length (including the kind/length bytes). A

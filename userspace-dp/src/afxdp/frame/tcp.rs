@@ -169,6 +169,69 @@ pub(in crate::afxdp) fn extract_tcp_seq_ack_window(frame: &[u8]) -> Option<(u32,
     Some((u32::from_be_bytes([tcp[4],tcp[5],tcp[6],tcp[7]]), u32::from_be_bytes([tcp[8],tcp[9],tcp[10],tcp[11]]), u16::from_be_bytes([tcp[14],tcp[15]])))
 }
 
+/// #15947 (H29-02): extract (seq, ack, window, window_scale) — the scale
+/// is `Some` only when this segment is a SYN carrying a well-formed
+/// WSOPT (kind 3, length 3). The option walk mirrors
+/// `tcp_header_has_auth_option`: EOL terminates, NOP is single-byte,
+/// every other kind must carry a well-formed length inside the declared
+/// header; a malformed option stops the walk (no scale learned — the
+/// caller then tracks the unscaled window, the conservative direction).
+#[inline]
+pub(in crate::afxdp) fn extract_tcp_seq_ack_window_scale(
+    frame: &[u8],
+) -> Option<(u32, u32, u16, Option<u8>)> {
+    let (seq, ack, window) = extract_tcp_seq_ack_window(frame)?;
+    let l3 = frame_l3_offset(frame)?;
+    let ip = frame.get(l3..)?;
+    let addr_family = match ip.first()? >> 4 {
+        4 => libc::AF_INET as u8,
+        6 => libc::AF_INET6 as u8,
+        _ => return None,
+    };
+    let (l4_offset, protocol) = packet_rel_l4_offset_and_protocol(ip, addr_family)?;
+    if protocol != PROTO_TCP {
+        return None;
+    }
+    let tcp = ip.get(l4_offset..)?;
+    if tcp.len() < 20 {
+        return Some((seq, ack, window, None));
+    }
+    // Only a SYN negotiates the scale (RFC 7323 §2.2); other segments
+    // carrying WSOPT must not re-teach it.
+    if !crate::tcp_flags::has_syn(tcp[13]) {
+        return Some((seq, ack, window, None));
+    }
+    let header_len = ((tcp[12] >> 4) as usize) * 4;
+    if header_len < 20 || tcp.len() < header_len {
+        return Some((seq, ack, window, None));
+    }
+    let mut pos = 20usize;
+    let mut scale = None;
+    while pos < header_len {
+        let kind = tcp[pos];
+        if kind == 0 {
+            break;
+        }
+        if kind == 1 {
+            pos += 1;
+            continue;
+        }
+        if pos + 1 >= header_len {
+            break;
+        }
+        let opt_len = tcp[pos + 1] as usize;
+        if opt_len < 2 || pos + opt_len > header_len {
+            break;
+        }
+        if kind == 3 && opt_len == 3 {
+            scale = Some(tcp[pos + 2].min(14));
+            break;
+        }
+        pos += opt_len;
+    }
+    Some((seq, ack, window, scale))
+}
+
 /// Offset into `frame` of the first TCP PAYLOAD byte (#7699).
 ///
 /// `None` unless the frame really is TCP and its declared data offset fits

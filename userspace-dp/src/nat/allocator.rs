@@ -7602,7 +7602,7 @@ pub(super) const STICKY_POOL_HASH_SEED: u64 = 0x5354_4943_4b59_0001;
 /// node running the same pool config and across process restarts, so
 /// the address survives an HA failover for new flows as well as for
 /// synced sessions (#14627).
-pub(super) fn sticky_pool_index(src_ip: IpAddr, pool_len: usize) -> usize {
+pub(crate) fn sticky_pool_index(src_ip: IpAddr, pool_len: usize) -> usize {
     sticky_pool_index_seeded(src_ip, pool_len, STICKY_POOL_HASH_SEED)
 }
 

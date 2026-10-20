@@ -767,8 +767,36 @@ impl SessionEntry {
     /// Record this direction's seq/window from an observed segment.
     #[inline]
     pub(crate) fn note_tcp_seq(&mut self, seq: u32, ack: u32, window: u16, payload_len: u32, tcp_flags: u8, max_window: u32) {
+        self.note_tcp_seq_scaled(seq, ack, window, None, payload_len, tcp_flags, max_window);
+    }
+    /// #15947 (H29-02): note with the RFC 7323 window scale parsed from
+    /// this segment's SYN options (`window_scale` is Some only on a SYN
+    /// carrying WSOPT). The scale is learned once from the SYN and then
+    /// applied to every window this direction advertises; the SYN's own
+    /// window field is never scaled (RFC 7323 §2.3). The result is
+    /// bounded by `maximum-window` (0 = the 64K default cap).
+    #[inline]
+    pub(crate) fn note_tcp_seq_scaled(&mut self, seq: u32, ack: u32, window: u16, window_scale: Option<u8>, payload_len: u32, tcp_flags: u8, max_window: u32) {
         let cap = if max_window == 0 { 65535 } else { max_window };
-        let wnd = (window as u32).min(cap);
+        if has_syn(tcp_flags) {
+            if let Some(scale) = window_scale {
+                // RFC 7323 caps the shift at 14; clamp defensively so a
+                // malformed option cannot overflow the scaled window.
+                self.tcp_window_scale = Some(scale.min(14));
+            }
+            self.tcp_syn_seen = true;
+        }
+        // RFC 7323: scaling applies only after WSOPT is seen on SYNs in
+        // BOTH directions. tcp_ws_negotiated is set by the table when it
+        // notes/seeds a SYN whose companion has already offered WSOPT;
+        // until then the offered shift is retained but not applied.
+        let shift = if has_syn(tcp_flags) || !self.tcp_ws_negotiated {
+            0
+        } else {
+            self.tcp_window_scale.unwrap_or(0)
+        };
+        let scaled = (window as u32).saturating_mul(1u32 << shift);
+        let wnd = scaled.min(cap);
         // This direction's send stream: peer expects seq+payload (+SYN/FIN).
         let mut end = seq.wrapping_add(payload_len);
         if has_syn(tcp_flags) { end = end.wrapping_add(1); }
@@ -1327,6 +1355,19 @@ struct SessionEntry {
     tcp_rcv_nxt: u32,
     tcp_rcv_wnd: u32,
     tcp_seq_seen: bool,
+    /// #15947 (H29-02): RFC 7323 window-scale shift learned from this
+    /// direction's SYN (WSOPT kind 3), or None until a SYN carrying the
+    /// option is noted. Node-local, no wire — a peer re-derives its own
+    /// from the SYNs it observes. Without it the tracked window was the
+    /// raw u16 header value, so every `maximum-window` above 64K was a
+    /// no-op and scaled windows were understated by the shift.
+    tcp_window_scale: Option<u8>,
+    /// True once this entry has observed a SYN in its own direction, so
+    /// negotiation state can be distinguished from a mid-stream pickup.
+    tcp_syn_seen: bool,
+    /// True only when BOTH directions offered WSOPT (RFC 7323 requires
+    /// bilateral negotiation before either window field is scaled).
+    tcp_ws_negotiated: bool,
 }
 
 /// Snapshot of one live half after a policy rebind. The worker uses this
@@ -1694,6 +1735,9 @@ pub(crate) struct SessionTable {
     /// authority bit to reject stale same-RG bulk requests until activation.
     demoted_owner_rgs: FxHashSet<i32>,
     deltas: VecDeque<SessionDelta>,
+    /// HA transition withheld by a deferring flow-cache probe until the
+    /// packet survives output-filter/policer admission.
+    pending_probe_state_updates: Vec<(SessionKey, u8, u8)>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2048,6 +2092,7 @@ impl SessionTable {
             owner_rg_sessions: FxHashMap::default(),
             demoted_owner_rgs: FxHashSet::default(),
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
+            pending_probe_state_updates: Vec::new(),
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
             reserved_session_slots: 0,
@@ -3547,7 +3592,71 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true)
+    }
+
+    /// Probe a flow-cache hit while deferring the HA completion delta.
+    ///
+    /// The cache caller still has output-filter and policer verdicts to
+    /// replay after this probe. Completing the local handshake here is
+    /// needed for liveness, but publishing `SessionDeltaKind::Update`
+    /// before those verdicts would tell the standby that an ACK later
+    /// discarded on this node completed the handshake. The caller invokes
+    /// [`Self::emit_probe_hit_state_update`] only after the packet is
+    /// admitted for TX; a dropped packet simply never publishes it.
+    pub fn probe_hit_deferring_state_update(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+    ) -> bool {
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false)
+    }
+
+    /// Emit the HA Update withheld by
+    /// [`Self::probe_hit_deferring_state_update`] after TX admission.
+    pub fn emit_probe_hit_state_update(&mut self, key: &SessionKey) {
+        // Round-3: an intervening admitted flow must not discard another
+        // flow's deferred transition. Only consume the pending record when
+        // it belongs to this key; a mismatching admission leaves it for
+        // its own retransmitted/admitted completing packet.
+        let pending_matches = self
+            .pending_probe_state_updates
+            .iter()
+            .any(|(matched_key, _, _)| matched_key == key);
+        if pending_matches {
+            let pending = std::mem::take(&mut self.pending_probe_state_updates);
+            let mut retained = Vec::with_capacity(pending.len());
+            for (matched_key, class_before, handshake_before) in pending {
+                if matched_key == *key {
+                    self.emit_session_state_update(&matched_key, class_before, handshake_before);
+                } else {
+                    retained.push((matched_key, class_before, handshake_before));
+                }
+            }
+            self.pending_probe_state_updates = retained;
+        }
+    }
+
+    fn probe_hit_inner(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        emit_state_update: bool,
+    ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #15947 (H29-04): wire state BEFORE the completion below, so the
+        // HA Update emission can tell whether the handshake actually
+        // transitioned (emit_session_state_update is transition-only).
+        let mut handshake_state_before = 0u8;
+        let mut close_class_before = 0u8;
         let mut canonical_refresh_key: Option<SessionKey> = None;
         let mut reverse_fold: Option<(SessionKey, crate::nat::NatDecision)> = None;
         match self.record_by_key_mut(key) {
@@ -3568,6 +3677,9 @@ impl SessionTable {
                     && !is_closing(tcp_flags)
                     && (entry.syn_ack_first == entry.metadata.is_reverse)
                 {
+                    handshake_state_before =
+                        entry.tcp_handshake_state_wire(key.protocol);
+                    close_class_before = entry.tcp_close_class_wire();
                     completing = Some((record.key.clone(), entry.decision.nat));
                 }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
@@ -3626,6 +3738,41 @@ impl SessionTable {
                     handshake_completed: true,
                 },
             );
+            // #15947 (H29-04): the slow path emits the HA state Update on
+            // this same transition (lookup.rs); without it a cache-served
+            // completing ACK leaves the standby holding a pending-handshake
+            // entry on the short opening expiry. The flow-cache caller can
+            // defer this until after its output-filter/policer verdict.
+            if emit_state_update {
+                self.emit_session_state_update(
+                    &matched_key,
+                    close_class_before,
+                    handshake_state_before,
+                );
+            } else {
+                // Deferred completions are retained per key: a second
+                // completing flow must neither publish nor discard an
+                // older flow's unadmitted transition. Bound the queue so a
+                // sustained dropped-ACK stream cannot grow it without
+                // limit; 64 covers a full poll batch of completions.
+                self.pending_probe_state_updates
+                    .retain(|(old_key, _, _)| old_key != &matched_key);
+                if self.pending_probe_state_updates.len() >= 64 {
+                    // Overflow must not silently lose an HA transition:
+                    // publish the evicted oldest Update immediately and
+                    // latch delta-loss so the worker forces a full resync
+                    // (the same recovery used for delta-ring overflow).
+                    let (old_key, old_class, old_handshake) =
+                        self.pending_probe_state_updates.remove(0);
+                    self.emit_session_state_update(&old_key, old_class, old_handshake);
+                    self.set_delta_loss();
+                }
+                self.pending_probe_state_updates.push((
+                    matched_key.clone(),
+                    close_class_before,
+                    handshake_state_before,
+                ));
+            }
             self.push_to_wheel(&matched_key, now_ns);
         } else if let Some(canonical_key) = canonical_refresh_key {
             self.touch(&canonical_key, now_ns);
@@ -3715,6 +3862,9 @@ impl SessionTable {
         payload_len: u32,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #15947 (H29-04): pre-completion wire state for the HA Update.
+        let mut handshake_state_before = 0u8;
+        let mut close_class_before = 0u8;
         let canonical_refresh_key = match self.record_by_key(key) {
             Some(record) => {
                 let entry = &record.entry;
@@ -3734,6 +3884,9 @@ impl SessionTable {
                     && !is_closing(tcp_flags)
                     && (entry.syn_ack_first == entry.metadata.is_reverse)
                 {
+                    handshake_state_before =
+                        entry.tcp_handshake_state_wire(key.protocol);
+                    close_class_before = entry.tcp_close_class_wire();
                     completing = Some((record.key.clone(), entry.decision.nat));
                 }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
@@ -3780,6 +3933,12 @@ impl SessionTable {
                     established: false,
                     handshake_completed: true,
                 },
+            );
+            // #15947 (H29-04): HA Update on completion, as in probe_hit.
+            self.emit_session_state_update(
+                &matched_key,
+                close_class_before,
+                handshake_state_before,
             );
             self.push_to_wheel(&matched_key, now_ns);
         } else if let Some(canonical_key) = canonical_refresh_key {
@@ -4224,6 +4383,17 @@ impl SessionTable {
         let live_policy_gen = self.policy_revalidation_gen;
         let reverse_syn_ack;
         let handshake_completed;
+        // #15947 (H29-04): pre-mutation wire state for the HA Update.
+        let close_class_before = self
+            .entries
+            .get(handle as usize)
+            .map(|record| record.entry.tcp_close_class_wire())
+            .unwrap_or(0);
+        let handshake_state_before = self
+            .entries
+            .get(handle as usize)
+            .map(|record| record.entry.tcp_handshake_state_wire(protocol))
+            .unwrap_or(0);
         {
             let record = self
                 .entries
@@ -4377,6 +4547,10 @@ impl SessionTable {
                     handshake_completed,
                 },
             );
+            // #15947 (H29-04): HA Update on completion/promotion, as in
+            // the lookup path — emit_session_state_update is
+            // transition-only, so a non-transition emits nothing.
+            self.emit_session_state_update(key, close_class_before, handshake_state_before);
         }
         if protocol == PROTO_TCP {
             if !metadata.is_reverse {

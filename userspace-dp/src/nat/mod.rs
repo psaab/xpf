@@ -284,7 +284,8 @@ pub(crate) struct NatScopeCtx<'a> {
 pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentSourceKey,
-    PortAllocator, PortAllocatorSnapshot, SourceNatReservationSnapshot,
+    PortAllocator, PortAllocatorSnapshot, SourceNatReservationSnapshot, deterministic_indices_v4,
+    sticky_pool_index,
 };
 #[cfg(test)]
 pub(crate) use allocator::PersistentLeaseDebugState;
@@ -325,7 +326,7 @@ pub(crate) use source::{
 // Untracked, so they ride the same gate — a production caller would silently
 // mint single-holder allocations.
 pub(crate) use source::retire_worker_from_pool_rules;
-pub(crate) use source::{source_nat_translation_matches, source_nat_tuple_translation_possible};
+pub(crate) use source::{candidate_source_nat_translations, source_nat_translation_matches, source_nat_tuple_translation_possible};
 #[cfg(test)]
 pub(crate) use source::{
     match_source_nat, match_source_nat_result, release_source_nat_allocation,

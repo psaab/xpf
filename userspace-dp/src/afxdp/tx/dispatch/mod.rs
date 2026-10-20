@@ -702,7 +702,44 @@ fn enqueue_copy_fallback_frame(
     };
     match built_frames {
         Some(frames) => {
+            // #15947 (H26-04): pre-validate every built frame BEFORE any
+            // enqueue or commit. The pre-fix loop enqueued fragment 0,
+            // fired its WireGuard commit and consumed the overlap
+            // admission, then discovered fragment 1 was oversized — with
+            // fragment 0 already on the wire, state committed, and
+            // fallback_to_slow_path=false (enqueued != 0), so the partial
+            // datagram could never be retried whole.
+            if frames.iter().any(|(frame, _)| copy_frame_is_oversized(frame.len())) {
+                for (frame, _) in frames {
+                    let copy_len = frame.len();
+                    if copy_frame_is_oversized(copy_len) {
+                        record_exception(
+                            recent_exceptions,
+                            ingress_ident,
+                            "oversized_forward_frame",
+                            copy_len as u32,
+                            Some(request.meta.into()),
+                            None,
+                            forwarding,
+                        );
+                    }
+                    crate::afxdp::cos::redirect_pool::recycle(frame);
+                }
+                // Oversized is undeliverable by construction: recycle
+                // and drop WITHOUT slow-path reinject (base contract).
+                return (true, false);
+            }
             let mut enqueued = 0usize;
+            // WireGuard commits are held until every fragment is accepted
+            // by an enqueue API whose Ok is an admission receipt. The
+            // cross-owner path now uses `try_enqueue_tx_owned`, so Ok
+            // means the bounded inbox actually retained the request. The
+            // local `pending_tx_local` VecDeque is unbounded at push time
+            // and later FIFO-bounded by `bound_pending_tx_local`; that is
+            // a documented queue-eviction contract, not an admission
+            // refusal this fast loop can observe synchronously. Do not
+            // claim hardware delivery—only queue admission.
+            let mut pending_wg_commits: Vec<_> = Vec::new();
             for (frame, wg_commit) in frames {
                 if cfg!(feature = "debug-log") && enqueued == 0 {
                     let source_ports = live_frame_ports_from_meta_bytes(source_frame, request.meta);
@@ -739,76 +776,76 @@ fn enqueue_copy_fallback_frame(
                     }
                 }
                 let copy_len = frame.len();
+                // Oversize was pre-validated above for the whole datagram;
+                // this arm is now unreachable but stays fail-closed.
                 if copy_frame_is_oversized(copy_len) {
-                    record_exception(
-                        recent_exceptions,
-                        ingress_ident,
-                        "oversized_forward_frame",
-                        copy_len as u32,
-                        Some(request.meta.into()),
-                        None,
-                        forwarding,
-                    );
-                    // #2208: oversized fallback-copy frame —
-                    // undeliverable. Fall through to the
-                    // finalizer (recycle the ingress
-                    // descriptor); the bare `continue;` here
-                    // leaked it. Drop-and-recycle, no slow-path
-                    // reinject (the frame is already oversized).
                     build_failed = true;
+                    fallback_to_slow_path = enqueued == 0;
                     crate::afxdp::cos::redirect_pool::recycle(frame);
                     break;
-                } else {
-                    let req = TxRequest {
-                        bytes: frame,
-                        expected_ports,
-                        expected_addr_family: request.meta.addr_family,
-                        expected_protocol: request.meta.protocol,
-                        flow_key: if enqueued == 0 { flow_key.take() } else { None },
-                        egress_ifindex: request.decision.resolution.egress_ifindex,
-                        cos_queue_id: request.cos_queue_id,
-                        dscp_rewrite: request.dscp_rewrite,
-                        mirror_clone: false,
-                        overlap_admissions: if enqueued == 0 {
-                            overlap_admissions.take()
-                        } else {
-                            None
-                        },
-                        enqueue_ns: 0,
-                    };
-                    if let Err(rejected) =
-                        enqueue_local_request_to_target_or_owner(target_binding, req)
-                    {
-                        crate::afxdp::cos::redirect_pool::recycle(rejected.bytes);
-                        // #2208: cross-binding CoS-owner queue
-                        // full (TX congestion). Set the
-                        // build-failure flags and FALL THROUGH
-                        // to the finalizer instead of the old
-                        // bare `continue;`, which skipped both
-                        // handle_forward_build_failure (the
-                        // slow-path reinject the flags request)
-                        // AND recycle_ingress_frame (leaking the
-                        // ingress descriptor under congestion).
-                        build_failed = true;
-                        fallback_to_slow_path = enqueued == 0;
-                        break;
+                }
+                let req = TxRequest {
+                    bytes: frame,
+                    expected_ports,
+                    expected_addr_family: request.meta.addr_family,
+                    expected_protocol: request.meta.protocol,
+                    // #15947 (H26-04): every fragment carries the flow key
+                    // (cloned), like the TCP-segmentation sibling sites —
+                    // the pre-fix `take()` on fragment 0 left fragments 2+
+                    // keyless, hashing them into the reserved CoS bucket 0
+                    // instead of the datagram's 5-tuple bucket.
+                    flow_key: flow_key.clone(),
+                    egress_ifindex: request.decision.resolution.egress_ifindex,
+                    cos_queue_id: request.cos_queue_id,
+                    dscp_rewrite: request.dscp_rewrite,
+                    mirror_clone: false,
+                    overlap_admissions: if enqueued == 0 {
+                        overlap_admissions.take()
                     } else {
-                        if let Some(commit) = wg_commit {
-                            if let Some(engine) = forwarding
-                                .wg_engines
-                                .get(&request.decision.resolution.tunnel_endpoint_id)
-                            {
-                                engine.note_encap_sent(&commit.peer_pubkey, commit.outcome);
-                            }
-                        }
-                        dbg.enqueue_ok += 1;
-                        dbg.enqueue_copy += 1;
-                        target_binding.tx_counters.pending_copy_tx_packets += 1;
-                        dbg.tx_bytes_total += copy_len as u64;
-                        if (copy_len as u32) > dbg.tx_max_frame {
-                            dbg.tx_max_frame = copy_len as u32;
-                        }
-                        enqueued += 1;
+                        None
+                    },
+                    enqueue_ns: 0,
+                };
+                if let Err(rejected) =
+                    enqueue_local_request_to_target_or_owner(target_binding, req)
+                {
+                    crate::afxdp::cos::redirect_pool::recycle(rejected.bytes);
+                    // #2208: cross-binding CoS-owner queue full (TX
+                    // congestion). Set the build-failure flags and FALL
+                    // THROUGH to the finalizer instead of the old bare
+                    // `continue;`, which skipped both
+                    // handle_forward_build_failure (the slow-path reinject
+                    // the flags request) AND recycle_ingress_frame
+                    // (leaking the ingress descriptor under congestion).
+                    // Note: fragments already enqueued stay enqueued (they
+                    // cannot be recalled); the held WireGuard commits are
+                    // dropped un-fired below, so no encap state is
+                    // committed for the undelivered tail.
+                    build_failed = true;
+                    fallback_to_slow_path = enqueued == 0;
+                    break;
+                }
+                if let Some(commit) = wg_commit {
+                    pending_wg_commits.push(commit);
+                }
+                dbg.enqueue_ok += 1;
+                dbg.enqueue_copy += 1;
+                target_binding.tx_counters.pending_copy_tx_packets += 1;
+                dbg.tx_bytes_total += copy_len as u64;
+                if (copy_len as u32) > dbg.tx_max_frame {
+                    dbg.tx_max_frame = copy_len as u32;
+                }
+                enqueued += 1;
+            }
+            // #15947 (H26-04): fire WireGuard commits once, only after
+            // every fragment of the datagram has enqueued.
+            if !build_failed {
+                for commit in pending_wg_commits {
+                    if let Some(engine) = forwarding
+                        .wg_engines
+                        .get(&request.decision.resolution.tunnel_endpoint_id)
+                    {
+                        engine.note_encap_sent(&commit.peer_pubkey, commit.outcome);
                     }
                 }
             }

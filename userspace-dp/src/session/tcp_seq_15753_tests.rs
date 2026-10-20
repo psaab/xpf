@@ -17,3 +17,115 @@ fn in_window_rst_valid_blind_rst_invalid_15753() {
     assert!(!e.closing);
     let _ = TCP_RST;
 }
+
+#[test]
+fn scaled_window_and_receiver_window_verdict_15947() {
+    // #15947 (H29-02 arms 1-2): SYN WSOPT scale 7 + window 8192 (scaled
+    // 1,048,576) under maximum-window 256K, then a legitimate FIN beyond
+    // +65535. Pre-fix the tracked window was the raw u16 (8192) checked
+    // against the sender's own window, so the verdict logic could not
+    // honour the scaled receiver window.
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    // Forward SYN: seq 1000, unscaled window 8192, scale 7.
+    table.note_tcp_seq_scaled(&forward, 1000, 0, 8192, Some(7), 0, TCP_SYN, 256 * 1024);
+    // Reverse SYN-ACK: receiver advertises window 8192 at scale 7 too.
+    table.note_tcp_seq_scaled(&reverse, 5000, 1001, 8192, Some(7), 0, TCP_SYN | TCP_ACK, 256 * 1024);
+    // Forward data: seq 1001 + 100 bytes -> rcv_nxt 1101.
+    table.note_tcp_seq_scaled(&forward, 1001, 5001, 8192, None, 100, TCP_ACK, 256 * 1024);
+    let fwd_entry = table.entry_by_key(&forward).unwrap();
+    // Non-SYN windows are scaled (8192 << 7 = 1,048,576), capped at 256K.
+    assert_eq!(fwd_entry.tcp_rcv_wnd, 256 * 1024, "scaled window must honour maximum-window above 64K");
+    // The receiver (reverse) entry's tracked window governs: it noted
+    // only its SYN-ACK (window field never scaled per RFC 7323), so a
+    // seq 100k behind rcv_nxt is outside it — the sender's own scaled
+    // 256K window must NOT rescue it. Pre-fix the verdict used the
+    // sender entry's own window and returned Valid here.
+    let behind_100k = 1101u32.wrapping_sub(100_000);
+    assert_eq!(
+        table.tcp_closing_seq_verdict(&forward, behind_100k),
+        SeqVerdict::Invalid,
+        "receiver window (unscaled SYN-ACK field) governs, not the sender's scaled window"
+    );
+    assert_eq!(table.tcp_closing_seq_verdict(&forward, 1050), SeqVerdict::Valid);
+    // Grow the receiver window with a non-SYN segment at scale: window
+    // 8192 << 7 capped at the 64K default (max_window=0).
+    table.note_tcp_seq_scaled(&reverse, 5001, 1101, 8192, None, 0, TCP_ACK, 0);
+    assert_eq!(
+        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(50_000)),
+        SeqVerdict::Valid,
+        "scaled receiver window (64K cap) admits 50k-behind closing seq"
+    );
+    assert_eq!(
+        table.tcp_closing_seq_verdict(&forward, behind_100k),
+        SeqVerdict::Invalid,
+        "100k behind exceeds the 64K-capped receiver window"
+    );
+    // Asymmetric windows: shrink the receiver (reverse) window to 10
+    // (raw field 10 at scale 7 = 1280, still < 5000): a seq 5000 behind
+    // must be Invalid even though the sender's own window is 256K.
+    table.note_tcp_seq_scaled(&reverse, 5001, 1101, 10, None, 0, TCP_ACK, 0);
+    assert_eq!(
+        table.tcp_closing_seq_verdict(&forward, 1101u32.wrapping_sub(5000)),
+        SeqVerdict::Invalid,
+        "verdict must use the receiver (companion) window, not the sender's own"
+    );
+    let _ = TCP_RST;
+}
+
+#[test]
+fn seed_tcp_window_scale_from_initial_syn_15947() {
+    // The ordinary first SYN installs; seeding its parsed WSOPT is what
+    // lets a later non-SYN segment use the negotiated scale without a
+    // session-hit note having manually supplied Some(scale) again.
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let t0 = 10_000_000_000u64;
+    let _rev = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+    table.seed_tcp_window_scale(&forward, Some(7));
+    assert_eq!(
+        table.entry_by_key(&forward).unwrap().tcp_window_scale,
+        Some(7)
+    );
+    // Bilateral offer is required before the seed drives scaling; this
+    // seed-only cell records the offer and its later unscaled behaviour
+    // is covered by unilateral_wsopt_not_applied_15947.
+    assert!(!table.entry_by_key(&forward).unwrap().tcp_ws_negotiated);
+    table.note_tcp_seq_scaled(
+        &forward,
+        1001,
+        0,
+        8192,
+        None,
+        0,
+        TCP_ACK,
+        256 * 1024,
+    );
+    assert_eq!(
+        table.entry_by_key(&forward).unwrap().tcp_rcv_wnd,
+        8192,
+        "unilateral seed must not scale later windows"
+    );
+}
+
+#[test]
+fn unilateral_wsopt_not_applied_15947() {
+    // RFC 7323 requires both SYNs to offer WSOPT. One-sided offer keeps
+    // later windows unscaled; both-sided offer scales to the cap.
+    let build = |both: bool| {
+        let forward = key_v4();
+        let mut table = SessionTable::new();
+        let t0 = 10_000_000_000u64;
+        let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_SYN);
+        table.seed_tcp_window_scale(&forward, Some(7));
+        if both {
+            table.seed_tcp_window_scale(&reverse, Some(7));
+        }
+        table.note_tcp_seq(&forward, 1001, 0, 8192, 0, TCP_ACK, 256 * 1024);
+        table.entry_by_key(&forward).unwrap().tcp_rcv_wnd
+    };
+    assert_eq!(build(false), 8192, "unilateral WSOPT must not scale");
+    assert_eq!(build(true), 256 * 1024, "bilateral WSOPT scales to cap");
+}

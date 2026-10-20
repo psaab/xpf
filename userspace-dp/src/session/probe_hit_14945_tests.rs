@@ -247,6 +247,153 @@ fn probe_hit_completes_pending_handshake_like_unfused_14945() {
     }
 }
 
+#[test]
+fn probe_hit_completion_emits_ha_state_update_15947() {
+    // #15947 (H29-04): a completing ACK served by probe_hit must queue a
+    // SessionDeltaKind::Update, exactly as the slow-path lookup does.
+    // Pre-fix probe_hit completed the handshake (established, pending
+    // cleared, wheel pushed) with no Update, leaving the standby to reap
+    // the flow at the opening expiry.
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    assert!(table.probe_hit(&forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    let deltas = table.drain_deltas(16);
+    let updates: Vec<_> = deltas
+        .iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1, "probe_hit completion must emit one HA Update, got {deltas:?}");
+    assert_eq!(updates[0].key, forward);
+}
+
+#[test]
+fn probe_hit_deferring_state_update_waits_for_admission_15947() {
+    // Triple-review fold (H29-04): flow-cache output-drop must not
+    // publish the completion. The deferring probe completes locally and
+    // withholds the Update; emitting it after admission produces exactly
+    // one Update. If the caller drops the packet, it simply never emits.
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    let entry = table.entry_by_key(&forward).expect("completed forward half");
+    assert!(entry.established && !entry.handshake_pending);
+    assert!(
+        table.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update),
+        "deferred probe must not publish Update before TX admission"
+    );
+    table.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = table
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].key, forward);
+}
+
+#[test]
+fn deferred_probe_update_survives_intervening_flow_15947() {
+    // A dropped completing ACK for A leaves one deferred pending record.
+    // Admitting unrelated B must not take/discard A's record; A's later
+    // admitted retransmission can still publish exactly one A Update.
+    let mut a = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut a, &forward, now, TCP_SYN);
+    assert!(a.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    let _ = a.drain_deltas(16);
+    assert!(a.probe_hit_deferring_state_update(&forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    assert!(a.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update));
+
+    let other = SessionKey {
+        src_port: 23456,
+        ..key_v4()
+    };
+    // Different-key emit is a no-op and leaves A's record intact.
+    a.emit_probe_hit_state_update(&other);
+    assert!(a.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update));
+    a.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = a.drain_deltas(16).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].key, forward);
+}
+
+#[test]
+fn deferred_probe_updates_two_completing_flows_retained_15947() {
+    // Two distinct completing flows: B's deferred completion must not
+    // publish or discard A's still-unadmitted Update. Emitting B first
+    // publishes only B; emitting A later publishes exactly one A.
+    let build_pair = |src_port: u16| {
+        let mut table = SessionTable::new();
+        let forward = SessionKey { src_port, ..key_v4() };
+        let now = 1_000_000_000u64;
+        let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+        assert!(table.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+        let _ = table.drain_deltas(16);
+        (table, forward, now)
+    };
+    // This cell uses one table with A installed, then drives B through a
+    // second pair installed in the same table via a distinct tuple.
+    let (mut table, a_forward, now) = build_pair(12345);
+    let b_forward = SessionKey { src_port: 23456, ..key_v4() };
+    let b_reverse = install_forward_reverse_pair(&mut table, &b_forward, now, TCP_SYN);
+    assert!(table.lookup_with_origin(&b_reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    let _ = table.drain_deltas(32);
+    assert!(table.probe_hit_deferring_state_update(&a_forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    assert!(table.probe_hit_deferring_state_update(&b_forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    assert!(table.drain_deltas(32).iter().all(|d| d.kind != SessionDeltaKind::Update), "neither deferred completion may publish before admission");
+    table.emit_probe_hit_state_update(&b_forward);
+    let b_updates: Vec<_> = table.drain_deltas(32).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(b_updates.len(), 1);
+    assert_eq!(b_updates[0].key, b_forward);
+    table.emit_probe_hit_state_update(&a_forward);
+    let a_updates: Vec<_> = table.drain_deltas(32).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(a_updates.len(), 1);
+    assert_eq!(a_updates[0].key, a_forward);
+}
+
+
+#[test]
+fn deferred_probe_update_overflow_publishes_oldest_and_latches_resync_15947() {
+    // Fill the bounded deferred queue past its 64-entry cap with distinct
+    // completing flows. The 65th completion must publish the evicted
+    // oldest Update immediately and latch delta-loss for a full resync,
+    // rather than silently losing the HA transition.
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let mut first_forward = None;
+    for index in 0..65u16 {
+        let forward = SessionKey { src_port: 30000 + index, ..key_v4() };
+        if index == 0 { first_forward = Some(forward.clone()); }
+        let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+        assert!(table.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+        let _ = table.drain_deltas(64);
+        assert!(table.probe_hit_deferring_state_update(&forward, now + 2 * SEC, 512, TCP_ACK | TCP_PSH, 512, 46));
+    }
+    let updates: Vec<_> = table.drain_deltas(256).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
+    assert_eq!(updates.len(), 1, "overflow must publish exactly the evicted oldest");
+    assert_eq!(updates[0].key, first_forward.expect("first flow"));
+    assert!(table.take_delta_loss(), "overflow must latch resync");
+}
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with
 /// payload progress re-stamps, matching the unfused keepalive.

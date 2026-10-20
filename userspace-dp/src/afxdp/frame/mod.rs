@@ -108,7 +108,8 @@ pub(in crate::afxdp) use inspect::{
     neighbor_ip_is_learnable, neighbor_mac_is_learnable, parse_session_flow,
     post_nat_expected_ports, source_is_invalid_for_icmp_error, src_is_directed_broadcast,
     src_is_directed_broadcast_in_table, term_match_extra_from_frame,
-    term_match_extra_from_meta, transit_dst_is_martian, transit_src_is_martian,
+    term_match_extra_from_meta, term_match_extra_from_meta_and_frame, transit_dst_is_martian,
+    transit_src_is_martian,
     try_parse_metadata, v4_addr_is_directed_broadcast_in_table,
 };
 pub(super) use inspect::{
@@ -133,7 +134,8 @@ pub(super) use inspect::{
 #[allow(unused_imports)]
 pub(in crate::afxdp) use tcp::{
     build_reject_rst_frame, build_syn_cookie_ack_rst_frame, build_syn_cookie_syn_ack_frame,
-    extract_tcp_seq_ack_window, frame_has_tcp_rst, tcp_payload_offset, tcp_payload_offset_from_l3,
+    extract_tcp_seq_ack_window, extract_tcp_seq_ack_window_scale, frame_has_tcp_rst,
+    tcp_payload_offset, tcp_payload_offset_from_l3,
 };
 pub(super) use tcp::{extract_tcp_flags_and_window, extract_tcp_window, tcp_flags_str};
 // #15119: segmentation builders and the dispatch admission gate decline

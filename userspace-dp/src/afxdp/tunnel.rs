@@ -823,7 +823,10 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     // `meta` describe the pre-encap packet, so use the meta-only extra
     // (tcp_flags authoritative; is-fragment / icmp-type under-match on this rare
     // local path rather than risk mis-parsing inner offsets).
-    let cos_extra = crate::afxdp::frame::term_match_extra_from_meta(meta.into());
+    let cos_extra = crate::afxdp::frame::term_match_extra_from_meta_and_frame(
+        &inner_frame,
+        meta.into(),
+    );
     let cos = resolve_cos_tx_selection_at(
         forwarding,
         decision.resolution.egress_ifindex,

@@ -111,7 +111,16 @@ pub(crate) struct WorkerScratch {
     /// fast-path; not yet wired (hence `#[allow(dead_code)]`).
     #[allow(dead_code)]
     pub(crate) scratch_cross_binding_tx: Vec<(usize, PreparedTxRequest)>,
-    pub(crate) scratch_rst_teardowns: Vec<(SessionKey, NatDecision)>,
+    /// #15947 (H29-01): each teardown also carries the triggering RST's
+    /// own forward (key + desc addr), so the lifecycle drain can exempt
+    /// exactly that request from the pending-forward cancel — the
+    /// pre-fix drain cancelled the RST itself before TX. `None` trigger
+    /// (no forward was queued for this RST) cancels everything, as before.
+    pub(crate) scratch_rst_teardowns: Vec<(
+        SessionKey,
+        NatDecision,
+        Option<(SessionKey, u64)>,
+    )>,
     /// #7212: forward + reverse keys of every session this poll pass REVOKED
     /// because a static interface INPUT filter now denies it.
     ///
