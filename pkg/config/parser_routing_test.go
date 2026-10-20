@@ -1245,7 +1245,7 @@ func TestFRRAuthValueWhitespaceRejected(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected commit rejection of an OSPF auth key containing a space, got nil")
 		}
-		if !strings.Contains(err.Error(), "authentication-key") {
+		if !strings.Contains(err.Error(), "md5 1 key") {
 			t.Errorf("error should name the auth field, got: %v", err)
 		}
 	})

@@ -587,6 +587,19 @@ func validateFRRAuthValuesStrict(cfg *Config) error {
 					if iface == nil {
 						continue
 					}
+					// #15715: AuthKey is only the legacy single-key view
+					// (overwritten by the last keyPresent md5 entry), so a
+					// rollover key carrying whitespace was never checked
+					// when a later valid key overwrote it. Check every
+					// configured MD5 key by key-id first; the renderer
+					// renders AuthMD5Keys, so every entry must be
+					// renderable. AuthKey (simple / legacy view) follows.
+					for _, k := range iface.AuthMD5Keys {
+						kfld := fmt.Sprintf("protocols ospf area %s interface %s md5 %d key", area.ID, iface.Name, k.ID)
+						if err := checkKey(scope, kfld, k.Key); err != nil {
+							return err
+						}
+					}
 					fld := fmt.Sprintf("protocols ospf area %s interface %s authentication-key", area.ID, iface.Name)
 					if err := checkKey(scope, fld, iface.AuthKey); err != nil {
 						return err

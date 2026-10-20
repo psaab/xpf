@@ -20,11 +20,14 @@ import (
 // LSAs area-wide.
 //
 // Strict rejects the keyless selection, naming area and interface, so the
-// operator supplies a key or removes the authentication stanza. A
-// rollover mix carrying at least one non-empty MD5 key stays valid
-// (at-least-one-non-empty-key rule); the renderer skips the empty
-// entries. Lenient (#1960) warns instead of rejecting so an
-// already-persisted or peer-synced config still boots; the renderer
+// operator supplies a key or removes the authentication stanza.
+// #15715 narrows the rollover rule: when AuthMD5Keys is populated, EVERY
+// configured entry must be non-empty — an empty/keyless entry beside a
+// valid one is an incomplete rollover stanza Junos rejects per-entry,
+// and the renderer would silently drop it. The legacy single-key view
+// (AuthMD5Keys empty, e.g. directly constructed configs) still passes
+// on a non-empty AuthKey. Lenient (#1960) warns instead of rejecting so
+// an already-persisted or peer-synced config still boots; the renderer
 // belt in pkg/frr then omits the keyless-auth interface rather than
 // activating it unauthenticated.
 func validateOSPFAuthKeyPresenceStrict(cfg *Config, lenient bool) ([]string, error) {
@@ -32,9 +35,15 @@ func validateOSPFAuthKeyPresenceStrict(cfg *Config, lenient bool) ([]string, err
 		return nil, nil
 	}
 	var warnings []string
-	report := func(scope, areaID string, iface *OSPFInterface) error {
+	report := func(scope, areaID string, iface *OSPFInterface, emptyKeyID int, hasEmpty bool) error {
 		var msg string
-		if iface.AuthType == "md5" {
+		if iface.AuthType == "md5" && hasEmpty {
+			msg = fmt.Sprintf("%sprotocols ospf area %s interface %s authentication md5 %d key is empty: "+
+				"every configured md5 key must carry a non-empty key, so the incomplete rollover "+
+				"entry would be silently dropped — set `authentication md5 %d key <secret>` with a "+
+				"non-empty key, or remove that md5 entry (#15715)",
+				scope, areaID, iface.Name, emptyKeyID, emptyKeyID)
+		} else if iface.AuthType == "md5" {
 			msg = fmt.Sprintf("%sprotocols ospf area %s interface %s authentication md5 is configured "+
 				"with no key: every md5 key is empty, so the interface would run with NO "+
 				"authentication — set `authentication md5 <key-id> key <secret>` with a "+
@@ -70,21 +79,28 @@ func validateOSPFAuthKeyPresenceStrict(cfg *Config, lenient bool) ([]string, err
 				}
 				switch iface.AuthType {
 				case "md5":
-					hasKey := iface.AuthKey != ""
-					for _, key := range iface.AuthMD5Keys {
-						if key.Key != "" {
-							hasKey = true
-							break
+					if len(iface.AuthMD5Keys) > 0 {
+						// #15715: every configured entry must carry a
+						// key. An empty entry beside a valid one is not
+						// a valid rollover — Junos requires the key
+						// statement per md5 entry, and the renderer
+						// would silently drop the empty entry.
+						for _, key := range iface.AuthMD5Keys {
+							if key.Key.Reveal() == "" {
+								if err := report(scope, area.ID, iface, key.ID, true); err != nil {
+									return err
+								}
+								break
+							}
 						}
-					}
-					if !hasKey {
-						if err := report(scope, area.ID, iface); err != nil {
+					} else if iface.AuthKey == "" {
+						if err := report(scope, area.ID, iface, 0, false); err != nil {
 							return err
 						}
 					}
 				case "simple":
 					if iface.AuthKey == "" {
-						if err := report(scope, area.ID, iface); err != nil {
+						if err := report(scope, area.ID, iface, 0, false); err != nil {
 							return err
 						}
 					}
