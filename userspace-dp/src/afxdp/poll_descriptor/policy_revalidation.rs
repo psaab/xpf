@@ -372,6 +372,16 @@ fn arrival_carries_translated_source(nat: NatDecision, flow: &SessionFlow) -> bo
 ///   allocates and — like the `*_with_counter_scoped` lookups, which only
 ///   clone the matched rule's `Arc<NatRuleCounter>` handle that this path
 ///   discards — never increments a rule hit counter.
+/// #15934: DNAT geometry verdict. `ignore_icmp_selector` splits the
+/// verdict into its selector-dependent and selector-independent parts:
+/// when true, an entry whose ONLY mismatch is its ICMP type/code
+/// constraint still counts (the selector sub-check is treated as a
+/// wildcard / non-revoking), while rule existence, scope, source,
+/// ports, and the translated destination geometry are all still
+/// judged. It is set only for a reverse ICMP hit with no stored
+/// forward selector (DNAT-only provenance gap): such a hit must not
+/// be revoked for the selector, but withdrawal, replacement
+/// geometry, NPTv6, and NAT64 grounds all still apply.
 fn destination_nat_translation_still_valid(
     forwarding: &ForwardingState,
     decision: &SessionDecision,
@@ -379,6 +389,7 @@ fn destination_nat_translation_still_valid(
     forward_key: &SessionKey,
     now_ns: u64,
     packet_icmp: Option<(u8, u8)>,
+    ignore_icmp_selector: bool,
 ) -> bool {
     let nat = decision.nat;
     let Some(translated_dst) = nat.rewrite_dst else {
@@ -445,9 +456,8 @@ fn destination_nat_translation_still_valid(
             )
         })
         .or_else(|| {
-            forwarding
-                .dnat_table
-                .lookup_with_counter_scoped(
+            let lookup = |selector: Option<(u8, u8)>| {
+                forwarding.dnat_table.lookup_with_counter_scoped(
                     forward_key.protocol,
                     forward_key.src_ip,
                     forward_key.dst_ip,
@@ -456,9 +466,24 @@ fn destination_nat_translation_still_valid(
                     scope.zone_name,
                     scope.ifname,
                     scope.routing_instance,
-                    packet_icmp,
+                    selector,
                 )
-                .map(|(decision, _)| decision)
+            };
+            match lookup(packet_icmp) {
+                Some(found) => Some(found),
+                // #15934: selector-wildcard retry — candidate ICMP
+                // type/code values that could satisfy a constrained
+                // entry. Only the candidate that reproduces the STORED
+                // translation counts (see the geometry equality below),
+                // so a replacement rule of a different type with a
+                // different rewrite still fails, and a withdrawn rule
+                // (no candidate matches anything) still fails.
+                None if ignore_icmp_selector => [Some((8u8, 0u8)), Some((0u8, 0u8)), Some((128u8, 0u8)), Some((129u8, 0u8))]
+                    .into_iter()
+                    .find_map(|candidate| lookup(candidate)),
+                None => None,
+            }
+            .map(|(decision, _)| decision)
         });
     expected.is_some_and(|current| {
         current.rewrite_dst == Some(translated_dst)
@@ -630,6 +655,7 @@ fn nptv6_source_still_valid(
 /// Static and dynamic SNAT can produce identical tuples, so equality of the
 /// translated address alone is not enough to carry authorization across a
 /// config generation.
+#[allow(clippy::too_many_arguments)]
 fn source_nat_translation_still_valid(
     forwarding: &ForwardingState,
     decision: &SessionDecision,
@@ -638,6 +664,7 @@ fn source_nat_translation_still_valid(
     stored_static: Option<bool>,
     now_ns: u64,
     packet_icmp: Option<(u8, u8)>,
+    ignore_icmp_selector: bool,
 ) -> (bool, Option<bool>) {
     let nat = decision.nat;
     let destination_valid = destination_nat_translation_still_valid(
@@ -647,6 +674,7 @@ fn source_nat_translation_still_valid(
         forward_key,
         now_ns,
         packet_icmp,
+        ignore_icmp_selector,
     );
     let Some(translated_src) = nat.rewrite_src else {
         return (destination_valid, None);
@@ -849,6 +877,29 @@ fn forward_selector_for_hit(
     }
 }
 
+/// #15934: the selector-provenance gap — a reverse ICMP hit judging a
+/// translated decision that carries NO stored forward selector
+/// (DNAT-only flows mint none). Only the ICMP-selector sub-check is
+/// non-revoking for such hits (see
+/// `destination_nat_translation_still_valid`); every other ground
+/// (withdrawal, geometry, NPTv6, NAT64, source side) still runs.
+/// Protocol is ICMP/ICMPv6 only: other protocols never consult the
+/// selector, so their selector-independence is already total.
+fn selector_provenance_absent(
+    is_reverse_hit: bool,
+    protocol: u8,
+    stored: Option<(u8, u8)>,
+    has_translation: bool,
+) -> bool {
+    is_reverse_hit
+        && stored.is_none()
+        && has_translation
+        && matches!(
+            protocol,
+            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     forwarding: &ForwardingState,
@@ -999,27 +1050,19 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                     {
                         return None;
                     }
-                    // #15934: DNAT-only echo flows record no forward
-                    // selector, and the arriving reply cannot supply the
-                    // request's type — revoking on selector grounds
-                    // would kill every such session at the first
-                    // revalidation boundary, while judging by the reply
-                    // could also LAUNDER a replacement rule of the
-                    // reply's type with the same rewrite. Decline to
-                    // revoke on NAT-selector grounds (keep), the same
-                    // absent-provenance shape as the #15176 scope keep
-                    // above. Sessions WITH stored provenance are judged
-                    // normally, so a withdrawn rule still revokes.
+                    // #15934: only the selector SUB-CHECK is
+                    // non-revoking when forward provenance is absent
+                    // (selector_provenance_absent); withdrawal,
+                    // geometry, NPTv6/NAT64 and source grounds below
+                    // still judge the session normally.
                     let stored_forward_icmp = forward_decision.nat.source_nat_icmp;
-                    if stored_forward_icmp.is_none()
-                        && forward_decision.nat.rewrite_dst.is_some()
-                        && matches!(
-                            forward_query.protocol,
-                            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
-                        )
-                    {
-                        return None;
-                    }
+                    let ignore_selector = selector_provenance_absent(
+                        true,
+                        forward_query.protocol,
+                        stored_forward_icmp,
+                        forward_decision.nat.rewrite_dst.is_some()
+                            || forward_decision.nat.rewrite_src.is_some(),
+                    );
                     std::mem::swap(
                         &mut forward_metadata.ingress_zone,
                         &mut forward_metadata.egress_zone,
@@ -1034,10 +1077,8 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         // #15934: reverse-direction hit — the stored
                         // forward selector wins over the reply's own
                         // type/code (see forward_selector_for_hit).
-                        // With no stored selector there is no forward
-                        // provenance (DNAT-only flows mint none): decline
-                        // below rather than judge by the reply's type.
                         forward_selector_for_hit(true, packet_icmp, stored_forward_icmp),
+                        ignore_selector,
                     );
                     return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
@@ -1120,20 +1161,15 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // forward_selector_for_hit), not session-branch shape: a reverse hit
     // that reaches this arm because its forward companion IS materialized
     // still arrives as a reply, so the stored forward selector wins; a
-    // forward hit's live packet selector is authoritative. The
-    // absent-provenance decline below mirrors the companion-less arm:
-    // a reverse ICMP hit judging a DNAT rewrite with no stored selector
-    // cannot be selector-judged at all.
-    if metadata.is_reverse
-        && forward_decision.nat.source_nat_icmp.is_none()
-        && forward_decision.nat.rewrite_dst.is_some()
-        && matches!(
-            forward_key.protocol,
-            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
-        )
-    {
-        return None;
-    }
+    // forward hit's live packet selector is authoritative. When forward
+    // provenance is absent, only the selector sub-check is waived
+    // (ignore_selector); all other grounds still judge.
+    let ignore_selector = selector_provenance_absent(
+        metadata.is_reverse,
+        forward_key.protocol,
+        forward_decision.nat.source_nat_icmp,
+        forward_decision.nat.rewrite_dst.is_some() || forward_decision.nat.rewrite_src.is_some(),
+    );
     let (valid, static_nat) = source_nat_translation_still_valid(
         forwarding,
         &forward_decision,
@@ -1146,6 +1182,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
             packet_icmp,
             forward_decision.nat.source_nat_icmp,
         ),
+        ignore_selector,
     );
     if valid {
         if let Some(canonical_key) = canonical_key.as_ref() {

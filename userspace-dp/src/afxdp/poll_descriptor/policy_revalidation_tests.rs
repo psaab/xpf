@@ -2269,6 +2269,7 @@ fn source_nat_revalidation_resolves_vlan_logical_ingress_12861() {
         Some(false),
         1_000_000_000,
         None,
+        false,
     );
     assert!(
         valid,
@@ -2344,6 +2345,7 @@ fn source_nat_revalidation_untagged_trunk_stays_valid_12861() {
         Some(false),
         1_000_000_000,
         None,
+        false,
     );
     assert!(valid, "untagged SNAT session on lan unit must remain valid");
 }
@@ -2365,6 +2367,7 @@ fn source_nat_revalidation_physical_lan_stays_valid_12861() {
         Some(false),
         1_000_000_000,
         None,
+        false,
     );
     assert!(
         valid,
@@ -2386,6 +2389,7 @@ fn source_nat_revalidation_fabric_keeps_recorded_zones_12861() {
         Some(false),
         1_000_000_000,
         None,
+        false,
     );
     assert!(
         valid,
@@ -2411,6 +2415,7 @@ fn source_nat_revalidation_other_vlan_zone_still_revoked_12861() {
         Some(false),
         1_000_000_000,
         None,
+        false,
     );
     assert!(
         !valid,
@@ -4031,14 +4036,16 @@ fn withdrawn_icmp_dnat_revokes_14315() {
             &metadata,
             &key,
             NOW_14315,
-            None
+            None,
+            false
         ),
         "ICMP DNAT session must validate while its rule exists"
     );
     let withdrawn = ForwardingState::default();
     assert!(
         !destination_nat_translation_still_valid(
-            &withdrawn, &decision, &metadata, &key, NOW_14315, None
+            &withdrawn, &decision, &metadata, &key, NOW_14315, None,
+            false
         ),
         "withdrawing the ICMP DNAT rule must invalidate the session (#14315)"
     );
@@ -4082,7 +4089,8 @@ fn icmp_application_dnat_survives_revalidation_15791() {
             &metadata,
             &key,
             NOW_14315,
-            Some((8, 0))
+            Some((8, 0)),
+            false
         ),
         "ICMP echo DNAT session must validate with its real (8,0) selector (#15791)"
     );
@@ -4093,7 +4101,8 @@ fn icmp_application_dnat_survives_revalidation_15791() {
             &metadata,
             &key,
             NOW_14315,
-            None
+            None,
+            false
         ),
         "type-constrained DNAT must fail closed for None (the pre-fix hardcoded value)"
     );
@@ -4104,7 +4113,8 @@ fn icmp_application_dnat_survives_revalidation_15791() {
             &metadata,
             &key,
             NOW_14315,
-            Some((13, 0))
+            Some((13, 0)),
+            false
         ),
         "type-constrained DNAT must not validate for a different ICMP type"
     );
@@ -4194,7 +4204,8 @@ fn persistent_precedes_dnat_in_revalidation_15791() {
             &metadata,
             &in_key,
             NOW_14315 + 1,
-            None
+            None,
+            false
         ),
         "persistent-admitted session must survive revalidation (persistent precedes dnat, #15791)"
     );
@@ -4213,7 +4224,8 @@ fn persistent_precedes_dnat_in_revalidation_15791() {
             &metadata,
             &in_key,
             NOW_14315 + 1,
-            None
+            None,
+            false
         ),
         "shadowed DNAT translation must not validate when persistent precedes it (#15791)"
     );
@@ -4245,14 +4257,16 @@ fn withdrawn_gre_static_nat_revokes_14315() {
             &metadata,
             &key,
             NOW_14315,
-            None
+            None,
+            false
         ),
         "GRE static-NAT session must validate while its rule exists"
     );
     let withdrawn = ForwardingState::default();
     assert!(
         !destination_nat_translation_still_valid(
-            &withdrawn, &decision, &metadata, &key, NOW_14315, None
+            &withdrawn, &decision, &metadata, &key, NOW_14315, None,
+            false
         ),
         "withdrawing the GRE static-NAT rule must invalidate the session (#14315)"
     );
@@ -4296,7 +4310,8 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
             &metadata,
             &in_key,
             NOW_14315,
-            None
+            None,
+            false
         ),
         "NPTv6 inbound session must validate while its prefix rule exists"
     );
@@ -4307,7 +4322,8 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
             &metadata,
             &in_key,
             NOW_14315,
-            None
+            None,
+            false
         ),
         "withdrawing the NPTv6 prefix must invalidate the inbound session (#14315)"
     );
@@ -4328,6 +4344,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
         None,
         NOW_14315,
         None,
+        false,
     );
     assert!(
         valid,
@@ -4341,6 +4358,7 @@ fn withdrawn_nptv6_prefix_revokes_14315() {
         None,
         NOW_14315,
         None,
+        false,
     );
     assert!(
         !valid,
@@ -4418,7 +4436,8 @@ fn persistent_nat_inbound_survives_revalidation_14315() {
             &metadata,
             &in_key,
             NOW_14315 + 1,
-            None
+            None,
+            false
         ),
         "live Persistent-NAT inbound binding must survive revalidation (#14315)"
     );
@@ -4430,7 +4449,8 @@ fn persistent_nat_inbound_survives_revalidation_14315() {
             &metadata,
             &in_key,
             NOW_14315 + 1,
-            None
+            None,
+            false
         ),
         "withdrawing the persistent rule must invalidate the inbound binding (#14315)"
     );
@@ -4530,7 +4550,8 @@ fn persistent_nat_cross_zone_grant_does_not_validate_revalidation_14802() {
             &wan_metadata,
             &in_key,
             NOW_14315 + 1,
-            None
+            None,
+            false
         ),
         "dmz any-remote-host grant must not keep a wan-arriving session alive (#14802/#14322)"
     );
@@ -4543,7 +4564,8 @@ fn persistent_nat_cross_zone_grant_does_not_validate_revalidation_14802() {
             &dmz_metadata,
             &in_key,
             NOW_14315 + 1,
-            None
+            None,
+            false
         ),
         "dmz-arriving session must validate on its own any-remote-host grant (#14802)"
     );
@@ -4609,7 +4631,8 @@ fn revalidation_leaves_nat_rule_counters_unchanged_14315() {
         &metadata,
         &dnat_key,
         NOW_14315,
-        None
+        None,
+            false
     ));
     // Static SNAT session (also exercises the static destination branch).
     // Forward direction is lan -> wan; the validator resolves the zone pair
@@ -4628,6 +4651,7 @@ fn revalidation_leaves_nat_rule_counters_unchanged_14315() {
         Some(true),
         NOW_14315,
         None,
+        false,
     );
     assert!(
         valid,
@@ -5464,15 +5488,50 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
         "companion-less reverse reply must judge by the stored forward selector (#15934)"
     );
     // (3) DNAT-only reply: stored None + reply (0,0) under the
-    // UNCHANGED type-8 rule must NOT revoke (absent provenance ->
-    // decline), companion-less and companion-present.
+    // UNCHANGED type-8 rule must NOT revoke: the selector sub-check is
+    // waived (wildcard) and the stored geometry still matches.
     assert!(
         reverse_hit(&type8, None, false, Some((0, 0))).is_none(),
-        "DNAT-only echo reply must survive: no forward provenance to judge by (#15934)"
+        "DNAT-only echo reply must survive: selector waived, geometry matches (#15934)"
     );
     assert!(
         reverse_hit(&type8, None, true, Some((0, 0))).is_none(),
         "DNAT-only echo reply (companion present) must survive (#15934)"
+    );
+    // (3b) Selector-less but WITHDRAWN DNAT must still revoke: no
+    // candidate reproduces the stored translation.
+    let withdrawn0 = imported_snat_forwarding(false);
+    assert!(
+        reverse_hit(&withdrawn0, None, false, Some((0, 0))).is_some(),
+        "withdrawn DNAT must revoke even with no stored selector (#15934)"
+    );
+    assert!(
+        reverse_hit(&withdrawn0, None, true, Some((0, 0))).is_some(),
+        "withdrawn DNAT (companion present) must revoke selector-less (#15934)"
+    );
+    // (3c) Selector-less REPLACEMENT geometry (same public tuple,
+    // different internal target) must revoke: the wildcard finds a
+    // rule, but its rewrite != stored translation.
+    let replaced = {
+        let rule = crate::protocol::DestinationNATRuleSnapshot {
+            name: "icmp-ping-forward".to_string(),
+            destination_address: "198.51.100.9".to_string(),
+            pool_address: "10.0.0.99".to_string(),
+            protocol: "icmp".to_string(),
+            match_icmp_type: Some(8),
+            match_icmp_code: Some(0),
+            ..Default::default()
+        };
+        let mut f = imported_snat_forwarding(false);
+        f.dnat_table = crate::nat::DnatTable::from_snapshots(
+            &[rule],
+            &crate::nat::NatCounterStore::default(),
+        );
+        f
+    };
+    assert!(
+        reverse_hit(&replaced, None, false, Some((0, 0))).is_some(),
+        "replacement DNAT geometry must revoke selector-less (#15934)"
     );
     // (4) Anti-laundering: DNAT-only reply under a REPLACEMENT type-0
     // rule with the same rewrite must NOT be validated BY the reply
@@ -5586,4 +5645,88 @@ fn forward_hit_keeps_packet_first_selector_15934() {
         .is_some(),
         "forward hit: live packet (13,0) must revoke against the type-8 rule (#15934)"
     );
+}
+
+/// #15934 round-4: the selector waiver is ONLY the selector sub-check.
+/// Selector-less (stored None) reverse ICMP hits must still revoke on
+/// every selector-independent ground: withdrawn/replacement DNAT is
+/// covered in the direction test; here NPTv6 prefix withdrawal and
+/// deterministic NAT64 geometry mismatch, driven at the composed
+/// validity level with ignore_icmp_selector=true (the exact flag the
+/// reverse arms pass for DNAT-only provenance).
+#[test]
+fn selector_less_reverse_still_revokes_nptv6_nat64_15934() {
+    // NPTv6 inbound, ICMPv6 protocol, no stored selector.
+    let configured = nptv6_forwarding_14315();
+    let withdrawn = ForwardingState::default();
+    let mut internal = "2001:db8:1::1234".parse::<std::net::Ipv6Addr>().expect("v6");
+    assert!(configured.nptv6.translate_inbound(&mut internal, ""));
+    let in_key = key_14315(libc::IPPROTO_ICMPV6 as u8, "2001:db8:9::1", "2001:db8:1::1234", 0x1234, 0);
+    let in_decision = decision_14315(NatDecision {
+        rewrite_dst: Some(IpAddr::V6(internal)),
+        nptv6: true,
+        source_nat_icmp: None,
+        ..NatDecision::default()
+    });
+    let metadata = meta_14315(2, 1);
+    assert!(
+        destination_nat_translation_still_valid(
+            &configured, &in_decision, &metadata, &in_key, NOW_14315, Some((129, 0)), true
+        ),
+        "NPTv6 session must validate while its prefix exists, selector waived (#15934)"
+    );
+    assert!(
+        !destination_nat_translation_still_valid(
+            &withdrawn, &in_decision, &metadata, &in_key, NOW_14315, Some((129, 0)), true
+        ),
+        "withdrawn NPTv6 prefix must revoke selector-less (#15934)"
+    );
+    // NAT64 deterministic geometry mismatch (mirror of #15178, ICMP key).
+    let mk_nat64 = |block_size: u16| {
+        crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+            name: "napt64-15934".to_string(),
+            prefix: "64:ff9b::/96".to_string(),
+            pool_addresses: vec!["198.51.100.1".to_string()],
+            deterministic_block_size: block_size,
+            deterministic_blocks_per_ip: 2016,
+            deterministic_host_prefix_len: 32,
+            deterministic_host_base_v6: "2001:db8::".to_string(),
+            ..Default::default()
+        }])
+    };
+    let old_state = mk_nat64(32);
+    let sub: std::net::Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let (pool_ip, old_port) = old_state
+        .allocate_source(0, libc::IPPROTO_ICMPV6 as u8, sub, Ipv4Addr::new(8, 8, 8, 8), 0x1234, 0, 1_000_000_000)
+        .expect("mint old tuple");
+    let key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: libc::IPPROTO_ICMPV6 as u8,
+        src_ip: IpAddr::V6(sub),
+        dst_ip: "64:ff9b::808:808".parse().expect("synthetic dst"),
+        src_port: 0x1234,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let decision = decision_14315(crate::nat::NatDecision {
+        rewrite_src: Some(IpAddr::V4(pool_ip)),
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        rewrite_src_port: Some(old_port),
+        source_nat_icmp: None,
+        nat64: true,
+        ..NatDecision::default()
+    });
+    let mut fwd_new = ForwardingState::default();
+    fwd_new.nat64 = mk_nat64(1024);
+    let (valid_new, _) = source_nat_translation_still_valid(
+        &fwd_new, &decision, &metadata, &key, None, NOW_14315, Some((129, 0)), true,
+    );
+    assert!(!valid_new, "deterministic NAT64 geometry mismatch must revoke selector-less (#15934)");
+    let mut fwd_old = ForwardingState::default();
+    fwd_old.nat64 = mk_nat64(32);
+    let (valid_old, _) = source_nat_translation_still_valid(
+        &fwd_old, &decision, &metadata, &key, None, NOW_14315, Some((129, 0)), true,
+    );
+    assert!(valid_old, "minting NAT64 geometry must survive selector-less (#15934)");
 }
