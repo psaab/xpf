@@ -360,6 +360,63 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				sys.NTPServerOptions[addr] = opt
 			}
 			sort.Ints(sys.NTPServerKeyIDs)
+			// #15709: peers compile like servers but to NTPPeers, rendered
+			// as chrony `peer` directives. Packed tails (`ntp peer X
+			// prefer;`) ride Keys, expanded via ntpSourceValues.
+			ntpChildren15709 := hoistAndSplitRun8939(packedBodyChildren(child, schemaForPath("system", "ntp")), schemaForPath("system", "ntp"))
+			for _, peerChild := range ntpChildren15709 {
+				if peerChild.Name() != "peer" {
+					continue
+				}
+				peers, peerOpts := ntpSourceValues(peerChild, "peer")
+				for _, addr := range peers {
+					if !ntpServerListed(sys.NTPPeers, addr) {
+						sys.NTPPeers = append(sys.NTPPeers, addr)
+					}
+				}
+				for addr, opt := range peerOpts {
+					if sys.NTPPeerOptions == nil {
+						sys.NTPPeerOptions = map[string]NTPServerOption{}
+					}
+					sys.NTPPeerOptions[addr] = mergeNTPServerOption(sys.NTPPeerOptions[addr], opt)
+				}
+			}
+			// Strip peer keys like server keys (#14596 belt).
+			for addr, opt := range sys.NTPPeerOptions {
+				if opt.Key <= 0 {
+					continue
+				}
+				found := false
+				for _, id := range sys.NTPServerKeyIDs {
+					if id == opt.Key {
+						found = true
+						break
+					}
+				}
+				if !found {
+					sys.NTPServerKeyIDs = append(sys.NTPServerKeyIDs, opt.Key)
+				}
+				opt.Key = 0
+				sys.NTPPeerOptions[addr] = opt
+			}
+			sort.Ints(sys.NTPServerKeyIDs)
+			for _, tk := range child.FindChildren("trusted-key") {
+				for _, v := range firewallMatchValues(tk) {
+					if id, err := strconv.Atoi(v); err == nil && id > 0 {
+						found := false
+						for _, e := range sys.NTPTrustedKeyIDs {
+							if e == id {
+								found = true
+								break
+							}
+						}
+						if !found {
+							sys.NTPTrustedKeyIDs = append(sys.NTPTrustedKeyIDs, id)
+						}
+					}
+				}
+			}
+			sort.Ints(sys.NTPTrustedKeyIDs)
 			if thNode := child.FindChild("threshold"); thNode != nil {
 				if v := nodeVal(thNode); v != "" {
 					if n, ok := parseIntLeaf(&cfg.Warnings, "system ntp threshold", v); ok {
@@ -1130,6 +1187,79 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 							}
 						}
 					}
+				}
+			}
+			// #15709: top-level syslog statements. Expand packed/chained
+			// shapes, inherit source-address, record inert globals.
+			{
+				syslogTop := hoistAndSplitRun8939(packedBodyChildren(child, schemaForPath("system", "syslog")), schemaForPath("system", "syslog"))
+				inert := map[string]bool{}
+				for _, kw := range sys.Syslog.TopLevelInert {
+					inert[kw] = true
+				}
+				for _, top := range syslogTop {
+					switch top.Name() {
+					case "source-address":
+						if v := nodeVal(top); v != "" {
+							sys.Syslog.DefaultSourceAddress = v
+						}
+						// Packed value on Keys of syslog node itself.
+						if len(top.Keys) >= 2 && top.Name() == "source-address" {
+							sys.Syslog.DefaultSourceAddress = top.Keys[len(top.Keys)-1]
+						}
+					case "console":
+						inert["console"] = true
+						for _, prop := range hoistAndSplitRun8939(packedBodyChildren(top, schemaForPath("system", "syslog", "console")), syslogDestinationHoistSchema9414("host")) {
+							switch prop.Name() {
+							case "match", "match-strings", "structured-data", "explicit-priority", "allow-duplicates":
+								skipped.note("console", prop.Name())
+							}
+						}
+					case "time-format":
+						inert["time-format"] = true
+					case "archive":
+						inert["archive"] = true
+					case "log-rotate-frequency":
+						inert["log-rotate-frequency"] = true
+					}
+				}
+				// Also scan raw children/Keys for shapes packedBodyChildren missed.
+				for _, c := range child.Children {
+					switch c.Name() {
+					case "console", "time-format", "archive", "log-rotate-frequency":
+						inert[c.Name()] = true
+					case "source-address":
+						if v := nodeVal(c); v != "" {
+							sys.Syslog.DefaultSourceAddress = v
+						}
+					}
+				}
+				for i := 1; i < len(child.Keys); i++ {
+					switch child.Keys[i] {
+					case "console", "time-format", "archive", "log-rotate-frequency":
+						inert[child.Keys[i]] = true
+					case "source-address":
+						if i+1 < len(child.Keys) {
+							sys.Syslog.DefaultSourceAddress = child.Keys[i+1]
+						}
+					}
+				}
+				if len(inert) > 0 {
+					sys.Syslog.TopLevelInert = sys.Syslog.TopLevelInert[:0]
+					for kw := range inert {
+						sys.Syslog.TopLevelInert = append(sys.Syslog.TopLevelInert, kw)
+					}
+					sort.Strings(sys.Syslog.TopLevelInert)
+				}
+				if sys.Syslog.DefaultSourceAddress != "" {
+					for _, h := range sys.Syslog.Hosts {
+						if h.SourceAddress == "" {
+							h.SourceAddress = sys.Syslog.DefaultSourceAddress
+						}
+					}
+				}
+				for _, kw := range sys.Syslog.TopLevelInert {
+					skipped.note("top-level", kw)
 				}
 			}
 			if cfg != nil {
@@ -3478,6 +3608,27 @@ func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 				break
 			}
 		}
+		for _, option := range system.NTPServerOptions {
+			if option.SourceAddress != "" {
+				add("system ntp server source-address: accepted but NOT bound (chrony sources are not bound to a per-source source address) (#15709)")
+				break
+			}
+		}
+		for _, option := range system.NTPPeerOptions {
+			if option.RoutingInstance != "" {
+				add("system ntp peer routing-instance: accepted but NOT enforced (NTP peers assigned to a routing-instance are queried through the default instance) (#15709)")
+				break
+			}
+		}
+		for _, option := range system.NTPPeerOptions {
+			if option.SourceAddress != "" {
+				add("system ntp peer source-address: accepted but NOT bound (chrony peers are not bound to a per-peer source address) (#15709)")
+				break
+			}
+		}
+		if len(system.NTPTrustedKeyIDs) > 0 {
+			add("system ntp trusted-key: NTP authentication accepted but NOT enforced (no chrony keyfile is written, so trusted keys are not used) (#15709)")
+		}
 	}
 	for _, io := range sysChildren {
 		if io.Name() != "internet-options" {
@@ -5184,6 +5335,12 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 // of truth for the same grammar, and every future leaf in this shape would have
 // grown its own copy.
 func ntpServerModifierNames() map[string]int {
+	return ntpSourceModifierNames("server")
+}
+
+// ntpSourceModifierNames returns modifier keywords for an ntp source
+// leaf ("server" or "peer") from the schema (#15709, generalizing #7132).
+func ntpSourceModifierNames(keyword string) map[string]int {
 	out := map[string]int{}
 	sys, ok := setSchema.children["system"]
 	if !ok || sys == nil {
@@ -5193,18 +5350,11 @@ func ntpServerModifierNames() map[string]int {
 	if !ok || ntp == nil {
 		return out
 	}
-	server, ok := ntp.children["server"]
-	if !ok || server == nil {
+	src, ok := ntp.children[keyword]
+	if !ok || src == nil {
 		return out
 	}
-	for name, child := range server.children {
-		// The ARGUMENT COUNT matters as much as the name, and losing it was a
-		// real regression caught by Test_6690_NTPServerOptionTokensAreNotServers:
-		// the HIERARCHICAL spelling puts `server 1.1.1.1 key 5` on ONE node's
-		// Keys, so skipping only the keyword leaves `5` to be read as a second
-		// server. That argcount is exactly what the retired ntpServerOptionArgs
-		// table carried — it now comes from the schema's own `args`, which is the
-		// point of the retirement: one source of truth, not two.
+	for name, child := range src.children {
 		n := 0
 		if child != nil {
 			n = child.args
@@ -5269,14 +5419,21 @@ func mergeNTPServerOption(base, add NTPServerOption) NTPServerOption {
 	if add.RoutingInstance != "" {
 		out.RoutingInstance = add.RoutingInstance
 	}
+	if add.SourceAddress != "" {
+		out.SourceAddress = add.SourceAddress
+	}
 	return out
 }
 
 func ntpServerValues(n *Node) ([]string, map[string]NTPServerOption) {
+	return ntpSourceValues(n, "server")
+}
+
+func ntpSourceValues(n *Node, keyword string) ([]string, map[string]NTPServerOption) {
 	if n == nil {
 		return nil, nil
 	}
-	modifiers := ntpServerModifierNames()
+	modifiers := ntpSourceModifierNames(keyword)
 	var servers []string
 	opts := map[string]NTPServerOption{}
 	// The COMPACT spelling puts a modifier and its argument on the parent's Keys
@@ -5316,7 +5473,7 @@ func ntpServerValues(n *Node) ([]string, map[string]NTPServerOption) {
 	// docs/config-schema.md warns about, and it is exactly the one an
 	// early-return on Keys cannot see.
 	var mods []*Node
-	for _, child := range expandResolvingRuns9792(n.Children, ntpServerSchema9792()) {
+	for _, child := range expandResolvingRuns9792(n.Children, resolveSchemaPath9235("system", "ntp", keyword)) {
 		if child == nil || len(child.Keys) == 0 {
 			continue
 		}
@@ -5460,6 +5617,8 @@ func applyNTPServerModifier(opt *NTPServerOption, name, arg string) {
 		}
 	case "routing-instance":
 		opt.RoutingInstance = arg
+	case "source-address":
+		opt.SourceAddress = arg
 	}
 }
 

@@ -14,6 +14,14 @@ func TestRenderChronySources(t *testing.T) {
 	}
 }
 
+func TestRenderChronyPeers15709(t *testing.T) {
+	got := renderChronyPeers([]string{"192.0.2.1", "pool.example.net"}, nil)
+	want := "peer 192.0.2.1 iburst\npeer pool.example.net iburst\n"
+	if got != want {
+		t.Fatalf("renderChronyPeers() = %q, want %q", got, want)
+	}
+}
+
 func TestRenderChronyThresholdAccept(t *testing.T) {
 	got := renderChronyThreshold(400, "accept")
 	want := "logchange 400\n"

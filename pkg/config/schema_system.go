@@ -228,6 +228,11 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				"key":              {desc: "Authentication key id for this server", args: 1, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
 				"version":          {desc: "NTP version for this server", args: 1, placeholder: "<version>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
 				"routing-instance": {desc: "Routing instance to reach this server in", args: 1, placeholder: "<instance>", children: nil},
+				// #15709: per-server source-address. Chrony has no per-source
+				// source-bind directive xpf renders, so this is recorded on the
+				// server option and warned as not bound, rather than being
+				// absorbed as a second server address.
+				"source-address": {desc: "Source address for this server", args: 1, placeholder: "<ip>", valueType: ValueIPAddress, valueDesc: "IPv4 or IPv6 source address", valueExamples: []string{"10.0.1.1", "2001:db8::1"}, validator: ValidateIPAddress, children: nil},
 			}},
 		"threshold": {desc: "Threshold", args: 1, placeholder: "<seconds>",
 			valueType: ValueInteger, valueDesc: "NTP step threshold in seconds (>= 1; 0 means 'use the default')",
@@ -243,6 +248,26 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				// committing a silently-unrendered value.
 				"action": {desc: "Action on threshold", args: 1, placeholder: "<action>", valueType: ValueEnumOf, validator: ValidateEnum([]string{"accept", "reject"}), children: nil},
 			}},
+		// #15709: Junos NTP peers (symmetric mode) compile to chrony
+		// `peer` directives (NTPPeers); trusted-key/authentication-key/
+		// boot-server/source-address are declared so they commit and
+		// systemInertKnobWarnings can name them (xpf writes no chrony
+		// keyfile and does no one-shot boot sync).
+		"peer": {desc: "NTP peer", args: 1, multi: true, valueList: true, valueType: ValueHostname, valueDesc: "NTP peer IP address or hostname", valueExamples: []string{"192.0.2.1"}, validator: ValidateNTPServer, placeholder: "<address>",
+			children: map[string]*schemaNode{
+				"prefer":           {desc: "Prefer this peer", children: nil},
+				"key":              {desc: "Authentication key id for this peer", args: 1, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
+				"version":          {desc: "NTP version for this peer", args: 1, placeholder: "<version>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
+				"routing-instance": {desc: "Routing instance to reach this peer in", args: 1, placeholder: "<instance>", children: nil},
+				"source-address":   {desc: "Source address for this peer", args: 1, placeholder: "<ip>", valueType: ValueIPAddress, validator: ValidateIPAddress, children: nil},
+			}},
+		"trusted-key": {desc: "Trusted authentication key id", args: 1, multi: true, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
+		"authentication-key": {desc: "NTP authentication key", args: 1, placeholder: "<key-id>", children: map[string]*schemaNode{
+			"type":  {desc: "Key type", args: 1, placeholder: "<type>", children: nil},
+			"value": {desc: "Key value", args: 1, placeholder: "<value>", children: nil},
+		}},
+		"boot-server":    {desc: "Boot-time NTP server", args: 1, placeholder: "<address>", valueType: ValueHostname, validator: ValidateNTPServer, children: nil},
+		"source-address": {desc: "Source address for NTP queries", args: 1, placeholder: "<ip>", valueType: ValueIPAddress, validator: ValidateIPAddress, children: nil},
 	}},
 	"syslog": {desc: "Syslog configuration", children: map[string]*schemaNode{
 		// #2008 (syslog schema-only): a system syslog host/file/user
@@ -307,6 +332,29 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 					"archive-sites":     {desc: "Off-box archive site URL", args: 1, multi: true, placeholder: "<url>", children: nil},
 				}},
 			})},
+		// #15709: top-level syslog statements. `console` is a destination
+		// xpf does not render; `source-address` is the default for hosts
+		// without their own; `time-format`/`archive`/`log-rotate-frequency`
+		// are global knobs xpf does not apply. Declared so they commit,
+		// are compiled (source-address) or warned, never silently dropped.
+		"console": {desc: "Syslog console destination", args: 0, packedTail: true,
+			wildcard: syslogFacilitySeverityLeaf(),
+			children: syslogDestinationModifiers(nil)},
+		"source-address": {desc: "Default source address for syslog hosts", args: 1, placeholder: "<ip>", valueType: ValueIPAddress, validator: ValidateIPAddress, children: nil},
+		"time-format": {desc: "Syslog timestamp format", args: 1, placeholder: "<format>", children: map[string]*schemaNode{
+			"year":        {desc: "Include year in timestamp", children: nil},
+			"millisecond": {desc: "Include milliseconds in timestamp", children: nil},
+		}},
+		"archive": {desc: "Global syslog archive settings", children: map[string]*schemaNode{
+			"size":              {desc: "Maximum file size before rotation", args: 1, placeholder: "<size>", children: nil},
+			"files":             {desc: "Number of archive files to retain", args: 1, placeholder: "<count>", children: nil},
+			"world-readable":    {desc: "Archives readable by all users", children: nil},
+			"no-world-readable": {desc: "Archives readable only by root", children: nil},
+			"start-time":        {desc: "Scheduled archive start time", args: 1, placeholder: "<time>", children: nil},
+			"transfer-interval": {desc: "Periodic archive interval (minutes)", args: 1, placeholder: "<minutes>", children: nil},
+			"archive-sites":     {desc: "Off-box archive site URL", args: 1, multi: true, placeholder: "<url>", children: nil},
+		}},
+		"log-rotate-frequency": {desc: "Log rotation frequency (minutes)", args: 1, placeholder: "<minutes>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
 	}},
 	"login": {desc: "Login configuration", children: map[string]*schemaNode{
 		// #4304 S-2: custom `login class <name>` RBAC definition. Recognized so

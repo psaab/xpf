@@ -1020,6 +1020,27 @@ func renderChronySources(servers []string, opts map[string]config.NTPServerOptio
 	return b.String()
 }
 
+// renderChronyPeers renders chrony `peer` lines for NTPPeers (#15709).
+func renderChronyPeers(peers []string, opts map[string]config.NTPServerOption) string {
+	var b strings.Builder
+	for _, peer := range peers {
+		if err := config.ValidateNTPServer(peer, nil); err != nil {
+			slog.Warn("skipping invalid NTP peer", "peer", peer, "err", err)
+			continue
+		}
+		opt := opts[peer]
+		line := fmt.Sprintf("peer %s iburst", peer)
+		if opt.Version > 0 {
+			line += fmt.Sprintf(" version %d", opt.Version)
+		}
+		if opt.Prefer {
+			line += " prefer"
+		}
+		fmt.Fprintf(&b, "%s\n", line)
+	}
+	return b.String()
+}
+
 func renderChronyThreshold(threshold int, action string) string {
 	if threshold <= 0 || action == "" {
 		return ""
@@ -1176,7 +1197,7 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 		return
 	}
 
-	sourcesChanged, err := reconcileManagedFile(chronySourcesPath, renderChronySources(cfg.System.NTPServers, cfg.System.NTPServerOptions))
+	sourcesChanged, err := reconcileManagedFile(chronySourcesPath, renderChronySources(cfg.System.NTPServers, cfg.System.NTPServerOptions)+renderChronyPeers(cfg.System.NTPPeers, cfg.System.NTPPeerOptions))
 	if err != nil {
 		slog.Warn("failed to reconcile chrony sources", "err", err)
 		return

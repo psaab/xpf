@@ -169,8 +169,14 @@ func syslogSkippedModifierEffect9414(kw string) string {
 		return "the local host name is not omitted from forwarded messages"
 	case "routing-instance":
 		return "the syslog client is not bound to the named routing instance, so messages follow the default routing table"
-	case "allow-duplicates":
-		return "xpf renders this destination as an rsyslog drop-in and does not set rsyslog's repeated-message reduction, so whether duplicates are collapsed is decided by the host's rsyslog configuration"
+	case "console":
+		return "xpf has no console syslog sink, so no messages are written to the console"
+	case "time-format":
+		return "the timestamp format of forwarded/logged messages is not changed"
+	case "archive":
+		return "no global syslog archive/rotation policy is applied (per-file archive is warned separately, #7146)"
+	case "log-rotate-frequency":
+		return "log rotation frequency is not changed; rotation is decided by the host log policy"
 	}
 	return "xpf does not implement this modifier"
 }
