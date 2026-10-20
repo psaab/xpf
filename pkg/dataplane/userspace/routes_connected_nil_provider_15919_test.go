@@ -163,6 +163,38 @@ func TestUnwiredPublishersRefuseClearedProvider15919(t *testing.T) {
 	if hasConnectedRoute15742(m.lastSnapshot.Routes, "172.16.80.0/24") || !m.lastSnapshot.Interfaces[0].ConnectedRGPeerOwned {
 		t.Fatal("retained snapshot lost the peer-owned RG1 suppression after rewired publish")
 	}
+
+	// Wired actual-send control (#15924 GLM2): the dedup above proves
+	// the gate lifts, but not that a clustered snapshot can still be
+	// SENT through the gated site — an always-refuse regression would
+	// pass everything so far. Publish with a non-empty overlay so the
+	// content changes and the fake helper must record a real
+	// apply_snapshot; assert it carries the peer-owned suppression
+	// (route absent, row marked), i.e. the gate admits wired sends
+	// without weakening the marking.
+	published, err = m.PublishRouteOverlaySnapshot(cfg, []config.RouteOverlayEntry{
+		{Destination: "198.51.100.0/24", NextHop: "10.0.61.254", Policy: "gate-15919"},
+	}, nil)
+	if err != nil || !published {
+		t.Fatalf("overlay publish wired with overlay = (%t, %v), want (true, nil)", published, err)
+	}
+	if len(rec.sent) != 1 {
+		t.Fatalf("wired publish sent %d snapshots, want 1 (always-refuse gate would send 0)", len(rec.sent))
+	}
+	sent := rec.sent[0]
+	if hasConnectedRoute15742(sent.Routes, "172.16.80.0/24") || !sent.Interfaces[0].ConnectedRGPeerOwned {
+		t.Fatalf("wired send leaked peer-owned RG1: route present=%t marked=%t",
+			hasConnectedRoute15742(sent.Routes, "172.16.80.0/24"), sent.Interfaces[0].ConnectedRGPeerOwned)
+	}
+	foundOverlay := false
+	for _, route := range sent.Routes {
+		if route.Destination == "198.51.100.0/24" {
+			foundOverlay = true
+		}
+	}
+	if !foundOverlay {
+		t.Fatalf("wired send missing overlay route: %+v", sent.Routes)
+	}
 }
 
 // refreshForGate15919 drives RefreshInterfaceRowsForLink on m with a
