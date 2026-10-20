@@ -444,6 +444,53 @@ now_secs: u64,) -> bool {
     true
 }
 
+/// #15958b round-5 r6: is `ifindex`'s routing instance the scope
+/// `table` names? The interface's RI is read from its egress row's
+/// routing instance via the ifindex->RI ledger the FIB builder
+/// maintains (`ifindex_to_routing_instance` / egress table name);
+/// default scope (None) admits only default-instance interfaces.
+/// Unknown ifindex: not in scope (never claim cross-RI ownership
+/// from an unattributed interface).
+pub(in crate::afxdp) fn interface_in_table_scope(
+    forwarding: &ForwardingState,
+    ifindex: i32,
+    table: Option<&str>,
+) -> bool {
+    let Some(want) = table else {
+        // Default scope: the interface must not belong to a named RI.
+        // The connected rows' table for default interfaces is the
+        // canonical default; an interface with no RI row is default.
+        return forwarding
+            .ifindex_to_routing_instance
+            .get(&ifindex)
+            .is_none_or(|ri| ri.is_empty());
+    };
+    // Named table (e.g. "tenant-a.inet.0"): the interface's RI is the
+    // table's instance part (strip the family suffix) or the table
+    // name itself as recorded on egress rows.
+    forwarding
+        .ifindex_to_routing_instance
+        .get(&ifindex)
+        .is_some_and(|ri| {
+            !ri.is_empty()
+                && (want == ri
+                    || want.starts_with(ri.as_str())
+                    || forwarding
+                        .egress
+                        .get(&ifindex)
+                        .is_some_and(|egress| egress_table_matches(egress, want)))
+        })
+}
+
+fn egress_table_matches(egress: &EgressInterface, want: &str) -> bool {
+    // EgressInterface carries no table name; RI match falls back to
+    // the ifindex ledger above. Kept as a named seam so a future
+    // table field on the egress row slots in without call-site churn.
+    let _ = egress;
+    let _ = want;
+    false
+}
+
 /// #15958b: the RG that owns `target` as a connected destination:
 /// the redundancy group of the interface whose connected prefix
 /// contains the address (per-address ownership, not per-zone —
@@ -484,8 +531,16 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
                     }
                 }
             }
-            if best.is_none() && table.is_none() {
+            if best.is_none() {
+                // Ledger WITH RI filter (round-5 r6): peer-owned
+                // named-RI prefixes exist ONLY here (the FIB row is
+                // suppressed), so scoped lookups must consult it —
+                // filtered to interfaces whose routing instance is
+                // the session's table (default scope: default RIs).
                 for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
                     for prefix in prefixes {
                         if prefix.contains(ip) {
                             let len = prefix.prefix_len();
@@ -510,8 +565,16 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
                     }
                 }
             }
-            if best.is_none() && table.is_none() {
+            if best.is_none() {
+                // Ledger WITH RI filter (round-5 r6): peer-owned
+                // named-RI prefixes exist ONLY here (the FIB row is
+                // suppressed), so scoped lookups must consult it —
+                // filtered to interfaces whose routing instance is
+                // the session's table (default scope: default RIs).
                 for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
                     for prefix in prefixes {
                         if prefix.contains(ip) {
                             let len = prefix.prefix_len();
@@ -534,7 +597,14 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     match target {
         IpAddr::V4(ip) => {
             if let Some(by_table) = forwarding.interface_nat_v4.get(&ip) {
-                for ifindex in by_table.values() {
+                // Scoped by the session table: the map is keyed by
+                // table name; only the session's table entry (or the
+                // canonical default) may claim the address.
+                let want = table.unwrap_or("inet.0");
+                for (table_name, ifindex) in by_table.iter() {
+                    if table_name != want {
+                        continue;
+                    }
                     let rg = owner_rg_for_flow(forwarding, *ifindex);
                     if rg > 0 {
                         return rg;
@@ -549,7 +619,14 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
         }
         IpAddr::V6(ip) => {
             if let Some(by_table) = forwarding.interface_nat_v6.get(&ip) {
-                for ifindex in by_table.values() {
+                // Scoped by the session table: the map is keyed by
+                // table name; only the session's table entry (or the
+                // canonical default) may claim the address.
+                let want = table.unwrap_or("inet6.0");
+                for (table_name, ifindex) in by_table.iter() {
+                    if table_name != want {
+                        continue;
+                    }
                     let rg = owner_rg_for_flow(forwarding, *ifindex);
                     if rg > 0 {
                         return rg;
@@ -611,8 +688,11 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
                     }
                 }
             }
-            if best.is_none() && table.is_none() {
+            if best.is_none() {
                 for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
                     for prefix in prefixes {
                         if prefix.contains(ip) {
                             let len = prefix.prefix_len();
@@ -637,8 +717,11 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
                     }
                 }
             }
-            if best.is_none() && table.is_none() {
+            if best.is_none() {
                 for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
                     for prefix in prefixes {
                         if prefix.contains(ip) {
                             let len = prefix.prefix_len();
@@ -654,28 +737,6 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
     best.map(|(_, ifindex)| ifindex).unwrap_or(0)
 }
 
-/// The destination target for a re-home judgment: the post-NAT
-/// destination of the companion (`resolution_target_for_session`
-/// equivalent for callers that already hold the decision + flow
-/// target). Callers pass `target` explicitly so this helper stays
-/// pure resolution logic.
-pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_15958b(
-    forwarding: &ForwardingState,
-    stored: ForwardingResolution,
-    candidate: ForwardingResolution,
-    destination_zone: u16,
-    destination_owner_active: bool,
-) -> ForwardingResolution {
-    rehome_or_retain_fabric_redirect_for_target_15958b(
-        forwarding,
-        stored,
-        candidate,
-        destination_zone,
-        destination_owner_active,
-        None,
-    )
-}
-
 /// Target-aware re-home (round-4): re-home ONLY when the fresh
 /// candidate genuinely reaches the destination locally —
 /// `ForwardCandidate`, its egress IS the destination's connected
@@ -684,8 +745,6 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_15958b(
 /// window the fresh candidate is the HA-suppressed WAN default
 /// (egress = WAN gateway, not the connected LAN interface), so the
 /// redirect is retained instead of laundering the reply onto WAN.
-/// When `target` is `None` (legacy callers), fall back to the
-/// owner-active acceptance.
 pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_for_target_15958b(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,
