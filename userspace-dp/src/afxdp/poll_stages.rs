@@ -759,8 +759,7 @@ pub(in crate::afxdp) fn capture_pptp_control_segment(
     }
     inbox.push_in_domain(
         flow.forward_key.routing_domain,
-        crate::session::pptp_control::PendingControlSegment {
-            src: flow.src_ip,
+        crate::session::pptp_control::PendingControlSegment { epoch: 0,            src: flow.src_ip,
             dst: flow.dst_ip,
             src_port: flow.forward_key.src_port,
             dst_port: flow.forward_key.dst_port,

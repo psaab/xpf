@@ -641,6 +641,17 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                             // associations must still be purged. A present
                             // session with a different id is a replacement
                             // incarnation and is protected.
+                            // Trade-off (explicit, #15966r4): the absent arm
+                            // cannot discriminate a stale batch (captured
+                            // before a replacement was learned on THIS
+                            // worker, which holds no local row to check)
+                            // from a genuine delete on a non-owning worker.
+                            // It chooses purge: leaving broadcast calls
+                            // after a genuine delete resurrects a revoked
+                            // channel, while a stale purge is bounded by
+                            // call re-learning on the live control channel
+                            // and association idle expiry. The present-row
+                            // arm IS incarnation-scoped above.
                             let genuine = applied || local_id_before == 0;
                             if applied {
                                 applied_slot[index] = true;

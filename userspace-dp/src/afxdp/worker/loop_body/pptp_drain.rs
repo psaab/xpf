@@ -22,16 +22,16 @@ pub(super) fn run_pptp_control_drain(
     // #15950: when the PPTP ALG is disabled, do not install associations
     // from segments buffered before the disable. Purge the inbox so a
     // later re-enable cannot resurrect pre-disable calls either.
+    // Epoch eligibility is decided at DRAIN time, never by clearing at
+    // poll: observing the bit only advances the epoch on a
+    // disabled->enabled transition. A skipped disabled generation is
+    // handled because the epoch advances whenever the enabled state is
+    // observed after a disabled observation (by any worker sharing this
+    // inbox), and steady-enabled polls change nothing.
+    pptp_control.note_enabled_state(pptp_enabled);
     if !pptp_enabled {
-        // First disabled poll purges immediately (no interval window in
-        // which a re-enable could resurrect pre-disable segments).
-        pptp_control.note_poll(false);
-        pptp_control.purge_once_per_disable();
         return;
     }
-    // Edge-triggered: drops pre-enable buffers only on the
-    // disabled->enabled transition; steady-enabled polls are no-ops.
-    pptp_control.note_poll(true);
     crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
         &pptp_control,
         &mut sessions,

@@ -15470,16 +15470,14 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
         );
     };
 
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
         captured_ns: 10,
         payload: outgoing_call_reply(0xAAAA, 0xBBBB, 1),
     }));
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -15516,8 +15514,7 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
             pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
         }
     }
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -15563,8 +15560,7 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
         assert_eq!(sessions.pptp().resolve(pns, 0xFFFF), Some(unrelated_handle));
     }
 
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -15645,8 +15641,7 @@ fn a_refused_pptp_install_reaches_the_worker_on_retry_12133() {
             pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
         }
     }
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -15748,16 +15743,14 @@ fn run_own_pptp_retry_behind_queued_cdn_12133(own_retry: bool) -> (Option<u32>, 
     }
 
     let inbox = PptpControlInbox::default();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
         captured_ns: 20,
         payload: call_disconnect_notify(0x1111),
     }));
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -21190,16 +21183,14 @@ fn run_both_refused_pptp_retry_resolves_replacement_12133(
     }
 
     let inbox = PptpControlInbox::default();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
         captured_ns: 20,
         payload: call_disconnect_notify(0x1111),
     }));
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -21411,8 +21402,7 @@ fn run_same_pass_cdn_does_not_resurrect_queued_install_12133(
         }
     }
     let inbox = PptpControlInbox::default();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -21472,8 +21462,7 @@ fn run_same_pass_cdn_does_not_resurrect_queued_install_12133(
             pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
         }
     }
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -22427,8 +22416,7 @@ fn run_first_learn_collision_backlog_15251() -> (Option<u32>, Option<u32>, usize
     // Phase 1: the CDN alone. X's own queue is non-empty, so the CDN arm
     // queues its self-forget behind the backlog (FIFO) rather than
     // applying it directly — the not-yet-applied CDN of the claim.
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -22461,8 +22449,7 @@ fn run_first_learn_collision_backlog_15251() -> (Option<u32>, Option<u32>, usize
     // Phase 2: the replacement reply alone. X's local install collides
     // with the old call. Pre-fix: learned=0, nothing broadcast, nothing
     // recorded. Post-fix: broadcast to Q + retry recorded with X unsent.
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -22711,13 +22698,13 @@ fn stop_control_refusal_recorded_and_retried_15966r() {
     }
     // Stop-Control Request (type 3, len 16)
     let mut stop = Vec::new(); stop.extend_from_slice(&16u16.to_be_bytes()); stop.extend_from_slice(&1u16.to_be_bytes()); stop.extend_from_slice(&0x1A2B3C4Du32.to_be_bytes()); stop.extend_from_slice(&3u16.to_be_bytes()); stop.extend_from_slice(&0u16.to_be_bytes()); stop.extend_from_slice(&[0,0,0,0]);
-    assert!(inbox.push(PendingControlSegment { src: pac, dst: pns, src_port: 1723, dst_port: 49152, captured_ns: 20, payload: stop }));
+    assert!(inbox.push(PendingControlSegment { epoch: 0, src: pac, dst: pns, src_port: 1723, dst_port: 49152, captured_ns: 20, payload: stop }));
     crate::afxdp::worker_queue::drain_pptp_control_inbox(&inbox, &mut local, &queues, 1_000_000_000);
     assert_eq!(local.pptp().resolve(pac, 0xAAAA), None, "local must forget on Stop");
     assert!(remote.pptp().resolve(pac, 0xAAAA).is_some(), "refused remote still holds before retry");
     // Drain queue, retry via next drain (empty pending, retry head runs)
     queues[0].lock().unwrap().clear();
-    assert!(inbox.push(PendingControlSegment { src: pac, dst: pns, src_port: 1723, dst_port: 49152, captured_ns: 30, payload: outgoing_call_reply(0xEEEE, 0xFFFF, 1) }));
+    assert!(inbox.push(PendingControlSegment { epoch: 0, src: pac, dst: pns, src_port: 1723, dst_port: 49152, captured_ns: 30, payload: outgoing_call_reply(0xEEEE, 0xFFFF, 1) }));
     crate::afxdp::worker_queue::drain_pptp_control_inbox(&inbox, &mut local, &queues, 2_000_000_000);
     // Apply queued forget to remote
     let forwarding = test_forwarding_state();

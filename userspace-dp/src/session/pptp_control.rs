@@ -50,6 +50,9 @@ use std::sync::Mutex;
 /// after a close has already been observed.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingControlSegment {
+    /// Enable-epoch at capture (stamped by the inbox at push). Entries
+    /// whose epoch is not the inbox's current epoch at drain are dropped.
+    pub(crate) epoch: u64,
     pub(crate) src: IpAddr,
     pub(crate) dst: IpAddr,
     pub(crate) src_port: u16,
@@ -111,12 +114,14 @@ struct InboxInner {
     /// PPTP installs refused by full worker queues.
     pending_call_installs: Vec<PendingCallInstall>,
     last_call_install_retry_ns: u64,
-    /// #15966r: true once the current disabled period has purged.
-    disabled_purged: bool,
-    /// Edge state: true after the first enabled poll is seen.
-    enabled_seen: bool,
-    /// Previous poll was disabled (edge detector for enable transition).
+    /// Current enable-epoch. Advances on every disabled->enabled
+    /// observation at drain time; entries stamped with an older epoch
+    /// are dropped at drain, never at poll.
+    epoch: u64,
+    /// Previous drain/poll observation was disabled (edge detector).
     was_disabled: bool,
+    /// Whether any poll has been observed (first-poll seeding).
+    seen_poll: bool,
 }
 
 /// A control close still waiting for a bounded worker queue or local table.
@@ -140,6 +145,7 @@ pub(crate) struct PendingCallInstall {
     pub(crate) call: crate::session::pptp::PptpCall,
     pub(crate) control: crate::session::pptp::ControlChannelId,
     pub(crate) learned_ns: u64,
+    pub(crate) epoch: u64,
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
@@ -160,7 +166,7 @@ impl PptpControlInbox {
         self.push_in_domain(0, seg)
     }
 
-    pub(crate) fn push_in_domain(&self, routing_domain: u32, seg: PendingControlSegment) -> bool {
+    pub(crate) fn push_in_domain(&self, routing_domain: u32, mut seg: PendingControlSegment) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -169,6 +175,7 @@ impl PptpControlInbox {
             inner.dropped = inner.dropped.saturating_add(1);
             return false;
         }
+        seg.epoch = inner.epoch;
         inner.pending.push((routing_domain, seg));
         true
     }
@@ -204,7 +211,9 @@ impl PptpControlInbox {
             return Vec::new();
         }
         inner.last_drain_ns = now_ns;
-        std::mem::take(&mut inner.pending)
+        let epoch = inner.epoch;
+        let all = std::mem::take(&mut inner.pending);
+        all.into_iter().filter(|(_, seg)| seg.epoch == epoch).collect()
     }
 
     pub(crate) fn dropped_count(&self) -> u64 {
@@ -221,57 +230,37 @@ impl PptpControlInbox {
         }
     }
 
-    /// #15966r: purge exactly once per disabled period. The first disabled
-    /// poll purges regardless of drain-interval timing (a rapid
-    /// disable/re-enable must not resurrect pre-disable segments); later
-    /// disabled polls are a single flag check under the same lock, and
-    /// re-enable rearms it. Returns true when this call purged.
-    pub(crate) fn purge_once_per_disable(&self) -> bool {
+    /// Observe the enabled bit at drain/poll time. On a
+    /// disabled->enabled transition the epoch ADVANCES: every buffered
+    /// segment/install stamped with an older epoch becomes ineligible
+    /// at the next drain. Nothing is cleared here — poll-time state is
+    /// never mutated destructively, so steady-enabled traffic is
+    /// untouched by construction, a skipped disabled generation still
+    /// advances the epoch when the enabled generation is observed, and
+    /// a lagging worker cannot purge current-epoch entries (it only
+    /// ever advances the epoch forward, and entries stamped after the
+    /// advance carry the new epoch).
+    pub(crate) fn note_enabled_state(&self, enabled: bool) {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if inner.disabled_purged {
-            return false;
-        }
-        inner.disabled_purged = true;
-        inner.was_disabled = true;
-        inner.pending.clear();
-        inner.pending_call_installs.clear();
-        true
-    }
-
-    /// Combined poll gate, called once per worker poll with the current
-    /// enabled bit. Returns true when this poll is the disabled->enabled
-    /// transition, in which case pre-enable buffered segments have been
-    /// dropped. Steady polls (enabled->enabled or disabled->disabled)
-    /// never drop buffers, so CallReplies queued between enabled polls
-    /// survive to the next drain. The first poll ever observed only
-    /// seeds the edge state. A disabled poll purges once per period via
-    /// purge_once_per_disable; if no disabled poll ran (generation
-    /// skipped), the transition detected here still drops the buffer.
-    pub(crate) fn note_poll(&self, enabled: bool) -> bool {
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if !inner.enabled_seen {
-            inner.enabled_seen = true;
+        if !inner.seen_poll {
+            inner.seen_poll = true;
             inner.was_disabled = !enabled;
-            inner.disabled_purged = false;
-            return false;
+            return;
         }
         if enabled && inner.was_disabled {
-            inner.pending.clear();
-            inner.pending_call_installs.clear();
-            inner.was_disabled = false;
-            inner.disabled_purged = false;
-            return true;
+            inner.epoch = inner.epoch.saturating_add(1);
         }
-        if !enabled {
-            inner.was_disabled = true;
+        inner.was_disabled = !enabled;
+    }
+
+    pub(crate) fn current_epoch(&self) -> u64 {
+        match self.inner.lock() {
+            Ok(g) => g.epoch,
+            Err(poisoned) => poisoned.into_inner().epoch,
         }
-        false
     }
 
     /// #15950: drop every buffered segment (ALG disabled). Returns count.
@@ -399,15 +388,19 @@ impl PptpControlInbox {
             if unsent_queue_ids.is_empty() {
                 inner.pending_call_installs.remove(index);
             } else {
+                let epoch = inner.epoch;
                 let pending = &mut inner.pending_call_installs[index];
                 pending.learned_ns = learned_ns;
+                pending.epoch = epoch;
                 pending.unsent_queue_ids = unsent_queue_ids;
             }
         } else if !unsent_queue_ids.is_empty() {
+            let epoch = inner.epoch;
             inner.pending_call_installs.push(PendingCallInstall {
                 call,
                 control,
                 learned_ns,
+                epoch,
                 unsent_queue_ids,
             });
         }
@@ -508,7 +501,13 @@ impl PptpControlInbox {
             return Vec::new();
         }
         inner.last_call_install_retry_ns = now_ns;
-        inner.pending_call_installs.clone()
+        let epoch = inner.epoch;
+        inner
+            .pending_call_installs
+            .iter()
+            .filter(|pending| pending.epoch == epoch)
+            .cloned()
+            .collect()
     }
 
     /// Acknowledge a close delivered to its queue or applied to its local table.
@@ -991,8 +990,7 @@ mod inbox_drop_policy_tests_7699 {
     use super::*;
 
     fn seg(n: u8) -> PendingControlSegment {
-        PendingControlSegment {
-            src: "198.51.100.7".parse().unwrap(),
+        PendingControlSegment { epoch: 0, src: "198.51.100.7".parse().unwrap(),
             dst: "203.0.113.9".parse().unwrap(),
             src_port: PPTP_CONTROL_PORT,
             dst_port: 49152,
@@ -1179,8 +1177,7 @@ mod routing_domain_inbox_13681_tests {
     fn closing_one_routing_domain_does_not_purge_another_domains_reply_13681() {
         let src = "198.51.100.7".parse().unwrap();
         let dst = "203.0.113.9".parse().unwrap();
-        let segment = || PendingControlSegment {
-            src,
+        let segment = || PendingControlSegment { epoch: 0,            src,
             dst,
             src_port: 49_152,
             dst_port: 1723,
@@ -1224,34 +1221,36 @@ mod tests_15950_parse {
 #[cfg(test)]
 mod tests_15966r_toggle {
     use super::*;
+    fn seg(ns: u64, b: u8) -> PendingControlSegment {
+        PendingControlSegment { epoch: 0, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: ns, payload: vec![b] }
+    }
     #[test]
-    fn enable_transition_drops_pre_enable_segments_15966r() {
+    fn epoch_drain_filtering_15966r() {
+        // Steady state: enabled polls/drains never drop current-epoch entries.
         let inbox = PptpControlInbox::default();
-        let seg = PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 1, payload: vec![1,2,3] };
-        assert!(inbox.push(seg));
-        // Worker never observed disabled generation; enable transition must drop it.
-        assert!(inbox.note_poll(false) == false);
-        assert!(inbox.note_poll(true), "enable transition must report");
-        assert_eq!(inbox.pending_len(), 0, "pre-enable buffered segments must be dropped on enable");
-        // Disabled purge fires once, rearmed by enable.
-        assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 2, payload: vec![4] }));
-        assert!(inbox.purge_once_per_disable());
-        assert_eq!(inbox.pending_len(), 0);
-        assert!(!inbox.purge_once_per_disable(), "second disabled poll must not re-purge (flag)");
-        inbox.note_poll(true);
-        assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 3, payload: vec![5] }));
-        assert!(inbox.purge_once_per_disable(), "enable must rearm disabled purge");
-        // Steady-enabled: multiple enabled polls must NOT drop queued replies.
-        inbox.note_poll(true);
-        assert!(inbox.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 4, payload: vec![9,9,9] }));
-        for _ in 0..5 { assert!(!inbox.note_poll(true), "steady enabled poll must be a no-op"); }
-        assert_eq!(inbox.pending_len(), 1, "CallReply queued between enabled polls must survive");
-        // Generation-skip: disabled state seeded by note_poll(false) without purge, then enable drops.
-        let inbox2 = PptpControlInbox::default();
-        inbox2.note_poll(true);
-        assert!(inbox2.push(PendingControlSegment { src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 5, payload: vec![7] }));
-        inbox2.note_poll(false);
-        assert!(inbox2.note_poll(true));
-        assert_eq!(inbox2.pending_len(), 0, "skipped-generation pre-enable buffer must drop on transition");
+        inbox.note_enabled_state(true);
+        assert!(inbox.push(seg(1, 1)));
+        for _ in 0..5 { inbox.note_enabled_state(true); }
+        assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 1, "steady-enabled reply must survive to drain");
+        // Skipped generation: pre-disable reply stamped epoch N, epoch advances
+        // when enabled is observed (no disabled drain needed), drain drops it.
+        let inbox = PptpControlInbox::default();
+        inbox.note_enabled_state(true);
+        assert!(inbox.push(seg(1, 2)));
+        inbox.note_enabled_state(false);
+        inbox.note_enabled_state(true);
+        assert_eq!(inbox.take_pending_in_domain(1_000_000_000).len(), 0, "pre-disable reply must be epoch-ineligible after re-enable");
+        // Lagging worker: after the epoch advanced, a NEW reply is stamped with
+        // the current epoch; a lagging worker observing enabled again must not
+        // drop it (no second purge).
+        assert!(inbox.push(seg(2, 3)));
+        inbox.note_enabled_state(true);
+        inbox.note_enabled_state(true);
+        assert_eq!(inbox.take_pending_in_domain(2_000_000_000).len(), 1, "current-epoch reply must survive lagging enabled polls");
+        // Two epochs later the same entry would be stale; fresh capture is current.
+        inbox.note_enabled_state(false);
+        inbox.note_enabled_state(true);
+        assert!(inbox.push(seg(3, 4)));
+        assert_eq!(inbox.take_pending_in_domain(3_000_000_000).len(), 1);
     }
 }

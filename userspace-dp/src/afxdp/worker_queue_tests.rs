@@ -1733,8 +1733,7 @@ fn a_refused_worker_applies_its_install_retry_to_its_own_table_12133() {
     let inbox = PptpControlInbox::default();
     let mut x_sessions = crate::session::SessionTable::new();
     let mut q_sessions = crate::session::SessionTable::new();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -1816,8 +1815,7 @@ fn own_retry_retains_allocator_collision_until_cdn_frees_alias_12133() {
         }
     }
     let inbox = PptpControlInbox::default();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -1860,8 +1858,7 @@ fn own_retry_retains_allocator_collision_until_cdn_frees_alias_12133() {
 
     // The real disconnect timestamp predates the replacement reply. It
     // frees only the old association and does not cancel the newer retry.
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -1950,8 +1947,7 @@ fn a_cdn_cancels_a_pending_pptp_install_retry_12133() {
     }
     let inbox = PptpControlInbox::default();
     let mut local = crate::session::SessionTable::new();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -1963,8 +1959,7 @@ fn a_cdn_cancels_a_pending_pptp_install_retry_12133() {
         1
     );
 
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -2024,8 +2019,7 @@ fn a_cdn_cancels_only_its_call_and_the_next_call_still_retries_12133() {
     let mut x_sessions = crate::session::SessionTable::new();
     let mut q_sessions = crate::session::SessionTable::new();
     for (captured_ns, call_id, peer_call_id) in [(10, 0x1111, 0x2222), (11, 0x3333, 0x4444)] {
-        assert!(inbox.push(PendingControlSegment {
-            src: pac,
+        assert!(inbox.push(PendingControlSegment { epoch: 0,            src: pac,
             dst: pns,
             src_port: 1723,
             dst_port: 49152,
@@ -2044,8 +2038,7 @@ fn a_cdn_cancels_only_its_call_and_the_next_call_still_retries_12133() {
         ),
         2
     );
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -2112,8 +2105,7 @@ fn closing_a_control_channel_cancels_a_pending_pptp_install_retry_12133() {
     }
     let inbox = PptpControlInbox::default();
     let mut local = crate::session::SessionTable::new();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -2186,8 +2178,7 @@ fn a_complete_rebroadcast_clears_the_older_install_retry_12133() {
     }
     let inbox = PptpControlInbox::default();
     let mut local = crate::session::SessionTable::new();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
@@ -2203,8 +2194,7 @@ fn a_complete_rebroadcast_clears_the_older_install_retry_12133() {
     // full. A new reply can then be parsed before another retry snapshot.
     retry_pending_pptp_call_installs(&inbox, &mut local, None, &queues, 2_000_000_000);
     queues[1].lock().expect("refused queue").clear();
-    assert!(inbox.push(PendingControlSegment {
-        src: pac,
+    assert!(inbox.push(PendingControlSegment { epoch: 0,        src: pac,
         dst: pns,
         src_port: 1723,
         dst_port: 49152,
