@@ -278,14 +278,6 @@ func (e *PublishedSnapshotTailError) Error() string {
 
 func (e *PublishedSnapshotTailError) Unwrap() error { return e.err }
 
-// isPublishedSnapshotTailError reports whether err proves the full
-// snapshot was ACCEPTED by the helper before a post-publish tail step
-// failed (round-4 stamp accounting: the helper holds the new count).
-func isPublishedSnapshotTailError(err error) bool {
-	var tailErr *PublishedSnapshotTailError
-	return errors.As(err, &tailErr)
-}
-
 func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
 	// #15919: a clustered snapshot built before the daemon wires the RG
 	// provider carries no ownership evidence for its RG>0 connected

@@ -698,52 +698,101 @@ func TestCompileClearAllEndToEnd(t *testing.T) {
 	}
 }
 
-// TestTailErrorStampFollowsAcceptedBuild simulates the round-4 (a)
-// path at the accounting level: applyCompiledSnapshot ACCEPTED the
-// full build (lastSnapshot/publishedSnapshot advanced) and then its
-// tail failed with PublishedSnapshotTailError. Compile's commit rule
-// (applyErr == nil || isPublishedSnapshotTailError) must move the
-// stamp to the accepted count, and a subsequent PARTIAL sized for the
-// accepted set must publish — before the fix it wedged against the
-// stale stamp.
-func TestTailErrorStampFollowsAcceptedBuild(t *testing.T) {
-	cfg := hardeningPolicyCfg()
-	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
-	rec := &applyRecorder9520{}
-	m := newRepublishManager9520(good, rec)
-	m.expectedPolicyCount = 1 // stale: pre-change accepted count
+// TestCompileTailErrorStampsAcceptedCount drives the REAL
+// Manager.Compile with a tail-erroring apply: the fake helper ACCEPTS
+// the apply_snapshot, then the post-publish helper-status sync fails
+// (fakeCtrlMap updateErr — the TestPublishedTailFailureReturns pattern),
+// so Compile returns PublishedSnapshotTailError. The stamp must follow
+// the ACCEPTED count through production wiring (the send-site choke
+// committed it at acceptance), and a later partial sized for the
+// accepted set must publish. Replaces the former direct-helper pin:
+// reverting the choke commit turns this RED.
+func TestCompileTailErrorStampsAcceptedCount(t *testing.T) {
+	dir := t.TempDir()
+	controlSock, reqCh := overlayControlServer(t, dir)
+	cfg := overlayTestConfig()
+	seedPoliciesForOverlayFixture(cfg, 1)
+	cfg.System.UserspaceDataplane = &config.UserspaceConfig{ControlSocket: controlSock}
+	ucfg := deriveUserspaceConfig(cfg)
+	m := New()
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	m.proc = &exec.Cmd{Process: proc}
+	m.cfg = ucfg
+	m.syncCancel = func() {}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	// Tail failure: helper accepts the snapshot, status sync then fails.
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{updateErr: errors.New("status map write failed")}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.clearHelperHAStateHook = func() error { return nil }
+	m.lastStatus = ProcessStatus{ConfigSnapshotProtocolVersion: ProtocolVersion}
+	m.helperStatusObserved = true
+	m.xskLivenessProven = true
+	seed := mustBuildSnapshotWithSchedulerState(t, cfg, ucfg, 7, 0, nil, nil, nil)
+	m.lastSnapshot = seed
+	m.generation = 7
+	m.publishedSnapshot = 7
+	m.publishedPlanKey = snapshotBindingPlanKey(seed)
+	if h, ok := snapshotContentHash(seed); ok {
+		m.lastSnapshotHash = h
+	}
+	m.compileUserspaceShimHook = func(_ *config.Config, preflight func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error) {
+		result := &dataplane.CompileResult{}
+		if err := preflight(result); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	m.expectedPolicyCount = len(seed.Policies)
+	priorStamp := m.expectedPolicyCount
 
-	accepted := *good
-	accepted.Policies = append(append([]PolicyRuleSnapshot{}, good.Policies...), good.Policies[0])
-	accepted.Summary.PolicyCount = len(accepted.Policies)
-	accepted.Generation = 8
-	tailErr := &PublishedSnapshotTailError{generation: 8, stage: "helper status sync", err: errors.New("boom")}
-	if !isPublishedSnapshotTailError(tailErr) {
-		t.Fatal("premise: tail error must classify as landed evidence")
+	grown := overlayTestConfig()
+	seedPoliciesForOverlayFixture(grown, 2)
+	grown.System.UserspaceDataplane = cfg.System.UserspaceDataplane
+	_, compileErr := m.Compile(grown)
+	if compileErr == nil {
+		t.Fatal("premise: Compile must surface the tail error")
 	}
-	// Compile's exact commit rule.
-	if true { // applyErr != nil but is a tail error -> commit
-		m.commitExpectedPolicyCountFromLandedSnapshot(&accepted)
+	var tailErr *PublishedSnapshotTailError
+	if !errors.As(compileErr, &tailErr) {
+		t.Fatalf("Compile error = %v, want PublishedSnapshotTailError", compileErr)
 	}
-	if m.expectedPolicyCount != len(accepted.Policies) {
-		t.Fatalf("stamp after tail-error acceptance = %d, want %d", m.expectedPolicyCount, len(accepted.Policies))
+	// The grown snapshot DID reach the helper (accepted before tail).
+	deadline := time.After(5 * time.Second)
+	landed := false
+	for !landed {
+		select {
+		case req := <-reqCh:
+			if req.Type == "apply_snapshot" && req.Snapshot != nil && len(req.Snapshot.Policies) == priorStamp+1 {
+				landed = true
+			}
+		case <-deadline:
+			t.Fatal("grown Compile never reached the helper")
+		}
 	}
-	// Partial sized for the ACCEPTED set publishes.
+	m.mu.Lock()
+	stamp := m.expectedPolicyCount
+	m.mu.Unlock()
+	if stamp != priorStamp+1 {
+		t.Fatalf("stamp after tail-errored Compile = %d, want %d (accepted count via send-site choke)", stamp, priorStamp+1)
+	}
+	// Partial sized for the ACCEPTED set publishes through the gate.
+	m.mu.Lock()
+	accepted := *m.lastSnapshot
+	m.mu.Unlock()
 	partial := accepted
-	partial.Generation = 9
+	partial.Generation = m.generation + 1
 	stripSingleUseCommitMetadata(&partial)
+	rec := &applyRecorder9520{}
+	m.controlRequestHook = rec.hook
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{} // tail healthy again
 	if err := m.requestApplySnapshotPreparedLocked(&partial, &ProcessStatus{}); err != nil {
 		t.Fatalf("accepted-count partial after tail error must publish (stale-stamp wedge): %v", err)
 	}
 	if len(rec.sent) != 1 {
 		t.Fatalf("accepted-count partial sends = %d, want 1", len(rec.sent))
-	}
-	// And a partial sized for the STALE count now refuses.
-	stale := *good
-	stale.Generation = 10
-	stripSingleUseCommitMetadata(&stale)
-	if err := m.requestApplySnapshotPreparedLocked(&stale, &ProcessStatus{}); !errors.Is(err, errSnapshotPolicyMismatch) {
-		t.Fatalf("stale-count partial = %v, want errSnapshotPolicyMismatch", err)
 	}
 }
 
@@ -922,5 +971,35 @@ func TestOverlayFirstAcceptanceCommitsStamp(t *testing.T) {
 	stripSingleUseCommitMetadata(&stale)
 	if err := m.requestApplySnapshotPreparedLocked(&stale, &ProcessStatus{}); !errors.Is(err, errSnapshotPolicyMismatch) {
 		t.Fatalf("stale-count partial = %v, want errSnapshotPolicyMismatch", err)
+	}
+}
+
+// TestConflictRepublishArmCommitsStamp drives the SECOND success arm
+// of the send choke: the first round trip lands generation G with
+// different content (lost response), the retry at G is refused with
+// the content-conflict prefix, and the republish at G+1 succeeds.
+// The stamp must commit from the REPUBLISH arm (GLM6: neutering only
+// that arm left every stamp test green). The sent snapshot is a full
+// build whose count differs from the stamp.
+func TestConflictRepublishArmCommitsStamp(t *testing.T) {
+	cfg := hardeningPolicyCfg()
+	good := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
+	rec := &applyRecorder9520{replies: []error{contentConflict9520(8)}}
+	m := newRepublishManager9520(good, rec)
+	m.expectedPolicyCount = 1 // stale stamp
+
+	full := *good
+	full.Policies = append(append([]PolicyRuleSnapshot{}, good.Policies...), good.Policies[0])
+	full.Summary.PolicyCount = len(full.Policies)
+	full.Generation = 8
+	if err := m.requestApplySnapshotPreparedLocked(&full, &ProcessStatus{}); err != nil {
+		t.Fatalf("conflict republish must succeed: %v", err)
+	}
+	if got := rec.generations(); len(got) != 2 || got[0] != 8 || got[1] != 9 {
+		t.Fatalf("apply generations = %v, want [8 9] (conflict at 8, republish at 9)", got)
+	}
+	if m.expectedPolicyCount != len(full.Policies) {
+		t.Fatalf("stamp after conflict-republish acceptance = %d, want %d (republish arm must commit)",
+			m.expectedPolicyCount, len(full.Policies))
 	}
 }

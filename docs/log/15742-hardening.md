@@ -181,3 +181,19 @@ neutering the choke commits turns the overlay-first, clear-e2e,
 count-change-e2e and deferred-clear tests RED; the old direct-helper
 tests (tail/status) are retained as unit pins but no longer carry
 the lifecycle claim — the e2e/overlay tests do.
+
+## GLM6 confirmation fold
+
+- Conflict-republish choke arm now covered:
+  `TestConflictRepublishArmCommitsStamp` drives the #9520
+  conflict-republish (G refused, G+1 lands) and asserts the stamp
+  commits from that arm; neutering ONLY that arm turns exactly this
+  test RED (first-arm tests stay green).
+- Tail-error coverage moved to production wiring:
+  `TestCompileTailErrorStampsAcceptedCount` drives real
+  `Manager.Compile` with an accepting-then-tail-failing helper
+  (fakeCtrlMap updateErr) and asserts the accepted-count stamp +
+  partial publication; neutering both choke arms turns it RED.
+  The production-dead `isPublishedSnapshotTailError` classifier and
+  its direct-helper unit pin are removed (acceptance accounting
+  lives solely at the choke; nothing referenced the classifier).
