@@ -112,6 +112,7 @@ use super::poll_stages::{
     SynCookieAckOutcome, ike_host_inbound_gate_context,
     ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough,
     screen_zone_with_state, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
+    stage_ipsec_passthrough_check_with_scope,
     stage_link_layer_classify, stage_native_gre_decap, stage_parse_flow_and_learn,
     stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
 };
@@ -1811,12 +1812,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                     _ => None,
                 };
-                match stage_ipsec_passthrough_check(
+                match stage_ipsec_passthrough_check_with_scope(
                     flow.as_ref(),
                     stage11_packet_frame,
                     meta,
                     ingress_zone_override,
                     ambiguous_zone,
+                    ambiguous_scope_ifindex,
                     stage11_route_table.as_deref(),
                     &binding.live,
                     worker_ctx,

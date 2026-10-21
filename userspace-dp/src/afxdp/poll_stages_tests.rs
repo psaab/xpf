@@ -5238,6 +5238,230 @@ fn stage_ipsec_passthrough_dnat_to_self_ike_keeps_host_inbound_gate_11439() {
     );
 }
 
+/// #16047 RED-on-revert: the transit-DNAT discriminator must scope on the
+/// LOGICAL VLAN unit, not the raw physical ifindex. The trunk parent 11
+/// carries reth0.80 (logical 12, zone wan) and reth0.50 (logical 13, zone
+/// lan, RI tenant-b); the WAN interface address 172.16.80.8 is the DNAT VIP.
+/// A UDP/500 DNAT scoped `from zone wan` to an internal host must override
+/// interface locality ONLY on the wan unit; on the lan unit the same packet
+/// stays local. Pre-fix the probe read zone/ifname/RI from raw ifindex 11
+/// (contested parent, no zone), so the wan-scoped rule never matched and the
+/// wan-unit packet was wrongly claimed by local charon.
+#[test]
+fn stage_ipsec_transit_dnat_discriminator_uses_logical_vlan_16047() {
+    let mut snap = super::super::test_fixtures::nat_snapshot();
+    snap.interfaces.push(crate::InterfaceSnapshot {
+        name: "reth0.50".to_string(),
+        zone: "lan".to_string(),
+        linux_name: "ge-0-0-0.50".to_string(),
+        ifindex: 13,
+        parent_ifindex: 11,
+        redundancy_group: 1,
+        vlan_id: 50,
+        hardware_addr: "02:bf:72:00:50:08".to_string(),
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "172.16.50.8/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snap.destination_nat_rules = vec![crate::DestinationNATRuleSnapshot {
+        name: "transit-ike-vlan".to_string(),
+        from_zone: "wan".to_string(),
+        destination_address: "172.16.80.8".to_string(),
+        destination_port: 500,
+        protocol: "udp".to_string(),
+        pool_address: "10.0.61.102".to_string(),
+        pool_port: 500,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snap);
+    assert_eq!(
+        resolve_ingress_logical_ifindex(&forwarding, 11, 80),
+        Some(12),
+        "FIXTURE: VID 80 must resolve to the wan logical unit"
+    );
+    assert_eq!(
+        resolve_ingress_logical_ifindex(&forwarding, 11, 50),
+        Some(13),
+        "FIXTURE: VID 50 must resolve to the lan logical unit"
+    );
+    let vip = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+    let frame = ike_v4_frame(false, true);
+    let flow = ipsec_flow_to(libc::AF_INET, PROTO_UDP, 500, vip);
+    // Wan unit (VID 80, physical 11): the wan-scoped transit DNAT matches
+    // on the logical identity, so Stage 11 must NOT claim the packet.
+    let mut wan_meta = ike_v4_meta(&frame, 11);
+    wan_meta.ingress_vlan_id = 80;
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(&forwarding, &flow, &frame, wan_meta, 11),
+            IpsecPassthroughOutcome::NotClaimed
+        ),
+        "#16047: UDP/500 on the wan VLAN unit matching a wan-scoped transit \
+         DNAT to an internal host must continue to transit DNAT/policy, not \
+         be claimed by local charon"
+    );
+    // Lan unit (VID 50, same physical 11): the wan-scoped rule must NOT
+    // match, so the interface-local destination remains claimed.
+    let mut lan_meta = ike_v4_meta(&frame, 11);
+    lan_meta.ingress_vlan_id = 50;
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(&forwarding, &flow, &frame, lan_meta, 11),
+            IpsecPassthroughOutcome::Passthrough
+        ),
+        "#16047: UDP/500 on the lan VLAN unit must not match the wan-scoped \
+         transit DNAT; the local destination stays claimed"
+    );
+    // Interface-scoped sibling: a DNAT scoped `from interface reth0.50`
+    // must match only the lan unit's ifname, never the wan unit's.
+    let mut snap2 = snap.clone();
+    snap2.destination_nat_rules[0].from_zone = String::new();
+    snap2.destination_nat_rules[0].from_interface = "reth0.50".to_string();
+    let forwarding2 = build_forwarding_state(&snap2);
+    let mut lan_meta2 = ike_v4_meta(&frame, 11);
+    lan_meta2.ingress_vlan_id = 50;
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(&forwarding2, &flow, &frame, lan_meta2, 11),
+            IpsecPassthroughOutcome::NotClaimed
+        ),
+        "#16047: a `from interface reth0.50` transit DNAT must match on the \
+         lan unit's logical ifname"
+    );
+    let mut wan_meta2 = ike_v4_meta(&frame, 11);
+    wan_meta2.ingress_vlan_id = 80;
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(&forwarding2, &flow, &frame, wan_meta2, 11),
+            IpsecPassthroughOutcome::Passthrough
+        ),
+        "#16047: a `from interface reth0.50` transit DNAT must not match on \
+         the wan unit (reth0.80)"
+    );
+}
+
+/// #16047 ambiguous negative: an ambiguous fabric stamp's claimed zone must
+/// not grant its scoped transit DNAT before owner proof. The claimed zone
+/// (wan, TEST_WAN_ZONE_ID) scopes a UDP/500 DNAT on the WAN VIP to an
+/// internal host; with no owner-RG promotion (`gated_override` stays None
+/// because the destination's owner RG is not locally active in this
+/// fixture's empty HA state), the discriminator must fail closed — the
+/// packet stays claimed local and faces the host-inbound gate under the
+/// logical/fabric zone. Passing the claimed zone directly (pre-fix raw
+/// behaviour for a validated override conflated with an ambiguous claim)
+/// would flip this to NotClaimed (transit to the internal host).
+#[test]
+fn stage_ipsec_ambiguous_claim_does_not_grant_transit_dnat_16047() {
+    let mut snapshot = ike_gate_snapshot();
+    snapshot.destination_nat_rules = vec![crate::DestinationNATRuleSnapshot {
+        name: "claimed-transit-ike".to_string(),
+        from_zone: "permit-zone".to_string(),
+        destination_address: "172.16.80.8".to_string(),
+        destination_port: 500,
+        protocol: "udp".to_string(),
+        pool_address: "10.0.99.1".to_string(),
+        pool_port: 500,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let frame = ike_v4_frame(false, true);
+    let flow = ipsec_flow_to(
+        libc::AF_INET,
+        PROTO_UDP,
+        500,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+    );
+    // Ingress on the deny-zone interface (24) carrying an ambiguous claim
+    // for the permit zone. Without owner proof the claimed zone's DNAT
+    // must not override locality: NEW IKE is gated on the deny zone.
+    let outcome = {
+        // run via the scoped entry with an explicit ambiguous claim and no
+        // validated override; HA state is empty so no promotion occurs.
+        let ident = BindingIdentity {
+            slot: 0,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from("ge-0-0-1"),
+            ifindex: 24,
+        };
+        let live = BindingLiveState::new();
+        let binding_lookup = WorkerBindingLookup::default();
+        let mirror_targets = MirrorTargetMap::default();
+        let ha_state = BTreeMap::new();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+        let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+        let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+        let last_resolution = Arc::new(Mutex::new(None));
+        let peer_worker_commands = Vec::new();
+        let dnat_fds = DnatTableFds::default();
+        let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+        let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
+            8,
+            DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
+            },
+        );
+        let __pptp_control_7699 =
+            std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+        let worker_ctx = WorkerContext {
+            pptp_control: &__pptp_control_7699,
+            ident: &ident,
+            binding_lookup: &binding_lookup,
+            mirror_targets: &mirror_targets,
+            forwarding: &forwarding,
+            ha_state: &ha_state,
+            dynamic_neighbors: &dynamic_neighbors,
+            neighbor_resolver: None,
+            shared_sessions: &shared_sessions,
+            shared_nat_sessions: &shared_nat_sessions,
+            shared_forward_wire_sessions: &shared_forward_wire_sessions,
+            shared_owner_rg_indexes: &shared_owner_rg_indexes,
+            ike_exchanges: &ike_exchanges,
+            slow_path: None,
+            event_stream: Some(&event_handle),
+            local_tunnel_deliveries: &local_tunnel_deliveries,
+            recent_exceptions: &recent_exceptions,
+            last_resolution: &last_resolution,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+            dnat_fds: &dnat_fds,
+            rg_epochs: &rg_epochs,
+            cold_path_sample_mask: 0xff,
+        };
+        stage_ipsec_passthrough_check_with_scope(
+            Some(&flow),
+            &frame,
+            ike_v4_meta(&frame, 24),
+            None,
+            Some(crate::test_zone_ids::TEST_WAN_ZONE_ID),
+            Some(25),
+            None,
+            &live,
+            &worker_ctx,
+            TEST_NOW_NS,
+            TEST_NOW_SECS,
+        )
+    };
+    assert!(
+        matches!(outcome, IpsecPassthroughOutcome::Denied { .. }),
+        "#16047: an ambiguous claimed zone without owner proof must fail \
+         closed (claimed local, host-inbound denied on the deny zone), not \
+         grant the claimed zone's transit DNAT"
+    );
+}
+
 /// #8298 REACHABILITY: a teardrop fragment declaring `IHL = 0` reaches the LIVE
 /// flowless screen path and must still be dropped.
 ///
@@ -6642,4 +6866,201 @@ fn ambiguous_ike_stamp_is_judged_under_claimed_zone_15925() {
             "unpromoted ambiguous IKE must retain fabric-zone posture"
         );
     });
+}
+
+/// #16047 production-scope parity (fold): for ambiguous fabric arrivals the
+/// discriminator must consume the SAME still-unpromoted scope production
+/// pre-routing DNAT consumes. Production passes Stage 9's
+/// `(ingress_zone_override=None, ingress_nat_scope_ifindex=None)` to
+/// `prerouting_ingress_scope`, so the local fabric/logical identity answers;
+/// owner promotion happens only later. Test is in poll_stages_tests (child
+/// of poll_descriptor's parent) — `prerouting_ingress_scope` is
+/// `pub(super)` to poll_descriptor, so the test replicates its exact
+/// argument selection inline below and asserts it agrees with Stage 11.
+#[test]
+fn stage_ipsec_ambiguous_scope_parity_16047() {
+    // Fabric fixture: parent 21 (ge-0/0/0, unzoned), lan reth1.0/24 RG2,
+    // wan reth0.80/12 RG1 with VIP 172.16.80.8. Add a named `fabric` zone
+    // on the fabric parent so the production (unpromoted) zone is a real
+    // non-empty scope distinct from both lan and wan.
+    let mut snap = super::super::test_fixtures::nat_snapshot_with_fabric();
+    snap.zones.push(crate::ZoneSnapshot {
+        name: "fabric".to_string(),
+        id: crate::test_zone_ids::TEST_FABRIC_ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ike".to_string()],
+        ..Default::default()
+    });
+    for iface in &mut snap.interfaces {
+        if iface.ifindex == 21 {
+            iface.zone = "fabric".to_string();
+        }
+        if iface.name == "reth0.80" {
+            // VIP owner RG1 must be locally active for gated_override.
+            iface.redundancy_group = 1;
+        }
+    }
+    // Case A: fabric-scoped transit DNAT, no lan rule.
+    // Case B is built by swapping from_zone below.
+    let vip = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+    let mk_forwarding = |from_zone: &str| {
+        let mut s = snap.clone();
+        s.destination_nat_rules = vec![crate::DestinationNATRuleSnapshot {
+            name: "parity-ike".to_string(),
+            from_zone: from_zone.to_string(),
+            destination_address: "172.16.80.8".to_string(),
+            destination_port: 500,
+            protocol: "udp".to_string(),
+            pool_address: "10.0.61.102".to_string(),
+            pool_port: 500,
+            ..Default::default()
+        }];
+        // Competing local-target rule in the claimed zone (lan): if the
+        // discriminator wrongly promoted, this DNAT-to-self would hide the
+        // scope decision behind a local verdict in Case B's mirror.
+        build_forwarding_state(&s)
+    };
+    let frame = ike_v4_frame(false, true);
+    let flow = ipsec_flow_to(libc::AF_INET, PROTO_UDP, 500, vip);
+    let now_secs = TEST_NOW_SECS;
+    let active = |rg: i32| {
+        (
+            rg,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAForwardingLease::ActiveUntil(now_secs + 60),
+            },
+        )
+    };
+    let ha_both = BTreeMap::from([active(1), active(2)]);
+
+    // Production pre-routing scope for an ambiguous arrival: Stage 9 gives
+    // (None, None). Replicated exactly (prerouting_ingress_scope is
+    // pub(super) to poll_descriptor and unreachable from this module).
+    let production_scope = |forwarding: &ForwardingState| -> (String, String, String) {
+        let logical = resolve_ingress_logical_ifindex(forwarding, 21, 0).unwrap_or(21);
+        let zone = forwarding
+            .ifindex_to_zone_id
+            .get(&logical)
+            .and_then(|id| forwarding.zone_id_to_name.get(id))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let ifname = forwarding
+            .ifindex_to_config_name
+            .get(&logical)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let ri = forwarding
+            .ifindex_to_routing_instance
+            .get(&logical)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        (zone, ifname, ri)
+    };
+    let production_transit = |forwarding: &ForwardingState| -> bool {
+        let (zone, ifname, ri) = production_scope(forwarding);
+        match forwarding.dnat_table.lookup_with_counter_scoped(
+            PROTO_UDP,
+            flow.src_ip,
+            flow.dst_ip,
+            flow.forward_key.src_port,
+            500,
+            &zone,
+            &ifname,
+            &ri,
+            None,
+        ) {
+            Some((d, _)) => match d.rewrite_dst {
+                Some(IpAddr::V4(t)) => !forwarding.configured_iface_v4.contains(&t),
+                Some(IpAddr::V6(t)) => !forwarding.configured_iface_v6.contains(&t),
+                None => false,
+            },
+            None => false,
+        }
+    };
+
+    // V1 + V2 ambiguous shapes both arrive at Stage 11 as
+    // (override=None, ambiguous=Some(lan), scope withheld). V2 additionally
+    // carries Some(24); the discriminator must ignore it either way.
+    for (label, amb_scope) in [("V1", None), ("V2", Some(24))] {
+        // Case A: fabric-scoped transit DNAT. Production selects transit;
+        // Stage 11 must agree (NotClaimed), not capture locally.
+        let fwd_a = mk_forwarding("fabric");
+        assert!(
+            production_transit(&fwd_a),
+            "FIXTURE {label} A: production scope must select the fabric DNAT"
+        );
+        with_neighbor_learn_ctx_ha(&fwd_a, ha_both.clone(), |ctx, _n| {
+            let live = BindingLiveState::new();
+            let out = stage_ipsec_passthrough_check_with_scope(
+                Some(&flow),
+                &frame,
+                ike_v4_meta(&frame, 21),
+                None,
+                Some(TEST_LAN_ZONE_ID),
+                amb_scope,
+                None,
+                &live,
+                ctx,
+                TEST_NOW_NS,
+                now_secs,
+            );
+            assert!(
+                matches!(out, IpsecPassthroughOutcome::NotClaimed),
+                "#16047 {label} A: fabric-scoped transit DNAT production \
+                 selects must not be captured locally by a promoted claim"
+            );
+        });
+        // Case B: claimed-zone (lan) transit DNAT only. Production (fabric
+        // scope) cannot select it; Stage 11 must NOT release it as transit.
+        // It stays claimed-local; host-inbound under the promoted claimed
+        // zone (lan, any-service in fixture) admits -> Passthrough. The
+        // decisive point is NOT NotClaimed.
+        let fwd_b = mk_forwarding("lan");
+        assert!(
+            !production_transit(&fwd_b),
+            "FIXTURE {label} B: production scope must miss the lan-only DNAT"
+        );
+        with_neighbor_learn_ctx_ha(&fwd_b, ha_both.clone(), |ctx, _n| {
+            let live = BindingLiveState::new();
+            let out = stage_ipsec_passthrough_check_with_scope(
+                Some(&flow),
+                &frame,
+                ike_v4_meta(&frame, 21),
+                None,
+                Some(TEST_LAN_ZONE_ID),
+                amb_scope,
+                None,
+                &live,
+                ctx,
+                TEST_NOW_NS,
+                now_secs,
+            );
+            assert!(
+                !matches!(out, IpsecPassthroughOutcome::NotClaimed),
+                "#16047 {label} B: claimed-zone-only DNAT production cannot \
+                 select must not be released as transit by Stage 11"
+            );
+        });
+    }
+    // Stage-9 precondition: real stamped frames classify Ambiguous.
+    let fwd = mk_forwarding("fabric");
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let mut stamped = vec![0u8; 64];
+    stamped[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    stamped[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    assert!(
+        matches!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &stamped,
+                ike_v4_meta(&frame, 21),
+                &fwd,
+                &ha_both,
+                now_secs,
+            ),
+            ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, ifindex: None }
+        ),
+        "FIXTURE: V1 co-moved stamp must classify Ambiguous"
+    );
 }
