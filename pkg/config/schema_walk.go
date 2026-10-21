@@ -188,7 +188,7 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) er
 	// the commit path, which is why the gate below closes ONE level and
 	// inherits nothing.
 	if err := checkUnknownTopLevelStanza(tree); err != nil {
-		return err
+		return scrubSchemaErrorSecrets(tree, err)
 	}
 	vc := &walkContext{cfg: cfg, refs: refs}
 	// closed=false: the top-level walk is open-world. The per-subtree
@@ -215,23 +215,13 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	if err == nil || tree == nil {
 		return err
 	}
+	values := collectSecretValues(tree)
 	msg := err.Error()
-	scrubbed := msg
-	var walk func(nodes []*Node, base []string)
-	walk = func(nodes []*Node, base []string) {
-		for _, n := range nodes {
-			if n == nil {
-				continue
-			}
-			full := append(append([]string(nil), base...), n.Keys...)
-			scrubbed = scrubSecretTokens(full, scrubbed)
-			walk(n.Children, full)
-		}
-	}
-	walk(tree.Children, nil)
+	scrubbed := scrubSecretValuesText(values, msg)
 	if scrubbed == msg {
 		return err
 	}
+	scrubText := func(s string) string { return scrubSecretValuesText(values, s) }
 	// Preserve error classifications callers dispatch on (fold 3, F3):
 	// rebuilding a changed error as a bare fmt.Errorf would strip
 	// errors.As/errors.Is identities (typed-leaf, unknown-zone /
@@ -240,6 +230,9 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	// wrappers are rebuilt field-by-field with scrubbed text so
 	// Error() renders the scrubbed message under the same type;
 	// %w-carrying ingest errors are re-wrapped around their sentinel.
+	// Fold 4 (F3): EVERY field is scrubbed, including keyword — a
+	// wrapper rebuilt from an unscrubbed keyword re-prints a secret
+	// literal that happens to collide with an unknown child keyword.
 	// Any other changed, unclassified error is returned as plain text.
 	if IsTypedLeafSchemaError(err) {
 		return &typedLeafSchemaError{msg: scrubbed}
@@ -247,16 +240,16 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	var zoneErr *unknownSecurityZoneChildSchemaError
 	if errors.As(err, &zoneErr) {
 		return &unknownSecurityZoneChildSchemaError{
-			path:    scrubSecretTokensForText(tree, zoneErr.path),
-			keyword: zoneErr.keyword,
+			path:    scrubText(zoneErr.path),
+			keyword: scrubText(zoneErr.keyword),
 		}
 	}
 	var polErr *unknownSecurityPoliciesChildSchemaError12217
 	if errors.As(err, &polErr) {
 		return &unknownSecurityPoliciesChildSchemaError12217{
-			path:    scrubSecretTokensForText(tree, polErr.path),
-			keyword: polErr.keyword,
-			content: scrubSecretTokensForText(tree, polErr.content),
+			path:    scrubText(polErr.path),
+			keyword: scrubText(polErr.keyword),
+			content: scrubText(polErr.content),
 		}
 	}
 	var topErr *unknownTopLevelStanzaSchemaError
@@ -287,28 +280,6 @@ func extractAtPath(scrubbed string) string {
 		return unq
 	}
 	return strings.Trim(rest, "\"")
-}
-
-// scrubSecretTokensForText scrubs every secret token in tree from a
-// free-text fragment (used when rebuilding structured error fields).
-func scrubSecretTokensForText(tree *ConfigTree, text string) string {
-	if tree == nil || text == "" {
-		return text
-	}
-	out := text
-	var walk func(nodes []*Node, base []string)
-	walk = func(nodes []*Node, base []string) {
-		for _, n := range nodes {
-			if n == nil {
-				continue
-			}
-			full := append(append([]string(nil), base...), n.Keys...)
-			out = scrubSecretTokens(full, out)
-			walk(n.Children, full)
-		}
-	}
-	walk(tree.Children, nil)
-	return out
 }
 
 // walkContext carries the per-walk validation inputs: the (always-nil in
@@ -1877,6 +1848,116 @@ func scrubSecretTokens(fullPath []string, msg string) string {
 		}
 	}
 	return msg
+}
+
+// quotedInterior returns tok as it appears INSIDE a %q-quoted larger
+// string: strconv.Quote without the surrounding quote bytes (fold 4,
+// F1). A formatter that quotes a whole space-joined path escapes the
+// secret token in place; neither the raw token nor Quote(tok) (which
+// carries surrounding quotes) occurs there, but this interior form
+// does — byte-identical to what %q emits for those characters.
+func quotedInterior(tok string) string {
+	q := strconv.Quote(tok)
+	if len(q) >= 2 && q[0] == '"' && q[len(q)-1] == '"' {
+		return q[1 : len(q)-1]
+	}
+	return q
+}
+
+// collectSecretValues returns every secret VALUE in the candidate:
+// for each node, the secret-indexed tokens of its flattened path,
+// PLUS the inner secret tokens of any embedded
+// `change-configuration commands` payload (fold 4, F2 — the outer AST
+// sees the quoted command as one token, so its inner credential
+// operands are collected by lexing it exactly as the ingest guard
+// does). Deduplicated, longest first so a longer value is replaced
+// before any shorter value it contains.
+func collectSecretValues(tree *ConfigTree) []string {
+	if tree == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var values []string
+	add := func(tok string) {
+		if tok != "" && !seen[tok] {
+			seen[tok] = true
+			values = append(values, tok)
+		}
+	}
+	var walk func(nodes []*Node, base []string)
+	walk = func(nodes []*Node, base []string) {
+		for _, n := range nodes {
+			if n == nil {
+				continue
+			}
+			full := append(append([]string(nil), base...), n.Keys...)
+			for _, i := range secretIndices(full) {
+				if i >= 0 && i < len(full) {
+					add(full[i])
+				}
+			}
+			// Embedded commands payload: lex each candidate payload
+			// token (any token after a change-configuration/commands
+			// pair in this node's flattened path) and collect its
+			// inner secret values.
+			for i := 0; i+1 < len(full); i++ {
+				if full[i] != "change-configuration" || full[i+1] != "commands" {
+					continue
+				}
+				for _, payload := range full[i+2:] {
+					tokens, _ := lexConfigMutationLine9938(payload)
+					if len(tokens) < 2 || tokens[0] != "set" {
+						continue
+					}
+					for _, idx := range secretIndices(tokens) {
+						if idx >= 0 && idx < len(tokens) {
+							add(tokens[idx])
+						}
+					}
+					for _, idx := range urlLeafIndices(tokens) {
+						if idx >= 0 && idx < len(tokens) {
+							add(tokens[idx])
+						}
+					}
+				}
+			}
+			walk(n.Children, full)
+		}
+	}
+	walk(tree.Children, nil)
+	// Longest first: replacing a contained shorter value first would
+	// corrupt the longer one's match.
+	for i := range values {
+		for j := i + 1; j < len(values); j++ {
+			if len(values[j]) > len(values[i]) {
+				values[i], values[j] = values[j], values[i]
+			}
+		}
+	}
+	return values
+}
+
+// scrubSecretValuesText is the FINAL-string-level scrub (fold 4):
+// given the candidate's secret values, replace every occurrence in
+// text in raw, strconv.Quote, and quoted-interior forms. This is the
+// level token substitution kept losing to embedding — a value quoted
+// inside a larger %q string, or carried inside a quoted embedded
+// command, is still found because matching is on the final rendered
+// bytes, not on which formatter produced them.
+func scrubSecretValuesText(values []string, text string) string {
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, v, SecretRedacted)
+		if q := strconv.Quote(v); q != v {
+			text = strings.ReplaceAll(text, q, strconv.Quote(SecretRedacted))
+		}
+		if in := quotedInterior(v); in != v && len(in) >= 2 {
+			text = strings.ReplaceAll(text, in, SecretRedacted)
+		}
+	}
+	return text
 }
 
 func typedLeafInvalidErrorf(path []string, tok string, err error) error {

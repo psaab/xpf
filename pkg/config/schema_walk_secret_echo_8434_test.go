@@ -273,6 +273,107 @@ func TestPlaceholderGuardNeverEchoesPrecedingSecret16066(t *testing.T) {
 	}
 }
 
+// #16066 fold 4 (F1): a secret containing escapable characters inside a
+// %q-quoted WHOLE path. The placeholder guard quotes the entire
+// space-joined flattened path, so the preceding password token is
+// escaped IN PLACE — neither its raw form nor strconv.Quote(token)
+// (surrounding quotes) occurs. The final-string scrub must catch the
+// quoted-interior form. Authored through the real parser, whose lexer
+// admits \" and \\ inside quoted strings.
+func TestPlaceholderGuardEscapedSecretNeverEchoed16066(t *testing.T) {
+	// Config text: password "pa\"ss\\CANARY4" "##SECRET-DATA##"
+	// Lexer decodes to token: pa"ss\CANARY4
+	text := `system { services { dynamic-dns { provider p { password "pa\"ss\\CANARY4" "##SECRET-DATA##"; } } } }`
+	err := SchemaValidate(parseHier(t, text), nil)
+	if err == nil {
+		t.Fatal("placeholder fixture must be rejected")
+	}
+	if !IsRedactionPlaceholderIngestError(err) {
+		t.Fatalf("error lost its placeholder classification: %v", err)
+	}
+	msg := err.Error()
+	for _, frag := range []string{"CANARY4", `pa"ss`, `pa\"ss`, `ss\\CANARY4`, `ss\CANARY4`} {
+		if strings.Contains(msg, frag) {
+			t.Errorf("placeholder error leaked secret fragment %q: %v (#16066 fold 4 F1)", frag, err)
+		}
+	}
+}
+
+// #16066 fold 4 (F2): a secret operand inside a quoted
+// change-configuration commands payload. The outer AST sees one
+// payload token; the exit scrub must lex it (as the ingest guard
+// does) and remove the inner credential from the quoted outer path
+// the guard reports.
+func TestEmbeddedPlaceholderNeverEchoesInnerSecret16066(t *testing.T) {
+	const psk = "REALPSK16066"
+	// Build the reviewer's shape from RedactedClone's own output:
+	// the clone masks every token after `pre-shared-key`, emitting
+	// the nested-quote spelling the guard detects. Re-author that
+	// spelling with [REAL, placeholder] as the two secret values:
+	// both are secret-indexed after `pre-shared-key` (no qualifier),
+	// so the guard fires on the placeholder and quotes the outer
+	// path embedding the real secret.
+	clear := embeddedIngest15209FlatTree(t,
+		`set event-options policy p1 events ping_test_failed`,
+		`set event-options policy p1 then change-configuration commands "set security ike policy p1 pre-shared-key `+psk+` tailtoken"`,
+	)
+	cloneText := clear.RedactedClone().FormatSet()
+	if !strings.Contains(cloneText, SecretDataPlaceholder) {
+		t.Fatalf("premise: clone did not mask the embedded secret:\n%s", cloneText)
+	}
+	tree := &ConfigTree{}
+	for _, line := range strings.Split(cloneText, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Clone emits ... pre-shared-key \"##SECRET-DATA##\" (one
+		// masked value for the two-token secret). Put the real
+		// secret back as a second value token before it.
+		line = strings.Replace(line, `\"##SECRET-DATA##\"`, `\"`+psk+` ##SECRET-DATA##\"`, 1)
+		toks, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(toks); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	if err := checkRedactionPlaceholder(tree); err == nil {
+		t.Fatalf("premise: authored multi-token shape does not fire the guard:\n%s", tree.FormatSet())
+	}
+	err := SchemaValidate(tree, nil)
+	if err == nil {
+		t.Fatal("embedded placeholder fixture must be rejected")
+	}
+	if !IsRedactionPlaceholderIngestError(err) {
+		t.Fatalf("error lost its placeholder classification: %v", err)
+	}
+	if strings.Contains(err.Error(), psk) {
+		t.Errorf("schema error echoed the inner embedded secret: %v (#16066 fold 4 F2)", err)
+	}
+}
+
+// #16066 fold 4 (F3): a secret literal colliding with an unknown
+// closed-world child keyword. The unknown-zone wrapper rebuilds its
+// message from path+keyword; if keyword is left unscrubbed, Error()
+// re-prints the secret after the message scrub removed it.
+func TestUnknownZoneKeywordCollisionNeverEchoed16066(t *testing.T) {
+	const collide = "collidekw16066"
+	text := "system { services { dynamic-dns { provider p { password " + collide + "; } } } }\n" +
+		"security { zones { security-zone trust { " + collide + "; } } }"
+	err := SchemaValidate(parseHier(t, text), nil)
+	if err == nil {
+		t.Fatal("unknown zone child fixture must be rejected")
+	}
+	if !IsUnknownSecurityZoneChildSchemaError(err) {
+		t.Fatalf("error lost its unknown-zone-child classification: %v", err)
+	}
+	if strings.Contains(err.Error(), collide) {
+		t.Errorf("rebuilt unknown-zone error re-printed the colliding secret: %v (#16066 fold 4 F3)", err)
+	}
+}
+
 // Asserted DIRECTLY on typedLeafInvalidErrorf rather than through a config
 // fixture. The first draft used `system host-name "bad name with spaces"`,
 // which compiles cleanly — so the cell SKIPPED, and a skipped control has no
