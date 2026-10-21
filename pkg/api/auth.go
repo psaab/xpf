@@ -22,6 +22,16 @@ type AuthConfig struct {
 	APIKeyNames   map[string]string
 	APIKeyClasses map[string]string
 	APIKeyExpires map[string]time.Time
+	// MetricsRequireAuth opts a loopback listener into requiring a valid
+	// api-auth credential for /metrics (#16072). It is set from
+	// `web-management api-auth metrics-require-auth` and is carried inside
+	// the credential snapshot so the live swap (ReplaceAuth) and the
+	// retired-leg pin/tighten publish it exactly like a credential change.
+	// It has no effect on a non-loopback listener, where /metrics already
+	// requires credentials (#4162), and no effect when the snapshot is nil
+	// (no api-auth at all: dynamicAuthMiddleware passes through, so an
+	// operator who wants the gate must also configure a credential).
+	MetricsRequireAuth bool
 }
 
 var dummyAPIAuthVerifier = func() string {
@@ -108,6 +118,13 @@ func AuthForRetainedListener(live, next *AuthConfig) *AuthConfig {
 		APIKeyNames:   map[string]string{},
 		APIKeyClasses: map[string]string{},
 		APIKeyExpires: map[string]time.Time{},
+		// The metrics gate is a tightening, not a credential: it survives the
+		// intersection from either side, so a retained leg never drops a
+		// gate the live or committed snapshot carries (#16072).
+		MetricsRequireAuth: next.MetricsRequireAuth,
+	}
+	if live != nil {
+		out.MetricsRequireAuth = out.MetricsRequireAuth || live.MetricsRequireAuth
 	}
 	if live == nil {
 		for user, pw := range next.Users {
@@ -214,6 +231,16 @@ func CredentialCount(a *AuthConfig) int {
 	return n
 }
 
+// effectiveMetricsRequireAuth folds the per-listener #4162 bind rule with the
+// opt-in loopback gate (#16072): /metrics requires a credential when the bind
+// is not provably loopback, or when the operator set
+// `api-auth metrics-require-auth` in the live credential snapshot. The flag
+// lives in AuthConfig so ReplaceAuth and the retired-leg pin publish it with
+// the credentials it gates.
+func effectiveMetricsRequireAuth(cfg AuthConfig, bindRequiresAuth bool) bool {
+	return bindRequiresAuth || cfg.MetricsRequireAuth
+}
+
 // authMiddleware wraps an http.Handler with Basic Auth / Bearer / X-API-Key
 // checks. /health always bypasses authentication (it exposes no sensitive data
 // and is a liveness probe). /metrics bypasses authentication only when
@@ -250,7 +277,8 @@ func throttledAuthCheck(throttle *authFailureTracker, cfg AuthConfig, metricsReq
 // verifier. The checker is injectable only to let bounded tests hold verifier
 // work behind a barrier and observe the admission limit.
 func throttledAuthCheckWithCheck(throttle *authFailureTracker, cfg AuthConfig, metricsRequireAuth bool, r *http.Request, check func(AuthConfig, bool, *http.Request) (bool, string, bool)) (authorized bool, retryAfter time.Duration) {
-	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !metricsRequireAuth) {
+	effective := effectiveMetricsRequireAuth(cfg, metricsRequireAuth)
+	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !effective) {
 		return true, 0
 	}
 	source, claimed := throttleIdentity(r)
@@ -259,7 +287,7 @@ func throttledAuthCheckWithCheck(throttle *authFailureTracker, cfg AuthConfig, m
 	if retryAfter > 0 {
 		return false, retryAfter
 	}
-	authorized, verified, authorizationFailed := check(cfg, metricsRequireAuth, r)
+	authorized, verified, authorizationFailed := check(cfg, effective, r)
 	throttle.complete(&reservation, authorized, verified, authorizationFailed)
 	return authorized, 0
 }
@@ -294,7 +322,7 @@ func authCheck(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) bool {
 // throttled path charges that failed attempt even when the fallback authorizes
 // the request.
 func authCheckCredential(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (authorized bool, verified string, authorizationFailed bool) {
-	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !metricsRequireAuth) {
+	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !effectiveMetricsRequireAuth(cfg, metricsRequireAuth)) {
 		return true, "", false
 	}
 	if auth := r.Header.Get("Authorization"); auth != "" {

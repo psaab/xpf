@@ -194,7 +194,15 @@ type Config struct {
 	TLS               bool        // enable HTTPS with a management certificate
 	TLSCertificate    string      // optional PEM certificate-chain path
 	TLSPrivateKey     string      // optional PEM private-key path; pair must be configured together
-	Auth              *AuthConfig // nil = no authentication
+	Auth              *AuthConfig // nil = no authentication; MetricsRequireAuth inside it opts loopback /metrics into credential gating (#16072)
+	// MetricsRequireAuth opts loopback /metrics into api-auth credential
+	// gating (#16072). The daemon copies it from
+	// `web-management api-auth metrics-require-auth`; the management
+	// reconciler also stamps it into Auth.MetricsRequireAuth on every
+	// reconcile, so a gate-only commit publishes through the same live
+	// swap as a credential change. No effect without Auth (nil snapshot
+	// passes through) and no effect on a non-loopback bind (#4162).
+	MetricsRequireAuth bool
 	// ListenFunc is the listener factory the server binds through (#5866).
 	// nil defaults to net.Listen; a test injects a fake so the
 	// make-before-break listener reconcile is exercised without real ports.
@@ -919,7 +927,14 @@ func NewServer(cfg Config) *Server {
 	}
 	// #5866: seed the live auth snapshot; the middleware reads it atomically per
 	// request so ReplaceAuth can swap credentials without rebinding the listener.
-	s.auth.Store(cfg.Auth)
+	initialAuth := cfg.Auth
+	if initialAuth != nil && cfg.MetricsRequireAuth {
+		// #16072: never alias (or mutate) the caller's snapshot.
+		dup := *initialAuth
+		dup.MetricsRequireAuth = true
+		initialAuth = &dup
+	}
+	s.auth.Store(initialAuth)
 	// #5866: the listener factory (Config.ListenFunc or net.Listen).
 	s.listen = cfg.ListenFunc
 	if s.listen == nil {
@@ -1316,9 +1331,10 @@ func (a *authSlot) tighten(next *AuthConfig) {
 
 // listenerHandler wraps the shared pre-auth base with the per-listener auth gate
 // for a bind address (#4162/#5866): only a literal loopback bind leaves /metrics
-// open when auth is configured. The dynamic middleware reads the leg's own slot
-// per request — which follows the live snapshot until the leg is retired — so
-// ReplaceAuth needs no rebind.
+// open when auth is configured, unless the live snapshot carries the opt-in
+// MetricsRequireAuth gate (#16072). The dynamic middleware reads the leg's own
+// slot per request — which follows the live snapshot until the leg is retired —
+// so ReplaceAuth needs no rebind.
 func (s *Server) listenerHandler(addr string, slot *authSlot) http.Handler {
 	if slot == nil {
 		// Never let a missing slot become a pass-through: substitute a FOLLOWING
@@ -1567,6 +1583,25 @@ func (s *Server) ReplaceAuth(a *AuthConfig) {
 	for _, leg := range s.pruneRetiredLocked() {
 		leg.slot.tighten(a)
 	}
+}
+
+// ReplaceMetricsRequireAuth publishes a metrics-gate-only change (#16072):
+// the gate rides inside the credential snapshot, so toggling it is a snapshot
+// swap with the same semantics as a credential change — live legs follow it
+// on the next request, retired legs only ever tighten (a gate removal never
+// reaches a draining leg, matching authSlot.tighten's nil rule). Removing the
+// gate (enabled=false) is a loosening: the caller (the management
+// reconciler) publishes it only once every live leg is named by the
+// committed config, exactly like a credential grant. A nil snapshot passes
+// through regardless — the gate needs a credential to require.
+func (s *Server) ReplaceMetricsRequireAuth(enabled bool) {
+	cur := s.auth.Load()
+	if cur == nil || cur.MetricsRequireAuth == enabled {
+		return
+	}
+	next := *cur
+	next.MetricsRequireAuth = enabled
+	s.ReplaceAuth(&next)
 }
 
 // LiveAuth returns the credential snapshot the listeners are currently

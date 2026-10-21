@@ -115,6 +115,10 @@ destination rule`, unknown selectors deny), matching the gRPC charges for
     `xpf_config_remote_archive_pending_sites` and
     `xpf_config_remote_archive_failures_total`; these control-plane metrics are
     emitted even when the dataplane is unloaded (#11806).
+  - On a loopback bind the exposition is open to any local UID by default
+    (#4162); `web-management api-auth metrics-require-auth` opts it into
+    requiring a valid api-auth credential even there (#16072). `/health`
+    is unaffected either way.
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.
   - `GET /api/v1/security/policies` enumerates zone-pair policies AND
