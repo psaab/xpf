@@ -106,7 +106,7 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 				snaps.NodeID = nid
 				snaps.Primary = tree
 			}
-			return snaps, config.AuthorizeConfigShowWhole(priceCfg, class, suffix)
+			return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, suffix, snaps.Primary)
 		}
 		// #15995: price every rendered descendant, not just the
 		// requested path — the handler renders the whole subtree.
@@ -153,6 +153,25 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		var trees []*config.ConfigTree
 		snaps := configReadSnapshots{Present: true}
 		priceCfg := cfg
+		if len(r.GetPath()) == 0 && s.store != nil {
+			// Unscoped: substitute contained+expanded pricing over
+			// both actual arms; op verdict carried by the helper.
+			if r.GetActiveBaseline() || r.GetRollbackN() > 0 {
+				scfg, slot, other, nid, _, _ := s.store.RollbackCompareSnapshot(int(r.GetRollbackN()), r.GetActiveBaseline())
+				if scfg != nil {
+					priceCfg = scfg
+				}
+				snaps.NodeID = nid
+				snaps.Primary, snaps.Other = slot, other
+				return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, slot, other)
+			}
+			scfg, active, candidate, _ := s.store.CompareSnapshot()
+			if scfg != nil {
+				priceCfg = scfg
+			}
+			snaps.Primary, snaps.Other = active, candidate
+			return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, active, candidate)
+		}
 		if s.store != nil {
 			if r.GetActiveBaseline() || r.GetRollbackN() > 0 {
 				scfg, slot, other, nid, _, _ := s.store.RollbackCompareSnapshot(int(r.GetRollbackN()), r.GetActiveBaseline())

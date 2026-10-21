@@ -631,6 +631,36 @@ Three consequences an operator should know:
   still charged once on the requested command; a descendant is not
   a command spelling the operator typed.
 
+  Group-authored content is priced as effective configuration
+  (#15994, folded onto the rendered-descendant gate above): a
+  `groups <G> …` read is adjudicated on every effective spelling —
+  the authored definition path and the recursively unwrapped body
+  path — on BOTH regex pairs (`*-configuration` on the effective
+  path, `*-commands` on `show configuration <effective>`), including
+  the CLI operational arm and the `groups` / `groups <G>` ancestor
+  spellings, whose renders are admitted only when the rules admit
+  every path they contain (definitions included). Whole-tree,
+  compare and rollback renders keep the operational verdict
+  (e.g. a `display set` deny) even when the config-side whole-tree
+  refusal is substituted by contained pricing; a groupless render
+  keeps the whole-tree refusal above unchanged. An unresolvable
+  `groups` scope fails closed only for regex-restricted classes.
+  Folded further (#15994 fold 3): whole-tree, compare and rollback
+  renders carrying `groups` stanzas also price the effective op
+  commands, so a path-scoped `deny-commands` (e.g.
+  `^show configuration security`) refuses a whole render whose
+  group bodies supply that content — including the typed
+  `GET /api/v1/config` route, whose handler serializes the active
+  compiled config. Groupless whole renders are unchanged.
+  Folded further (#15994 fold 2): REST compare prices the
+  `?rollback` arms the handler renders and attaches them as the
+  render snapshot; the export/search/config handlers render the
+  attached (active) snapshot rather than re-reading the live store;
+  CLI rollback pricing reuses the same capture it stashes (no second
+  capture); and the `display inheritance` gates run the groups walk
+  and the op-descendant walk regardless of which regex pair
+  restricts.
+
   Residual closed by #14987: on the CLI the same decision now reaches
   the `show system …` spellings that render configuration —
   `show system rollback [compare] <N>`, `show system login`,

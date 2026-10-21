@@ -487,16 +487,35 @@ func (s *Server) configExportHandler(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = "set"
 	}
+	// #15994 fold2-2: render the snapshot the gate priced (active),
+	// not a second live-store read.
+	snaps, hasSnaps := restConfigReadSnapshotsFrom(r)
 	var output string
 	switch format {
 	case "set":
-		output = s.store.ShowActiveSetRedacted(nil)
+		if hasSnaps && snaps.Present {
+			output = configstore.RenderShowRedacted(snaps.Primary, nil, "set")
+		} else {
+			output = s.store.ShowActiveSetRedacted(nil)
+		}
 	case "text":
-		output = s.store.ShowActiveRedacted(nil)
+		if hasSnaps && snaps.Present {
+			output = configstore.RenderShowRedacted(snaps.Primary, nil, "text")
+		} else {
+			output = s.store.ShowActiveRedacted(nil)
+		}
 	case "json":
-		output = s.store.ShowActiveJSONRedacted(nil)
+		if hasSnaps && snaps.Present {
+			output = configstore.RenderShowRedacted(snaps.Primary, nil, "json")
+		} else {
+			output = s.store.ShowActiveJSONRedacted(nil)
+		}
 	case "xml":
-		output = s.store.ShowActiveXMLRedacted(nil)
+		if hasSnaps && snaps.Present {
+			output = configstore.RenderShowRedacted(snaps.Primary, nil, "xml")
+		} else {
+			output = s.store.ShowActiveXMLRedacted(nil)
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "unsupported format: "+format+"; use set, text, json, or xml")
 		return
@@ -512,6 +531,19 @@ func (s *Server) configCompareHandler(w http.ResponseWriter, r *http.Request) {
 	rollbackN, ok := queryIntStrict(r, "rollback", 0)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid rollback parameter: must be a non-negative integer")
+		return
+	}
+	// #15994 fold2-1/2: render the arms the gate priced (?rollback?
+	// selects slot-vs-candidate; absent selects candidate-vs-active),
+	// never a second live-store read.
+	if snaps, has := restConfigReadSnapshotsFrom(r); has && snaps.Present {
+		if !snaps.Renders {
+			// No candidate arm at pricing: the store compare
+			// renders "" (not in configuration mode).
+			writeOK(w, TextResponse{Output: ""})
+			return
+		}
+		writeOK(w, TextResponse{Output: configstore.RenderCompareRedacted(snaps.Primary, snaps.Other, nil, true)})
 		return
 	}
 	if rollbackN > 0 {
@@ -580,7 +612,11 @@ func (s *Server) configSearchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// Search over the redacted render so a matching line never returns a
 	// cleartext secret in its snippet (#4051).
+	// #15994 fold2-2: search over the priced (active) snapshot.
 	text := s.store.ShowActiveRedacted(nil)
+	if snaps, has := restConfigReadSnapshotsFrom(r); has && snaps.Present {
+		text = configstore.RenderShowRedacted(snaps.Primary, nil, "text")
+	}
 	results, truncated := searchConfigLines(text, query, maxConfigSearchResults)
 	if truncated {
 		w.Header().Set("X-Result-Truncated", "true")

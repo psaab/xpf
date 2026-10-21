@@ -98,7 +98,22 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 	}
 	full := append(append([]string(nil), editPath...), path...)
 	if len(full) == 0 {
-		return config.AuthorizeConfigShowWhole(cfg, c.userClass, displaySuffix14707(suffix))
+		// Whole candidate render: contained+expanded pricing over
+		// the priced candidate snapshot; op verdict carried by the
+		// helper (fold B1 — display set etc. must still deny).
+		var trees []*config.ConfigTree
+		priceCfg := cfg
+		if c.store != nil {
+			scfg, tree, _, _ := c.store.ShowConfigSnapshot("candidate")
+			if scfg != nil {
+				priceCfg = scfg
+			}
+			if tree != nil {
+				trees = []*config.ConfigTree{tree}
+			}
+			c.setCandidateSnapshot15995(tree)
+		}
+		return config.AuthorizeConfigShowWholeAtTree(priceCfg, c.userClass, displaySuffix14707(suffix), trees...)
 	}
 	// #15995: config-mode show renders the candidate subtree;
 	// | display inheritance renders its apply-groups expansion
@@ -176,7 +191,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				}
 				c.setRenderSnapshots15995(slot, other)
 			}
-			return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, "")
+			return c.priceRollbackWholeCompareCaptured15994(priceCfg, cfg)
 		}
 		n, err := strconv.Atoi(args[2])
 		if err != nil || n < 0 {
@@ -222,7 +237,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				}
 				c.setRenderSnapshots15995(tree, nil)
 			}
-			return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, suffix)
+			return c.priceRollbackWholeCaptured15994(priceCfg, cfg, suffix)
 		}
 		if piped {
 			if len(pipe) == 1 && pipe[0] == "compare" {
@@ -254,7 +269,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 					}
 					c.setRenderSnapshots15995(slot, other)
 				}
-				return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, "")
+				return c.priceRollbackWholeCompareCaptured15994(priceCfg, cfg)
 			}
 		}
 		// #15942 H2-04: a bare pre-pipe subtree path (`rollback 1
@@ -285,7 +300,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			}
 			c.setRenderSnapshots15995(tree, nil)
 		}
-		return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, "")
+		return c.priceRollbackWholeCaptured15994(priceCfg, cfg, "")
 	case "login":
 		// #15995 fold: `show system login` prints the whole
 		// system login subtree — price its rendered descendants
@@ -373,13 +388,24 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 		}
 	}
 	if len(path) == 0 {
-		return config.AuthorizeConfigShowWhole(cfg, c.userClass, displaySuffix14707(display))
+		var trees []*config.ConfigTree
+		priceCfg := cfg
+		if c.store != nil {
+			scfg, tree, _, _ := c.store.ShowConfigSnapshot("active")
+			if scfg != nil {
+				priceCfg = scfg
+			}
+			if tree != nil {
+				trees = []*config.ConfigTree{tree}
+			}
+			c.setRenderSnapshots15995(tree, nil)
+		}
+		return config.AuthorizeConfigShowWholeAtTree(priceCfg, c.userClass, displaySuffix14707(display), trees...)
 	}
-	// Operational arm already charged *-commands; re-checking it here
-	// would double-charge with a shorter command string. Evaluate only
-	// the configuration pair by passing a class whose operational
-	// verdict the caller already took: AuthorizeConfigShowPath checks
-	// both, so call the path arm via the config-only helper below.
+	// Operational arm already charged *-commands on the LITERAL line
+	// (checkCommandRegex); the effective (group-unwrapped) command
+	// was never charged — charge it here (#15994 fold 1), on every
+	// effective spelling, without weakening the literal verdict.
 	// #15995: price rendered descendants of the active tree too;
 	// | display inheritance prices the expanded active tree.
 	var trees []*config.ConfigTree
@@ -397,9 +423,9 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 		c.setRenderSnapshots15995(tree, nil)
 	}
 	if displaySuffix14707(display) == "inheritance" {
-		return config.AuthorizeExpandedConfigPathOnlyRendered(priceCfg, c.userClass, path, nodeID, trees...)
+		return config.AuthorizeExpandedConfigPathOnlyRenderedWithOp15994(priceCfg, c.userClass, path, displaySuffix14707(display), nodeID, trees...)
 	}
-	return config.AuthorizeConfigPathOnlyRendered(priceCfg, c.userClass, path, trees...)
+	return config.AuthorizeConfigPathOnlyRenderedWithOp15994(priceCfg, c.userClass, path, displaySuffix14707(display), trees...)
 }
 
 // displaySuffix14707 converts "display set" to the format spelling the
@@ -461,4 +487,34 @@ func (c *CLI) renderSnapshot15995(key string) *config.ConfigTree {
 		return nil
 	}
 	return c.renderSnapshots15995[key]
+}
+
+// priceRollbackWholeCompareCaptured15994 prices an unscoped
+// operational rollback-vs-active compare against the arms ALREADY
+// captured+stashed by the caller's RollbackCompareSnapshot(n, true)
+// (#15994 fold2-3: price and stash must be the SAME capture — the
+// helper never takes a second one).
+func (c *CLI) priceRollbackWholeCompareCaptured15994(priceCfg, cfg *config.Config) error {
+	if priceCfg == nil {
+		priceCfg = cfg
+	}
+	if c.store == nil {
+		return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, "")
+	}
+	return config.AuthorizeConfigShowCompareAtTree(priceCfg, c.userClass,
+		c.renderSnapshot15995("slot"), c.renderSnapshot15995("other"))
+}
+
+// priceRollbackWholeCaptured15994 prices an unscoped operational
+// rollback render against the slot tree ALREADY captured+stashed
+// by the caller's RollbackSnapshot(n) (fold2-3).
+func (c *CLI) priceRollbackWholeCaptured15994(priceCfg, cfg *config.Config, suffix string) error {
+	if priceCfg == nil {
+		priceCfg = cfg
+	}
+	if c.store == nil {
+		return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, suffix)
+	}
+	return config.AuthorizeConfigShowRollbackAtTree(priceCfg, c.userClass,
+		c.renderSnapshot15995("slot"), suffix)
 }
