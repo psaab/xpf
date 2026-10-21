@@ -45,6 +45,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -1458,58 +1459,128 @@ func StripManagedSectionFile(path string) error {
 // world-readable. Callers pass perm 0640 instead of the old 0644.
 // WithPreserveExisting preserves operator ownership but caps the mode
 // at 0640 (existing & 0640), so a legacy 0644 file is tightened to 0640
-// on the next apply while a stricter 0600 file stays 0600.
+// on the next apply while a stricter 0600 file stays 0600. Tightening
+// must stay service-readable (Codex fold): the FRR daemons run as
+// frr:frr (Debian frrcommon FRR_USER/FRR_GROUP), so a legacy root:root
+// 0644 capped to 0640 root:root would deny them. atomicWriteOwnerOpt
+// therefore migrates ONLY the group to the frr gid (uid preserved)
+// when tightening a non-service-group file, and preserveFloorPerm
+// floors the mode at the existing width when the frr group cannot be
+// resolved (never tighten into an unreadable file).
 // A 0640 file is only readable by its owner and group, so on a FRESH
 // create (no operator file to preserve) we install it owned root:<frr>
 // via WithOwner so the unprivileged frr daemons (group frr) can still
-// read it. See atomicWriteOwnerOpt for the fresh-only + best-effort
-// resolution rules that keep this from ever stranding a running FRR or
-// restamping an operator-owned file.
+// read it. See atomicWriteOwnerOpt for the resolution rules that keep
+// this from ever stranding a running FRR or restamping an operator file
+// beyond the tightening migration above.
 func atomicWriteFile(path string, data []byte, perm os.FileMode, resolveSymlinks bool) error {
+	effectivePerm := preserveFloorPerm(path, perm)
 	opts := []fsatomic.Option{
 		fsatomic.WithPreserveExisting(),
 	}
 	if resolveSymlinks {
 		opts = append(opts, fsatomic.WithResolveSymlinks())
 	}
-	if owner, ok := atomicWriteOwnerOpt(path); ok {
+	if owner, ok := atomicWriteOwnerOpt(path, perm); ok {
 		opts = append(opts, owner)
 	}
-	return fsatomic.WriteFileDurable(path, data, perm, opts...)
+	return fsatomic.WriteFileDurable(path, data, effectivePerm, opts...)
 }
 
-// atomicWriteOwnerOpt returns a WithOwner(0, frr-gid) option, and ok=false
-// when no ownership override should be applied. It returns an option ONLY
-// when BOTH:
+// atomicWriteOwnerOpt returns the WithOwner option for a write, and
+// ok=false when no ownership override should be applied.
 //
-//   - the target does not already exist — an existing frr.conf keeps its
-//     own ownership (and mode, capped at 0640 by fsatomic, #16046) via
-//     WithPreserveExisting with no WithOwner here, so a commit never
-//     restamps an operator's chosen owner (#4484 L-6
-//     "must not override an operator's existing ownership"); and
-//   - the frr group resolves — so we never chown a fresh file to a gid we
-//     could not verify. When the group is absent (FRR not installed — a dev
-//     host or a unit test) we skip the override and the file lands 0640
-//     root:root, which is harmless because nothing reads frr.conf without a
-//     running FRR. This mirrors the pkg/dhcpserver #2450 Kea-memfile owner
-//     handling: own the file by the unprivileged runtime user so a
-//     tightened mode stays readable, best-effort when that user is absent.
+// Fresh create (target does not exist): WithOwner(0, frr-gid) when the
+// frr group resolves, so the 0640 file is group-readable by the
+// unprivileged frr daemons from the first install. When the group is
+// absent (FRR not installed — a dev host or a unit test) we skip the
+// override and the file lands 0640 root:root, which is harmless because
+// nothing reads frr.conf without a running FRR.
+//
+// Existing file: operator ownership is preserved (WithPreserveExisting,
+// #4484) EXCEPT the #16046 tightening-migration case. When the existing
+// mode is WIDER than perm, fsatomic caps it (existing & perm); if the
+// preserved group is not the frr group, that tightening would strip
+// the world/other read the frr daemons (uid/gid frr, groups frr+frrvty
+// — Debian frrcommon FRR_USER/FRR_GROUP=frr) were relying on and leave
+// a 0640 root:root file they cannot read. So when tightening would
+// occur and the frr group resolves (root-only, via resolveFRRGroup),
+// migrate ONLY the group to the frr gid, keeping the operator uid:
+// WithOwner(existing-uid, frr-gid). The resulting 0640 uid:frr file is
+// readable by the service group and not world-readable. When the frr
+// group does not resolve we cannot prove service readability after
+// tightening, so no migration is attempted here and
+// preserveFloorPerm keeps the mode at the existing width (fail toward
+// service readability, not toward a stranded FRR) until the group can
+// be resolved on a later apply.
 //
 // os.Stat follows symlinks, matching WithResolveSymlinks: a symlink to an
-// existing file is treated as existing (preserve), a dangling symlink as a
-// fresh create (own root:frr on the resolved target).
-func atomicWriteOwnerOpt(path string) (fsatomic.Option, bool) {
-	if _, err := os.Stat(path); err == nil {
-		return nil, false // exists → preserve operator mode+ownership
+// existing file is treated as existing (preserve/migrate), a dangling
+// symlink as a fresh create (own root:frr on the resolved target).
+func atomicWriteOwnerOpt(path string, perm os.FileMode) (fsatomic.Option, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		// Fresh create.
+		gid, ok := resolveFRRGroup()
+		if !ok {
+			return nil, false
+		}
+		// uid 0: root owns/writes the xpf-managed frr.conf; the frr
+		// group only needs read access (the daemons load the file at
+		// startup), which the group-read bit of 0640 grants.
+		return fsatomic.WithOwner(0, gid), true
 	}
-	gid, ok := resolveFRRGroup()
+	// Existing file: migrate group only when fsatomic will tighten.
+	if fi.Mode().Perm()&^perm == 0 {
+		return nil, false // no tightening → preserve operator ownership
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return nil, false
 	}
-	// uid 0: root owns/writes the xpf-managed frr.conf; the frr group only
-	// needs read access (the daemons load the file at startup), which the
-	// group-read bit of 0640 grants.
-	return fsatomic.WithOwner(0, gid), true
+	gid, ok := resolveFRRGroup()
+	if !ok {
+		return nil, false // cannot prove service group; floor handles mode
+	}
+	if int(st.Gid) == gid {
+		return nil, false // already service group; cap alone is safe
+	}
+	return fsatomic.WithOwner(int(st.Uid), gid), true
+}
+
+// preserveFloorPerm returns the perm to pass to fsatomic for an
+// existing target: normally the caller's perm (0640), so fsatomic caps
+// a wider existing mode. But when the existing mode is wider, the
+// preserved group is not the frr service group, and the frr group
+// cannot be resolved (non-root / FRR absent), tightening to 0640
+// root:<other> would deny the unprivileged frr reader. In that case
+// floor at the existing mode — pass it as perm so existing & perm is
+// the existing mode — until a root apply with a resolvable frr group
+// can migrate the group and tighten safely (#16046). Fresh creates and
+// already-tight files return perm unchanged.
+func preserveFloorPerm(path string, perm os.FileMode) os.FileMode {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return perm
+	}
+	existing := fi.Mode().Perm()
+	if existing&^perm == 0 {
+		return perm // nothing to tighten
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return perm
+	}
+	gid, ok := resolveFRRGroup()
+	if ok && int(st.Gid) == gid {
+		return perm // service group already; cap is readable
+	}
+	if ok {
+		return perm // migration to frr gid will make the cap readable
+	}
+	// FRR group unresolvable: cannot migrate, so do not tighten into
+	// an unreadable file.
+	return existing
 }
 
 // frrGroupName is the unprivileged group the FRR daemons run under (Debian/

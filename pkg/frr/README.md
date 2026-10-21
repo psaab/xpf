@@ -25,12 +25,19 @@ readable only by owner+group, a **fresh** create (no operator file to
 preserve) is installed **owned `root:frr`** via `fsatomic.WithOwner`, so
 the unprivileged frr daemons (group `frr`) can still read it —
 `atomicWriteOwnerOpt` resolves the frr gid (`resolveFRRGroup`). The
-owner override is applied **only** when (a) the target does not already
-exist — an existing operator file keeps its own ownership and a
-stricter-or-equal mode; a wider mode is capped at 0640 by fsatomic
-(`existing & 0640`, #16046, so a legacy 0644 file is tightened, never
-kept world-readable) — AND (b) the process is root
-and the `frr` group resolves. When the group is absent (FRR not
+owner override is applied on a fresh create when the process is root
+and the `frr` group resolves. An existing operator file keeps its own
+ownership and a stricter-or-equal mode; a wider mode is capped at 0640
+by fsatomic (`existing & 0640`, #16046). **Tightening stays
+service-readable:** the FRR daemons run as `frr:frr` (Debian
+`frrcommon.sh`: `FRR_USER=frr`, `FRR_GROUP=frr`, `FRR_CONFIG_MODE=0640`;
+stock `/etc/frr/frr.conf` is `root:root 0644`), so capping a legacy
+`root:root 0644` to `0640 root:root` would deny the reader. When
+tightening a file whose group is not the frr group and the frr group
+resolves, only the group migrates to the frr gid (uid preserved) via
+`atomicWriteOwnerOpt`; when the group cannot be resolved,
+`preserveFloorPerm` keeps the existing mode until a root apply can
+migrate safely. When the group is absent on a fresh create (FRR not
 installed — a dev host / unit test) or the process is non-root the
 override is skipped and the file lands 0640 `root:root` (harmless:
 nothing reads `frr.conf` without a running FRR). This mirrors the

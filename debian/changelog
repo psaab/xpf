@@ -5,7 +5,10 @@ xpf (0.0.0) unstable; urgency=medium
     stayed world-readable after every managed apply despite the FRR
     writer requesting 0640 for a file carrying routing-auth secrets.
     Preserve now keeps ownership and a stricter-or-equal mode
-    (existing & perm) and never widens past the caller perm (#16046).
+    (existing & perm) and never widens past the caller perm; when
+    tightening a non-frr-group file the group migrates to the frr gid
+    (uid preserved), or the mode is floored until that migration is
+    possible, so the frr:frr daemons can always read the result (#16046).
 
 xpf (0.0.0) unstable; urgency=medium
 
