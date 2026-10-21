@@ -113,39 +113,26 @@ func countNodeUnits(nodes []*Node) int {
 	return n
 }
 
-// LineTargetKind classifies a set path against the existing tree for
-// delta estimation (#15999): Absent (no strict prefix match), Leaf
-// (full path resolves to a leaf node), Container (full path resolves
-// to a non-leaf, or a strict prefix matches but the tail is new —
-// SetPath then ADDS nodes, incl. twin leaves under containers).
-type LineTargetKind int
-
-const (
-	LineTargetAbsent LineTargetKind = iota
-	LineTargetLeaf
-	LineTargetContainer
-)
-
-// LineOccupancy walks the deepest STRICT (full-key) prefix match,
-// returning target kind and the matched leaf's key count when Leaf.
-// O(depth + sibling scans); no clone.
-
-// LineOccupancy walks the deepest STRICT (full-key) prefix match and
-// classifies the target (Absent/Leaf/Container) with matched units.
-func (t *ConfigTree) LineOccupancy(path []string) (kind LineTargetKind, matchedUnits int, leafKeys int) {
+// CreationCharge15999 returns parser units a set line CREATES by PATH
+// identity: resolve strictly; unresolved suffix segments each create
+// ~1 node + its keys (charge = 2*len(suffix) as chain bound). Fully
+// resolved to an existing leaf = 0 (value swap in place — alternating
+// fw1/fw2 charge 0). Subsumes prefix cases (unresolved tails charge).
+func (t *ConfigTree) CreationCharge15999(path []string) int {
 	if t == nil || len(path) == 0 {
-		return LineTargetAbsent, 0, 0
+		return 0
 	}
 	children := t.Children
 	pos := 0
 	var deepest *Node
+	lastConsumed, lastKeys := 0, 0
 	for pos < len(path) {
 		found := false
 		for _, child := range children {
 			consumed := matchNodeKeysFull(child, path, pos)
 			if consumed > 0 {
-				matchedUnits += 1 + len(child.Keys)
 				deepest = child
+				lastConsumed, lastKeys = consumed, len(child.Keys)
 				children = child.Children
 				pos += consumed
 				found = true
@@ -156,58 +143,34 @@ func (t *ConfigTree) LineOccupancy(path []string) (kind LineTargetKind, matchedU
 			break
 		}
 	}
-	if deepest == nil {
-		return LineTargetAbsent, 0, 0
+	if pos >= len(path) {
+		if deepest != nil && deepest.IsLeaf && lastConsumed == lastKeys {
+			return 0
+		}
+		return 2
 	}
-	if pos < len(path) {
-		return LineTargetContainer, matchedUnits, 0
-	}
-	if deepest.IsLeaf {
-		return LineTargetLeaf, matchedUnits, len(deepest.Keys)
-	}
-	return LineTargetContainer, matchedUnits, 0
-}
-
-// LineTargetLeafExact reports whether path resolves to an existing
-// leaf consuming EXACTLY the node's full Keys with no leftover and
-// no prefix-shortfall in either direction: walk with strict full-key
-// matching; at each node require consumed == len(node.Keys) (a
-// remaining-prefix match consuming fewer than the node's keys is a
-// shorter-prefix hit, NOT exact), and at the end require pos ==
-// len(path) and the final node IsLeaf. Only then does a set replace.
-func (t *ConfigTree) LineTargetLeafExact(path []string) bool {
-	if t == nil || len(path) == 0 {
-		return false
-	}
-	children := t.Children
-	pos := 0
-	var node *Node
-	for pos < len(path) {
-		found := false
-		for _, child := range children {
-			if len(child.Keys) == 0 || pos+len(child.Keys) > len(path) {
-				continue
-			}
-			eq := true
-			for j := range child.Keys {
-				if child.Keys[j] != path[pos+j] {
-					eq = false
-					break
-				}
-			}
-			if eq {
-				node = child
-				children = child.Children
-				pos += len(child.Keys)
-				found = true
-				break
+	// Unresolved suffix. BUT a set whose path diverges only in the
+	// terminal VALUE of an existing leaf (fw1 -> fw2: navigation
+	// consumed system + host-name container, suffix is just the new
+	// value) replaces that leaf in place (ast_edit single-value
+	// replace) — creation 0. Detect: deepest is a container whose
+	// children include a leaf with the same leading keys as the
+	// suffix head... simpler: if the unresolved suffix is a single
+	// segment and deepest has any leaf child, the edit targets that
+	// leaf's value slot. Charge by suffix otherwise.
+	// Value-swap: navigation stopped at the leaf's PARENT because
+	// the leaf node itself carries [host-name fw1] as one node —
+	// deepest is `system`, unresolved suffix is [host-name fw2]
+	// (2 segments). If deepest has a leaf child whose FIRST key
+	// equals the suffix head, the edit replaces that leaf's value.
+	if deepest != nil && !deepest.IsLeaf && len(path)-pos >= 1 {
+		for _, ch := range deepest.Children {
+			if ch.IsLeaf && len(ch.Keys) > 0 && ch.Keys[0] == path[pos] {
+				return 0
 			}
 		}
-		if !found {
-			return false
-		}
 	}
-	return node != nil && node.IsLeaf && pos == len(path)
+	return 2 * (len(path) - pos)
 }
 
 // Parser implements a recursive descent parser for Junos configuration syntax.

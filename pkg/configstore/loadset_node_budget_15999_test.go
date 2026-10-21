@@ -690,12 +690,62 @@ func TestShorterPrefixChargesFull15999(t *testing.T) {
 	short := "set unknown k"
 	// Direct: if charge were 0, gross would never refuse; assert the
 	// exact gate distinguishes: LineTargetLeafExact(short) is false.
-	if tree.LineTargetLeafExact([]string{"unknown", "k"}) {
-		t.Fatal("shorter prefix wrongly exact-matches long leaf")
+	if tree.CreationCharge15999([]string{"unknown", "k"}) == 0 {
+		t.Fatal("shorter prefix wrongly charges 0")
 	}
-	if !tree.LineTargetLeafExact([]string{"system", "host-name", "fw1"}) {
-		t.Fatal("exact leaf should match")
+	if tree.CreationCharge15999([]string{"system", "host-name", "fw1"}) != 0 {
+		t.Fatal("exact leaf re-set must charge 0")
 	}
 	_ = short
 	_ = b
+}
+
+// Discriminating witness (Opus): 300 sub-cap shorter-prefix lines, each
+// creating a NEW distinct leaf — with charge-0 (lenient prefix hit)
+// cumWork never crosses; with full charge it refuses at the work cap.
+// REDs if creation charging is replaced by lenient existence.
+func TestShorterPrefixDiscriminating15999(t *testing.T) {
+	tree := &config.ConfigTree{}
+	// Seed one key-dense long leaf via replay (bounded, under cap).
+	seed := "set unknown" + strings.Repeat(" k", 1000)
+	if _, err := replayFlatLines15999(tree, []string{seed}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before := tree.NodeCount()
+	var lines []string
+	for i := range 300 {
+		// Each line: short prefix of the long leaf + distinct tail,
+		// creating a new leaf each time (~1002 toks charged full).
+		lines = append(lines, "set unknown k"+strings.Repeat(" x", 1000)+fmt.Sprintf(" v%d", i))
+	}
+	_, err := replayFlatLines15999(tree, lines)
+	if err == nil || !strings.Contains(err.Error(), "work budget") {
+		t.Fatalf("300 shorter-prefix creations must refuse at work cap: err=%v", err)
+	}
+	// Working growth bounded: refused before all 300 applied (clone is
+	// discarded by callers; here assert helper applied < 300 lines
+	// worth — units growth < 300*1000).
+	if grew := tree.NodeCount() - before; grew > 250_000 {
+		t.Fatalf("working grew unbounded before refusal: +%d units", grew)
+	}
+}
+
+// Alternating values on one leaf charge 0 (path identity, not value):
+// 200k fw1/fw2 alternations accepted.
+func TestAlternatingValuesChargeZero15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for i := range 200_000 {
+		if i%2 == 0 {
+			b.WriteString("set system host-name fw1\n")
+		} else {
+			b.WriteString("set system host-name fw2\n")
+		}
+	}
+	if _, err := s.LoadSet(b.String()); err != nil {
+		t.Fatalf("alternating fw1/fw2 re-sets refused: %v", err)
+	}
 }

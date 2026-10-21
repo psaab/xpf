@@ -883,21 +883,9 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			charge = 0
 		case "deactivate":
 			charge = 1
-		default: // set/edit: charge CREATION only
-			// Existing leaf with same keys creates ~0 units:
-			// charge = max(0, lineToks-leafToks) (small). Absent/
-			// container targets charge full (twin-add creates).
+		default: // set/edit: charge = NEW NODES created (path identity)
 			if perr == nil {
-				// Charge-0 ONLY on exact leaf equality: entire
-				// path consumed AND leaf Keys == line value keys.
-				// Shorter-prefix/divergent targets charge full.
-				if working.LineTargetLeafExact(path) {
-					// Existence keys the charge: full path resolves
-					// to an existing leaf -> creation is ZERO
-					// regardless of depth (token arithmetic over-
-					// charged deep paths 6/line for zero creation).
-					charge = 0
-				}
+				charge = working.CreationCharge15999(path)
 			}
 		}
 		cumWork += charge
