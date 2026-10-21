@@ -727,6 +727,84 @@ fn fabric_ingress_different_owner_does_not_evict_16222() {
     );
 }
 
+/// #16222 round 2 (option B): the fw0 evicting shape is a DIRECT member
+/// ingress (not fabric ingress): a locally-seeded FabricRedirect stamp
+/// whose owner (RG2, the LAN leg) differs from the WAN egress RG1, served
+/// on LAN/WAN members with both fabric flags false. Round 1 only retained
+/// the redirect on fabric ingress, so this shape still evicted per packet.
+/// Option B: a different-owner local candidate supersedes ONLY if it
+/// serves the flow locally (per-flow resolution is ForwardCandidate with
+/// a locally-active egress RG). Here RG1 IS locally active, so a candidate
+/// that genuinely egresses locally on RG1 would serve — but the cached
+/// redirect's own stored resolution is FabricRedirect (egress = fabric
+/// parent), so the per-flow session resolution for this flow is the
+/// redirect, not a local candidate: the second packet must be served.
+#[test]
+fn direct_member_fabric_redirect_owner_mismatch_kept_16222() {
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // fw0 posture: RG1 (WAN) active locally, RG2 (LAN) peer-owned.
+    let ha_state = BTreeMap::from([
+        (1, active_ha_runtime(now_secs)),
+        (2, inactive_ha_runtime(now_secs)),
+    ]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: target,
+        src_port: 52490,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    // Direct member ingress, stamp owner RG2 != WAN RG1: the round-1
+    // fabric-ingress retention does not apply, yet the redirect must be
+    // judged against its stored context and kept when the different-owner
+    // candidate does not supersede it under option B's local-serving test
+    // as exercised through the stored redirect resolution.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            2,
+            false,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "direct-member FabricRedirect with owner mismatch must not evict per-packet (fw0 shape)"
+    );
+    // Control: same-owner stamp (RG1) on direct ingress with RG1 active
+    // retains via the #16220 same-owner rule (still None), and on fabric
+    // ingress same-owner still fails back via OwnerActiveRedirect.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::OwnerActiveRedirect),
+        "same-owner fabric ingress must still fail back"
+    );
+}
+
 #[test]
 fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
     let state = build_forwarding_state(&nat_snapshot());
