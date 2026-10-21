@@ -3194,7 +3194,7 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 	return warnings, nil
 }
 
-// validateNAT64ScopeStrict (#15678/#15932) validates the optional NAT64
+// validateNAT64ScopeStrict (#15678/#15932/#16049) validates the optional NAT64
 // ingress scoping (`from zone|routing-instance`, `match
 // source-address[-name]`).
 //
@@ -3204,8 +3204,8 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 // from-zone / routing-instance, an unparsable or non-IPv6
 // source-address, and an undefined source-address-name. Multiple values
 // of the SAME kind are a legitimate list: compileNAT64 unions them into
-// FromZones on the single authored rule-set, and every member is checked
-// here. Lenient: warn per defect (#1960); the
+// FromZones / FromRoutingInstances on the single authored rule-set, and
+// every member is checked here. Lenient: warn per defect (#1960); the
 // dataplane still fails closed — an unknown zone/RI name never equals
 // a packet's resolved scope, and an all-unparseable source list
 // matches nothing.
@@ -3229,16 +3229,20 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 		if rs == nil {
 			continue
 		}
-		// #15932: check every authored zone in the union, not just the
-		// surviving singular FromZone field.
+		// #15932/#16049: check every authored zone / routing-instance in
+		// the union, not just the surviving singular field.
 		effectiveZones := rs.FromZones
 		if len(effectiveZones) == 0 && rs.FromZone != "" {
 			effectiveZones = []string{rs.FromZone}
 		}
-		if len(effectiveZones) > 0 && rs.FromRoutingInstance != "" {
+		effectiveRIs := rs.FromRoutingInstances
+		if len(effectiveRIs) == 0 && rs.FromRoutingInstance != "" {
+			effectiveRIs = []string{rs.FromRoutingInstance}
+		}
+		if len(effectiveZones) > 0 && len(effectiveRIs) > 0 {
 			if err := emit(fmt.Sprintf(
 				"security nat nat64 rule-set %q has both `from zone %q` and `from routing-instance %q`; specify exactly one from scope (zone XOR routing-instance) — a mixed clause is never OR-widened (#15678)",
-				rs.Name, effectiveZones[0], rs.FromRoutingInstance)); err != nil {
+				rs.Name, effectiveZones[0], effectiveRIs[0])); err != nil {
 				return nil, err
 			}
 			continue
@@ -3252,11 +3256,13 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 				}
 			}
 		}
-		if rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance) {
-			if err := emit(fmt.Sprintf(
-				"security nat nat64 rule-set %q from routing-instance %q is not defined; define `set routing-instances %s ...` in the same commit (#15678)",
-				rs.Name, rs.FromRoutingInstance, rs.FromRoutingInstance)); err != nil {
-				return nil, err
+		for _, ri := range effectiveRIs {
+			if ri != "" && !natRoutingInstanceDefined15278(cfg, ri) {
+				if err := emit(fmt.Sprintf(
+					"security nat nat64 rule-set %q from routing-instance %q is not defined; define `set routing-instances %s ...` in the same commit (#15678)",
+					rs.Name, ri, ri)); err != nil {
+					return nil, err
+				}
 			}
 		}
 		for _, a := range rs.SourceAddresses {
@@ -5289,9 +5295,10 @@ func nat64PrefixOwnerKey(prefix string) (string, bool) {
 // matches every scope, so it must collide with any scoped sibling — the
 // caller therefore keys unscoped rule-sets by the bare prefix key and
 // scoped ones by prefix+scope, and treats an unscoped owner as covering
-// every scope (see nat64ShadowedRuleSets). #15932: the zone component is
-// the sorted effective zone SET (FromZones ∪ {FromZone}), so an authored
-// zone list keys as its union, never as separate per-zone owners.
+// every scope (see nat64ShadowedRuleSets). #15932/#16049: the zone and
+// routing-instance components are the sorted effective SETS
+// (FromZones ∪ {FromZone}, FromRoutingInstances ∪ {FromRoutingInstance}),
+// so an authored list keys as its union, never as separate per-value owners.
 // nat64EffectiveZones (#15932) is the zone set a NAT64 rule-set admits:
 // the authored FromZones list when present, else the singular FromZone.
 func nat64EffectiveZones(rs *NAT64RuleSet) []string {
@@ -5303,6 +5310,22 @@ func nat64EffectiveZones(rs *NAT64RuleSet) []string {
 	}
 	if rs.FromZone != "" {
 		return []string{rs.FromZone}
+	}
+	return nil
+}
+
+// nat64EffectiveRoutingInstances (#16049) is the routing-instance set
+// a NAT64 rule-set admits: the authored FromRoutingInstances list when
+// present, else the singular FromRoutingInstance.
+func nat64EffectiveRoutingInstances(rs *NAT64RuleSet) []string {
+	if rs == nil {
+		return nil
+	}
+	if len(rs.FromRoutingInstances) > 0 {
+		return rs.FromRoutingInstances
+	}
+	if rs.FromRoutingInstance != "" {
+		return []string{rs.FromRoutingInstance}
 	}
 	return nil
 }
@@ -5321,7 +5344,9 @@ func nat64PrefixOwnerKeyScoped(rs *NAT64RuleSet) (string, bool) {
 	}
 	zones := append([]string(nil), nat64EffectiveZones(rs)...)
 	sort.Strings(zones)
-	return prefixKey + "\x00" + strings.Join(zones, ",") + "\x00" + rs.FromRoutingInstance, true
+	ris := append([]string(nil), nat64EffectiveRoutingInstances(rs)...)
+	sort.Strings(ris)
+	return prefixKey + "\x00" + strings.Join(zones, ",") + "\x00" + strings.Join(ris, ","), true
 }
 
 // nat64ShadowedRuleSets maps every NAT64 rule-set the dataplane can NEVER select
@@ -5365,11 +5390,12 @@ func nat64ShadowedRuleSets(cfg *Config) map[*NAT64RuleSet]*NAT64RuleSet {
 			continue
 		}
 		scopedKey, _ := nat64PrefixOwnerKeyScoped(rs)
-		// #15932: shadowing compares the effective zone SET: a rule-set
-		// whose zone set is identical to an earlier one's (or covered by
-		// an unscoped earlier rule-set) can never be selected; a disjoint
-		// or merely overlapping zone set still owns its other zones.
-		isUnscoped := len(nat64EffectiveZones(rs)) == 0 && rs.FromRoutingInstance == ""
+		// #15932/#16049: shadowing compares the effective zone / RI SETs:
+		// a rule-set whose scope sets are identical to an earlier one's
+		// (or covered by an unscoped earlier rule-set) can never be
+		// selected; a disjoint or merely overlapping set still owns
+		// its other members.
+		isUnscoped := len(nat64EffectiveZones(rs)) == 0 && len(nat64EffectiveRoutingInstances(rs)) == 0
 		if earlier, seen := first[scopedKey]; seen {
 			shadowed[rs] = earlier
 			continue

@@ -15429,6 +15429,20 @@ Rust #6982 aggregate budget is the only bound. Tests:
 `nat64_scope_15678_test.go` (config + userspace),
 `compiler_nat64_cap_15678_test.go`, `nat64_scoped_*_15678` (Rust).
 
+### #16049 — NAT64 `from routing-instance` list union
+
+A NAT64 rule-set `from routing-instance [ a b ]` (or repeated
+single-value form) now unions every member on the one authored
+rule-set (`FromRoutingInstances`, first in the singular mirror),
+exactly as #15932 unions `from zone`. Previously the last RI won and
+the strict gate checked only that survivor, so a nonexistent first
+member committed clean and its traffic was never translated. The
+strict gate now checks every member; the snapshot carries
+`from_routing_instances` (ProtocolVersion 64) and Rust unions it in
+the scoped match. Tests: `nat64_scope_15678_test.go`
+(`TestNAT64RoutingInstanceListUnions16049`), `nat64_scope_15678_test.go`
+(userspace), `nat64_routing_instance_list_unions_16049` (Rust).
+
 ### #15930 — NAT64 source scope fail-closed (poisoned name / explicit `any`)
 
 The authored source constrainedness of a NAT64 rule-set is preserved

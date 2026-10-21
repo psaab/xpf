@@ -1055,8 +1055,9 @@ type NATv6v4Config struct {
 // build. Empty = match any source. Exactly one from axis may be set
 // (zone XOR routing-instance); a mixed-kind from clause is rejected at
 // strict commit (never OR-widened). Multiple values of the SAME kind
-// are a legitimate list: compileNAT64 unions them into FromZones on
-// the ONE authored rule-set (#15932) — never Cartesian-expanded into
+// are a legitimate list: compileNAT64 unions them into FromZones /
+// FromRoutingInstances on the ONE authored rule-set (#15932 zones,
+// #16049 routing-instances) — never Cartesian-expanded into
 // separate snapshots, because the dataplane owns one PortAllocator
 // per (prefix, pool) snapshot. #15930: `any` (or an IPv6 family
 // wildcard, or `::/0`) anywhere in the source selector is an explicit
@@ -1075,9 +1076,17 @@ type NAT64RuleSet struct {
 	// exactly one rule-set per authored name and stamps the whole list
 	// here; validators check every member. #15932.
 	FromZones []string
-	// FromRoutingInstance scopes the rule-set to traffic in this routing
-	// instance / VRF. "" = the default instance / unscoped. #15678.
+	// FromRoutingInstance is the FIRST authored routing-instance
+	// (back-compat singular); the full authored set is
+	// FromRoutingInstances. "" = unscoped. #15678/#16049.
 	FromRoutingInstance string
+	// FromRoutingInstances is the full authored
+	// `from routing-instance` list (bracket or repeated), unioned by
+	// the dataplane matcher exactly as FromZones unions zones.
+	// compileNAT64 keeps exactly one rule-set per authored name and
+	// stamps the whole list here; validators check every member.
+	// #16049 (the RI sibling of #15932's zone union).
+	FromRoutingInstances []string
 	// SourceAddresses is the full `match source-address` list (CIDRs or bare
 	// IPv6 hosts). Empty = match any source. #15678.
 	SourceAddresses []string

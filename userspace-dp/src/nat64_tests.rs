@@ -9638,6 +9638,29 @@ fn nat64_zone_list_unions_15932() {
     );
 }
 
+#[test]
+fn nat64_routing_instance_list_unions_16049() {
+    let mut snap = scoped_snap("", "blue", vec![]);
+    snap.from_routing_instances = vec!["blue".to_string(), "red".to_string()];
+    let state = Nat64State::from_snapshots(&[snap]);
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    for ri in ["blue", "red"] {
+        assert!(
+            matches!(
+                state.classify_ipv6_packet_scoped(src, dst, "", ri),
+                Nat64Match::MatchReady { .. }
+            ),
+            "listed routing-instance {ri} must match"
+        );
+    }
+    assert_eq!(
+        state.classify_ipv6_packet_scoped(src, dst, "", "green"),
+        Nat64Match::NoPrefixMatch,
+        "unlisted routing-instance must not match"
+    );
+}
+
 // #15932: ONE authored rule-set carrying a two-zone union over ONE pool
 // owns exactly ONE allocator: two subscribers admitted from different
 // zones mint distinct external tuples (no cross-zone double-mint, no

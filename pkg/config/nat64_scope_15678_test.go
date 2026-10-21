@@ -218,3 +218,78 @@ func TestNAT64ZoneListUnions15932(t *testing.T) {
 		t.Fatalf("mixed zone+RI must reject, got %v", err)
 	}
 }
+
+// #16049: a bracket `from routing-instance [ a b ]` list must UNION on
+// the ONE authored rule-set (the pre-fix compiler kept only the last
+// RI, and the strict gate checked only that survivor — a nonexistent
+// first member committed clean). Exactly one typed rule-set is
+// emitted — expanding into snapshot siblings would give the shared
+// pool one PortAllocator per RI and double-mint it. Fail-on-revert:
+// keeping only the last RI in FromRoutingInstances, or checking only
+// the singular in the strict gate, fails below.
+func TestNAT64RoutingInstanceListUnions16049(t *testing.T) {
+	lines := func(extra ...string) []string {
+		base := []string{
+			"set security zones security-zone trust",
+			"set routing-instances blue instance-type virtual-router",
+			"set routing-instances red instance-type virtual-router",
+			"set security nat source pool p64 address 100.64.0.1/32",
+			"set security nat nat64 rule-set rs1 prefix 64:ff9b::/96",
+			"set security nat nat64 rule-set rs1 source-pool p64",
+		}
+		return append(base, extra...)
+	}
+	cfg, err := compileNAT64Scope(t, lines(
+		"set security nat nat64 rule-set rs1 from routing-instance [ blue red ]",
+	))
+	if err != nil {
+		t.Fatalf("bracket RI list must compile: %v", err)
+	}
+	if len(cfg.Security.NAT.NAT64) != 1 {
+		t.Fatalf("NAT64 rule-sets = %d, want 1 (no snapshot expansion)", len(cfg.Security.NAT.NAT64))
+	}
+	rs := cfg.Security.NAT.NAT64[0]
+	if len(rs.FromRoutingInstances) != 2 || rs.FromRoutingInstances[0] != "blue" || rs.FromRoutingInstances[1] != "red" {
+		t.Fatalf("FromRoutingInstances = %v, want [blue red]", rs.FromRoutingInstances)
+	}
+	if rs.FromRoutingInstance != "blue" {
+		t.Fatalf("FromRoutingInstance = %q, want first authored RI blue", rs.FromRoutingInstance)
+	}
+	// Repeated single-value form unions the same way.
+	cfg2, err := compileNAT64Scope(t, lines(
+		"set security nat nat64 rule-set rs1 from routing-instance blue",
+		"set security nat nat64 rule-set rs1 from routing-instance red",
+	))
+	if err != nil {
+		t.Fatalf("repeated RI form must compile: %v", err)
+	}
+	if len(cfg2.Security.NAT.NAT64) != 1 || len(cfg2.Security.NAT.NAT64[0].FromRoutingInstances) != 2 {
+		t.Fatalf("repeated form = %+v, want one rule-set with two RIs", cfg2.Security.NAT.NAT64)
+	}
+	// Decisive: a nonexistent FIRST member is rejected — pre-fix it
+	// was dropped by last-wins and never reached the strict gate.
+	if _, err := compileNAT64Scope(t, lines(
+		"set security nat nat64 rule-set rs1 from routing-instance [ nosuchri red ]",
+	)); err == nil || !strings.Contains(err.Error(), "nosuchri") {
+		t.Fatalf("undefined first RI member must reject, got %v", err)
+	}
+	// A nonexistent LAST member is likewise rejected (order-independent).
+	if _, err := compileNAT64Scope(t, lines(
+		"set security nat nat64 rule-set rs1 from routing-instance [ blue nosuchri ]",
+	)); err == nil || !strings.Contains(err.Error(), "nosuchri") {
+		t.Fatalf("undefined last RI member must reject, got %v", err)
+	}
+	// Lenient path warns, never bricks (#1960).
+	if _, lerr := CompileConfigLenient(buildTree(t, lines(
+		"set security nat nat64 rule-set rs1 from routing-instance [ nosuchri red ]",
+	))); lerr != nil {
+		t.Fatalf("lenient path must not brick on undefined RI member: %v", lerr)
+	}
+	// Mixed zone+RI list clause still rejects.
+	if _, err := compileNAT64Scope(t, lines(
+		"set security nat nat64 rule-set rs1 from zone trust",
+		"set security nat nat64 rule-set rs1 from routing-instance blue",
+	)); err == nil || !strings.Contains(err.Error(), "mixes 2 scope kinds") {
+		t.Fatalf("mixed zone+RI must reject, got %v", err)
+	}
+}

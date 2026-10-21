@@ -246,6 +246,10 @@ pub(crate) struct Nat64Prefix {
     /// means fall back to `from_zone` (singular, pre-#15932 snapshots).
     pub(crate) from_zones: Vec<String>,
     pub(crate) from_routing_instance: String,
+    /// #16049: every authored routing-instance for this prefix (the
+    /// union). Empty means fall back to `from_routing_instance`
+    /// (singular, pre-#16049 snapshots).
+    pub(crate) from_routing_instances: Vec<String>,
     pub(crate) source_prefixes: Vec<PrefixV6>,
     pub(crate) source_constrained: bool,
     /// IPv4 source pool addresses for SNAT.
@@ -350,6 +354,7 @@ impl Nat64Prefix {
             from_zone: String::new(),
             from_zones: Vec::new(),
             from_routing_instance: String::new(),
+            from_routing_instances: Vec::new(),
             source_prefixes: Vec::new(),
             source_constrained: false,
             pool_index_v4: nat64_pool_index(&pool_v4),
@@ -375,6 +380,7 @@ impl Clone for Nat64Prefix {
             from_zone: self.from_zone.clone(),
             from_zones: self.from_zones.clone(),
             from_routing_instance: self.from_routing_instance.clone(),
+            from_routing_instances: self.from_routing_instances.clone(),
             source_prefixes: self.source_prefixes.clone(),
             source_constrained: self.source_constrained,
             pool_v4: self.pool_v4.clone(),
@@ -1250,6 +1256,17 @@ impl Nat64State {
                     snap.from_zones.clone()
                 },
                 from_routing_instance: snap.from_routing_instance.clone(),
+                // #16049: union — prefer the plural list; fall back to
+                // the singular for pre-#16049 snapshots.
+                from_routing_instances: if snap.from_routing_instances.is_empty() {
+                    if snap.from_routing_instance.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![snap.from_routing_instance.clone()]
+                    }
+                } else {
+                    snap.from_routing_instances.clone()
+                },
                 source_prefixes,
                 source_constrained,
                 pool_v4,
@@ -1610,7 +1627,12 @@ impl Nat64State {
         } else if !prefix.from_zone.is_empty() && prefix.from_zone != from_zone {
             return false;
         }
-        if !prefix.from_routing_instance.is_empty()
+        // #16049: routing-instance list is a union — any authored RI admits.
+        if !prefix.from_routing_instances.is_empty() {
+            if !prefix.from_routing_instances.iter().any(|ri| ri == routing_instance) {
+                return false;
+            }
+        } else if !prefix.from_routing_instance.is_empty()
             && prefix.from_routing_instance != routing_instance
         {
             return false;

@@ -461,7 +461,12 @@ const (
 	// union of every authored `from zone` value. A v62 helper ignores
 	// it and scopes the prefix to the singular from_zone only — the
 	// last-zone truncation — so exact-equality versioning fences it.
-	ProtocolVersion = 63
+	// v63 -> v64 (#16049): NAT64RuleSnapshot carries
+	// from_routing_instances, the union of every authored
+	// `from routing-instance` value. A v63 helper ignores it and
+	// scopes the prefix to the singular from_routing_instance only —
+	// the last-RI truncation — so exact-equality versioning fences it.
+	ProtocolVersion = 64
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
