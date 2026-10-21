@@ -1303,6 +1303,7 @@ fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
         session_gc_healed_on_promote: 7,
         session_gc_aged_owner_rg_zero_active_node: 8,
         session_gc_kept_alive_by_companion: 9,
+        session_gc_expired: 10,
         ..WorkerRuntimeStatus::default()
     };
     let value: serde_json::Value = serde_json::to_value(&status).expect("serialize status");
@@ -1316,6 +1317,7 @@ fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
         "session_gc_healed_on_promote",
         "session_gc_aged_owner_rg_zero_active_node",
         "session_gc_kept_alive_by_companion",
+        "session_gc_expired",
     ] {
         assert!(value.get(key).is_some(), "missing session GC key {key}");
     }
@@ -1329,6 +1331,7 @@ fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
     assert_eq!(decoded.session_gc_healed_on_promote, 7);
     assert_eq!(decoded.session_gc_aged_owner_rg_zero_active_node, 8);
     assert_eq!(decoded.session_gc_kept_alive_by_companion, 9);
+    assert_eq!(decoded.session_gc_expired, 10);
 }
 
 #[test]

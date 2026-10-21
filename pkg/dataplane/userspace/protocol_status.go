@@ -1216,6 +1216,7 @@ type WorkerRuntimeStatus struct {
 	SessionGCHealedOnPromote              uint64 `json:"session_gc_healed_on_promote,omitempty"`
 	SessionGCAgedOwnerRGZeroActiveNode    uint64 `json:"session_gc_aged_owner_rg_zero_active_node,omitempty"`
 	SessionGCKeptAliveByCompanion         uint64 `json:"session_gc_kept_alive_by_companion,omitempty"`
+	SessionGCExpired                      uint64 `json:"session_gc_expired,omitempty"`
 	// #1760: cumulative NAT reverse-key displacement events on this
 	// worker's SessionTable nat_reverse_index (#1758). omitempty for
 	// mixed-version back-compat.
