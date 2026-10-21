@@ -103,10 +103,10 @@ func TestSNMPv3UserTwoLevelSecondInstance15706(t *testing.T) {
 		t.Fatalf("v3 users = %v, want both u1 and u2 (2nd instance dropped pre-fix)", cfg.System.SNMP.V3Users)
 	}
 	if u2.AuthProtocol != "sha" || string(u2.AuthPassword) != "p2password" {
-		t.Fatalf("u2 = auth %q pw set %v, want sha/p2pass", u2.AuthProtocol, string(u2.AuthPassword) != "")
+		t.Fatalf("u2 = auth %q pw set %v, want sha/p2password", u2.AuthProtocol, string(u2.AuthPassword) != "")
 	}
 	if u1.AuthProtocol != "sha" || string(u1.AuthPassword) != "p1password" {
-		t.Fatalf("u1 = auth %q, want sha/p1pass", u1.AuthProtocol)
+		t.Fatalf("u1 = auth %q, want sha/p1password", u1.AuthProtocol)
 	}
 }
 

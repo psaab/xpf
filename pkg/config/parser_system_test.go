@@ -868,7 +868,7 @@ snmp {
 		t.Errorf("monitor priv = %q, want aes128", monitor.PrivProtocol)
 	}
 	if monitor.PrivPassword != "privpass123" {
-		t.Errorf("monitor priv password = %q, want privpass", monitor.PrivPassword)
+		t.Errorf("monitor priv password = %q, want privpass123", monitor.PrivPassword)
 	}
 	readonly := cfg.System.SNMP.V3Users["readonly"]
 	if readonly == nil {
