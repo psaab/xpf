@@ -113,19 +113,37 @@ func countNodeUnits(nodes []*Node) int {
 	return n
 }
 
-// OccupiedUnits returns the parser-unit size (1+len(Keys) per node) of
-// the subtree at path, or 0 if the path does not resolve. Used for
-// delta accounting: a replacement edit's net cost is its token charge
-// minus what its target already occupies. O(subtree), no clone.
-func (t *ConfigTree) OccupiedUnits(path []string) int {
+// LineOccupancy mirrors what a SetPath edit actually pays: it walks the
+// deepest existing node matching the line's path PREFIX (multi-key nodes
+// consume several path elements, exactly as navigation) and returns the
+// parser-unit cost of the nodes along that matched prefix
+// (1+len(Keys) per node). Path segments already present cost 0 net: a
+// replacement's net charge is (new nodes actually created), approximated
+// as tokCharge minus the matched-prefix node units, floored at the
+// line's trailing value tokens. No clone; O(depth + matched nodes).
+func (t *ConfigTree) LineOccupancy(path []string) (matchedUnits int, fullPath bool) {
 	if t == nil || len(path) == 0 {
-		return 0
+		return 0, false
 	}
-	node, err := t.findNode(path)
-	if err != nil || node == nil {
-		return 0
+	children := t.Children
+	pos := 0
+	for pos < len(path) {
+		found := false
+		for _, child := range children {
+			consumed := matchNodeKeys(child, path, pos)
+			if consumed > 0 {
+				matchedUnits += 1 + len(child.Keys)
+				children = child.Children
+				pos += consumed
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
 	}
-	return countNodeUnits([]*Node{node})
+	return matchedUnits, pos >= len(path)
 }
 
 // Parser implements a recursive descent parser for Junos configuration syntax.

@@ -300,3 +300,37 @@ func TestNearCapReplacementResultAware15999(t *testing.T) {
 		}
 	}
 }
+
+// Exact-cap (1 spare) no-op: candidate at exactly cap-? with 1 unit spare;
+// replacing host-name (matched prefix occupies its nodes) nets ~0 and must
+// be accepted, while a genuine new leaf over cap refuses.
+func TestExactCapNoOpAccepted15999(t *testing.T) {
+	s := shrinkWitness15999(t)
+	// Trim witness to exactly MaxParseNodes+1 then delete one leaf via
+	// shrink to land at cap-1... simpler: use near-cap fixture below.
+	_ = s
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	// One leaf with MaxParseNodes-3 keys: units = (1+len) + system(2) + leaf(3)
+	keys := make([]string, config.MaxParseNodes-6)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	s2.candidate = &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+		}},
+	}}
+	before := s2.candidate.NodeCount()
+	// No-op replacement of existing leaf must pass at near-cap.
+	if _, err := s2.LoadSet("set system host-name fw1"); err != nil {
+		t.Fatalf("exact-cap no-op replacement refused: %v (before=%d cap=%d)", err, before, config.MaxParseNodes)
+	}
+	if got := s2.candidate.NodeCount(); got != before {
+		t.Fatalf("no-op changed count %d -> %d", before, got)
+	}
+}

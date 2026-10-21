@@ -858,6 +858,7 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		return 0, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
 	}
 	charged := base
+	crossings := 0
 	count := 0
 	for i, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -870,29 +871,43 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		isShrink := isShrinkVerb15999(line)
 		if !isShrink {
 			// PRE-CHARGE by tokens BEFORE building. At crossing use
-			// DELTA accounting (no clone, no build of the new line):
-			// net = tokCharge - units the target path ALREADY
-			// occupies (OccupiedUnits, O(subtree)); refuse iff
-			// exact + net > cap. Same-leaf replacements have
-			// occupied ~= their own units, net ~0, so repeated
-			// near-cap replacements neither refuse nor recount
-			// the whole tree per line (exact is cached/refreshed
-			// at the 256-line recount).
+			// DELTA accounting mirroring applyEditLine: net =
+			// tokCharge - matched-prefix units (segments already
+			// present cost 0); refuse iff cachedExact + net > cap.
+			// cachedExact is refreshed at the 256-line recount and
+			// at crossings ONLY when the margin is small
+			// (amortized: at most one recount per 64 crossings or
+			// when within the line's subtree estimate of cap).
 			tokCharge := len(strings.Fields(line)) + 1
 			if charged+tokCharge > config.MaxParseNodes {
-				exact := working.NodeCount()
-				occupied := 0
+				// Estimate margin with cached exact (charged is an
+				// upper bound between recounts; use it directly —
+				// if even the upper bound + net fits, no recount).
+				matched := 0
 				if _, path, _, _, _, perr := config.ParseSetVerbGroupedClosed(line); perr == nil {
-					occupied = working.OccupiedUnits(path)
+					matched, _ = working.LineOccupancy(path)
 				}
-				net := tokCharge - occupied
+				net := tokCharge - matched
 				if net < 0 {
 					net = 0
 				}
-				if exact+net > config.MaxParseNodes {
-					return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+				// Amortized recount: only pay O(tree) when the
+				// estimate is within tokCharge of the cap (margin
+				// could flip the verdict) and at most every 64
+				// crossings; otherwise trust cached charged.
+				est := charged + net
+				crossings++
+				if est > config.MaxParseNodes || crossings%64 == 0 {
+					if exact := working.NodeCount(); exact+net <= config.MaxParseNodes {
+						charged = exact + net
+					} else if est > config.MaxParseNodes {
+						return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+					} else {
+						charged = est
+					}
+				} else {
+					charged = est
 				}
-				charged = exact + net
 			} else {
 				charged += tokCharge
 			}
