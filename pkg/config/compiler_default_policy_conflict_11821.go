@@ -192,22 +192,30 @@ func hasConflictingDefaultPolicyStanzas11821(nodes []*Node) bool {
 // keeping unsupported tokens instead of discarding them.
 func defaultPolicyTokens15998(node *Node) []string {
 	var tokens []string
-	var collect func(*Node)
-	collect = func(n *Node) {
+	var collect func(n *Node, root bool)
+	collect = func(n *Node, root bool) {
 		if n == nil {
 			return
 		}
 		if len(n.Keys) > 0 {
-			if n.Name() != "default-policy" {
+			// Only the stanza ROOT's identity is exempt. A DESCENDANT
+			// node also named `default-policy` is an authored invalid
+			// token in its own right (#15998 fold 3): exempting every
+			// node with that name dropped
+			// `default-policy { permit-all { default-policy; } }`
+			// from the census and left permit-all standing tolerant.
+			if root {
+				// root name is the stanza keyword, not a value
+			} else {
 				tokens = append(tokens, n.Name())
 			}
 			tokens = append(tokens, n.Keys[1:]...)
 		}
 		for _, child := range n.Children {
-			collect(child)
+			collect(child, false)
 		}
 	}
-	collect(node)
+	collect(node, true)
 	return tokens
 }
 

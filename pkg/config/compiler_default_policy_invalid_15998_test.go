@@ -134,6 +134,49 @@ func TestEmptyDefaultPolicyTokenFailsClosed15998(t *testing.T) {
 	}
 }
 
+// #15998 fold 3: a NESTED child also named `default-policy` is an authored
+// invalid token — the census must exempt only the stanza root's identity.
+func TestNestedDefaultPolicyChildFailsClosed15998(t *testing.T) {
+	cases := []struct{ name, text string }{
+		{"nested default-policy child", "security { policies { default-policy { permit-all { default-policy; } } } }"},
+		{"nested default-policy with typo value", "security { policies { default-policy { permit-all { default-policy bogus; } } } }"},
+		{"deep nested default-policy", "security { policies { default-policy { permit-all { x { default-policy; } } } } }"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := CompileConfig(defaultPolicyTree11821(t, tc.text)); err == nil {
+				t.Fatal("strict compile accepted nested default-policy child")
+			} else if !strings.Contains(err.Error(), "#15998") {
+				t.Fatalf("strict error %q does not name #15998", err)
+			}
+			for _, compile := range []struct {
+				name string
+				fn   func(*ConfigTree) (*Config, error)
+			}{
+				{"lenient", CompileConfigLenient},
+				{"node lenient", func(tr *ConfigTree) (*Config, error) { return CompileConfigForNodeLenient(tr, 0) }},
+			} {
+				cfg, err := compile.fn(defaultPolicyTree11821(t, tc.text))
+				if err != nil {
+					t.Fatalf("%s compile: %v", compile.name, err)
+				}
+				if cfg.Security.DefaultPolicy != PolicyDeny {
+					t.Fatalf("%s: nested child compiled as %v, want deny-all", compile.name, cfg.Security.DefaultPolicy)
+				}
+				found := false
+				for _, w := range cfg.Warnings {
+					if strings.Contains(w, "#15998") && strings.Contains(w, "default-policy") {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("%s: missing #15998 warning naming default-policy: %v", compile.name, cfg.Warnings)
+				}
+			}
+		})
+	}
+}
+
 func TestSingleInvalidDefaultPolicyAloneIsDeny15998(t *testing.T) {
 	cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, "security { policies { default-policy { bogus; } } }"))
 	if err != nil {
