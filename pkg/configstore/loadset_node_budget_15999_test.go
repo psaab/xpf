@@ -104,10 +104,8 @@ func TestFlatReplayBelowBudgetParity15999(t *testing.T) {
 	if _, err := s.LoadSet(b.String()); err != nil {
 		t.Fatalf("below-budget (final-tree units) LoadSet refused: %v", err)
 	}
-	// Repeated identical sets create no nodes: 250k of them must not be
-	// refused for cumulative charge (they are still bounded by byte cap
-	// and the >budget line-count guard does not fire at exactly this
-	// count via dedupe — use LoadMerge on a smaller repeat count here).
+	// Repeated identical sets create no nodes and must not accumulate
+	// charge: 30,000 repeats via LoadSet below.
 	s2 := newTestStore(t)
 	if err := s2.EnterConfigure(); err != nil {
 		t.Fatal(err)
@@ -118,5 +116,21 @@ func TestFlatReplayBelowBudgetParity15999(t *testing.T) {
 	}
 	if _, err := s2.LoadSet(rb.String()); err != nil {
 		t.Fatalf("repeated-set LoadSet refused by cumulative charge: %v", err)
+	}
+}
+
+// #15999 fold: decisive parser-unit cell. A verbless SetFromInput with
+// exactly MaxParseNodes path tokens passes the len(path) precheck but
+// creates a leaf of 1+len(Keys) = MaxParseNodes+1 parser units, so the
+// post-check must refuse it. Under a nodes-only NodeCount (minus Keys)
+// this publishes — RED.
+func TestSetFromInputParserUnitBudget15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	input := "unknown" + strings.Repeat(" k", config.MaxParseNodes-1)
+	if err := s.SetFromInput(input); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("key-dense SetFromInput (200k tokens, 200001 units): err=%v, want #15999 refusal", err)
 	}
 }
