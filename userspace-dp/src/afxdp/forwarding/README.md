@@ -1259,6 +1259,19 @@ that same WAN address remains local. The probe is read-only; normal NAT owns
 the hit counter and translation. Raw outer ESP/AH are still shunted by XDP and
 remain outside the Stage-11 flow path.
 
+#16047: that probe scopes on the same logical ingress identity as the
+pre-routing DNAT lookup — the LOGICAL VLAN unit
+(`resolve_ingress_logical_ifindex`), the fabric-validated zone override, and
+the validated NAT-scope ifindex — never the raw physical
+`meta.ingress_ifindex`. An ambiguous stamp's claimed zone is withheld until
+the local-address owner-RG gate promotes it; only then may the claimed zone
+plus its withheld NAT-scope ifindex re-scope the probe. Without owner proof
+the probe fails closed (packet stays claimed-local under the fabric/logical
+zone's host-inbound gate) rather than granting the claimed zone's transit
+DNAT. Regression coverage:
+`stage_ipsec_transit_dnat_discriminator_uses_logical_vlan_16047` and
+`stage_ipsec_ambiguous_claim_does_not_grant_transit_dnat_16047`.
+
 Regression coverage includes
 `stage_ipsec_passthrough_rejects_remote_transit_dst_5620`,
 `stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620`,
