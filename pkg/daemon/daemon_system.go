@@ -816,6 +816,7 @@ func (d *Daemon) applyAggregator(er *logging.EventReader, cfg *config.Config) {
 // takeover fence runs. 3s is comfortably under a single write timeout and well
 // under both the #5643 applyCloseoutDrainTimeout (5s) and the fence's share of
 // the stop budget, so a stalled sink can never starve the fence.
+const aggregatorFlushJoinTimeout = 3 * time.Second
 
 // stopAggregator cancels the live session-aggregation generation and JOINS its
 // flush goroutine (and any still-flushing retired generation) at shutdown. The

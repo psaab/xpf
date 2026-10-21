@@ -31,7 +31,9 @@ xpf (0.0.0) unstable; urgency=medium
     timeout. Slog records now queue (depth 128, 64 KiB each), overflow
     drops and counts with a rate-limited warning, and a record emitted
     from inside a client's own writer loop is dropped and counted
-    rather than re-queued (#16083).
+    rather than re-queued. Daemon shutdown drains the queued backlog
+    within a bounded 2s budget before closing the clients, counting any
+    remainder (#16083).
 
 xpf (0.0.0) unstable; urgency=medium
 

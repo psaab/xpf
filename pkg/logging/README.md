@@ -289,6 +289,16 @@ client), overflow drops and counts, and a slog-side overflow warns at
 most once a second. A record emitted from inside a client's own writer
 loop (e.g. a drop warning) is dropped and counted, never re-queued.
 
+**Orderly shutdown drain (#16083 fold).** `Close` still retires a writer
+by discarding and counting its queue (the reconfigure path — a swap must
+not wait on the old collector). Process exit uses
+`SyslogSlogHandler.ShutdownTimeout`: each client's backlog is delivered
+behind a flush barrier within one shared total deadline (daemon: 2s at
+the very end of `runShutdownSequence`, after `shutdown complete`), then
+closed; whatever cannot be delivered is discarded and counted, so an
+accepted record is never silently lost at exit. `DroppedWrites` is the
+observable for the undelivered remainder.
+
 **Write deadlines still apply to the writer and direct callers (#9025).** They
 apply to UDP too — a connected-UDP `Write` can block indefinitely on a full
 socket send buffer (ENOBUFS / congested or down egress), as

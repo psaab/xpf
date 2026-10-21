@@ -19,6 +19,24 @@ import (
 // can never stall the whole stop past the drain budget.
 const applyCloseoutDrainTimeout = 5 * time.Second
 
+// slogShutdownDrainTimeout bounds the orderly drain of the async syslog
+// writer at daemon exit (#16083 fold): queued records get this total
+// budget to reach a healthy collector before the remaining backlog is
+// dropped and counted. Well inside the systemd 20s TimeoutStopSec share
+// left at the end of the shutdown sequence.
+const slogShutdownDrainTimeout = 2 * time.Second
+
+// shutdownSlogHandler drains the async system-syslog writer and closes
+// its clients (#16083 fold). Without it, process exit silently discarded
+// records Handle had already accepted — neither delivered nor counted.
+// Nil-safe (handler never installed on early-abort paths before PHASE 1).
+func (d *Daemon) shutdownSlogHandler() {
+	if d.slogHandler == nil {
+		return
+	}
+	d.slogHandler.ShutdownTimeout(slogShutdownDrainTimeout)
+}
+
 // controlShutdownBounder is implemented by a dataplane runtime that can bound
 // its own control-socket round trips once a stop has begun (#8526). The
 // userspace runtime does: it holds its manager mutex across a control round
@@ -478,6 +496,12 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	d.restoreStep0TunablesOnShutdown()
 
 	slog.Info("shutdown complete")
+	// #16083 fold: drain queued system-syslog records last. This must be
+	// after "shutdown complete" — that very record is queued by the line
+	// above — and after every subsystem teardown, since teardown logging
+	// feeds the same clients. Records that cannot be delivered within the
+	// bounded budget are dropped and counted, never silently lost.
+	d.shutdownSlogHandler()
 	return runErr
 }
 
