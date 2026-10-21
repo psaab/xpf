@@ -5598,11 +5598,13 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     let v2 = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 10,
+        neighbor_generation: 0,
     };
 
     let run_packet = |binding: &mut BindingWorker,

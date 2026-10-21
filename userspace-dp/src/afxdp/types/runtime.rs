@@ -497,6 +497,11 @@ pub(in crate::afxdp) struct ValidationState {
     pub(in crate::afxdp) snapshot_installed: bool,
     pub(in crate::afxdp) config_generation: u64,
     pub(in crate::afxdp) fib_generation: u32,
+    /// #16109: helper-local neighbor-set generation (see
+    /// `ForwardingGenerationStamp::neighbor_generation`). Published
+    /// with the validation pair so the poll loop stamps sessions
+    /// against the neighbor set in force; never reported to Go.
+    pub(in crate::afxdp) neighbor_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

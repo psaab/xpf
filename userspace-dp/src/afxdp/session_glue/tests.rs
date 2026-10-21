@@ -20746,6 +20746,7 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
         ForwardingGenerationStamp {
             config_generation: 1,
             fib_generation: 2,
+            neighbor_generation: 0,
             valid: true,
         },
         "and stamp it with the live generation"
