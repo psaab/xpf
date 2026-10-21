@@ -322,14 +322,30 @@ fn parse_filter_table(
 /// The per-unit keying alternative was rejected: the hot path keys every
 /// filter lookup by bare ifindex (inner unit identity is not carried
 /// per-packet for WG/output), so per-unit maps would be dead state.
-/// GRE INPUT conflicts remain owned by the #10816 commit advisory (decap
-/// attributes to the first-sorting row by design); this gate is the
-/// snapshot-boundary backstop for every family+direction, including the
-/// WG input/output and GRE output arms #10816 does not cover.
+///
+/// EXCLUSION — GRE input (#10816): GRE decap attributes a shared tunnel
+/// identity to the FIRST row in snapshot order BY DESIGN (pinned by
+/// `gre_decap_attributes_shared_identity_to_first_sibling_row_10816`).
+/// Inheriting GRE units are defined to share one decap identity, so
+/// their input filter being shadowed is a decided model with a
+/// commit-time advisory (`gre_unit_filter_shadow_10816.go`), NOT an
+/// ambiguity this gate may refuse — rejecting it would brick configs
+/// #10816 deliberately admits. The interface snapshot carries no tunnel
+/// MODE (only `tunnel: bool`), so GRE input rows are identified the way
+/// the Go advisory identifies its scope's subject: tunnel rows whose
+/// interface name is a GRE device (`gr-*`, the only name the Go GRE
+/// emitter produces; a renamed GRE device falls back to refusing, which
+/// is fail-closed). Every other arm — WG input/output, GRE output, and
+/// non-tunnel shared ifindexes — has no designed winner, so it refuses.
 fn assign_interface_filters(
     state: &mut FilterState,
     interfaces: &[crate::InterfaceSnapshot],
 ) -> Result<(), SnapshotIntegrityError> {
+    // #10816: GRE input on tunnel rows keeps first-sorting-wins; exempt
+    // it from the conflict gate (see fn doc). GRE devices are `gr-*`.
+    let is_gre_input = |iface: &crate::InterfaceSnapshot, direction: &str| {
+        direction == "input" && iface.tunnel && iface.name.starts_with("gr-")
+    };
     // (ifindex, family, direction) -> (first interface name, filter name)
     let mut first_by_hook: rustc_hash::FxHashMap<(i32, &'static str, &'static str), (&str, &str)> =
         rustc_hash::FxHashMap::default();
@@ -344,7 +360,10 @@ fn assign_interface_filters(
             ("inet6", "output", &iface.filter_output_v6),
         ];
         for (family, direction, filter_name) in hooks {
-            if filter_name.is_empty() || iface.is_unit == Some(false) {
+            if filter_name.is_empty()
+                || iface.is_unit == Some(false)
+                || is_gre_input(iface, direction)
+            {
                 continue;
             }
             let key = (iface.ifindex, family, direction);

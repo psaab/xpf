@@ -1010,12 +1010,15 @@ never evaluated a packet. `assign_interface_filters` now rejects the
 snapshot with `InterfaceFilterSharedIfindexConflict` when two
 non-base rows (`is_unit != Some(false)`) disagree on a configured hook;
 identical names and single-claimant shapes stay valid, and known base
-rows (which carry no Go filter fields) are excluded. The #6236
-aggregate-from-final-map rule below still governs the remaining
-last-wins cases (known-base duplicates). A Go commit advisory
-(`wg_unit_filter_shadow_16059.go`) warns for the WG shape at commit
-time; GRE input conflicts keep their #10816 first-sorting-wins model
-and commit advisory, with this gate as the snapshot-boundary backstop.
+rows (which carry no Go filter fields) are excluded. EXCEPTION: GRE
+input on `gr-*` tunnel rows is exempt — #10816 decided GRE decap
+attributes a shared identity to the first-sorting row by design (with
+its commit advisory), so rejecting it would brick admitted configs.
+WG input/output, GRE output, and non-tunnel shared ifindexes refuse.
+The #6236 aggregate-from-final-map rule below still governs the
+remaining last-wins cases (known-base duplicates). A Go commit
+advisory (`wg_unit_filter_shadow_16059.go`) warns for the WG shape at
+commit time.
 
 **Aggregate-from-final-map rule.** Every retained family-wide `FilterState`
 aggregate (`has_input_tx_selection_*`, `has_input_three_color_policer_*`, and
