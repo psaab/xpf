@@ -42,3 +42,48 @@ func TestLoadSetBelowBudgetAccepted15999(t *testing.T) {
 		t.Fatalf("small LoadSet: n=%d err=%v", n, err)
 	}
 }
+
+func TestFlatReplayNodeBudgetAllVerbs15999(t *testing.T) {
+	var ob strings.Builder
+	for i := range config.MaxParseNodes + 1000 {
+		fmt.Fprintf(&ob, "set security address-book global address a%d 10.0.0.1/32\n", i)
+	}
+	over := ob.String()
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LoadMerge(over); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("LoadMerge over budget: err=%v", err)
+	}
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.LoadOverride(over); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("LoadOverride over budget: err=%v", err)
+	}
+	// Key-dense single line: >budget tokens in ONE set line (parser units).
+	var kb strings.Builder
+	kb.WriteString("set unknown")
+	for range config.MaxParseNodes + 1000 {
+		kb.WriteString(" k")
+	}
+	kb.WriteString("\n")
+	s3 := newTestStore(t)
+	if err := s3.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s3.LoadSet(kb.String()); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("key-dense LoadSet: err=%v", err)
+	}
+	// Sub-budget sibling-heavy control: many distinct interfaces, still
+	// under budget, must succeed (incremental abort must not fire early).
+	s4 := newTestStore(t)
+	if err := s4.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s4.LoadSet("set system host-name fw1\nset interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24\n"); err != nil {
+		t.Fatalf("below-budget control: %v", err)
+	}
+}

@@ -620,21 +620,8 @@ func parseOverrideContent(content string) (*config.ConfigTree, error) {
 	// Flat: replay onto an EMPTY tree. Starting from the candidate would make
 	// this a merge, which is the other verb.
 	tree := &config.ConfigTree{}
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		// #3442 M3, same rule as the merge path: once flat format is
-		// selected, every non-comment line MUST carry a recognized verb.
-		// Otherwise ParseSetVerb treats free text as a bare `set` path and
-		// materializes a junk node — which is the #7527 defect one layer down.
-		if !hasFlatVerb(trimmed) {
-			return nil, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
-		}
-		if err := applyEditLine(tree, trimmed); err != nil {
-			return nil, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-		}
+	if _, err := replayFlatLines15999(tree, lines); err != nil {
+		return nil, err
 	}
 	return tree, nil
 }
@@ -695,17 +682,8 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 		// instead — the bare-path default in ParseSetVerb is reserved for
 		// internal callers that prepend the verb themselves (SetEdit, Deactivate,
 		// Activate, ...).
-		for i, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			if !hasFlatVerb(trimmed) {
-				return fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
-			}
-			if err := applyEditLine(working, trimmed); err != nil {
-				return fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-			}
+		if _, err := replayFlatLines15999(working, lines); err != nil {
+			return err
 		}
 	} else {
 		// #15718: parse the RAW body so /* ... */ comments attach as
@@ -733,14 +711,8 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 		// the deactivate verb (#2008 H1) to preserve Inactive — applying it as
 		// a plain set would silently re-activate the node.
 		setLines := strings.Split(tree.FormatSetForLoadMerge(), "\n")
-		for _, line := range setLines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			if err := applyEditLine(working, trimmed); err != nil {
-				return fmt.Errorf("merge: %w", err)
-			}
+		if _, err := replayFlatLines15999(working, setLines); err != nil {
+			return fmt.Errorf("merge: %w", scrubLoadLineError(err))
 		}
 	}
 
@@ -807,6 +779,51 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 	default: // "set" (or a bare, unprefixed path)
 		return tree.SetPathQuotedGrouped(path, quoted, grouped, closed)
 	}
+}
+
+// replayFlatLines15999 applies flat lines to working with the shared node
+// budget enforced AS YOU BUILD (#15999 fold): each line is charged its
+// token-count upper bound BEFORE its sibling-search cost is paid, plus an
+// exact recount every 256 lines and at the end, so replay aborts as soon
+// as the charged total crosses MaxParseNodes instead of after an
+// over-budget tree is fully built under s.mu.
+func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, error) {
+	base := working.NodeCount()
+	if base > config.MaxParseNodes {
+		return 0, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+	}
+	charged := base
+	count := 0
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !hasFlatVerb(line) {
+			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
+		}
+		charged += len(strings.Fields(line)) + 1
+		if charged > config.MaxParseNodes {
+			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+		}
+		if err := applyEditLine(working, line); err != nil {
+			return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
+		}
+		count++
+		if count%256 == 0 {
+			exact := working.NodeCount()
+			if exact > config.MaxParseNodes {
+				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+			}
+			if exact > charged {
+				charged = exact
+			}
+		}
+	}
+	if working.NodeCount() > config.MaxParseNodes {
+		return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+	}
+	return count, nil
 }
 
 // loadLineError is the scrubbed form of a flat-load line failure (#14718).
@@ -882,14 +899,11 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 		return 0, fmt.Errorf("parse error: %w", err)
 	}
 	working := s.candidate.Clone()
-	// #15999: shared node budget mirroring the hierarchical parser's
-	// maxParseNodes. The byte cap alone admits several times that many
-	// nodes via short set lines, replayed super-linearly under s.mu.
-	// Refuse BEFORE the replay when the line count alone exceeds the
-	// budget (every distinct set line creates >=1 node, so this is a
-	// sound lower bound and skips the expensive replay entirely);
-	// otherwise enforce the exact node count incrementally.
-	baseNodes := working.NodeCount()
+	// #15999: shared node budget in parser units (1+len(Keys) per node).
+	// The byte cap alone admits several times that many units via short
+	// set lines, replayed super-linearly under s.mu. A >budget line count
+	// is refused before replay as a command-count guard;
+	// replayFlatLines15999 then enforces the exact budget as it builds.
 	lines := strings.Split(flatContent, "\n")
 	nonEmpty := 0
 	for _, line := range lines {
@@ -898,28 +912,12 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 			nonEmpty++
 		}
 	}
-	if baseNodes > config.MaxParseNodes || nonEmpty > config.MaxParseNodes {
-		return 0, fmt.Errorf("config too large: flat load of %d lines onto %d nodes exceeds node budget %d (#15999)", nonEmpty, baseNodes, config.MaxParseNodes)
+	if nonEmpty > config.MaxParseNodes {
+		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds node budget %d (#15999)", nonEmpty, config.MaxParseNodes)
 	}
-	count := 0
-	for i, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if !hasFlatVerb(line) {
-			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
-		}
-		if err := applyEditLine(working, line); err != nil {
-			return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-		}
-		count++
-		if count%1024 == 0 && working.NodeCount() > config.MaxParseNodes {
-			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
-		}
-	}
-	if working.NodeCount() > config.MaxParseNodes {
-		return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+	count, err := replayFlatLines15999(working, lines)
+	if err != nil {
+		return count, err
 	}
 	config.StampChangedEventPlantClasses(s.candidate, working, plantClass)
 	s.candidate = working

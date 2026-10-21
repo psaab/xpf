@@ -91,12 +91,26 @@ const maxParseNodes = 200_000
 // the store lock.
 const MaxParseNodes = maxParseNodes
 
-// NodeCount returns the number of AST nodes in the tree (nil-safe).
+// NodeCount returns the tree size in the parser's budget units (nil-safe):
+// 1 + len(Keys) per node (#15195), the same unit maxParseNodes charges.
+// Counting nodes alone would let one key-dense flat line (e.g.
+// `set unknown <200k tokens>`) sail past the shared budget as "1 node".
 func (t *ConfigTree) NodeCount() int {
 	if t == nil {
 		return 0
 	}
-	return countNodes(t.Children)
+	return countNodeUnits(t.Children)
+}
+
+func countNodeUnits(nodes []*Node) int {
+	n := 0
+	for _, x := range nodes {
+		if x == nil {
+			continue
+		}
+		n += 1 + len(x.Keys) + countNodeUnits(x.Children)
+	}
+	return n
 }
 
 // Parser implements a recursive descent parser for Junos configuration syntax.
