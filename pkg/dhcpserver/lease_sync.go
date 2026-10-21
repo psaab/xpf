@@ -1421,7 +1421,7 @@ func (m *Manager) writeMemfileAtomic(path, content string) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	uid, gid, ok := m.resolveKeaOwner()
+	uid, gid, ok := m.resolveKeaOwner(true)
 	return writeMemfileFile(path, []byte(content), 0640, uid, gid, ok)
 }
 
@@ -1494,18 +1494,26 @@ const (
 // lookup runs exactly once per process (cached behind keaOwnerOnce, a
 // sync.Once) so the takeover path does not hit /etc/passwd per pre-seed. The
 // resolver is seam-injectable for tests (keaOwnerLookup; nil selects the real
-// os/user lookup). When the lookup FAILS, the absent-user warning is emitted
-// HERE — inside the once-guarded closure — so it fires exactly once per
-// process rather than on every pre-seed (an operator who installs the Kea
-// package mid-process restarts xpfd anyway, which re-runs the lookup).
-func (m *Manager) resolveKeaOwner() (uid, gid int, ok bool) {
+// os/user lookup). When the lookup FAILS and warnMissing is set, the
+// absent-user warning is emitted HERE — inside the once-guarded closure
+// — so it fires exactly once per process rather than on every pre-seed
+// (an operator who installs the Kea package mid-process restarts xpfd
+// anyway, which re-runs the lookup). Only the memfile pre-seed passes
+// warnMissing: a root-owned 0640 memfile is Kea-UNREADABLE (EACCES at
+// failover), so the absence is operator-actionable there. The config
+// render (#16062) omits it — an unresolved group only means the config
+// lands plain 0640 root:root instead of root:_kea, which must not
+// pollute the warn sink other tests assert on (and a render-only
+// manager must not consume the shared resolution's one warning the
+// pre-seed relies on).
+func (m *Manager) resolveKeaOwner(warnMissing ...bool) (uid, gid int, ok bool) {
 	m.keaOwnerOnce.Do(func() {
 		lookup := m.keaOwnerLookup
 		if lookup == nil {
 			lookup = lookupKeaOwner
 		}
 		m.keaOwnerUID, m.keaOwnerGID, m.keaOwnerOK = lookup()
-		if !m.keaOwnerOK {
+		if !m.keaOwnerOK && len(warnMissing) > 0 && warnMissing[0] {
 			m.warnf("dhcpserver: no %s/%s runtime user found; pre-seeding Kea "+
 				"memfiles as root — Kea may be unable to open them (EACCES) if it "+
 				"runs unprivileged", keaPrimaryUser, keaFallbackUser)
