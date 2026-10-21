@@ -444,6 +444,349 @@ now_secs: u64,) -> bool {
     true
 }
 
+/// #15958b round-5 r6: is `ifindex`'s routing instance the scope
+/// `table` names? The interface's RI is read from its egress row's
+/// routing instance via the ifindex->RI ledger the FIB builder
+/// maintains (`ifindex_to_routing_instance` / egress table name);
+/// default scope (None) admits only default-instance interfaces.
+/// Unknown ifindex: not in scope (never claim cross-RI ownership
+/// from an unattributed interface).
+pub(in crate::afxdp) fn interface_in_table_scope(
+    forwarding: &ForwardingState,
+    ifindex: i32,
+    table: Option<&str>,
+) -> bool {
+    let instance = forwarding
+        .ifindex_to_routing_instance
+        .get(&ifindex)
+        .map(String::as_str)
+        .unwrap_or("");
+    let Some(want) = table else {
+        return instance.is_empty();
+    };
+    // Exact match (fib.rs `instance_owns_table_*` precedent): the
+    // instance owns exactly `<instance>.inet.0` / `<instance>.inet6.0`
+    // (length + suffix), so "tenant-a" never matches "tenant-ab...".
+    if instance.is_empty() {
+        return want == "inet.0" || want == "inet6.0";
+    }
+    (want.len() == instance.len() + ".inet.0".len()
+        && want.starts_with(instance)
+        && &want[instance.len()..] == ".inet.0")
+        || (want.len() == instance.len() + ".inet6.0".len()
+            && want.starts_with(instance)
+            && &want[instance.len()..] == ".inet6.0")
+}
+
+/// #15958b: the RG that owns `target` as a connected destination:
+/// the redundancy group of the interface whose connected prefix
+/// contains the address (per-address ownership, not per-zone —
+/// a co-zoned interface owned by a different RG must not decide).
+/// `connected_*_by_ifindex` is populated for every interface
+/// regardless of HA suppression, so a peer-owned connected prefix
+/// still names its owner here. 0 when no connected prefix matches.
+pub(in crate::afxdp) fn connected_owner_rg_for_target(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+) -> i32 {
+    connected_owner_rg_for_target_in_table(forwarding, target, None)
+}
+
+/// RI-scoped owner (round-5): only connected rows in `table` (the
+/// session's installing table; None = default instance) may claim
+/// ownership. A cross-RI interface with the same prefix must not
+/// decide this session's destination owner.
+pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+    table: Option<&str>,
+) -> i32 {
+    // Source 1: connected_* rows (the FIB's own connected route
+    // structs: prefix + ifindex) — longest prefix wins.
+    let mut best: Option<(u8, i32)> = None;
+    match target {
+        IpAddr::V4(ip) => {
+            for row in &forwarding.connected_v4 {
+                let want_table = table.unwrap_or("inet.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, owner_rg_for_flow(forwarding, row.ifindex)));
+                    }
+                }
+            }
+            if best.is_none() {
+                // Ledger WITH RI filter (round-5 r6): peer-owned
+                // named-RI prefixes exist ONLY here (the FIB row is
+                // suppressed), so scoped lookups must consult it —
+                // filtered to interfaces whose routing instance is
+                // the session's table (default scope: default RIs).
+                for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, owner_rg_for_flow(forwarding, *ifindex)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        IpAddr::V6(ip) => {
+            for row in &forwarding.connected_v6 {
+                let want_table = table.unwrap_or("inet6.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, owner_rg_for_flow(forwarding, row.ifindex)));
+                    }
+                }
+            }
+            if best.is_none() {
+                // Ledger WITH RI filter (round-5 r6): peer-owned
+                // named-RI prefixes exist ONLY here (the FIB row is
+                // suppressed), so scoped lookups must consult it —
+                // filtered to interfaces whose routing instance is
+                // the session's table (default scope: default RIs).
+                for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, owner_rg_for_flow(forwarding, *ifindex)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, rg)) = best {
+        return rg;
+    }
+    // Source 2: the interface-NAT local table (an interface address
+    // IS its own connected /32) and the local-address sets: the
+    // target is this node's own interface address; its owner is that
+    // interface's RG.
+    match target {
+        IpAddr::V4(ip) => {
+            if let Some(by_table) = forwarding.interface_nat_v4.get(&ip) {
+                // Scoped by the session table: the map is keyed by
+                // table name; only the session's table entry (or the
+                // canonical default) may claim the address.
+                let want = table.unwrap_or("inet.0");
+                for (table_name, ifindex) in by_table.iter() {
+                    if table_name != want {
+                        continue;
+                    }
+                    let rg = owner_rg_for_flow(forwarding, *ifindex);
+                    if rg > 0 {
+                        return rg;
+                    }
+                }
+            }
+            if forwarding.local_v4.contains(&ip) {
+                // Owning interface unknown from the set alone; fall
+                // through to unknown (0) rather than guessing an RG.
+                return 0;
+            }
+        }
+        IpAddr::V6(ip) => {
+            if let Some(by_table) = forwarding.interface_nat_v6.get(&ip) {
+                // Scoped by the session table: the map is keyed by
+                // table name; only the session's table entry (or the
+                // canonical default) may claim the address.
+                let want = table.unwrap_or("inet6.0");
+                for (table_name, ifindex) in by_table.iter() {
+                    if table_name != want {
+                        continue;
+                    }
+                    let rg = owner_rg_for_flow(forwarding, *ifindex);
+                    if rg > 0 {
+                        return rg;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+/// #15958b round-3: re-home-or-retain decision for a stored
+/// FabricRedirect companion, applied per packet (hit) and per HA
+/// transition (refresh/demote), AFTER the HAInactive composition.
+///
+/// Order (item 1): if the destination address's RG is locally
+/// forwarding-active NOW, the candidate wins — the companion
+/// re-homes to local forwarding and the retained marker must not
+/// defeat failback. This check runs before retention, per packet.
+///
+/// Otherwise (item 2): the redirect is re-resolved against the
+/// CURRENT fabric list, so a replaced peer (new parent/MAC) is the
+/// target — never the stored stale parent binding. If no redirect
+/// is resolvable (peer identity unresolved/down), return a
+/// FabricRedirect marker with zeroed egress/tx: the dispatcher
+/// finds no sendable fabric binding and counts
+/// `fabric_redirect_unsendable_drops` (fail closed) instead of
+/// transmitting to a stale parent or laundering to WAN egress.
+/// #15958b round-4: the egress ifindex of the connected interface
+/// serving `target` (the destination's own LAN interface), by
+/// longest connected prefix across the FIB connected rows and the
+/// by-ifindex ledger. 0 when no connected prefix serves it.
+pub(in crate::afxdp) fn connected_ifindex_for_target(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+) -> i32 {
+    connected_ifindex_for_target_in_table(forwarding, target, None)
+}
+
+/// RI-scoped connected ifindex (round-5); see
+/// `connected_owner_rg_for_target_in_table`.
+pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+    table: Option<&str>,
+) -> i32 {
+    let mut best: Option<(u8, i32)> = None;
+    match target {
+        IpAddr::V4(ip) => {
+            for row in &forwarding.connected_v4 {
+                let want_table = table.unwrap_or("inet.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, row.ifindex));
+                    }
+                }
+            }
+            if best.is_none() {
+                for (ifindex, prefixes) in &forwarding.connected_v4_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, *ifindex));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        IpAddr::V6(ip) => {
+            for row in &forwarding.connected_v6 {
+                let want_table = table.unwrap_or("inet6.0");
+                if row.table != want_table && !row.table.is_empty() {
+                    continue;
+                }
+                if row.prefix.contains(ip) {
+                    let len = row.prefix.prefix_len();
+                    if best.is_none_or(|(best_len, _)| len >= best_len) {
+                        best = Some((len, row.ifindex));
+                    }
+                }
+            }
+            if best.is_none() {
+                for (ifindex, prefixes) in &forwarding.connected_v6_by_ifindex {
+                    if !interface_in_table_scope(forwarding, *ifindex, table) {
+                        continue;
+                    }
+                    for prefix in prefixes {
+                        if prefix.contains(ip) {
+                            let len = prefix.prefix_len();
+                            if best.is_none_or(|(best_len, _)| len >= best_len) {
+                                best = Some((len, *ifindex));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, ifindex)| ifindex).unwrap_or(0)
+}
+
+/// RI-scoped re-home (round-5): the connected-interface test runs
+/// in the session's installing table.
+pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
+    forwarding: &ForwardingState,
+    stored: ForwardingResolution,
+    candidate: ForwardingResolution,
+    destination_zone: u16,
+    destination_owner_active: bool,
+    target: Option<IpAddr>,
+    table: Option<&str>,
+) -> ForwardingResolution {
+    if candidate.disposition == ForwardingDisposition::FabricRedirect {
+        return candidate;
+    }
+    if destination_owner_active {
+        if let Some(target) = target {
+            let connected_ifindex = connected_ifindex_for_target_in_table(forwarding, target, table);
+            let egress_is_fabric = candidate.egress_ifindex > 0
+                && super::forwarding::ingress_is_fabric(forwarding, candidate.egress_ifindex);
+            if candidate.disposition == ForwardingDisposition::ForwardCandidate
+                && connected_ifindex > 0
+                && candidate.egress_ifindex == connected_ifindex
+                && !egress_is_fabric
+            {
+                return candidate;
+            }
+            // Owner active but the fresh route does not reach the
+            // connected destination (transient FIB lag): retain the
+            // redirect below rather than laundering to WAN.
+        } else {
+            return candidate;
+        }
+    }
+    if candidate.disposition != ForwardingDisposition::ForwardCandidate {
+        return candidate;
+    }
+    let destination_zone_known = forwarding.egress.iter().any(|(ifindex, _)| {
+        forwarding.egress_zone_id(*ifindex) == destination_zone
+    }) || forwarding
+        .connected_v4_by_ifindex
+        .keys()
+        .chain(forwarding.connected_v6_by_ifindex.keys())
+        .any(|ifindex| forwarding.egress_zone_id(*ifindex) == destination_zone);
+    if !destination_zone_known {
+        return candidate;
+    }
+    match super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
+        forwarding,
+        destination_zone,
+    ) {
+        Some(current_redirect) => current_redirect,
+        None => ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            neighbor_mac: None,
+            src_mac: None,
+            next_hop: None,
+            ..stored
+        },
+    }
+}
+
 pub(in crate::afxdp) fn redirect_session_resolution_for_metadata(forwarding: &ForwardingState,
 resolution: ForwardingResolution,
 metadata: &SessionMetadata,) -> ForwardingResolution {

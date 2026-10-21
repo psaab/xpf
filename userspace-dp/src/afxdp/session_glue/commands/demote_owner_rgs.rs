@@ -92,13 +92,40 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
             );
             let enforced_resolution =
                 enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up_resolution);
-            let refreshed_decision = SessionDecision {
-                resolution: redirect_session_via_fabric_if_needed(
+            // #15958b (fold): same shared zone-egress rule as refresh.
+            let resolution = if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+                let dest_rg = super::super::connected_owner_rg_for_target_in_table(forwarding, resolution_target, install_table_name_for_session(forwarding, decision, resolution_target));
+                // Unknown owner (dest_rg==0) is NOT peer-ownership: keep the candidate (no redirect).
+            let destination_owner_active = dest_rg == 0 || (dest_rg > 0
+                    && ha_state
+                        .get(&dest_rg)
+                        .is_some_and(|group| group.is_forwarding_active(now_secs)));
+                let enforced_resolution = redirect_session_via_fabric_if_needed(
                     forwarding,
                     enforced_resolution,
                     metadata.fabric_ingress,
                     metadata.ingress_zone,
-                ),
+                );
+                let resolution2 = super::super::rehome_or_retain_fabric_redirect_scoped_15958b(
+                forwarding,
+                decision.resolution,
+                enforced_resolution,
+                metadata.egress_zone,
+                destination_owner_active,
+                Some(resolution_target),
+                install_table_name_for_session(forwarding, decision, resolution_target),
+            );
+            resolution2
+            } else {
+                redirect_session_via_fabric_if_needed(
+                    forwarding,
+                    enforced_resolution,
+                    metadata.fabric_ingress,
+                    metadata.ingress_zone,
+                )
+            };
+            let refreshed_decision = SessionDecision {
+                resolution,
                 ..decision
             };
             observed_terminal |= refreshed_decision.resolution.disposition

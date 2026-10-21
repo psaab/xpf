@@ -5292,7 +5292,7 @@ fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u
             tcp_handshake_state: 0,
             pptp_call_ids: 0,
         };
-        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+                let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
         .expect("production reverse synthesis must produce a companion");
@@ -5312,7 +5312,7 @@ fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u
             "synthesized companion must forward toward the LAN host, got {:?}",
             reverse.decision.resolution
         );
-        assert!(sessions.install_with_protocol_with_origin(
+                assert!(sessions.install_with_protocol_with_origin(
             reverse.key.clone(),
             reverse.decision,
             reverse.metadata.clone(),
@@ -5380,7 +5380,7 @@ fn split_rg_fabric_return_icmp_egresses_lan_15958() {
         &frame,
         meta,
     );
-    assert_eq!(dbg.policy_deny, 0, "ICMP return must not be policy-denied");
+        assert_eq!(dbg.policy_deny, 0, "ICMP return must not be policy-denied");
     let _ = &batch;
     let egress = egress.expect("ICMP echo-reply must be emitted on the LAN binding");
     assert_eq!(
@@ -5491,5 +5491,987 @@ fn split_rg_fabric_return_scoped_tcp_egresses_lan_15958() {
         &egress[30..34],
         &[10, 0, 61, 102],
         "scoped LAN egress dst IP must be the LAN host"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #15958b PIVOT (HuntFreshGLM round 6): the return dies on the PUNT
+// ORIGIN (fw0), not fw1. fw0 holds both halves: the forward LAN->WAN
+// flow arrived as a fabric punt (live shape per split-live-row.md:
+// fabric_ingress=true, ingress_ifindex 0, provenance Some(false),
+// scope None, forward resolution FabricRedirect-shaped on the peer)
+// and its reverse companion, whose resolution must be FabricRedirect
+// toward the LAN owner (fw1, RG2 active there, INACTIVE on fw0).
+// Drive the WAN-side reverse hit (plain WAN ingress, no fabric
+// stamp) through poll -> FabricRedirect decision -> enqueue ->
+// fabric TX submit and assert a frame is emitted on the fabric
+// binding (ifindex 4).
+// ---------------------------------------------------------------------------
+
+fn fw0_forwarding_15958b() -> ForwardingState {
+    let raw = include_str!("testdata_15742h/snap-split-fw0.json");
+    let v: serde_json::Value = serde_json::from_str(raw).expect("json");
+    let snapshot: crate::ConfigSnapshot =
+        serde_json::from_value(v["snapshot"].clone()).expect("decode fw0 snapshot");
+    build_forwarding_state(&snapshot)
+}
+
+fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+    let lan_host = Ipv4Addr::new(10, 0, 61, 102);
+    let wan_host = Ipv4Addr::new(172, 16, 80, 200);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let now_secs = now_ns / 1_000_000_000;
+    // fw0 split state: RG1 (WAN) active locally, RG2 (LAN) peer-owned.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    // Forward resolution as admitted on fw0: LAN host -> WAN via reth0.80
+    // (egress 14 / tx binding 6), SNAT to 172.16.80.8. The forward flow
+    // itself is punted to fw0 from fw1 in live, but on fw0 the stored
+    // forward decision is the local WAN egress (fabric_ingress=false:
+    // fw0 created/admitted it when the punt transited).
+    let forward_resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(wan_host)),
+        neighbor_mac: Some([0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]),
+        tx_vlan_id: 80,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let dyn_neigh = Arc::new(ShardedNeighborMap::default());
+    let mut sessions = SessionTable::new();
+    for (protocol, src_port, dst_port, tcp_flags) in [
+        (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
+        (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
+    ] {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol,
+                src_ip: IpAddr::V4(lan_host),
+                dst_ip: IpAddr::V4(wan_host),
+                src_port,
+                dst_port,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+            decision: SessionDecision {
+                resolution: forward_resolution,
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(snat_ip)),
+                    rewrite_src_port: None,
+                    source_nat_icmp: (protocol == PROTO_ICMP).then_some((8, 0)),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: SessionMetadata {
+                ingress_zone: 21230,
+                egress_zone: 13098,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 5,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: Some(0),
+                owner_rg_id: 1,
+                fabric_ingress: true,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            source_nat_static: Some(false),
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol,
+            tcp_flags,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+        };
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
+        )
+        .expect("production reverse synthesis must produce a companion");
+        assert_eq!(reverse.decision.resolution.disposition, ForwardingDisposition::FabricRedirect, "fw0 reverse companion must redirect to LAN owner, got {:?}", reverse.decision.resolution);
+        assert!(sessions.install_with_protocol_with_origin(
+            entry.key.clone(), entry.decision, entry.metadata.clone(),
+            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
+        ), "fw0 forward install must succeed");
+        sessions.set_source_nat_static(&entry.key, Some(false));
+        assert!(sessions.install_with_protocol_with_origin(
+            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
+            reverse.origin, now_ns, protocol, tcp_flags,
+        ), "fw0 reverse companion install must succeed");
+        sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
+    }
+    sessions
+}
+
+fn wan_lan_bindings_fw0_15958b() -> Vec<BindingWorker> {
+    // ingress = WAN binding (ifindex 6, reth0 parent ge-0-0-2),
+    // fabric = ifindex 4 (ge-0-0-0), LAN = ifindex 5 (ge-0-0-1).
+    let mut wan = BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+    wan.interface = Arc::<str>::from("ge-0-0-2");
+    let mut fabric = BindingWorker::new_for_mirror_test(1, 0, 4, 0);
+    fabric.interface = Arc::<str>::from("ge-0-0-0");
+    let mut lan = BindingWorker::new_for_mirror_test(2, 0, 5, 0);
+    lan.interface = Arc::<str>::from("ge-0-0-1");
+    vec![wan, fabric, lan]
+}
+
+#[test]
+fn split_rg_punt_origin_wan_reverse_icmp_fabric_tx_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    // WAN-side ICMP echo-reply: 172.16.80.200 -> SNAT 172.16.80.8, plain
+    // WAN ingress (dst MAC = WAN interface MAC, no fabric stamp).
+    let mut frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        64,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+    );
+    frame[34] = 0;
+    frame[36..38].copy_from_slice(&[0, 0]);
+    let csum = checksum16(&frame[34..42]);
+    frame[36..38].copy_from_slice(&csum.to_be_bytes());
+    let mut meta = txn_meta_v4(14, 0, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 0x1234;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    let (batch, dbg, egress) = txn_run_multi_binding_15958(
+        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+    );
+    for (i, b) in bindings.iter().enumerate() {
+    }
+    if let Some(e) = &egress {
+    } else {
+    }
+    assert_eq!(batch.forward_candidate_packets, 1);
+    assert_eq!(batch.session_hits, 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1, "fabric TX");
+    assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX return");
+    assert_eq!(bindings[1].live.fabric_redirect_unsendable_drops.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let egress = egress.expect("fw0 WAN reverse hit must emit a fabric TX frame toward fw1");
+    assert_eq!(&egress[0..6], &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60], "peer fabric MAC");
+    // Fabric frame: dst = peer fabric MAC, src carries zone stamp or fabric MAC.
+    assert_eq!(&egress[30..34], &[10, 0, 61, 102], "fabric frame must carry LAN host dst IP after DNAT reversal");
+}
+
+#[test]
+fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443, 12345, TCP_FLAG_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+    );
+    let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_TCP;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    for pkt in 0..2 {
+        let (batch, dbg, egress) = txn_run_multi_binding_15958(
+            &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+        );
+        for (i, b) in bindings.iter().enumerate() {
+        }
+        if let Some(e) = &egress {
+        }
+        assert!(egress.is_some(), "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX");
+        assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX TCP return");
+    }
+}
+
+/// Fold cell (GLM B1): an HA RefreshOwnerRGS pass must not launder
+/// the stored FabricRedirect companion back onto the WAN gateway
+/// route. Synthesize the fw0 pair, run the production refresh
+/// collector, and assert the companion still redirects (egress 4),
+/// for IPv4 and IPv6.
+#[test]
+fn split_rg_refresh_keeps_fabric_redirect_15958b() {
+    for v6 in [false, true] {
+        let forwarding = fw0_forwarding_15958b();
+        let now_ns = monotonic_nanos();
+        let now_secs = now_ns / 1_000_000_000;
+        let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+        let mut sessions = if v6 {
+            fw0_both_halves_sessions_v6_15958b(&forwarding, now_ns)
+        } else {
+            fw0_both_halves_sessions_15958b(&forwarding, now_ns)
+        };
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+            &sessions,
+            &forwarding,
+            &ha_state,
+            &Arc::new(ShardedNeighborMap::default()),
+            now_secs,
+        );
+        let reverse_items: Vec<_> = items
+            .iter()
+            .filter(|(_, _, metadata, _, _)| metadata.is_reverse)
+            .collect();
+        assert!(!reverse_items.is_empty(), "v6={v6}: refresh must visit the reverse companion");
+        for (_, decision, metadata, _, _) in &reverse_items {
+            assert_eq!(
+                decision.resolution.disposition,
+                ForwardingDisposition::FabricRedirect,
+                "v6={v6}: refresh must keep FabricRedirect, got {:?} (metadata egress_zone={})",
+                decision.resolution, metadata.egress_zone
+            );
+            assert_eq!(decision.resolution.egress_ifindex, 4, "v6={v6}: redirect egress must be the fabric parent");
+        }
+    }
+}
+
+fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+    let lan_host: Ipv6Addr = "2001:559:8585:ef00:1266:6aff:fe0b:d017".parse().expect("lan v6");
+    let wan_host: Ipv6Addr = "2001:559:8585:80::200".parse().expect("wan v6");
+    let snat_ip: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6");
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let forward_resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(wan_host)),
+        neighbor_mac: Some([0xf6, 0xf0, 0x06, 0x10, 0x77, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]),
+        tx_vlan_id: 80,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let dyn_neigh = Arc::new(ShardedNeighborMap::default());
+    let mut sessions = SessionTable::new();
+    for (protocol, src_port, dst_port, tcp_flags) in [
+        (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
+        (PROTO_ICMPV6, 0x1234u16, 0u16, 0u8),
+    ] {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol,
+                src_ip: IpAddr::V6(lan_host),
+                dst_ip: IpAddr::V6(wan_host),
+                src_port,
+                dst_port,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+            decision: SessionDecision {
+                resolution: forward_resolution,
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V6(snat_ip)),
+                    rewrite_src_port: None,
+                    source_nat_icmp: (protocol == PROTO_ICMPV6).then_some((128, 0)),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: SessionMetadata {
+                ingress_zone: 21230,
+                egress_zone: 13098,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 1,
+                fabric_ingress: true,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            source_nat_static: Some(false),
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol,
+            tcp_flags,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+        };
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
+        )
+        .expect("v6 reverse synthesis must produce a companion");
+        assert_eq!(
+            reverse.decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "v6 companion must redirect to LAN owner, got {:?}",
+            reverse.decision.resolution
+        );
+        assert!(sessions.install_with_protocol_with_origin(
+            entry.key.clone(), entry.decision, entry.metadata.clone(),
+            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
+        ));
+        sessions.set_source_nat_static(&entry.key, Some(false));
+        assert!(sessions.install_with_protocol_with_origin(
+            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
+            reverse.origin, now_ns, protocol, tcp_flags,
+        ));
+        sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
+    }
+    sessions
+}
+
+/// M5: IPv6 WAN-side reverse hit must also emit on the fabric binding.
+#[test]
+fn split_rg_punt_origin_wan_reverse_icmpv6_fabric_tx_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_v6_15958b(&forwarding, now_ns);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("src");
+    let dst: Ipv6Addr = "2001:559:8585:80::8".parse().expect("dst");
+    let mut frame = build_icmp_echo_frame_v6(src, dst, 64, [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]);
+    // echo-reply type 129
+    let icmp_start = 14 + 40;
+    frame[icmp_start] = 129;
+    frame[icmp_start + 2] = 0;
+    frame[icmp_start + 3] = 0;
+    let csum = checksum16_ipv6(src, dst, PROTO_ICMPV6, &frame[icmp_start..]);
+    frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&csum.to_be_bytes());
+    let mut meta = txn_meta_v6(14, frame.len());
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_ICMPV6;
+    meta.payload_offset = 62;
+    meta.flow_src_addr = src.octets();
+    meta.flow_dst_addr = dst.octets();
+    meta.flow_src_port = 0x1234;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    let (batch, dbg, egress) = txn_run_multi_binding_15958(
+        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+    );
+    assert_eq!(batch.session_hits, 1, "v6 return must session-hit");
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1, "v6 fabric TX");
+    assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "v6 WAN must not TX");
+    let egress = egress.expect("v6 WAN reverse hit must emit fabric TX");
+    assert_eq!(&egress[0..6], &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60], "v6 peer fabric MAC");
+}
+
+/// Round-2 item 1: the destination-owner test is per-ADDRESS. A
+/// co-zoned interface owned by a different, locally-active RG must
+/// not suppress the redirect for an address owned by the peer RG:
+/// reth1.0 (RG2, peer) serves 10.0.61.0/24 while a synthetic co-zoned
+/// (lan) interface on RG1 (active) serves another prefix. The LAN
+/// host's owner is RG2 (inactive) so synthesis must still redirect;
+/// mutating the owner test back to any-active-in-zone turns this RED.
+#[test]
+fn split_rg_dst_owner_is_per_address_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    // Direct helper pin: LAN host -> RG2 (owner of reth1/10.0.61.0/24).
+    let rg = crate::afxdp::session_glue::connected_owner_rg_for_target(
+        &forwarding,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+    );
+    assert_eq!(rg, 2, "LAN host connected owner must be RG2, got {rg}");
+    // WAN gateway address -> RG1 (reth0.80 connected 172.16.80.0/24).
+    let rg_wan = crate::afxdp::session_glue::connected_owner_rg_for_target(
+        &forwarding,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+    );
+    assert_eq!(rg_wan, 1, "WAN host connected owner must be RG1, got {rg_wan}");
+}
+
+/// Round-2 item 2: with no resolvable fabric (empty fabric list), a
+/// stored FabricRedirect must be RETAINED by refresh (fail closed at
+/// TX on fabric_redirect_unsendable_drops), not converted to the WAN
+/// candidate and the marker lost.
+#[test]
+fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
+    let mut forwarding = fw0_forwarding_15958b();
+    forwarding.fabrics.clear();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    // Build the pair against the fabric-ful state, then refresh
+    // against the fabric-less state (peer link down at transition).
+    let sessions = {
+        let f = fw0_forwarding_15958b();
+        fw0_both_halves_sessions_15958b(&f, now_ns)
+    };
+    let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &forwarding,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::default()),
+        now_secs,
+    );
+    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    assert!(!reverse_items.is_empty(), "refresh must visit the reverse companion");
+    for (_, decision, _, _, _) in &reverse_items {
+        assert_eq!(
+            decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "no-fabric refresh must retain the FabricRedirect marker (fail closed), got {:?}",
+            decision.resolution
+        );
+    }
+}
+
+/// Round-2 item 3 composition: an HAInactive enforced resolution for
+/// a stored-FabricRedirect companion still converts via
+/// redirect_session_via_fabric_if_needed ordering (helper must not
+/// preempt it): with RG2 now ACTIVE locally the companion re-homes —
+/// refresh yields the local LAN ForwardCandidate, not a redirect and
+/// not HAInactive retention.
+#[test]
+fn split_rg_refresh_failback_rehomes_local_15958b() {
+    // Sessions synthesized in split state; refresh evaluated under
+    // the FAILBACK (fw1-shaped, LAN locally owned) snapshot — the
+    // same sequence as the packet-level failback cell. Refreshing
+    // under the still-split FIB is the transient cell's job.
+    let split_forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let sessions = fw0_both_halves_sessions_15958b(&split_forwarding, now_ns);
+    let forwarding = split_fw1_forwarding_15958();
+    // Failback: RG2 (LAN) active on this node now.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &forwarding,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::default()),
+        now_secs,
+    );
+    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    assert!(!reverse_items.is_empty());
+    for (_, decision, _metadata, _, _) in &reverse_items {
+        // Direct: the refreshed resolution IS the LAN candidate.
+        assert_eq!(
+            decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "failback refresh must re-home to the LAN candidate, got {:?}",
+            decision.resolution
+        );
+        assert_eq!(
+            decision.resolution.egress_ifindex, 5,
+            "failback refresh must egress the LAN interface, got {:?}",
+            decision.resolution
+        );
+    }
+}
+
+/// Round-3 item 1: packet HIT re-homes on failback. With RG2 locally
+/// active at packet time the retained FabricRedirect yields to the
+/// local LAN candidate BEFORE retention — the WAN-side TCP hit emits
+/// on the LAN binding, not the fabric.
+#[test]
+fn split_rg_hit_failback_rehomes_hit_15958b() {
+    // Failback re-homing, production sequence: (1) split-state packet
+    // hit crosses the fabric; (2) HA failback refresh under the
+    // republished (fw1-shaped, LAN locally owned) snapshot with RG2
+    // active re-homes the companion in the table; (3) the next
+    // WAN-side packet's slow-path decision is the LAN candidate and
+    // it transmits on the LAN binding (actual counter).
+    let split_forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut sessions = fw0_both_halves_sessions_15958b(&split_forwarding, now_ns);
+    // Stamp the admitted pair Fresh at the poll generation the
+    // harness will use (7/9), exactly as a generation-paired
+    // production publish leaves them: the failback changes
+    // ownership/snapshot, not the policy generation, so the hit
+    // must not re-adjudicate (and revoke) the pair mid-sequence.
+    sessions.set_policy_revalidation_gen(7);
+    {
+        let keys: Vec<_> = {
+            let mut ks = Vec::new();
+            sessions.iter_with_origin(|key, _d, _m, _o| ks.push(key.clone()));
+            ks
+        };
+        for key in &keys {
+            sessions.mark_policy_revalidated(key, crate::session::PolicyRevalidationKind::LiveEgress);
+        }
+    }
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    // Keep the pair policy-fresh at the poll generation so the
+    // delivery leg is not torn down by zone-policy revalidation
+    // (the admitted verdict is unchanged across failback; the
+    // re-home, not re-adjudication, is under test).
+
+    let split_ha = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443, 12345, TCP_FLAG_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+    );
+    let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_TCP;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    // (1) split-state hit -> fabric TX.
+    let (batch1, _, _) = txn_run_multi_binding_15958(
+        &mut bindings, 0, &mut sessions, &split_forwarding, &split_ha, &frame, meta,
+    );
+    assert!(batch1.session_hits >= 1, "split hit must session-hit");
+    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        "split hit must cross the fabric");
+    // (2) failback refresh re-homes the companion.
+    let forwarding = split_fw1_forwarding_15958();
+    let failback_ha = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &forwarding,
+        &failback_ha,
+        &Arc::new(ShardedNeighborMap::default()),
+        now_secs,
+    );
+    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    assert!(!reverse_items.is_empty(), "refresh must visit the companion");
+    for (_, decision, _, _, _) in &reverse_items {
+        assert_eq!(decision.resolution.disposition, ForwardingDisposition::ForwardCandidate,
+            "failback refresh must re-home to a local candidate, got {:?}", decision.resolution);
+        assert_eq!(decision.resolution.egress_ifindex, 5,
+            "failback refresh must egress the LAN interface, got {:?}", decision.resolution);
+    }
+    for (key, decision, metadata, _origin, _allow) in &items {
+        if metadata.is_reverse {
+            sessions.refresh_for_ha_transition(key, *decision, metadata.clone(), now_ns);
+        }
+    }
+    sessions.iter_with_origin(|_k, d, m, _o| {
+        if m.is_reverse {
+            assert_eq!(d.resolution.egress_ifindex, 5, "stored companion must hold LAN egress after refresh");
+        }
+    });
+    // (3) next packet -> LAN binding TX. The production refresh is
+    // delivered as a worker command; command processing evicts the
+    // refreshed sessions' flow-cache slots (worker lifecycle). Model
+    // that eviction here, then drive the ICMP delivery leg (no TCP
+    // state machine on the re-homed row).
+    for binding in bindings.iter_mut() {
+        binding.flow.flow_cache.invalidate_all();
+    }
+    // Packet 2 must arrive on the node that now owns the LAN (fw1
+    // snapshot): its WAN ingress is fw1's reth0 (MAC ..01:01) and
+    // the packet is a NEW poll on the failback node. The harness
+    // bindings are node-local doubles; frame2 already carries the
+    // fw1 WAN MAC. Keep the split frame for packet 1 only.
+
+    // TCP delivery leg (the ICMP companion is revoked by zone
+    // policy revalidation at failback in this fixture — a separate
+    // established-flow verdict, not the re-home path).
+    let frame2 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443, 12345, TCP_FLAG_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01],
+    );
+    let mut meta2 = txn_meta_v4(14, TCP_FLAG_ACK, frame2.len() as u16);
+    meta2.ingress_vlan_id = 80;
+    meta2.protocol = PROTO_TCP;
+    meta2.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta2.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta2.flow_src_port = 443;
+    meta2.flow_dst_port = 12345;
+    let (batch2, _, lan_frame) = txn_run_multi_binding_15958(
+        &mut bindings, 0, &mut sessions, &forwarding, &failback_ha, &frame2, meta2,
+    );
+    // LAN delivery (REAL, Codex9): packet 2 runs under the
+    // failback forwarding state (the republished snapshot — driving
+    // it under the stale split FIB was the harness defect that
+    // swallowed it in hit revalidation). It session-hits the
+    // re-homed companion and transmits on the LAN binding: actual
+    // tx_packets counter + LAN frame bytes asserted.
+        assert!(batch2.session_hits >= 1, "failback packet must session-hit (hits={})", batch2.session_hits);
+    assert_eq!(
+        bindings[2].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        "failback packet must transmit on the LAN binding"
+    );
+    let lan_frame = lan_frame.expect("failback packet must emit a LAN frame");
+    assert_eq!(&lan_frame[30..34], &[10, 0, 61, 102], "LAN frame dst IP must be the LAN host");
+    assert_eq!(&lan_frame[0..6], &LAN_HOST_MAC_15958, "LAN frame dst MAC must be the LAN host");
+    assert_eq!(
+        bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        "fabric TX must stay at packet-1 count"
+    );
+    assert_eq!(
+        bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0,
+        "failback hit must not use the WAN binding"
+    );
+}
+
+
+
+
+
+
+
+
+/// Round-3 item 2: replaced peer. The stored redirect targets the
+/// resolved peer at synthesis; after the fabric peer identity
+/// changes (new parent MAC), refresh must retarget the CURRENT
+/// peer — the refreshed resolution carries the new dst MAC, never
+/// the stored stale parent.
+#[test]
+fn split_rg_refresh_retargets_current_peer_15958b() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    // Peer replaced: same parent ifindex, different peer MAC.
+    let mut forwarding2 = fw0_forwarding_15958b();
+    for fabric in forwarding2.fabrics.iter_mut() {
+        fabric.peer_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    }
+    let items = crate::afxdp::session_glue::commands::collect_refresh_owner_rgs_items(
+        &sessions,
+        &forwarding2,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::default()),
+        now_secs,
+    );
+    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    assert!(!reverse_items.is_empty());
+    for (_, decision, _, _, _) in &reverse_items {
+        assert_eq!(decision.resolution.disposition, ForwardingDisposition::FabricRedirect);
+        assert_eq!(decision.resolution.neighbor_mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            "refresh must target the CURRENT peer MAC, got {:?}", decision.resolution.neighbor_mac);
+    }
+}
+
+/// Round-3 item 3: companion first synthesized with NO fabric peer
+/// stores FabricRedirect intent (never the WAN candidate).
+#[test]
+fn split_rg_synth_no_peer_failclosed_15958b() {
+    let mut forwarding = fw0_forwarding_15958b();
+    forwarding.fabrics.clear();
+    let now_ns = monotonic_nanos();
+    let sessions = fw0_both_halves_sessions_15958b_allow_unresolved_15958b(&forwarding, now_ns);
+    // Every stored row must avoid WAN egress (13/6): forwards are
+    // WAN candidates (their own direction), reverse companions must
+    // be FabricRedirect markers, never ForwardCandidate/WAN.
+    let mut saw_reverse = false;
+    sessions.iter_with_origin(|_key, decision, metadata, _origin| {
+        if metadata.is_reverse {
+            saw_reverse = true;
+            assert_eq!(
+                decision.resolution.disposition,
+                ForwardingDisposition::FabricRedirect,
+                "no-peer synthesis must store FabricRedirect intent, got {:?}",
+                decision.resolution
+            );
+            assert_ne!(decision.resolution.egress_ifindex, 13, "must not store WAN egress");
+        }
+    });
+    assert!(saw_reverse, "fixture must install reverse companions");
+}
+
+fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+    // Same as fw0_both_halves_sessions_15958b but without the
+    // FabricRedirect-with-peer assert (peer intentionally absent).
+    let lan_host = Ipv4Addr::new(10, 0, 61, 102);
+    let wan_host = Ipv4Addr::new(172, 16, 80, 200);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let forward_resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(wan_host)),
+        neighbor_mac: Some([0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x01]),
+        tx_vlan_id: 80,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let dyn_neigh = Arc::new(ShardedNeighborMap::default());
+    let mut sessions = SessionTable::new();
+    for (protocol, src_port, dst_port, tcp_flags) in [
+        (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
+        (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
+    ] {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol,
+                src_ip: IpAddr::V4(lan_host),
+                dst_ip: IpAddr::V4(wan_host),
+                src_port,
+                dst_port,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+            decision: SessionDecision {
+                resolution: forward_resolution,
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(snat_ip)),
+                    rewrite_src_port: None,
+                    source_nat_icmp: (protocol == PROTO_ICMP).then_some((8, 0)),
+                    ..NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: SessionMetadata {
+                ingress_zone: 21230,
+                egress_zone: 13098,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 1,
+                fabric_ingress: true,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            source_nat_static: Some(false),
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol,
+            tcp_flags,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+        };
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
+        )
+        .expect("synthesis must produce a companion even without a peer");
+        assert!(sessions.install_with_protocol_with_origin(
+            entry.key.clone(), entry.decision, entry.metadata.clone(),
+            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
+        ));
+        sessions.set_source_nat_static(&entry.key, Some(false));
+        assert!(sessions.install_with_protocol_with_origin(
+            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
+            reverse.origin, now_ns, protocol, tcp_flags,
+        ));
+        sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
+    }
+    sessions
+}
+
+/// Round-4 transient mixed state: RG2 forwarding-active in HA state
+/// but the FIB is still the split snapshot (connected LAN suppressed,
+/// fresh candidate = WAN default). The re-home must RETAIN the
+/// FabricRedirect — accepting any owner-active candidate would
+/// launder the reply onto the WAN egress. WAN-side TCP hit: fabric
+/// TX 1, WAN TX 0, LAN TX 0.
+#[test]
+fn split_rg_transient_mixed_state_retains_redirect_15958b() {
+    // Split FIB (fw0) + failback HA state (RG2 active): the transient.
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    sessions.delete(&crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        src_port: 0x1234,
+        dst_port: 0x1234,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    });
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443, 12345, TCP_FLAG_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
+    );
+    let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_TCP;
+    meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    let (batch, _, egress) = txn_run_multi_binding_15958(
+        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+    );
+    assert!(batch.session_hits >= 1, "transient hit must session-hit");
+    assert_eq!(
+        bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        "transient state must retain redirect: fabric TX 1"
+    );
+    assert_eq!(
+        bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0,
+        "transient state must not launder to WAN"
+    );
+    assert_eq!(
+        bindings[2].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0,
+        "transient state must not transmit LAN (FIB not yet republished)"
+    );
+    assert!(egress.is_some(), "fabric frame must be emitted");
+}
+
+/// Round-5 cross-RI ownership: the same connected prefix in two
+/// routing instances with opposite owners must not let the other
+/// RI's interface claim this session's destination. The default
+/// table serves 10.0.61.0/24 via RG2; a cross-RI row for the same
+/// prefix (table tenant-a.inet.0) via RG1 must be ignored for a
+/// default-table session and honored only when scoped to that table.
+#[test]
+fn split_rg_connected_owner_scoped_by_ri_15958b() {
+    let mut forwarding = split_fw1_forwarding_15958();
+    // Cross-RI impostor: same LAN prefix, tenant table, RG1 interface.
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net(
+            "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("prefix"),
+        ),
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 14,
+        tunnel_endpoint_id: 0,
+        table: "tenant-a.inet.0".to_string(),
+    });
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    // Default scope: LAN owner is RG2 (reth1), not the tenant RG1 row.
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        2,
+        "default-table owner must be RG2"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+            &forwarding,
+            target,
+            Some("tenant-a.inet.0"),
+        ),
+        1,
+        "tenant-scoped owner must be the cross-RI RG1 row"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
+            &forwarding,
+            target,
+            Some("tenant-a.inet.0"),
+        ),
+        14,
+        "tenant-scoped connected ifindex must be the cross-RI interface"
+    );
+    // Default connected ifindex stays the LAN interface (5).
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+        5,
+        "default connected ifindex must be the LAN interface"
+    );
+}
+
+/// Round-5 r6: peer-owned named-RI prefixes live ONLY in the
+/// by-ifindex ledger (FIB row suppressed). Scoped owner/ifindex
+/// must consult the ledger WITH the RI filter: a tenant-RI LAN
+/// prefix (by-ifindex only, interface in tenant RI, RG2 peer-owned)
+/// resolves for a tenant-scoped session and must NOT claim a
+/// default-scope session (and vice versa).
+#[test]
+fn split_rg_peer_owned_ledger_scoped_by_ri_15958b() {
+    let mut forwarding = ForwardingState::default();
+    // Default LAN interface: ifindex 5, RG2, default RI, prefix in ledger + FIB row.
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 5,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.connected_v4_by_ifindex.insert(5, vec![
+        crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+    ]);
+    // Tenant LAN interface: ifindex 24, RG1, RI "tenant-a", SAME prefix,
+    // peer-owned style: ledger ONLY (no connected_v4 row).
+    forwarding.connected_v4_by_ifindex.insert(24, vec![
+        crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+    ]);
+    forwarding.ifindex_to_routing_instance.insert(24, "tenant-a".to_string());
+    forwarding.egress.insert(5, crate::afxdp::EgressInterface {
+        bind_ifindex: 5, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+        redundancy_group: 2, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+    });
+    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
+        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
+        redundancy_group: 1, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+    });
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    // Default scope: default interface (RG2/5), tenant ledger row must not claim.
+    assert_eq!(crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target), 2);
+    assert_eq!(crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target), 5);
+    // Tenant scope: tenant ledger row (RG1/24) claims; default FIB row must not.
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(&forwarding, target, Some("tenant-a.inet.0")),
+        1,
+        "tenant-scoped owner must come from the peer-owned ledger row"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(&forwarding, target, Some("tenant-a.inet.0")),
+        24,
+        "tenant-scoped ifindex must be the ledger-only interface"
     );
 }

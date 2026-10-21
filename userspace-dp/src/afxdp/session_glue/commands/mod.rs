@@ -34,4 +34,4 @@ pub(in crate::afxdp::session_glue) use upsert_synced::handle_upsert_synced;
 // cannot create BPF maps). Production reaches it in-file via
 // `handle_refresh_owner_rgs`, so the re-export is test-only.
 #[cfg(test)]
-pub(in crate::afxdp::session_glue) use refresh_owner_rgs::collect_refresh_owner_rgs_items;
+pub(in crate::afxdp) use refresh_owner_rgs::collect_refresh_owner_rgs_items;
