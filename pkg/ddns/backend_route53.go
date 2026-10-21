@@ -525,7 +525,7 @@ func (b *route53Backend) UpsertLease(ctx context.Context, rec LeaseDNSRecord) er
 // from "the identical 203.0.113.5 a foreign publisher added to the same
 // RRset" (the two are literally the same datum, stored once). Unlike
 // Cloudflare, where each row is individually addressable and now carries
-// the cfOwnedComment ownership tag, a same-value withdraw here MUST strip
+// an instance-scoped ownership tag, a same-value withdraw here MUST strip
 // the value — so if a foreign publisher independently holds the identical
 // value at the same name+type, xpf's withdraw removes that shared datum
 // too and the victim's name flaps until its engine's forced refresh
