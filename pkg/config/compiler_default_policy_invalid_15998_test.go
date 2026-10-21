@@ -90,6 +90,50 @@ func TestInvalidTrailingTokenInOneStanzaFailsClosed15998(t *testing.T) {
 	}
 }
 
+// #15998 fold 2: a quoted-empty or missing value is INVALID, never skipped.
+// Skipping tok=="" left the selected permit-all standing on tolerant load.
+func TestEmptyDefaultPolicyTokenFailsClosed15998(t *testing.T) {
+	cases := []struct{ name, text string }{
+		{"single-stanza bracket empty", `security { policies { default-policy [ permit-all "" ]; } }`},
+		{"duplicate empty stanza", "security { policies { default-policy { permit-all; } default-policy \"\"; } }"},
+		{"missing-value stanza", "security { policies { default-policy { permit-all; } default-policy; } }"},
+		{"flat missing value beside permit", "security { policies { default-policy permit-all; default-policy; } }"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := CompileConfig(defaultPolicyTree11821(t, tc.text)); err == nil {
+				t.Fatal("strict compile accepted empty/missing default-policy value")
+			} else if !strings.Contains(err.Error(), "#15998") {
+				t.Fatalf("strict error %q does not name #15998", err)
+			}
+			for _, compile := range []struct {
+				name string
+				fn   func(*ConfigTree) (*Config, error)
+			}{
+				{"lenient", CompileConfigLenient},
+				{"node lenient", func(tr *ConfigTree) (*Config, error) { return CompileConfigForNodeLenient(tr, 0) }},
+			} {
+				cfg, err := compile.fn(defaultPolicyTree11821(t, tc.text))
+				if err != nil {
+					t.Fatalf("%s compile: %v", compile.name, err)
+				}
+				if cfg.Security.DefaultPolicy != PolicyDeny {
+					t.Fatalf("%s: empty token compiled as %v, want deny-all", compile.name, cfg.Security.DefaultPolicy)
+				}
+				found := false
+				for _, w := range cfg.Warnings {
+					if strings.Contains(w, "#15998") {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("%s: missing #15998 warning: %v", compile.name, cfg.Warnings)
+				}
+			}
+		})
+	}
+}
+
 func TestSingleInvalidDefaultPolicyAloneIsDeny15998(t *testing.T) {
 	cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, "security { policies { default-policy { bogus; } } }"))
 	if err != nil {

@@ -227,10 +227,19 @@ func invalidDefaultPolicyTokens15998(nodes []*Node) []string {
 				if stanza == nil || stanza.Name() != "default-policy" {
 					continue
 				}
-				for _, tok := range defaultPolicyTokens15998(stanza) {
-					if tok == "" {
-						continue
-					}
+				toks := defaultPolicyTokens15998(stanza)
+				if len(toks) == 0 {
+					// Missing-value stanza (`default-policy;` with no
+					// keys/children): an authored stanza carrying NO valid
+					// action is invalid (#15998 fold 2), distinct from an
+					// absent stanza (deny init).
+					invalid = append(invalid, "")
+					continue
+				}
+				for _, tok := range toks {
+					// An empty token (quoted "") is INVALID, never
+					// skipped (#15998 fold 2): skipping it left the
+					// selected permit-all standing fail-open.
 					switch tok {
 					case "permit-all", "deny-all", "reject-all":
 					default:
