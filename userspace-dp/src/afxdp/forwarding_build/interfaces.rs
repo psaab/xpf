@@ -85,6 +85,31 @@ enum EgressZoneClaim {
 /// `Agreed("")` is a statement, not an absence: every unit row on the ifindex
 /// was left out of every zone, so the ifindex has no zone and no derivation may
 /// give it one.
+/// What the LOGICAL UNIT rows on ONE ifindex say about that ifindex's
+/// EFFECTIVE per-interface host-inbound override (#16057).
+///
+/// A flat `ifindex → ZoneHostInbound` map cannot carry two distinct unit
+/// overrides: the AF_XDP ingress descriptor names the netdev, not the unit.
+/// When the unit rows on one ifindex disagree, inserting the last one would
+/// hand every unit a sibling's management admission. `Disagree` therefore
+/// refuses to keep any unit override for the ifindex; the caller installs
+/// the empty fail-closed sentinel instead.
+///
+/// An UNCONFIGURED unit row casts no vote: it would have fallen back to its
+/// zone set per-unit, so it cannot dispute a configured sibling. Different
+/// zones are also not, by themselves, a dispute — Go resolves each unit's
+/// effective set per unit NAME (`#3362`/`#3720`), so same-zone provenance is
+/// not required; only the effective token sets are compared.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UnitHostInboundClaim {
+    /// Every configured logical-unit row on the ifindex carried this
+    /// effective token triple.
+    Agreed(Vec<String>, Vec<String>, Vec<String>),
+    /// Configured logical-unit rows on one ifindex carried DIFFERENT
+    /// effective token triples.
+    Disagree,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum UnitZoneClaim {
     /// Every logical-unit row on the ifindex carried this zone name.
@@ -360,6 +385,63 @@ fn unit_rows_with_empty_zone_10520(snapshot: &ConfigSnapshot) -> std::collection
     out
 }
 
+/// ifindex -> [`UnitHostInboundClaim`] for every ifindex carrying at least
+/// one CONFIGURED logical-unit host-inbound override row (#16057).
+/// Computed BEFORE the walk, like [`unit_zone_claims`], so the base row's
+/// write and each unit row's write consult the same precomputed verdict
+/// regardless of snapshot row order.
+fn unit_host_inbound_claims(snapshot: &ConfigSnapshot) -> BTreeMap<i32, UnitHostInboundClaim> {
+    let mut out: BTreeMap<i32, UnitHostInboundClaim> = BTreeMap::new();
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0
+            || !iface.host_inbound_configured
+            || !is_logical_unit_row(&iface.name, iface.is_unit)
+        {
+            continue;
+        }
+        let vote = UnitHostInboundClaim::Agreed(
+            iface.host_inbound_system_services.clone(),
+            iface.host_inbound_protocols.clone(),
+            iface.host_inbound_protocols_except.clone(),
+        );
+        match out.entry(iface.ifindex) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(vote);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if slot.get() != &vote {
+                    slot.insert(UnitHostInboundClaim::Disagree);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether the configured unit rows on `ifindex` admit the override spelled
+/// by `services`/`protocols`/`protocols_except` as that ifindex's
+/// per-interface host-inbound set (#16057). Mirrors [`unit_rows_admit`]:
+/// `true` when no configured unit row sits on the ifindex, or when every
+/// one carried exactly this triple; `false` when they disagree among
+/// themselves (the triple itself is then one of the disputed sets).
+fn unit_host_inbound_claims_admit(
+    claims: &BTreeMap<i32, UnitHostInboundClaim>,
+    ifindex: i32,
+    services: &[String],
+    protocols: &[String],
+    protocols_except: &[String],
+) -> bool {
+    match claims.get(&ifindex) {
+        None => true,
+        Some(UnitHostInboundClaim::Agreed(s, p, e)) => {
+            s.as_slice() == services
+                && p.as_slice() == protocols
+                && e.as_slice() == protocols_except
+        }
+        Some(UnitHostInboundClaim::Disagree) => false,
+    }
+}
+
 fn unit_refused_rows_are_all_zoned_10520(
     claim: Option<&UnitZoneClaim>,
     has_empty_zone: bool,
@@ -479,6 +561,18 @@ pub(super) fn populate_interfaces(
         .filter(|iface| is_logical_unit_row(&iface.name, iface.is_unit))
         .map(|iface| iface.ifindex)
         .collect();
+    // #16057: ifindexes whose CONFIGURED unit rows carry DIFFERENT effective
+    // host-inbound overrides. Precomputed before the walk so the refusal is
+    // row-order independent; the disputed override is refused in the walk
+    // and the empty fail-closed sentinel is installed after it (plus a
+    // warning), mirroring the #10503 contested-zone backstop.
+    let unit_host_inbound_claim_map = unit_host_inbound_claims(snapshot);
+    let disputed_host_inbound_ifindexes: std::collections::BTreeSet<i32> =
+        unit_host_inbound_claim_map
+            .iter()
+            .filter(|(_, claim)| **claim == UnitHostInboundClaim::Disagree)
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -812,7 +906,22 @@ pub(super) fn populate_interfaces(
         }
         // #3362 per-interface host-inbound OVERRIDE. The control plane carries
         // the effective token set resolved for this interface.
+        // #16057: a DISPUTED unit override (configured unit rows on this
+        // ifindex carrying different effective triples) is refused for every
+        // row, base included — keeping any one would hand the sibling's
+        // admission to the whole netdev. The empty fail-closed sentinel is
+        // installed after the walk. Unit rows whose triples AGREE keep the
+        // #12646 unit-wins behaviour byte-identically (one agreed triple,
+        // written by each unit row); a base row whose triple differs from
+        // the agreed unit triple still loses, exactly as #12646 pinned.
         if iface.host_inbound_configured
+            && unit_host_inbound_claims_admit(
+                &unit_host_inbound_claim_map,
+                iface.ifindex,
+                &iface.host_inbound_system_services,
+                &iface.host_inbound_protocols,
+                &iface.host_inbound_protocols_except,
+            )
             && (is_logical_unit_row(&iface.name, iface.is_unit)
                 || !unit_host_inbound_ifindexes.contains(&iface.ifindex))
         {
@@ -820,7 +929,8 @@ pub(super) fn populate_interfaces(
             // unit override is more specific than the base row's set and must
             // win regardless of snapshot row order. Skip the base's write when
             // a configured unit row exists; retain the unit's existing
-            // last-write behavior for any additional unit aliases.
+            // last-write behaviour for any additional unit aliases whose
+            // triples agree (#16057 refuses only a genuine disagreement).
             empty_zone_host_inbound_sentinels.remove(&iface.ifindex);
             state.ifindex_host_inbound.insert(
                 iface.ifindex,
@@ -1097,6 +1207,50 @@ pub(super) fn populate_interfaces(
             true
         }
     });
+
+    // #16057: disputed unit host-inbound override fail-closed backstop —
+    // SYMMETRY with #10503. Two configured units on one ifindex carried
+    // DIFFERENT effective overrides; the walk refused every one, so without
+    // this entry the ifindex would fall back to its ZONE set (or, when
+    // unzoned, the `None => true` global admit) — either way a sibling's
+    // broader admission would govern the whole netdev, the exact leak the
+    // issue reports. Insert the same EMPTY sentinel the contested-zone
+    // backstop uses, so `host_inbound_admits_iface` DENIES host-bound
+    // services there in both row orders. The AF_XDP descriptor cannot
+    // distinguish units on one netdev, so no narrower verdict exists.
+    // Guards mirror #10503: never clobber an existing entry (defensive —
+    // the walk refused every disputed write, and the empty-zone sentinel
+    // bookkeeping is left untouched), never arm a lifeline, and warn once
+    // per disputed ifindex per build so the deny is observable (#8296).
+    let mut disputed_host_inbound_sentinels: std::collections::BTreeSet<i32> =
+        std::collections::BTreeSet::new();
+    for ifindex in &disputed_host_inbound_ifindexes {
+        if let Some(name) = state.ifindex_to_config_name.get(ifindex) {
+            if is_host_inbound_lifeline(name) {
+                continue;
+            }
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) =
+            state.ifindex_host_inbound.entry(*ifindex)
+        {
+            disputed_host_inbound_sentinels.insert(*ifindex);
+            slot.insert(crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
+        }
+    }
+    for ifindex in &disputed_host_inbound_sentinels {
+        eprintln!(
+            "xpf-userspace-dp: WARNING host-inbound override contest on shared ifindex {}: \
+             configured logical units on the same netdev carry different effective \
+             host-inbound overrides, so no unit's override is honoured and host-bound \
+             services are DENIED by the per-ifindex empty host-inbound sentinel \
+             (#16057; ICMP errors/PMTUD/ND control messages remain admitted). The \
+             dataplane sees an ifindex, not a unit, so it cannot tell which unit a \
+             packet arrived on; give the units the same host-inbound override, \
+             distinct netdevs, or rely on the zone-level host-inbound set by \
+             removing the per-unit overrides.",
+            ifindex
+        );
+    }
 
     // #10503: contested-ifindex host-inbound fail-closed backstop — SYMMETRY
     // with the #5659 addressed-empty-zone backstop above. Despite its historical
