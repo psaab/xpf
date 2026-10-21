@@ -431,3 +431,37 @@ func TestConfigShowIntermediateMultiKey15995(t *testing.T) {
 		t.Errorf("allowed sibling policy refused: %v", err)
 	}
 }
+
+// Fold 4 witness (Codex executed regression, verbatim shape): an
+// anchored deny on the intermediate context must refuse a child read
+// that omits the context's trailing pair. Pricing only the terminal
+// rendered path (`… policy p1`) never matches the $-anchored context
+// string; the trail ancestors carrying the omitted keys are priced.
+func TestConfigShowAnchoredIntermediateContext15995(t *testing.T) {
+	cfg := cfg15995(t, "", `^security policies from-zone trust to-zone untrust$`)
+	tree, errs := NewParser(`security { policies {
+		from-zone trust to-zone untrust { policy p1 { then { permit; } } }
+		from-zone trust to-zone trust { policy p2 { then { permit; } } }
+	} }`).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("fixture parse: %v", errs)
+	}
+	context := []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust"}
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", context, "", tree); err == nil {
+		t.Fatal("control failed: direct denied context was admitted")
+	}
+	incomplete := []string{"security", "policies", "from-zone", "trust", "policy", "p1"}
+	if out := tree.FormatPathRedacted(incomplete); !strings.Contains(out, "p1") {
+		t.Fatalf("premise failed: requested selector did not render policy: %q", out)
+	}
+	allowed := []string{"security", "policies", "from-zone", "trust", "to-zone", "trust", "policy", "p2"}
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", allowed, "", tree); err != nil {
+		t.Fatalf("allowed sibling was refused: %v", err)
+	}
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", incomplete, "", tree); err == nil {
+		t.Fatal("anchored deny on intermediate context was bypassed by incomplete-selector child read")
+	}
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", incomplete, "display set", tree); err == nil {
+		t.Fatal("anchored deny on intermediate context bypassed (display set)")
+	}
+}

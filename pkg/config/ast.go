@@ -831,28 +831,56 @@ func navigatePathWidth(nodes []*Node, path []string) ([]*Node, int) {
 
 // navigateRenderedMatches resolves path exactly as navigatePathWidth
 // does, but also returns, per match, the complete rendered path of the
-// matched node: every intermediate node's full Keys in descent order,
-// then the terminal node's full Keys. navigatePathWidth reports only
-// the terminal consumed width, which loses keys an INTERMEDIATE
-// multi-key node carries past the pairs the request spelled
-// (`from-zone trust` descending into the node keyed
-// `from-zone trust to-zone untrust`): authorization that rebuilds the
-// path from the request + terminal Keys alone prices a truncated
-// string the renderer never prints (#15995 fold 3). The descent below
-// mirrors navigatePathWidth branch for branch (multi-key pairs,
-// bracketed later members, terminal bare-keyword fan-out, unioned
-// intermediate descent) while tracking each sibling's rendered prefix,
-// so a deeper selector resolves against exactly the nodes (and the
-// complete paths) the renderer navigates.
+// matched node AND of every ancestor node on its descent trail:
+// ancestors holds each intermediate node's complete path in descent
+// order (root first), and path is the terminal node's complete path
+// (ancestors' last element repeated as path's prefix chain — path ==
+// ancestors[last] extended, i.e. path is the terminal complete path).
+// navigatePathWidth reports only the terminal consumed width, which
+// loses keys an INTERMEDIATE multi-key node carries past the pairs
+// the request spelled (`from-zone trust` descending into the node
+// keyed `from-zone trust to-zone untrust`): authorization that
+// rebuilds the path from the request + terminal Keys alone prices a
+// truncated string the renderer never prints (#15995 fold 3).
+//
+// The priced-path invariant (fold 4): the set of complete paths the
+// authorization walk prices must EQUAL the set of complete paths the
+// renderer can print for this selector — every node on the trail
+// from the tree root to the terminal match, plus every descendant of
+// the terminal match. ancestors+path give exactly the trail half of
+// that set (the descendant half is the recursive walk below the
+// terminal node). Deriving prices from this same trail is what keeps
+// the two sets equal by construction rather than by a parallel
+// matcher re-deriving them.
+//
+// The descent below mirrors navigatePathWidth branch for branch
+// (multi-key pairs, bracketed later members, terminal bare-keyword
+// fan-out, unioned intermediate descent) while tracking each
+// sibling's rendered prefix, so a deeper selector resolves against
+// exactly the nodes (and the complete paths) the renderer navigates.
 type renderedMatch struct {
-	node *Node
-	path []string
+	node      *Node
+	path      []string
+	ancestors [][]string
+}
+
+// copyTrail copies a descent trail (slice of complete paths).
+func copyTrail(t [][]string) [][]string {
+	if len(t) == 0 {
+		return nil
+	}
+	out := make([][]string, len(t))
+	for i, p := range t {
+		out[i] = append([]string(nil), p...)
+	}
+	return out
 }
 
 func navigateRenderedMatches(nodes []*Node, path []string) []renderedMatch {
 	type frame struct {
 		node   *Node
 		prefix []string
+		trail  [][]string
 	}
 	current := make([]frame, 0, len(nodes))
 	for _, n := range nodes {
@@ -881,15 +909,17 @@ func navigateRenderedMatches(nodes []*Node, path []string) []renderedMatch {
 					if i >= len(path) {
 						out := make([]renderedMatch, 0, len(groups))
 						for _, f := range groups {
-							out = append(out, renderedMatch{node: f.node, path: append(append([]string(nil), f.prefix...), f.node.Keys...)})
+							cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
+							out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
 						}
 						return out
 					}
 					var next []frame
 					for _, f := range groups {
 						p := append(append([]string(nil), f.prefix...), f.node.Keys...)
+						tr := append(copyTrail(f.trail), p)
 						for _, ch := range f.node.Children {
-							next = append(next, frame{node: ch, prefix: p})
+							next = append(next, frame{node: ch, prefix: p, trail: tr})
 						}
 					}
 					current = next
@@ -917,15 +947,17 @@ func navigateRenderedMatches(nodes []*Node, path []string) []renderedMatch {
 				if i >= len(path) {
 					out := make([]renderedMatch, 0, len(matched))
 					for _, f := range matched {
-						out = append(out, renderedMatch{node: f.node, path: append(append([]string(nil), f.prefix...), f.node.Keys...)})
+						cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
+						out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
 					}
 					return out
 				}
 				var next []frame
 				for _, f := range matched {
 					p := append(append([]string(nil), f.prefix...), f.node.Keys...)
+					tr := append(copyTrail(f.trail), p)
 					for _, ch := range f.node.Children {
-						next = append(next, frame{node: ch, prefix: p})
+						next = append(next, frame{node: ch, prefix: p, trail: tr})
 					}
 				}
 				current = next
@@ -937,7 +969,8 @@ func navigateRenderedMatches(nodes []*Node, path []string) []renderedMatch {
 			var out []renderedMatch
 			for _, f := range current {
 				if len(f.node.Keys) > 0 && f.node.Keys[0] == keyword {
-					out = append(out, renderedMatch{node: f.node, path: append(append([]string(nil), f.prefix...), f.node.Keys...)})
+					cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
+					out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
 				}
 			}
 			return out
@@ -946,8 +979,9 @@ func navigateRenderedMatches(nodes []*Node, path []string) []renderedMatch {
 		for _, f := range current {
 			if len(f.node.Keys) > 0 && f.node.Keys[0] == keyword {
 				p := append(append([]string(nil), f.prefix...), f.node.Keys...)
+				tr := append(copyTrail(f.trail), p)
 				for _, ch := range f.node.Children {
-					next = append(next, frame{node: ch, prefix: p})
+					next = append(next, frame{node: ch, prefix: p, trail: tr})
 				}
 			}
 		}

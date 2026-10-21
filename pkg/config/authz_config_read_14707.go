@@ -221,16 +221,40 @@ func authorizeConfigRenderedDescendants(cfg *Config, class string, path []string
 // matched node's complete keys, so pricing rebuilds each rendered
 // path from the actual descent trail (navigateRenderedMatches):
 // every intermediate node's full Keys, then the terminal node's full
-// Keys. A deny anchored on any complete rendered spelling cannot be
-// escaped by truncating the selector at any depth.
+// Keys.
+//
+// Fold 4 invariant: every complete path the renderer prints for
+// this selector that the REQUEST did not itself spell must be
+// priced — the trail ancestors carrying omitted keys, the terminal
+// rendered path, and every descendant below it. Pricing only the
+// terminal path left an anchored deny on an intermediate context
+// (`^… from-zone trust to-zone untrust$`) unmatched by the longer
+// terminal string, admitting a child read the direct context read
+// refuses. Exact request prefixes are NOT re-priced (see the walk):
+// they are the request the caller already adjudicated, and Junos
+// longest-match semantics forbid re-judging an allowed request by
+// its prefixes.
 func authorizeConfigRenderedDescendantsWithRules(class string, rules CompiledLoginRegexes, path []string, trees []*ConfigTree) error {
 	for _, tree := range trees {
 		if tree == nil {
 			continue
 		}
 		for _, m := range navigateRenderedMatches(tree.Children, path) {
-			if err := authorizeRenderedPath(class, rules, path, m.path); err != nil {
-				return err
+			// Price the trail only where it EXTENDS the request:
+			// an intermediate/terminal node whose complete keys
+			// differ from the request's spelling of it (omitted
+			// pairs). Strict ancestors spelled exactly as requested
+			// must not be re-priced: Junos longest-match prices an
+			// allowed named instance (^firewall filter f1 for
+			// [firewall filter f1]) against the request, not each
+			// prefix — re-pricing prefixes refuses every allowed
+			// instance under an allowlist. The terminal rendered
+			// path (ancestors' last element) is priced whenever it
+			// differs from the requested spelling.
+			for _, anc := range trailPathsBeyondRequest(path, m) {
+				if err := authorizeRenderedPath(class, rules, path, anc); err != nil {
+					return err
+				}
 			}
 			if err := authorizeRenderedNode(class, rules, m.path, m.node); err != nil {
 				return err
@@ -238,6 +262,39 @@ func authorizeConfigRenderedDescendantsWithRules(class string, rules CompiledLog
 		}
 	}
 	return nil
+}
+
+// trailPathsBeyondRequest returns the complete trail paths carrying
+// keys the request did not spell: ancestors that are not token-wise
+// prefixes of the request, plus everything deeper once the trail
+// extends past the request spelling. Exact request prefixes are
+// excluded — the caller already priced the request itself.
+func trailPathsBeyondRequest(requested []string, m renderedMatch) [][]string {
+	var out [][]string
+	beyond := false
+	for _, anc := range m.ancestors {
+		if !beyond {
+			if isPathPrefix(anc, requested) {
+				continue
+			}
+			beyond = true
+		}
+		out = append(out, anc)
+	}
+	return out
+}
+
+// isPathPrefix reports whether anc is a token-wise prefix of requested.
+func isPathPrefix(anc, requested []string) bool {
+	if len(anc) > len(requested) {
+		return false
+	}
+	for i := range anc {
+		if anc[i] != requested[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // authorizeRenderedPath prices one complete rendered path, skipping the

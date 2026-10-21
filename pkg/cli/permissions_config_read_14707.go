@@ -168,14 +168,13 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			// ACTIVE — a whole committed-tree diff, adjudicated
 			// like ShowRollback, not the candidate compare.
 			// #15995 fold: stash the priced arms for the handler.
-			priceCfg := cfg
 			if c.store != nil {
-				scfg, slot, other, _, _, _ := c.store.RollbackCompareSnapshot(n, true)
-				if scfg != nil {
-					priceCfg = scfg
-				}
+				// Atomic capture for the handler; the whole-tree
+				// price below uses cfg from this same gate frame
+				// (AuthorizeConfigShowRollback consults only
+				// whether cfg's class is restricted + op pair).
+				slot, other := c.store.RollbackCompareTrees(n, true)
 				c.setRenderSnapshots15995(slot, other)
-				_ = priceCfg // whole-tree arm: policy priced via AuthorizeConfigShowRollback below
 			}
 			return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 		}
@@ -216,7 +215,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				return config.AuthorizeConfigShowPathRendered(priceCfg, c.userClass, rbPath, suffix, trees...)
 			}
 			if c.store != nil {
-				tree := c.store.RollbackTree(n)
+				_, tree, _, _, _ := c.store.RollbackSnapshot(n)
 				c.setRenderSnapshots15995(tree, nil)
 			}
 			return config.AuthorizeConfigShowRollback(cfg, c.userClass, suffix)
@@ -228,12 +227,16 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				// whole-tree rollback. #15995: price rendered
 				// descendants on both arms (slot + active).
 				var trees []*config.ConfigTree
+				priceCfg := cfg
 				if c.store != nil {
-					slot, other := c.store.RollbackCompareTrees(n, true)
+					scfg, slot, other, _, _, _ := c.store.RollbackCompareSnapshot(n, true)
+					if scfg != nil {
+						priceCfg = scfg
+					}
 					trees = []*config.ConfigTree{slot, other}
 					c.setRenderSnapshots15995(slot, other)
 				}
-				return config.AuthorizeConfigShowRollbackAtPathRendered(cfg, c.userClass, rbPath, "", trees...)
+				return config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, c.userClass, rbPath, "", trees...)
 			}
 			return nil // handler syntax error; renders nothing
 		}
@@ -253,17 +256,21 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 		// already separated them as rbPath; the handler validates).
 		if len(rbPath) > 0 {
 			var trees []*config.ConfigTree
+			priceCfg := cfg
 			if c.store != nil {
-				tree := c.store.RollbackTree(n)
+				scfg, tree, _, _, _ := c.store.RollbackSnapshot(n)
+				if scfg != nil {
+					priceCfg = scfg
+				}
 				if tree != nil {
 					trees = []*config.ConfigTree{tree}
 				}
 				c.setRenderSnapshots15995(tree, nil)
 			}
-			return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, rbPath, "", trees...)
+			return config.AuthorizeConfigShowPathRendered(priceCfg, c.userClass, rbPath, "", trees...)
 		}
 		if c.store != nil {
-			tree := c.store.RollbackTree(n)
+			_, tree, _, _, _ := c.store.RollbackSnapshot(n)
 			c.setRenderSnapshots15995(tree, nil)
 		}
 		return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
