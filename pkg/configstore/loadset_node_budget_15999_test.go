@@ -183,3 +183,65 @@ func TestOverBudgetCandidateShrinkPasses15999(t *testing.T) {
 		t.Fatalf("delete replay did not shrink: %d", big.NodeCount())
 	}
 }
+
+func shrinkWitness15999(t *testing.T) *Store {
+	t.Helper()
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, config.MaxParseNodes+1)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	s.candidate = &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+			{Keys: []string{"services", "ssh"}, IsLeaf: true},
+		}},
+	}}
+	if got := s.candidate.NodeCount(); got <= config.MaxParseNodes {
+		t.Fatalf("witness not over budget: %d", got)
+	}
+	return s
+}
+
+// Witness 1: oversized single line refused BEFORE building (count 0, tree untouched).
+func TestOversizedSingleLinePrecharge15999(t *testing.T) {
+	tree := &config.ConfigTree{}
+	line := "set unknown" + strings.Repeat(" k", config.MaxParseNodes+50)
+	count, err := replayFlatLines15999(tree, []string{line})
+	if err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("oversized line: count=%d err=%v", count, err)
+	}
+	if count != 0 || tree.NodeCount() != 0 {
+		t.Fatalf("budget checked AFTER building: count=%d units=%d", count, tree.NodeCount())
+	}
+}
+
+// Witness 2: tab-separated delete classified as shrink via tokenizer.
+func TestTabDeleteShrinksOverBudget15999(t *testing.T) {
+	s := shrinkWitness15999(t)
+	before := s.candidate.NodeCount()
+	count, err := s.LoadSet("delete\tsystem host-name fw1")
+	if err != nil || count != 1 || s.candidate.NodeCount() >= before {
+		t.Fatalf("tab delete: count=%d err=%v before=%d after=%d", count, err, before, s.candidate.NodeCount())
+	}
+}
+
+// Witness 3: pure-deactivate no-progress over line-count refuses as WORK
+// bound before replay (candidate unchanged), not after O(lines*siblings).
+func TestShrinkWorkBoundRefusesFast15999(t *testing.T) {
+	s := shrinkWitness15999(t)
+	before := s.candidate.NodeCount()
+	lines := strings.Repeat("deactivate system host-name fw1\n", config.MaxParseNodes+1)
+	count, err := s.LoadSet(lines)
+	if err == nil || !strings.Contains(err.Error(), "work budget") || count != 0 {
+		t.Fatalf("no-progress shrink work bound: count=%d err=%v", count, err)
+	}
+	if s.candidate.NodeCount() != before {
+		t.Fatalf("work-bound refusal changed candidate: %d -> %d", before, s.candidate.NodeCount())
+	}
+}

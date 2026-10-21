@@ -811,6 +811,25 @@ func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, erro
 // author wrote in that path is synthesized. Restoring parent behavior
 // byte-identically (merge: %w) is the deliberate disposition; the flat
 // path keeps scrubbing because its lines are raw operator input.
+// flatVerb15999 classifies a line's verb via the same tokenizer the replay
+// uses (strings.Fields — tabs and any whitespace split, #15999 fold), never
+// literal "delete " prefixes.
+func flatVerb15999(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func isShrinkVerb15999(line string) bool {
+	switch flatVerb15999(line) {
+	case "delete", "deactivate":
+		return true
+	}
+	return false
+}
+
 func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub bool) (int, error) {
 	nonEmpty := 0
 	shrinking := true
@@ -820,16 +839,18 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			continue
 		}
 		nonEmpty++
-		// delete/deactivate only shrink (or no-op) the tree; a script of
-		// ONLY shrinking verbs applied to an over-budget candidate must
-		// pass — otherwise a restored over-budget config is undeletable.
-		// Budget applies to the RESULT for those, checked post-edit below.
-		if !strings.HasPrefix(line, "delete ") && line != "delete" &&
-			!strings.HasPrefix(line, "deactivate ") && line != "deactivate" {
+		if !isShrinkVerb15999(line) {
 			shrinking = false
 		}
 	}
-	if !shrinking && nonEmpty > config.MaxParseNodes {
+	// WORK bound (all scripts, incl. pure-shrink): >budget lines refuse
+	// before any replay. For growing scripts this is also the node
+	// precheck; for shrinking scripts the reason is work, not result —
+	// a no-progress shrink must not pay O(lines*siblings) to find out.
+	if nonEmpty > config.MaxParseNodes {
+		if shrinking {
+			return 0, fmt.Errorf("config too large: flat load of %d shrinking lines exceeds work budget %d (#15999)", nonEmpty, config.MaxParseNodes)
+		}
 		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds node budget %d (#15999)", nonEmpty, config.MaxParseNodes)
 	}
 	base := working.NodeCount()
@@ -846,23 +867,28 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		if !hasFlatVerb(line) {
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
-		isShrink := strings.HasPrefix(line, "delete ") || line == "delete" ||
-			strings.HasPrefix(line, "deactivate ") || line == "deactivate"
+		isShrink := isShrinkVerb15999(line)
 		if !isShrink {
-			// Charging bounds sibling-search work for growing verbs.
-			// Shrinking verbs need no charge: their result count is
-			// checked exactly below, (1) result-based adjudication.
-			charged += len(strings.Fields(line)) + 1
-			if charged > config.MaxParseNodes {
-				// Allow if the edit so far has actually shrunk the
-				// tree below/at budget (mixed scripts on an
-				// over-budget base that net-shrink must pass).
-				if exact := working.NodeCount(); exact <= config.MaxParseNodes {
-					charged = exact + len(strings.Fields(line)) + 1
+			// PRE-CHARGE by tokens BEFORE building: the token upper
+			// bound is the refusal bound. Never reset charged above
+			// the cap and build anyway — refuse at the crossing.
+			// No-growth re-sets are reconciled at the 256-line exact
+			// recount (charged=exact), so a crossing caused purely
+			// by re-setting existing leaves is admitted there; a
+			// single line whose own tokens cross refuses here,
+			// before any insertion under the lock.
+			tokCharge := len(strings.Fields(line)) + 1
+			if charged+tokCharge > config.MaxParseNodes {
+				// Give the exact tree one chance: if it is actually
+				// at/below cap (cumulative charge over-counted
+				// re-sets), reconcile and re-check this line alone.
+				if exact := working.NodeCount(); exact+tokCharge <= config.MaxParseNodes {
+					charged = exact
 				} else {
 					return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 				}
 			}
+			charged += tokCharge
 		}
 		if err := applyEditLine(working, line); err != nil {
 			if scrub {
@@ -873,10 +899,6 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		count++
 		if count%256 == 0 {
 			exact := working.NodeCount()
-			// Result-based: refuse only if the tree NOW exceeds the
-			// budget AND the last verb was not shrinking it. A tree
-			// still over budget mid-shrink is fine — it is heading
-			// down; the final check decides.
 			if exact > config.MaxParseNodes && !isShrink {
 				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 			}
