@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"unicode/utf8"
 )
 
 // compiler_validate_strict_snmpv3_keys_7530.go — #7530.
@@ -36,6 +37,17 @@ import (
 //
 // A user with auth and no privacy is LEGITIMATE (authNoPriv), so the gate fires
 // on a named protocol missing its own material, never on an absent protocol.
+
+// snmpv3MinPassphraseRunes is the SNMPv3 passphrase length floor (#16084).
+// RFC 3414 section 11.2 recommends pass phrases of at least 8 characters
+// (Junos enforces the same minimum), and the agent is an online HMAC oracle:
+// every guess costs one passwordToKey derivation but there is no per-user
+// lockout or backoff, so a 1-character passphrase that compiles today is
+// recovered after a handful of guesses. The floor is counted in runes, not
+// bytes, so a multibyte passphrase is judged by the characters an operator
+// typed, not by its UTF-8 encoding length.
+const snmpv3MinPassphraseRunes = 8
+
 func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 	if cfg == nil || cfg.System.SNMP == nil {
 		return nil
@@ -90,6 +102,28 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 				"`privacy-password`, or remove the protocol to configure a genuinely "+
 				"authNoPriv user (#7530)",
 				name, u.PrivProtocol, name)
+		}
+		// #16084: presence is not strength. A non-empty passphrase shorter
+		// than the floor is an online-guessable credential: the serve path
+		// answers HMAC challenges with no per-user lockout, so a 1-character
+		// passphrase is recovered after a handful of guesses. Reject at
+		// commit, naming the user and the length -- never the passphrase
+		// itself, which must not leak into an error string.
+		if pw := string(u.AuthPassword); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
+			return fmt.Errorf("snmp v3 usm local-engine user %q authentication-password "+
+				"is too short: %d characters, minimum %d. The agent answers SNMPv3 "+
+				"authentication challenges online with no per-user lockout, so a short "+
+				"passphrase is guessable; RFC 3414 section 11.2 recommends at least %d "+
+				"characters. Set a longer `authentication-password` (#16084)",
+				name, utf8.RuneCountInString(pw), snmpv3MinPassphraseRunes, snmpv3MinPassphraseRunes)
+		}
+		if pw := string(u.PrivPassword); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
+			return fmt.Errorf("snmp v3 usm local-engine user %q privacy-password "+
+				"is too short: %d characters, minimum %d. The agent answers SNMPv3 "+
+				"authentication challenges online with no per-user lockout, so a short "+
+				"passphrase is guessable; RFC 3414 section 11.2 recommends at least %d "+
+				"characters. Set a longer `privacy-password` (#16084)",
+				name, utf8.RuneCountInString(pw), snmpv3MinPassphraseRunes, snmpv3MinPassphraseRunes)
 		}
 	}
 	return nil
