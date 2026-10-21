@@ -50,10 +50,12 @@ pay an fsync; fsync costs land only on operator-paced commit paths.
 
 ## Options
 
-- `WithPreserveExisting()` — lift mode/ownership from an existing target
+- `WithPreserveExisting()` — lift ownership (and mode, capped at the
+  caller's `perm`: `existing & perm`, #16046) from an existing target
   (fchmod/fchown on the temp fd; chown only when the owner actually
   differs; a chown failure is surfaced, never silently renamed over a
-  differently-owned file). Without it, the caller's `perm` is **enforced
+  differently-owned file). Preserve can keep a stricter mode but never
+  widens past `perm`. Without it, the caller's `perm` is **enforced
   on every write** — unlike `os.WriteFile`, which keeps an existing
   inode's mode.
 - `WithResolveSymlinks()` — write through a symlink to its resolved
@@ -69,7 +71,7 @@ pay an fsync; fsync costs land only on operator-paced commit paths.
   uid/gid cgo-free (the codebase parses `/etc/passwd` directly via
   `lookupUIDGID`, never `os/user`).
   - **Precedence vs `WithPreserveExisting`**: if both are set, owner =
-    `WithOwner`'s, mode = preserved-existing's (explicit owner always wins).
+    `WithOwner`'s, mode = preserved-existing's capped at `perm` (#16046).
 
 `WithPreserveExisting()` + `WithResolveSymlinks()` together reproduce
 `pkg/frr`'s `atomicWriteFile` (#1883) semantics, which this package lifted;

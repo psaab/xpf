@@ -45,6 +45,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -1364,9 +1365,10 @@ func stripManagedSection(content string) (string, bool) {
 // writeManagedSection uses). A file with NO managed section is left
 // byte-for-byte untouched (changed=false ⇒ no rewrite), so a purely
 // operator-managed frr.conf is never modified. An absent file is not an error
-// (nothing to strip). The rewrite is atomic and preserves the existing file's
-// mode (atomicWriteFile, no-resolve on this path), so a crash mid-strip cannot
-// leave a half-written frr.conf.
+// (nothing to strip). The rewrite goes through atomicWriteFile's single
+// #16046 decision (mode capped at 0640, service-readable or rejected
+// before publication; no-resolve on this path), so a crash mid-strip
+// cannot leave a half-written frr.conf.
 //
 // #10100 R-2: a symlinked path is REFUSED (non-nil, no read-through, no write)
 // — ReadFile+WithResolveSymlinks would otherwise replace content AT THE TARGET,
@@ -1437,9 +1439,10 @@ func StripManagedSectionFile(path string) error {
 // half-written file is what creates the orphaned-begin-marker state
 // handled in writeManagedSection).
 //
-// The base options reproduce this function's pre-#1894 semantics verbatim
-// (they were lifted from here, see pkg/fsatomic):
-//   - WithPreserveExisting: an existing target's mode/ownership is
+// The fsatomic options are built by planFRRWrite (one stat + one frr-group
+// resolution per write; see frrWritePlan for the full decision table):
+//   - WithPreserveExisting (preserve plans only): an existing target's
+//     ownership (and mode, capped at the caller's perm, #16046) is
 //     reapplied on the temp fd (fchmod/fchown before rename, no
 //     path race; chown only when the owner differs, failure surfaced),
 //     falling back to perm for a new file.
@@ -1453,59 +1456,185 @@ func StripManagedSectionFile(path string) error {
 // parent-directory fsync that was missing here, making the rename
 // itself crash-safe.
 //
-// #4484 L-6: the managed section carries routing-authentication secrets
-// (BGP TCP-MD5, OSPF/IS-IS/RIP keys), so frr.conf must not be
-// world-readable. Callers now pass perm 0640 instead of the old 0644.
-// A 0640 file is only readable by its owner and group, so on a FRESH
-// create (no operator file to preserve) we install it owned root:<frr>
-// via WithOwner so the unprivileged frr daemons (group frr) can still
-// read it. See atomicWriteOwnerOpt for the fresh-only + best-effort
-// resolution rules that keep this from ever stranding a running FRR or
-// restamping an operator-owned file.
+// #4484 L-6 / #16046: the managed section carries routing-authentication
+// secrets (BGP TCP-MD5, OSPF/IS-IS/RIP keys), so frr.conf must not be
+// world-readable. Callers pass perm 0640 instead of the old 0644 — a
+// FRESH write always lands exactly 0640 (root:frr when the group
+// resolves, root:root otherwise; the residual in fold review was never
+// the fresh path, it was the existing-file floor below).
+//
+// Invariant for every SUCCESSFUL write through here (both callers:
+// writeManagedSection, which adds secrets, and StripManagedSectionFile,
+// which removes them): the published file (a) grants no other-read/
+// write (mode subset of caller's perm, bit-wise) and (b) does not drop
+// a reader the service principal (frr uid/gid, groups frr+frrvty —
+// Debian frrcommon FRR_USER/FRR_GROUP=frr) had on the prior inode via
+// the owner, group, or other arm. When both cannot be established the
+// write FAILS before publication and the old inode is left untouched:
+// an apply that cannot be made safe is an error, never an insecure or
+// unreadable success.
 func atomicWriteFile(path string, data []byte, perm os.FileMode, resolveSymlinks bool) error {
-	opts := []fsatomic.Option{
-		fsatomic.WithPreserveExisting(),
+	plan, err := planFRRWrite(path, perm)
+	if err != nil {
+		return err
 	}
+	opts := plan.options()
 	if resolveSymlinks {
 		opts = append(opts, fsatomic.WithResolveSymlinks())
 	}
-	if owner, ok := atomicWriteOwnerOpt(path); ok {
-		opts = append(opts, owner)
-	}
-	return fsatomic.WriteFileDurable(path, data, perm, opts...)
+	return fsatomic.WriteFileDurable(path, data, plan.writePerm, opts...)
 }
 
-// atomicWriteOwnerOpt returns a WithOwner(0, frr-gid) option, and ok=false
-// when no ownership override should be applied. It returns an option ONLY
-// when BOTH:
-//
-//   - the target does not already exist — an existing frr.conf keeps its
-//     own mode AND ownership (WithPreserveExisting, and no WithOwner here),
-//     so a commit never restamps an operator's chosen owner (#4484 L-6
-//     "must not override an operator's existing ownership"); and
-//   - the frr group resolves — so we never chown a fresh file to a gid we
-//     could not verify. When the group is absent (FRR not installed — a dev
-//     host or a unit test) we skip the override and the file lands 0640
-//     root:root, which is harmless because nothing reads frr.conf without a
-//     running FRR. This mirrors the pkg/dhcpserver #2450 Kea-memfile owner
-//     handling: own the file by the unprivileged runtime user so a
-//     tightened mode stays readable, best-effort when that user is absent.
-//
-// os.Stat follows symlinks, matching WithResolveSymlinks: a symlink to an
-// existing file is treated as existing (preserve), a dangling symlink as a
-// fresh create (own root:frr on the resolved target).
-func atomicWriteOwnerOpt(path string) (fsatomic.Option, bool) {
-	if _, err := os.Stat(path); err == nil {
-		return nil, false // exists → preserve operator mode+ownership
+// frrWritePlan is the SINGLE mode/owner decision for one frr.conf write
+// (#16046 folds 1+2). planFRRWrite makes it from ONE os.Stat snapshot
+// and ONE resolveFRRGroup result, both carried in the plan — the mode
+// and owner arms can never disagree mid-write (fold-2 claim 4: the old
+// preserveFloorPerm+atomicWriteOwnerOpt pair re-statted and re-resolved
+// independently, so a resolver flip between them could publish 0640
+// without migration or 0644 with it).
+type frrWritePlan struct {
+	// writePerm is the perm handed to fsatomic: the capped result for
+	// preserve plans, the grant-adjusted result for explicit plans.
+	writePerm os.FileMode
+	// preserve selects fsatomic.WithPreserveExisting; false means the
+	// plan pins mode+owner explicitly (fresh create, group migration,
+	// or a group-read grant).
+	preserve bool
+	// owner, when non-nil, is installed via fsatomic.WithOwner.
+	owner *frrWriteOwner
+}
+
+type frrWriteOwner struct{ uid, gid int }
+
+func (p frrWritePlan) options() []fsatomic.Option {
+	var opts []fsatomic.Option
+	if p.preserve {
+		opts = append(opts, fsatomic.WithPreserveExisting())
 	}
-	gid, ok := resolveFRRGroup()
+	if p.owner != nil {
+		opts = append(opts, fsatomic.WithOwner(p.owner.uid, p.owner.gid))
+	}
+	return opts
+}
+
+// planFRRWrite decides mode+owner for one write from one stat + one
+// group resolution. perm is the caller's request (0640 at both call
+// sites). Decision table (existing = prior inode's mode/uid/gid):
+//
+//   - Fresh (no existing file): writePerm=perm, explicit owner
+//     (0, frr-gid) when the group resolves (root:frr, group-readable
+//     from first install); else plain perm (root:root — harmless, no
+//     FRR is installed to read it). Always subset of perm.
+//   - Existing, mode subset of perm (nothing to tighten): pure
+//     preserve — operator mode+ownership untouched, even if already
+//     unreadable to the service (0600 root:root was already so; not
+//     this write's regression to fix or worsen).
+//   - Existing, wider than perm, group unresolved: ERROR. Publishing
+//     new content at the floored (world-readable) mode was the
+//     original #16046 failure (fold-2 claim 2); tightening without a
+//     known service group could strand the reader. Fail closed,
+//     old inode untouched, retry when resolution recovers.
+//   - Existing, wider, group resolved, final gid == service gid and
+//     capped mode keeps group-read: pure preserve (cap via fsatomic).
+//   - Existing, wider, group resolved, otherwise (gid must migrate,
+//     and/or capped mode lacks group-read — e.g. 0604, whose only
+//     service access was other-read): explicit plan — gid is PINNED to
+//     the service gid (uid preserved; pinning even when the file
+//     already carries that gid, because without preserve fsatomic
+//     would install the temp inode's root/process group instead —
+//     fold-3) and group-read is GRANTED if the capped mode lacks it.
+//     Granting 0040 is the one deliberate
+//     exception to strict bitwise preservation: without it the capped
+//     file drops the service reader (fold-2 claim 3); the result is
+//     still subset of perm (0640 has the group-read bit), never wider
+//     than the caller asked.
+//
+// A non-Stat_t platform cannot prove ownership; wider files fail
+// closed there rather than guess (Linux appliance always has Stat_t).
+func planFRRWrite(path string, perm os.FileMode) (frrWritePlan, error) {
+	// ONE resolution for the whole write.
+	frrGID, groupOK := resolveFRRGroup()
+	// Installability annotates that one resolution (it does not
+	// re-resolve): a non-root process can only chown to its egid or a
+	// supplementary group. Production resolveFRRGroup already gates
+	// root, so in production groupOK implies installable; injected
+	// test resolvers may resolve to a foreign gid, in which case no
+	// ownership can be installed here — mode decisions then treat the
+	// group as unknown except where no chown is needed at all.
+	installable := false
+	if groupOK {
+		installable = os.Geteuid() == 0 || gidInstallable(frrGID)
+	}
+	fi, err := os.Stat(path) // ONE snapshot (follows symlinks, as before)
+	if err != nil {
+		// Fresh create. Pin the service group only when it differs
+		// from what the temp inode already carries (process egid):
+		// pinning (0, egid) on a non-root process would attempt a
+		// uid-changing fchown fsatomic cannot skip (uid differs) and
+		// fail EPERM. Root (production) always pins (0, frr-gid).
+		plan := frrWritePlan{writePerm: perm}
+		if groupOK && installable && (os.Geteuid() == 0 || frrGID != os.Getegid()) {
+			// uid 0: root owns/writes; the frr group needs only the
+			// group-read bit of 0640 (daemons load at startup).
+			plan.owner = &frrWriteOwner{uid: 0, gid: frrGID}
+		}
+		return plan, nil
+	}
+	existing := fi.Mode().Perm()
+	if existing&^perm == 0 {
+		return frrWritePlan{writePerm: perm, preserve: true}, nil
+	}
+	// Tightening required from here. Ownership must be provable.
+	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return nil, false
+		return frrWritePlan{}, fmt.Errorf("frr.conf %s: cannot determine existing ownership (no Stat_t); refusing to tighten mode %04o past %04o without a proven service group (#16046)", path, existing, perm)
 	}
-	// uid 0: root owns/writes the xpf-managed frr.conf; the frr group only
-	// needs read access (the daemons load the file at startup), which the
-	// group-read bit of 0640 grants.
-	return fsatomic.WithOwner(0, gid), true
+	if groupOK && int(st.Gid) == frrGID {
+		// Already the service group. If the capped mode keeps
+		// group-read, pure preserve suffices (no chown). If not
+		// (0604-class: service read via other only), group-read is
+		// granted via an explicit plan — which MUST also pin the
+		// owner to (existing uid, service gid): a non-preserve write
+		// without WithOwner installs the temp inode's group
+		// (root/process), silently dropping the service group the
+		// grant was meant for (fold-3).
+		capped := existing & perm
+		if capped&0o040 != 0 {
+			return frrWritePlan{writePerm: perm, preserve: true}, nil
+		}
+		return frrWritePlan{writePerm: capped | 0o040, owner: &frrWriteOwner{uid: int(st.Uid), gid: frrGID}}, nil
+	}
+	if !groupOK || !installable {
+		// Cannot name (or cannot install) the service group: tightening
+		// would either publish new content world-readable at the
+		// floored mode (original #16046 failure) or strand the reader
+		// at 0640 <other-group>. Fail closed, old inode untouched.
+		return frrWritePlan{}, fmt.Errorf("frr.conf %s: mode %04o is wider than %04o but the %s group cannot be resolved and installed; refusing to publish new content world-readable or tighten into a service-unreadable file - resolve the group (run as root with FRR installed) and retry (#16046)", path, existing, perm, frrGroupName)
+	}
+	// Migrate: service gid, operator uid, group-read granted if lost.
+	capped := existing & perm
+	if capped&0o040 == 0 {
+		capped |= 0o040
+	}
+	return frrWritePlan{writePerm: capped, owner: &frrWriteOwner{uid: int(st.Uid), gid: frrGID}}, nil
+}
+
+// gidInstallable reports whether this process may chgrp a file to gid:
+// root, own egid, or a supplementary group.
+func gidInstallable(gid int) bool {
+	if gid == os.Getegid() {
+		return true
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return false
+	}
+	for _, g := range groups {
+		if g == gid {
+			return true
+		}
+	}
+	return false
 }
 
 // frrGroupName is the unprivileged group the FRR daemons run under (Debian/

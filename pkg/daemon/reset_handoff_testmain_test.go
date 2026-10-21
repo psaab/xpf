@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/frr"
 )
 
 // TestMain points package-level external/stateful paths at disposable locations.
@@ -58,6 +59,11 @@ func TestMain(m *testing.M) {
 	sshdPAMModuleAvailable = func() bool { return true }
 	sethostname = func([]byte) error { return os.ErrPermission }
 	hostnamePath = filepath.Join(dir, "hostname")
+	// #16046 fold-2: default frr-group resolution for daemon fixtures
+	// that write a seeded 0644 frr.conf through a NewForTest manager —
+	// the process egid as service gid (pure-preserve tightening, no
+	// root/host group needed). Per-test stubs restore via the seam.
+	_ = frr.SetFRRGroupResolverForTest(func() (int, bool) { return os.Getegid(), true })
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

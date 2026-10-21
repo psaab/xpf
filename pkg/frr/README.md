@@ -18,21 +18,31 @@ no-resolve so a swapped-in link is replaced, never followed into a victim
 file. The file carries operator content outside the managed section, so it
 must survive power loss.
 
-**File mode (#4484 L-6):** the managed section carries routing-auth
+**File mode (#4484 L-6 / #16046):** the managed section carries routing-auth
 secrets (BGP TCP-MD5, OSPF/IS-IS/RIP keys), so `frr.conf` must not be
-world-readable. The write perm is **0640** (was 0644). Because 0640 is
-readable only by owner+group, a **fresh** create (no operator file to
-preserve) is installed **owned `root:frr`** via `fsatomic.WithOwner`, so
-the unprivileged frr daemons (group `frr`) can still read it —
-`atomicWriteOwnerOpt` resolves the frr gid (`resolveFRRGroup`). The
-owner override is applied **only** when (a) the target does not already
-exist — an existing operator file keeps its own mode+ownership
-(`WithPreserveExisting`, never restamped) — AND (b) the process is root
-and the `frr` group resolves. When the group is absent (FRR not
-installed — a dev host / unit test) or the process is non-root the
-override is skipped and the file lands 0640 `root:root` (harmless:
-nothing reads `frr.conf` without a running FRR). This mirrors the
-pkg/dhcpserver #2450 Kea-memfile ownership handling.
+world-readable. The write perm is **0640** (was 0644); a **fresh** create
+always lands exactly 0640, installed **owned `root:frr`** via
+`fsatomic.WithOwner` when root + the group resolves (0640 `root:root`
+otherwise — harmless, no FRR installed to read it). Existing files are
+decided by the single `planFRRWrite` (one stat + one `resolveFRRGroup`
+per write): mode ⊆ 0640 → pure preserve; wider → capped by fsatomic
+(`existing & 0640`). **Every successful write is non-world-readable and
+keeps the service reader; otherwise it fails before publication with
+the old inode untouched:**
+
+- The FRR daemons run as `frr:frr` (Debian `frrcommon.sh`:
+  `FRR_USER=frr`, `FRR_GROUP=frr`, `FRR_CONFIG_MODE=0640`; stock
+  `/etc/frr/frr.conf` is `root:root 0644`), so capping `root:root 0644`
+  to `0640 root:root` would deny the reader. When tightening a
+  non-service-group file, only the group migrates to the frr gid (uid
+  preserved); a capped mode lacking group-read (e.g. `0604`, whose only
+  service access was other-read) gets group-read **granted** — the one
+  deliberate exception to bitwise preservation, still ⊆ 0640.
+- When the frr group cannot be named AND installed (unresolved, or a
+  foreign gid a non-root process cannot chown to), a wider file's write
+  **fails closed** — it never publishes new secrets at a floored
+  world-readable mode, and never tightens into unreadability. Retry
+  once resolution recovers (root with FRR installed).
 
 ## Real FRR validation
 

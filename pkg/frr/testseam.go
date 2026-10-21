@@ -96,3 +96,17 @@ func NewForTest(confPath string, exec frrExecutor) *Manager {
 	m.DisableDegradedRetry()
 	return m
 }
+
+// SetFRRGroupResolverForTest replaces the frr-group resolver (the seam
+// planFRRWrite consults exactly once per frr.conf write, #16046) and
+// returns a restore func. It lets cross-package tests (daemon boot
+// paths writing through NewForTest managers, grpcapi zeroize) run
+// deterministically without root or a host frr group: pass a resolver
+// returning the test process's egid so seeded 0644 files tighten by
+// pure preserve. Test-only; production never calls it, and it is not
+// safe under t.Parallel (process-global seam).
+func SetFRRGroupResolverForTest(fn func() (int, bool)) (restore func()) {
+	prev := resolveFRRGroup
+	resolveFRRGroup = fn
+	return func() { resolveFRRGroup = prev }
+}

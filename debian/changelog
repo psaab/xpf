@@ -1,5 +1,21 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Cap fsatomic preserved mode at the caller perm: WithPreserveExisting
+    lifted an existing file's mode wholesale, so a legacy 0644 frr.conf
+    stayed world-readable after every managed apply despite the FRR
+    writer requesting 0640 for a file carrying routing-auth secrets.
+    Preserve now keeps ownership and a stricter-or-equal mode
+    (existing & perm) and never widens past the caller perm. One
+    single planFRRWrite decision (one stat + one group resolution)
+    per frr.conf write: tightening migrates the group to the frr gid
+    (uid preserved) and grants group-read where the cap lost it
+    (0604 other-read-only), and when the frr group cannot be named
+    and installed the write fails before publication with the old
+    file untouched — never a world-readable or service-unreadable
+    success, so the frr:frr daemons can always read the result (#16046).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Fix split-RG punt-origin fabric return: on the WAN owner (fw0) the
     HA-suppressed connected LAN prefix makes the FIB answer the LAN
     return target with the WAN gateway default route, so the reverse

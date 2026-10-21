@@ -22,14 +22,17 @@
 //   - The target INODE is replaced and perm is enforced on every write.
 //     This differs from os.WriteFile over an existing file, which keeps
 //     the existing inode's mode/owner. Pass WithPreserveExisting to
-//     lift mode/ownership from an existing target instead (fchmod /
-//     fchown on the temp fd, never a path race). Pass WithOwner(uid,
+//     lift ownership (and a stricter-or-equal mode) from an existing
+//     target instead (fchmod / fchown on the temp fd, never a path
+//     race): the preserved mode is capped at the caller's perm
+//     (existing & perm), so preserve can tighten but NEVER widen past
+//     the perm the caller requested (#16046). Pass WithOwner(uid,
 //     gid) to install the new inode already owned by a specific
 //     user/group (fchown the temp fd before rename — required for
 //     DurableState authorized_keys so a crash can never leave
 //     root-owned keys sshd refuses). If both WithOwner and
 //     WithPreserveExisting are set, owner = WithOwner's, mode =
-//     preserved-existing's.
+//     preserved-existing's capped at perm.
 //   - A symlinked target is replaced by a regular file unless
 //     WithResolveSymlinks is passed, in which case the write lands on
 //     the resolved target (and, for WriteFileDurable, the directory
@@ -103,11 +106,16 @@ type options struct {
 // Option configures WriteFileAtomic / WriteFileDurable.
 type Option func(*options)
 
-// WithPreserveExisting lifts mode and ownership from an existing target
-// file instead of enforcing the caller's perm. Ownership is restored
+// WithPreserveExisting lifts ownership (and mode, capped at the
+// caller's perm) from an existing target file instead of enforcing
+// the caller's perm wholesale. Ownership is restored
 // with fchown on the temp fd only when it actually differs from the
 // temp file's owner; a chown failure is surfaced, never silently
 // renamed over a differently-owned target (FRR #1883 semantics).
+// The mode is existing & perm: preserve may keep a stricter mode
+// (0600 under a 0640 request stays 0600) but never installs a mode
+// wider than the caller asked for (#16046 — a legacy 0644 frr.conf
+// under a 0640 request lands 0640, not 0644).
 func WithPreserveExisting() Option {
 	return func(o *options) { o.preserveExisting = true }
 }
@@ -122,9 +130,9 @@ func WithPreserveExisting() Option {
 // window by owning the inode atomically at install time.
 //
 // Precedence vs WithPreserveExisting: WithPreserveExisting may lift the
-// MODE from an existing target, but an explicit WithOwner always WINS
-// OWNERSHIP. If both are passed, owner = WithOwner's uid/gid, mode =
-// the preserved-existing mode.
+// MODE from an existing target (capped at perm, #16046), but an explicit
+// WithOwner always WINS OWNERSHIP. If both are passed, owner =
+// WithOwner's uid/gid, mode = preserved-existing's capped at perm.
 func WithOwner(uid, gid int) Option {
 	return func(o *options) { o.owner = &ownerIDs{uid: uid, gid: gid} }
 }
@@ -293,7 +301,13 @@ func writeFile(path string, data []byte, perm os.FileMode, durable bool, opts ..
 	)
 	if o.preserveExisting {
 		if fi, err := statFile(target); err == nil {
-			mode = fi.Mode().Perm()
+			// #16046: never widen beyond the caller's perm. Capping
+			// (existing & perm) keeps a stricter operator mode
+			// (0600 & 0640 = 0600) while stripping any bit the
+			// caller did not grant (0644 & 0640 = 0640, so routing
+			// secrets in a legacy world-readable frr.conf do not
+			// stay world-readable on every managed apply).
+			mode = fi.Mode().Perm() & perm
 			if ids, ok := fileOwner(fi); ok {
 				setOwner = true
 				owner = ids
@@ -301,7 +315,7 @@ func writeFile(path string, data []byte, perm os.FileMode, durable bool, opts ..
 		}
 	}
 	// WithOwner always wins ownership (explicit beats preserved-existing);
-	// the mode lifted by WithPreserveExisting above is left untouched.
+	// the capped mode lifted by WithPreserveExisting above is left untouched.
 	if o.owner != nil {
 		setOwner = true
 		owner = *o.owner
