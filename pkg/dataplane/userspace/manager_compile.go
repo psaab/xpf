@@ -1931,6 +1931,9 @@ func (m *Manager) ensureRequiredSnapshotProtocolLocked(snap *ConfigSnapshot) err
 	if err := m.ensureNAT64RoutingInstanceListProtocolLocked(cfg); err != nil {
 		return err
 	}
+	if err := m.ensurePMechProtocolLocked(snap); err != nil {
+		return err
+	}
 	// Between the existing pair, secure-tunnel runs before egress-zone. Since
 	// #6648 they no longer fence the same number — the secure-tunnel gate asks
 	// "can this helper read the refusal contract?" (floor 7) and the egress-zone
