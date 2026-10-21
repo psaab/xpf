@@ -206,12 +206,12 @@ type schemaNode struct {
 	// splitters consult effectiveArgs so a bare DN never steals the next
 	// statement's keyword as its value.
 	identityBareDN bool
-	valueHint       ValueHint // hint for dynamic value completion (when args > 0)
-	desc            string    // description shown in completion help
-	placeholder     string    // Junos-style placeholder (e.g., "<interface-name>")
-	midKeyword      string    // fixed keyword in the middle of args (e.g., "to-zone")
-	midKeywordAt    int       // 1-based arg position where midKeyword appears (e.g., 2 for "from-zone X to-zone Y")
-	compoundKey     bool      // children form compound key (e.g., "family inet6" → Keys=["family","inet6"])
+	valueHint      ValueHint // hint for dynamic value completion (when args > 0)
+	desc           string    // description shown in completion help
+	placeholder    string    // Junos-style placeholder (e.g., "<interface-name>")
+	midKeyword     string    // fixed keyword in the middle of args (e.g., "to-zone")
+	midKeywordAt   int       // 1-based arg position where midKeyword appears (e.g., 2 for "from-zone X to-zone Y")
+	compoundKey    bool      // children form compound key (e.g., "family inet6" → Keys=["family","inet6"])
 
 	// closedWorld opts this subtree in to closed-world validation: when
 	// true, an unmodeled child keyword under this subtree is REJECTED at
@@ -439,6 +439,28 @@ func IsTopLevelStanza(name string) bool {
 	return ok
 }
 
+// schemaGrammarKeywords accumulates every keyword registered in the
+// schema grammar (#16090 fold 6): isPublicVocabulary derives its
+// vocabulary from this registry instead of a hand list. Populated
+// explicitly in init() below — NEVER via a sync.Once callback that
+// references setSchema from schema_walk.go: belt -> scrub ->
+// schemaErrorf is named by schema initializers, so that reference
+// is a proven initialization cycle.
+var schemaGrammarKeywords = map[string]bool{}
+
+func registerSchemaKeywords(n *schemaNode) {
+	if n == nil {
+		return
+	}
+	for kw, child := range n.children {
+		schemaGrammarKeywords[kw] = true
+		registerSchemaKeywords(child)
+		if child != nil {
+			registerSchemaKeywords(child.wildcard)
+		}
+	}
+}
+
 func init() {
 	// Wire groups wildcard to mirror top-level schema children.
 	// This allows "set groups <name> security ..." etc. to parse correctly.
@@ -450,4 +472,6 @@ func init() {
 		}
 		groupWild.children[k] = v
 	}
+	registerSchemaKeywords(setSchema)
+	registerSchemaKeywords(groupWild)
 }

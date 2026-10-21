@@ -1187,13 +1187,83 @@ func checkRedactionPlaceholder(t *ConfigTree) error {
 	if t == nil {
 		return nil
 	}
-	if path := findRedactionPlaceholder(t.Children, nil); path != "" {
-		return fmt.Errorf("%w (at %q)", errRedactionPlaceholderIngest, path)
+	// Fold 5 (#16090): the "(at %q)" location names the stanza/leaf
+	// NAME path only — never the rendered flattened path. The old form
+	// embedded candidate VALUES (a preceding secret operand on the
+	// same leaf, or the whole quoted change-configuration payload),
+	// and every string-scrub layer kept losing to deeper escaping.
+	// Names are schema vocabulary, not operator data.
+	if loc := findRedactionPlaceholder(t.Children, nil); loc != "" {
+		return fmt.Errorf("%w (at %s)", errRedactionPlaceholderIngest, loc)
 	}
-	if path := findRedactedURL(t.Children, nil); path != "" {
-		return fmt.Errorf("%w (at %q)", errRedactedURLIngest, path)
+	if loc := findRedactedURL(t.Children, nil); loc != "" {
+		return fmt.Errorf("%w (at %s)", errRedactedURLIngest, loc)
 	}
 	return nil
+}
+
+// redactedLocName renders the name-only location for a guard hit:
+// the flattened path up to and including the offending leaf KEYWORD
+// (plus instance names, which are identifiers, not values). For an
+// embedded change-configuration hit the location is the event-policy
+// stanza path without the payload token. Callers pass the flattened
+// path and the index of the last token to keep.
+func redactedLocName(full []string, keep int) string {
+	if keep >= len(full) {
+		keep = len(full) - 1
+	}
+	if keep < 0 {
+		return ""
+	}
+	return strings.Join(redactSecretPath(full[:keep+1]), " ")
+}
+
+// secretLeafKeywordIndex returns the index in full of the keyword that
+// opened the secret span containing value index idx: walk back from
+// idx-1 while the token is itself secret-indexed as a value.
+func secretLeafKeywordIndex(full []string, idx int) int {
+	keep := idx - 1
+	for keep > 0 {
+		isVal := false
+		for _, si := range secretIndices(full[:keep+1]) {
+			if si == keep {
+				isVal = true
+				break
+			}
+		}
+		if !isVal {
+			break
+		}
+		keep--
+	}
+	if keep < 0 {
+		keep = idx
+	}
+	return keep
+}
+
+// urlLeafKeywordIndex is the urlLeafIndices twin: the keyword is the
+// token immediately before the first URL value token; walk back over
+// any additional URL-indexed tokens.
+func urlLeafKeywordIndex(full []string, idx int) int {
+	keep := idx - 1
+	for keep > 0 {
+		isVal := false
+		for _, ui := range urlLeafIndices(full[:keep+1]) {
+			if ui == keep {
+				isVal = true
+				break
+			}
+		}
+		if !isVal {
+			break
+		}
+		keep--
+	}
+	if keep < 0 {
+		keep = idx
+	}
+	return keep
 }
 
 // findRedactedURL is the URL-leaf mirror of findRedactionPlaceholder (#6703).
@@ -1210,7 +1280,7 @@ func findRedactedURL(nodes []*Node, base []string) string {
 		full := append(append([]string(nil), base...), n.Keys...)
 		for _, idx := range urlLeafIndices(full) {
 			if idx >= len(base) && idx < len(full) && strings.Contains(n.Keys[idx-len(base)], SecretRedacted) {
-				return strings.Join(full[:idx+1], " ")
+				return redactedLocName(full, urlLeafKeywordIndex(full, idx))
 			}
 		}
 		if hit, _ := embeddedRedactionHit15209(n, full, base); hit != "" {
@@ -1240,7 +1310,7 @@ func findRedactionPlaceholder(nodes []*Node, base []string) string {
 		full := append(append([]string(nil), base...), n.Keys...)
 		for _, idx := range secretIndices(full) {
 			if idx >= len(base) && idx < len(full) && n.Keys[idx-len(base)] == SecretDataPlaceholder {
-				return strings.Join(full[:idx+1], " ")
+				return redactedLocName(full, secretLeafKeywordIndex(full, idx))
 			}
 		}
 		if _, hit := embeddedRedactionHit15209(n, full, base); hit != "" {
@@ -1313,7 +1383,7 @@ func embeddedRedactionHit15209(n *Node, full, base []string) (string, string) {
 	}
 	if quoted(0) {
 		for j := range tail {
-			cmdPath := strings.Join(full[:len(base)+tailStart+j+1], " ")
+			cmdPath := redactedLocName(full, len(base)+tailStart-1)
 			if hit := embeddedCommandURLHit15209(tail[j], cmdPath); hit != "" {
 				return hit, ""
 			}
@@ -1324,7 +1394,7 @@ func embeddedRedactionHit15209(n *Node, full, base []string) (string, string) {
 		return "", ""
 	}
 	joined := strings.Join(tail, " ")
-	nodePath := strings.Join(full, " ")
+	nodePath := redactedLocName(full, len(base)+tailStart-1)
 	if hit := embeddedCommandURLHit15209(joined, nodePath); hit != "" {
 		return hit, ""
 	}
@@ -1349,7 +1419,7 @@ func embeddedChildRedactionHit15209(child *Node, parentFull []string) (string, s
 		(child.Keys[0] == "" || strings.Contains(child.Keys[0], " ")))
 	if quotedFirst {
 		for j := range child.Keys {
-			cmdPath := strings.Join(childFull[:len(parentFull)+j+1], " ")
+			cmdPath := redactedLocName(childFull, len(parentFull)-1)
 			if hit := embeddedCommandURLHit15209(child.Keys[j], cmdPath); hit != "" {
 				return hit, ""
 			}
@@ -1360,7 +1430,7 @@ func embeddedChildRedactionHit15209(child *Node, parentFull []string) (string, s
 		return "", ""
 	}
 	joined := strings.Join(child.Keys, " ")
-	nodePath := strings.Join(childFull, " ")
+	nodePath := redactedLocName(childFull, len(parentFull)-1)
 	if hit := embeddedCommandURLHit15209(joined, nodePath); hit != "" {
 		return hit, ""
 	}

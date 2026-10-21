@@ -88,6 +88,15 @@ const (
 // structure, not just the generic `$id$salt$checksum` shape. In particular,
 // `chpasswd -e` accepts malformed hashes without necessarily rejecting the
 // write, leaving PAM unable to verify the password.
+//
+// #16066: no error from this validator (or its per-algorithm helpers) may
+// interpolate the raw value. A mistyped plaintext IS the secret, and callers
+// log/return these errors verbatim (the daemon apply boundary slog.Warn +
+// fail), which widens the audience from the root-only config store to
+// journal/syslog forwarding and support bundles. Errors name only the defect
+// class and the expected form; the id is echoed only in the unreachable
+// default arm where it is already a recognized non-secret algorithm token.
+// The schema-walk redaction (#8434) is retained as defense in depth.
 func ValidateCryptHash(raw string, _ *Config) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected a crypt(3) hash, e.g. from `openssl passwd -6`)")
@@ -102,105 +111,105 @@ func ValidateCryptHash(raw string, _ *Config) error {
 		body = body[1:]
 	}
 	if !strings.HasPrefix(body, "$") {
-		return fmt.Errorf("not an encrypted password hash (got %q) — plaintext is not "+
-			"allowed; generate a hash with `openssl passwd -6` or `mkpasswd -m sha512crypt`", raw)
+		return fmt.Errorf("not an encrypted password hash — plaintext is not " +
+			"allowed; generate a hash with `openssl passwd -6` or `mkpasswd -m sha512crypt`")
 	}
 	fields := strings.Split(body, "$")
 	if len(fields) < 4 {
-		return fmt.Errorf("malformed crypt hash %q — expected a complete modular crypt hash", raw)
+		return fmt.Errorf("malformed crypt hash — expected a complete modular crypt hash")
 	}
 	id := fields[1]
 	if !cryptModularIDs[id] {
-		return fmt.Errorf("unsupported crypt hash id %q in %q — accepted ids: "+
-			"2a, 2b, 2y, 6, 7, y, gy", id, raw)
+		return fmt.Errorf("unsupported crypt hash id — accepted ids: " +
+			"2a, 2b, 2y, 6, 7, y, gy")
 	}
 	for i, field := range fields[2:] {
 		if field == "" {
-			return fmt.Errorf("empty field in crypt hash %q — a doubled or trailing '$' is malformed", raw)
+			return fmt.Errorf("empty field in crypt hash — a doubled or trailing '$' is malformed")
 		}
 		for _, r := range field {
 			if !cryptFieldRune(r) && !(id == "6" && len(fields) == 5 && i == 0 && r == '=') {
-				return fmt.Errorf("invalid character %q in crypt hash %q", r, raw)
+				return fmt.Errorf("invalid character in crypt hash")
 			}
 		}
 	}
 
 	switch id {
 	case "6":
-		return validateSHA512Crypt(fields, raw)
+		return validateSHA512Crypt(fields)
 	case "2a", "2b", "2y":
-		return validateBcrypt(fields, raw)
+		return validateBcrypt(fields)
 	case "y", "gy":
-		return validateYescrypt(fields, raw)
+		return validateYescrypt(fields)
 	case "7":
-		return validateScrypt(fields, raw)
+		return validateScrypt(fields)
 	default:
 		return fmt.Errorf("unsupported crypt hash id %q", id)
 	}
 }
 
-func validateSHA512Crypt(fields []string, raw string) error {
+func validateSHA512Crypt(fields []string) error {
 	if len(fields) != 4 && len(fields) != 5 {
-		return fmt.Errorf("malformed sha512crypt hash %q — expected optional rounds, salt, and 86-character checksum", raw)
+		return fmt.Errorf("malformed sha512crypt hash — expected optional rounds, salt, and 86-character checksum")
 	}
 	saltField := 2
 	if len(fields) == 5 {
 		const prefix = "rounds="
 		if !strings.HasPrefix(fields[2], prefix) {
-			return fmt.Errorf("malformed sha512crypt parameters in %q", raw)
+			return fmt.Errorf("malformed sha512crypt parameters")
 		}
 		roundsText := strings.TrimPrefix(fields[2], prefix)
 		rounds, err := strconv.ParseUint(roundsText, 10, 32)
 		if err != nil || strconv.FormatUint(rounds, 10) != roundsText ||
 			rounds < minSHA512Rounds || rounds > 999_999_999 {
-			return fmt.Errorf("sha512crypt rounds in %q must be between %d and 999999999",
-				raw, minSHA512Rounds)
+			return fmt.Errorf("sha512crypt rounds must be between %d and 999999999",
+				minSHA512Rounds)
 		}
 		saltField = 3
 	}
 	if len(fields[saltField]) < minCryptSaltLength || len(fields[saltField]) > 16 {
-		return fmt.Errorf("sha512crypt salt in %q must be between %d and 16 characters",
-			raw, minCryptSaltLength)
+		return fmt.Errorf("sha512crypt salt must be between %d and 16 characters",
+			minCryptSaltLength)
 	}
 	if len(fields[saltField+1]) != 86 {
-		return fmt.Errorf("sha512crypt checksum in %q must be exactly 86 characters", raw)
+		return fmt.Errorf("sha512crypt checksum must be exactly 86 characters")
 	}
 	return nil
 }
 
-func validateBcrypt(fields []string, raw string) error {
+func validateBcrypt(fields []string) error {
 	if len(fields) != 4 || len(fields[2]) != 2 || len(fields[3]) != 53 {
-		return fmt.Errorf("malformed bcrypt hash %q — expected a two-digit cost and 53-character salt/checksum field", raw)
+		return fmt.Errorf("malformed bcrypt hash — expected a two-digit cost and 53-character salt/checksum field")
 	}
 	if fields[2][0] < '0' || fields[2][0] > '9' || fields[2][1] < '0' || fields[2][1] > '9' {
-		return fmt.Errorf("bcrypt cost in %q must be a two-digit number", raw)
+		return fmt.Errorf("bcrypt cost must be a two-digit number")
 	}
 	cost, err := strconv.Atoi(fields[2])
 	if err != nil || cost < minBcryptCost || cost > 31 {
-		return fmt.Errorf("bcrypt cost in %q must be between %d and 31", raw, minBcryptCost)
+		return fmt.Errorf("bcrypt cost must be between %d and 31", minBcryptCost)
 	}
 	return nil
 }
 
-func validateYescrypt(fields []string, raw string) error {
+func validateYescrypt(fields []string) error {
 	if len(fields) != 5 || len(fields[2]) != 3 || fields[2][0] != 'j' ||
 		fields[2][2] != 'T' || len(fields[3]) < minCryptSaltLength ||
 		len(fields[3]) > 86 || len(fields[4]) != 43 {
-		return fmt.Errorf("malformed yescrypt hash %q — expected j<cost>T parameters, a salt of 8-86 characters, and a 43-character checksum", raw)
+		return fmt.Errorf("malformed yescrypt hash — expected j<cost>T parameters, a salt of 8-86 characters, and a 43-character checksum")
 	}
 	// In libxcrypt's yescrypt encoding, the second parameter character stores
 	// cost + 6 for costs 3-11. Require at least cost 5 (j9T, the default),
 	// and reject values above the supported maximum cost 11.
 	costCode := cryptBase64Value(fields[2][1])
 	if costCode < minYescryptCost+6 || costCode > 11+6 {
-		return fmt.Errorf("yescrypt cost in %q must be between %d and 11", raw, minYescryptCost)
+		return fmt.Errorf("yescrypt cost must be between %d and 11", minYescryptCost)
 	}
 	return nil
 }
 
-func validateScrypt(fields []string, raw string) error {
+func validateScrypt(fields []string) error {
 	if len(fields) != 4 || len(fields[2]) < 11 || len(fields[2]) > 97 || len(fields[3]) != 43 {
-		return fmt.Errorf("malformed scrypt hash %q — expected an 11-97-character setting and a 43-character checksum", raw)
+		return fmt.Errorf("malformed scrypt hash — expected an 11-97-character setting and a 43-character checksum")
 	}
 	return nil
 }

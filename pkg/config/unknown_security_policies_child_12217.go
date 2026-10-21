@@ -10,9 +10,16 @@ type unknownSecurityPoliciesChildSchemaError12217 struct {
 	path    string
 	keyword string
 	content string
+	// render, when set, is the pre-scrubbed final text Error()
+	// returns (#16090 fold 7): no field combination can reassemble
+	// a secret at render time.
+	render string
 }
 
 func (e *unknownSecurityPoliciesChildSchemaError12217) Error() string {
+	if e.render != "" {
+		return e.render
+	}
 	return fmt.Sprintf("%s: child %q content %q does not match the known non-enforcement grammar under the closed-world subtree",
 		e.path, e.keyword, e.content)
 }
