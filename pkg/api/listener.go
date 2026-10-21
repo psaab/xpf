@@ -296,6 +296,10 @@ func (s *Server) serveLegLocked(plan legPlan, ln net.Listener, isTLS bool) *list
 	// the plan's handler closes over, because they were allocated together —
 	// so pin / tighten can never operate on an object no request reads.
 	srv := plan.srv
+	// #16081: wrap once at serve time so every leg — Start, reconcile and
+	// test-installed legs alike — is behind the Server-wide connection
+	// gate, while leg.ln stays the raw listener for Addr()/Effective*.
+	bln := s.boundListener(ln)
 	leg := &listenerLeg{srv: srv, ln: ln, stopCh: make(chan struct{}), slot: plan.slot}
 	rootCtx := s.rootCtx
 	s.wg.Add(1)
@@ -308,9 +312,9 @@ func (s *Server) serveLegLocked(plan legPlan, ln net.Listener, isTLS bool) *list
 			if isTLS {
 				// The selector validates the current in-memory pair on every
 				// handshake, including clients that omit SNI.
-				serveErr <- srv.ServeTLS(ln, "", "")
+				serveErr <- srv.ServeTLS(bln, "", "")
 			} else {
-				serveErr <- srv.Serve(ln)
+				serveErr <- srv.Serve(bln)
 			}
 		}()
 

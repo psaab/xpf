@@ -119,6 +119,12 @@ type xpfCollector struct {
 	admissionRefusalsTotal       *prometheus.Desc
 	authzDenialsTotal            *prometheus.Desc
 	fabricStreamArgsUnboundTotal *prometheus.Desc
+	// #16081: REST connection-count bound refusals + current occupancy.
+	// Declared here, emitted from metrics_rest_conn_16081.go; the values
+	// live on the Server's gate, so there is no counter state on the
+	// collector to keep in step.
+	restConnRefusalsTotal *prometheus.Desc
+	restConnActive        *prometheus.Desc
 
 	// #9019: work the dataplane DECLINED to do. Both counters existed with no
 	// reader; see metrics_dataplane_silent_skips_9019.go.
@@ -1191,6 +1197,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.collectorPanicsTotal
 	ch <- c.managementTLSCertificateInvalidTotal
 	c.describeAdmissionRefusals(ch)
+	c.describeRESTConnBound(ch)
 	c.describeAuthzDenials(ch)
 	c.describeFabricStreamArgsUnbound(ch)
 	c.describeDataplaneSilentSkips(ch)
@@ -1820,6 +1827,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// exactly when a scrape is most likely to be refused, so emitting these
 	// after the dataplane gate would hide them in the case they matter most.
 	defer c.emitAdmissionRefusals(ch)
+	defer c.emitRESTConnBound(ch)
 	defer c.emitAuthzDenials(ch)
 	defer c.emitFabricStreamArgsUnbound(ch)
 	// #9019: also before the dataplane gate -- these report a dataplane that
