@@ -389,6 +389,21 @@ editing cmdtree.
     Basic, Bearer, or API-key credentials as every other protected endpoint.
     `/health` remains exempt. With `cfg.Auth == nil`, no auth wrapper is
     installed on either listener, so both use the shared base mux unchanged.
+  - **Loopback `/metrics` opt-in gate (#16072).** The loopback exemption
+    above is open to any local UID. An operator who runs untrusted local
+    workloads can close it with `set system services web-management
+    api-auth metrics-require-auth`: loopback `/metrics` then requires a
+    valid api-auth credential (Basic, Bearer, or X-API-Key — the local
+    Prometheus scraper presents one), while `/health` stays exempt and the
+    default posture is unchanged. The gate intent lives independently
+    of the credential snapshot, so it survives credential filtering:
+    if every credential expires or is filtered out (restart, tolerant
+    load, HA sync), loopback `/metrics` fails closed (401) instead of
+    reopening, while `/health` stays exempt. It publishes through the
+    same live swap discipline as a credential change (addition
+    immediately, removal only once every live leg is named by the
+    committed config; a retired leg only ever tightens). Strict commit
+    also rejects the leaf without a usable api-auth credential.
   - **Cross-site mutation guard (CSRF, #5055).** HTTP Basic auth is an
     *ambient* browser credential (`WWW-Authenticate: Basic`) — once a browser
     is challenged it reattaches the cached credentials to every request to the

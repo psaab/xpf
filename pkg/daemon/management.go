@@ -263,6 +263,7 @@ func (m *managementReconciler) desired(cfg *config.Config) api.Config {
 	next.TLSCertificate = ""
 	next.TLSPrivateKey = ""
 	next.Auth = nil
+	next.MetricsRequireAuth = false
 	m.d.resolveAPIBinds(&next, cfg)
 	return next
 }
@@ -670,6 +671,17 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		m.publishNilDirectionLocked()
 	}
 
+	// #16072: the gate intent is independent of the credential snapshot, so
+	// publish it even when next.Auth is nil (all credentials filtered by
+	// expiry/tolerant load): an ADDITION is a tightening and lands now
+	// (ReplaceMetricsRequireAuth also tightens retired legs); a REMOVAL is
+	// a loosening and is deferred to the sanctioned publish below, like a
+	// credential grant. Keyed on MetricsGate(), never on LiveAuth, so
+	// credential filtering cannot nil-drop it.
+	if next.MetricsRequireAuth && !m.srv.MetricsGate() {
+		m.srv.ReplaceMetricsRequireAuth(true)
+	}
+
 	// HTTP leg: rebind only when the address set changes (or its degraded
 	// state changes, #14582); an empty desired address disables the cleartext
 	// listener. Retry an unexpected exit only when a non-empty bind is still
@@ -774,6 +786,15 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// (TestMgmtWithheldGrantIsExitableByASubsequentCommit_5561).
 	if next.Auth != nil && !sanctioned && m.liveLegsSanctionedLocked(next) {
 		m.srv.ReplaceAuth(next.Auth)
+	}
+	// #16072 deferred half: a gate-ONLY removal withheld above lands here
+	// once every live leg is named by next, mirroring the credential grant.
+	// Keyed on MetricsGate() so it fires even when the credential snapshot
+	// is nil (the gate outlived its credentials). An addition already
+	// landed above (tightening).
+	if !next.MetricsRequireAuth && m.srv.MetricsGate() &&
+		m.liveLegsSanctionedLocked(next) {
+		m.srv.ReplaceMetricsRequireAuth(false)
 	}
 
 	// The remove-all-api-auth direction is resolved AGAIN here, against the

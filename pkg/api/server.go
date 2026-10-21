@@ -196,7 +196,15 @@ type Config struct {
 	TLS               bool        // enable HTTPS with a management certificate
 	TLSCertificate    string      // optional PEM certificate-chain path
 	TLSPrivateKey     string      // optional PEM private-key path; pair must be configured together
-	Auth              *AuthConfig // nil = no authentication
+	Auth              *AuthConfig // nil = no authentication; MetricsRequireAuth inside it opts loopback /metrics into credential gating (#16072)
+	// MetricsRequireAuth opts loopback /metrics into api-auth credential
+	// gating (#16072). The daemon copies it from
+	// `web-management api-auth metrics-require-auth`; the management
+	// reconciler also stamps it into Auth.MetricsRequireAuth on every
+	// reconcile, so a gate-only commit publishes through the same live
+	// swap as a credential change. No effect without Auth (nil snapshot
+	// passes through) and no effect on a non-loopback bind (#4162).
+	MetricsRequireAuth bool
 	// ListenFunc is the listener factory the server binds through (#5866).
 	// nil defaults to net.Listen; a test injects a fake so the
 	// make-before-break listener reconcile is exercised without real ports.
@@ -632,6 +640,13 @@ type Server struct {
 	// ReplaceAuth swaps it; a bind-address/port/TLS change instead goes through a
 	// make-before-break listener rebuild (managementReconciler).
 	auth atomic.Pointer[AuthConfig]
+	// metricsGate is the #16072 loopback /metrics gate intent, independent
+	// of the credential snapshot: it must survive credential filtering
+	// (expiry, tolerant load) that leaves auth nil, so /metrics fails
+	// closed instead of silently reopening. Live legs follow it; a retired
+	// leg's slot pins it (tighten-only). Published by
+	// ReplaceMetricsRequireAuth, never by ReplaceAuth.
+	metricsGate atomic.Bool
 	// authThrottle is shared across the HTTP/HTTPS legs and survives listener
 	// rebuilds. Its keys are source IP plus claimed account, with a second
 	// source-only budget to stop username rotation (#10825).
@@ -927,7 +942,17 @@ func NewServer(cfg Config) *Server {
 	}
 	// #5866: seed the live auth snapshot; the middleware reads it atomically per
 	// request so ReplaceAuth can swap credentials without rebinding the listener.
-	s.auth.Store(cfg.Auth)
+	initialAuth := cfg.Auth
+	if initialAuth != nil && cfg.MetricsRequireAuth {
+		// #16072: never alias (or mutate) the caller's snapshot.
+		dup := *initialAuth
+		dup.MetricsRequireAuth = true
+		initialAuth = &dup
+	}
+	s.auth.Store(initialAuth)
+	// #16072 fold: the gate intent lives outside the snapshot so credential
+	// filtering that nils Auth cannot drop it.
+	s.metricsGate.Store(cfg.MetricsRequireAuth || (initialAuth != nil && initialAuth.MetricsRequireAuth))
 	// #5866: the listener factory (Config.ListenFunc or net.Listen).
 	s.listen = cfg.ListenFunc
 	if s.listen == nil {
@@ -1268,6 +1293,9 @@ type authSlot struct {
 	// isPinned is separate from a nil `pinned` because nil is a MEANINGFUL
 	// policy (no authentication at all), not "unset".
 	isPinned atomic.Bool
+	// pinnedGate is the #16072 metrics gate frozen at retirement; it only
+	// ever turns on afterwards (tighten-only, like the credential pin).
+	pinnedGate atomic.Bool
 }
 
 // newAuthSlot allocates a live (following) slot for a new leg.
@@ -1284,6 +1312,16 @@ func (a *authSlot) load() *AuthConfig {
 	return a.srv.auth.Load()
 }
 
+// metricsGate reports the #16072 gate this leg enforces: the pinned value
+// once retired, otherwise the server-wide intent (which survives a nil
+// credential snapshot, so /metrics fails closed rather than reopening).
+func (a *authSlot) metricsGate() bool {
+	if a.isPinned.Load() {
+		return a.pinnedGate.Load()
+	}
+	return a.srv.metricsGate.Load()
+}
+
 // authForRequest returns the credential policy attached to the request's
 // listener. Direct handler tests without a connection context use the live
 // snapshot; production HTTP requests carry their per-leg authSlot from accept.
@@ -1294,6 +1332,22 @@ func (s *Server) authForRequest(r *http.Request) *AuthConfig {
 		}
 	}
 	return s.auth.Load()
+}
+
+// gateForRequest reports the #16072 gate for this request's leg: the leg
+// slot's pinned/following value when the connection context carries one,
+// otherwise the server-wide intent. Handler-direct tests (no ConnContext)
+// therefore see the same gate production serving sees.
+func (s *Server) gateForRequest(r *http.Request, fallback *authSlot) bool {
+	if r != nil {
+		if peer, ok := peerIdentityFrom(r.Context()); ok && peer.authSlot != nil {
+			return peer.authSlot.metricsGate()
+		}
+	}
+	if fallback != nil {
+		return fallback.metricsGate()
+	}
+	return s.metricsGate.Load()
 }
 
 func (s *Server) connContextForAuthSlot(slot *authSlot) func(context.Context, net.Conn) context.Context {
@@ -1310,6 +1364,7 @@ func (s *Server) connContextForAuthSlot(slot *authSlot) func(context.Context, ne
 // slot stops following: a request racing this sees either the server-wide
 // snapshot or cur, and at the pin instant those are the same value.
 func (a *authSlot) pin(cur *AuthConfig) {
+	a.pinnedGate.Store(a.srv.metricsGate.Load() || (cur != nil && cur.MetricsRequireAuth))
 	a.pinned.Store(cur)
 	a.isPinned.Store(true)
 }
@@ -1323,14 +1378,18 @@ func (a *authSlot) tighten(next *AuthConfig) {
 	if next == nil || !a.isPinned.Load() {
 		return
 	}
+	if next.MetricsRequireAuth {
+		a.pinnedGate.Store(true)
+	}
 	a.pinned.Store(AuthForRetainedListener(a.pinned.Load(), next))
 }
 
 // listenerHandler wraps the shared pre-auth base with the per-listener auth gate
 // for a bind address (#4162/#5866): only a literal loopback bind leaves /metrics
-// open when auth is configured. The dynamic middleware reads the leg's own slot
-// per request — which follows the live snapshot until the leg is retired — so
-// ReplaceAuth needs no rebind.
+// open when auth is configured, unless the live snapshot carries the opt-in
+// MetricsRequireAuth gate (#16072). The dynamic middleware reads the leg's own
+// slot per request — which follows the live snapshot until the leg is retired —
+// so ReplaceAuth needs no rebind.
 func (s *Server) listenerHandler(addr string, slot *authSlot) http.Handler {
 	if slot == nil {
 		// Never let a missing slot become a pass-through: substitute a FOLLOWING
@@ -1583,6 +1642,35 @@ func (s *Server) ReplaceAuth(a *AuthConfig) {
 	}
 }
 
+// ReplaceMetricsRequireAuth publishes the #16072 loopback /metrics gate
+// intent, independent of the credential snapshot: toggling it must survive
+// credential filtering (expiry, tolerant load) that leaves Auth nil, so
+// /metrics fails closed (401) instead of silently reopening. Live legs
+// follow the server-wide flag on the next request; retired legs only ever
+// tighten (a gate removal never reaches a draining leg — the caller, the
+// management reconciler, publishes a removal only once every live leg is
+// named by the committed config, like a credential grant). The flag also
+// rides inside AuthConfig for the credential-present path; this method is
+// the authority and stamps both.
+func (s *Server) ReplaceMetricsRequireAuth(enabled bool) {
+	s.metricsGate.Store(enabled)
+	if cur := s.auth.Load(); cur != nil && cur.MetricsRequireAuth != enabled {
+		next := *cur
+		next.MetricsRequireAuth = enabled
+		s.ReplaceAuth(&next)
+		return
+	}
+	if enabled {
+		// No snapshot to stamp (or already stamped): still tighten retired
+		// legs, whose pinned gate must see the addition.
+		s.retireMu.Lock()
+		defer s.retireMu.Unlock()
+		for _, leg := range s.pruneRetiredLocked() {
+			leg.slot.pinnedGate.Store(true)
+		}
+	}
+}
+
 // LiveAuth returns the credential snapshot the listeners are currently
 // enforcing (#5866). The management reconciler reads it to compute what a
 // listener RETAINED by a failed rebind is allowed to keep accepting (#5561
@@ -1590,6 +1678,11 @@ func (s *Server) ReplaceAuth(a *AuthConfig) {
 // published. It is the same atomic pointer the middleware reads per request, so
 // it never drifts from what is actually enforced.
 func (s *Server) LiveAuth() *AuthConfig { return s.auth.Load() }
+
+// MetricsGate reports the live #16072 loopback /metrics gate intent. It is
+// independent of LiveAuth: credential filtering can nil the snapshot while
+// the gate stays on, in which case /metrics fails closed.
+func (s *Server) MetricsGate() bool { return s.metricsGate.Load() }
 
 // HTTPHandlerForTest returns the http.Handler the LIVE HTTP leg is serving, or
 // nil when no HTTP leg exists. Test-only, and specifically a CROSS-PACKAGE one
@@ -1743,11 +1836,21 @@ func (s *Server) SetTLSCertDirForTest(dir string) {
 func (s *Server) dynamicAuthMiddleware(metricsRequireAuth bool, slot *authSlot, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a := slot.load()
+		gate := s.gateForRequest(r, slot)
 		if a == nil {
+			// #16072 fold: the gate intent survives a nil snapshot
+			// (credential expiry/filtering, tolerant load). A gated
+			// /metrics fails closed here; every other path keeps the
+			// nil pass-through the loopback clamp licenses.
+			if r.URL.Path == "/metrics" && gate {
+				logRESTAPIAuthFailure(r)
+				writeAuthChallenge(w)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
-		authorized, retryAfter := throttledAuthCheck(s.throttle(), *a, metricsRequireAuth, r)
+		authorized, retryAfter := throttledAuthCheck(s.throttle(), *a, effectiveMetricsRequireAuth(*a, metricsRequireAuth) || gate, r)
 		if authorized {
 			next.ServeHTTP(w, r)
 			return

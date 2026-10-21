@@ -509,7 +509,8 @@ type credentialMemo struct {
 }
 
 func sameAuthConfig(a, b AuthConfig) bool {
-	return maps.Equal(a.Users, b.Users) && maps.Equal(a.UserClasses, b.UserClasses) &&
+	return a.MetricsRequireAuth == b.MetricsRequireAuth &&
+		maps.Equal(a.Users, b.Users) && maps.Equal(a.UserClasses, b.UserClasses) &&
 		sameTimes(a.UserExpires, b.UserExpires) && maps.Equal(a.APIKeys, b.APIKeys) &&
 		maps.Equal(a.APIKeyNames, b.APIKeyNames) && maps.Equal(a.APIKeyClasses, b.APIKeyClasses) &&
 		sameTimes(a.APIKeyExpires, b.APIKeyExpires)

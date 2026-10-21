@@ -1501,6 +1501,9 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				if raw, present := lastAPIAuthExpires(authNode); present {
 					auth.DefaultExpiresAt, _ = ParseAPIAuthExpiry(raw)
 				}
+				if authNode.FindChild("metrics-require-auth") != nil {
+					auth.MetricsRequireAuth = true
+				}
 				for _, inst := range namedInstances(authNode.FindChildren("user")) {
 					if pwNode := inst.node.FindChild("password"); pwNode != nil {
 						class := auth.DefaultClass
