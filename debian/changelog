@@ -44,6 +44,16 @@ xpf (0.0.0) unstable; urgency=medium
     rather than re-queued. Daemon shutdown drains the queued backlog
     within a bounded 2s budget before closing the clients, counting any
     remainder (#16083).
+  * Refuse snapshots whose logical units share one kernel ifindex but
+    name different interface filters: the dataplane's per-interface
+    filter maps are keyed by ifindex alone, so units of an
+    interface-level WireGuard tunnel (wg0.0/wg0.1 on one wg0 device)
+    naming different input/output filters silently kept only the last
+    row's filter and the losing filter never evaluated. The Rust
+    filter compiler now rejects such snapshots (prior good state is
+    kept), identical or single-claimant filters stay valid, and a Go
+    commit advisory warns for the WireGuard shape. GRE input keeps
+    its #10816 first-sorting-wins model. No hot-path change (#16059).
 
 xpf (0.0.0) unstable; urgency=medium
 

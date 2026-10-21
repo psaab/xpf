@@ -653,6 +653,23 @@ pub(crate) enum SnapshotIntegrityError {
         first_interface: String,
         second_interface: String,
     },
+    /// #16059: two logical-unit rows sharing a kernel ifindex name different
+    /// firewall filters for the same family+direction. The per-interface
+    /// filter fast maps are keyed by ifindex alone, so accepting both would
+    /// silently last-win and the losing unit's filter would never evaluate
+    /// (fail-open for a deny filter). Reject the snapshot (preflight keeps
+    /// prior good state). Identical names and known base rows
+    /// (`is_unit == Some(false)`, which carry no filter fields) do not
+    /// conflict.
+    InterfaceFilterSharedIfindexConflict {
+        ifindex: i32,
+        family: String,
+        direction: String,
+        first_interface: String,
+        first_filter: String,
+        second_interface: String,
+        second_filter: String,
+    },
     /// #2706: an interface snapshot's `mtu` is NEGATIVE. The pre-fix code
     /// narrowed it with `iface.mtu.max(0) as usize`, so a negative value
     /// silently collapsed to 0 — and the egress MTU guard
@@ -1317,6 +1334,25 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "cos logical units {:?} and {:?} share ifindex {} but have different runtime CoS configurations — refusing to install last-writer-wins state",
                 first_interface, second_interface, ifindex
+            ),
+            Self::InterfaceFilterSharedIfindexConflict {
+                ifindex,
+                family,
+                direction,
+                first_interface,
+                first_filter,
+                second_interface,
+                second_filter,
+            } => write!(
+                f,
+                "interfaces {:?} (filter {:?}) and {:?} (filter {:?}) share ifindex {} but name different {} {} filters — refusing to install last-writer-wins filter state (the losing filter would never evaluate)",
+                first_interface,
+                first_filter,
+                second_interface,
+                second_filter,
+                ifindex,
+                family,
+                direction
             ),
             Self::InterfaceMtuInvalid { interface, mtu } => write!(
                 f,
