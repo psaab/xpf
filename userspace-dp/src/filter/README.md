@@ -1001,6 +1001,22 @@ off the borrow — BOTH through the same `&Filter` core
 `needs_tx_eval()`), pinned by `pr2c_folded_single_lookup_equals_two_lookup_path`
 in `filter/tests.rs`.
 
+**Shared-ifindex filter conflicts reject (#16059).** The fast maps are
+keyed by bare `i32` ifindex, so two logical units sharing one kernel
+ifindex (the WireGuard/GRE interface-level tunnel fan-out: `wg0.0`/`wg0.1`
+resolve to one `wg0` netdev) that name DIFFERENT filters for the same
+family+direction used to last-win silently — the losing unit's filter
+never evaluated a packet. `assign_interface_filters` now rejects the
+snapshot with `InterfaceFilterSharedIfindexConflict` when two
+non-base rows (`is_unit != Some(false)`) disagree on a configured hook;
+identical names and single-claimant shapes stay valid, and known base
+rows (which carry no Go filter fields) are excluded. The #6236
+aggregate-from-final-map rule below still governs the remaining
+last-wins cases (known-base duplicates). A Go commit advisory
+(`wg_unit_filter_shadow_16059.go`) warns for the WG shape at commit
+time; GRE input conflicts keep their #10816 first-sorting-wins model
+and commit advisory, with this gate as the snapshot-boundary backstop.
+
 **Aggregate-from-final-map rule.** Every retained family-wide `FilterState`
 aggregate (`has_input_tx_selection_*`, `has_input_three_color_policer_*`, and
 `has_output_needs_tx_eval_*`) is recomputed **after** the interface loop from the

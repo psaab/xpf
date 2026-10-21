@@ -306,10 +306,69 @@ fn parse_filter_table(
 /// Build per-interface filter assignments: each of the four hooks
 /// (inet/inet6 x input/output) resolves its named filter against the
 /// compiled table and installs it into the per-ifindex fast map.
+///
+/// #16059: the fast maps are keyed by `i32` ifindex alone, so two logical
+/// units sharing one kernel ifindex (the WireGuard/GRE interface-level
+/// tunnel fan-out: `wg0.0`/`wg0.1` resolve to one `wg0` netdev, pinned by
+/// `TunnelNameMap`) that name DIFFERENT filters for the same
+/// family+direction would silently last-win — the loser's filter never
+/// evaluates a packet, order-dependently. Reject the snapshot instead,
+/// mirroring the CoS duplicate-unit gate (#11429). Identical names are
+/// unambiguous and stay valid; a base-interface row (`is_unit ==
+/// Some(false)`) carries no filter fields in the Go snapshot (only unit
+/// rows populate them), so it cannot conflict. Unknown-unit rows
+/// (`is_unit != Some(false)`, i.e. `Some(true)` or legacy `None`) are
+/// included so a legacy snapshot cannot smuggle a conflict past the gate.
+/// The per-unit keying alternative was rejected: the hot path keys every
+/// filter lookup by bare ifindex (inner unit identity is not carried
+/// per-packet for WG/output), so per-unit maps would be dead state.
+/// GRE INPUT conflicts remain owned by the #10816 commit advisory (decap
+/// attributes to the first-sorting row by design); this gate is the
+/// snapshot-boundary backstop for every family+direction, including the
+/// WG input/output and GRE output arms #10816 does not cover.
 fn assign_interface_filters(
     state: &mut FilterState,
     interfaces: &[crate::InterfaceSnapshot],
 ) -> Result<(), SnapshotIntegrityError> {
+    // (ifindex, family, direction) -> (first interface name, filter name)
+    let mut first_by_hook: rustc_hash::FxHashMap<(i32, &'static str, &'static str), (&str, &str)> =
+        rustc_hash::FxHashMap::default();
+    for iface in interfaces {
+        if iface.ifindex <= 0 {
+            continue;
+        }
+        let hooks: [(&'static str, &'static str, &str); 4] = [
+            ("inet", "input", &iface.filter_input_v4),
+            ("inet", "output", &iface.filter_output_v4),
+            ("inet6", "input", &iface.filter_input_v6),
+            ("inet6", "output", &iface.filter_output_v6),
+        ];
+        for (family, direction, filter_name) in hooks {
+            if filter_name.is_empty() || iface.is_unit == Some(false) {
+                continue;
+            }
+            let key = (iface.ifindex, family, direction);
+            match first_by_hook.get(&key) {
+                Some(&(first_interface, first_filter)) if first_filter != filter_name => {
+                    return Err(
+                        SnapshotIntegrityError::InterfaceFilterSharedIfindexConflict {
+                            ifindex: iface.ifindex,
+                            family: family.to_string(),
+                            direction: direction.to_string(),
+                            first_interface: first_interface.to_string(),
+                            first_filter: first_filter.to_string(),
+                            second_interface: iface.name.clone(),
+                            second_filter: filter_name.to_string(),
+                        },
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    first_by_hook.insert(key, (iface.name.as_str(), filter_name));
+                }
+            }
+        }
+    }
     for iface in interfaces {
         if iface.ifindex <= 0 {
             continue;

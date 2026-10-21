@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Refuse snapshots whose logical units share one kernel ifindex but
+    name different interface filters: the dataplane's per-interface
+    filter maps are keyed by ifindex alone, so units of an
+    interface-level WireGuard tunnel (wg0.0/wg0.1 on one wg0 device)
+    naming different input/output filters silently kept only the last
+    row's filter and the losing filter never evaluated. The Rust
+    filter compiler now rejects such snapshots (prior good state is
+    kept), identical or single-claimant filters stay valid, and a Go
+    commit advisory warns for the WireGuard shape. GRE input keeps
+    its #10816 first-sorting-wins model. No hot-path change (#16059).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Render Kea DHCP configs 0640 root:_kea instead of 0644 in a 0755
     directory: the rendered kea-dhcp{4,6}.conf carries the full
     static-reservation inventory (MAC, IP, hostname), previously
