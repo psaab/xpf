@@ -10,6 +10,20 @@ xpf (0.0.0) unstable; urgency=medium
     degraded growth that drops nothing installed, clean below-floor
     shrinks, first fetches, and remembered-baseline bootstraps are
     unchanged (#16085).
+  * Stop DDNS withdraw from deleting foreign same-content records:
+    Cloudflare records xpf creates now carry an instance-scoped
+    `xpf-managed:prov/<endpoint-fingerprint>` comment ownership tag
+    (stable per provider identity; HA peers sharing it are one owner,
+    an independent xpf instance is not), publish never adopts or
+    PATCHes an unowned record (untagged, legacy, or another
+    instance's — it creates its own tagged row alongside, at any TTL),
+    stale previous-value cleanup follows the same ownership
+    discipline, and withdraw deletes only this instance's rows, so a
+    second publisher's identical record at the same name survives.
+    Records published before tagging withdraw through a logged
+    value-scoped fallback rather than being orphaned. Route 53 cannot
+    distinguish identical RRset values, so its withdraw stays
+    value-scoped; that limitation is now documented (#16086).
 
 xpf (0.0.0) unstable; urgency=medium
 

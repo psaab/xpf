@@ -24,6 +24,9 @@ import (
 // appliance set at the same shared name. A bare single-value UPSERT (the pre-#5389
 // path) would create-or-replace the entire RRset and silently delete those
 // foreign members. See the read-modify-write concurrency caveat on UpsertLease.
+// "Preserving foreign" holds only for DISTINCT values: an RRset member has no
+// provenance, so a foreign value IDENTICAL to xpf's cannot be told apart and is
+// stripped with it on withdraw — the documented #16086 limitation on DeleteLease.
 //
 // SigV4 is implemented in sigv4.go (a minimal signer — no AWS SDK dependency;
 // plan §5.2 open question resolved toward the minimal signer since we sign ONE
@@ -515,6 +518,22 @@ func (b *route53Backend) UpsertLease(ctx context.Context, rec LeaseDNSRecord) er
 //   - only xpf's value existed → DELETE the whole RRset. Route 53 requires the
 //     DELETE to match the live RRset exactly (name, type, TTL, value), so the
 //     LIVE TTL is carried, not the configured one.
+//
+// KNOWN LIMITATION — value-scoped ownership (#16086 A10-16): Route 53 has NO
+// per-value provenance. An RRset member is a bare value string: no record ID
+// and no comment/tag exists to distinguish "the 203.0.113.5 xpf published"
+// from "the identical 203.0.113.5 a foreign publisher added to the same
+// RRset" (the two are literally the same datum, stored once). Unlike
+// Cloudflare, where each row is individually addressable and now carries
+// an instance-scoped ownership tag, a same-value withdraw here MUST strip
+// the value — so if a foreign publisher independently holds the identical
+// value at the same name+type, xpf's withdraw removes that shared datum
+// too and the victim's name flaps until its engine's forced refresh
+// republishes. This is accepted and documented, not fixable at this API:
+// refusing to strip would orphan xpf's own record on every withdraw. The
+// mitigation is operational (do not point two autonomous publishers at the
+// same Route 53 name+type+value), and distinct VALUES at a shared name are
+// unaffected — those foreign members are preserved above.
 //
 // IDEMPOTENT delete (#2771) still applies to the whole-RRset DELETE: if the
 // record raced to gone between the List and the DELETE, Route 53 rejects it with
