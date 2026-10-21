@@ -461,7 +461,10 @@ const (
 	// union of every authored `from zone` value. A v62 helper ignores
 	// it and scopes the prefix to the singular from_zone only — the
 	// last-zone truncation — so exact-equality versioning fences it.
-	ProtocolVersion = 63
+	// v63 -> v64 (#16059): InterfaceSnapshot carries tunnel_mode. A v63
+	// helper ignores it, decodes "" (not-GRE), and would REFUSE GRE-input
+	// shapes #10816 admits — exact-equality versioning fences it.
+	ProtocolVersion = 64
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1382,6 +1385,14 @@ type InterfaceSnapshot struct {
 	EgressZone string `json:"egress_zone"`
 	UnitCount  int    `json:"unit_count"`
 	Tunnel     bool   `json:"tunnel"`
+	// TunnelMode is the tunnel mode the builder decided for this row
+	// (#16059 fold 2): the unit's own tunnel stanza mode, else the
+	// interface-level mode it inherits ("" when neither). WireGuard is
+	// legally configured on gr-0/0/0 names, so consumers must key on
+	// this, never on name shape. Additive (omitempty): an old helper
+	// ignores it and decodes Rust-side "" = not-GRE = fail-closed.
+	// ProtocolVersion 63 -> 64 fences the pairing.
+	TunnelMode string `json:"tunnel_mode,omitempty"`
 	// SecureTunnel reports that this row's netdev is a route-based IPsec
 	// tunnel device, so the dataplane must neither adjudicate nor bind it.
 	//

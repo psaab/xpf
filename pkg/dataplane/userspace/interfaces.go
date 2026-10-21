@@ -517,6 +517,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			RedundancyGroup: rg,
 			UnitCount:       len(iface.Units),
 			Tunnel:          iface.Tunnel != nil,
+			TunnelMode:      tunnelModeOf(iface.Tunnel, nil),
 			SecureTunnel:    snapshotSecureTunnel(cfg, name, linuxName, liveXfrm),
 			MTU:             mtu,
 			HardwareAddr:    hardwareAddr,
@@ -597,6 +598,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				RedundancyGroup:           rg, // inherit resolved RG (RETH parent or own)
 				UnitCount:                 0,
 				Tunnel:                    iface.Tunnel != nil || unit.Tunnel != nil,
+				TunnelMode:                tunnelModeOf(iface.Tunnel, unit.Tunnel),
 				SecureTunnel:              snapshotSecureTunnel(cfg, unitName, linuxUnit, liveXfrm),
 				MTU:                       mtu,
 				HardwareAddr:              hardwareAddr,
@@ -1550,6 +1552,20 @@ func cloneInterfaceSnapshots(rows []InterfaceSnapshot) []InterfaceSnapshot {
 		}
 	}
 	return out
+}
+
+// tunnelModeOf decides a snapshot row's tunnel mode (#16059 fold 2): the
+// unit's own tunnel stanza mode wins, else the interface-level mode the
+// unit inherits, else "". Mirrors how TunnelNameMap treats inheritance
+// (a unit with its own stanza is its own definition).
+func tunnelModeOf(ifaceTunnel, unitTunnel *config.TunnelConfig) string {
+	if unitTunnel != nil && unitTunnel.Mode != "" {
+		return unitTunnel.Mode
+	}
+	if ifaceTunnel != nil {
+		return ifaceTunnel.Mode
+	}
+	return ""
 }
 
 // revalidateSnapshotIfindexesInPlace is reserved for snapshots whose interface

@@ -3926,15 +3926,18 @@ fn shared_ifindex_wg_filters_conflict_rejects_16059() {
     )
     .expect("distinct ifindices keep distinct filters");
 
-    // #10816 control (Opus2 fold): GRE INPUT dispute on a shared ifindex
-    // still compiles and keeps first-sorting-wins — decap attributes to
-    // the first row by design, so the input fast map must hold the FIRST
-    // row's filter. GRE OUTPUT on the same rows still rejects.
+    // #10816 control (fold 2): GRE INPUT dispute on a shared ifindex
+    // still compiles and the winner is the FIRST row's filter — decap
+    // attributes to the first-sorting row by design, and the assignment
+    // is now first-wins so the fast map PROVES the winner's identity
+    // (not merely contains_key). The discriminator is tunnel_mode, so
+    // the wg-named-on-gr-* counterexample below must still reject.
     let gre_unit = |name: &str| crate::InterfaceSnapshot {
         name: name.into(),
         ifindex: 77,
         is_unit: Some(true),
         tunnel: true,
+        tunnel_mode: "gre".into(),
         ..Default::default()
     };
     let mut g0 = gre_unit("gr-0/0/0.0");
@@ -3952,14 +3955,37 @@ fn shared_ifindex_wg_filters_conflict_rejects_16059() {
         "",
     )
     .expect("GRE input dispute keeps #10816 first-sorting-wins");
-    assert!(
-        state.iface_filter_v4_fast.contains_key(&77),
-        "GRE input dispute compiles with an input filter installed (#10816)"
+    assert_eq!(
+        state
+            .iface_filter_v4_fast
+            .get(&77)
+            .map(|f| f.name.as_str()),
+        Some("f-a"),
+        "first-sorting row's filter must WIN the shared GRE-input key \
+         (first-wins, #10816)"
+    );
+    // Reversed order: the other row is now first and must win instead.
+    let state = parse_filter_state(
+        &[
+            accept_filter_16059("f-a", "inet"),
+            accept_filter_16059("f-b", "inet"),
+        ],
+        &[],
+        &[g1.clone(), g0.clone()],
+        "",
+        "",
+    )
+    .expect("reversed GRE input dispute still compiles");
+    assert_eq!(
+        state
+            .iface_filter_v4_fast
+            .get(&77)
+            .map(|f| f.name.as_str()),
+        Some("f-b"),
+        "snapshot order decides the GRE-input winner (#10816)"
     );
     // Distinct-logical-ifindex spelling (the production GRE shape: one
-    // device, per-unit logical ifindexes): each unit's input filter
-    // lands under its own key, and decap attribution picks the first
-    // row's key — the first row's filter is the proven #10816 winner.
+    // device, per-unit logical ifindexes): each unit keeps its filter.
     let mut g0d = gre_unit("gr-0/0/0.0");
     g0d.ifindex = 77;
     g0d.filter_input_v4 = "f-a".into();
@@ -3984,6 +4010,29 @@ fn shared_ifindex_wg_filters_conflict_rejects_16059() {
             .map(|f| f.name.as_str()),
         Some("f-a"),
         "first-sorting row's filter is the #10816 decap winner"
+    );
+    // Counterexample (fold 2 #1): WireGuard legally configured ON a
+    // gr-* name (tunnel_mode=wireguard) must NOT inherit the GRE
+    // exemption — its input dispute rejects like any WG row.
+    let mut w0 = gre_unit("gr-0/0/0.0");
+    w0.tunnel_mode = "wireguard".into();
+    w0.filter_input_v4 = "f-a".into();
+    let mut w1 = gre_unit("gr-0/0/0.1");
+    w1.tunnel_mode = "wireguard".into();
+    w1.filter_input_v4 = "f-b".into();
+    assert!(
+        parse_filter_state(
+            &[
+                accept_filter_16059("f-a", "inet"),
+                accept_filter_16059("f-b", "inet"),
+            ],
+            &[],
+            &[w0, w1],
+            "",
+            "",
+        )
+        .is_err(),
+        "WG-on-gr-name input conflict must reject (mode, not name)"
     );
     // GRE output dispute on shared-ifindex GRE rows still rejects.
     let mut g0 = gre_unit("gr-0/0/0.0");
