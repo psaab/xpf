@@ -3978,6 +3978,459 @@ fn shared_ifindex_host_inbound_unit0_wins_in_both_row_orders_12646() {
         "base-only https override must continue to deny ssh"
     );
 }
+
+// #16057: two CONFIGURED units on one shared ifindex carrying DIFFERENT
+// effective host-inbound overrides. Pre-fix the per-row insert was
+// last-writer-wins, so the whole netdev inherited whichever sibling was
+// walked last — the low-trust unit gained the sibling's management
+// admission. The disputed override must be REFUSED (empty fail-closed
+// sentinel + build warning) in BOTH row orders: neither unit's service is
+// admitted, the zone's any-service set does not leak through the refused
+// override slot, and global ICMP control traffic still passes.
+// Fail-on-revert: restoring the plain last-writer-wins insert makes the
+// last unit's ssh (or https, reversed) assertion RED.
+#[test]
+fn shared_ifindex_disputed_unit_host_inbound_refused_in_both_row_orders_16057() {
+    use crate::afxdp::forwarding::{
+        host_inbound_admits_iface, host_inbound_admits_iface_for_destination,
+    };
+
+
+    const SHARED: i32 = 16057;
+    const ZONE_ID: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+    const PROTO_ICMP: u8 = 1;
+    let unit_a = InterfaceSnapshot {
+        name: "st0.0".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ssh".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    let unit_b = InterfaceSnapshot {
+        name: "st0.1".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["https".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    // A base row carrying a THIRD distinct override must not rescue the
+    // dispute either: it shares the disputed netdev.
+    let base_row = InterfaceSnapshot {
+        name: "st0".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["telnet".into()],
+        is_unit: Some(false),
+        ..Default::default()
+    };
+    for (label, interfaces) in [
+        ("ssh unit first", vec![unit_a.clone(), unit_b.clone()]),
+        ("https unit first", vec![unit_b.clone(), unit_a.clone()]),
+        (
+            "base row last",
+            vec![unit_a.clone(), unit_b.clone(), base_row.clone()],
+        ),
+        (
+            "base row first",
+            vec![base_row.clone(), unit_a.clone(), unit_b.clone()],
+        ),
+    ] {
+        let snapshot = ConfigSnapshot {
+            zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+            interfaces,
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        assert!(
+            state.ifindex_host_inbound.contains_key(&SHARED),
+            "{label}: disputed ifindex must carry the empty fail-closed sentinel"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+            "{label}: unit ssh override must NOT be inherited by the shared netdev"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
+            "{label}: unit https override must NOT be inherited by the shared netdev"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 23, false, 0),
+            "{label}: base telnet override must NOT rescue a disputed ifindex"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 179, false, 0),
+            "{label}: zone any-service set must not leak through the refused override"
+        );
+        assert!(
+            host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_ICMP, 0, false, 3),
+            "{label}: global ICMP destination-unreachable must remain admitted"
+        );
+        // #16057 fold: the sentinel's ND policy is pinned EXPLICITLY through
+        // BOTH admission entry points — ND (ICMPv6 133-136) is DENIED with
+        // the sentinel (matching #10503), while IPv6 errors 1-4 stay
+        // admitted. A future weakening must flip these deliberately.
+        for ty in 133..=136u8 {
+            assert!(
+                !host_inbound_admits_iface(&state, SHARED, ZONE_ID, 58, 0, true, ty),
+                "{label}: ND type {ty} must be denied by the disputed sentinel (iface form)"
+            );
+            assert!(
+                !host_inbound_admits_iface_for_destination(
+                    &state,
+                    SHARED,
+                    ZONE_ID,
+                    58,
+                    0,
+                    true,
+                    ty,
+                    "2001:db8::1".parse().unwrap(),
+                ),
+                "{label}: ND type {ty} must be denied by the disputed sentinel (destination form)"
+            );
+        }
+        for ty in 1..=4u8 {
+            assert!(
+                host_inbound_admits_iface(&state, SHARED, ZONE_ID, 58, 0, true, ty),
+                "{label}: ICMPv6 error type {ty} must remain admitted (iface form)"
+            );
+            assert!(
+                host_inbound_admits_iface_for_destination(
+                    &state,
+                    SHARED,
+                    ZONE_ID,
+                    58,
+                    0,
+                    true,
+                    ty,
+                    "2001:db8::1".parse().unwrap(),
+                ),
+                "{label}: ICMPv6 error type {ty} must remain admitted (destination form)"
+            );
+        }
+    }
+}
+
+// #16057 positive controls: the refusal must fire ONLY on a genuine
+// disagreement between configured unit rows.
+//  (a) units whose effective triples AGREE keep the agreed override;
+//  (b) a single configured unit beside an UNCONFIGURED sibling is not
+//      disputed — the configured unit's override still wins, in both
+//      orders (the unconfigured row casts no vote);
+//  (c) configured units on DISTINCT ifindexes keep their own overrides.
+// Fail-on-revert (over-broad refusal): refusing on any multi-unit ifindex,
+// or counting unconfigured rows as dissenting votes, turns these RED.
+#[test]
+fn shared_ifindex_agreed_or_single_unit_host_inbound_still_admitted_16057() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const SHARED: i32 = 16058;
+    const OTHER: i32 = 16059;
+    const ZONE_ID: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+    let ssh_unit = |name: &str, ifindex: i32| InterfaceSnapshot {
+        name: name.into(),
+        zone: "wan".into(),
+        ifindex,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ssh".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+
+    // (a) agreed triples on one shared ifindex.
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+        interfaces: vec![ssh_unit("st0.0", SHARED), ssh_unit("st0.1", SHARED)],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+        "agreed unit ssh override must be admitted on the shared ifindex"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
+        "agreed ssh-only override must still deny https (no zone leak)"
+    );
+
+    // (b) one configured + one unconfigured unit, both orders.
+    let plain_unit = InterfaceSnapshot {
+        name: "st0.1".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    for (label, interfaces) in [
+        (
+            "configured first",
+            vec![ssh_unit("st0.0", SHARED), plain_unit.clone()],
+        ),
+        (
+            "configured last",
+            vec![plain_unit.clone(), ssh_unit("st0.0", SHARED)],
+        ),
+    ] {
+        let snapshot = ConfigSnapshot {
+            zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+            interfaces,
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        assert!(
+            host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+            "{label}: single configured unit's ssh override must be admitted"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
+            "{label}: single configured unit's ssh-only override must deny https"
+        );
+    }
+
+    // (c) distinct ifindexes, distinct overrides.
+    let https_unit = InterfaceSnapshot {
+        name: "st0.1".into(),
+        zone: "wan".into(),
+        ifindex: OTHER,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["https".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+        interfaces: vec![ssh_unit("st0.0", SHARED), https_unit],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+        "ssh unit on its own ifindex must admit ssh"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
+        "ssh unit on its own ifindex must deny https"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, OTHER, ZONE_ID, PROTO_TCP, 443, false, 0),
+        "https unit on its own ifindex must admit https"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, OTHER, ZONE_ID, PROTO_TCP, 22, false, 0),
+        "https unit on its own ifindex must deny ssh"
+    );
+}
+
+// #16057 fold: the dispute comparison is over EFFECTIVE admission SETS,
+// not ordered token vectors. Two units whose tokens differ only in order,
+// duplicates, case, or non-ND `protocols_except` provenance classify to
+// the same admission and must NOT be disputed — the producer does not
+// canonicalise order (zones_override.go dedups but never sorts), so a
+// vector comparison would deny ordinary equal overrides. ND provenance
+// is the one except-list bit that counts, and only as the EFFECTIVE
+// withdrawal (a surviving positive `ndp`/`all` makes the raw except token
+// inert), mirroring Go's CanonicalHostInboundTokenSigExcept.
+// Fail-on-revert: restoring the ordered-vector comparison makes every
+// cell below RED (both services denied by the false dispute sentinel).
+#[test]
+fn shared_ifindex_reordered_unit_host_inbound_not_disputed_16057() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const SHARED: i32 = 16060;
+    const ZONE_ID: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+    let unit = |name: &str,
+                svc: Vec<&str>,
+                proto: Vec<&str>,
+                except: Vec<&str>|
+     -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: name.into(),
+            zone: "wan".into(),
+            ifindex: SHARED,
+            host_inbound_configured: true,
+            host_inbound_system_services: svc.into_iter().map(Into::into).collect(),
+            host_inbound_protocols: proto.into_iter().map(Into::into).collect(),
+            host_inbound_protocols_except: except.into_iter().map(Into::into).collect(),
+            is_unit: Some(true),
+            ..Default::default()
+        }
+    };
+    // (label, unit A fields, unit B fields, expect ND admitted via iface form)
+    let cells: Vec<(&str, InterfaceSnapshot, InterfaceSnapshot, bool)> = vec![
+        (
+            "service order reversed",
+            unit("st0.0", vec!["ssh", "https"], vec![], vec![]),
+            unit("st0.1", vec!["https", "ssh"], vec![], vec![]),
+            true,
+        ),
+        (
+            "duplicates and case differ",
+            unit("st0.0", vec!["ssh", "https", "ssh"], vec![], vec![]),
+            unit("st0.1", vec!["HTTPS", "ssh"], vec![], vec![]),
+            true,
+        ),
+        (
+            "protocol order reversed, non-ND except provenance differs",
+            unit("st0.0", vec!["ssh", "https"], vec!["ospf", "bgp"], vec!["igmp"]),
+            unit("st0.1", vec!["https", "ssh"], vec!["bgp", "ospf"], vec!["dvmrp"]),
+            true,
+        ),
+        // The surviving positive `ndp` token is present on BOTH units, so
+        // no effective withdrawal exists (Go effectiveNDPWithdrawn) and
+        // the dispute VOTE treats unit A's raw `ndp except` as stale
+        // provenance — no sentinel in either order. The ND expectation is
+        // nevertheless TRUE in A-first order, deliberately: unit B's row
+        // (positive ndp, no except) writes last and its classified set
+        // admits ND via the default arm. In B-first order unit A's row
+        // writes last and its raw-except bit denies ND — today's
+        // order-dependent classified-set wrinkle, pinned explicitly after
+        // the loop. ssh/https stay admitted in both orders, which is the
+        // dispute-level property this cell exists to pin.
+        (
+            "stale ndp except beside surviving positive ndp",
+            unit("st0.0", vec!["ssh", "https"], vec!["ndp"], vec!["ndp"]),
+            unit("st0.1", vec!["https", "ssh"], vec!["ndp"], vec![]),
+            true,
+        ),
+        (
+            "effective ndp withdrawal on both units",
+            unit("st0.0", vec!["ssh", "https"], vec![], vec!["ndp"]),
+            unit("st0.1", vec!["https", "ssh"], vec![], vec!["igmp", "ndp"]),
+            false,
+        ),
+    ];
+    for (label, a, b, nd_admitted) in cells {
+        for (order, interfaces) in [
+            ("A first", vec![a.clone(), b.clone()]),
+            ("B first", vec![b.clone(), a.clone()]),
+        ] {
+            let snapshot = ConfigSnapshot {
+                zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+                interfaces,
+                ..Default::default()
+            };
+            let state = build_forwarding_state(&snapshot);
+            assert!(
+                host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+                "{label} ({order}): ssh must remain admitted — set-equal units are not disputed"
+            );
+            assert!(
+                host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
+                "{label} ({order}): https must remain admitted — set-equal units are not disputed"
+            );
+            assert!(
+                !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 23, false, 0),
+                "{label} ({order}): telnet must stay denied (no zone any-service leak)"
+            );
+            // The stale-except cell is the one deliberate exception: its
+            // loop ND expectation holds only in A-first order (unit B's
+            // no-except set is stored last). Its B-first ND outcome is
+            // pinned separately after the loop.
+            if !(label.starts_with("stale ndp except") && order == "B first") {
+                assert_eq!(
+                    host_inbound_admits_iface(&state, SHARED, ZONE_ID, 58, 0, true, 135),
+                    nd_admitted,
+                    "{label} ({order}): ND admission must follow the effective ND bit"
+                );
+            }
+        }
+    }
+    // Pre-existing consumer wrinkle, pinned so it stays visible rather
+    // than silently absorbed: in the B-first order of the stale-except
+    // cell above, unit A's row writes last and its raw `ndp except` token
+    // denies unicast ND through ndp_excluded, even though the dispute
+    // VOTE (correctly, per the shared Go signature) treats that token as
+    // inert beside the surviving positive ndp. The A-first loop order
+    // stores unit B's set (no except) and admits ND via the default arm,
+    // which is exactly the order-dependent classified-set wrinkle this
+    // comment names; the loop therefore pins ssh/https in both orders
+    // and leaves ND to this explicit B-order assertion. Fixing the
+    // wrinkle means changing how the classified set is built or stored,
+    // which is outside #16057; this assertion flips loudly if that ever
+    // happens.
+    let stale_a = unit("st0.0", vec!["ssh", "https"], vec!["ndp"], vec!["ndp"]);
+    let stale_b = unit("st0.1", vec!["https", "ssh"], vec!["ndp"], vec![]);
+    let snapshot = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+        interfaces: vec![stale_b, stale_a],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+        "stale-except B-first order: ssh must remain admitted (no dispute)"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED, ZONE_ID, 58, 0, true, 135),
+        "stale-except B-first order: unit A's raw ndp except denies ND today (pre-existing consumer wrinkle)"
+    );
+}
+
+
+// #16057 fold counterweight: an EFFECTIVE ND difference IS a genuine
+// dispute. One unit withdraws ND (`ndp except`, no positive ndp) while
+// its sibling retains the ND default on the same positives — the sets
+// differ in exactly the bit CanonicalHostInboundTokenSigExcept splits on,
+// so the refusal must still fire in both row orders.
+// Fail-on-revert: comparing only the positive token sets (dropping the
+// ND bit from the vote) makes the ssh/https denial assertions RED.
+#[test]
+fn shared_ifindex_nd_only_difference_is_disputed_16057() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const SHARED: i32 = 16061;
+    const ZONE_ID: u16 = 7;
+    const PROTO_TCP: u8 = 6;
+    let withdrawn = InterfaceSnapshot {
+        name: "st0.0".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ssh".into(), "https".into()],
+        host_inbound_protocols_except: vec!["ndp".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    let retained = InterfaceSnapshot {
+        name: "st0.1".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["https".into(), "ssh".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    for (label, interfaces) in [
+        ("withdrawn first", vec![withdrawn.clone(), retained.clone()]),
+        ("withdrawn last", vec![retained.clone(), withdrawn.clone()]),
+    ] {
+        let snapshot = ConfigSnapshot {
+            zones: vec![any_service_zone_10503("wan", ZONE_ID)],
+            interfaces,
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        assert!(
+            state.ifindex_host_inbound.contains_key(&SHARED),
+            "{label}: ND-differing units must receive the fail-closed sentinel"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 22, false, 0),
+            "{label}: ssh must be denied — an effective ND difference is a real dispute"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, ZONE_ID, PROTO_TCP, 443, false, 0),
+            "{label}: https must be denied — an effective ND difference is a real dispute"
+        );
+    }
+}
 // #10556 Cell 1: an addressed base can be refused by an unzoned unit sharing
 // its ifindex. The base's zone is nonempty, while the unit has no address, so
 // neither row qualifies for #5659 and the refused ifindex misses #10503.
