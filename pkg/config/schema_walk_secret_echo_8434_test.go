@@ -129,6 +129,60 @@ func TestSecretLeafExtraTokenNeverEchoed16066(t *testing.T) {
 	}
 }
 
+// #16066 fold 2 witness: the #8437 fused-statement formatter under the
+// UNTYPED dynamic-dns provider leaves `password` and `tsig-secret`.
+// A missing semicolon fuses `backend` onto the secret leaf's node; the
+// formatter quoted that extra token twice. Through the shared choke
+// point the token must appear NOWHERE in the returned error (the exit
+// scrub sees the whole tree), the sibling/fused defect class must
+// survive, and the non-secret `server` control on the same formatter
+// must keep quoting it. Both braced and flat spellings are covered.
+// RED pre-fold with "backend" quoted in both secret cells.
+func TestSecretLeafFusedTokenNeverEchoed16066(t *testing.T) {
+	for _, leaf := range []string{"password", "tsig-secret", "server"} {
+		t.Run(leaf+"/braced", func(t *testing.T) {
+			text := "system { services { dynamic-dns { provider p { " +
+				leaf + " firstvalue backend; } } } }"
+			err := SchemaValidate(parseHier(t, text), nil)
+			if err == nil || !strings.Contains(err.Error(), "names a SIBLING") {
+				t.Fatalf("fixture did not reach the #8437 formatter: %v", err)
+			}
+			assertFusedTokenDisposition16066(t, leaf, err)
+		})
+		t.Run(leaf+"/flat-valid", func(t *testing.T) {
+			tree := &ConfigTree{}
+			cmd := "set system services dynamic-dns provider p " + leaf + " firstvalue"
+			path, err := ParseSetCommand(cmd)
+			if err != nil {
+				t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+			}
+			if err := tree.SetPath(path); err != nil {
+				t.Fatalf("SetPath(%q): %v", cmd, err)
+			}
+			if err := SchemaValidate(tree, nil); err != nil {
+				t.Fatalf("flat valid %s leaf must validate clean: %v", leaf, err)
+			}
+		})
+	}
+}
+
+func assertFusedTokenDisposition16066(t *testing.T, leaf string, err error) {
+	t.Helper()
+	quoted := strings.Contains(err.Error(), `"backend"`) || strings.Contains(err.Error(), " backend")
+	if leaf == "server" {
+		if !strings.Contains(err.Error(), `"backend"`) {
+			t.Errorf("non-secret control lost its quoted keyword diagnostic: %v", err)
+		}
+		return
+	}
+	if quoted || strings.Contains(err.Error(), "backend") {
+		t.Errorf("registered secret leaf %q echoed its extra operand in the schema error (#16066): %v", leaf, err)
+	}
+	if !strings.Contains(err.Error(), "names a SIBLING") {
+		t.Errorf("error lost its fused-statement defect class: %v", err)
+	}
+}
+
 // POSITIVE CONTROL on the instrument: a NON-secret leaf must still quote its
 // value. Without this, a change that redacted every validation error would pass
 // the cell above while destroying every ordinary diagnostic.

@@ -7,6 +7,40 @@ import (
 	"strings"
 )
 
+// schemaErrorf is the single construction choke point for schema-walk
+// errors (#16066 fold 2). SchemaValidate's return value is logged
+// verbatim by tolerant ingress (configstore compileTreeLenient) and
+// copied into compiled warnings, so an error built anywhere in this
+// walker can reach journal/syslog. Before this helper, each formatter
+// redacted ad hoc — typedLeafInvalidErrorf (#8434), then
+// typedLeafErrorf (fold 1) — and the class kept recurring per-helper
+// (the #8437 fused-statement formatter quoted an extra token under
+// the untyped `password`/`tsig-secret` DDNS leaves). Now EVERY schema
+// error is constructed here: callers pass the leaf's full key path
+// (path tokens plus the node's own Keys) and the already-formatted
+// message; when any token of that path is secret per secretIndices —
+// the same registry the AST redactor uses, so `password` is secret
+// only under dynamic-dns/api-auth/... and `community` only under
+// snmp — every secret-indexed token is scrubbed from the message
+// (all occurrences) before the error is created. The path itself is
+// rendered through redactSecretPath as before. Non-secret messages
+// pass through byte-identical. Validators that return their own
+// errors (ValidateCryptHash, #16066) must still be value-free at the
+// source; this is the walker-level net for formatter-built text.
+func schemaErrorf(fullPath []string, format string, args ...interface{}) error {
+	msg := fmt.Sprintf(format, args...)
+	return fmt.Errorf("%s", scrubSecretTokens(fullPath, msg))
+}
+
+// schemaPathErrorf is schemaErrorf for the common walker shape: the
+// message is "<joined redacted path>: <formatted detail>". fullPath is
+// the complete key path of the leaf the detail describes.
+func schemaPathErrorf(fullPath []string, format string, args ...interface{}) error {
+	joined := strings.Join(redactSecretPath(fullPath), " ")
+	detail := fmt.Sprintf(format, args...)
+	return schemaErrorf(fullPath, "%s: %s", joined, detail)
+}
+
 // SchemaValidate is the #1319 typed-leaf gate that runs at commit-check
 // time, BEFORE the existing compiler. It walks the AST against setSchema
 // — the SAME tree the live config-mode `set` completer walks — and, for
@@ -156,7 +190,52 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) er
 	// closed-world flag (#4313) is inherited from schemaNode.closedWorld as
 	// the walker descends. No count here — see the keyword-resolution gate
 	// below for why prose must not state how many subtrees are armed.
-	return walkSchemaChildren(tree.Children, setSchema, nil, vc, false)
+	if err := walkSchemaChildren(tree.Children, setSchema, nil, vc, false); err != nil {
+		return scrubSchemaErrorSecrets(tree, err)
+	}
+	return nil
+}
+
+// scrubSchemaErrorSecrets is the exit half of the #16066 shared choke
+// point: schemaErrorf scrubs at construction inside schema_walk.go,
+// but validators and node/tail validators return errors built in
+// other files, and a future formatter can still bypass construction.
+// At the SchemaValidate exit, any secret token in the candidate tree
+// (per secretIndices over every flattened node path) is scrubbed from
+// the returned error text — all occurrences — so no schema error can
+// carry a credential operand to tolerant-ingress logs or compiled
+// warnings regardless of which helper built it. Cost is rejection-
+// path only: the tree is walked once per failed validation.
+func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
+	if err == nil || tree == nil {
+		return err
+	}
+	msg := err.Error()
+	scrubbed := msg
+	var walk func(nodes []*Node, base []string)
+	walk = func(nodes []*Node, base []string) {
+		for _, n := range nodes {
+			if n == nil {
+				continue
+			}
+			full := append(append([]string(nil), base...), n.Keys...)
+			for _, i := range secretIndices(full) {
+				if i >= 0 && i < len(full) && full[i] != "" {
+					scrubbed = strings.ReplaceAll(scrubbed, full[i], SecretRedacted)
+				}
+			}
+			walk(n.Children, full)
+		}
+	}
+	walk(tree.Children, nil)
+	if scrubbed == msg {
+		return err
+	}
+	// Preserve the typed-leaf classification tolerant ingress keys on.
+	if IsTypedLeafSchemaError(err) {
+		return &typedLeafSchemaError{msg: scrubbed}
+	}
+	return fmt.Errorf("%s", scrubbed)
 }
 
 // walkContext carries the per-walk validation inputs: the (always-nil in
@@ -417,7 +496,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 					content: securityPoliciesChildContentShape12819(node),
 				}
 			}
-			return fmt.Errorf("%s: unknown configuration keyword %q under closed-world subtree",
+			return schemaErrorf(append(append([]string(nil), path...), keyword), "%s: unknown configuration keyword %q under closed-world subtree",
 				strings.Join(redactSecretPath(path), " "), keyword)
 		}
 		// Open-world — the default for a subtree that has NOT opted in, which
@@ -447,8 +526,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// Their leaf-list names and apply-macro body are opaque to schema walk.
 	if childSchema == applyStatementSchema {
 		if len(node.Keys) < 2 && len(node.Children) == 0 {
-			return fmt.Errorf("%s: `%s` requires at least one value",
-				strings.Join(redactSecretPath(path), " "), keyword)
+			return schemaPathErrorf(append(append([]string(nil), path...), keyword), "`%s` requires at least one value", keyword)
 		}
 		return nil
 	}
@@ -466,7 +544,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	if childSchema.nodeValidator != nil && exactMatch {
 		if err := childSchema.nodeValidator(node, parent); err != nil {
 			leafPath := append(append([]string(nil), path...), keyword)
-			return fmt.Errorf("%s: %v", strings.Join(redactSecretPath(leafPath), " "), err)
+			return schemaPathErrorf(leafPath, "%v", err)
 		}
 	}
 	// exactMatch is computed here rather than at its original site further
@@ -605,9 +683,8 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// levels arrive as nested children.
 	if childSchema.midKeyword != "" && len(node.Keys) > childSchema.midKeywordAt &&
 		node.Keys[childSchema.midKeywordAt] != childSchema.midKeyword {
-		return fmt.Errorf("%s: unexpected keyword %q — expected %q (`%s <a> %s <b>` names a zone pair, and the middle keyword is fixed)",
-			strings.Join(redactSecretPath(newPath), " "), node.Keys[childSchema.midKeywordAt],
-			childSchema.midKeyword, node.Keys[0], childSchema.midKeyword)
+		return schemaPathErrorf(newPath, "unexpected keyword %q — expected %q (`%s <a> %s <b>` names a zone pair, and the middle keyword is fixed)",
+			node.Keys[childSchema.midKeywordAt], childSchema.midKeyword, node.Keys[0], childSchema.midKeyword)
 	}
 
 	// Typed KEY slot (#1319 PR 3): a named-instance container with a
@@ -685,7 +762,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 					continue
 				}
 			}
-			return fmt.Errorf("%s: the token %q follows `%s` but names a SIBLING "+
+			return schemaErrorf(append(append([]string(nil), path...), node.Keys...), "%s: the token %q follows `%s` but names a SIBLING "+
 				"statement — a missing semicolon after `%s` fuses the two, and the "+
 				"`%s` statement is then silently dropped from the compiled config "+
 				"while `show configuration` still displays it. Add the missing `;` "+
@@ -820,10 +897,9 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// addition to their value form. That capability is explicit on the
 		// schema node; every other value-taking leaf retains this refusal.
 		if !childSchema.allowEmptyValue {
-			return fmt.Errorf("%s: `%s` declares a value and none was given — the compiler "+
+			return schemaPathErrorf(newPath, "`%s` declares a value and none was given — the compiler "+
 				"drops a valueless statement, so this commits clean and the configuration "+
-				"silently does not carry it",
-				strings.Join(redactSecretPath(newPath), " "), keyword)
+				"silently does not carry it", keyword)
 		}
 	}
 	if missingArgs > 0 && !childSchema.compoundKey {
@@ -887,8 +963,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// error names the dropped keyword, never its value.
 	if !childSchema.packedTail && len(node.Keys) > consumed {
 		if tok, _ := packedTailCredential14412(node, descendSchema, consumed); tok != "" {
-			return fmt.Errorf("%s: packed configuration keyword %q is not a child of this stanza and would be silently dropped — the credential it carries would not take effect; author it under the stanza that declares it, with its exact spelling (#14412)",
-				strings.Join(redactSecretPath(newPath), " "), tok)
+			return schemaPathErrorf(newPath, "packed configuration keyword %q is not a child of this stanza and would be silently dropped — the credential it carries would not take effect; author it under the stanza that declares it, with its exact spelling (#14412)", tok)
 		}
 	}
 	return walkSchemaChildren(walkChildren, descendSchema, newPath, vc, childClosed)
@@ -932,7 +1007,7 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 	if containerSchema.midKeyword != "" {
 		for i, tok := range node.Keys[:consume] {
 			if baseArgIdx+i == containerSchema.midKeywordAt-1 && tok != containerSchema.midKeyword {
-				return fmt.Errorf("%s: unexpected keyword %q — expected %q (the middle keyword of this stanza is fixed)",
+				return schemaErrorf(append(append([]string(nil), path...), node.Keys[:consume]...), "%s: unexpected keyword %q — expected %q (the middle keyword of this stanza is fixed)",
 					strings.Join(redactSecretPath(path), " "), tok, containerSchema.midKeyword)
 			}
 		}
@@ -1110,14 +1185,12 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 	// the same sense: `set system host-name` with no name commits clean and
 	// the system carries no host-name. One arity check, both directions.
 	if len(node.Keys) < allowed && len(node.Children) == 0 && !leafSchema.allowEmptyValue {
-		return fmt.Errorf("%s: `%s` declares a value and none was given (this leaf takes %d value token(s)); "+
+		return schemaPathErrorf(leafPath, "`%s` declares a value and none was given (this leaf takes %d value token(s)); "+
 			"the compiler drops a valueless statement, so this commits clean and the "+
-			"configuration silently does not carry it",
-			strings.Join(redactSecretPath(leafPath), " "), leafName, leafSchema.args)
+			"configuration silently does not carry it", leafName, leafSchema.args)
 	}
 	if len(node.Keys) > allowed {
-		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)",
-			strings.Join(redactSecretPath(leafPath), " "), node.Keys[allowed], leafSchema.args)
+		return schemaPathErrorf(append(append([]string(nil), leafPath...), node.Keys[allowed]), "unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)", node.Keys[allowed], leafSchema.args)
 	}
 	// #12093: a scalar leaf that opts into blockValue also accepts the
 	// single-child block spelling `keyword { value; }` — the same
@@ -1138,8 +1211,7 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
-		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s) and no sub-statement; the extra token would be silently dropped)",
-			strings.Join(redactSecretPath(leafPath), " "), c.Keys[0], leafSchema.args)
+		return schemaPathErrorf(append(append([]string(nil), leafPath...), c.Keys[0]), "unexpected trailing token %q (this leaf takes %d value token(s) and no sub-statement; the extra token would be silently dropped)", c.Keys[0], leafSchema.args)
 	}
 	return nil
 }
@@ -1254,23 +1326,23 @@ func validateSecurityLogHostNode15270(node *Node, _ *schemaNode) error {
 		switch c.Keys[0] {
 		case "port":
 			if len(c.Keys) != 2 || len(c.Children) != 0 {
-				return fmt.Errorf("host port requires exactly one value")
+				return schemaErrorf(nil, "host port requires exactly one value")
 			}
 			if err := ValidateInteger(1, 65535)(c.Keys[1], nil); err != nil {
-				return fmt.Errorf("host port: %v", err)
+				return schemaErrorf(nil, "host port: %v", err)
 			}
 		default:
 			if len(c.Keys) != 1 || len(c.Children) != 0 {
-				return fmt.Errorf("unknown modifier %q under host (only a bare address and port are allowed)", c.Keys[0])
+				return schemaErrorf(nil, "unknown modifier %q under host (only a bare address and port are allowed)", c.Keys[0])
 			}
 			addrs = append(addrs, c.Keys[0])
 		}
 	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("missing value (host requires exactly one address)")
+		return schemaErrorf(nil, "missing value (host requires exactly one address)")
 	}
 	if len(addrs) > 1 {
-		return fmt.Errorf("host requires exactly one address, found %d", len(addrs))
+		return schemaErrorf(nil, "host requires exactly one address, found %d", len(addrs))
 	}
 	if err := ValidateSyslogHost(addrs[0], nil); err != nil {
 		return err
@@ -1536,7 +1608,7 @@ func validateTailLeaf(node *Node, leafSchema *schemaNode, parentPath []string, s
 	}
 	if err := leafSchema.tailValidator(tokens, siblingTails); err != nil {
 		return &typedLeafSchemaError{
-			msg: fmt.Sprintf("%s: %v", strings.Join(redactSecretPath(path), " "), err),
+			msg: schemaErrorf(append(append([]string(nil), path...), tokens...), "%s: %v", strings.Join(redactSecretPath(path), " "), err).Error(),
 		}
 	}
 	return nil
@@ -1652,31 +1724,20 @@ func IsTypedLeafSchemaError(err error) bool {
 // consumed config path, e.g. "class-of-service schedulers be
 // transmit-rate: missing value". path already includes the leaf keyword.
 //
-// #16066 (Codex fold on #16090): on a SECRET leaf this must stay
-// value-free like typedLeafInvalidErrorf. Several call sites format an
-// operator token with %q — the additional-token arms
-// ("unknown modifier %q") in validateTypedLeaf/validateModifierChild
-// quote whatever follows a VALID first value, so a plaintext pasted as
-// an extra token of `encrypted-password` reached tolerant-ingress logs
-// verbatim even though the validator itself never echoes. When the
-// leaf is secret (same isSecretLeaf registry test as #8434, so dual-use
-// keywords stay resolved by root), any string argument equal to a
-// non-keyword path-irrelevant token is replaced with <redacted> before
-// formatting; in practice every %q argument at these sites is an
-// operator token, so it is redacted unconditionally for secret leaves
-// while the defect class ("unknown modifier") survives. Non-secret
-// leaves keep quoting the token — that diagnostic is the point there.
+// It delegates to schemaPathErrorf (the #16066 shared choke point):
+// call sites format an operator token with %q — the additional-token
+// arms ("unknown modifier %q") in validateTypedLeaf /
+// validateModifierChild quote whatever follows a VALID first value,
+// so a plaintext pasted as an extra token of `encrypted-password`
+// reached tolerant-ingress logs verbatim even though the validator
+// itself never echoes. The choke point scrubs every secret-indexed
+// token of the leaf path from the formatted text while the defect
+// class ("unknown modifier") survives; non-secret leaves keep
+// quoting the token — that diagnostic is the point there.
 func typedLeafErrorf(path []string, format string, args ...interface{}) error {
-	joined := strings.Join(redactSecretPath(path), " ")
-	if len(path) > 0 && isSecretLeaf(joined, path[len(path)-1:]) {
-		for i, a := range args {
-			if _, ok := a.(string); ok {
-				args[i] = SecretRedacted
-			}
-		}
-	}
+	detail := fmt.Sprintf(format, args...)
 	return &typedLeafSchemaError{
-		msg: fmt.Sprintf("%s: %s", joined, fmt.Sprintf(format, args...)),
+		msg: schemaPathErrorf(path, "%s", detail).Error(),
 	}
 }
 
@@ -1706,8 +1767,33 @@ func typedLeafErrorf(path []string, format string, args ...interface{}) error {
 // SECOND time, so redacting only the wrapper leaves the leak intact. The
 // containment test can over-redact for a very short token; that is the safe
 // direction and it is preferred to reasoning about which validators echo.
+//
+// #16066 fold 2: the final text additionally passes through
+// schemaPathErrorf, so any secret token of the leaf (not just tok)
+// appearing anywhere in the message is scrubbed at the shared choke
+// point.
+// scrubSecretTokens replaces every secret-indexed token of fullPath
+// occurring in msg with SecretRedacted. Shared by schemaErrorf and
+// the typed-leaf helpers so replacement semantics stay identical.
+func scrubSecretTokens(fullPath []string, msg string) string {
+	if idx := secretIndices(fullPath); len(idx) > 0 {
+		seen := make(map[string]bool, len(idx))
+		for _, i := range idx {
+			if i < 0 || i >= len(fullPath) {
+				continue
+			}
+			if tok := fullPath[i]; tok != "" && !seen[tok] {
+				seen[tok] = true
+				msg = strings.ReplaceAll(msg, tok, SecretRedacted)
+			}
+		}
+	}
+	return msg
+}
+
 func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 	joined := strings.Join(redactSecretPath(path), " ")
+	fullPath := append(append([]string(nil), path...), tok)
 	if len(path) > 0 && isSecretLeaf(joined, path[len(path)-1:]) {
 		// Redact the value INSIDE the reason rather than discarding the
 		// reason. Validators may echo it themselves, so they are a second
@@ -1724,12 +1810,14 @@ func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 				reason = strings.ReplaceAll(reason, tok, "<redacted>")
 			}
 		}
+		detail := fmt.Sprintf("invalid value <redacted>: %s", reason)
 		return &typedLeafSchemaError{
-			msg: fmt.Sprintf("%s: invalid value <redacted>: %s", joined, reason),
+			msg: fmt.Sprintf("%s: %s", joined, scrubSecretTokens(fullPath, detail)),
 		}
 	}
+	detail := fmt.Sprintf("invalid value %q: %v", tok, err)
 	return &typedLeafSchemaError{
-		msg: fmt.Sprintf("%s: invalid value %q: %v", joined, tok, err),
+		msg: fmt.Sprintf("%s: %s", joined, scrubSecretTokens(fullPath, detail)),
 	}
 }
 
