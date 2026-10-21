@@ -566,3 +566,31 @@ func TestQuotedValueChargeAccepted15999(t *testing.T) {
 		t.Fatalf("quoted 200k-word value (~3 units) refused: %v", err)
 	}
 }
+
+// Creation-charge parity: 50k+ identical re-sets (tree stays ~5 units)
+// must be accepted — existing-leaf sets charge ~0. Distinct growing
+// sets still refuse at the cap.
+func TestIdenticalResetsCreationCharge15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for range 200_000 {
+		b.WriteString("set system host-name fw1\n")
+	}
+	if _, err := s.LoadSet(b.String()); err != nil {
+		t.Fatalf("200k identical re-sets refused by gross cap: %v", err)
+	}
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	var g strings.Builder
+	for i := range config.MaxParseNodes + 1 {
+		fmt.Fprintf(&g, "set security address-book global address a%d 10.0.0.1/32\n", i)
+	}
+	if _, err := s2.LoadSet(g.String()); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("distinct growing sets must refuse: err=%v", err)
+	}
+}

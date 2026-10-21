@@ -882,6 +882,24 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			charge = 0
 		case "deactivate":
 			charge = 1
+		default: // set/edit: charge CREATION only
+			// Existing leaf with same keys creates ~0 units:
+			// charge = max(0, lineToks-leafToks) (small). Absent/
+			// container targets charge full (twin-add creates).
+			if perr == nil {
+				kind, _, leafKeys := working.LineOccupancy(path)
+				if kind == config.LineTargetLeaf {
+					// toks includes verb+path; leaf replacement
+					// creates only keys beyond the existing leaf's.
+					charge = (toks - 1) - leafKeys
+					if charge < 0 {
+						charge = 0
+					}
+					if charge > 1 && toks-leafKeys <= 1 {
+						charge = 1
+					}
+				}
+			}
 		}
 		cumWork += charge
 		if cumWork > 2*config.MaxParseNodes {
