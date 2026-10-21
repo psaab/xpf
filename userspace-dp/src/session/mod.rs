@@ -6355,6 +6355,10 @@ mod opening_state_sync_10888_tests;
 #[cfg(test)]
 #[path = "reimport_idle_anchor_16043_tests.rs"]
 mod reimport_idle_anchor_16043_tests;
+// #16218: promoted/demoted opening rows must survive the failover GC pass.
+#[cfg(test)]
+#[path = "promoted_opening_gc_16218_tests.rs"]
+mod promoted_opening_gc_16218_tests;
 // #9582: a close seen only by a worker replica of a local session is announced, with
 // the installer's id. Written before the fix.
 #[cfg(test)]

@@ -1879,6 +1879,7 @@ impl super::Coordinator {
                     session_gc_aged_owner_rg_zero_active_node: s
                         .session_gc_aged_owner_rg_zero_active_node,
                     session_gc_kept_alive_by_companion: s.session_gc_kept_alive_by_companion,
+                    session_gc_expired: s.session_gc_expired,
                     nat_reverse_key_collisions: s.nat_reverse_key_collisions,
                     nat_reverse_key_collisions_distinct_src: s
                         .nat_reverse_key_collisions_distinct_src,

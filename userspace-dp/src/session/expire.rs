@@ -727,15 +727,26 @@ impl SessionTable {
         if fabric_ingress {
             return StandbyGateDecision::Age;
         }
-        // #10888: an opening import has only its original opening deadline.
-        // Once that deadline is crossed, a missing primary Close must not
-        // grant a second stale-ceiling interval based on its app timeout.
-        if is_opening
-            && origin.is_peer_synced()
-            && now_ns.saturating_sub(last_seen_ns) > expires_after_ns
-        {
-            return StandbyGateDecision::ReapStaleSynced;
-        }
+        // #10888/#16218: an opening import has only its original opening
+        // deadline. Once that deadline is crossed, a missing primary Close
+        // must not grant a second stale-ceiling interval based on its app
+        // timeout (86400s in the #10888 fixture). It must NOT, however, be
+        // reaped instantly at the deadline: at an RG failover the promoted
+        // copy can still be opening/handshake-pending on this node (its
+        // hits may have crossed the fabric or the flow cache without
+        // completing the local handshake state), and an instant reap at
+        // the first post-move GC pass deletes the live flow on BOTH nodes
+        // within seconds (#16218). Route opening rows through the same
+        // bounded HOLD ceiling as established rows instead: the ceiling is
+        // min(MULT x expires_after_ns, ABS) measured from first_held_ns, so
+        // a lost-Close opening still reaps at <=3x its opening window
+        // (60s at the 20s default), never at its app timeout. When this
+        // node now forwards the RG, the SelfHeal arm below re-stamps the
+        // row instead of holding it. The reap therefore only fires via
+        // the Hold arm's ceiling check; there is no separate instant arm.
+        // Opening rows take the same SelfHeal/Hold path as established
+        // rows (#16218); `is_opening` no longer selects a separate arm.
+        let _ = is_opening;
         let peer_synced = origin.is_peer_synced();
         // forwards_here: does THIS node forward this session right now?
         // (rg > 0 → per-RG predicate; rg <= 0 → node-level.)

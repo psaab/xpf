@@ -633,6 +633,7 @@ pub(crate) fn worker_loop(
                 wr_counters.session_gc_aged_owner_rg_zero_active_node =
                     gc.aged_owner_rg_zero_active_node as u64;
                 wr_counters.session_gc_kept_alive_by_companion = gc.kept_alive_by_companion as u64;
+                wr_counters.session_gc_expired = gc.expired as u64;
                 // #1760 W1: durable artifact for the reverse-key-collision
                 // watch. The in-process counters reset on every restart
                 // and the lab has no long-term Prometheus store, so a

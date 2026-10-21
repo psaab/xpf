@@ -11,7 +11,7 @@ import (
 func (c *xpfCollector) emitSessionGCMetrics(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
 	var scanned, droppedGone, droppedStale, reBucketed uint64
 	var heldStandby, reapedStaleSynced, healedOnPromote uint64
-	var agedOwnerRGZeroActiveNode, keptAliveByCompanion uint64
+	var agedOwnerRGZeroActiveNode, keptAliveByCompanion, expired uint64
 	for _, worker := range status.WorkerRuntime {
 		scanned += worker.SessionGCScanned
 		droppedGone += worker.SessionGCDroppedGone
@@ -22,6 +22,7 @@ func (c *xpfCollector) emitSessionGCMetrics(ch chan<- prometheus.Metric, status 
 		healedOnPromote += worker.SessionGCHealedOnPromote
 		agedOwnerRGZeroActiveNode += worker.SessionGCAgedOwnerRGZeroActiveNode
 		keptAliveByCompanion += worker.SessionGCKeptAliveByCompanion
+		expired += worker.SessionGCExpired
 	}
 	c.emitConstMetric(ch, c.userspaceSessionGCScanned, prometheus.CounterValue, float64(scanned))
 	c.emitConstMetric(ch, c.userspaceSessionGCDroppedGone, prometheus.CounterValue, float64(droppedGone))
@@ -32,4 +33,5 @@ func (c *xpfCollector) emitSessionGCMetrics(ch chan<- prometheus.Metric, status 
 	c.emitConstMetric(ch, c.userspaceSessionGCHealedOnPromote, prometheus.CounterValue, float64(healedOnPromote))
 	c.emitConstMetric(ch, c.userspaceSessionGCAgedOwnerRGZeroActiveNode, prometheus.CounterValue, float64(agedOwnerRGZeroActiveNode))
 	c.emitConstMetric(ch, c.userspaceSessionGCKeptAliveByCompanion, prometheus.CounterValue, float64(keptAliveByCompanion))
+	c.emitConstMetric(ch, c.userspaceSessionGCExpired, prometheus.CounterValue, float64(expired))
 }

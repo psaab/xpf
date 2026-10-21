@@ -123,6 +123,8 @@ pub struct WorkerRuntimeStatus {
     pub session_gc_aged_owner_rg_zero_active_node: u64,
     #[serde(rename = "session_gc_kept_alive_by_companion", default)]
     pub session_gc_kept_alive_by_companion: u64,
+    #[serde(rename = "session_gc_expired", default)]
+    pub session_gc_expired: u64,
     /// #1760: cumulative NAT reverse-key displacement events on this
     /// worker's SessionTable nat_reverse_index — the latent 1:N collision
     /// (#1758) made observable. A near-precise upper bound on live
