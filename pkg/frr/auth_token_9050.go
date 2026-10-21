@@ -3,6 +3,8 @@ package frr
 import (
 	"log/slog"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #9050: the render belt must not defer auth-secret token safety to a gate the
@@ -52,13 +54,22 @@ import (
 // activation this file's contract used to leave behind. The belt
 // itself (omit the LINE) is unchanged; the fail-closed escalation
 // lives at the callers in protocols_render.go.
+//
+// #15990 extends the same belt to Junos `$9$` credentials on the
+// tolerant path. Strict compilation decodes valid values and refuses
+// malformed ones before render, but a persisted config can retain a
+// warned, literal `$9$...` blob. A decodable value is rendered as its
+// decoded plaintext; an undecodable or decoded-empty value is not a
+// credential at all and must be omitted so the caller withholds the
+// enclosing capability instead of activating the adjacency with the
+// publicly recognizable blob as its key.
 
 // frrAuthTokenUnsafe reports whether s cannot be emitted as a single vtysh
 // token. It mirrors config.frrTokenUnsafeIndex's character set deliberately: a
 // render belt that admits a character the commit gate rejects is a seam, and
 // this file exists because there was one.
 func frrAuthTokenUnsafe(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range s {
 		c := s[i]
 		if c == ' ' || c == '\t' || c < 0x20 || c == 0x7f {
 			return true
@@ -67,20 +78,39 @@ func frrAuthTokenUnsafe(s string) bool {
 	return false
 }
 
+// decodedAuthSecret resolves a configured routing credential through
+// its Junos `$9$` decoded form. Non-`$9$` values pass through byte-for-
+// byte. A `$9$` value that decodes successfully supplies its plaintext;
+// one that is malformed or decodes to zero bytes supplies no credential.
+func decodedAuthSecret(s string) (string, bool) {
+	decoded, err := config.DecodeJunos9Secret(s)
+	if err != nil || decoded == "" {
+		return "", false
+	}
+	return decoded, true
+}
+
 // authTokenOrOmit returns the value to interpolate and whether the caller may
 // emit the line at all.
 //
 // The warning names the protocol and the length and NEVER the value: this is an
 // auth secret, and the log is not 0640.
 func authTokenOrOmit(kind, s string) (string, bool) {
-	if !frrAuthTokenUnsafe(s) {
-		return sanitizeFRRValue(s), true
+	resolved, ok := decodedAuthSecret(s)
+	if !ok {
+		slog.Warn("frr: OMITTING a routing authentication line whose Junos $9$ secret cannot be decoded to a non-empty credential (#15990) — the adjacency will not authenticate; re-set the key",
+			"protocol", kind,
+			"secret_len", len(s))
+		return "", false
+	}
+	if !frrAuthTokenUnsafe(resolved) {
+		return sanitizeFRRValue(resolved), true
 	}
 	slog.Warn("frr: OMITTING a routing authentication line whose secret is not a "+
 		"single vtysh token (#9050) — the adjacency will not authenticate; "+
 		"re-set the key without whitespace",
 		"protocol", kind,
-		"secret_len", len(s),
-		"has_space", strings.ContainsAny(s, " \t"))
+		"secret_len", len(resolved),
+		"has_space", strings.ContainsAny(resolved, " \t"))
 	return "", false
 }

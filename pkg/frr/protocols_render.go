@@ -1211,12 +1211,15 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		// rejected by ripd on EVERY frr-reload, so emitting it would
 		// brick the reload forever. Fail closed exactly like the
 		// unrenderable-token arm: omit RIP enrollment entirely
-		// rather than the rejected line or an unauthenticated block.
-		ripKeyTooLong15013 := rip.AuthKey != "" && len([]rune(rip.AuthKey.Reveal())) > config.MaxRIPAuthKeyLen
+		ripResolvedKey15990, ripResolvedOK15990 := "", true
+		if rip.AuthKey != "" {
+			ripResolvedKey15990, ripResolvedOK15990 = decodedAuthSecret(rip.AuthKey.Reveal())
+		}
+		ripKeyTooLong15013 := rip.AuthKey != "" && ripResolvedOK15990 && len([]rune(ripResolvedKey15990)) > config.MaxRIPAuthKeyLen
 		if ripKeyTooLong15013 {
 			slog.Warn("frr: rip authentication-key exceeds the 16-character maximum accepted by ripd; "+
 				"NOT enrolling any interface in RIP rather than rendering a line ripd rejects on every reload (#15013)",
-				"key_len", len([]rune(rip.AuthKey.Reveal())), "max", config.MaxRIPAuthKeyLen)
+				"key_len", len([]rune(ripResolvedKey15990)), "max", config.MaxRIPAuthKeyLen)
 		}
 		ripFailClosed14977 := ripKeylessAuth14398 || !ripAuthTokOK14977 || ripUnrecognized14977 || ripKeyTooLong15013
 		if !ripAuthTokOK14977 {
