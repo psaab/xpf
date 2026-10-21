@@ -3672,29 +3672,31 @@ fn counter_only_output_filter_needs_tx_eval_and_sets_aggregate() {
     assert!(!filter.affects_tx_selection);
 }
 
-/// #6236 PR-2A blocker-#1 pin (updated for PR-2B): a duplicate ifindex where a
-/// needs-tx-eval output filter is followed by a plain-accept one at the SAME
-/// ifindex+family+direction. The fast map overwrites last-wins (holds the
-/// SECOND, plain filter); the `has_output_needs_tx_eval_v4` aggregate —
-/// recomputed from the FINAL map, NOT accumulated in-loop — therefore reads
-/// FALSE, agreeing with the filter the hot path actually evaluates. PR-2B
-/// deleted the monotonic `iface_filter_out_v4_needs_tx_eval` set, so the
-/// migrated `interface_output_filter_needs_tx_eval` accessor now also reads the
-/// last-wins fast-map filter → FALSE (part c), closing the §5.1 divergence at
-/// the per-interface level too. The snapshot still compiles Ok (last-wins
-/// canonical, NOT reject-fail-closed).
+/// #6236 PR-2A blocker-#1 pin (updated for PR-2B), as narrowed by #16059:
+/// differing per-unit filters on a shared ifindex now REJECT (#16059, see
+/// `shared_ifindex_wg_filters_conflict_rejects_16059`), so this pin uses
+/// KNOWN BASE rows (`is_unit: Some(false)`) — base rows carry no Go
+/// filters, but a hand-built snapshot can set them; the #16059 gate
+/// deliberately excludes known bases, so the fast-map last-wins +
+/// final-map aggregate semantics the #6236 fold pins are still exercised
+/// here. The fast map holds the SECOND (plain) filter; the
+/// `has_output_needs_tx_eval_v4` aggregate — recomputed from the FINAL
+/// map, NOT accumulated in-loop — therefore reads FALSE, agreeing with
+/// the filter the hot path actually evaluates.
 #[test]
 fn duplicate_ifindex_output_filter_aggregate_is_last_wins() {
     let ifaces = vec![
         crate::InterfaceSnapshot {
             name: "reth0.80".into(),
             ifindex: 7,
+            is_unit: Some(false),
             filter_output_v4: "wan-count".into(),
             ..Default::default()
         },
         crate::InterfaceSnapshot {
             name: "reth0.80-dup".into(),
             ifindex: 7,
+            is_unit: Some(false),
             filter_output_v4: "plain".into(),
             ..Default::default()
         },
@@ -3726,25 +3728,331 @@ fn duplicate_ifindex_output_filter_aggregate_is_last_wins() {
         "",
         "",
     )
-    .expect("duplicate ifindex is accepted (last-wins canonical, not rejected)");
+    .expect("known-base duplicate ifindex is accepted (last-wins canonical)");
 
     // (a) last-wins: the fast map holds the SECOND (plain) filter.
     assert_eq!(
-        state.iface_filter_out_v4_fast.get(&7).map(|f| f.name.as_str()),
+        state
+            .iface_filter_out_v4_fast
+            .get(&7)
+            .map(|f| f.name.as_str()),
         Some("plain")
     );
-    // (b) the recomputed aggregate follows the final map (plain → false), NOT the
-    // stale union.
+    // (b) the recomputed aggregate follows the final map (plain → false).
     assert!(
         !state.has_output_needs_tx_eval_v4,
         "aggregate must derive from the final last-wins filter"
     );
-    // (c) #6236 PR-2B: the monotonic set is deleted and the accessor now reads
-    // `Filter::needs_tx_eval()` off the last-wins fast-map entry — so it returns
-    // FALSE, agreeing with the (plain) filter the TX path actually evaluates.
-    // This is exactly the divergence the fold closes: before PR-2B the set
-    // `.contains(&7)` was stale-true while the fast map held the plain filter.
+    // (c) the accessor reads `Filter::needs_tx_eval()` off the last-wins
+    // fast-map entry — FALSE, agreeing with the evaluated (plain) filter.
     assert!(!interface_output_filter_needs_tx_eval(&state, 7, false));
+}
+
+/// #16059 helpers: one accept-term filter per name, WG unit rows sharing
+/// ifindex 42 (the `wg0.0`/`wg0.1` -> one `wg0` netdev fan-out).
+fn wg_unit_16059(name: &str, ifindex: i32) -> crate::InterfaceSnapshot {
+    crate::InterfaceSnapshot {
+        name: name.into(),
+        ifindex,
+        is_unit: Some(true),
+        tunnel: true,
+        ..Default::default()
+    }
+}
+
+fn accept_filter_16059(name: &str, family: &str) -> FirewallFilterSnapshot {
+    FirewallFilterSnapshot {
+        name: name.into(),
+        family: family.into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "ok".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }
+}
+
+/// #16059 decisive: differing WG output filters on a shared ifindex
+/// reject (before the fix this compiled Ok and `plain` last-won, so
+/// `deny-out` never evaluated). Each family+direction arm rejects;
+/// identical names and single-claimant mixes stay valid (an empty hook
+/// names no filter, so nothing is shadowed).
+#[test]
+fn shared_ifindex_wg_filters_conflict_rejects_16059() {
+    // WG/output v4 — the issue's headline arm.
+    let mut a = wg_unit_16059("wg0.0", 42);
+    a.filter_output_v4 = "deny-out".into();
+    let mut b = wg_unit_16059("wg0.1", 42);
+    b.filter_output_v4 = "plain".into();
+    let err = parse_filter_state(
+        &[
+            accept_filter_16059("deny-out", "inet"),
+            accept_filter_16059("plain", "inet"),
+        ],
+        &[],
+        &[a.clone(), b.clone()],
+        "",
+        "",
+    )
+    .expect_err("differing WG output filters on one ifindex must reject");
+    match err {
+        crate::policy::SnapshotIntegrityError::InterfaceFilterSharedIfindexConflict {
+            ifindex,
+            ref family,
+            ref direction,
+            ref first_interface,
+            ref first_filter,
+            ref second_interface,
+            ref second_filter,
+        } => {
+            assert_eq!(ifindex, 42);
+            assert_eq!(family, "inet");
+            assert_eq!(direction, "output");
+            assert_eq!(first_interface, "wg0.0");
+            assert_eq!(first_filter, "deny-out");
+            assert_eq!(second_interface, "wg0.1");
+            assert_eq!(second_filter, "plain");
+        }
+        other => panic!("expected InterfaceFilterSharedIfindexConflict, got {other:?}"),
+    }
+    // Reversed row order names the other row first — still rejects.
+    assert!(
+        parse_filter_state(
+            &[
+                accept_filter_16059("deny-out", "inet"),
+                accept_filter_16059("plain", "inet"),
+            ],
+            &[],
+            &[b, a],
+            "",
+            "",
+        )
+        .is_err()
+    );
+
+    // Each remaining arm rejects too: input v4, input v6, output v6.
+    for (hook, family) in [("in4", "inet"), ("in6", "inet6"), ("out6", "inet6")] {
+        let mut x = wg_unit_16059("wg0.0", 42);
+        let mut y = wg_unit_16059("wg0.1", 42);
+        match hook {
+            "in4" => {
+                x.filter_input_v4 = "f-a".into();
+                y.filter_input_v4 = "f-b".into();
+            }
+            "in6" => {
+                x.filter_input_v6 = "f-a".into();
+                y.filter_input_v6 = "f-b".into();
+            }
+            _ => {
+                x.filter_output_v6 = "f-a".into();
+                y.filter_output_v6 = "f-b".into();
+            }
+        }
+        assert!(
+            parse_filter_state(
+                &[
+                    accept_filter_16059("f-a", family),
+                    accept_filter_16059("f-b", family),
+                ],
+                &[],
+                &[x, y],
+                "",
+                "",
+            )
+            .is_err(),
+            "{hook} conflict must reject"
+        );
+    }
+
+    // Identical output filter on both units: unambiguous, compiles, and
+    // the fast map holds that filter (the winner is proven, not assumed).
+    let mut a = wg_unit_16059("wg0.0", 42);
+    a.filter_output_v4 = "plain".into();
+    let mut b = wg_unit_16059("wg0.1", 42);
+    b.filter_output_v4 = "plain".into();
+    let state = parse_filter_state(
+        &[accept_filter_16059("plain", "inet")],
+        &[],
+        &[a, b],
+        "",
+        "",
+    )
+    .expect("identical shared-ifindex filters are unambiguous");
+    assert_eq!(
+        state
+            .iface_filter_out_v4_fast
+            .get(&42)
+            .map(|f| f.name.as_str()),
+        Some("plain")
+    );
+
+    // One unit filtered, sibling unfiltered: single claimant wins in
+    // either row order.
+    let mut a = wg_unit_16059("wg0.0", 42);
+    a.filter_output_v4 = "plain".into();
+    let b = wg_unit_16059("wg0.1", 42);
+    for ifaces in [vec![a.clone(), b.clone()], vec![b, a]] {
+        let state = parse_filter_state(
+            &[accept_filter_16059("plain", "inet")],
+            &[],
+            &ifaces,
+            "",
+            "",
+        )
+        .expect("single claimant on shared ifindex is unambiguous");
+        assert_eq!(
+            state
+                .iface_filter_out_v4_fast
+                .get(&42)
+                .map(|f| f.name.as_str()),
+            Some("plain")
+        );
+    }
+
+    // Different ifindices with different filters: no sharing, no conflict.
+    let mut a = wg_unit_16059("wg0.0", 42);
+    a.filter_output_v4 = "deny-out".into();
+    let mut b = wg_unit_16059("wg1.0", 43);
+    b.filter_output_v4 = "plain".into();
+    parse_filter_state(
+        &[
+            accept_filter_16059("deny-out", "inet"),
+            accept_filter_16059("plain", "inet"),
+        ],
+        &[],
+        &[a, b],
+        "",
+        "",
+    )
+    .expect("distinct ifindices keep distinct filters");
+
+    // #10816 control (fold 2): GRE INPUT dispute on a shared ifindex
+    // still compiles and the winner is the FIRST row's filter — decap
+    // attributes to the first-sorting row by design, and the assignment
+    // is now first-wins so the fast map PROVES the winner's identity
+    // (not merely contains_key). The discriminator is tunnel_mode, so
+    // the wg-named-on-gr-* counterexample below must still reject.
+    let gre_unit = |name: &str| crate::InterfaceSnapshot {
+        name: name.into(),
+        ifindex: 77,
+        is_unit: Some(true),
+        tunnel: true,
+        tunnel_mode: "gre".into(),
+        ..Default::default()
+    };
+    let mut g0 = gre_unit("gr-0/0/0.0");
+    g0.filter_input_v4 = "f-a".into();
+    let mut g1 = gre_unit("gr-0/0/0.1");
+    g1.filter_input_v4 = "f-b".into();
+    let state = parse_filter_state(
+        &[
+            accept_filter_16059("f-a", "inet"),
+            accept_filter_16059("f-b", "inet"),
+        ],
+        &[],
+        &[g0.clone(), g1.clone()],
+        "",
+        "",
+    )
+    .expect("GRE input dispute keeps #10816 first-sorting-wins");
+    assert_eq!(
+        state
+            .iface_filter_v4_fast
+            .get(&77)
+            .map(|f| f.name.as_str()),
+        Some("f-a"),
+        "first-sorting row's filter must WIN the shared GRE-input key \
+         (first-wins, #10816)"
+    );
+    // Reversed order: the other row is now first and must win instead.
+    let state = parse_filter_state(
+        &[
+            accept_filter_16059("f-a", "inet"),
+            accept_filter_16059("f-b", "inet"),
+        ],
+        &[],
+        &[g1.clone(), g0.clone()],
+        "",
+        "",
+    )
+    .expect("reversed GRE input dispute still compiles");
+    assert_eq!(
+        state
+            .iface_filter_v4_fast
+            .get(&77)
+            .map(|f| f.name.as_str()),
+        Some("f-b"),
+        "snapshot order decides the GRE-input winner (#10816)"
+    );
+    // Distinct-logical-ifindex spelling (the production GRE shape: one
+    // device, per-unit logical ifindexes): each unit keeps its filter.
+    let mut g0d = gre_unit("gr-0/0/0.0");
+    g0d.ifindex = 77;
+    g0d.filter_input_v4 = "f-a".into();
+    let mut g1d = gre_unit("gr-0/0/0.1");
+    g1d.ifindex = 78;
+    g1d.filter_input_v4 = "f-b".into();
+    let state = parse_filter_state(
+        &[
+            accept_filter_16059("f-a", "inet"),
+            accept_filter_16059("f-b", "inet"),
+        ],
+        &[],
+        &[g0d, g1d],
+        "",
+        "",
+    )
+    .expect("distinct-logical-ifindex GRE units keep their own filters");
+    assert_eq!(
+        state
+            .iface_filter_v4_fast
+            .get(&77)
+            .map(|f| f.name.as_str()),
+        Some("f-a"),
+        "first-sorting row's filter is the #10816 decap winner"
+    );
+    // Counterexample (fold 2 #1): WireGuard legally configured ON a
+    // gr-* name (tunnel_mode=wireguard) must NOT inherit the GRE
+    // exemption — its input dispute rejects like any WG row.
+    let mut w0 = gre_unit("gr-0/0/0.0");
+    w0.tunnel_mode = "wireguard".into();
+    w0.filter_input_v4 = "f-a".into();
+    let mut w1 = gre_unit("gr-0/0/0.1");
+    w1.tunnel_mode = "wireguard".into();
+    w1.filter_input_v4 = "f-b".into();
+    assert!(
+        parse_filter_state(
+            &[
+                accept_filter_16059("f-a", "inet"),
+                accept_filter_16059("f-b", "inet"),
+            ],
+            &[],
+            &[w0, w1],
+            "",
+            "",
+        )
+        .is_err(),
+        "WG-on-gr-name input conflict must reject (mode, not name)"
+    );
+    // GRE output dispute on shared-ifindex GRE rows still rejects.
+    let mut g0 = gre_unit("gr-0/0/0.0");
+    g0.filter_output_v4 = "f-a".into();
+    let mut g1 = gre_unit("gr-0/0/0.1");
+    g1.filter_output_v4 = "f-b".into();
+    assert!(
+        parse_filter_state(
+            &[
+                accept_filter_16059("f-a", "inet"),
+                accept_filter_16059("f-b", "inet"),
+            ],
+            &[],
+            &[g0, g1],
+            "",
+            "",
+        )
+        .is_err(),
+        "GRE output conflict must still reject"
+    );
 }
 
 /// #6236 PR-2B equivalence gate. During development this assertion was written
