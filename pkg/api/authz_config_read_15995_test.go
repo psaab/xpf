@@ -2,12 +2,14 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
@@ -218,4 +220,38 @@ func TestRESTWholeShowSnapshotGeneration15995(t *testing.T) {
 		t.Errorf("whole-show snapshot does not render the priced generation:\n%s", out)
 	}
 	// Gate-level: whole arm returns Present with the priced tree.
+}
+
+// Fold 6 (REST twin): whole-show gate must authorize with the
+// snapshot's scfg. Witness: stale cfg (class unrestricted, as read
+// before a restricting commit) + store whose snapshot cfg restricts
+// the class — whole show must refuse.
+func TestRESTWholePricesWithSnapshotCfg15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	srv, _ := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(uid15995REST)})
+	staleText := strings.Replace(config15995REST, `deny-configuration "^security ipsec";`, ``, 1)
+	staleTree, errs := config.NewParser(staleText).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("stale parse: %v", errs)
+	}
+	staleCfg, err := config.CompileConfig(staleTree)
+	if err != nil {
+		t.Fatalf("stale compile: %v", err)
+	}
+	if _, restricted, err := config.ConfigurationLoginRegexesFor(staleCfg, "ancestor-view"); err != nil || restricted {
+		t.Fatalf("stale fixture must be unrestricted (restricted=%v err=%v)", restricted, err)
+	}
+	req := httptest.NewRequest("GET", "/api/v1/config/show", nil)
+	p := authz.Principal{Class: "ancestor-view"}
+	if _, err := srv.authorizeRESTConfigRead(req, staleCfg, p); err == nil {
+		t.Error("REST whole show priced with STALE cfg was ADMITTED though snapshot cfg restricts (#15995 fold6)")
+	}
+	if _, err := srv.authorizeRESTConfigRead(req, store.ActiveConfig(), p); err == nil {
+		t.Error("REST whole show with current cfg admitted (control broken)")
+	}
 }

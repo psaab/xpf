@@ -105,12 +105,19 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 				target = "active"
 			}
 			snaps := restConfigReadSnapshots{Present: true, NodeID: -1}
+			priceCfg := cfg
 			if s.store != nil {
-				_, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+				// Fold 6: authorize with the snapshot's OWN cfg —
+				// a commit between authorizeInputs and this capture
+				// must not pair new tree with stale (earlier) rules.
+				scfg, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+				if scfg != nil {
+					priceCfg = scfg
+				}
 				snaps.NodeID = nid
 				snaps.Primary = tree
 			}
-			return snaps, config.AuthorizeConfigShowWhole(cfg, class,
+			return snaps, config.AuthorizeConfigShowWhole(priceCfg, class,
 				config.ConfigShowDisplaySuffix(restShowFormat(format)))
 		}
 	case "GET /api/v1/config":

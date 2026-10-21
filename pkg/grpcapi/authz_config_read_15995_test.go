@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -287,5 +288,42 @@ func TestShowCompareRollbackAncestorDeniedDescendant15995(t *testing.T) {
 	if err := s.authorizeRPC(ctxOpen, show14707Method("ShowConfig"),
 		&pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE, Path: []string{"security"}}); err != nil {
 		t.Errorf("open-view ShowConfig [security] must stay admitted: %v", err)
+	}
+}
+
+// Fold 6: the whole-show arm must authorize with the snapshot's OWN
+// cfg (scfg), not the cfg authorizeRPCContext read earlier. Witness:
+// call the gate with a STALE cfg whose class carries no restriction
+// (as if authorizeInputs raced a restricting commit) while the store
+// snapshot's cfg restricts the class — whole show must refuse. The
+// scoped arm already priced with scfg; the whole arm discarded it.
+func TestShowWholePricesWithSnapshotCfg15995(t *testing.T) {
+	s := ancestor15995Server(t)
+	s.store.ExitConfigure()
+	// Stale cfg: same classes, but ancestor-view WITHOUT the deny.
+	staleCfg := func() *config.Config {
+		tree, errs := config.NewParser(strings.Replace(ancestor15995Config,
+			`deny-configuration "^security ipsec";`, ``, 1)).Parse()
+		if len(errs) > 0 {
+			t.Fatalf("stale fixture parse: %v", errs)
+		}
+		cfg, err := config.CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("stale fixture compile: %v", err)
+		}
+		return cfg
+	}()
+	if _, restricted, err := config.ConfigurationLoginRegexesFor(staleCfg, "ancestor-view"); err != nil || restricted {
+		t.Fatalf("stale fixture must be unrestricted (restricted=%v err=%v)", restricted, err)
+	}
+	if _, err := s.authorizeRPCConfigRead(staleCfg, "ancestor-view", show14707Method("ShowConfig"),
+		&pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE}); err == nil {
+		t.Error("whole ShowConfig priced with STALE cfg was ADMITTED though snapshot cfg restricts the class (#15995 fold6)")
+	}
+	// Control: with the store's current cfg it also refuses (above is
+	// the discriminating cell only if stale alone changes the answer).
+	if _, err := s.authorizeRPCConfigRead(s.store.ActiveConfig(), "ancestor-view", show14707Method("ShowConfig"),
+		&pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE}); err == nil {
+		t.Error("whole ShowConfig with current cfg admitted (control broken)")
 	}
 }

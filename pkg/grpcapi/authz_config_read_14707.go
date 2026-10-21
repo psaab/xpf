@@ -92,16 +92,21 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 			// (restricted classes are refused by ShowWhole below;
 			// admitted ones render this snapshot, not live).
 			snaps := configReadSnapshots{Present: true, NodeID: -1}
+			priceCfg := cfg
 			if s.store != nil {
 				target := "candidate"
 				if r.GetTarget() == pb.ConfigTarget_ACTIVE {
 					target = "active"
 				}
-				_, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+				// Fold 6: authorize with the snapshot's OWN cfg.
+				scfg, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+				if scfg != nil {
+					priceCfg = scfg
+				}
 				snaps.NodeID = nid
 				snaps.Primary = tree
 			}
-			return snaps, config.AuthorizeConfigShowWhole(cfg, class, suffix)
+			return snaps, config.AuthorizeConfigShowWhole(priceCfg, class, suffix)
 		}
 		// #15995: price every rendered descendant, not just the
 		// requested path — the handler renders the whole subtree.
