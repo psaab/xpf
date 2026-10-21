@@ -1,8 +1,11 @@
 package ddns
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -87,8 +90,9 @@ func (f *cfFakeAPI) handler() http.Handler {
 		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/zones/"+f.zoneID+"/dns_records/"):
 			f.patched++
 			id := strings.TrimPrefix(r.URL.Path, "/zones/"+f.zoneID+"/dns_records/")
+			body := mustReadBody(f.t, r)
 			var upd cfRecord
-			_ = json.NewDecoder(r.Body).Decode(&upd)
+			_ = json.Unmarshal(body, &upd)
 			cur := f.records[id]
 			cur.Content = upd.Content
 			// #9067: apply the TTL too. The fake used to drop it, so a cell
@@ -97,6 +101,16 @@ func (f *cfFakeAPI) handler() http.Handler {
 			// fix. Real Cloudflare applies every field in the PATCH payload.
 			if upd.TTL != 0 {
 				cur.TTL = upd.TTL
+			}
+			// Apply a comment only when the payload carries the key: real
+			// Cloudflare leaves the comment alone when it is absent, and the
+			// backend's PATCH deliberately omits it (#16086 — a PATCH must
+			// never claim a row by stamping it). Decoding into cfRecord
+			// cannot distinguish absent from empty, so inspect the raw keys.
+			var raw map[string]json.RawMessage
+			_ = json.Unmarshal(body, &raw)
+			if _, ok := raw["comment"]; ok {
+				cur.Comment = upd.Comment
 			}
 			f.records[id] = cur
 			f.ok(w, cur)
@@ -224,6 +238,9 @@ func TestCloudflareRenumberPatchesOnlyOwnedRow(t *testing.T) {
 // fail-on-revert for a renumber whose new value already exists at Cloudflare.
 // The previous value remains stale: both the exact-content no-op and the
 // TTL-correction path must clean it up without touching a foreign record.
+// The new-value and stale rows are seeded TAGGED (#16086): this cell is
+// about xpf's OWN rows. An UNTAGGED new-value row is the #16086 adoption
+// case (xpf POSTs its own tagged row instead) and is covered there.
 func TestCloudflareExistingNewValueRemovesStalePreviousRecord10715(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -241,8 +258,8 @@ func TestCloudflareExistingNewValueRemovesStalePreviousRecord10715(t *testing.T)
 
 			const fqdn = "wan.example.net"
 			foreignID := fake.seedRecordTTL("A", fqdn, "198.51.100.20", 1800)
-			newID := fake.seedRecordTTL("A", fqdn, "203.0.113.9", tc.liveTTL)
-			oldID := fake.seedRecordTTL("A", fqdn, "203.0.113.5", 300)
+			newID := fake.seedRecordTTLComment("A", fqdn, "203.0.113.9", tc.liveTTL, cfOwnedComment)
+			oldID := fake.seedRecordTTLComment("A", fqdn, "203.0.113.5", 300, cfOwnedComment)
 			rec := hostRecordTTL(t, fqdn, "203.0.113.9", 300)
 			rec.PrevAddr = netip.MustParseAddr("203.0.113.5")
 			if err := b.UpsertLease(context.Background(), rec); err != nil {
@@ -354,13 +371,58 @@ func (f *cfFakeAPI) seedRecord(rtype, name, content string) string {
 	return id
 }
 
-// TestCloudflareDeleteAllOwnedRecords is the #2770 fail-on-revert: a name can
-// carry MULTIPLE records of one type, several of which xpf owns. DeleteLease
-// must issue a DELETE for EVERY row whose content equals the owned address,
-// must NOT touch a row with foreign content, and must leave a record that
-// merely shares the name+type but a different value untouched. If reverted to
-// the first-only / content-blind delete this goes RED: either it leaves a
+// seedRecordComment seeds a record carrying a comment (the ownership tag
+// dimension #16086 adds); seedRecord/seedRecordTTL leave it empty.
+func (f *cfFakeAPI) seedRecordComment(rtype, name, content, comment string) string {
+	id := f.seedRecord(rtype, name, content)
+	rec := f.records[id]
+	rec.Comment = comment
+	f.records[id] = rec
+	return id
+}
+
+// seedRecordTTLComment seeds a tagged record WITH a TTL, so a cell can
+// stage an xpf-owned row whose TTL alone varies (#9067/#10715 x #16086).
+func (f *cfFakeAPI) seedRecordTTLComment(rtype, name, content string, ttl int, comment string) string {
+	id := f.seedRecordTTL(rtype, name, content, ttl)
+	rec := f.records[id]
+	rec.Comment = comment
+	f.records[id] = rec
+	return id
+}
+
+// mustReadBody drains a fake-handler request body, failing the test on error.
+func mustReadBody(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	return body
+}
+
+// captureWarn16086 installs a WARN-level slog default writing to a buffer and
+// restores the previous default on cleanup. Tests asserting on the rendered
+// log must not run in parallel (process-global default).
+func captureWarn16086(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestCloudflareDeleteAllOwnedRecords is the #2770 fail-on-revert, restated
+// for #16086 tag ownership: a name can carry MULTIPLE records of one type,
+// several of which xpf owns (tagged). DeleteLease must issue a DELETE for
+// EVERY proven-owned row whose content equals the owned address, must NOT
+// touch a row with foreign content, and must leave a record that merely
+// shares the name+type but a different value untouched. If reverted to the
+// first-only / content-blind delete this goes RED: either it leaves a
 // second owned row behind (deleted < 2) or it clobbers the foreign value.
+// (Untagged same-content rows are the legacy fallback — see the #16086
+// tests below; they are deliberately NOT staged here.)
 func TestCloudflareDeleteAllOwnedRecords(t *testing.T) {
 	fake := newCFFakeAPI(t)
 	srv := httptest.NewServer(fake.handler())
@@ -369,10 +431,10 @@ func TestCloudflareDeleteAllOwnedRecords(t *testing.T) {
 
 	const fqdn = "wan.example.net"
 	const owned = "203.0.113.5"
-	// Two owned rows (duplicate same-value A records) + one foreign value a
-	// human set on the same name + an unrelated AAAA that must never be hit.
-	ownedA := fake.seedRecord("A", fqdn, owned)
-	ownedB := fake.seedRecord("A", fqdn, owned)
+	// Two xpf-owned (tagged) rows + one foreign value a human set on the
+	// same name + an unrelated AAAA that must never be hit.
+	ownedA := fake.seedRecordComment("A", fqdn, owned, cfOwnedComment)
+	ownedB := fake.seedRecordComment("A", fqdn, owned, cfOwnedComment)
 	foreignA := fake.seedRecord("A", fqdn, "198.51.100.20")
 	foreignAAAA := fake.seedRecord("AAAA", fqdn, "2001:db8::1")
 
