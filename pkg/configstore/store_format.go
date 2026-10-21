@@ -42,6 +42,191 @@ func (s *Store) ShowActivePath(path []string) string {
 	return s.active.FormatPath(path)
 }
 
+// ShowConfigTrees returns a DEEP-COPY snapshot of the rendered tree for
+// a ShowConfig target: the active tree for target "active", the
+// candidate tree otherwise (mirroring ShowConfig's target switch). The
+// snapshot is cloned under one store-lock acquisition, so the caller
+// can price it and render it as the same generation: a concurrent
+// candidate edit or commit neither races the walk (the live candidate
+// is mutated in place under the store lock) nor swaps the generation
+// between authorization and rendering (#15995 fold). Callers that
+// authorize against these trees MUST render from the same snapshots,
+// never re-resolve the target in the store (see the Render*SnapshotOn
+// helpers in configstore and the snapshot-carrying call sites).
+func (s *Store) ShowConfigTrees(target string) []*config.ConfigTree {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var tree *config.ConfigTree
+	if target == "active" {
+		tree = s.active
+	} else {
+		tree = s.candidate
+	}
+	if tree == nil {
+		return nil
+	}
+	return []*config.ConfigTree{tree.Clone()}
+}
+
+// CompareTrees returns deep-copy snapshots of both arms of a candidate
+// compare: (active, candidate). Either may be nil; a nil arm renders
+// nothing. Same snapshot contract as ShowConfigTrees.
+func (s *Store) CompareTrees() (active, candidate *config.ConfigTree) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.active != nil {
+		active = s.active.Clone()
+	}
+	if s.candidate != nil {
+		candidate = s.candidate.Clone()
+	}
+	return active, candidate
+}
+
+// RollbackCompareTrees returns deep-copy snapshots of both arms of a
+// rollback compare: (rollback slot n, candidate) for the candidate
+// baseline, or (rollback slot n, active) when activeBaseline is set
+// (the operational `show system rollback compare` shape). A slot that
+// cannot be resolved yields a nil first arm. Same snapshot contract as
+// ShowConfigTrees.
+func (s *Store) RollbackCompareTrees(n int, activeBaseline bool) (slot, other *config.ConfigTree) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return nil, nil
+	}
+	slot = tree.Clone()
+	if activeBaseline {
+		if s.active != nil {
+			other = s.active.Clone()
+		}
+		return slot, other
+	}
+	if s.candidate != nil {
+		other = s.candidate.Clone()
+	}
+	return slot, other
+}
+
+// RollbackTree returns a deep-copy snapshot of the tree a scoped
+// rollback render of slot n will disclose (n == 0 is the active
+// configuration), or nil when the slot cannot be resolved (the render
+// then fails on its own error). Same snapshot contract as
+// ShowConfigTrees: price and render this snapshot, do not re-resolve.
+func (s *Store) RollbackTree(n int) *config.ConfigTree {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return nil
+	}
+	return tree.Clone()
+}
+
+// ShowConfigSnapshot atomically captures one active promotion for a
+// config read: the compiled config (authorization policy), a deep copy
+// of the rendered tree for target ("active" or candidate, mirroring
+// ShowConfigTrees), the store node ID, and the active publication
+// generation. Policy and tree are read under ONE store-lock
+// acquisition, so a commit landing mid-request cannot pair promotion
+// A's class rules with promotion B's data (#15995 fold 3): callers
+// price the returned tree with the returned cfg. The tree is a deep
+// copy (same snapshot contract as ShowConfigTrees); a nil tree means
+// the target was ABSENT at capture — callers must render that absence
+// (empty / slot error), never re-resolve the live store.
+func (s *Store) ShowConfigSnapshot(target string) (*config.Config, *config.ConfigTree, int, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var gen uint64
+	if snap := s.activeSnap.Load(); snap != nil {
+		gen = snap.gen
+	}
+	var src *config.ConfigTree
+	if target == "active" {
+		src = s.active
+	} else {
+		src = s.candidate
+	}
+	var tree *config.ConfigTree
+	if src != nil {
+		tree = src.Clone()
+	}
+	return s.compiled, tree, s.nodeID, gen
+}
+
+// CompareSnapshot is ShowConfigSnapshot for a candidate compare: the
+// compiled policy plus deep copies of both arms under one lock.
+func (s *Store) CompareSnapshot() (*config.Config, *config.ConfigTree, *config.ConfigTree, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var gen uint64
+	if snap := s.activeSnap.Load(); snap != nil {
+		gen = snap.gen
+	}
+	var active, candidate *config.ConfigTree
+	if s.active != nil {
+		active = s.active.Clone()
+	}
+	if s.candidate != nil {
+		candidate = s.candidate.Clone()
+	}
+	return s.compiled, active, candidate, gen
+}
+
+// RollbackCompareSnapshot is ShowConfigSnapshot for a rollback
+// compare: policy plus deep copies of (slot, candidate) — or (slot,
+// active) when activeBaseline — under one lock. An unresolved slot
+// yields slotErr (the handler's slot error) and nil arms.
+func (s *Store) RollbackCompareSnapshot(n int, activeBaseline bool) (cfg *config.Config, slot, other *config.ConfigTree, nodeID int, gen uint64, slotErr error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if snap := s.activeSnap.Load(); snap != nil {
+		gen = snap.gen
+	}
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return s.compiled, nil, nil, s.nodeID, gen, err
+	}
+	slot = tree.Clone()
+	if activeBaseline {
+		if s.active != nil {
+			other = s.active.Clone()
+		}
+		return s.compiled, slot, other, s.nodeID, gen, nil
+	}
+	if s.candidate != nil {
+		other = s.candidate.Clone()
+	}
+	return s.compiled, slot, other, s.nodeID, gen, nil
+}
+
+// RollbackSnapshot is ShowConfigSnapshot for a scoped rollback render:
+// policy plus a deep copy of the slot tree under one lock. An
+// unresolved slot yields slotErr and a nil tree.
+func (s *Store) RollbackSnapshot(n int) (cfg *config.Config, tree *config.ConfigTree, nodeID int, gen uint64, slotErr error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if snap := s.activeSnap.Load(); snap != nil {
+		gen = snap.gen
+	}
+	src, err := s.rollbackTree(n)
+	if err != nil {
+		return s.compiled, nil, s.nodeID, gen, err
+	}
+	return s.compiled, src.Clone(), s.nodeID, gen, nil
+}
+
+// NodeID returns the store's cluster node identity — the identity the
+// inheritance renderers expand apply-groups for (negative = standalone
+// node0 view). Authorization for a `display inheritance` read must
+// expand with this same identity (#15995 fold).
+func (s *Store) NodeID() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nodeID
+}
+
 // ShowCandidateSet returns the candidate configuration as flat set commands.
 func (s *Store) ShowCandidateSet() string {
 	s.mu.RLock()

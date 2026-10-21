@@ -970,21 +970,38 @@ func candidateConfigReadPermission(r *http.Request) (config.LoginClassPermission
 // SSE re-authorization calls the same function as entry so coarse permissions
 // and command regexes cannot diverge while a stream is open.
 func (s *Server) authorizeRESTRead(r *http.Request, required config.LoginClassPermission) (authz.Principal, error) {
+	_, p, err := s.authorizeRESTReadSnapshots(r, required)
+	return p, err
+}
+
+// authorizeRESTReadSnapshots is authorizeRESTRead plus the priced
+// config-read snapshots, stashed on the returned request for the
+// handler (#15995 fold). The error-only wrapper above keeps the
+// stream-reauthorization call sites unchanged (they re-price fresh
+// snapshots each tick and discard them).
+func (s *Server) authorizeRESTReadSnapshots(r *http.Request, required config.LoginClassPermission) (*http.Request, authz.Principal, error) {
 	cfg, p, _ := s.authorizeInputs(r)
 	if err := authz.Authorize(cfg, p, required); err != nil {
-		return p, err
+		return r, p, err
 	}
 	if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
-		return p, err
+		return r, p, err
 	}
 	// #14707: subtree/format-scoped config-read adjudication (shared
 	// with gRPC in pkg/config). The operational gate above saw only the
 	// bare "show configuration"; the *-configuration pair was never
 	// consulted on reads at all.
-	if err := s.authorizeRESTConfigRead(r, cfg, p); err != nil {
-		return p, err
+	snaps, err := s.authorizeRESTConfigRead(r, cfg, p)
+	if err != nil {
+		return r, p, err
 	}
-	return p, nil
+	// Fold 3: attach whenever a snapshot was captured — a nil Primary
+	// is a priced absence the handler must render, not a cue to
+	// re-resolve the live store.
+	if snaps.Present {
+		r = withRESTConfigReadSnapshots(r, snaps)
+	}
+	return r, p, nil
 }
 func logRESTLoginDenial(r *http.Request, p authz.Principal, required, decision string) {
 	if emit, suppressed := denyaudit.Note(denyaudit.SurfaceRESTLoginClass, "rest-login-class"); emit {
@@ -1033,7 +1050,7 @@ func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Han
 	if candidatePerm, isCandidateRead := candidateConfigReadPermission(r); isCandidateRead {
 		required = candidatePerm
 	}
-	p, err := s.authorizeRESTRead(r, required)
+	r, p, err := s.authorizeRESTReadSnapshots(r, required)
 	if err != nil {
 		logRESTLoginDenial(r, p, authz.PermissionName(required), "read-policy")
 		writeError(w, http.StatusForbidden, err.Error())

@@ -28,6 +28,20 @@ import (
 //     "show configuration" as an alternate form (EvaluateForms), so an
 //     anchored `^show configuration$` still covers sub-paths and a
 //     path-scoped `^show configuration security` fires.
+//   - #15995: a subtree render discloses every descendant of the
+//     requested path, so the path verdict alone is not the render's
+//     price. AuthorizeConfigShowPathRendered (and the tree-aware
+//     wrappers the surfaces call) additionally adjudicate every
+//     rendered descendant path of the tree(s) that will actually be
+//     rendered: a strict descendant the *-configuration pair denies —
+//     or an allow-configuration allowlist does not cover — refuses the
+//     ancestor read, exactly as the whole-tree refusal below refuses
+//     what cannot be enumerated. The operational pair is NOT charged
+//     per descendant: `show configuration security` is one command,
+//     and a `^show configuration security ipsec$` deny is a command
+//     spelling the operator never typed (mirroring whole-tree, where
+//     a path-scoped operational deny does not refuse). A class with
+//     no configuration regexes pays no tree walk.
 //   - A whole-tree render, a candidate diff, and a rollback render have
 //     no single path: like AuthorizeConfigLoad's override arm and
 //     AuthorizeConfigRollback, they are REFUSED for a class with
@@ -43,11 +57,14 @@ import (
 //     hierarchical form carries no suffix.
 
 // AuthorizeConfigShowPath adjudicates an explicit `show configuration
-// <path>` subtree read. path is the resolved config path the handler
-// will render (nil/empty is NOT this function — see
-// AuthorizeConfigShowWhole). displaySuffix is "display set" /
-// "display json" / "display xml" / "display inheritance", or "" for the
-// hierarchical form.
+// <path>` subtree read WITHOUT the rendered trees: only the requested
+// path is priced. Prefer AuthorizeConfigShowPathRendered wherever the
+// rendered tree is available — this form cannot see denied strict
+// descendants below path (#15995) and remains only for callers that
+// have already priced the descendants (AuthorizeConfigPathOnly's CLI
+// arm, whose operational pair was charged on the full command line).
+// displaySuffix is "display set" / "display json" / "display xml" /
+// "display inheritance", or "" for the hierarchical form.
 func AuthorizeConfigShowPath(cfg *Config, class string, path []string, displaySuffix string) error {
 	if class == "" {
 		return nil
@@ -57,6 +74,332 @@ func AuthorizeConfigShowPath(cfg *Config, class string, path []string, displaySu
 		return err
 	}
 	return authorizeShowCommand(cfg, class, "show configuration "+joined, displaySuffix)
+}
+
+// AuthorizeConfigShowPathRendered adjudicates an explicit subtree read
+// against every path the render will disclose: the requested path plus
+// every descendant path present in trees (the tree(s) the handler will
+// render — active/candidate for ShowConfig, both compare arms for a
+// scoped compare, the rollback slot for a scoped rollback). A strict
+// descendant denied by the *-configuration pair (deny match, or outside
+// an allow-configuration allowlist) refuses the whole ancestor read;
+// filtering the denied subtree out of the render instead would silently
+// present a partial tree as the requested subtree. Nil trees are
+// skipped (a missing candidate renders nothing). The operational pair
+// is charged once, on the requested command, as in
+// AuthorizeConfigShowPath.
+//
+// trees must be the EFFECTIVE trees the handler renders. For the
+// `display inheritance` format that is the apply-groups-expanded tree
+// (see AuthorizeExpandedConfigShowPathRendered / the store's
+// *Expanded trees accessors): pricing the raw tree would miss denied
+// descendants an applied group materializes at the requested path.
+func AuthorizeConfigShowPathRendered(cfg *Config, class string, path []string, displaySuffix string, trees ...*ConfigTree) error {
+	if class == "" {
+		return nil
+	}
+	if err := AuthorizeConfigShowPath(cfg, class, path, displaySuffix); err != nil {
+		return err
+	}
+	return authorizeConfigRenderedDescendants(cfg, class, path, trees)
+}
+
+// AuthorizeExpandedConfigShowPathRendered is AuthorizeConfigShowPathRendered
+// for a `display inheritance` read: each raw tree is first expanded
+// exactly as the renderer expands it (expandForInheritance: inactive
+// stripped, compact stanzas normalized, apply-groups resolved for
+// nodeID), and the rendered descendants are priced on the expanded
+// tree. An expansion failure refuses the read — the renderer would
+// surface it as an error and render nothing, and adjudicating the
+// unexpanded tree instead could admit what the expanded render would
+// disclose on a retry with a fixed group. nodeID is the rendering
+// store's cluster identity (negative = standalone/node0 view).
+func AuthorizeExpandedConfigShowPathRendered(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees ...*ConfigTree) error {
+	if class == "" {
+		return nil
+	}
+	if err := AuthorizeConfigShowPath(cfg, class, path, displaySuffix); err != nil {
+		return err
+	}
+	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	if !ok {
+		return nil
+	}
+	expanded, err := expandRenderedTrees15995(class, path, nodeID, trees)
+	if err != nil {
+		return err
+	}
+	return authorizeConfigRenderedDescendantsWithRules(class, rules, path, expanded)
+}
+
+// expandRenderedTrees15995 expands each tree exactly as the inheritance
+// renderer does (expandForInheritance for nodeID). A failure refuses:
+// the expanded render cannot be adjudicated from the raw tree.
+func expandRenderedTrees15995(class string, path []string, nodeID int, trees []*ConfigTree) ([]*ConfigTree, error) {
+	expanded := make([]*ConfigTree, 0, len(trees))
+	for _, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		exp, err := tree.expandForInheritance(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+				"the inheritance expansion for %q cannot be resolved for adjudication: %w (#15995)",
+				class, strings.Join(path, " "), err)
+		}
+		expanded = append(expanded, exp)
+	}
+	return expanded, nil
+}
+
+// AuthorizeConfigShowCompareAtPathRendered is
+// AuthorizeConfigShowCompareAtPath priced over the rendered compare
+// arms: a candidate (or rollback) descendant below path that the
+// *-configuration pair denies refuses the scoped diff, because the
+// diff lines disclose it (#15995). A nil/empty path is the global
+// compare (AuthorizeConfigShowCompare).
+func AuthorizeConfigShowCompareAtPathRendered(cfg *Config, class string, path []string, trees ...*ConfigTree) error {
+	if class == "" || len(path) == 0 {
+		return AuthorizeConfigShowCompare(cfg, class)
+	}
+	return AuthorizeConfigShowPathRendered(cfg, class, path, "", trees...)
+}
+
+// AuthorizeConfigShowRollbackAtPathRendered is
+// AuthorizeConfigShowRollbackAtPath priced over the rendered rollback
+// tree: a denied strict descendant below path refuses the scoped
+// rollback render (#15995). A nil/empty path is the whole-tree
+// rollback (AuthorizeConfigShowRollback).
+func AuthorizeConfigShowRollbackAtPathRendered(cfg *Config, class string, path []string, displaySuffix string, trees ...*ConfigTree) error {
+	if class == "" || len(path) == 0 {
+		return AuthorizeConfigShowRollback(cfg, class, displaySuffix)
+	}
+	return AuthorizeConfigShowPathRendered(cfg, class, path, displaySuffix, trees...)
+}
+
+// AuthorizeExpandedConfigShowRollbackAtPathRendered is the scoped
+// rollback twin of AuthorizeExpandedConfigShowPathRendered, for a
+// `display inheritance` rollback render: the slot tree is expanded
+// exactly as the renderer expands it before descendants are priced.
+func AuthorizeExpandedConfigShowRollbackAtPathRendered(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees ...*ConfigTree) error {
+	if class == "" || len(path) == 0 {
+		return AuthorizeConfigShowRollback(cfg, class, displaySuffix)
+	}
+	return AuthorizeExpandedConfigShowPathRendered(cfg, class, path, displaySuffix, nodeID, trees...)
+}
+
+// authorizeConfigRenderedDescendants adjudicates every descendant path
+// of path present in any of trees against the *-configuration pair.
+// The requested path itself was already adjudicated by the caller;
+// only strict descendants are priced here. A class with no
+// configuration regexes returns before any tree is touched, so the
+// common unrestricted read pays nothing.
+func authorizeConfigRenderedDescendants(cfg *Config, class string, path []string, trees []*ConfigTree) error {
+	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	if !ok {
+		return nil
+	}
+	return authorizeConfigRenderedDescendantsWithRules(class, rules, path, trees)
+}
+
+// authorizeConfigRenderedDescendantsWithRules is the walk behind
+// authorizeConfigRenderedDescendants with the rules already compiled.
+//
+// The requested path need not spell the matched node in full:
+// navigatePath also matches a terminal PREFIX of a multi-key node
+// (`security policies from-zone trust` selects the node keyed
+// `from-zone trust to-zone untrust`), AND descends through an
+// intermediate multi-key node on its first spelled pair alone
+// (`… from-zone trust policy p1` selects the policy under the node
+// keyed `from-zone trust to-zone untrust`). The renderer prints every
+// matched node's complete keys, so pricing rebuilds each rendered
+// path from the actual descent trail (navigateRenderedMatches):
+// every intermediate node's full Keys, then the terminal node's full
+// Keys.
+//
+// Fold 4 invariant: every complete path the renderer prints for
+// this selector that the REQUEST did not itself spell must be
+// priced — the trail ancestors carrying omitted keys, the terminal
+// rendered path, and every descendant below it. Pricing only the
+// terminal path left an anchored deny on an intermediate context
+// (`^… from-zone trust to-zone untrust$`) unmatched by the longer
+// terminal string, admitting a child read the direct context read
+// refuses. Exact request prefixes are NOT re-priced (see the walk):
+// they are the request the caller already adjudicated, and Junos
+// longest-match semantics forbid re-judging an allowed request by
+// its prefixes.
+func authorizeConfigRenderedDescendantsWithRules(class string, rules CompiledLoginRegexes, path []string, trees []*ConfigTree) error {
+	for _, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		for _, m := range navigateRenderedMatches(tree.Children, path) {
+			// Price the trail only where it EXTENDS the request:
+			// an intermediate/terminal node whose complete keys
+			// differ from the request's spelling of it (omitted
+			// pairs). Strict ancestors spelled exactly as requested
+			// must not be re-priced: Junos longest-match prices an
+			// allowed named instance (^firewall filter f1 for
+			// [firewall filter f1]) against the request, not each
+			// prefix — re-pricing prefixes refuses every allowed
+			// instance under an allowlist. The terminal rendered
+			// path (ancestors' last element) is priced whenever it
+			// differs from the requested spelling.
+			for _, anc := range trailPathsBeyondRequest(path, m) {
+				if err := authorizeRenderedPath(class, rules, path, anc); err != nil {
+					return err
+				}
+			}
+			// Fold 5: the terminal node itself may be a bracketed
+			// group — price each member spelling of it, and price
+			// its children under each member path (shared body
+			// renders under every member selector).
+			for _, mp := range renderedNodePaths(parentPathOf(m), m.node) {
+				if err := authorizeRenderedPath(class, rules, path, mp); err != nil {
+					return err
+				}
+				if strings.Join(mp, " ") != strings.Join(m.path, " ") {
+					if err := authorizeRenderedNode(class, rules, mp, m.node); err != nil {
+						return err
+					}
+				}
+			}
+			if err := authorizeRenderedNode(class, rules, m.path, m.node); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// trailPathsBeyondRequest returns the complete trail paths carrying
+// keys the request did not spell: ancestors that are not token-wise
+// prefixes of the request, plus everything deeper once the trail
+// extends past the request spelling. Exact request prefixes are
+// excluded — the caller already priced the request itself.
+func trailPathsBeyondRequest(requested []string, m renderedMatch) [][]string {
+	var out [][]string
+	beyond := false
+	for _, anc := range m.ancestors {
+		if !beyond {
+			if isPathPrefix(anc, requested) {
+				continue
+			}
+			beyond = true
+		}
+		out = append(out, anc)
+	}
+	return out
+}
+
+// isPathPrefix reports whether anc is a token-wise prefix of requested.
+func isPathPrefix(anc, requested []string) bool {
+	if len(anc) > len(requested) {
+		return false
+	}
+	for i := range anc {
+		if anc[i] != requested[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// parentPathOf returns the complete path of m's parent: the
+// second-to-last trail ancestor, or — for a top-level match — the
+// terminal path minus the node's own Keys.
+func parentPathOf(m renderedMatch) []string {
+	if len(m.ancestors) >= 2 {
+		return m.ancestors[len(m.ancestors)-2]
+	}
+	if len(m.path) >= len(m.node.Keys) {
+		return m.path[:len(m.path)-len(m.node.Keys)]
+	}
+	return nil
+}
+
+// authorizeRenderedNode prices every descendant below n (already priced
+// at prefix by the caller), recursively. The first denied descendant
+// refuses the render, naming only the path root (configAuditRoot) as
+//
+// Bracketed groups (fold 5): a node authored `keyword [ m1 m2 ]`
+// carries Keys [keyword m1 m2] with bracket provenance on the member
+// keys. The renderer prints the whole group for ANY member selector,
+// and FormatPathSet emits one line per member spelling — each member
+// is therefore a rendered path of its own (`... keyword m1`,
+// `... keyword m2`) in addition to the combined key path. An anchored
+// deny naming one member must refuse a render of its sibling member
+// (the group body is shared), so every bracketed member path is
+// priced, and children are priced under EACH member path (the body
+// renders under every member spelling).
+func authorizeRenderedNode(class string, rules CompiledLoginRegexes, prefix []string, n *Node) error {
+	for _, child := range n.Children {
+		for _, childPath := range renderedNodePaths(prefix, child) {
+			joined := strings.Join(childPath, " ")
+			if decision := rules.Evaluate(joined); !decision.Allowed {
+				return fmt.Errorf("permission denied: login class %q denies configuration under %q (%s); "+
+					"the requested subtree %q renders that descendant, so the ancestor read is refused — "+
+					"request an allowed subtree instead (#15995)",
+					class, configAuditRoot(joined), decision.Reason, configAuditRoot(strings.Join(prefix, " ")))
+			}
+			if err := authorizeRenderedNode(class, rules, childPath, child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// renderedNodePaths returns every complete path at which node n (child
+// of the node at parentPrefix) is rendered: the combined key path
+// (parentPrefix + n.Keys), plus — for a bracketed group — one path per
+// member (parentPrefix + [keyword, member]). Member detection uses
+// bracket PROVENANCE (KeyBracketed), exactly as the renderer's
+// bracketed-group handling does: unbracketed trailing keys are a
+// packed body, never member names (#9799).
+func renderedNodePaths(parentPrefix []string, n *Node) [][]string {
+	combined := append(append([]string(nil), parentPrefix...), n.Keys...)
+	out := [][]string{combined}
+	if len(n.Keys) >= 2 && n.KeyBracketed(1) {
+		for j := 1; j < len(n.Keys); j++ {
+			if !n.KeyBracketed(j) {
+				break // the bracketed group ended
+			}
+			member := append(append([]string(nil), parentPrefix...), n.Keys[0], n.Keys[j])
+			out = append(out, member)
+		}
+	}
+	return out
+}
+
+// authorizeRenderedPath prices one complete rendered path, skipping the
+func authorizeRenderedPath(class string, rules CompiledLoginRegexes, requested, rendered []string) error {
+	if len(rendered) == len(requested) {
+		same := true
+		for i := range rendered {
+			if rendered[i] != requested[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return nil
+		}
+	}
+	joined := strings.Join(rendered, " ")
+	if decision := rules.Evaluate(joined); !decision.Allowed {
+		return fmt.Errorf("permission denied: login class %q denies configuration under %q (%s); "+
+			"the requested subtree %q renders that descendant, so the ancestor read is refused — "+
+			"request an allowed subtree instead (#15995)",
+			class, configAuditRoot(joined), decision.Reason, configAuditRoot(strings.Join(requested, " ")))
+	}
+	return nil
 }
 
 // AuthorizeConfigShowWhole adjudicates a whole-tree configuration read
@@ -143,6 +486,23 @@ func AuthorizeConfigShowSystemPath(cfg *Config, class string, path []string, com
 	return authorizeShowCommand(cfg, class, command, "")
 }
 
+// AuthorizeConfigShowSystemPathRendered is AuthorizeConfigShowSystemPath
+// priced over the rendered descendants of path in trees (#15995 fold):
+// `show system login` and `show system root-authentication` print the
+// whole subtree at path, so a denied strict descendant refuses the
+// command exactly as a denied descendant refuses
+// AuthorizeConfigShowPathRendered. The operational pair is charged
+// once, on the real `show system <name>` spelling, as before.
+func AuthorizeConfigShowSystemPathRendered(cfg *Config, class string, path []string, command string, trees ...*ConfigTree) error {
+	if err := AuthorizeConfigShowSystemPath(cfg, class, path, command); err != nil {
+		return err
+	}
+	if class == "" {
+		return nil
+	}
+	return authorizeConfigRenderedDescendants(cfg, class, path, trees)
+}
+
 // AuthorizeConfigShowRescue adjudicates `show system configuration
 // rescue`: a whole-tree text render, refused for a *-configuration-
 // restricted class like AuthorizeConfigShowWhole, and evaluated
@@ -187,15 +547,56 @@ func authorizeConfigWhole(cfg *Config, class, what string) error {
 }
 
 // AuthorizeConfigPathOnly adjudicates one config path against the
-// *-configuration pair alone. For surfaces that already charged the
-// operational pair on the full command line (the on-box CLI's
-// checkCommandRegex) and must not double-charge it against a shorter
-// string.
+// *-configuration pair alone, WITHOUT the rendered trees. For surfaces
+// that already charged the operational pair on the full command line
+// (the on-box CLI's checkCommandRegex) and must not double-charge it
+// against a shorter string. Prefer AuthorizeConfigPathOnlyRendered
+// wherever the rendered tree is available (#15995).
 func AuthorizeConfigPathOnly(cfg *Config, class string, path []string) error {
 	if class == "" {
 		return nil
 	}
 	return authorizeConfigReadPath(cfg, class, strings.Join(path, " "))
+}
+
+// AuthorizeConfigPathOnlyRendered is AuthorizeConfigPathOnly plus the
+// rendered-descendant price (#15995): every strict descendant of path
+// present in trees is adjudicated against the *-configuration pair,
+// and a denied one refuses the ancestor read.
+func AuthorizeConfigPathOnlyRendered(cfg *Config, class string, path []string, trees ...*ConfigTree) error {
+	if class == "" {
+		return nil
+	}
+	if err := AuthorizeConfigPathOnly(cfg, class, path); err != nil {
+		return err
+	}
+	return authorizeConfigRenderedDescendants(cfg, class, path, trees)
+}
+
+// AuthorizeExpandedConfigPathOnlyRendered is AuthorizeConfigPathOnly
+// plus the rendered-descendant price over apply-groups-expanded trees,
+// for the CLI operational `show configuration … | display inheritance`
+// arm whose operational pair was already charged on the full command
+// line (#15995 fold).
+func AuthorizeExpandedConfigPathOnlyRendered(cfg *Config, class string, path []string, nodeID int, trees ...*ConfigTree) error {
+	if class == "" {
+		return nil
+	}
+	if err := AuthorizeConfigPathOnly(cfg, class, path); err != nil {
+		return err
+	}
+	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	if !ok {
+		return nil
+	}
+	expanded, err := expandRenderedTrees15995(class, path, nodeID, trees)
+	if err != nil {
+		return err
+	}
+	return authorizeConfigRenderedDescendantsWithRules(class, rules, path, expanded)
 }
 
 // authorizeShowCommand evaluates the operational pair against the

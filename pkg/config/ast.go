@@ -829,6 +829,171 @@ func navigatePathWidth(nodes []*Node, path []string) ([]*Node, int) {
 	return nil, 0
 }
 
+// navigateRenderedMatches resolves path exactly as navigatePathWidth
+// does, but also returns, per match, the complete rendered path of the
+// matched node AND of every ancestor node on its descent trail:
+// ancestors holds each intermediate node's complete path in descent
+// order (root first), and path is the terminal node's complete path
+// (ancestors' last element repeated as path's prefix chain — path ==
+// ancestors[last] extended, i.e. path is the terminal complete path).
+// navigatePathWidth reports only the terminal consumed width, which
+// loses keys an INTERMEDIATE multi-key node carries past the pairs
+// the request spelled (`from-zone trust` descending into the node
+// keyed `from-zone trust to-zone untrust`): authorization that
+// rebuilds the path from the request + terminal Keys alone prices a
+// truncated string the renderer never prints (#15995 fold 3).
+//
+// The priced-path invariant (fold 4): the set of complete paths the
+// authorization walk prices must EQUAL the set of complete paths the
+// renderer can print for this selector — every node on the trail
+// from the tree root to the terminal match, plus every descendant of
+// the terminal match. ancestors+path give exactly the trail half of
+// that set (the descendant half is the recursive walk below the
+// terminal node). Deriving prices from this same trail is what keeps
+// the two sets equal by construction rather than by a parallel
+// matcher re-deriving them.
+//
+// The descent below mirrors navigatePathWidth branch for branch
+// (multi-key pairs, bracketed later members, terminal bare-keyword
+// fan-out, unioned intermediate descent) while tracking each
+// sibling's rendered prefix, so a deeper selector resolves against
+// exactly the nodes (and the complete paths) the renderer navigates.
+type renderedMatch struct {
+	node      *Node
+	path      []string
+	ancestors [][]string
+}
+
+// copyTrail copies a descent trail (slice of complete paths).
+func copyTrail(t [][]string) [][]string {
+	if len(t) == 0 {
+		return nil
+	}
+	out := make([][]string, len(t))
+	for i, p := range t {
+		out[i] = append([]string(nil), p...)
+	}
+	return out
+}
+
+func navigateRenderedMatches(nodes []*Node, path []string) []renderedMatch {
+	type frame struct {
+		node   *Node
+		prefix []string
+		trail  [][]string
+	}
+	current := make([]frame, 0, len(nodes))
+	for _, n := range nodes {
+		current = append(current, frame{node: n})
+	}
+	i := 0
+	for i < len(path) {
+		keyword := path[i]
+		if i+1 < len(path) {
+			var matched []frame
+			for _, f := range current {
+				n := f.node
+				if len(n.Keys) >= 2 && n.Keys[0] == keyword && n.Keys[1] == path[i+1] {
+					matched = append(matched, f)
+				}
+			}
+			if len(matched) == 0 {
+				var groups []frame
+				for _, f := range current {
+					if bracketedLaterMember9799(f.node, keyword, path[i+1]) {
+						groups = append(groups, f)
+					}
+				}
+				if len(groups) > 0 {
+					i += 2
+					if i >= len(path) {
+						out := make([]renderedMatch, 0, len(groups))
+						for _, f := range groups {
+							cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
+							out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
+						}
+						return out
+					}
+					var next []frame
+					for _, f := range groups {
+						p := append(append([]string(nil), f.prefix...), f.node.Keys...)
+						tr := append(copyTrail(f.trail), p)
+						for _, ch := range f.node.Children {
+							next = append(next, frame{node: ch, prefix: p, trail: tr})
+						}
+					}
+					current = next
+					continue
+				}
+			}
+			if len(matched) > 0 {
+				consumed := 2
+				for consumed < len(matched[0].node.Keys) && i+consumed+1 < len(path) {
+					nextKey := path[i+consumed]
+					nextVal := path[i+consumed+1]
+					var filtered []frame
+					for _, f := range matched {
+						if len(f.node.Keys) > consumed+1 && f.node.Keys[consumed] == nextKey && f.node.Keys[consumed+1] == nextVal {
+							filtered = append(filtered, f)
+						}
+					}
+					if len(filtered) == 0 {
+						break
+					}
+					matched = filtered
+					consumed += 2
+				}
+				i += consumed
+				if i >= len(path) {
+					out := make([]renderedMatch, 0, len(matched))
+					for _, f := range matched {
+						cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
+						out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
+					}
+					return out
+				}
+				var next []frame
+				for _, f := range matched {
+					p := append(append([]string(nil), f.prefix...), f.node.Keys...)
+					tr := append(copyTrail(f.trail), p)
+					for _, ch := range f.node.Children {
+						next = append(next, frame{node: ch, prefix: p, trail: tr})
+					}
+				}
+				current = next
+				continue
+			}
+		}
+		// Single-key match.
+		if i+1 >= len(path) {
+			var out []renderedMatch
+			for _, f := range current {
+				if len(f.node.Keys) > 0 && f.node.Keys[0] == keyword {
+					cp := append(append([]string(nil), f.prefix...), f.node.Keys...)
+					out = append(out, renderedMatch{node: f.node, path: cp, ancestors: append(copyTrail(f.trail), cp)})
+				}
+			}
+			return out
+		}
+		var next []frame
+		for _, f := range current {
+			if len(f.node.Keys) > 0 && f.node.Keys[0] == keyword {
+				p := append(append([]string(nil), f.prefix...), f.node.Keys...)
+				tr := append(copyTrail(f.trail), p)
+				for _, ch := range f.node.Children {
+					next = append(next, frame{node: ch, prefix: p, trail: tr})
+				}
+			}
+		}
+		if len(next) == 0 {
+			return nil
+		}
+		i++
+		current = next
+	}
+	return nil
+}
+
 // unionChildren concatenates the children of every node in sibling order.
 // It backs navigatePath's intermediate-descent read-all-siblings behavior
 // (#4562): when a display path descends past a level that holds multiple

@@ -150,8 +150,24 @@ type CLI struct {
 	// field rather than a parameter because dispatchOperational has five
 	// callers and the suffix is relevant to exactly one of them.
 	pendingPipeSuffix string
-	version           string
-	startTime         time.Time
+	// renderSnapshots15995 carries the deep-copy tree snapshots the
+	// authorization gate priced for the in-flight config-read dispatch
+	// (#15995 fold): handlers render from these exact snapshots so the
+	// priced generation is the rendered generation. Set by the gate
+	// (permissions_config_read_14707.go) at dispatch entry, cleared when
+	// the dispatch returns. Keys: "active", "candidate", "slot",
+	// "other". Presence (a non-nil map) records that a snapshot was
+	// captured even when its tree is absent (nil): handlers render the
+	// priced absence, never re-resolve the live store (fold 3).
+	renderSnapshots15995 map[string]*config.ConfigTree
+	// renderPath15995 is the exact path the gate priced for the
+	// in-flight dispatch (config-mode edit-cursor fold included), and
+	// renderComparePath15995 its compare twin. Handlers render the
+	// priced path, not a re-read cursor (fold 3 PATH-TOCTOU).
+	renderPath15995        []string
+	renderComparePath15995 []string
+	version                string
+	startTime              time.Time
 
 	vrrpMgr *vrrp.Manager
 

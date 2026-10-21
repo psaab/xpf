@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // checkPermission verifies the current user's login class permits the given
@@ -100,6 +101,15 @@ func (c *CLI) showConfigRedacted() bool {
 // store.ShowActivePath calls on secret-bearing subtrees (`show system login`,
 // `show system root-authentication`).
 func (c *CLI) showActiveConfigPath(path []string) string {
+	// #15995 fold: render from the priced snapshot when gated
+	// (a nil snapshot tree is a priced absence: renders empty).
+	if c.snapshotsCaptured15995() {
+		snap := c.renderSnapshot15995("active")
+		if c.showConfigRedacted() {
+			return configstore.RenderShowRedacted(snap, path, "text")
+		}
+		return configstore.RenderShowCleartext(snap, path, "text")
+	}
 	if c.showConfigRedacted() {
 		return c.store.ShowActiveRedacted(path)
 	}

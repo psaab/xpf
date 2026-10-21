@@ -404,7 +404,7 @@ func configWarnings(cfg *config.Config) []string {
 	return append([]string(nil), cfg.Warnings...)
 }
 
-func (s *Server) ShowConfig(_ context.Context, req *pb.ShowConfigRequest) (*pb.ShowConfigResponse, error) {
+func (s *Server) ShowConfig(ctx context.Context, req *pb.ShowConfigRequest) (*pb.ShowConfigResponse, error) {
 	// Secrets are masked on this raw-AST render RPC (#4051), matching the
 	// #2053 typed-struct redaction. This stays unconditional for every remote
 	// caller, including one authorized by PermAll; unlike the in-process CLI,
@@ -412,9 +412,19 @@ func (s *Server) ShowConfig(_ context.Context, req *pb.ShowConfigRequest) (*pb.S
 	// renderers take the path directly (nil/empty selects the whole tree) and
 	// mirror the cleartext siblings' nil-source defaults; the cleartext Show*
 	// SSOT still backs HA config sync, the DR archive and persistence.
+	//
+	// #15995 fold: when the gate authorized this call it stashed the
+	// priced snapshot in ctx — render THAT generation. Handlers reached
+	// without the gate (direct/superuser calls) keep the store renderers.
+	// Fold 3: a captured snapshot with nil Primary is a priced ABSENCE:
+	// render empty (the candidate/slot did not exist at pricing), never
+	// fall through to the live store.
 	var path []string
 	if len(req.Path) > 0 {
 		path = req.Path
+	}
+	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
+		return showConfigSnapshotResponse(snaps.Primary, snaps.NodeID, path, req.Format)
 	}
 	var output string
 	var inhErr error
@@ -446,7 +456,28 @@ func (s *Server) ShowConfig(_ context.Context, req *pb.ShowConfigRequest) (*pb.S
 	return &pb.ShowConfigResponse{Output: output}, nil
 }
 
-func (s *Server) ShowCompare(_ context.Context, req *pb.ShowCompareRequest) (*pb.ShowCompareResponse, error) {
+// showConfigSnapshotResponse renders path from one priced snapshot tree
+// in the requested wire format (redacted, as ShowConfig always is).
+func showConfigSnapshotResponse(tree *config.ConfigTree, nodeID int, path []string, format pb.ConfigFormat) (*pb.ShowConfigResponse, error) {
+	switch format {
+	case pb.ConfigFormat_JSON:
+		return &pb.ShowConfigResponse{Output: configstore.RenderShowRedacted(tree, path, "json")}, nil
+	case pb.ConfigFormat_SET:
+		return &pb.ShowConfigResponse{Output: configstore.RenderShowRedacted(tree, path, "set")}, nil
+	case pb.ConfigFormat_XML:
+		return &pb.ShowConfigResponse{Output: configstore.RenderShowRedacted(tree, path, "xml")}, nil
+	case pb.ConfigFormat_INHERITANCE:
+		out, err := configstore.RenderShowInheritanceRedacted(tree, path, nodeID)
+		if err != nil {
+			return nil, err
+		}
+		return &pb.ShowConfigResponse{Output: out}, nil
+	default:
+		return &pb.ShowConfigResponse{Output: configstore.RenderShowRedacted(tree, path, "text")}, nil
+	}
+}
+
+func (s *Server) ShowCompare(ctx context.Context, req *pb.ShowCompareRequest) (*pb.ShowCompareResponse, error) {
 	// rollback_n is a change-control selector: 0 reserves candidate-vs-active,
 	// positive values select a 1-based rollback slot. A negative value used to
 	// fall through to the candidate-vs-active compare with a success response
@@ -454,6 +485,25 @@ func (s *Server) ShowCompare(_ context.Context, req *pb.ShowCompareRequest) (*pb
 	if req.RollbackN < 0 {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"invalid rollback_n %d: must be non-negative (0 = candidate vs active)", req.RollbackN)
+	}
+	// #15995 fold: render the priced snapshot arms when the gate ran.
+	// Fold 3: a captured absent candidate arm is the priced absence.
+	// Candidate-baseline compares (RollbackN>=0, !ActiveBaseline)
+	// require a candidate exactly as the live store helper does
+	// ("not in configuration mode"); only the active-baseline arm
+	// deliberately diffs without one.
+	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
+		if !req.ActiveBaseline && snaps.Other == nil {
+			if req.RollbackN > 0 && snaps.Primary == nil {
+				return nil, status.Errorf(codes.InvalidArgument, "rollback slot %d not found", req.RollbackN)
+			}
+			return nil, status.Errorf(codes.InvalidArgument, "not in configuration mode")
+		}
+		if req.RollbackN > 0 && snaps.Primary == nil {
+			return nil, status.Errorf(codes.InvalidArgument, "rollback slot %d not found", req.RollbackN)
+		}
+		hasCandidate := snaps.Other != nil || req.ActiveBaseline
+		return &pb.ShowCompareResponse{Output: configstore.RenderCompareRedacted(snaps.Primary, snaps.Other, req.Path, hasCandidate)}, nil
 	}
 	// #15657 V45-03: the operational baseline diffs the rollback slot
 	// (0 = active) against ACTIVE — no candidate read, no config mode.
@@ -474,7 +524,7 @@ func (s *Server) ShowCompare(_ context.Context, req *pb.ShowCompareRequest) (*pb
 	return &pb.ShowCompareResponse{Output: s.store.ShowCompareRedactedAtPath(req.Path)}, nil
 }
 
-func (s *Server) ShowRollback(_ context.Context, req *pb.ShowRollbackRequest) (*pb.ShowRollbackResponse, error) {
+func (s *Server) ShowRollback(ctx context.Context, req *pb.ShowRollbackRequest) (*pb.ShowRollbackResponse, error) {
 	// #15657 V45-03/V48-02: n == 0 is the active configuration (Junos
 	// rollback 0); only a negative wire value is invalid. Format and
 	// Path are honoured for every format — previously only SET was
@@ -487,6 +537,22 @@ func (s *Server) ShowRollback(_ context.Context, req *pb.ShowRollbackRequest) (*
 	var path []string
 	if len(req.Path) > 0 {
 		path = req.Path
+	}
+	// #15995 fold: render the priced slot snapshot when the gate ran.
+	// Fold 3: captured nil Primary = slot absent at pricing — surface
+	// the live slot lookup error, never render a later live slot.
+	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
+		if snaps.Primary == nil {
+			if err := s.store.RollbackSnapshotErr(int(req.N)); err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+			}
+			return &pb.ShowRollbackResponse{Output: ""}, nil
+		}
+		resp, err := showConfigSnapshotResponse(snaps.Primary, snaps.NodeID, path, req.Format)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+		}
+		return &pb.ShowRollbackResponse{Output: resp.Output}, nil
 	}
 	var output string
 	var err error

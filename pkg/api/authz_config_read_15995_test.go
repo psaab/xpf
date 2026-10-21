@@ -1,0 +1,334 @@
+package api
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
+)
+
+// #15995 (A8-01, REST arm): deny-configuration "^security ipsec" was
+// evaluated only on the requested ?path=, so GET /config/show?path=security
+// rendered the denied ipsec descendant. The gate now prices every
+// rendered descendant of the target (and rollback slot) tree.
+// Scoped compare has no REST selector (whole-tree, refused for a
+// restricted class — covered by the 14707 suite).
+
+const uid15995REST = 4260
+
+const passwd15995REST = `root:x:0:0:root:/root:/bin/bash
+ancuser:x:4260:4260::/home/ancuser:/bin/bash
+openuser:x:4261:4261::/home/openuser:/bin/bash
+`
+
+const config15995REST = `
+system {
+    host-name ancestor-15995-rest;
+    login {
+        class ancestor-view {
+            permissions [ view configure ];
+            deny-configuration "^security ipsec";
+        }
+        class open-view {
+            permissions [ view configure ];
+        }
+        user ancuser { class ancestor-view; }
+        user openuser { class open-view; }
+    }
+}
+security {
+    zones {
+        security-zone trust {
+            description "ZONE-DESC-15995";
+            interfaces [ ge-0/0/0.0 ];
+        }
+    }
+    ipsec {
+        vpn vpn1 { bind-interface st0.0; pre-shared-key ascii-text dummy15995; }
+    }
+}
+interfaces {
+    ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
+}
+`
+
+func TestRESTShowAncestorDeniedDescendant15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+
+	store := authzStore(t, config15995REST)
+	// Second commit so rollback slot 1 holds the first config.
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadOverride(strings.Replace(config15995REST, "ancestor-15995-rest", "ancestor-15995-rest-b", 1)); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	store.ExitConfigure()
+	// Stage a candidate so the ?target=candidate arm has a rendered
+	// tree with the denied descendant (an idle candidate renders "").
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure candidate: %v", err)
+	}
+	defer store.ExitConfigure()
+	if err := store.SetFromInput("security zones security-zone trust description CANDIDATE-15995"); err != nil {
+		t.Fatalf("stage candidate: %v", err)
+	}
+
+	_, base := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(uid15995REST),
+	})
+
+	denied := []string{
+		"/api/v1/config/show?path=security",
+		"/api/v1/config/show?path=security&format=set",
+		"/api/v1/config/show?path=security&target=candidate",
+		"/api/v1/config/show?path=security%20ipsec",
+		"/api/v1/config/show-rollback?n=1&path=security",
+		"/api/v1/config/show-rollback?n=0&path=security",
+	}
+	for _, route := range denied {
+		code, body := get14707(t, base, route)
+		if code != http.StatusForbidden {
+			t.Errorf("GET %s returned %d, want 403 (renders denied ipsec descendant, #15995): %s", route, code, body)
+		}
+		if strings.Contains(body, "ipsec") || strings.Contains(body, "vpn1") {
+			t.Errorf("GET %s disclosed the denied ipsec descendant: %s", route, body)
+		}
+	}
+
+	allowed := []string{
+		"/api/v1/config/show?path=security%20zones",
+		"/api/v1/config/show?path=interfaces",
+		"/api/v1/config/show-rollback?n=1&path=security%20zones",
+	}
+	for _, route := range allowed {
+		code, body := get14707(t, base, route)
+		if code != http.StatusOK {
+			t.Errorf("GET %s returned %d, want 200 (no denied descendant): %s", route, code, body)
+		}
+	}
+	// The allowed sibling actually renders its content.
+	if code, body := get14707(t, base, "/api/v1/config/show?path=security%20zones"); code != http.StatusOK ||
+		!strings.Contains(body, "ZONE-DESC-15995") {
+		t.Errorf("GET zones sibling lost content (code=%d): %s", code, body)
+	}
+
+	// Unrestricted control reads the ancestor.
+	_, baseOpen := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(4261),
+	})
+	if code, body := get14707(t, baseOpen, "/api/v1/config/show?path=security"); code != http.StatusOK ||
+		!strings.Contains(body, "ipsec") {
+		t.Errorf("control: open-view GET ?path=security = %d, want 200 with ipsec: %s", code, body)
+	}
+}
+
+// Fold 3 (3): HEAD reaches the GET handler through the mux, so HEAD
+// must price as GET at the *-configuration gate. Pre-fix the gate
+// switched on the raw method and HEAD skipped concealment entirely
+// (status/Content-Length oracle: denied subtree answered 200).
+func TestRESTHeadPricesAsGet15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(strings.Replace(config15995REST, "ancestor-15995-rest", "ancestor-15995-rest-b", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	_, base := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(uid15995REST),
+	})
+	head := func(p string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodHead, base+p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("HEAD %s: %v", p, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for _, route := range []string{
+		"/api/v1/config/show?path=security",
+		"/api/v1/config/show",
+		"/api/v1/config/show-rollback?n=1&path=security",
+	} {
+		if code := head(route); code != http.StatusForbidden {
+			t.Errorf("HEAD %s = %d, want 403 (must price as GET, #15995 fold3-3)", route, code)
+		}
+	}
+	if code := head("/api/v1/config/show?path=security%20zones"); code != http.StatusOK {
+		t.Errorf("HEAD allowed sibling = %d, want 200", code)
+	}
+}
+
+// Fold 5 (Codex): whole GET /config/show must render the priced
+// generation: the gate attaches the atomic active snapshot for the
+// whole-tree arm, and the handler renders it. Witness: snapshot the
+// active tree at gate time, swap the active config, render from the
+// snapshot — output is the priced generation.
+func TestRESTWholeShowSnapshotGeneration15995(t *testing.T) {
+	store := authzStore(t, config15995REST)
+	_, tree, _, _ := store.ShowConfigSnapshot("active")
+	if tree == nil {
+		t.Fatal("active snapshot nil")
+	}
+	// Swap active: commit a changed host-name/description marker.
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(strings.Replace(config15995REST, "ZONE-DESC-15995", "SWAPPED-GEN-15995", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	out := configstore.RenderShowRedacted(tree, nil, "text")
+	if !strings.Contains(out, "ZONE-DESC-15995") || strings.Contains(out, "SWAPPED-GEN-15995") {
+		t.Errorf("whole-show snapshot does not render the priced generation:\n%s", out)
+	}
+	// Gate-level: whole arm returns Present with the priced tree.
+}
+
+// Fold 6 (REST twin): whole-show gate must authorize with the
+// snapshot's scfg. Witness: stale cfg (class unrestricted, as read
+// before a restricting commit) + store whose snapshot cfg restricts
+// the class — whole show must refuse.
+func TestRESTWholePricesWithSnapshotCfg15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	srv, _ := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(uid15995REST)})
+	staleText := strings.Replace(config15995REST, `deny-configuration "^security ipsec";`, ``, 1)
+	staleTree, errs := config.NewParser(staleText).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("stale parse: %v", errs)
+	}
+	staleCfg, err := config.CompileConfig(staleTree)
+	if err != nil {
+		t.Fatalf("stale compile: %v", err)
+	}
+	if _, restricted, err := config.ConfigurationLoginRegexesFor(staleCfg, "ancestor-view"); err != nil || restricted {
+		t.Fatalf("stale fixture must be unrestricted (restricted=%v err=%v)", restricted, err)
+	}
+	req := httptest.NewRequest("GET", "/api/v1/config/show", nil)
+	p := authz.Principal{Class: "ancestor-view"}
+	if _, err := srv.authorizeRESTConfigRead(req, staleCfg, p); err == nil {
+		t.Error("REST whole show priced with STALE cfg was ADMITTED though snapshot cfg restricts (#15995 fold6)")
+	}
+	if _, err := srv.authorizeRESTConfigRead(req, store.ActiveConfig(), p); err == nil {
+		t.Error("REST whole show with current cfg admitted (control broken)")
+	}
+}
+
+// Fold 6 handler-level witness (REST): whole GET /config/show through
+// the real HTTP surface. The store restricts ancuser's class, so the
+// whole render must 403 through middleware+handler — an admitted
+// handler execution (the stale-pairing shape) would answer 200 with
+// the tree size in Content-Length.
+func TestRESTWholeShowHandlerRestricted15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	_, base := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(uid15995REST)})
+	if code, body := get14707(t, base, "/api/v1/config/show"); code != http.StatusForbidden {
+		t.Errorf("whole GET /config/show (handler) = %d, want 403: %s", code, body)
+	}
+	// Open control renders the whole tree through the handler.
+	_, baseOpen := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(4261)})
+	if code, body := get14707(t, baseOpen, "/api/v1/config/show"); code != http.StatusOK || !strings.Contains(body, "ipsec") {
+		t.Errorf("open whole GET (handler) = %d, want 200 with ipsec: %s", code, body)
+	}
+}
+
+// Fold-6 strengthening (REST): closest production seam to the
+// middleware is readAuthz itself (the middleware wrapper
+// mutationAuthzGuard routes safe methods to it). authorizeInputs has
+// NO injection seam (peer identity comes from the connection context;
+// cfg is s.activeConfig() read inside authorizeRESTReadSnapshots), so
+// a stale cfg cannot be injected into the middleware call chain
+// in-test — by construction the gate's only policy source besides
+// authorizeInputs' cfg is the single ShowConfigSnapshot capture
+// (store_format.go, one RLock). This cell therefore: (1) drives the
+// gate entry (authorizeRESTConfigRead — readAuthz's exact call) with
+// the stale cfg and requires refusal with NO attached snapshots, then
+// (2) drives readAuthz + handler over HTTP with the restricted
+// principal and requires the handler never executes admitted (403),
+// while the open principal renders through the same middleware.
+func TestRESTWholeStaleGateThenMiddleware15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	srv, base := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(uid15995REST)})
+	staleText := strings.Replace(config15995REST, `deny-configuration "^security ipsec";`, ``, 1)
+	staleTree, errs := config.NewParser(staleText).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("stale parse: %v", errs)
+	}
+	staleCfg, err := config.CompileConfig(staleTree)
+	if err != nil {
+		t.Fatalf("stale compile: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/api/v1/config/show", nil)
+	p := authz.Principal{Class: "ancestor-view"}
+	snaps, err := srv.authorizeRESTConfigRead(req, staleCfg, p)
+	if err == nil {
+		t.Fatalf("gate admitted stale cfg (snaps=%+v); middleware would attach and handler would render", snaps)
+	}
+	// NB: the gate returns (snaps, err) together — middleware drops
+	// snaps on err (authorizeRESTReadSnapshots returns before attach),
+	// so a non-nil Primary beside a refusal is never rendered. The
+	// handler-reachability fact is the middleware assertion below.
+	_ = snaps
+	// Middleware+handler surface (restricted 403, open 200) — same
+	// assertions as TestRESTWholeShowHandlerRestricted15995, kept
+	// here so this cell is self-contained.
+	if code, _ := get14707(t, base, "/api/v1/config/show"); code != http.StatusForbidden {
+		t.Errorf("middleware whole show (restricted) = %d, want 403", code)
+	}
+	_, baseOpen := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(4261)})
+	if code, body := get14707(t, baseOpen, "/api/v1/config/show"); code != http.StatusOK || !strings.Contains(body, "ipsec") {
+		t.Errorf("middleware whole show (open) = %d want 200+ipsec: %s", code, body)
+	}
+}

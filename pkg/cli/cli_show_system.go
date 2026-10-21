@@ -13,6 +13,7 @@ import (
 	"github.com/psaab/xpf/pkg/bootstrapshow"
 	"github.com/psaab/xpf/pkg/clockskew"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/sysinfo"
@@ -926,7 +927,14 @@ func (c *CLI) handleShowSystem(args []string) error {
 					return fmt.Errorf("usage: show system rollback compare <N> (0 = active configuration)")
 				}
 				var diff string
-				if redact {
+				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
+					other := c.renderSnapshot15995("other")
+					if redact {
+						diff = configstore.RenderCompareRedacted(slotSnap, other, nil, true)
+					} else {
+						diff = configstore.RenderCompareCleartext(slotSnap, other, nil, true)
+					}
+				} else if redact {
 					diff, err = c.store.ShowCompareRollbackActiveRedacted(n)
 				} else {
 					diff, err = c.store.ShowCompareRollbackActive(n)
@@ -1003,7 +1011,14 @@ func (c *CLI) handleShowSystem(args []string) error {
 					comparePath = nil
 				}
 				var diff string
-				if redact {
+				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
+					other := c.renderSnapshot15995("other")
+					if redact {
+						diff = configstore.RenderCompareRedacted(slotSnap, other, comparePath, true)
+					} else {
+						diff = configstore.RenderCompareCleartext(slotSnap, other, comparePath, true)
+					}
+				} else if redact {
 					diff, err = c.store.ShowCompareRollbackActiveRedactedAtPath(n, comparePath)
 				} else {
 					diff, err = c.store.ShowCompareRollbackActiveAtPath(n, comparePath)
@@ -1020,29 +1035,45 @@ func (c *CLI) handleShowSystem(args []string) error {
 				// #15657 V48-02: every display format is honoured,
 				// scoped to the pre-pipe subtree path.
 				var content string
+				slotSnap := c.renderSnapshot15995("slot")
+				rbFormatName := ""
 				switch rbFormat {
 				case displayPipeSet:
-					if redact {
-						content, err = c.store.ShowRollbackSetRedactedPath(n, rbPath)
-					} else {
-						content, err = c.store.ShowRollbackSetPath(n, rbPath)
-					}
+					rbFormatName = "set"
 				case displayPipeJSON:
-					if redact {
-						content, err = c.store.ShowRollbackJSONRedactedPath(n, rbPath)
-					} else {
-						content, err = c.store.ShowRollbackJSONPath(n, rbPath)
-					}
+					rbFormatName = "json"
 				case displayPipeXML:
-					if redact {
+					rbFormatName = "xml"
+				}
+				switch rbFormat {
+				case displayPipeSet, displayPipeJSON, displayPipeXML:
+					switch {
+					case c.snapshotsCaptured15995() && redact:
+						content = configstore.RenderShowRedacted(slotSnap, rbPath, rbFormatName)
+					case c.snapshotsCaptured15995():
+						content = configstore.RenderShowCleartext(slotSnap, rbPath, rbFormatName)
+					case redact && rbFormat == displayPipeSet:
+						content, err = c.store.ShowRollbackSetRedactedPath(n, rbPath)
+					case redact && rbFormat == displayPipeJSON:
+						content, err = c.store.ShowRollbackJSONRedactedPath(n, rbPath)
+					case redact:
 						content, err = c.store.ShowRollbackXMLRedactedPath(n, rbPath)
-					} else {
+					case rbFormat == displayPipeSet:
+						content, err = c.store.ShowRollbackSetPath(n, rbPath)
+					case rbFormat == displayPipeJSON:
+						content, err = c.store.ShowRollbackJSONPath(n, rbPath)
+					default:
 						content, err = c.store.ShowRollbackXMLPath(n, rbPath)
 					}
 				case displayPipeInheritance:
-					if redact {
+					switch {
+					case c.snapshotsCaptured15995() && redact:
+						content, err = configstore.RenderShowInheritanceRedacted(slotSnap, rbPath, c.store.NodeID())
+					case c.snapshotsCaptured15995():
+						content, err = configstore.RenderShowInheritanceCleartext(slotSnap, rbPath, c.store.NodeID())
+					case redact:
 						content, err = c.store.ShowRollbackInheritanceRedactedPath(n, rbPath)
-					} else {
+					default:
 						content, err = c.store.ShowRollbackInheritancePath(n, rbPath)
 					}
 				}
@@ -1060,7 +1091,13 @@ func (c *CLI) handleShowSystem(args []string) error {
 				// #15942 H2-04: bare form, optionally scoped to the
 				// pre-pipe subtree path (rbPath, empty = whole tree).
 				var content string
-				if redact {
+				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
+					if redact {
+						content = configstore.RenderShowRedacted(slotSnap, rbPath, "text")
+					} else {
+						content = configstore.RenderShowCleartext(slotSnap, rbPath, "text")
+					}
+				} else if redact {
 					content, err = c.store.ShowRollbackRedactedPath(n, rbPath)
 				} else {
 					content, err = c.store.ShowRollbackPath(n, rbPath)

@@ -382,20 +382,44 @@ func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 	// #15657 V48-02: an UNRECOGNISED format is likewise refused (400)
 	// instead of silently rendering hierarchical text; "inheritance"
 	// renders the groups-expanded form like gRPC ShowConfig.
+	// #15995 fold: render the priced snapshot when the gate ran.
+	snaps, hasSnaps := restConfigReadSnapshotsFrom(r)
 	var output string
 	switch target {
 	case "", "active":
 		switch format {
 		case "", "text":
-			output = s.store.ShowActiveRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "text")
+			} else {
+				output = s.store.ShowActiveRedacted(path)
+			}
 		case "set":
-			output = s.store.ShowActiveSetRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "set")
+			} else {
+				output = s.store.ShowActiveSetRedacted(path)
+			}
 		case "json":
-			output = s.store.ShowActiveJSONRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "json")
+			} else {
+				output = s.store.ShowActiveJSONRedacted(path)
+			}
 		case "xml":
-			output = s.store.ShowActiveXMLRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "xml")
+			} else {
+				output = s.store.ShowActiveXMLRedacted(path)
+			}
 		case "inheritance":
-			inh, err := s.store.ShowActiveInheritanceRedacted(path)
+			var inh string
+			var err error
+			if hasSnaps && snaps.Present {
+				inh, err = configstore.RenderShowInheritanceRedacted(snaps.Primary, path, snaps.NodeID)
+			} else {
+				inh, err = s.store.ShowActiveInheritanceRedacted(path)
+			}
 			if err != nil {
 				writeError(w, http.StatusBadRequest, err.Error())
 				return
@@ -409,15 +433,37 @@ func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 	case "candidate":
 		switch format {
 		case "", "text":
-			output = s.store.ShowCandidateRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "text")
+			} else {
+				output = s.store.ShowCandidateRedacted(path)
+			}
 		case "set":
-			output = s.store.ShowCandidateSetRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "set")
+			} else {
+				output = s.store.ShowCandidateSetRedacted(path)
+			}
 		case "json":
-			output = s.store.ShowCandidateJSONRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "json")
+			} else {
+				output = s.store.ShowCandidateJSONRedacted(path)
+			}
 		case "xml":
-			output = s.store.ShowCandidateXMLRedacted(path)
+			if hasSnaps && snaps.Present {
+				output = configstore.RenderShowRedacted(snaps.Primary, path, "xml")
+			} else {
+				output = s.store.ShowCandidateXMLRedacted(path)
+			}
 		case "inheritance":
-			inh, err := s.store.ShowCandidateInheritanceRedacted(path)
+			var inh string
+			var err error
+			if hasSnaps && snaps.Present {
+				inh, err = configstore.RenderShowInheritanceRedacted(snaps.Primary, path, snaps.NodeID)
+			} else {
+				inh, err = s.store.ShowCandidateInheritanceRedacted(path)
+			}
 			if err != nil {
 				writeError(w, http.StatusBadRequest, err.Error())
 				return
@@ -674,6 +720,42 @@ func (s *Server) configShowRollbackHandler(w http.ResponseWriter, r *http.Reques
 	format := r.URL.Query().Get("format")
 	// #15657 V48-02: ?path= subtree selector, as on /config/show.
 	path := strings.Fields(r.URL.Query().Get("path"))
+
+	// #15995 fold: render the priced slot snapshot when the gate ran.
+	// Fold 3: captured nil Primary = slot absent at pricing — surface
+	// the slot error, never render a later live slot.
+	if snaps, ok := restConfigReadSnapshotsFrom(r); ok && snaps.Present && snaps.Primary == nil {
+		if err := s.store.RollbackSnapshotErr(n); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if snaps, ok := restConfigReadSnapshotsFrom(r); ok && snaps.Present {
+		var snapOut string
+		var snapErr error
+		switch format {
+		case "", "text":
+			snapOut = configstore.RenderShowRedacted(snaps.Primary, path, "text")
+		case "set":
+			snapOut = configstore.RenderShowRedacted(snaps.Primary, path, "set")
+		case "json":
+			snapOut = configstore.RenderShowRedacted(snaps.Primary, path, "json")
+		case "xml":
+			snapOut = configstore.RenderShowRedacted(snaps.Primary, path, "xml")
+		case "inheritance":
+			snapOut, snapErr = configstore.RenderShowInheritanceRedacted(snaps.Primary, path, snaps.NodeID)
+		default:
+			writeError(w, http.StatusBadRequest,
+				"unsupported format: "+format+"; use text, set, json, xml, or inheritance")
+			return
+		}
+		if snapErr != nil {
+			writeError(w, http.StatusBadRequest, snapErr.Error())
+			return
+		}
+		writeOK(w, TextResponse{Output: snapOut})
+		return
+	}
 
 	var output string
 	var err error
