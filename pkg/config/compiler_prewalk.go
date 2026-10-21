@@ -621,6 +621,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #15998: an invalid default-policy value beside a valid one must not
+	// leave the earlier permit standing (the valid-only censuses miss it).
+	invalidDefaultPolicyWarnings, err := validateInvalidDefaultPolicy15998(
+		tree.Children, opts.lenientDefaultPolicyConflict11821)
+	if err != nil {
+		return nil, err
+	}
 	// #12825: validate the recognized system-wide policy-statistics enum
 	// spellings and reject or fail closed on contradictory duplicate values.
 	policyStatsWarnings, err := validatePolicyStatsSystemWide12825(
@@ -936,6 +943,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, defaultPolicyWarnings...)
 	warnings = append(warnings, defaultPolicyConflictWarnings...)
 	warnings = append(warnings, defaultPolicyValueWarnings...)
+	warnings = append(warnings, invalidDefaultPolicyWarnings...)
 	warnings = append(warnings, policyStatsWarnings...)
 	warnings = append(warnings, policyThenSiblingWarnings...)
 	warnings = append(warnings, policyEnforcementWarnings...)

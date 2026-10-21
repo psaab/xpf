@@ -107,6 +107,13 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 				// no-match verdict sends an ICMP/RST reject instead of a
 				// silent drop.
 				sec.DefaultPolicy = PolicyReject
+			default:
+				// #15998: an invalid value must not leave an earlier
+				// permit-all standing. Force deny here as well as in the
+				// post-dispatch reset (which covers group-expanded trees).
+				if policyStr != "" {
+					sec.DefaultPolicy = PolicyDeny
+				}
 			}
 			continue
 		}

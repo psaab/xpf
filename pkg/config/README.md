@@ -1164,6 +1164,8 @@ selected by first-child order.
 
 **Contradictory action spellings within one default-policy stanza are rejected and tolerant-load fail-closed (#12821):** action tokens in trailing keys and nested children are all checked, so bracketed lists and mixed key/body forms cannot silently compile only the first value as permit-all. Strict compilation rejects differing supported actions; tolerant `Load` and `SyncApply` warn naming both and force the no-match default to deny-all. Identical repeated values remain accepted. See `docs/config-schema.md` "#12821".
 
+**An invalid default-policy value beside a valid one is strict-rejected and tolerant-load fail-closed (#15998):** the conflict censuses count only `permit-all|deny-all|reject-all`, so a garbage second value (duplicate roots/group restatement) previously left an earlier `permit-all` standing. Strict rejects naming the invalid value; tolerant warns and forces deny-all. A single invalid value alone was already safe (deny init).
+
 **Inline default-policy overrides of group choices remain valid (#12823):** an
 inline block or flat value replaces the corresponding group `default-policy`,
 including when group inheritance is nested; `apply-groups-except` presence
