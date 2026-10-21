@@ -1715,19 +1715,29 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 		}
 	})
 
-	t.Run("empty gateway emits connection with no remote_addrs", func(t *testing.T) {
+	t.Run("empty gateway PSK VPN is skipped, no lone %any secret (#15989)", func(t *testing.T) {
+		// #15989 (H-4): a gateway-less PSK VPN (gw == nil, remote == "")
+		// has no peer address or identity to scope its secret to — it
+		// previously rendered a connection with no remote_addrs and a
+		// lone id-1 = "%any" selector matching any peer identity. The
+		// render belt must skip it entirely: no connection, no secret.
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
 				"tun": {Gateway: "", PSK: "k", BindInterface: "st0.0"},
 			},
 		}
-		got, _, err := m.renderConfig(cfg)
+		got, rendered, err := m.renderConfig(cfg)
 		if err != nil {
 			t.Fatalf("renderConfig() error = %v", err)
 		}
-		parseSwanctlDoc(t, got).at(t, "connections", "tun")
-		if vals := remoteAddrsValues(t, got); len(vals) != 0 {
-			t.Fatalf("empty gateway should emit no remote_addrs, got %v\n%s", vals, got)
+		if rendered["tun"] {
+			t.Fatalf("gateway-less PSK VPN was rendered, want skip:\n%s", got)
+		}
+		doc := parseSwanctlDoc(t, got)
+		doc.at(t, "connections").hasNoChild(t, "tun")
+		doc.at(t, "secrets").hasNoChild(t, "ike-tun")
+		if strings.Contains(got, "%any") {
+			t.Fatalf("gateway-less PSK VPN emitted a %%any selector:\n%s", got)
 		}
 	})
 

@@ -913,8 +913,13 @@ all files stay in `package ipsec`, so the public API is unchanged.
   #15193 local-owner `%any` never replaces the peer selector.)
   Configure `remote-identity` on the gateway (or use
   `dynamic hostname <fqdn>`); the peer presenting that identity with
-  this VPN's key is then the only one the secret matches. A
-  cert/EAP VPN has no PSK,
+  this VPN's key is then the only one the secret matches. Since #15989
+  (H-4) the same rule covers a gateway-less PSK VPN (no `ike gateway`
+  leaf): it renders with no `remote_addrs` and no peer selector, so it
+  would likewise carry a lone `%any` selector — commit rejects it and
+  the render belt skips it. Inline endpoints (a usable IP/hostname in
+  the gateway leaf, no gateway object) are unaffected: the peer
+  address scopes their secret. A cert/EAP VPN has no PSK,
   so it emits no secret block and is unaffected. The selector values reuse
   the `sanitizeSwanctlValue`/`escapeSwanctlQuoted` quoting (#1798/#2126).
   Two #14139 (D5-06) refinements: a comma-separated multi-address gateway

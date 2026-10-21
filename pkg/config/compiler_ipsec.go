@@ -980,8 +980,10 @@ func validateIPsecGatewayReferencesStrict(cfg *Config) error {
 	for _, name := range names {
 		vpn := ipsec.VPNs[name]
 		if vpn == nil || vpn.Gateway == "" {
-			// A VPN may legitimately omit the remote endpoint (the
-			// generated connection simply has no remote_addrs line).
+			// No gateway reference to resolve here. A gateway-less PSK
+			// VPN is rejected by validateIPsecResponderIdentityStrict
+			// (#15989): it renders with no remote_addrs and no peer
+			// selector to scope its secret to.
 			continue
 		}
 		if gw, ok := ipsec.Gateways[vpn.Gateway]; ok {

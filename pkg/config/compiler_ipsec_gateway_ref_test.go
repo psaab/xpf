@@ -157,13 +157,52 @@ func TestValidateIPsecGatewayReferences(t *testing.T) {
 		}
 	})
 
-	t.Run("no gateway is not rejected", func(t *testing.T) {
-		// A VPN may legitimately omit the gateway (cert/TS-only shapes).
-		tree := buildTree2074(t, []string{
+	t.Run("no gateway PSK VPN is rejected (#15989)", func(t *testing.T) {
+		// #15989 (H-4): a gateway-less PSK VPN has no peer address or
+		// identity to scope its secret to — it rendered a lone "%any"
+		// selector matching any peer. Commit must refuse it; the
+		// tolerant path warns (same #14591 prefix) and keeps the VPN
+		// (the render belt skips it). Inline endpoints stay legal.
+		cmds := []string{
 			"set security ipsec vpn tun bind-interface st0.0",
-		})
-		if _, err := CompileConfig(tree); err != nil {
-			t.Fatalf("a gateway-less VPN should compile, got: %v", err)
+			"set security ipsec vpn tun pre-shared-key ascii-text gwless-secret",
+		}
+		if _, err := CompileConfig(buildTree2074(t, cmds)); err == nil ||
+			!strings.Contains(err.Error(), "no ike gateway") {
+			t.Fatalf("commit must refuse a gateway-less PSK VPN (#15989), got %v", err)
+		}
+		lenient, err := CompileConfigLenient(buildTree2074(t, cmds))
+		if err != nil {
+			t.Fatalf("tolerant path must not refuse: %v", err)
+		}
+		warned := false
+		for _, w := range lenient.Warnings {
+			if strings.Contains(w, "ipsec responder-only remote identity") {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Fatalf("tolerant path must warn about the gateway-less PSK VPN, warnings=%v", lenient.Warnings)
+		}
+		if lenient.Security.IPsec.VPNs["tun"] == nil {
+			t.Fatal("tolerant path must keep the VPN (render belt skips it)")
+		}
+	})
+
+	t.Run("inline endpoint PSK VPN still compiles (#15989 control)", func(t *testing.T) {
+		// Control: an inline gateway endpoint (no gateway object, but a
+		// usable remote) scopes its secret by the peer address — the
+		// #15193 %any is only a local owner alongside it. Both forms
+		// must keep committing.
+		for _, endpoint := range []string{"192.0.2.1", "peer.example.com"} {
+			tree := buildTree2074(t, []string{
+				"set security ipsec vpn tun gateway " + endpoint,
+				"set security ipsec vpn tun bind-interface st0.0",
+				"set security ipsec vpn tun pre-shared-key ascii-text inline-secret",
+			})
+			if _, err := CompileConfig(tree); err != nil {
+				t.Fatalf("inline endpoint %s PSK VPN must compile (#15989), got: %v", endpoint, err)
+			}
 		}
 	})
 }

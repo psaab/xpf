@@ -78,12 +78,13 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // from the render — a skip class: an unrenderable gateway reference
 // (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
 // (#9919 F-161), an unsupported IKE authentication method, a malformed PSK,
-// a PSK connection with no effective secret (#14139), a responder-only PSK
-// connection whose gateway has no remote-identity or dynamic hostname (#14591),
-// a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
-// VPN or gateway name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
-// ESP/PFS DH group (#9919 F-161), a non-empty bind-interface that resolves to
-// no XFRM if_id (#10681), an external-interface with no resolved local-address
+// a PSK connection with no effective secret (#14139), a responder-only or
+// gateway-less PSK connection with no peer identity to scope its secret
+// to (#14591/#15989), a `protocol ah` proposal with no ESP render path
+// (#4298), a section-breaking VPN or gateway name (#9495), an unresolved
+// ipsec-policy chain (#9919 F-090), an unusable ESP/PFS DH group
+// (#9919 F-161), a non-empty bind-interface that resolves to no XFRM
+// if_id (#10681), an external-interface with no resolved local-address
 // (#11689), or an explicit selector set with no renderable children (#10884) —
 // is NOT in
 // the returned set even though renderConfig still returns success. Apply
@@ -400,23 +401,38 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			continue
 		}
 
-		// A responder-only PSK VPN whose gateway has no peer identity
-		// (#14591, Y09-04) accepts an initiator from any address, and
-		// with no configured peer identity its secret carries no id
-		// selector — it matches any peer, so strongSwan's key selection
-		// by the claimed IDi lets a holder of another VPN's PSK
+		// A responder-only or gateway-less PSK VPN with no peer identity
+		// (#14591, Y09-04; #15989, H-4) accepts an initiator from any
+		// address, and with no configured peer identity/endpoint its
+		// secret carries no peer id selector — a lone "%any" local-owner
+		// selector — so it matches any peer, and strongSwan's key
+		// selection by the claimed IDi lets a holder of another VPN's PSK
 		// authenticate into this connection by claiming that site's
 		// identity. Every other credential failure skips the VPN; an
 		// unscoped responder secret must do the same (fail-closed), so
 		// Apply unloads it and tears down any stale SA. The commit-time
-		// gate (validateIPsecResponderIdentityStrict) hard-rejects the
-		// shape; this belt covers the tolerant load / peer-sync path.
-		// Pubkey (certificate) VPNs are unaffected. The peer identity
-		// may be an explicit remote-identity or the `dynamic hostname`
-		// FQDN (#14590), which the renderer renders as remote id @FQDN
-		// and scopes the secret by — either satisfies the gate. Use
-		// responderOnlyGateway so a dynamic-hostname gateway whose
-		// ResponderOnly flag was not carried is gated identically.
+		// gate (validateIPsecResponderIdentityStrict) hard-rejects both
+		// shapes; this belt covers the tolerant load / peer-sync path.
+		// Gateway-less: gw == nil && remoteAddr == "" (resolveRemoteAddr's
+		// empty-endpoint arm). Inline endpoints (gw == nil but a usable
+		// IP/hostname remote) keep rendering — the peer address scopes
+		// their secret. Pubkey (certificate) VPNs are unaffected. The
+		// peer identity may be an explicit remote-identity or the
+		// `dynamic hostname` FQDN (#14590) — either satisfies the
+		// responder-only gate. Use responderOnlyGateway so a
+		// dynamic-hostname gateway whose ResponderOnly flag was not
+		// carried is gated identically.
+		if authMethod == "psk" && gw == nil && remoteAddr == "" {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: no ike gateway configured, "+
+				"so its pre-shared key cannot be scoped to a peer — "+
+				"configure an ike gateway with an address or an "+
+				"inline gateway endpoint (rendering the connection "+
+				"would let a holder of another VPN's key authenticate "+
+				"into it by claiming that peer's identity)",
+				"vpn", name)
+			continue
+		}
 		if authMethod == "psk" && responderOnlyGateway(gw) && gw.RemoteIDValue == "" && gw.DynamicHostname == "" {
 			skipped[name] = true
 			slog.Warn("skipping IPsec VPN: responder-only gateway has "+
