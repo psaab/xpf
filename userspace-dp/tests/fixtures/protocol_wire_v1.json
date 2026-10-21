@@ -897,6 +897,7 @@
   },
   "mirror_config_snapshot": {
     "ingress_ifindex": 0,
+    "ingress_unit": 0,
     "ingress_vlan_id": 0,
     "output_ifindex": 0,
     "rate": 0,
