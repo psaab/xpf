@@ -60,16 +60,30 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
         // liveness for a genuinely-forwarding session.
         // #9752: terminal joins the HAInactive exclusion — a non-forwarding
         // entry must not reset its HOLD clock, same reasoning.
+        // #16109: the refreshed decision MUST overwrite a stored terminal
+        // decision: a peer-synced row was terminalized on the standby
+        // (DiscardRoute after the HAInactive conversion, or
+        // ClusterTerminalHAInactive), and the scan above has already
+        // re-resolved it from the live FIB under the now-active owner.
+        // Skipping the rewrite (as this gate did) left the row serving
+        // its stored terminal decision on every hit while the SNAT
+        // revalidator revoked-and-deleted it at the first packet.
+        // Genuinely non-forwarding refresh outcomes keep the exclusion
+        // (they must not reset their HOLD clock): HAInactive /
+        // TableUnavailable, and rows whose re-resolution is STILL a
+        // terminal discard on this node.
         let rewrote_session = !matches!(
             refreshed_decision.resolution.disposition,
-            ForwardingDisposition::HAInactive | ForwardingDisposition::TableUnavailable
-        )
-            && sessions.refresh_for_ha_transition(
-                &key,
-                refreshed_decision,
-                refreshed_metadata.clone(),
-                now_ns,
-            );
+            ForwardingDisposition::HAInactive
+                | ForwardingDisposition::TableUnavailable
+                | ForwardingDisposition::DiscardRoute
+                | ForwardingDisposition::ClusterTerminalHAInactive
+        ) && sessions.refresh_for_ha_transition(
+            &key,
+            refreshed_decision,
+            refreshed_metadata.clone(),
+            now_ns,
+        );
         // Still publish the refreshed forwarding decision for every scanned
         // session that is still present — the documented reason for the wider
         // scan is to land split-RG local-forward<->fabric-redirect transitions

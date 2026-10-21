@@ -1222,6 +1222,7 @@ fn stale_foreign_icmp_hit_does_not_mutate_forwarding_session_12265() {
         crate::session::ForwardingGenerationStamp {
             config_generation: 7,
             fib_generation: 9,
+            neighbor_generation: 0,
             valid: true,
         }
     );
@@ -1270,6 +1271,7 @@ fn owner_close_update_carries_revalidated_route_12265() {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 10,
+            neighbor_generation: 0,
         },
     );
     assert_eq!(batch.validated_packets, 1);

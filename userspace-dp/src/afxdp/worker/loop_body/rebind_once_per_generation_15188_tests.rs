@@ -113,6 +113,7 @@ fn view(generation: u64, forwarding: Arc<ForwardingState>) -> Arc<RuntimeView> {
             snapshot_installed: true,
             config_generation: generation,
             fib_generation: generation as u32,
+            neighbor_generation: 0,
         },
         forwarding,
     ))

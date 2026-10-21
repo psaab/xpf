@@ -459,6 +459,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
     let rows = vec![IpsecTunnelRowSnapshot {
@@ -520,6 +521,7 @@ fn snapshot_published_empty_tunnel_rows_clear_generation_10485() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let snapshot = ConfigSnapshot {
         generation: 7,
@@ -545,6 +547,7 @@ fn snapshot_stop_inner_clears_published_tunnel_rows_10485() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let snapshot = ConfigSnapshot {
         generation: 7,
@@ -584,6 +587,7 @@ fn snapshot_published_duplicate_if_id_rows_deny_claimants_10485() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     // st0/st1 share if_id 7 (ambiguous claimants); st2 is an unrelated row.
     let rows = vec![
@@ -642,6 +646,7 @@ fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
     let rows = vec![IpsecTunnelRowSnapshot {
@@ -730,6 +735,7 @@ fn snapshot_empty_rows_withdraw_published_generation_deny_through_load_10540() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
 
@@ -832,6 +838,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
     coordinator.forwarding.ifindex_to_zone_id.insert(11, 1);
@@ -964,6 +971,7 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 3,
+            neighbor_generation: 0,
         };
         coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
 
@@ -1009,6 +1017,7 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
             snapshot_installed: true,
             config_generation: config_gen,
             fib_generation: fib_gen,
+            neighbor_generation: 0,
         };
         coordinator.set_ipsec_tunnel_rows_from_snapshot(&second);
         coordinator.publish_runtime_view();
@@ -1084,6 +1093,7 @@ fn snapshot_stop_inner_teardown_denies_previously_valid_advisory_10540() {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 3,
+            neighbor_generation: 0,
         };
         coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
         let rows = vec![IpsecTunnelRowSnapshot {
@@ -2256,6 +2266,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             snapshot_installed: true,
             config_generation: NEW_GEN,
             fib_generation: NEW_FIB_GEN,
+            neighbor_generation: 0,
         },
         "the published view must carry this refresh's generation",
     );
@@ -6104,6 +6115,7 @@ fn reconcile_mandatory_map_open_failure_keeps_prior_generation_published() {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -6191,6 +6203,7 @@ fn reconcile_missing_session_pin_keeps_prior_generation_published() {
         snapshot_installed: true,
         config_generation: 11,
         fib_generation: 5,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -6242,6 +6255,7 @@ fn reconcile_all_mandatory_maps_open_advances_published_generation() {
         snapshot_installed: true,
         config_generation: 1,
         fib_generation: 0,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -6282,6 +6296,7 @@ fn reconcile_build_failure_returns_integrity_err_and_keeps_prior_generation_3789
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -8375,6 +8390,7 @@ fn reconcile_fresh_boot_concrete_zone_policy_passes_preflight_3402() {
         snapshot_installed: true,
         config_generation: 1,
         fib_generation: 0,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -8438,6 +8454,7 @@ fn reconcile_policy_references_undefined_zone_still_fails_closed_3402() {
         snapshot_installed: true,
         config_generation: 5,
         fib_generation: 2,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -8525,6 +8542,7 @@ fn reconcile_snapshot_integrity_error_preserves_prior_generation_and_state() {
         snapshot_installed: true,
         config_generation: 20,
         fib_generation: 7,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -8649,6 +8667,7 @@ fn reconcile_present_conntrack_pin_open_failure_keeps_prior_generation() {
         snapshot_installed: true,
         config_generation: 30,
         fib_generation: 9,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -8717,6 +8736,7 @@ fn reconcile_present_dnat_pin_open_failure_keeps_prior_generation() {
         snapshot_installed: true,
         config_generation: 40,
         fib_generation: 12,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -8781,6 +8801,7 @@ fn reconcile_empty_optional_pins_advance_published_generation() {
         snapshot_installed: true,
         config_generation: 50,
         fib_generation: 0,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -8817,6 +8838,7 @@ fn reconcile_present_optional_pins_open_ok_advance_generation() {
         snapshot_installed: true,
         config_generation: 60,
         fib_generation: 0,
+        neighbor_generation: 0,
     };
     coordinator.validation = prior;
     coordinator.seed_published_validation(prior);
@@ -9223,6 +9245,7 @@ fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
         snapshot_installed: true,
         config_generation: 70,
         fib_generation: 0,
+        neighbor_generation: 0,
     };
     coord.validation = prior;
     coord.seed_published_validation(prior);

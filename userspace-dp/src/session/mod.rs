@@ -2462,9 +2462,25 @@ impl SessionTable {
         config_generation: u64,
         fib_generation: u32,
     ) {
+        self.set_forwarding_revalidation_gen_with_neighbor(
+            config_generation,
+            fib_generation,
+            self.forwarding_revalidation_gen.neighbor_generation,
+        );
+    }
+
+    /// #16109: as `set_forwarding_revalidation_gen`, plus the
+    /// helper-local neighbor-set generation the pass resolved against.
+    pub(crate) fn set_forwarding_revalidation_gen_with_neighbor(
+        &mut self,
+        config_generation: u64,
+        fib_generation: u32,
+        neighbor_generation: u64,
+    ) {
         self.forwarding_revalidation_gen = ForwardingGenerationStamp {
             config_generation,
             fib_generation,
+            neighbor_generation,
             valid: true,
         };
     }

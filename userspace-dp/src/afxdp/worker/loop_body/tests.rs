@@ -805,6 +805,7 @@ mod snapshot_refresh_ordering_tests {
                     snapshot_installed: true,
                     config_generation: generation,
                     fib_generation: generation as u32,
+                    neighbor_generation: 0,
                 },
                 forwarding,
             ))
@@ -962,6 +963,7 @@ mod snapshot_refresh_ordering_tests {
                 snapshot_installed: true,
                 config_generation: 3,
                 fib_generation: 99,
+                neighbor_generation: 0,
             },
             unrotated.clone(),
         )));

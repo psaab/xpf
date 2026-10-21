@@ -1008,8 +1008,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     // #11373: a session's cached route decision is valid only within the
     // current config/FIB pair. Publish the same validation read used by this
     // pass's metadata classifier before processing any descriptors.
-    sessions
-        .set_forwarding_revalidation_gen(validation.config_generation, validation.fib_generation);
+    sessions.set_forwarding_revalidation_gen_with_neighbor(
+        validation.config_generation,
+        validation.fib_generation,
+        validation.neighbor_generation,
+    );
     // #8356: the zone-policy verdict's generation, published from the SAME
     // `ValidationState` in the SAME statement pair, so the two stamps can never
     // be compared against generations from different publishes. They stay

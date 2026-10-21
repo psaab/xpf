@@ -689,6 +689,7 @@ mod tests {
                 snapshot_installed: true,
                 config_generation,
                 fib_generation,
+                neighbor_generation: 0,
             },
             Arc::new(forwarding),
             Arc::new(rows),
@@ -1159,6 +1160,7 @@ mod tests {
                 snapshot_installed: true,
                 config_generation: 1,
                 fib_generation: validation_fib_generation,
+                neighbor_generation: 0,
             },
             Arc::new(forwarding),
             Arc::new(st0_rows()),
@@ -1532,7 +1534,7 @@ mod tests {
         );
         forwarding.policy = port_term_policy(policy_protocol, policy_dst_port);
         let view = RuntimeView::new_with_ipsec_authority(
-            ValidationState { snapshot_installed: true, config_generation: 1, fib_generation: 1 },
+            ValidationState { snapshot_installed: true, config_generation: 1, fib_generation: 1 , neighbor_generation: 0},
             Arc::new(forwarding),
             Arc::new(st0_rows()),
             1,
