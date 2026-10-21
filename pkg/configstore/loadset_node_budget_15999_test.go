@@ -245,3 +245,50 @@ func TestShrinkWorkBoundRefusesFast15999(t *testing.T) {
 		t.Fatalf("work-bound refusal changed candidate: %d -> %d", before, s.candidate.NodeCount())
 	}
 }
+
+// Near-cap witness: candidate at 199,997 units; replacing an existing
+// leaf (final unchanged) must pass even though token charge crosses;
+// a genuine addition pushing over cap still refuses pre-build.
+func TestNearCapReplacementResultAware15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	// Build a candidate just below cap: one big key-dense leaf +
+	// system host-name leaf to replace.
+	keys := make([]string, config.MaxParseNodes-10)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	s.candidate = &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+		}},
+	}}
+	before := s.candidate.NodeCount()
+	if before > config.MaxParseNodes {
+		t.Fatalf("fixture over cap: %d", before)
+	}
+	// Repeated re-sets cross cumulative charge many times over; final
+	// count unchanged, so LoadSet must accept.
+	var b strings.Builder
+	for range 300 {
+		b.WriteString("set system host-name fw1\n")
+	}
+	if _, err := s.LoadSet(b.String()); err != nil {
+		t.Fatalf("near-cap same-leaf replacement refused: %v (before=%d)", err, before)
+	}
+	if got := s.candidate.NodeCount(); got != before {
+		t.Fatalf("replacement changed count: %d -> %d", before, got)
+	}
+	// Genuine over-cap addition refuses and leaves candidate unchanged.
+	if _, err := s.LoadSet("set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24\nset interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24\nset interfaces ge-0/0/2 unit 0 family inet address 10.0.2.1/24\nset interfaces ge-0/0/3 unit 0 family inet address 10.0.3.1/24"); err == nil || !strings.Contains(err.Error(), "#15999") {
+		// Only a refusal counts if it actually crosses; if the small
+		// addition fits under cap, skip this leg.
+		if s.candidate.NodeCount() > before {
+			t.Fatalf("over-cap addition admitted without refusal check, err=%v", err)
+		}
+	}
+}
