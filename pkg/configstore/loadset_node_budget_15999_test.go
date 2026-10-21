@@ -518,25 +518,51 @@ func TestDelayedRepairCadenceAccepted15999(t *testing.T) {
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
+	keys := make([]string, config.MaxParseNodes-9)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	s.candidate = &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+		}},
+	}}
+	base := s.candidate.NodeCount()
 	var b strings.Builder
-	b.WriteString("set system host-name fw1\n")
+	b.WriteString("set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24\n")
 	for range 255 {
 		b.WriteString("set system host-name fw1\n")
 	}
-	b.WriteString("delete system host-name fw1\n")
+	b.WriteString("delete interfaces ge-0/0/0\n")
 	if _, err := s.LoadSet(b.String()); err != nil {
-		t.Fatalf("delayed-repair cadence script refused: %v", err)
+		t.Fatalf("delayed repair (base=%d, intermediate over cap) refused: %v", base, err)
 	}
-	// Growing 200k lines refuse at cumulative-work/line cap:
+	// Churn: insert/delete big leaf repeatedly — gross work refuses.
 	s2 := newTestStore(t)
 	if err := s2.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
-	var g strings.Builder
-	for i := range config.MaxParseNodes + 1 {
-		fmt.Fprintf(&g, "set security address-book global address a%d 10.0.0.1/32\n", i)
+	var ch strings.Builder
+	for range 300 {
+		ch.WriteString("set security address-book global address churn 10.0.0.1/32" + strings.Repeat(" k", 1000) + "\n")
+		ch.WriteString("delete security address-book global address churn\n")
 	}
-	if _, err := s2.LoadSet(g.String()); err == nil || !strings.Contains(err.Error(), "#15999") {
-		t.Fatalf("200k growing lines: err=%v", err)
+	if _, err := s2.LoadSet(ch.String()); err == nil || !strings.Contains(err.Error(), "work budget") {
+		t.Fatalf("churn must refuse at transient work cap: err=%v", err)
+	}
+}
+
+// Quoted-value charge: 200k words inside ONE quoted value = 1 parser
+// token, ~3 units — must be accepted (strings.Fields would refuse).
+func TestQuotedValueChargeAccepted15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	line := `set unknown "a` + strings.Repeat(" a", 200_000) + `"`
+	if _, err := s.LoadSet(line); err != nil {
+		t.Fatalf("quoted 200k-word value (~3 units) refused: %v", err)
 	}
 }

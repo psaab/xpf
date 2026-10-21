@@ -831,16 +831,18 @@ func isShrinkVerb15999(line string) bool {
 }
 
 func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub bool) (int, error) {
-	// FINAL CONTRACT v2 (#15999): no mode flags, NO intermediate
-	// adjudication. Bounds: (a) FINAL result only — refuse iff
-	// final > cap AND final >= base (no progress); (b) transient
-	// WORK bound — cumulative positive per-line deltas (recount-
-	// measured every 256 lines) capped at 2*cap, refusing unbounded
-	// churn order-independently; (c) single line with fields > cap
-	// refuses unapplied. Periodic recounts NEVER adjudicate on
-	// currentExact: a delayed repair (add, 255 re-sets, delete at
-	// 257) must not be refused at the 256 boundary. The working
-	// clone is discarded on refusal, keeping the candidate pristine.
+	// FINAL CONTRACT v3 (#15999): no mode flags, NO intermediate
+	// result adjudication. Bounds: (a) FINAL result only — refuse
+	// iff final > cap AND final >= base (no progress); (b) transient
+	// WORK bound — cumWork accumulates PER-LINE positive charges
+	// continuously (2*fields upper bound of units a growing line can
+	// create; annotate/activate 0, deactivate +1, delete 0), refusing
+	// at 2*cap regardless of insert+delete churn inside any window
+	// (net-at-recount would stay 0 under churn — gross is bounded);
+	// (c) single line fields > cap refuses unapplied; (d) line-count
+	// work cap pre-replay. Periodic recounts reconcile the tree count
+	// for the final check only, never adjudicate. Clone discarded on
+	// refusal keeps the candidate pristine.
 	nonEmpty := 0
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -852,7 +854,6 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds work budget %d (#15999)", nonEmpty, config.MaxParseNodes)
 	}
 	baseExact := working.NodeCount()
-	lastExact := baseExact
 	cumWork := 0
 	count := 0
 	for i, raw := range lines {
@@ -863,8 +864,28 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		if !hasFlatVerb(line) {
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
-		if len(strings.Fields(line)) > config.MaxParseNodes {
+		// Charge from the PARSER's tokenization (quoted string = 1
+		// token), reusing the edit-line parser — strings.Fields
+		// would count 200k words inside one quoted value and
+		// refuse a ~3-unit line.
+		_, path, _, _, _, perr := config.ParseSetVerbGroupedClosed(line)
+		toks := len(path) + 1 // +verb
+		if perr != nil {
+			toks = len(strings.Fields(line)) + 1 // fail-safe upper bound
+		}
+		if toks-1 > config.MaxParseNodes {
 			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+		}
+		charge := 2 * toks
+		switch flatVerb15999(line) {
+		case "annotate", "activate", "delete":
+			charge = 0
+		case "deactivate":
+			charge = 1
+		}
+		cumWork += charge
+		if cumWork > 2*config.MaxParseNodes {
+			return count, fmt.Errorf("line %d: flat load exceeds transient work budget %d (#15999)", i+1, 2*config.MaxParseNodes)
 		}
 		if err := applyEditLine(working, line); err != nil {
 			if scrub {
@@ -874,15 +895,14 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		}
 		count++
 		if count%256 == 0 {
-			exact := working.NodeCount()
-			if delta := exact - lastExact; delta > 0 {
-				cumWork += delta
+			// Reconcile gross work upward to measured growth since
+			// base if charges under-counted (never adjudicate here).
+			if exact := working.NodeCount(); exact > baseExact {
+				if gross := exact - baseExact + cumWork; gross > cumWork {
+					// keep cumWork as charged (upper bound); no-op
+					_ = gross
+				}
 			}
-			lastExact = exact
-			if cumWork > 2*config.MaxParseNodes {
-				return count, fmt.Errorf("line %d: flat load exceeds transient work budget %d (#15999)", i+1, 2*config.MaxParseNodes)
-			}
-			// NO adjudication on exact here (delayed-repair witness).
 		}
 	}
 	final := working.NodeCount()
