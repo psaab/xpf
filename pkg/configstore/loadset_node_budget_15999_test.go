@@ -510,3 +510,33 @@ func TestSetFirstMixedRepairAccepted15999(t *testing.T) {
 		t.Fatalf("grow on over-budget: err=%v", err)
 	}
 }
+
+// Cadence witness: add (over intermediate), 255 re-sets, delete at 257
+// — periodic recount at 256 must NOT adjudicate; final result accepted.
+func TestDelayedRepairCadenceAccepted15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("set system host-name fw1\n")
+	for range 255 {
+		b.WriteString("set system host-name fw1\n")
+	}
+	b.WriteString("delete system host-name fw1\n")
+	if _, err := s.LoadSet(b.String()); err != nil {
+		t.Fatalf("delayed-repair cadence script refused: %v", err)
+	}
+	// Growing 200k lines refuse at cumulative-work/line cap:
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	var g strings.Builder
+	for i := range config.MaxParseNodes + 1 {
+		fmt.Fprintf(&g, "set security address-book global address a%d 10.0.0.1/32\n", i)
+	}
+	if _, err := s2.LoadSet(g.String()); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("200k growing lines: err=%v", err)
+	}
+}

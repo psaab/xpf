@@ -831,13 +831,16 @@ func isShrinkVerb15999(line string) bool {
 }
 
 func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub bool) (int, error) {
-	// FINAL CONTRACT (#15999): no mode flags. Every line gets only the
-	// work-bound pre-check (line count + per-line token bound).
-	// Adjudication is RESULT-based at periodic recounts and at the
-	// end: refuse iff currentExact > cap AND currentExact >= baseExact
-	// (no progress). Guards re-arm naturally as the tree shrinks —
-	// order-independent, so set-first mixed repair ending below base
-	// passes and grow-on-overbudget with no progress refuses.
+	// FINAL CONTRACT v2 (#15999): no mode flags, NO intermediate
+	// adjudication. Bounds: (a) FINAL result only — refuse iff
+	// final > cap AND final >= base (no progress); (b) transient
+	// WORK bound — cumulative positive per-line deltas (recount-
+	// measured every 256 lines) capped at 2*cap, refusing unbounded
+	// churn order-independently; (c) single line with fields > cap
+	// refuses unapplied. Periodic recounts NEVER adjudicate on
+	// currentExact: a delayed repair (add, 255 re-sets, delete at
+	// 257) must not be refused at the 256 boundary. The working
+	// clone is discarded on refusal, keeping the candidate pristine.
 	nonEmpty := 0
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -849,7 +852,8 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds work budget %d (#15999)", nonEmpty, config.MaxParseNodes)
 	}
 	baseExact := working.NodeCount()
-	charged := baseExact // upper-bound estimate between recounts
+	lastExact := baseExact
+	cumWork := 0
 	count := 0
 	for i, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -859,28 +863,9 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		if !hasFlatVerb(line) {
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
-		// Work-bound per line: tokCharge must UPPER-BOUND the parser
-		// units the line can create. A line's tokens split into at
-		// most len(tokens) nodes, each costing 1+len(Keys); the
-		// widest single node carries all tokens (1+len), intermediate
-		// nodes partition them, so created units <= 2*len(tokens).
-		// Charge 2*fields as the safe bound (split-edit witness:
-		// naive fields+1 under-charged 1200 vs 1502 built).
-		fields := len(strings.Fields(line))
-		verb15999 := flatVerb15999(line)
-		charge := 2 * fields
-		switch verb15999 {
-		case "annotate", "activate":
-			charge = 0 // zero new units
-		case "deactivate":
-			charge = 1 // can add an inactive-flag unit worst case
-		case "delete":
-			charge = 0 // negative
-		}
-		if fields > config.MaxParseNodes {
+		if len(strings.Fields(line)) > config.MaxParseNodes {
 			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 		}
-		charged += charge
 		if err := applyEditLine(working, line); err != nil {
 			if scrub {
 				return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
@@ -888,21 +873,16 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			return count, err
 		}
 		count++
-		// Recount cadence: every 256 lines, plus at crossings where
-		// the estimate is within the line's subtree margin of cap
-		// (charged is an upper bound, so crossing it triggers the
-		// exact adjudication; below it no recount is needed).
-		// Adjudication ONLY at 256-line cadence and at the end:
-		// a crossing estimate triggers no refusal (a later shrink
-		// in the same script can still bring the result below
-		// base — order-independence). charged tracks the estimate
-		// for telemetry/recount timing only.
 		if count%256 == 0 {
 			exact := working.NodeCount()
-			charged = exact
-			if exact > config.MaxParseNodes && exact >= baseExact {
-				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+			if delta := exact - lastExact; delta > 0 {
+				cumWork += delta
 			}
+			lastExact = exact
+			if cumWork > 2*config.MaxParseNodes {
+				return count, fmt.Errorf("line %d: flat load exceeds transient work budget %d (#15999)", i+1, 2*config.MaxParseNodes)
+			}
+			// NO adjudication on exact here (delayed-repair witness).
 		}
 	}
 	final := working.NodeCount()
