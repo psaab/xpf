@@ -859,6 +859,11 @@ impl FlowCacheEntry {
     }
 }
 
+/// #16220: every distinct reason a flow-cache entry is dropped. The
+/// aggregate `evictions` counter alone could not attribute the
+/// 0-hit/6.9M-eviction regression on PR #16217; each arm is counted
+/// separately and exported per binding.
+///
 /// Per-worker flow cache. 4-way set-associative with LRU eviction
 /// within each set (#918). Layout: `FLOW_CACHE_SETS = 1024` sets,
 /// each holding `FLOW_CACHE_WAYS = 4` ways. The `entries` vec
@@ -866,6 +871,55 @@ impl FlowCacheEntry {
 /// `[s * WAYS, s * WAYS + WAYS)`. Per set, `lru[s]` is a
 /// permutation of `[0, 1, 2, 3]` where index 0 is MRU and
 /// index 3 is LRU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FlowCacheEvictionArm {
+    LookupGeneration = 0,
+    LookupRgEpoch = 1,
+    LookupLease = 2,
+    LookupDenyExpiry = 3,
+    LookupScheduler = 4,
+    SchedulerPhaseFlush = 5,
+    Collision = 6,
+    PostHitNeighborMac = 7,
+    PostHitDecisionInvalid = 8,
+    PostHitDenySuperseded = 9,
+    PostHitSessionDead = 10,
+}
+
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 11;
+
+impl FlowCacheEvictionArm {
+    pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
+        Self::LookupGeneration,
+        Self::LookupRgEpoch,
+        Self::LookupLease,
+        Self::LookupDenyExpiry,
+        Self::LookupScheduler,
+        Self::SchedulerPhaseFlush,
+        Self::Collision,
+        Self::PostHitNeighborMac,
+        Self::PostHitDecisionInvalid,
+        Self::PostHitDenySuperseded,
+        Self::PostHitSessionDead,
+    ];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::LookupGeneration => "lookup_generation",
+            Self::LookupRgEpoch => "lookup_rg_epoch",
+            Self::LookupLease => "lookup_lease",
+            Self::LookupDenyExpiry => "lookup_deny_expiry",
+            Self::LookupScheduler => "lookup_scheduler",
+            Self::SchedulerPhaseFlush => "scheduler_phase_flush",
+            Self::Collision => "collision",
+            Self::PostHitNeighborMac => "post_hit_neighbor_mac",
+            Self::PostHitDecisionInvalid => "post_hit_decision_invalid",
+            Self::PostHitDenySuperseded => "post_hit_deny_superseded",
+            Self::PostHitSessionDead => "post_hit_session_dead",
+        }
+    }
+}
+
 pub(super) struct FlowCache {
     /// Physical ifindex of the binding that owns this per-binding cache.
     ///
@@ -882,6 +936,9 @@ pub(super) struct FlowCache {
     pub(super) hits: u64,
     pub(super) misses: u64,
     pub(super) evictions: u64,
+    /// #16220: per-arm breakdown of `evictions` so a retention failure is
+    /// attributable without perf. Index by `FlowCacheEvictionArm as usize`.
+    pub(super) evictions_by_arm: [u64; FLOW_CACHE_EVICTION_ARM_COUNT],
     /// Collision evictions = inserts that displaced a different-key entry
     /// (i.e. the set was full and we kicked out the LRU way). Tracked
     /// separately from `evictions` (which also counts stale-on-lookup
@@ -913,10 +970,22 @@ impl FlowCache {
             hits: 0,
             misses: 0,
             evictions: 0,
+            evictions_by_arm: [0; FLOW_CACHE_EVICTION_ARM_COUNT],
             collision_evictions: 0,
             current_epoch: 1,
             scheduler_expired: false,
         }
+    }
+
+    #[inline]
+    pub(super) fn note_eviction(&mut self, arm: FlowCacheEvictionArm) {
+        self.evictions += 1;
+        self.evictions_by_arm[arm as usize] += 1;
+    }
+
+    #[inline]
+    pub(super) fn evictions_for(&self, arm: FlowCacheEvictionArm) -> u64 {
+        self.evictions_by_arm[arm as usize]
     }
 
     /// #1219: advance the per-binding active-flow epoch counter.
@@ -1246,6 +1315,7 @@ impl FlowCache {
                 policy.has_scheduled_permit() || policy.has_scheduled_deny_or_reject()
             };
             if phase_can_change_verdict {
+                let mut evicted_in_flush = 0u64;
                 for entry in &mut self.entries {
                     let invalid = if scheduler_expired {
                         // Expiry can invalidate an old-phase forward verdict
@@ -1261,9 +1331,12 @@ impl FlowCache {
                         })
                     };
                     if invalid && entry.take().is_some() {
-                        self.evictions += 1;
+                        evicted_in_flush += 1;
                     }
                 }
+                self.evictions += evicted_in_flush;
+                self.evictions_by_arm[FlowCacheEvictionArm::SchedulerPhaseFlush as usize] +=
+                    evicted_in_flush;
             }
             self.scheduler_expired = scheduler_expired;
         }
@@ -1322,7 +1395,7 @@ impl FlowCache {
                     || entry.stamp.fib_generation != lookup.fib_generation
                 {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupGeneration);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1335,7 +1408,7 @@ impl FlowCache {
                 let current_epoch = rg_epochs[rg_epoch_index(owner)].load(Ordering::Relaxed);
                 if current_epoch != entry.stamp.owner_rg_epoch {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupRgEpoch);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1362,14 +1435,14 @@ impl FlowCache {
                     && (current_lease == 0 || now_secs > current_lease)
                 {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupLease);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
                 }
                 if entry.deny_expires_at_secs != 0 && now_secs >= entry.deny_expires_at_secs {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupDenyExpiry);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1380,7 +1453,7 @@ impl FlowCache {
                     })
                 {
                     self.entries[entry_idx] = None;
-                    self.evictions += 1;
+                    self.note_eviction(FlowCacheEvictionArm::LookupScheduler);
                     self.demote_lru(set, way as u8);
                     self.misses += 1;
                     return None;
@@ -1467,7 +1540,7 @@ impl FlowCache {
         let lru_way = self.lru[set][FLOW_CACHE_WAYS - 1];
         let entry_idx = base + (lru_way as usize);
         self.entries[entry_idx] = Some(entry);
-        self.evictions += 1;
+        self.note_eviction(FlowCacheEvictionArm::Collision);
         self.collision_evictions += 1;
         self.promote_lru(set, lru_way);
     }
@@ -1512,9 +1585,14 @@ impl FlowCache {
     /// steady-state hit path, so the fast path is untouched.
     #[inline]
     pub(super) fn reclassify_hit_as_miss(&mut self) {
+        self.reclassify_hit_as_miss_arm(FlowCacheEvictionArm::PostHitDecisionInvalid);
+    }
+
+    #[inline]
+    pub(super) fn reclassify_hit_as_miss_arm(&mut self, arm: FlowCacheEvictionArm) {
         self.hits = self.hits.saturating_sub(1);
         self.misses += 1;
-        self.evictions += 1;
+        self.note_eviction(arm);
     }
 
     pub(super) fn invalidate_slot(

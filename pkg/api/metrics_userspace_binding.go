@@ -142,3 +142,38 @@ func (c *xpfCollector) emitBindingUMEMFrames(ch chan<- prometheus.Metric, status
 			prometheus.GaugeValue, float64(b.DebugInFlightRecycles), labels...)
 	}
 }
+
+// flowCacheEvictionArmLabels maps the Rust FlowCacheEvictionArm ordinal
+// (protocol BindingStatus.FlowCacheEvictionsByArm index) to its label.
+var flowCacheEvictionArmLabels = []string{
+	"lookup_generation",
+	"lookup_rg_epoch",
+	"lookup_lease",
+	"lookup_deny_expiry",
+	"lookup_scheduler",
+	"scheduler_phase_flush",
+	"collision",
+	"post_hit_neighbor_mac",
+	"post_hit_decision_invalid",
+	"post_hit_deny_superseded",
+	"post_hit_session_dead",
+}
+
+// #16220: emit per-arm flow-cache evictions so a cache-retention failure
+// is attributable from Prometheus without perf.
+func (c *xpfCollector) emitBindingFlowCacheEvictionsByArm(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, b := range status.Bindings {
+		slot := strconv.FormatUint(uint64(b.Slot), 10)
+		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
+		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
+		for i, arm := range flowCacheEvictionArmLabels {
+			var n uint64
+			if i < len(b.FlowCacheEvictionsByArm) {
+				n = b.FlowCacheEvictionsByArm[i]
+			}
+			c.emitConstMetric(ch, c.bindingFlowCacheEvictionsArm,
+				prometheus.CounterValue, float64(n),
+				slot, queueID, workerID, b.Interface, arm)
+		}
+	}
+}

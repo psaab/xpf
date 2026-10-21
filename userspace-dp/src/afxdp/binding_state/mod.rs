@@ -181,6 +181,10 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) flow_cache_hits: AtomicU64,
     pub(super) flow_cache_misses: AtomicU64,
     pub(super) flow_cache_evictions: AtomicU64,
+    /// #16220: per-arm breakdown of `flow_cache_evictions`, indexed by
+    /// `FlowCacheEvictionArm as usize`. Folded from the worker-owned
+    /// cache at the debug tick, like the aggregate above.
+    pub(super) flow_cache_evictions_by_arm: [AtomicU64; super::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
     /// #918: subset of `flow_cache_evictions` driven by full-set LRU
     /// displacement (i.e. an insert kicked out a different-key entry
     /// from the LRU way). Surfaces hot-set thrash distinctly from
@@ -1083,9 +1087,11 @@ const _: [(); 2736] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_adm
 const _: [(); 2865] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 // #16215 adds one unconditional u64 snat_revoked_sessions counter before
 // both sentinels; offsets advance by 8 bytes, size unchanged.
-const _: [(); 2688] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2552] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2681] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #16220 adds eleven unconditional u64 per-arm flow-cache eviction
+// counters before both sentinels; offsets advance by 88 bytes, size unchanged.
+const _: [(); 2816] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2640] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2769] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1140,6 +1146,7 @@ impl BindingLiveState {
             flow_cache_hits: AtomicU64::new(0),
             flow_cache_misses: AtomicU64::new(0),
             flow_cache_evictions: AtomicU64::new(0),
+            flow_cache_evictions_by_arm: std::array::from_fn(|_| AtomicU64::new(0)),
             flow_cache_collision_evictions: AtomicU64::new(0),
             active_flow_count: AtomicU32::new(0),
             flow_cache_capacity: AtomicU32::new(super::flow_cache::flow_cache_capacity() as u32),

@@ -107,6 +107,7 @@
     "flow_cache_capacity": 0,
     "flow_cache_collision_evictions": 0,
     "flow_cache_evictions": 0,
+    "flow_cache_evictions_by_arm": [],
     "flow_cache_hits": 0,
     "flow_cache_misses": 0,
     "flowless_forward_bytes": 0,
@@ -2801,6 +2802,7 @@
       "write_errors": 0
     },
     "snapshot_policy_mismatch_total": 0,
+    "snat_revoked_sessions_total": 0,
     "source_nat_match_consulted_total": 0,
     "source_nat_match_matched_total": 0,
     "source_nat_match_no_match_total": 0,
@@ -3120,6 +3122,7 @@
       "write_errors": 0
     },
     "snapshot_policy_mismatch_total": 0,
+    "snat_revoked_sessions_total": 0,
     "source_nat_match_consulted_total": 0,
     "source_nat_match_matched_total": 0,
     "source_nat_match_no_match_total": 0,
@@ -3988,6 +3991,7 @@
       "write_errors": 0
     },
     "snapshot_policy_mismatch_total": 0,
+    "snat_revoked_sessions_total": 0,
     "source_nat_match_consulted_total": 0,
     "source_nat_match_matched_total": 0,
     "source_nat_match_no_match_total": 0,
