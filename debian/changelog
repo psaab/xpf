@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Refuse a malformed-line feed candidate that drops a previously-enforced
+    prefix at any feed size: the drastic-shrink guard's default floors
+    (old >= 32, drop >= 16, retain >= 50%) left small deny feeds wholly
+    unguarded, so a 10-entry feed losing 3 entries to origin corruption
+    installed the 7-entry subset and silently stopped enforcing them.
+    The degraded candidate now retains last-good and alarms through the
+    existing shrink-refusal state/metrics until its exact acknowledgement;
+    degraded growth that drops nothing installed, clean below-floor
+    shrinks, first fetches, and remembered-baseline bootstraps are
+    unchanged (#16085).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Render Kea DHCP configs 0640 root:_kea instead of 0644 in a 0755
     directory: the rendered kea-dhcp{4,6}.conf carries the full
     static-reservation inventory (MAC, IP, hostname), previously

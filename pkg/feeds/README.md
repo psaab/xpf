@@ -104,6 +104,25 @@ Tuning guidance:
 - `shrink-guard-min-drop` filters small cumulative count decreases. It does not
   exempt a content swap below the retained-overlap floor.
 
+Malformed-line loss is guarded separately, at any size (#16085): a degraded
+candidate (its body skipped malformed lines, `invalidLines > 0`) that drops
+a previously-enforced installed prefix is refused even when every floor
+above is inert — e.g. a 10-entry deny feed losing 3 entries to origin
+corruption (retained 70%, drop 3) previously installed the 7-entry subset
+and silently stopped enforcing the corrupted prefixes. Malformed lines are
+not evidence of an intended withdrawal, so there is no minimum-old-count,
+minimum-drop, or retained-percent exemption for them. The refusal binds
+the installed set as its baseline (`guard_reason` "malformed lines dropped
+previously-enforced prefixes") and uses the same exact-candidate
+acknowledgement below; the `xpf_feed_shrink_refused` /
+`xpf_feed_shrink_refusals_total` metrics cover it. A degraded candidate
+that drops no installed prefix (pure growth beside a garbage line) installs
+normally, still marked `DEGRADED`; a clean below-floor shrink is a
+provider-authored reduction and also installs unchanged. First fetches and
+remembered-baseline bootstraps have no installed set to drop, so they keep
+the behaviour above (degraded first bodies bootstrap their valid subset,
+marked degraded).
+
 An operator can review the refused candidate ID, candidate SHA-256, and
 last-good baseline SHA-256 in `show security dynamic-address`, alongside the
 installed snapshot hash. A pending acknowledgement also displays its bound
