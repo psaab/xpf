@@ -52,8 +52,10 @@ xpf (0.0.0) unstable; urgency=medium
     row's filter and the losing filter never evaluated. The Rust
     filter compiler now rejects such snapshots (prior good state is
     kept), identical or single-claimant filters stay valid, and a Go
-    commit advisory warns for the WireGuard shape. GRE input keeps
-    its #10816 first-sorting-wins model. No hot-path change (#16059).
+    commit advisory warns for the WireGuard shape. GRE input on gr-*
+    tunnel rows is exempt — it keeps its #10816 first-sorting-wins
+    decap model; GRE output refuses like WG. No hot-path change
+    (#16059).
 
 xpf (0.0.0) unstable; urgency=medium
 
