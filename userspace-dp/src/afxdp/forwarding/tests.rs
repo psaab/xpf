@@ -146,6 +146,85 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
     ));
 }
 
+/// #16220: production shape from the loss cluster — egress ifindex 14
+/// (ge-0-0-2.80, RG1) whose ForwardingState egress row is missing or
+/// carries redundancy_group 0 while HA rg1 is active. A ForwardCandidate
+/// cached on that egress must NOT be invalidated by
+/// `cached_flow_decision_valid`: with owner RG 0 on a clustered node,
+/// `enforce_ha_resolution_snapshot` rewrites it to HAInactive, so every
+/// cached hit self-evicts (the live 0-hit / decision_invalid=7.1M shape).
+/// Both fixture shapes (missing row, rg=0 row) must reproduce.
+#[test]
+fn cached_forward_candidate_with_unowned_egress_is_invalid_16220() {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+
+    for (label, mut state) in [
+        (
+            "missing egress row",
+            build_forwarding_state(&nat_snapshot()),
+        ),
+        ("rg0 egress row", build_forwarding_state(&nat_snapshot())),
+    ] {
+        if label == "rg0 egress row" {
+            // Production: the .80 unit exists but is not RETH-owned.
+            state.egress.insert(
+                14,
+                EgressInterface {
+                    bind_ifindex: 14,
+                    redundancy_group: 0,
+                    ..state.egress.get(&12).cloned().expect("fixture egress 12")
+                },
+            );
+        }
+        let resolution = ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 14,
+            tx_ifindex: 14,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(target),
+            neighbor_mac: Some([0x10, 0x66, 0x6a, 0x8b, 0x91, 0xa4]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
+            tx_vlan_id: 80,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        };
+        assert_eq!(
+            cached_flow_decision_invalid_reason(
+                &state,
+                &ha_state,
+                &dynamic_neighbors,
+                now_secs,
+                1,
+                false,
+                target,
+                None,
+                resolution,
+            ),
+            Some(CachedDecisionInvalid::EnforceChanged),
+            "{label}: an unowned ForwardCandidate egress on a clustered node must read EnforceChanged (HAInactive rewrite)"
+        );
+        assert!(
+            !cached_flow_decision_valid(
+                &state,
+                &ha_state,
+                &dynamic_neighbors,
+                now_secs,
+                1,
+                false,
+                target,
+                None,
+                resolution,
+            ),
+            "{label}: cached_flow_decision_valid must reject the unowned-egress candidate"
+        );
+    }
+}
+
 /// #13980: a tunnel resolution is HA-gated on BOTH the tunnel endpoint's RG
 /// (its source RETH — the GRE endpoint here sits on reth0.80/RG1) and the
 /// OUTER egress RETH that transmits the encapsulated frame. Moving the outer
@@ -306,15 +385,22 @@ fn cached_flow_decision_invalidates_fabric_redirect_on_fabric_ingress_when_local
 }
 
 #[test]
-fn cached_flow_decision_invalidates_fabric_redirect_on_non_fabric_ingress_when_local_owner_active()
+fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_owner_active_16220()
 {
+    // #16220: was `..._invalidates_..._when_local_owner_active`. The
+    // owner-active arm fired on EVERY direct-ingress hit of a redirect
+    // cached under a locally-active owner, so the cache could never
+    // serve it (live: owner_active_redirect = 18,683/19,953 evictions,
+    // 0 hits). A direct hit's cached redirect is the serving decision;
+    // only fabric-ingress hits (packet already crossed to this node)
+    // still re-resolve locally. See the companion reason-level test.
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
 
-    assert!(!cached_flow_decision_valid(
+    assert!(cached_flow_decision_valid(
         &state,
         &ha_state,
         &dynamic_neighbors,
@@ -367,6 +453,48 @@ fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_o
         None,
         resolution
     ));
+}
+
+/// #16220: reason-level pin for the owner-active arm split: direct
+/// ingress -> None (valid), fabric ingress -> OwnerActiveRedirect.
+#[test]
+fn fabric_redirect_owner_active_reason_splits_on_ingress_16220() {
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            false,
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "direct-ingress redirect under an active owner must stay valid"
+    );
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            true,
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::OwnerActiveRedirect),
+        "fabric-ingress redirect whose owner is now local must re-resolve"
+    );
 }
 
 #[test]
@@ -460,7 +588,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
     }
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -474,7 +602,7 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "::/0".to_string(),
@@ -760,14 +888,21 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
         "the demotion must preserve cluster-terminal provenance (#16216)"
     );
     assert!(discard_route_is_cluster_terminal_peer_owned(
-        &state, &inactive_map, now_secs, &demoted
+        &state,
+        &inactive_map,
+        now_secs,
+        &demoted
     ));
     assert!(!discard_route_is_cluster_terminal_peer_owned(
-        &state, &active_map, now_secs, &demoted
+        &state,
+        &active_map,
+        now_secs,
+        &demoted
     ));
 
     // Rescued at conversion time (peer-owned now): fabric redirect.
-    let rescued = redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, demoted, 24, None);
+    let rescued =
+        redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, demoted, 24, None);
     assert_eq!(
         rescued.disposition,
         ForwardingDisposition::FabricRedirect,
@@ -776,8 +911,14 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
     );
     // Fabric ingress never re-redirects.
     let fabric_ifindex = state.fabrics[0].parent_ifindex;
-    let not_rescued =
-        redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, demoted, fabric_ifindex, None);
+    let not_rescued = redirect_via_fabric_if_needed_at(
+        &state,
+        &inactive_map,
+        now_secs,
+        demoted,
+        fabric_ifindex,
+        None,
+    );
     assert_eq!(not_rescued.disposition, ForwardingDisposition::DiscardRoute);
 
     // Operator discard (no provenance stamp) never rescues.
@@ -806,7 +947,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     }
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -820,7 +961,7 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     });
     snapshot.routes.push(RouteSnapshot {
         reject: true,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "::/0".to_string(),
@@ -881,7 +1022,9 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     // either local map proves local-delivery state was preserved.
     assert!(
         state.local_v4.contains(&Ipv4Addr::new(172, 16, 80, 8))
-            || state.interface_nat_v4.contains_key(&Ipv4Addr::new(172, 16, 80, 8))
+            || state
+                .interface_nat_v4
+                .contains_key(&Ipv4Addr::new(172, 16, 80, 8))
     );
     assert!(state.connected_v4_by_ifindex.contains_key(&12));
 
@@ -4117,7 +4260,9 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
     // #15950 contract: LocalMiss itself is published for cross-worker
     // FragAssoc liveness; transient seeds are not (see seed test below).
     let shared = shared_sessions.lock().expect("shared lock");
-    let published = shared.get(&key).expect("LocalMiss row must be in shared_sessions");
+    let published = shared
+        .get(&key)
+        .expect("LocalMiss row must be in shared_sessions");
     assert_eq!(published.origin, SessionOrigin::LocalMiss);
     assert_eq!(published.session_id, sessions.session_id_for(&key));
     drop(shared);
@@ -4235,7 +4380,9 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         false,
     ));
     let shared = shared_sessions.lock().expect("shared lock");
-    let published = shared.get(&key).expect("LocalMiss replacement must publish its row");
+    let published = shared
+        .get(&key)
+        .expect("LocalMiss replacement must publish its row");
     assert_eq!(published.origin, SessionOrigin::LocalMiss);
     drop(shared);
     assert!(
@@ -5357,7 +5504,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -5371,7 +5518,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -6935,7 +7082,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -6949,7 +7096,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:3::/64".to_string(),
@@ -7086,7 +7233,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
     // One sfmix.inet.0 ECMP prefix with a mixed direct + tunnel next-hop set.
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "sfmix.inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -7305,7 +7452,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
     });
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
@@ -7400,7 +7547,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     // (Disjoint from the GRE outer prefix 2602:ffd3:0:2::/64.)
     snapshot.routes.push(crate::RouteSnapshot {
         reject: false,
-            cluster_terminal: false,
+        cluster_terminal: false,
         table: "sfmix.inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:dead::/48".to_string(),
@@ -7892,7 +8039,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
         routes: vec![
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -7909,7 +8056,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "198.51.100.0/24".to_string(),
@@ -7923,7 +8070,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
             },
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:dead::/48".to_string(),
@@ -8222,7 +8369,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
             // WORSE route first (higher preference = less preferred).
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -8237,7 +8384,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
                 reject: false,
-            cluster_terminal: false,
+                cluster_terminal: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
