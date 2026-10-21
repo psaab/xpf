@@ -1462,6 +1462,15 @@ type FirewallConfig struct {
 	FiltersInet6       map[string]*FirewallFilter          // family inet6 filters
 	Policers           map[string]*PolicerConfig           // named policer definitions
 	ThreeColorPolicers map[string]*ThreeColorPolicerConfig // named three-color policers
+	// CollidingNames records firewall-filter names whose definitions collide
+	// on the tolerant path (#15997): same name under two families folding into
+	// one pool, the same name twice under one family, or family any + inet6.
+	// Those names are omitted from both pools so no arbitrary last-write-wins
+	// winner (e.g. discard replaced by accept) stays enforceable; a reference
+	// to the name then dangles and the snapshot-integrity backstop refuses it
+	// fail-closed. Duplicates with identical family-resolved effective compiled form are not recorded. Compiler
+	// metadata only, never serialized.
+	CollidingNames map[string]struct{} `json:"-"`
 }
 
 // PolicerConfig defines a single-rate two-color policer (token bucket).

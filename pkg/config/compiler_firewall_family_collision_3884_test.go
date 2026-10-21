@@ -104,11 +104,10 @@ firewall {
 	}
 }
 
-// Lenient path (load / peer-sync): the collision must downgrade to a warning so
-// an already-persisted or peer-synced config an older binary silently accepted
-// still BOOTS. The last-write-wins map is preserved — and it is precisely the
-// fail-open: the `family inet` discard has been silently replaced by the
-// `family any` accept.
+// Lenient path (load / peer-sync): the collision downgrades to a warning so
+// an already-persisted or peer-synced config still BOOTS, but #15997
+// quarantines the colliding name out of BOTH pools — neither the discard
+// nor the accept winner stays enforceable.
 func TestFirewallFilterCrossFamilyNameCollisionLenientWarns(t *testing.T) {
 	tree := parseHier(t, `
 firewall {
@@ -147,15 +146,284 @@ firewall {
 	if !found {
 		t.Fatalf("expected a #3884 cross-family collision warning on the lenient path, got: %v", cfg.Warnings)
 	}
-	// The last-write-wins behavior is deliberately unchanged on the lenient path:
-	// the filter still lands in fw.FiltersInet under its single shared name, and
-	// it is the accept that survived — the exact fail-open the strict gate blocks.
-	f, ok := cfg.Firewall.FiltersInet["blockX"]
-	if !ok {
-		t.Fatal("lenient path: expected blockX to remain in FiltersInet (last-write-wins preserved)")
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; !ok {
+		t.Fatalf("colliding name not quarantined: %v", cfg.Firewall.CollidingNames)
 	}
-	if len(f.Terms) != 1 || f.Terms[0].Action != "accept" {
-		t.Fatalf("lenient path: expected the fail-open accept to survive last-write-wins, got %+v", f.Terms)
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; ok {
+		t.Fatal("lenient path: colliding blockX must be omitted from FiltersInet (#15997 quarantine)")
+	}
+	if _, ok := cfg.Firewall.FiltersInet6["blockX"]; ok {
+		t.Fatal("lenient path: colliding blockX must be omitted from FiltersInet6 (#15997 quarantine)")
+	}
+}
+
+// #15997: identical-body duplicates are unaffected — one unambiguous meaning,
+// so the name stays enforceable on the tolerant path.
+func TestFirewallFilterIdenticalDuplicateUnaffected15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+    family any {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; ok {
+		t.Fatalf("identical-body duplicate must not be quarantined: %v", cfg.Firewall.CollidingNames)
+	}
+	f, ok := cfg.Firewall.FiltersInet["blockX"]
+	if !ok || len(f.Terms) != 1 || f.Terms[0].Action != "discard" {
+		t.Fatalf("identical-body duplicate must stay enforceable as discard, got %+v ok=%v", f, ok)
+	}
+}
+
+// #15997 fold (#16091): text-identical inet6 vs any bodies are NOT effectively
+// identical — icmp-type echo-request resolves 128 under inet6 vs 8 under any.
+// The dedupe key is the family-resolved compiled form, so this name stays
+// quarantined and FiltersInet6 must not silently carry type 8.
+func TestFirewallFilterInet6AnyEchoRequestNotIdentical15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet6 {
+        filter F {
+            term t {
+                from {
+                    icmp-type echo-request;
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+    family any {
+        filter F {
+            term t {
+                from {
+                    icmp-type echo-request;
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["F"]; !ok {
+		t.Fatalf("inet6/any echo-request counterexample must stay quarantined (effective forms differ 128 vs 8): %v", cfg.Firewall.CollidingNames)
+	}
+	if f, ok := cfg.Firewall.FiltersInet6["F"]; ok {
+		t.Fatalf("quarantined F must be omitted from FiltersInet6, got %+v (icmp types %v)", f, f.Terms[0].ICMPTypes)
+	}
+	if f, ok := cfg.Firewall.FiltersInet["F"]; ok {
+		t.Fatalf("quarantined F must be omitted from FiltersInet, got %+v", f)
+	}
+	// Warning must not falsely claim quarantine for a pruned identical case;
+	// here quarantine is real, so the suffix must be present.
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "\"F\"") && strings.Contains(w, "quarantined") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected quarantine warning for F, got %v", cfg.Warnings)
+	}
+}
+
+// Control: same-family identical effective duplicates stay enforceable and
+// their warning must not claim they were quarantined/omitted.
+func TestFirewallFilterIdenticalWarningTruthful15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+    family any {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; !ok {
+		t.Fatal("identical effective duplicate must stay in FiltersInet")
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "blockX") && strings.Contains(w, "quarantined from both filter pools") {
+			t.Fatalf("identical-body warning falsely claims quarantine: %q", w)
+		}
+	}
+}
+
+// #15997 fold 2: definitions differing ONLY in unexported term semantics must
+// stay quarantined — JSON dropped unknownChildren / routing-instance
+// conflict. Cell A: one body carries an unknown term child (#10294), the
+// other is a clean accept with identical exported fields.
+func TestFirewallFilterUnknownChildrenDifferNotIdentical15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    accept;
+                }
+            }
+        }
+        filter blockX {
+            term t1 {
+                bogus-child;
+                then {
+                    accept;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; !ok {
+		t.Fatalf("unknownChildren-differing duplicate must stay quarantined: %v", cfg.Firewall.CollidingNames)
+	}
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; ok {
+		t.Fatal("quarantined blockX must be omitted from FiltersInet")
+	}
+}
+
+// Cell B: one body steers to two conflicting routing-instance targets
+// (#11814, routingInstanceTargetConflict set), the other to one target,
+// with identical exported RoutingInstance/Action.
+func TestFirewallFilterRIConflictDifferNotIdentical15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    routing-instance RI-A;
+                }
+            }
+        }
+        filter blockX {
+            term t1 {
+                then {
+                    routing-instance RI-A;
+                    routing-instance RI-B;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; !ok {
+		t.Fatalf("RI-conflict-differing duplicate must stay quarantined: %v", cfg.Firewall.CollidingNames)
+	}
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; ok {
+		t.Fatal("quarantined blockX must be omitted from FiltersInet")
+	}
+}
+
+// #15997 fold 3: identical FlexMatch duplicates must be PRUNED — the nested
+// *FlexMatchConfig pointers live at different addresses, so an address-
+// printing comparator falsely quarantined them. Key must be by value.
+func TestFirewallFilterIdenticalFlexMatchPruned15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                from {
+                    flexible-match-range {
+                        range r1 {
+                            match-start layer-3;
+                            byte-offset 12;
+                            bit-length 16;
+                            match-value 0x1234;
+                            match-mask 0xFFFF;
+                        }
+                    }
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+        filter blockX {
+            term t1 {
+                from {
+                    flexible-match-range {
+                        range r1 {
+                            match-start layer-3;
+                            byte-offset 12;
+                            bit-length 16;
+                            match-value 0x1234;
+                            match-mask 0xFFFF;
+                        }
+                    }
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; ok {
+		t.Fatalf("identical FlexMatch duplicate falsely quarantined (pointer-address key?): %v", cfg.Firewall.CollidingNames)
+	}
+	f, ok := cfg.Firewall.FiltersInet["blockX"]
+	if !ok || len(f.Terms) != 1 || f.Terms[0].FlexMatch == nil {
+		t.Fatalf("identical FlexMatch duplicate must stay enforceable, got %+v ok=%v", f, ok)
 	}
 }
 

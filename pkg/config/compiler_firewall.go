@@ -800,6 +800,14 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					filter.Terms = append(filter.Terms, term)
 				}
 
+				// #15997: a name recorded as colliding on the tolerant path
+				// is quarantined out of BOTH pools — neither the discard nor
+				// the accept winner stays enforceable. A referencing hook
+				// then dangles and the #3296 snapshot-integrity backstop
+				// refuses it fail-closed.
+				if _, colliding := fw.CollidingNames[filter.Name]; colliding {
+					continue
+				}
 				for _, dest := range dests {
 					dest[filter.Name] = filter
 				}
@@ -847,17 +855,21 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 //
 // Strict path (commit / commit-check, lenient=false): the first collision is a
 // hard compile error naming the offending filter and its families. Lenient path
-// (load / peer-sync, lenient=true): every collision is returned as a warning and
-// compilation continues with the existing last-write-wins behavior, so an
-// already-persisted or peer-synced config that an older binary silently accepted
-// still BOOTS (#1960 / #3261 fail-closed-on-load doctrine).
+// (load / peer-sync, lenient=true): every collision is returned as a warning
+// plus the colliding-name set; compileExpanded stamps it on
+// Firewall.CollidingNames and compileFirewall omits those names from both
+// pools (#15997), so no last-write-wins winner stays enforceable. Duplicates
+// with identical family-resolved effective compiled form are excluded by
+// the caller-side prune. Compilation still
+// succeeds so an already-persisted config BOOTS (#1960 / #3261).
 //
 // The traversal mirrors compileFirewall's family/filter walk exactly (BOTH AST
 // shapes: hierarchical `family inet { filter ... }` and the set-command
 // `family { inet { filter ... } }`), and aggregates across every top-level
 // `firewall {}` block because compileFirewall compiles each into the same
 // fw.FiltersInet map — a collision split across two blocks is just as real.
-func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]string, error) {
+func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]string, map[string]struct{}, error) {
+	colliding := map[string]struct{}{}
 	// filterFamilies[name] = the ordered set of DISTINCT non-inet6 families that
 	// define a filter of this name (all folding into the shared FiltersInet pool).
 	filterFamilies := map[string][]string{}
@@ -973,8 +985,9 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 				"(#8426)",
 			name, strings.Join(fams, ", "))
 		if !lenient {
-			return nil, fmt.Errorf("%s", msg)
+			return nil, nil, fmt.Errorf("%s", msg)
 		}
+		colliding[name] = struct{}{}
 		warnings = append(warnings, msg)
 	}
 	for _, name := range order {
@@ -990,8 +1003,9 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 				"Junos namespaces filters per family, so rename one of them (#3884)",
 			name, strings.Join(fams, ", "))
 		if !lenient {
-			return nil, fmt.Errorf("%s", msg)
+			return nil, nil, fmt.Errorf("%s", msg)
 		}
+		colliding[name] = struct{}{}
 		warnings = append(warnings, msg)
 	}
 	// #4287 any+inet6 cross-check: a `family any` filter now folds into the
@@ -1021,11 +1035,211 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 				"the other (fail-open); rename one of them",
 			name)
 		if !lenient {
-			return nil, fmt.Errorf("%s", msg)
+			return nil, nil, fmt.Errorf("%s", msg)
 		}
+		colliding[name] = struct{}{}
 		warnings = append(warnings, msg)
 	}
-	return warnings, nil
+	if len(colliding) == 0 {
+		colliding = nil
+	}
+	return warnings, colliding, nil
+}
+
+// effectiveFirewallInstances15997 compiles every definition of the colliding
+// names through compileFirewall itself (family-resolved: `family any`
+// dual-compiles into both pools, icmp-type echo-request resolves 128 under
+// inet6 vs 8 under any/inet) and returns, per name, the distinct effective
+// forms as (pool, filter) pairs. This is the dedupe key for the identical-
+// body exception — rendered text excludes the containing family, so two
+// text-identical bodies can be different effective filters (#16091 fold).
+func effectiveFirewallInstances15997(tree *ConfigTree, colliding map[string]struct{}) map[string]map[string]struct{} {
+	forms := map[string]map[string]struct{}{}
+	if tree == nil {
+		return forms
+	}
+	permitted := firewallFamilyPermitted9017()
+	for _, fwNode := range tree.Children {
+		if fwNode.Name() != "firewall" {
+			continue
+		}
+		for _, familyNode := range fwNode.FindChildren("family") {
+			for _, m := range firewallFamilyMembers9883(familyNode) {
+				if firewallFamilyQuarantined9883(m, permitted) {
+					continue
+				}
+				for _, inst := range namedInstances(m.AfNode.FindChildren("filter")) {
+					if _, want := colliding[inst.name]; !want {
+						continue
+					}
+					// Synthesise a one-filter firewall root under the same
+					// family and compile it, so family-resolved values
+					// (icmp-type etc.) are baked into the compared form.
+					famNode := &Node{Keys: []string{"family", m.Af}, Children: []*Node{
+						{Keys: []string{"filter", inst.name}, Children: inst.node.Children, IsLeaf: inst.node.IsLeaf},
+					}}
+					root := &Node{Keys: []string{"firewall"}, Children: []*Node{famNode}}
+					fw := &FirewallConfig{}
+					if err := compileFirewall(root, fw); err != nil {
+						continue
+					}
+					for pool, filters := range map[string]map[string]*FirewallFilter{"inet": fw.FiltersInet, "inet6": fw.FiltersInet6} {
+						f := filters[inst.name]
+						if f == nil {
+							continue
+						}
+						key := pool + "|" + firewallFilterEffectiveKey15997(f)
+						if forms[inst.name] == nil {
+							forms[inst.name] = map[string]struct{}{}
+						}
+						forms[inst.name][key] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	return forms
+}
+
+// effectiveTermProjection15997 lists EVERY semantic field of a compiled
+// term, including the unexported ones encoding/json drops and fmt %#v
+// mishandles (unknownChildren, nameless, routingInstanceTargetFirst /
+// routingInstanceTargetConflict). It is the canonical compared form:
+// pointers are dereferenced by value (FlexMatch), slices keep authored
+// order, no addresses appear. Any new semantic term field MUST be added
+// here — the projection test pins the field count.
+type effectiveTermProjection15997 struct {
+	Name                          string
+	UnknownChildren               []string
+	Nameless                      bool
+	SourceAddresses               []string
+	DestAddresses                 []string
+	SourcePrefixLists             []PrefixListRef
+	DestPrefixLists               []PrefixListRef
+	DSCPs                         []string
+	Protocols                     []string
+	DestinationPorts              []string
+	SourcePorts                   []string
+	SourcePortsExcept             []string
+	DestPortsExcept               []string
+	ICMPTypes                     []int
+	ICMPCodes                     []int
+	UnknownICMPTypes              []string
+	UnknownICMPCodes              []string
+	UnknownPorts                  []string
+	UnknownAddresses              []string
+	TCPFlags                      []string
+	IsFragment                    bool
+	Action                        string
+	TerminalActions               []string
+	RoutingInstanceTargetFirst    string
+	RoutingInstanceTargetConflict string
+	UnknownActions                []string
+	RejectMessageType             string
+	NextTerm                      bool
+	RoutingInstance               string
+	Log                           bool
+	Syslog                        bool
+	Count                         string
+	ForwardingClass               string
+	LossPriority                  string
+	DSCPRewrite                   string
+	Policer                       string
+	FlexMatch                     FlexMatchConfig // value copy; HasFlexMatch distinguishes nil
+	HasFlexMatch                  bool
+	UnknownFlexMatch              []string
+	FlexMatchRangeNames           []string
+	UnknownFrom                   []string
+	ValuelessFrom                 []string
+	CrossFamilyMatchSpellings     []string
+}
+
+func projectTerm15997(t *FirewallFilterTerm) effectiveTermProjection15997 {
+	var flex FlexMatchConfig
+	hasFlex := t.FlexMatch != nil
+	if hasFlex {
+		flex = *t.FlexMatch // deref: compare values, never addresses
+	}
+	return effectiveTermProjection15997{
+		Name: t.Name, UnknownChildren: t.unknownChildren, Nameless: t.nameless,
+		SourceAddresses: t.SourceAddresses, DestAddresses: t.DestAddresses,
+		SourcePrefixLists: t.SourcePrefixLists, DestPrefixLists: t.DestPrefixLists,
+		DSCPs: t.DSCPs, Protocols: t.Protocols, DestinationPorts: t.DestinationPorts,
+		SourcePorts: t.SourcePorts, SourcePortsExcept: t.SourcePortsExcept, DestPortsExcept: t.DestPortsExcept,
+		ICMPTypes: t.ICMPTypes, ICMPCodes: t.ICMPCodes,
+		UnknownICMPTypes: t.UnknownICMPTypes, UnknownICMPCodes: t.UnknownICMPCodes, UnknownPorts: t.UnknownPorts,
+		UnknownAddresses: t.UnknownAddresses, TCPFlags: t.TCPFlags, IsFragment: t.IsFragment,
+		Action: t.Action, TerminalActions: t.TerminalActions,
+		RoutingInstanceTargetFirst: t.routingInstanceTargetFirst, RoutingInstanceTargetConflict: t.routingInstanceTargetConflict,
+		UnknownActions: t.UnknownActions, RejectMessageType: t.RejectMessageType,
+		NextTerm: t.NextTerm, RoutingInstance: t.RoutingInstance,
+		Log: t.Log, Syslog: t.Syslog, Count: t.Count, ForwardingClass: t.ForwardingClass,
+		LossPriority: t.LossPriority, DSCPRewrite: t.DSCPRewrite, Policer: t.Policer,
+		FlexMatch: flex, HasFlexMatch: hasFlex, UnknownFlexMatch: t.UnknownFlexMatch, FlexMatchRangeNames: t.FlexMatchRangeNames,
+		UnknownFrom: t.UnknownFrom, ValuelessFrom: t.ValuelessFrom, CrossFamilyMatchSpellings: t.CrossFamilyMatchSpellings,
+	}
+}
+
+// firewallFilterEffectiveKey15997 is a deterministic canonical key over the
+// FULL compiled filter semantics. The projection contains no pointers, no
+// maps, and no addresses (FlexMatch is value-copied), so fmt %#v of it is
+// deterministic and address-free; identical effective duplicates — nested
+// pointers included — produce the same key at different addresses.
+func firewallFilterEffectiveKey15997(f *FirewallFilter) string {
+	if f == nil {
+		return "<nil>"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "name=%q ifaceSpecific=%v terms=%d;", f.Name, f.InterfaceSpecific, len(f.Terms))
+	for _, t := range f.Terms {
+		if t == nil {
+			b.WriteString("term=nil;")
+			continue
+		}
+		fmt.Fprintf(&b, "term=%#v;", projectTerm15997(t))
+	}
+	return b.String()
+}
+
+// pruneIdenticalFirewallCollisions15997 drops colliding names whose every
+// definition has the SAME effective compiled form in the SAME pool: such a
+// duplicate has one unambiguous meaning, so last-write-wins is harmless and
+// the name stays enforceable (#15997 decisive check). The key is the
+// family-resolved compiled filter, NOT rendered text — inet6 vs any bodies
+// with identical text resolve icmp-type echo-request to 128 vs 8.
+func pruneIdenticalFirewallCollisions15997(tree *ConfigTree, colliding map[string]struct{}) map[string]struct{} {
+	if len(colliding) == 0 || tree == nil {
+		return colliding
+	}
+	forms := effectiveFirewallInstances15997(tree, colliding)
+	out := map[string]struct{}{}
+	for name := range colliding {
+		// Identical effective duplicate iff every pool sees exactly one
+		// distinct form and at least one form was compiled. Pool keys are
+		// part of the form key, so group by pool prefix.
+		byPool := map[string]map[string]struct{}{}
+		for key := range forms[name] {
+			pool, _, _ := strings.Cut(key, "|")
+			if byPool[pool] == nil {
+				byPool[pool] = map[string]struct{}{}
+			}
+			byPool[pool][key] = struct{}{}
+		}
+		identical := len(byPool) > 0
+		for _, set := range byPool {
+			if len(set) != 1 {
+				identical = false
+			}
+		}
+		if identical {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // validateFirewallFilterDuplicateTermsAST rejects a repeated term name

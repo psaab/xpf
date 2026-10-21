@@ -2235,6 +2235,14 @@ reference is quarantined instead of falling through to the unrelated global
 entry. Non-colliding application and address references keep their existing
 wire representation.
 
+**Tolerant firewall-filter collision quarantine (#15997):** a same-name
+firewall-filter collision (cross-family, same-family duplicate, or
+`family any`+`inet6`) warned on tolerant load but kept the last-write-wins
+winner enforceable — a `discard` could be replaced by `accept`. Tolerant
+compilation now records the name in `Firewall.CollidingNames` and omits it
+from both filter pools, so referencing hooks dangle and the snapshot
+backstop refuses fail-closed. Duplicates whose family-resolved effective compiled form is identical are unaffected.
+
 Only MATCH leaves count. `applicationMatchLeaves9525` and
 `applicationSettingLeaves9525` partition `valueTakingApplicationLeaves`, so a
 bad, dangling or conflicting timeout or `alg`, which does not change what
