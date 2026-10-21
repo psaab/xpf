@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,74 @@ func TestAcquireDaemonLockRejectsSecondOwner15085(t *testing.T) {
 		t.Fatalf("acquire after release: %v", err)
 	}
 	third.release()
+}
+
+// TestDaemonLockTightensPermissiveModes16050 is the #16050 regression for
+// the singleton lock: a pre-existing 0755 parent (shell first-creator
+// shape) must be tightened to 0750 on acquire and the lock file must land
+// 0600. RED-on-revert: restoring MkdirAll(0o755) without the chmod leaves
+// the seeded 0755 in place.
+func TestDaemonLockTightensPermissiveModes16050(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "xpf")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := acquireDaemonLockAt(filepath.Join(dir, "xpfd.lock"))
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lease.release()
+	if fi, err := os.Stat(dir); err != nil {
+		t.Fatal(err)
+	} else if got := fi.Mode().Perm(); got != 0o750 {
+		t.Fatalf("daemon lock dir mode = %04o, want 0750 (#16050)", got)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "xpfd.lock")); err != nil {
+		t.Fatal(err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("daemon lock file mode = %04o, want 0600 (#16050)", got)
+	}
+}
+
+// TestUnitRuntimeDirectoryHardened16050 pins the shipped unit's #16050
+// directives, parsing test/incus/xpfd.service (the source debian/rules
+// stages) as in TestUnitRestartForceExitStatus15084: RuntimeDirectory=xpf
+// at 0750 plus UMask=0027, so no file created under /run/xpf by the
+// daemon or a shell first-creator it spawns lands world-readable.
+// RED-on-revert: deleting any of the three directives fails here.
+func TestUnitRuntimeDirectoryHardened16050(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "xpfd.service"))
+	if err != nil {
+		t.Fatalf("read shipped unit: %v", err)
+	}
+	var runtimeDir, runtimeMode, umask string
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if v, ok := strings.CutPrefix(line, "RuntimeDirectory="); ok {
+			runtimeDir = v
+		}
+		if v, ok := strings.CutPrefix(line, "RuntimeDirectoryMode="); ok {
+			runtimeMode = v
+		}
+		if v, ok := strings.CutPrefix(line, "UMask="); ok {
+			umask = v
+		}
+	}
+	if runtimeDir != "xpf" {
+		t.Errorf("RuntimeDirectory = %q, want %q (#16050)", runtimeDir, "xpf")
+	}
+	if m, err := strconv.ParseUint(runtimeMode, 8, 32); err != nil || m != 0o750 {
+		t.Errorf("RuntimeDirectoryMode = %q, want 0750 (#16050)", runtimeMode)
+	}
+	if m, err := strconv.ParseUint(umask, 8, 32); err != nil || m != 0o027 {
+		t.Errorf("UMask = %q, want 0027 (#16050)", umask)
+	}
 }
 
 // TestDaemonRunRefusesSecondProcessBeforeMarkerClear15085 drives the real

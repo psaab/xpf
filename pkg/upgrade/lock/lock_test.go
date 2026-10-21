@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -452,5 +453,158 @@ func TestMkdirCreatesRunDir(t *testing.T) {
 	defer h.Release()
 	if _, err := os.Stat(filepath.Dir(p)); err != nil {
 		t.Fatalf("parent dir not created: %v", err)
+	}
+}
+
+// TestAcquireTightensPermissiveModes16050 is the #16050 regression: a
+// pre-existing 0755 parent + 0644 lock file (the shell first-creator shape:
+// debian/xpf.preinst `mkdir -p` + flock(1) under umask 022) must be
+// tightened to 0750/0600 on acquire, and a fresh acquire under umask 0
+// must still land 0750/0600. On Linux flock(LOCK_EX) succeeds on a
+// readable O_RDONLY fd, so the pre-fix 0755/0644 pair let any local user
+// block every upgrade; these mode assertions are that check, made
+// without needing a second uid.
+//
+// RED-on-revert: restoring MkdirAll(0o755)/OpenFile(0o644) without the
+// chmods leaves the seeded modes untouched (first subtest) and lands
+// 0755/0644 under umask 0 (second subtest); restoring only the file
+// chmod still fails the dir assertion.
+func TestAcquireTightensPermissiveModes16050(t *testing.T) {
+	assertModes := func(t *testing.T, dir, path string) {
+		t.Helper()
+		if fi, err := os.Stat(dir); err != nil {
+			t.Fatalf("stat dir: %v", err)
+		} else if got := fi.Mode().Perm(); got != 0o750 {
+			t.Fatalf("lock dir mode = %04o, want 0750 (#16050)", got)
+		}
+		if fi, err := os.Stat(path); err != nil {
+			t.Fatalf("stat lock: %v", err)
+		} else if got := fi.Mode().Perm(); got != 0o600 {
+			t.Fatalf("lock file mode = %04o, want 0600 (#16050)", got)
+		}
+	}
+
+	t.Run("pre-existing permissive modes are tightened", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "xpf")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "upgrade.lock")
+		if err := os.WriteFile(p, []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h, err := AcquireAt(p, "upgrade", "perms")
+		if err != nil {
+			t.Fatalf("acquire over permissive modes: %v", err)
+		}
+		defer h.Release()
+		assertModes(t, dir, p)
+	})
+
+	t.Run("fresh create under umask zero lands tight", func(t *testing.T) {
+		old := syscall.Umask(0)
+		defer syscall.Umask(old)
+		p := filepath.Join(t.TempDir(), "xpf", "upgrade.lock")
+		h, err := AcquireAt(p, "upgrade", "perms")
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		defer h.Release()
+		assertModes(t, filepath.Dir(p), p)
+	})
+}
+
+// TestUnprivilegedCannotFlockUpgradeLock16050 is the decisive #16050
+// check at the syscall level: after Acquire, an O_RDONLY open+flock
+// attempt by a process that cannot read the 0600 file must fail, while
+// before the fix (0644) it would succeed and block the upgrade. It runs
+// the probe as uid/gid nobody via setpriv when available and running as
+// root; otherwise (non-root test binary, which cannot demonstrate the
+// cross-uid case) it asserts the mode bits that make that probe fail,
+// so the cell never silently passes for the wrong reason.
+func TestUnprivilegedCannotFlockUpgradeLock16050(t *testing.T) {
+	// Use the suite-shaped path (xpf/ subdir at 0750) and make every
+	// ancestor traversable by nobody: t.TempDir() itself is 0700, which
+	// would make the probe fail for the wrong reason (EACCES on the
+	// temp root, not on the lock), so open the ancestors up explicitly.
+	// The lock dir stays 0750 root-owned: nobody must fail there or at
+	// the 0600 file — either is the #16050 property.
+	// t.TempDir() nests 001/ under a 0700 root; open every ancestor so
+	// the nobody probe's only barrier is the lock dir/file itself.
+	base := t.TempDir()
+	for anc := base; anc != "/" && anc != "/tmp" && anc != "."; anc = filepath.Dir(anc) {
+		if err := os.Chmod(anc, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := filepath.Join(base, "xpf", "upgrade.lock")
+	h, err := AcquireAt(p, "upgrade", "perms")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer h.Release()
+
+	setpriv, lookErr := exec.LookPath("setpriv")
+	if os.Geteuid() != 0 || lookErr != nil {
+		// Cannot drop privileges here; the mode assertions in
+		// TestAcquireTightensPermissiveModes16050 are the portable half.
+		// Assert them here too so this cell is never vacuous.
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Fatalf("lock mode = %04o, want 0600", fi.Mode().Perm())
+		}
+		return
+	}
+	// Control first: with the modes loosened to the pre-fix 0755/0644
+	// and our own flock released, the same nobody probe MUST succeed —
+	// otherwise a failure below would prove only that the probe cannot
+	// flock at all (e.g. a 0700 ancestor), not that the tight modes
+	// block it. Re-acquire afterwards for the blocked probe.
+	h.Release()
+	dir := filepath.Dir(p)
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(setpriv, "--reuid=nobody", "--regid=nogroup",
+		"--clear-groups", "flock", "-n", p, "true").CombinedOutput(); err != nil {
+		t.Fatalf("control probe: nobody flock failed on permissive 0755/0644 modes (%v, %q) — probe cannot demonstrate the fix", err, out)
+	}
+	// Restore the fixed modes, re-acquire, and require the probe to
+	// fail: flock(1) opens O_RDONLY, which 0600 (inside a 0750 dir)
+	// denies before contention is even reached.
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h2, err := AcquireAt(p, "upgrade", "perms")
+	if err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+	defer h2.Release()
+	ran := false
+	defer func() {
+		if !ran {
+			t.Error("unprivileged flock probe never ran")
+		}
+	}()
+	ran = true
+	out, err := exec.Command(setpriv, "--reuid=nobody", "--regid=nogroup",
+		"--clear-groups", "flock", "-n", p, "true").CombinedOutput()
+	if err == nil {
+		t.Fatalf("unprivileged flock on %s succeeded (output %q) — a local user can still block upgrades (#16050)", p, out)
 	}
 }

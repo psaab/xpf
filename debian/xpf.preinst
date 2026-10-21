@@ -212,7 +212,14 @@ migrate_legacy_layout() {
 case "$1" in
     upgrade)
         # /run is tmpfs and may lack our subdir on a fresh boot.
-        mkdir -p /run/xpf
+        # #16050: 0750/0600, asserted with chmod — mkdir/flock creation mode
+        # is umask-dependent, and a readable lock in a traversable dir lets
+        # any local user flock it (O_RDONLY suffices) and block upgrades.
+        # Runs as root, so tightening a pre-existing permissive dir/file is
+        # safe; flock(1) below then creates the lock 0640 at worst, and the
+        # explicit chmod pins it to 0600.
+        mkdir -p /run/xpf && chmod 0750 /run/xpf
+        if [ -e "$LOCK" ]; then chmod 0600 "$LOCK"; fi
 
         # Non-blocking exclusive lock. If another upgrade holds it, flock
         # exits non-zero and (under set -e) fails the preinst, so apt aborts
@@ -220,7 +227,7 @@ case "$1" in
         # release (the subshell exits); the gate only needs to PROVE the
         # lock is free at this instant, not hold it through the unpack (which
         # a preinst fd cannot do across the dpkg boundary anyway).
-        if ! flock -n "$LOCK" true; then
+        if ! (umask 077; flock -n "$LOCK" true); then
             echo "xpf: another in-place upgrade is in progress (holds $LOCK)." >&2
             echo "xpf: refusing to unpack — wait for it to finish, then re-run apt." >&2
             cat "$LOCK" 2>/dev/null >&2 || true

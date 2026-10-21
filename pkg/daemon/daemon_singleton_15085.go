@@ -37,8 +37,16 @@ func acquireDaemonLock() (*daemonLockLease, error) {
 // empty file while the holder is publishing; that window only degrades the
 // error text to the pid-less form).
 func acquireDaemonLockAt(path string) (*daemonLockLease, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("daemon lock: create %s: %w", filepath.Dir(path), err)
+	// #16050: 0750 (not 0755) — a world-traversable /run/xpf plus a readable
+	// lock file lets any local user flock it (flock works on an O_RDONLY fd)
+	// and block the daemon singleton / upgrades. Mode is asserted on use as
+	// well as at creation: a shell first-creator may have made it 0755.
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, fmt.Errorf("daemon lock: create %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return nil, fmt.Errorf("daemon lock: tighten %s to 0750: %w", dir, err)
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {

@@ -52,6 +52,31 @@ func tryEpochFlock(t *testing.T, path string) bool {
 	return true
 }
 
+// TestEpochLockFileTightened16050 is the #16050 regression for the epoch
+// lock: a pre-existing 0644 .lock file must be tightened to 0600 by
+// withEpochFileLock (creation mode asserted on use). RED-on-revert:
+// restoring OpenFile(0o644) without the chmod leaves 0644.
+func TestEpochLockFileTightened16050(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ha-boot-epoch")
+	lockPath := path + ".lock"
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	withEpochFileLock(path, func() { ran = true })
+	if !ran {
+		t.Fatal("epoch lock callback did not run")
+	}
+	if fi, err := os.Stat(lockPath); err != nil {
+		t.Fatal(err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("epoch lock mode = %04o, want 0600 (#16050)", got)
+	}
+}
+
 // TestSecondDescriptionContendsWithAHeldEpochFlock6826 is the ground-truth
 // control for the cells below. If a second description did NOT contend, every
 // "the lock is free" assertion in this file would pass vacuously.

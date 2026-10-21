@@ -316,7 +316,7 @@ case "$1" in
                 # 0600 (not umask-derived 0664): the SH-negligible premise
                 # holds for it too (mode asserted by fixture).
                 # Missing PARENT → flock exits 66 → live → skip: bounded —
-                # creation ensures the dir (daemon MkdirAll 0755), removal
+                # creation ensures the dir (daemon MkdirAll 0750, #16050), removal
                 # unlinks file-only (daemon clear, postrm rm -f), and dpkg
                 # serializes postrm vs postinst, so only a manual rm -rf in
                 # the microsecond window triggers it; self-heals at the

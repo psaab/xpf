@@ -5,6 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# #16050: /run/xpf holds flock files (upgrade.lock, xpfd.lock, markers)
+# an exclusive flock can be taken on via a readable O_RDONLY fd, so the
+# runtime dir must not be world-traversable and the service umask must
+# not let any file created under it land group/world-readable. Go code
+# also asserts 0750/0600 on use; this covers shell first-creators and
+# any other file the daemon or its children create under /run/xpf.
+RuntimeDirectory=xpf
+RuntimeDirectoryMode=0750
+UMask=0027
 ExecStart=/usr/local/sbin/xpfd
 Restart=on-failure
 RestartForceExitStatus=SIGHUP SIGPIPE

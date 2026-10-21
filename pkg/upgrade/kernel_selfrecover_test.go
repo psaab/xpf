@@ -50,6 +50,41 @@ func writeLease(t *testing.T, path string, l KernelRollLease) {
 	}
 }
 
+// TestKernelRollLockTightened16050 is the #16050 regression for the
+// kernel-roll lock: consumeLease must tighten a pre-existing 0644
+// kernel-roll.lock (the orchestrator's shell flock(1) first-creator shape)
+// to 0600. RED-on-revert: restoring OpenFile(0o644) without the chmod
+// leaves 0644.
+func TestKernelRollLockTightened16050(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cl := &fakeSRCluster{drained: true, peerOK: true}
+	sr := newSR(t, cl, &now, 10*time.Second)
+	writeLease(t, sr.cfg.LeasePath, KernelRollLease{NodeID: 0, ExpiresAt: now.Add(-time.Minute)})
+	// consumeLease only acts on the expiry readLeaseState recorded.
+	if st := sr.readLeaseState(); st != leaseExpiredOurs {
+		t.Fatalf("lease state = %v, want expired-ours", st)
+	}
+	lockPath := filepath.Join(filepath.Dir(sr.cfg.LeasePath), "kernel-roll.lock")
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := sr.consumeLease()
+	if err != nil {
+		t.Fatalf("consumeLease: %v", err)
+	}
+	if !consumed {
+		t.Fatal("expired own lease was not consumed")
+	}
+	if fi, err := os.Stat(lockPath); err != nil {
+		t.Fatal(err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("kernel-roll lock mode = %04o, want 0600 (#16050)", got)
+	}
+}
+
 // EXPIRED-lease-ours (crashed orchestrator) + drained + healthy peer, held for
 // Grace -> auto-ResetFailover. (Self-recovery fires ONLY on an expired lease
 // naming us — the crashed-orchestrator fingerprint.)
