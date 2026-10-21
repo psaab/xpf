@@ -755,7 +755,8 @@ Special cases:
   rename so the file is correctly owned atomically at install. The owner is
   resolved cgo-free from `/etc/passwd` (`lookupUIDGID` — never `os/user`).
 - **`WithOwner` vs `WithPreserveExisting` precedence**: if both are set,
-  owner = `WithOwner`'s, mode = preserved-existing's (explicit owner wins).
+  owner = `WithOwner`'s, mode = preserved-existing's capped at the caller's
+  `perm` (`existing & perm`, #16046 — preserve never widens).
 - **`ssh_known_hosts` WRITE is AtomicGeneratedConfig, but its REMOVAL
   fsyncs the parent dir** (#5112): the write is a no-fsync
   `WriteFileAtomic` because a lost-on-power-cut rewrite just re-renders the

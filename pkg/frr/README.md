@@ -26,8 +26,10 @@ preserve) is installed **owned `root:frr`** via `fsatomic.WithOwner`, so
 the unprivileged frr daemons (group `frr`) can still read it —
 `atomicWriteOwnerOpt` resolves the frr gid (`resolveFRRGroup`). The
 owner override is applied **only** when (a) the target does not already
-exist — an existing operator file keeps its own mode+ownership
-(`WithPreserveExisting`, never restamped) — AND (b) the process is root
+exist — an existing operator file keeps its own ownership and a
+stricter-or-equal mode; a wider mode is capped at 0640 by fsatomic
+(`existing & 0640`, #16046, so a legacy 0644 file is tightened, never
+kept world-readable) — AND (b) the process is root
 and the `frr` group resolves. When the group is absent (FRR not
 installed — a dev host / unit test) or the process is non-root the
 override is skipped and the file lands 0640 `root:root` (harmless:

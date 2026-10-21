@@ -1439,10 +1439,10 @@ func StripManagedSectionFile(path string) error {
 //
 // The base options reproduce this function's pre-#1894 semantics verbatim
 // (they were lifted from here, see pkg/fsatomic):
-//   - WithPreserveExisting: an existing target's mode/ownership is
-//     reapplied on the temp fd (fchmod/fchown before rename, no
-//     path race; chown only when the owner differs, failure surfaced),
-//     falling back to perm for a new file.
+//   - WithPreserveExisting: an existing target's ownership (and mode,
+//     capped at the caller's perm, #16046) is reapplied on the temp fd
+//     (fchmod/fchown before rename, no path race; chown only when the
+//     owner differs, failure surfaced), falling back to perm for a new file.
 //   - WithResolveSymlinks (resolveSymlinks=true only): a symlinked frr.conf
 //     is resolved and replaced at its target, preserving the operator's
 //     symlink. The normal apply path (writeManagedSection) keeps this; the
@@ -1453,9 +1453,12 @@ func StripManagedSectionFile(path string) error {
 // parent-directory fsync that was missing here, making the rename
 // itself crash-safe.
 //
-// #4484 L-6: the managed section carries routing-authentication secrets
-// (BGP TCP-MD5, OSPF/IS-IS/RIP keys), so frr.conf must not be
-// world-readable. Callers now pass perm 0640 instead of the old 0644.
+// #4484 L-6 / #16046: the managed section carries routing-authentication
+// secrets (BGP TCP-MD5, OSPF/IS-IS/RIP keys), so frr.conf must not be
+// world-readable. Callers pass perm 0640 instead of the old 0644.
+// WithPreserveExisting preserves operator ownership but caps the mode
+// at 0640 (existing & 0640), so a legacy 0644 file is tightened to 0640
+// on the next apply while a stricter 0600 file stays 0600.
 // A 0640 file is only readable by its owner and group, so on a FRESH
 // create (no operator file to preserve) we install it owned root:<frr>
 // via WithOwner so the unprivileged frr daemons (group frr) can still
@@ -1480,8 +1483,9 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode, resolveSymlinks
 // when BOTH:
 //
 //   - the target does not already exist — an existing frr.conf keeps its
-//     own mode AND ownership (WithPreserveExisting, and no WithOwner here),
-//     so a commit never restamps an operator's chosen owner (#4484 L-6
+//     own ownership (and mode, capped at 0640 by fsatomic, #16046) via
+//     WithPreserveExisting with no WithOwner here, so a commit never
+//     restamps an operator's chosen owner (#4484 L-6
 //     "must not override an operator's existing ownership"); and
 //   - the frr group resolves — so we never chown a fresh file to a gid we
 //     could not verify. When the group is absent (FRR not installed — a dev

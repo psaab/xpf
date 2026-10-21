@@ -118,6 +118,48 @@ func TestPreserveExistingMode(t *testing.T) {
 	}
 }
 
+// TestPreserveExistingNeverWidensBeyondCallerPerm pins #16046: a
+// pre-existing mode WIDER than the caller's perm is capped, not lifted
+// wholesale (legacy 0644 under a 0640 request lands 0640). A stricter
+// existing mode is kept as-is (0600 under 0640 stays 0600). RED-on-revert:
+// restoring mode = fi.Mode().Perm() makes the 0644 row land 0644.
+func TestPreserveExistingNeverWidensBeyondCallerPerm(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing os.FileMode
+		perm     os.FileMode
+		want     os.FileMode
+	}{
+		{"wider-existing-capped", 0o644, 0o640, 0o640},
+		{"stricter-existing-kept", 0o600, 0o640, 0o600},
+		{"equal-existing-kept", 0o640, 0o640, 0o640},
+		{"world-writable-capped", 0o777, 0o600, 0o600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "out.conf")
+			if err := os.WriteFile(path, []byte("old"), tc.existing); err != nil {
+				t.Fatal(err)
+			}
+			// os.WriteFile is subject to umask; force the exact seed mode.
+			if err := os.Chmod(path, tc.existing); err != nil {
+				t.Fatal(err)
+			}
+			if err := WriteFileDurable(path, []byte("new"), tc.perm, WithPreserveExisting()); err != nil {
+				t.Fatal(err)
+			}
+			fi, _ := os.Stat(path)
+			if fi.Mode().Perm() != tc.want {
+				t.Fatalf("mode = %04o, want %04o (existing %04o & perm %04o, #16046 never-widen)",
+					fi.Mode().Perm(), tc.want, tc.existing, tc.perm)
+			}
+			if got := mustRead(t, path); got != "new" {
+				t.Fatalf("content = %q, want new", got)
+			}
+		})
+	}
+}
+
 // TestWithOwnerChownsTempBeforeRename asserts WithOwner fchowns the temp
 // fd (not a post-rename path chown) and that the chown happens before the
 // rename — the invariant that prevents a crash-window root-owned keys file.
@@ -194,10 +236,11 @@ func TestWithOwnerPrecedenceOverPreserveExisting(t *testing.T) {
 	if chownedUID != 7000 || chownedGID != 7001 {
 		t.Fatalf("chown(%d,%d), want WithOwner (7000,7001)", chownedUID, chownedGID)
 	}
-	// Mode comes from WithPreserveExisting (0640), not the perm arg (0644).
+	// Mode comes from WithPreserveExisting capped at perm (0640 & 0644 =
+	// 0640), not the raw perm arg alone in general — here both agree.
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm() != 0640 {
-		t.Fatalf("mode = %v, want preserved 0640", fi.Mode().Perm())
+		t.Fatalf("mode = %v, want preserved-capped 0640", fi.Mode().Perm())
 	}
 }
 

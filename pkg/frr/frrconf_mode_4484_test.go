@@ -1,9 +1,10 @@
-// frrconf_mode_4484_test.go — #4484 L-6: frr.conf must not be written
+// frrconf_mode_4484_test.go — #4484 L-6 / #16046: frr.conf must not be written
 // world-readable. The xpf-managed section carries routing-authentication
 // secrets (BGP TCP-MD5, OSPF/IS-IS/RIP keys), so a fresh frr.conf is written
 // 0640 (was 0644) and owned root:<frr-group> so the unprivileged frr daemons
-// can still read it, while an existing operator file keeps its own
-// mode+ownership untouched.
+// can still read it, while an existing operator file keeps a stricter-or-equal
+// mode+ownership but is capped at 0640 when wider (a legacy 0644 file is
+// tightened to 0640, never kept world-readable — #16046).
 package frr
 
 import (
@@ -65,6 +66,39 @@ func TestFRRConfPreservesOperatorMode(t *testing.T) {
 	if got := fi.Mode().Perm(); got != 0o600 {
 		t.Fatalf("existing operator frr.conf mode = %04o, want 0600 preserved "+
 			"(fresh-create hardening must not restamp an operator file)", got)
+	}
+}
+
+// TestFRRConfLegacy0644TightenedTo0640 is the decisive #16046 regression:
+// seed a pre-existing 0644 frr.conf carrying a routing-auth leaf, run the
+// next managed-section apply, and require the file to land at 0640
+// (0644 & 0640) — group read kept, world read stripped. RED-on-revert:
+// restoring wholesale preserve in fsatomic leaves it 0644 and fails here.
+func TestFRRConfLegacy0644TightenedTo0640(t *testing.T) {
+	restore := resolveFRRGroup
+	resolveFRRGroup = func() (int, bool) { return 0, false }
+	t.Cleanup(func() { resolveFRRGroup = restore })
+
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "frr.conf")
+	seed := "hostname r1\nrouter bgp 65000\n neighbor 192.0.2.1 password route-secret\n"
+	if err := os.WriteFile(conf, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed legacy frr.conf: %v", err)
+	}
+	if err := os.Chmod(conf, 0o644); err != nil {
+		t.Fatalf("chmod seed frr.conf: %v", err)
+	}
+	m := &Manager{frrConf: conf}
+	if err := m.writeManagedSection("router bgp 65000\n"); err != nil {
+		t.Fatalf("writeManagedSection: %v", err)
+	}
+	fi, err := os.Stat(conf)
+	if err != nil {
+		t.Fatalf("stat frr.conf: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o640 {
+		t.Fatalf("legacy 0644 frr.conf mode = %04o after apply, want 0640 "+
+			"(world-readable routing-auth secrets must not survive, #16046/#4484)", got)
 	}
 }
 

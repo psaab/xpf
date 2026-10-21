@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Cap fsatomic preserved mode at the caller perm: WithPreserveExisting
+    lifted an existing file's mode wholesale, so a legacy 0644 frr.conf
+    stayed world-readable after every managed apply despite the FRR
+    writer requesting 0640 for a file carrying routing-auth secrets.
+    Preserve now keeps ownership and a stricter-or-equal mode
+    (existing & perm) and never widens past the caller perm (#16046).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Fix split-RG punt-origin fabric return: on the WAN owner (fw0) the
     HA-suppressed connected LAN prefix makes the FIB answer the LAN
     return target with the WAN gateway default route, so the reverse
