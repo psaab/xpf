@@ -69,8 +69,15 @@ func (s *Store) setAsQuotedGroupedPlantClass(sessionID, plantClass string, path 
 		return fmt.Errorf("not in configuration mode")
 	}
 	before := s.candidate.Clone()
+	if len(path) > config.MaxParseNodes {
+		return fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+	}
 	if err := s.candidate.SetPathQuotedGrouped(path, quoted, grouped, closed...); err != nil {
 		return err
+	}
+	if s.candidate.NodeCount() > config.MaxParseNodes {
+		s.candidate = before
+		return fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()       // #4476: refresh the config-lock idle lease
@@ -875,17 +882,29 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 		return 0, fmt.Errorf("parse error: %w", err)
 	}
 	working := s.candidate.Clone()
+	// #15999: shared node budget mirroring the hierarchical parser's
+	// maxParseNodes. The byte cap alone admits several times that many
+	// nodes via short set lines, replayed super-linearly under s.mu.
+	// Refuse BEFORE the replay when the line count alone exceeds the
+	// budget (every distinct set line creates >=1 node, so this is a
+	// sound lower bound and skips the expensive replay entirely);
+	// otherwise enforce the exact node count incrementally.
+	nonEmpty := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			nonEmpty++
+		}
+	}
+	if baseNodes > config.MaxParseNodes || nonEmpty > config.MaxParseNodes {
+		return 0, fmt.Errorf("config too large: flat load of %d lines onto %d nodes exceeds node budget %d (#15999)", nonEmpty, baseNodes, config.MaxParseNodes)
+	}
 	count := 0
-	for i, line := range strings.Split(flatContent, "\n") {
+	for i, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// #3442 M4: a non-blank, non-comment line that is not a recognized
-		// verb is malformed input (e.g. "sett system host-name fw"). Previously
-		// LoadSet silently `continue`d on it, so REST/gRPC/CLI returned OK while
-		// dropping the intended command — the operator could commit a config
-		// missing it. Fail with a line-numbered error instead.
 		if !hasFlatVerb(line) {
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
@@ -893,6 +912,12 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 			return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
 		}
 		count++
+		if count%1024 == 0 && working.NodeCount() > config.MaxParseNodes {
+			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+		}
+	}
+	if working.NodeCount() > config.MaxParseNodes {
+		return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
 	}
 	config.StampChangedEventPlantClasses(s.candidate, working, plantClass)
 	s.candidate = working

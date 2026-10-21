@@ -84,6 +84,21 @@ const maxParseErrors = 64
 // so a key-dense statement reached ~4x this bound at the input cap.
 const maxParseNodes = 200_000
 
+// MaxParseNodes is the shared AST node budget (#15999): the hierarchical
+// parser enforces it via maxParseNodes, and flat `set` replay (LoadSet /
+// SetPath) must enforce the same budget — it previously capped only bytes,
+// so ~16 MiB of short set lines built several times this many nodes under
+// the store lock.
+const MaxParseNodes = maxParseNodes
+
+// NodeCount returns the number of AST nodes in the tree (nil-safe).
+func (t *ConfigTree) NodeCount() int {
+	if t == nil {
+		return 0
+	}
+	return countNodes(t.Children)
+}
+
 // Parser implements a recursive descent parser for Junos configuration syntax.
 type Parser struct {
 	lexer  *Lexer
