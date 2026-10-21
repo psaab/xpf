@@ -889,6 +889,8 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 	// budget (every distinct set line creates >=1 node, so this is a
 	// sound lower bound and skips the expensive replay entirely);
 	// otherwise enforce the exact node count incrementally.
+	baseNodes := working.NodeCount()
+	lines := strings.Split(flatContent, "\n")
 	nonEmpty := 0
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
