@@ -26,12 +26,39 @@ func isPackedTailCredentialToken14412(tok string) bool {
 	return false
 }
 
+// packedTailCredentialDropped14412 reports whether a credential token that
+// resolves (exact-case) as a child of descend is nevertheless DROPPED when
+// packed at this position, because that child is modelled only so it is
+// refused (its typed-leaf validator rejects every value — the
+// unmodeled*Leaf shape of schema_ospf_authentication_8443.go) and the
+// walker branch that would invoke that validator is bypassed for packed
+// tails that do not opt into packedTail validation. A credential child
+// with any other validator (or none) is genuinely consumed/validated
+// where it stands and is not dropped. #16108.
+func packedTailCredentialDropped14412(descend *schemaNode, tok string) bool {
+	if descend == nil {
+		return false
+	}
+	child := resolveSchemaChild(descend, tok)
+	if child == nil || child.validator == nil || child.valueType != ValueEnumOf || len(child.valueExamples) != 0 {
+		return false
+	}
+	// A refusal stub rejects EVERY value; a real enum leaf only rejects
+	// values outside its (here empty) example set but its validator may
+	// still accept. Probe with a sentinel: refusal stubs ignore the
+	// value and always error.
+	return child.validator("xpf-probe-16108", nil) != nil
+}
+
 // packedTailCredential14412 returns the first dropped credential token in
 // node.Keys[from:], with its index in node.Keys, or ""/-1. A token is
 // consumed — not dropped — when its exact-case form resolves as a child
-// of the descendent schema (a validly placed credential owns its packed
-// spelling). A token authored as a quoted or bracketed value (#9635) is a
-// value, not a statement head, and is never reported.
+// of the descendent schema AND that child is not itself a refusal stub
+// (see packedTailCredentialDropped14412: a packed refusal-stub is never
+// validated on the non-packedTail path, so authoring a credential
+// packed at this node drops it exactly as a misplaced one). A token
+// authored as a quoted or bracketed value (#9635) is a value, not a
+// statement head, and is never reported.
 func packedTailCredential14412(node *Node, descend *schemaNode, from int) (string, int) {
 	if node == nil || descend == nil || from >= len(node.Keys) {
 		return "", -1
@@ -45,7 +72,7 @@ func packedTailCredential14412(node *Node, descend *schemaNode, from int) (strin
 		if mask != nil && mask[i] {
 			continue
 		}
-		if resolveSchemaChild(descend, tok) != nil {
+		if resolveSchemaChild(descend, tok) != nil && !packedTailCredentialDropped14412(descend, tok) {
 			continue
 		}
 		return tok, i

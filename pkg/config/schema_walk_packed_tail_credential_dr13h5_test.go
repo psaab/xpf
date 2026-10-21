@@ -116,34 +116,47 @@ func TestPackedTailCredentialWarns10707_14412(t *testing.T) {
 	}
 }
 
-// Controls: the CHILD-node forms keep their existing #10707 warnings.
-func TestPackedTailCredentialChildControlsKeep10707_14412(t *testing.T) {
-	cases := []struct {
-		name, src, token string
-	}{
-		{
-			name: "ospf interface misplaced child",
-			src: `protocols { ospf { area 0.0.0.0 {
-				interface ge-0/0/0.0 { passive; authentication-key SECRET14412; } } } }`,
-			token: "authentication-key",
-		},
-		{
-			name: "isis interface case-variant child",
-			src: `protocols { isis { net 49.0001.0000.0000.0001.00;
-				interface ge-0/0/0.0 { Authentication-Key SECRET14412; authentication-type md5; } } }`,
-			token: "Authentication-Key",
-		},
+// Controls: the CHILD-node (braced) forms are NOT warn-only at compile.
+// #16108 re-verification: the OSPF braced `authentication-key` is a
+// refusal stub (#14402), so SchemaValidate rejects it (never a #10707
+// warning — exact-case children of a stanza resolve, so the open-world
+// walker stays silent by design); the IS-IS case-variant child's
+// `authentication-type md5` without a (case-exact) key strict-rejects via
+// #14399 and warns on the lenient path. The original #14412 assertion
+// (warn-only via CompileConfig) was never satisfiable on master.
+func TestPackedTailCredentialChildControls16108(t *testing.T) {
+	// OSPF braced child: exact-case refusal stub — strict reject naming
+	// the token, no secret echo; compile must not be silent either.
+	ospfSrc := `protocols { ospf { area 0.0.0.0 {
+		interface ge-0/0/0.0 { passive; authentication-key SECRET14412; } } } }`
+	if err := SchemaValidate(parseHier14412(t, ospfSrc), nil); err == nil ||
+		!strings.Contains(err.Error(), "authentication-key") {
+		t.Fatalf("ospf braced authentication-key must strict-reject (#14402), got: %v", err)
+	} else if strings.Contains(err.Error(), "SECRET14412") {
+		t.Fatalf("strict error must not echo the secret value, got: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parseHier14412(t, tc.src))
-			if err != nil {
-				t.Fatalf("child control must stay warn-only at compile, got: %v", err)
-			}
-			if !hasWarning14412(cfg, tc.token) {
-				t.Fatalf("child-node form lost its #10707 warning for %q; warnings=%v", tc.token, cfg.Warnings)
-			}
-		})
+	// CompileConfig alone does not schema-gate (#14402 premise: "compiler
+	// doesn't gate, schema is gate"); the decisive channel is above.
+	// IS-IS case-variant child: lenient compile warns (#10707 for the
+	// case-variant key and/or #14399 for the keyless type); strict
+	// compile rejects via #14399. Never silently accepted.
+	isisSrc := `protocols { isis { net 49.0001.0000.0000.0001.00;
+		interface ge-0/0/0.0 { Authentication-Key SECRET14412; authentication-type md5; } } }`
+	cfg, err := CompileConfigLenient(parseHier14412(t, isisSrc))
+	if err != nil {
+		t.Fatalf("isis lenient compile must warn, not error: %v", err)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "Authentication-Key") || strings.Contains(w, "#14399") {
+			found = true
+		}
+		if strings.Contains(w, "SECRET14412") {
+			t.Fatalf("warning must not echo the secret value: %q", w)
+		}
+	}
+	if !found {
+		t.Fatalf("isis case-variant child lost its warning; warnings=%v", cfg.Warnings)
 	}
 }
 
