@@ -25,7 +25,9 @@ run_scenario() {
       -e "s#^STAGED=.*#STAGED=$ROOT/usr/local/share/xpf/staged#" \
       -e "s#^SBIN=.*#SBIN=$ROOT/usr/local/sbin#" \
       -e "s#^VERSIONS=.*#VERSIONS=$ROOT/var/lib/xpf/versions#" \
-      -e "s#mkdir -p /run/xpf#mkdir -p $ROOT/run/xpf#" \
+      -e "s#mkdir -p /run/xpf#mkdir -p $ROOT/run/xpf#g" \
+      -e "s#chmod 0750 /run/xpf#chmod 0750 $ROOT/run/xpf#g" \
+      -e 's#chmod 0600 "$LOCK"#chmod 0600 "$LOCK"#' \
       "$PREINST" > "$ROOT/preinst"
     chmod +x "$ROOT/preinst"
     STAGED="$ROOT/usr/local/share/xpf/staged"

@@ -2434,7 +2434,7 @@ def _acquire_lease(runner, backend, node, target_node_id, holder, ttl_secs):
         'if [ "$now" -lt "$ee" ]; then exit 1; fi; '
         'fi; '
         "exp=$(date -u -d \"+%d seconds\" +%%Y-%%m-%%dT%%H:%%M:%%SZ); "
-        "umask 022; "
+        "umask 077; "
         # Write to a temp file then atomic-rename, so a reader (the self-recovery
         # loop, which does NOT take the flock) never observes a partial/truncated
         # lease (r2 AGY non-atomic-write). The flock still serializes writers.
@@ -2445,9 +2445,15 @@ def _acquire_lease(runner, backend, node, target_node_id, holder, ttl_secs):
     # this node; -E 9 distinguishes a lock-acquire timeout (exit 9) from the
     # critical section's own exit-1 (live lease held).
     script = (
-        "mkdir -p /var/lib/xpf; "
-        "flock -w 30 -E 9 /var/lib/xpf/kernel-roll.lock "
-        "sh -c " + shlex.quote(crit) + " && echo ACQUIRED"
+        # #16050: 0750 dir + 0600 lock/lease asserted on use — flock(1)
+        # creates kernel-roll.lock under the caller's umask, and a readable
+        # lock lets any local user flock it (O_RDONLY) and block the roll.
+        # Fail closed like the Go paths: a failed chmod aborts before
+        # flock, never proceeding on a world-flockable lock.
+        "(umask 077; mkdir -p /var/lib/xpf) && chmod 0750 /var/lib/xpf "
+        "&& { [ ! -e /var/lib/xpf/kernel-roll.lock ] || chmod 0600 /var/lib/xpf/kernel-roll.lock; } "
+        "&& (umask 077; flock -w 30 -E 9 /var/lib/xpf/kernel-roll.lock "
+        "sh -c " + shlex.quote(crit) + ") && echo ACQUIRED"
     )
     out = _node_exec(runner, backend, node, ["sh", "-c", script], check=False)
     # Return whether WE won the lease (the caller releases-what-it-got + aborts
@@ -2468,7 +2474,14 @@ def _clear_lease(runner, backend, node, holder):
         '[ "$cur" = "%s" ] && rm -f "$f"; exit 0'
     ) % h
     _node_exec(runner, backend, node, ["sh", "-c",
-               "flock -w 30 /var/lib/xpf/kernel-roll.lock sh -c " + shlex.quote(crit)],
+               # #16050: fail closed like acquire/renew — a chmod failure
+               # must not fall through to flocking a world-readable lock.
+               # A failure here only leaves the lease to expire (the safe
+               # direction this function already prefers over deleting
+               # under an untightened lock).
+               "chmod 0750 /var/lib/xpf "
+               "&& { [ ! -e /var/lib/xpf/kernel-roll.lock ] || chmod 0600 /var/lib/xpf/kernel-roll.lock; } "
+               "&& flock -w 30 /var/lib/xpf/kernel-roll.lock sh -c " + shlex.quote(crit)],
                check=False)
 
 
@@ -2512,14 +2525,16 @@ def _renew_lease(runner, backend, node, target_node_id, holder, ttl_secs):
         'cur=$(sed -n \'s/.*"holder": *"\\([^"]*\\)".*/\\1/p\' "$f"); '
         'if [ "$cur" != "%s" ]; then echo LOST; exit 0; fi; '
         "exp=$(date -u -d \"+%d seconds\" +%%Y-%%m-%%dT%%H:%%M:%%SZ); "
-        "umask 022; "
+        "umask 077; "
         "printf '{\"node_id\": %d, \"holder\": \"%s\", \"expires_at\": \"%%s\"}' "
         "\"$exp\" > \"$f.tmp\" && mv -f \"$f.tmp\" \"$f\" && echo RENEWED"
     ) % (h, ttl_secs, target_node_id, h)
     script = (
-        "mkdir -p /var/lib/xpf; "
-        "flock -w 30 /var/lib/xpf/kernel-roll.lock "
-        "sh -c " + shlex.quote(crit)
+        # #16050: as in _acquire_lease (fail closed on chmod failure).
+        "(umask 077; mkdir -p /var/lib/xpf) && chmod 0750 /var/lib/xpf "
+        "&& { [ ! -e /var/lib/xpf/kernel-roll.lock ] || chmod 0600 /var/lib/xpf/kernel-roll.lock; } "
+        "&& (umask 077; flock -w 30 /var/lib/xpf/kernel-roll.lock "
+        "sh -c " + shlex.quote(crit) + ")"
     )
     # Use the STRUCTURED wrapper so a transport failure (un-ok) is distinguished
     # from a reachable LOST — a mid-reboot node's unreachable read must NEVER be

@@ -151,17 +151,38 @@ func Acquire(subcommand, target string) (*Handle, error) {
 
 // AcquireAt is Acquire against an explicit path (for tests; production
 // always uses DefaultPath via Acquire).
+//
+// #16050: the parent directory is created 0750 and the lock file 0600,
+// and both modes are asserted (chmod) on every acquire — creation mode
+// alone is insufficient because a shell first-creator (debian/xpf.preinst
+// `mkdir -p` + flock(1)) may have created them 0755/0644 under a permissive
+// umask. On Linux an exclusive flock can be taken on a readable O_RDONLY
+// fd, so a world-readable lock file in a world-traversable directory lets
+// any local user block every upgrade indefinitely. The chmod runs before
+// the flock: a chmod failure while we do not yet hold the lock must refuse
+// the acquire rather than proceed on a lock an unprivileged user can also
+// take.
 func AcquireAt(path, subcommand, target string) (*Handle, error) {
 	// /run is tmpfs and may lack our subdir on a fresh boot.
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("upgrade lock: create %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, fmt.Errorf("upgrade lock: create %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return nil, fmt.Errorf("upgrade lock: tighten %s to 0750: %w", dir, err)
 	}
 
 	// O_CREATE so the first acquirer makes the file; no O_TRUNC so a busy
 	// acquirer can still read the holder's metadata.
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("upgrade lock: open %s: %w", path, err)
+	}
+	// Assert 0600 on use as well as at creation (see doc above): the file
+	// may pre-exist 0644 from a shell first-creator.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("upgrade lock: tighten %s to 0600: %w", path, err)
 	}
 
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {

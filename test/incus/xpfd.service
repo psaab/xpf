@@ -5,6 +5,27 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# #16050: /run/xpf holds flock files (upgrade.lock, xpfd.lock, markers)
+# an exclusive flock can be taken on via a readable O_RDONLY fd, so the
+# runtime dir must not be world-traversable and the service umask must
+# strip world access from anything created under it (UMask=0027 caps
+# new files at 0640 / dirs at 0750; it does not by itself guarantee
+# 0600, and a group member could still read a 0640 file — the Go
+# chmods to 0750/0600 on use are the actual lock-file guarantee).
+# Together they cover shell first-creators and any other file the
+# daemon or its children create under /run/xpf.
+RuntimeDirectory=xpf
+RuntimeDirectoryMode=0750
+# #16050 fold: systemd would otherwise REMOVE /run/xpf at unit stop —
+# while the upgrade runner holds an open flock on
+# /run/xpf/upgrade.lock across stopping xpfd, so the path would be
+# unlinked and a second process could flock a NEW inode, splitting
+# the mutex mid-cutover. Preserve keeps the directory (and the lock
+# path) alive across stops; it does not preserve lock semantics
+# across a reboot — /run is tmpfs, the dir is recreated empty at
+# boot, and flock state is per-boot by design (see pkg/upgrade/lock).
+RuntimeDirectoryPreserve=yes
+UMask=0027
 ExecStart=/usr/local/sbin/xpfd
 Restart=on-failure
 RestartForceExitStatus=SIGHUP SIGPIPE

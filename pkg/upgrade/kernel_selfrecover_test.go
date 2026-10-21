@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type fakeSRCluster struct {
@@ -47,6 +49,141 @@ func writeLease(t *testing.T, path string, l KernelRollLease) {
 	b, _ := json.Marshal(l)
 	if err := os.WriteFile(path, b, 0644); err != nil {
 		t.Fatalf("write lease: %v", err)
+	}
+}
+
+// TestKernelRollLockTightened16050 is the #16050 regression for the
+// kernel-roll lock: consumeLease must tighten a pre-existing 0644
+// kernel-roll.lock (the orchestrator's shell flock(1) first-creator shape)
+// to 0600. RED-on-revert: restoring OpenFile(0o644) without the chmod
+// leaves 0644.
+func TestKernelRollLockTightened16050(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cl := &fakeSRCluster{drained: true, peerOK: true}
+	sr := newSR(t, cl, &now, 10*time.Second)
+	writeLease(t, sr.cfg.LeasePath, KernelRollLease{NodeID: 0, ExpiresAt: now.Add(-time.Minute)})
+	// consumeLease only acts on the expiry readLeaseState recorded.
+	if st := sr.readLeaseState(); st != leaseExpiredOurs {
+		t.Fatalf("lease state = %v, want expired-ours", st)
+	}
+	lockPath := filepath.Join(filepath.Dir(sr.cfg.LeasePath), "kernel-roll.lock")
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := sr.consumeLease()
+	if err != nil {
+		t.Fatalf("consumeLease: %v", err)
+	}
+	if !consumed {
+		t.Fatal("expired own lease was not consumed")
+	}
+	if fi, err := os.Stat(lockPath); err != nil {
+		t.Fatal(err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("kernel-roll lock mode = %04o, want 0600 (#16050)", got)
+	}
+}
+
+// countLockFDs16050 returns how many of this process's open fds point at
+// path (via /proc/self/fd symlinks). Linux-only, like the flock contract
+// itself; other platforms report -1 and the caller skips.
+func countLockFDs16050(path string) int {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, e := range entries {
+		if target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); err == nil && target == path {
+			n++
+		}
+	}
+	return n
+}
+
+// TestConsumeLeaseReleasesLockFD16050 pins the fd lifecycle of
+// consumeLease: the kernel-roll.lock fd must be Closed on EVERY return
+// path — success, busy (another description holds the flock), and
+// error — not leaked until GC. Before the fix the busy/success returns
+// after the flock never closed (the defer Close had been dropped when
+// the #16050 chmod was added), so each Tick leaked one fd.
+//
+// RED-on-revert: removing `defer lock.Close()` leaves the count at 1
+// after each call below.
+func TestConsumeLeaseReleasesLockFD16050(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cl := &fakeSRCluster{drained: true, peerOK: true}
+	sr := newSR(t, cl, &now, 10*time.Second)
+	lockPath := filepath.Join(filepath.Dir(sr.cfg.LeasePath), "kernel-roll.lock")
+	if n := countLockFDs16050(lockPath); n < 0 {
+		t.Skip("/proc/self/fd unavailable on this platform")
+	} else if n != 0 {
+		t.Fatalf("precondition: %d fds already open on %s", n, lockPath)
+	}
+	assertReleased := func(what string) {
+		t.Helper()
+		if n := countLockFDs16050(lockPath); n != 0 {
+			t.Fatalf("%s: %d fd(s) still open on %s after consumeLease returned — fd leaked", what, n, lockPath)
+		}
+	}
+
+	// Success: expired lease naming us is consumed under the lock.
+	writeLease(t, sr.cfg.LeasePath, KernelRollLease{NodeID: 0, ExpiresAt: now.Add(-time.Minute)})
+	if st := sr.readLeaseState(); st != leaseExpiredOurs {
+		t.Fatalf("lease state = %v, want expired-ours", st)
+	}
+	consumed, err := sr.consumeLease()
+	if err != nil || !consumed {
+		t.Fatalf("success path: consumed=%v err=%v", consumed, err)
+	}
+	assertReleased("success path")
+
+	// Busy: hold the flock from an independent description; consumeLease
+	// must report not-consumed AND release its own fd.
+	writeLease(t, sr.cfg.LeasePath, KernelRollLease{NodeID: 0, ExpiresAt: now.Add(-time.Minute)})
+	if st := sr.readLeaseState(); st != leaseExpiredOurs {
+		t.Fatalf("lease state = %v, want expired-ours", st)
+	}
+	holder, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(holder.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		holder.Close()
+		t.Fatalf("hold flock: %v", err)
+	}
+	consumed, err = sr.consumeLease()
+	// Close OUR holder before counting: it legitimately holds one fd.
+	holder.Close()
+	if err != nil || consumed {
+		t.Fatalf("busy path: consumed=%v err=%v, want (false, nil)", consumed, err)
+	}
+	assertReleased("busy path")
+
+	// Error: LeasePath in a nonexistent directory makes the re-read (and
+	// consume) fail after the lock file was opened in a sibling dir —
+	// use a lease path whose directory exists for the lock but whose
+	// lease file is a directory, so ReadFile errors non-NotExist.
+	dir2 := t.TempDir()
+	leaseAsDir := filepath.Join(dir2, "kernel-roll.lease")
+	if err := os.Mkdir(leaseAsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sr2 := NewKernelSelfRecovery(SelfRecoveryConfig{
+		NodeID:    0,
+		LeasePath: leaseAsDir,
+		Grace:     10 * time.Second,
+		Now:       func() time.Time { return now },
+	}, cl)
+	lockPath2 := filepath.Join(dir2, "kernel-roll.lock")
+	if _, err := sr2.consumeLease(); err == nil {
+		t.Fatal("error path: expected a re-read error, got nil")
+	}
+	if n := countLockFDs16050(lockPath2); n != 0 {
+		t.Fatalf("error path: %d fd(s) still open on %s — fd leaked", n, lockPath2)
 	}
 }
 

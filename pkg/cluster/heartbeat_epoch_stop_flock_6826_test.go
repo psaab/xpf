@@ -52,6 +52,119 @@ func tryEpochFlock(t *testing.T, path string) bool {
 	return true
 }
 
+// TestEpochLockFileTightened16050 is the #16050 regression for the epoch
+// lock: a pre-existing 0644 .lock file must be tightened to 0600 by
+// withEpochFileLock (creation mode asserted on use). RED-on-revert:
+// restoring OpenFile(0o644) without the chmod leaves 0644.
+func TestEpochLockFileTightened16050(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ha-boot-epoch")
+	lockPath := path + ".lock"
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	withEpochFileLock(path, func() { ran = true })
+	if !ran {
+		t.Fatal("epoch lock callback did not run")
+	}
+	if fi, err := os.Stat(lockPath); err != nil {
+		t.Fatal(err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("epoch lock mode = %04o, want 0600 (#16050)", got)
+	}
+}
+
+// countLockFDs16050 returns how many of this process's open fds point at
+// path (via /proc/self/fd symlinks), or -1 where unavailable.
+func countLockFDs16050(path string) int {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, e := range entries {
+		if target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); err == nil && target == path {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEpochLockReleasesFD16050 pins the fd lifecycle of
+// withEpochFileLock: the .lock fd must be Closed on the success path
+// AND on the #16050 chmod-error decline path (whose return originally
+// sat before `defer f.Close()` and leaked the fd).
+//
+// RED-on-revert: moving `defer f.Close()` back below the chmod (or
+// removing it) leaves the count at 1 after the chmod-error call.
+func TestEpochLockReleasesFD16050(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ha-boot-epoch")
+	lockPath := path + ".lock"
+	if n := countLockFDs16050(lockPath); n < 0 {
+		t.Skip("/proc/self/fd unavailable on this platform")
+	} else if n != 0 {
+		t.Fatalf("precondition: %d fds already open on %s", n, lockPath)
+	}
+
+	// Success path: callback runs under the lock; fd closed on return.
+	ran := false
+	withEpochFileLock(path, func() { ran = true })
+	if !ran {
+		t.Fatal("success path: callback did not run")
+	}
+	if n := countLockFDs16050(lockPath); n != 0 {
+		t.Fatalf("success path: %d fd(s) still open on %s — fd leaked", n, lockPath)
+	}
+
+	// Chmod-error path: make path+".lock" a symlink to /proc/self/mem.
+	// OpenFile(O_RDWR) on it succeeds (mem is openable), but Chmod
+	// follows the symlink and fails EPERM — reaching exactly the
+	// chmod-decline return that used to sit before `defer f.Close()`.
+	// The mem fd's /proc/self/fd target is the resolved /proc/<pid>/mem
+	// (not countable by a stable path), so count TOTAL fds: +1 means
+	// the decline leaked.
+	totalFDs := func() int {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			return -1
+		}
+		return len(entries)
+	}
+	memPath := filepath.Join(t.TempDir(), "ha-boot-epoch")
+	memLock := memPath + ".lock"
+	if err := os.Symlink("/proc/self/mem", memLock); err != nil {
+		t.Fatal(err)
+	}
+	before := totalFDs()
+	ran = false
+	withEpochFileLock(memPath, func() { ran = true })
+	if ran {
+		t.Fatal("chmod-error path: callback ran despite chmod failure")
+	}
+	if after := totalFDs(); after != before {
+		t.Fatalf("chmod-error path: open fd count %d before, %d after — fd leaked", before, after)
+	}
+
+	// Open-error path: point the lock through a regular file so
+	// OpenFile fails before any fd exists.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	badPath := filepath.Join(blocker, "sub", "ha-boot-epoch")
+	ran = false
+	withEpochFileLock(badPath, func() { ran = true })
+	if ran {
+		t.Fatal("open-error path: callback ran despite lock open failure")
+	}
+	if n := countLockFDs16050(badPath + ".lock"); n != 0 {
+		t.Fatalf("open-error path: %d fd(s) still open — fd leaked", n)
+	}
+}
+
 // TestSecondDescriptionContendsWithAHeldEpochFlock6826 is the ground-truth
 // control for the cells below. If a second description did NOT contend, every
 // "the lock is free" assertion in this file would pass vacuously.

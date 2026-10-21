@@ -393,13 +393,17 @@ var EarlyInputHandoffMarkerPath = "/run/xpf/early-input-handoff.done"
 // swap-failed (#10751 R4-7).
 func (d *Daemon) setEarlyInputHandoffDone() error {
 	first := !d.earlyInputHandoffDone.Load()
-	if err := os.MkdirAll(filepath.Dir(EarlyInputHandoffMarkerPath), 0755); err != nil {
+	// #16050: 0750 (not 0755) so /run/xpf is not world-traversable; these
+	// markers are flock-held ownership proofs an unprivileged flock could
+	// otherwise forge. Best-effort chmod heals a shell-created 0755 dir.
+	if err := os.MkdirAll(filepath.Dir(EarlyInputHandoffMarkerPath), 0o750); err != nil {
 		slog.Warn("cannot record early-input handoff marker", "err", err)
 		if !first {
 			return nil
 		}
 		return fmt.Errorf("record early-input handoff marker: %w", err)
 	}
+	_ = os.Chmod(filepath.Dir(EarlyInputHandoffMarkerPath), 0o750)
 	if err := writeMarkerLocked(EarlyInputHandoffMarkerPath, "handed-off\n", &earlyInputHandoffLockFile); err != nil {
 		slog.Warn("cannot record early-input handoff marker", "err", err)
 		if !first {
@@ -645,10 +649,12 @@ func markerHeldByOtherSlot(slot **os.File) bool {
 // which the next apply hands off), so it must never fail the commit.
 // Retried on every successful install, healing any earlier failure.
 func noteHostInboundInstalled() {
-	if err := os.MkdirAll(filepath.Dir(HostInboundFirstApplyMarkerPath), 0755); err != nil {
+	// #16050: 0750, as at setEarlyInputHandoffDone.
+	if err := os.MkdirAll(filepath.Dir(HostInboundFirstApplyMarkerPath), 0o750); err != nil {
 		slog.Warn("cannot record host-inbound first-apply marker", "err", err)
 		return
 	}
+	_ = os.Chmod(filepath.Dir(HostInboundFirstApplyMarkerPath), 0o750)
 	if err := writeMarkerLocked(HostInboundFirstApplyMarkerPath, "applied\n", &hostInboundFirstApplyLockFile); err != nil {
 		slog.Warn("cannot record host-inbound first-apply marker", "err", err)
 		return

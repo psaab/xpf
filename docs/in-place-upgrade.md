@@ -895,6 +895,21 @@ target. Read-only status (`xpfd upgrade kernel status`) stays lock-free.
   leaves no stale lock; the resume reads the journal, not the lock.
   `mkdir -p /run/xpf` runs before every acquire (a fresh boot's tmpfs may
   lack the dir).
+- **Modes (#16050):** `/run/xpf` is 0750 and every flock file under it
+  (`upgrade.lock`, `xpfd.lock`, the input-barrier markers) is 0600, as are
+  `/var/lib/xpf/ha-boot-epoch.lock` and `/var/lib/xpf/kernel-roll.lock`.
+  Modes are asserted (chmod) on every acquire, not just at creation,
+  because shell first-creators (`xpf.preinst`, `xpf-deploy.py`) create
+  them under the caller's umask. This matters because on Linux an
+  exclusive flock can be taken on a readable `O_RDONLY` fd: the pre-fix
+  0755/0644 pair let any local user flock the upgrade lock and block all
+  upgrades indefinitely. The shipped unit also sets
+  `RuntimeDirectory=xpf`/`RuntimeDirectoryMode=0750`/`UMask=0027` and
+  `RuntimeDirectoryPreserve=yes` — preserve so stopping xpfd cannot
+  unlink `/run/xpf/upgrade.lock` while the upgrade runner holds its
+  flock across the stop (a removed path would let a second process
+  flock a new inode and split the mutex mid-cutover); only the
+  directory survives a stop, and `/run` tmpfs still clears it at boot.
 - Owner metadata (PID, subcommand, target, start time) is written into
   the lock file after the flock succeeds, so a busy acquirer's error
   NAMES the current owner.

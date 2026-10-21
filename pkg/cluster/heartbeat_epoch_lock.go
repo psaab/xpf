@@ -144,14 +144,29 @@ import (
 // already declines and WriteFileDurable failure already declines, so lock
 // failure was the only branch of three that proceeded.
 func withEpochFileLock(path string, fn func()) {
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	// #16050: 0600 (not 0644) and asserted on use — a readable lock file lets
+	// any local user flock it on an O_RDONLY fd and block epoch persists.
+	// The parent (/var/lib/xpf) mode is owned by the durable-state creators
+	// (MkdirAllDurable in refineBootEpoch); only the lock file is tightened
+	// here, before the flock, and a chmod failure declines like an open
+	// failure rather than proceeding on a world-flockable lock.
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		slog.Warn("cluster: HA epoch state lock unavailable; SKIPPING the persist "+
 			"(the wall-clock epoch is already in use; only backward-clock-step "+
 			"protection is lost)", "path", path, "err", err)
 		return
 	}
+	// Close on EVERY return path: registered before the chmod so its
+	// failure path is covered too (a chmod-error return must not leak
+	// the fd). Defers run LIFO, so the LOCK_UN defer fires first.
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		slog.Warn("cluster: HA epoch state lock tighten to 0600 failed; SKIPPING the persist "+
+			"(the wall-clock epoch is already in use; only backward-clock-step "+
+			"protection is lost)", "path", path, "err", err)
+		return
+	}
 	if err := acquireEpochFileLock(int(f.Fd()), path); err != nil {
 		slog.Warn("cluster: HA epoch state lock failed; SKIPPING the persist "+
 			"(the wall-clock epoch is already in use; only backward-clock-step "+
