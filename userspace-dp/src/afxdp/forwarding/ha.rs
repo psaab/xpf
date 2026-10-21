@@ -5,7 +5,10 @@
 
 use super::*;
 
-pub(in crate::afxdp) fn owner_rg_for_flow(forwarding: &ForwardingState, egress_ifindex: i32) -> i32 {
+pub(in crate::afxdp) fn owner_rg_for_flow(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+) -> i32 {
     forwarding
         .egress
         .get(&egress_ifindex)
@@ -58,7 +61,10 @@ pub(in crate::afxdp) fn cluster_terminal_peer_owned_egress_rg(
         return false;
     }
     let rg = owner_rg_for_flow(forwarding, resolution.source_ifindex);
-    rg > 0 && ha_state.get(&rg).is_none_or(|g| !g.is_forwarding_active(now_secs))
+    rg > 0
+        && ha_state
+            .get(&rg)
+            .is_none_or(|g| !g.is_forwarding_active(now_secs))
 }
 
 /// #16216: is this DiscardRoute a demoted cluster-terminal row whose
@@ -133,7 +139,12 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
         if ha_state.is_empty() {
             return resolution;
         }
-        return match cluster_terminal_peer_owned_egress_rg(forwarding, ha_state, now_secs, &resolution) {
+        return match cluster_terminal_peer_owned_egress_rg(
+            forwarding,
+            ha_state,
+            now_secs,
+            &resolution,
+        ) {
             true => resolution,
             false => ForwardingResolution {
                 disposition: ForwardingDisposition::DiscardRoute,
@@ -239,7 +250,10 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
             ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
         )
     {
-        let Some(endpoint) = forwarding.tunnel_endpoints.get(&resolution.tunnel_endpoint_id) else {
+        let Some(endpoint) = forwarding
+            .tunnel_endpoints
+            .get(&resolution.tunnel_endpoint_id)
+        else {
             return ForwardingResolution {
                 disposition: ForwardingDisposition::HAInactive,
                 route_mtu: 0,
@@ -318,6 +332,18 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
     resolution
 }
 
+/// #16220: why a cached decision failed revalidation — the sub-arm the
+/// flow-cache post-hit eviction attributes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum CachedDecisionInvalid {
+    EnforceChanged,
+    OwnerActiveRedirect,
+    FabricLocalWins,
+    FabricIngressLocalWins,
+    /// #16220: FabricLocalWins where the local resolution's owner RG is
+    /// the SAME as the cached entry's owner (vs a different local owner).
+    FabricLocalWinsSameOwner,
+}
 
 pub(in crate::afxdp) fn cached_flow_decision_valid(
     forwarding: &ForwardingState,
@@ -332,20 +358,47 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
     install_table: Option<&str>,
     resolution: ForwardingResolution,
 ) -> bool {
+    cached_flow_decision_invalid_reason(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        cached_owner_rg_id,
+        fabric_ingress,
+        target_ip,
+        install_table,
+        resolution,
+    )
+    .is_none()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    fabric_ingress: bool,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> Option<CachedDecisionInvalid> {
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
-        return false;
+        return Some(CachedDecisionInvalid::EnforceChanged);
     }
     // RG-stamped redirect hits are the common split-RG cache case. Once the
     // cached owner RG becomes locally active again, invalidate immediately and
     // let the slow path recompute the current local/fabric decision instead of
     // taking a neighbor-map lock on every cache hit.
     if cached_owner_rg_id > 0
+        && fabric_ingress
         && ha_state
             .get(&cached_owner_rg_id)
             .is_some_and(|group| group.is_forwarding_active(now_secs))
-        && (resolution.disposition == ForwardingDisposition::FabricRedirect || fabric_ingress)
+        && resolution.disposition == ForwardingDisposition::FabricRedirect
     {
-        return false;
+        return Some(CachedDecisionInvalid::OwnerActiveRedirect);
     }
     if resolution.disposition == ForwardingDisposition::FabricRedirect {
         let local_resolution = enforce_ha_resolution_snapshot(
@@ -353,8 +406,6 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
             ha_state,
             now_secs,
             match install_table {
-                // #9752: same table rule as `prefer_local` (non-flow lookup:
-                // existing per-destination hash semantics preserved).
                 Some(table) => {
                     super::lookup_forwarding_resolution_in_table_with_dynamic(
                         forwarding,
@@ -365,8 +416,12 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
                     .resolution
                 }
                 None => {
-                    lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip)
-                        .resolution
+                    lookup_forwarding_resolution_with_dynamic(
+                        forwarding,
+                        dynamic_neighbors,
+                        target_ip,
+                    )
+                    .resolution
                 }
             },
         );
@@ -379,7 +434,19 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
         ) && local_owner_rg > 0
             && !local_egress_is_fabric
         {
-            return false;
+            // #16220: on direct ingress, a same-owner local candidate does
+            // not supersede the cached redirect — the redirect was seeded
+            // for exactly this split-RG shape and the slow path recomputes
+            // it; only a DIFFERENT local owner (or fabric ingress, where
+            // the packet already crossed) retires it.
+            if local_owner_rg == cached_owner_rg_id && !fabric_ingress {
+                return None;
+            }
+            return Some(if local_owner_rg == cached_owner_rg_id {
+                CachedDecisionInvalid::FabricLocalWinsSameOwner
+            } else {
+                CachedDecisionInvalid::FabricLocalWins
+            });
         }
     }
     if fabric_ingress
@@ -394,9 +461,9 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
             resolution,
         ) != resolution
     {
-        return false;
+        return Some(CachedDecisionInvalid::FabricIngressLocalWins);
     }
-    true
+    None
 }
 
 pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(

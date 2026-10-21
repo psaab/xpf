@@ -157,6 +157,12 @@ var flowCacheEvictionArmLabels = []string{
 	"post_hit_decision_invalid",
 	"post_hit_deny_superseded",
 	"post_hit_session_dead",
+	"post_hit_enforce_changed",
+	"post_hit_owner_active_redirect",
+	"post_hit_fabric_local_wins",
+	"post_hit_fabric_ingress_local_wins",
+	"post_hit_fabric_redirect_on_fabric_ingress",
+	"post_hit_fabric_local_wins_same_owner",
 }
 
 // #16220: emit per-arm flow-cache evictions so a cache-retention failure

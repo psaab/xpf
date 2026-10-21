@@ -884,9 +884,19 @@ pub(super) enum FlowCacheEvictionArm {
     PostHitDecisionInvalid = 8,
     PostHitDenySuperseded = 9,
     PostHitSessionDead = 10,
+    /// #16220 sub-arms of PostHitDecisionInvalid: which check inside
+    /// `cached_flow_decision_valid` (or its fabric-redirect guard)
+    /// rejected the cached decision. Kept separate so the live readout
+    /// names the exact sub-check without another instrumented build.
+    PostHitEnforceChanged = 11,
+    PostHitOwnerActiveRedirect = 12,
+    PostHitFabricLocalWins = 13,
+    PostHitFabricIngressLocalWins = 14,
+    PostHitFabricRedirectOnFabricIngress = 15,
+    PostHitFabricLocalWinsSameOwner = 16,
 }
 
-pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 11;
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 17;
 
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
@@ -901,6 +911,12 @@ impl FlowCacheEvictionArm {
         Self::PostHitDecisionInvalid,
         Self::PostHitDenySuperseded,
         Self::PostHitSessionDead,
+        Self::PostHitEnforceChanged,
+        Self::PostHitOwnerActiveRedirect,
+        Self::PostHitFabricLocalWins,
+        Self::PostHitFabricIngressLocalWins,
+        Self::PostHitFabricRedirectOnFabricIngress,
+        Self::PostHitFabricLocalWinsSameOwner,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -916,6 +932,14 @@ impl FlowCacheEvictionArm {
             Self::PostHitDecisionInvalid => "post_hit_decision_invalid",
             Self::PostHitDenySuperseded => "post_hit_deny_superseded",
             Self::PostHitSessionDead => "post_hit_session_dead",
+            Self::PostHitEnforceChanged => "post_hit_enforce_changed",
+            Self::PostHitOwnerActiveRedirect => "post_hit_owner_active_redirect",
+            Self::PostHitFabricLocalWins => "post_hit_fabric_local_wins",
+            Self::PostHitFabricIngressLocalWins => "post_hit_fabric_ingress_local_wins",
+            Self::PostHitFabricRedirectOnFabricIngress => {
+                "post_hit_fabric_redirect_on_fabric_ingress"
+            }
+            Self::PostHitFabricLocalWinsSameOwner => "post_hit_fabric_local_wins_same_owner",
         }
     }
 }

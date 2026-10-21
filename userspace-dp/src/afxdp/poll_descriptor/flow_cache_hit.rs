@@ -223,11 +223,15 @@ pub(super) fn stage_flow_cache_hit(
         // relaxed atomic load + compare. A mismatch means the cached dst_mac
         // or neighbor liveness may be stale;
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
-        // evict and re-resolve on the slow path.
-        if neighbor_mac_stale
+        // #16220: sub-attribute the decision revalidation so the live
+        // readout names the exact rejecting check.
+        let invalid_reason = if neighbor_mac_stale
             || (fabric_link_ingress
                 && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect)
-            || !cached_flow_decision_valid(
+        {
+            None
+        } else {
+            crate::afxdp::forwarding::cached_flow_decision_invalid_reason(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 worker_ctx.dynamic_neighbors,
@@ -242,14 +246,40 @@ pub(super) fn stage_flow_cache_hit(
                 ),
                 cached.decision.resolution,
             )
+        };
+        // evict and re-resolve on the slow path.
+        if neighbor_mac_stale
+            || (fabric_link_ingress
+                && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect)
+            || invalid_reason.is_some()
         {
             // #16220: attribute the arm — neighbor-MAC staleness vs the
-            // HA/fabric decision revalidation — so a retention failure
-            // names its cause in the per-binding counters.
+            // HA/fabric decision revalidation sub-check.
             let arm = if neighbor_mac_stale {
                 crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac
+            } else if fabric_link_ingress
+                && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+            {
+                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricRedirectOnFabricIngress
             } else {
-                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDecisionInvalid
+                match invalid_reason {
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::EnforceChanged) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged
+                    }
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::OwnerActiveRedirect) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitOwnerActiveRedirect
+                    }
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::FabricLocalWins) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins
+                    }
+                    Some(
+                        crate::afxdp::forwarding::CachedDecisionInvalid::FabricLocalWinsSameOwner,
+                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWinsSameOwner,
+                    Some(crate::afxdp::forwarding::CachedDecisionInvalid::FabricIngressLocalWins) => {
+                        crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressLocalWins
+                    }
+                    None => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDecisionInvalid,
+                }
             };
             flow_state
                 .flow_cache

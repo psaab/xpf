@@ -51,13 +51,14 @@ mod tx_inbox;
 // `profile::Owner|Peer` precedent and to avoid E0364 (documented in
 // `userspace-dp/src/afxdp/tx/mod.rs:38`).
 pub(in crate::afxdp) use debug_state::{
+    DEBUG_STATE_PUBLISH_MASK, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
     advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
-    update_binding_debug_state, update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
-    IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
+    update_binding_debug_state, update_binding_idle_debug_state,
 };
 pub(in crate::afxdp) use latency::{
     bucket_index_for_ns, tx_batch_bucket, DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS,
     TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
+    DRAIN_HIST_BUCKETS, TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS, bucket_index_for_ns,
 };
 // Only `binding_state/tests/latency_buckets.rs` consumes this
 // re-export (via the `use super::*;` chain); gate on `cfg(test)` so
@@ -66,7 +67,7 @@ pub(in crate::afxdp) use latency::{
 #[cfg(test)]
 pub(in crate::afxdp) use latency::REDIRECT_SAMPLE_MASK;
 pub(in crate::afxdp) use profile::{OwnerProfileOwnerWrites, OwnerProfilePeerWrites};
-pub(in crate::afxdp) use tx_inbox::{PendingTxAdmission, PENDING_TX_INBOX_HARD_CAP};
+pub(in crate::afxdp) use tx_inbox::{PENDING_TX_INBOX_HARD_CAP, PendingTxAdmission};
 // #6304: the admission-attempt test instrument. Same `cfg(test)` treatment as
 // `REDIRECT_SAMPLE_MASK` above — it has no production consumer, so gating the
 // re-export keeps production builds warning-free. Consumed by
@@ -184,7 +185,8 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #16220: per-arm breakdown of `flow_cache_evictions`, indexed by
     /// `FlowCacheEvictionArm as usize`. Folded from the worker-owned
     /// cache at the debug tick, like the aggregate above.
-    pub(super) flow_cache_evictions_by_arm: [AtomicU64; super::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
+    pub(super) flow_cache_evictions_by_arm:
+        [AtomicU64; super::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
     /// #918: subset of `flow_cache_evictions` driven by full-set LRU
     /// displacement (i.e. an insert kicked out a different-key entry
     /// from the LRU way). Surfaces hot-set thrash distinctly from
@@ -1087,12 +1089,11 @@ const _: [(); 2736] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_adm
 const _: [(); 2865] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 // #16215 adds one unconditional u64 snat_revoked_sessions counter before
 // both sentinels; offsets advance by 8 bytes, size unchanged.
-// #16220 adds eleven unconditional u64 per-arm flow-cache eviction
-// counters before both sentinels; offsets advance by 88 bytes, size unchanged.
-const _: [(); 2816] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2640] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2769] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
-
+// #16220 adds seventeen unconditional u64 per-arm flow-cache eviction
+// counters before both sentinels.
+const _: [(); 2880] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2688] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2817] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 impl BindingLiveState {
     pub(super) fn new() -> Self {
         Self {
