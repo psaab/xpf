@@ -162,11 +162,16 @@ the apply path pays no fsync (the file is regenerated on every apply).
   IKE SA with no child yet, so the HA per-RG attribution maps names back here.
   Eligibility is decided per VPN from the whole-config render's
   membership set (a whole-config render decides grouping): a VPN the
-  renderer skips contributes no name. On a whole-config hard render
+  renderer skips contributes no name (pinned by
+  `TestSANameIndexMembership15989`). On a whole-config hard render
   error the index falls back to the pre-fold #9511 per-VPN rule — a
   VPN whose own render fails outright keeps its names as candidates,
   one that skips cleanly contributes nothing (restored in the #15989
-  fold; pinned by `TestSANameIndexMembershipAndHardErrorContract15989`).
+  fold). That fallback is untested defensive code: every resolver
+  error today is skip-class, so no reachable config triggers it; it
+  guards the render's documented future hard-error class, and the
+  reachable behavior (successful-render membership) is identical
+  with or without it.
   Two VPN names that sanitise alike cannot borrow each other's result
   on the successful path. A name two VPNs render (`a` + selector
   `b-c` and `a-b` + selector `c`; or `blue` + selector `red` and

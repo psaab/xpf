@@ -1046,6 +1046,10 @@ type SANameIndex map[string][]string
 // BuildSANameIndex). A VPN whose render SUCCEEDS membership-clean
 // contributes nothing, and the successful whole-config membership
 // path never borrows names, so the #15989 collision stays closed.
+// The fallback is untested defensive code: every resolver error today
+// is skip-class, so no reachable config triggers it; it guards the
+// documented future hard-error class, and reachable behavior is
+// identical with or without it.
 //
 // Building renders the config once on the healthy path, so build once
 // per config, not per name. ipsecCfg is only read. The active config
