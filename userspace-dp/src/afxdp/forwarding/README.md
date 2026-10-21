@@ -1263,14 +1263,17 @@ remain outside the Stage-11 flow path.
 pre-routing DNAT lookup — the LOGICAL VLAN unit
 (`resolve_ingress_logical_ifindex`), the fabric-validated zone override, and
 the validated NAT-scope ifindex — never the raw physical
-`meta.ingress_ifindex`. An ambiguous stamp's claimed zone is withheld until
-the local-address owner-RG gate promotes it; only then may the claimed zone
-plus its withheld NAT-scope ifindex re-scope the probe. Without owner proof
-the probe fails closed (packet stays claimed-local under the fabric/logical
-zone's host-inbound gate) rather than granting the claimed zone's transit
-DNAT. Regression coverage:
-`stage_ipsec_transit_dnat_discriminator_uses_logical_vlan_16047` and
-`stage_ipsec_ambiguous_claim_does_not_grant_transit_dnat_16047`.
+`meta.ingress_ifindex`. For ambiguous fabric arrivals it uses the SAME
+still-unpromoted scope production pre-routing DNAT consumes (Stage 9
+withholds the claimed zone and NAT-scope ifindex, so the local
+fabric/logical zone and interface/RI answer; owner promotion happens only
+later, after DNAT/routing). The locally owner-promoted claimed zone governs
+only the host-inbound gate and never re-scopes this probe, so the claim
+decision cannot disagree with the translation production would select.
+Regression coverage:
+`stage_ipsec_transit_dnat_discriminator_uses_logical_vlan_16047`,
+`stage_ipsec_ambiguous_claim_does_not_grant_transit_dnat_16047`, and
+`stage_ipsec_ambiguous_scope_parity_16047`.
 
 Regression coverage includes
 `stage_ipsec_passthrough_rejects_remote_transit_dst_5620`,

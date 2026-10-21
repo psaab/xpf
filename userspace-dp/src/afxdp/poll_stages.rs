@@ -1729,10 +1729,11 @@ pub(super) fn stage_ipsec_passthrough_check(
 }
 
 /// #16047: scoped Stage-11 entry. The ambiguous stamp's withheld NAT-scope
-/// ifindex is carried alongside its claimed zone exactly as the poll loop
-/// hands both to the pre-routing DNAT scope (`ingress_nat_scope_ifindex.or(
-/// ambiguous_scope_ifindex)`); the discriminator below may use it only
-/// after owner proof, never to grant the claimed zone directly.
+/// ifindex is carried for signature parity with the poll loop's Stage-9
+/// outputs; the transit-DNAT discriminator deliberately does NOT consume
+/// it (production pre-routing DNAT receives `ingress_nat_scope_ifindex`,
+/// which is `None` for ambiguous arrivals — see the discriminator doc).
+/// The claimed zone governs only the #4323/#15925 host-inbound gate.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn stage_ipsec_passthrough_check_with_scope(
@@ -1741,7 +1742,7 @@ pub(super) fn stage_ipsec_passthrough_check_with_scope(
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
     ambiguous_zone: Option<u16>,
-    ambiguous_scope_ifindex: Option<i32>,
+    _ambiguous_scope_ifindex: Option<i32>,
     route_override_table: Option<&str>,
     binding_live: &BindingLiveState,
     worker_ctx: &WorkerContext,
@@ -1838,10 +1839,7 @@ pub(super) fn stage_ipsec_passthrough_check_with_scope(
             flow,
             meta,
             ingress_zone_override,
-            ambiguous_zone,
-            ambiguous_scope_ifindex,
             ingress_logical,
-            _gated_override,
         )
     {
         return IpsecPassthroughOutcome::NotClaimed;
@@ -1912,7 +1910,7 @@ pub(super) fn stage_ipsec_passthrough_check_with_scope(
 /// counter and translation.
 ///
 /// #16047: the probe MUST use the same logical ingress identity as the
-/// pre-routing DNAT lookup and zone policy — the LOGICAL VLAN unit
+/// pre-routing DNAT lookup — the LOGICAL VLAN unit
 /// (`resolve_ingress_logical_ifindex`, #5802), the fabric-validated zone
 /// override, and the validated NAT-scope ifindex — never the raw physical
 /// `meta.ingress_ifindex`. The pre-fix probe read zone/ifname/RI from the raw
@@ -1920,48 +1918,39 @@ pub(super) fn stage_ipsec_passthrough_check_with_scope(
 /// interfaces / routing-instances it matched a sibling unit's scoped DNAT (or
 /// missed its own) and mis-delivered IKE to the local charon (or vice versa).
 ///
-/// An ambiguous stamp's claimed zone is never granted here: the probe first
-/// scopes by the adjudicated identity alone (validated override, else the
-/// logical unit's own zone/interface/RI, with the claimed zone entering
-/// only through the owner-gated `_gated_override`). Only when that probe
-/// finds no DNAT AND the local-address owner-RG gate has promoted the
-/// ambiguous claim (`gated_override` is `Some`, computed by
-/// `ike_host_inbound_gate_context_with_ambiguous` from the destination's
-/// owner RG) does it re-probe with the promoted zone + withheld NAT-scope
-/// ifindex — the same promotion the pre-routing scope applies via
-/// `ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex)`. An ambiguous
-/// arrival whose owner proof fails therefore fails closed: the claimed
-/// zone's DNAT cannot override interface locality, so the packet is claimed
-/// local and still faces the #4323 host-inbound gate under the fabric/logical
-/// zone rather than being handed to the claimed zone's transit target.
-#[allow(clippy::too_many_arguments)]
+/// Ambiguous fabric arrivals use the SAME still-unpromoted scope production
+/// pre-routing DNAT consumes: Stage 9 withholds the claimed zone
+/// (`ingress_zone_override=None`, `ingress_nat_scope_ifindex=None`), so
+/// `prerouting_ingress_scope` selects the local fabric/logical zone and the
+/// local logical interface/RI, and owner-resolution promotion happens only
+/// later (after DNAT/routing). The discriminator therefore probes exactly
+/// that unpromoted identity: it must NOT substitute the locally
+/// owner-promoted claimed zone (`gated_override`, which the host-inbound
+/// gate uses for admission only) nor the withheld peer NAT-scope ifindex,
+/// or its claim decision can disagree with the translation production
+/// would actually select — capturing a fabric-scoped transit DNAT locally,
+/// or releasing a claimed-zone-only rule production cannot apply. The
+/// claimed zone still governs host-inbound admission via the separate
+/// #4323/#15925 gate; it never re-scopes this probe.
 fn ipsec_destination_matches_transit_dnat(
     forwarding: &crate::afxdp::ForwardingState,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
-    ambiguous_zone: Option<u16>,
-    ambiguous_scope_ifindex: Option<i32>,
     ingress_logical: i32,
-    gated_override: Option<u16>,
 ) -> bool {
-    // Adjudicated identity: validated override wins; an ambiguous claim is
-    // withheld (None) until owner proof promotes it below. The logical unit
-    // supplies ifname/RI; an unknown VID suppresses the local zone fallback
-    // exactly as `prerouting_ingress_scope` does (#10313/#10656).
-    let adjudicated_zone = ingress_zone_override.or(gated_override);
+    // Mirror `prerouting_ingress_scope` exactly: a validated override wins;
+    // an ambiguous claim arrives as `None` here and stays withheld, so the
+    // logical unit's own zone answers (suppressed for an unknown VID). The
+    // ifname/RI come from the validated V2 stamp if present, else the local
+    // logical unit — ambiguous arrivals carry no stamp (Stage 9 clears it),
+    // so they read the local logical identity production DNAT reads.
     let unknown_vlan = crate::afxdp::forwarding::unknown_ingress_vlan(
         forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
     );
-    let zone_name = |zone_id: Option<u16>| -> &str {
-        zone_id
-            .and_then(|id| forwarding.zone_id_to_name.get(&id))
-            .map(String::as_str)
-            .unwrap_or("")
-    };
-    let base_zone = adjudicated_zone
+    let zone_name = ingress_zone_override
         .and_then(|id| forwarding.zone_id_to_name.get(&id).map(String::as_str))
         .or_else(|| {
             if unknown_vlan {
@@ -1975,54 +1964,39 @@ fn ipsec_destination_matches_transit_dnat(
             }
         })
         .unwrap_or("");
-    let lookup = |zone: &str, scope_ifindex: i32| {
-        let ifname = forwarding
-            .ifindex_to_config_name
-            .get(&scope_ifindex)
-            .map(String::as_str)
-            .unwrap_or("");
-        let routing_instance = forwarding
-            .ifindex_to_routing_instance
-            .get(&scope_ifindex)
-            .map(String::as_str)
-            .unwrap_or("");
-        forwarding.dnat_table.lookup_with_counter_scoped(
-            meta.protocol,
-            flow.src_ip,
-            flow.dst_ip,
-            flow.forward_key.src_port,
-            flow.forward_key.dst_port,
-            zone,
-            ifname,
-            routing_instance,
-            None,
-        )
-    };
-    let is_transit = |decision: &crate::nat::NatDecision| match decision.rewrite_dst {
-        Some(std::net::IpAddr::V4(target)) => !forwarding.configured_iface_v4.contains(&target),
-        Some(std::net::IpAddr::V6(target)) => !forwarding.configured_iface_v6.contains(&target),
-        None => false,
-    };
-    // A validated V2 scope names the peer ingress unit (meta stamp, set only
-    // for ValidScoped); otherwise the local logical unit is authoritative.
-    let validated_scope = if meta.fabric_ingress_ifindex != 0 {
+    let scope_ifindex = if meta.fabric_ingress_ifindex != 0 {
         meta.fabric_ingress_ifindex as i32
     } else {
         ingress_logical
     };
-    if let Some((decision, _)) = lookup(base_zone, validated_scope) {
-        return is_transit(&decision);
+    let ifname = forwarding
+        .ifindex_to_config_name
+        .get(&scope_ifindex)
+        .map(String::as_str)
+        .unwrap_or("");
+    let routing_instance = forwarding
+        .ifindex_to_routing_instance
+        .get(&scope_ifindex)
+        .map(String::as_str)
+        .unwrap_or("");
+    let Some((decision, _)) = forwarding.dnat_table.lookup_with_counter_scoped(
+        meta.protocol,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        zone_name,
+        ifname,
+        routing_instance,
+        None,
+    ) else {
+        return false;
+    };
+    match decision.rewrite_dst {
+        Some(std::net::IpAddr::V4(target)) => !forwarding.configured_iface_v4.contains(&target),
+        Some(std::net::IpAddr::V6(target)) => !forwarding.configured_iface_v6.contains(&target),
+        None => false,
     }
-    // Ambiguous promotion: only with owner proof (gated_override Some) may
-    // the withheld claimed zone + NAT-scope ifindex re-scope the probe.
-    if gated_override.is_some()
-        && ambiguous_zone.is_some()
-        && let Some(scope_ifindex) = ambiguous_scope_ifindex
-        && let Some((decision, _)) = lookup(zone_name(ambiguous_zone), scope_ifindex)
-    {
-        return is_transit(&decision);
-    }
-    false
 }
 
 /// Reinject an IPsec packet only after the caller has completed every
