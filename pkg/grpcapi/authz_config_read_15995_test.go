@@ -327,3 +327,41 @@ func TestShowWholePricesWithSnapshotCfg15995(t *testing.T) {
 		t.Error("whole ShowConfig with current cfg admitted (control broken)")
 	}
 }
+
+// Fold 6 handler-level witness: whole ShowConfig through
+// authorizeRPCContext (the production interceptor path) + handler.
+// The store restricts ancuser's class; authorize with the store's
+// CURRENT cfg via the full context (which internally captures the
+// snapshot cfg) — the handler must never be reached admitted. An
+// admitted context that rendered (the pre-fix stale-pairing shape at
+// handler level) fails here.
+func TestShowWholeHandlerStaleInterleave15995(t *testing.T) {
+	s := ancestor15995Server(t)
+	s.store.ExitConfigure()
+	ctx, err := s.authorizeRPCContext(ctxWithPeerUID(uidAncestor15995), show14707Method("ShowConfig"),
+		wholeReq15995())
+	if err == nil {
+		resp, herr := s.ShowConfig(ctx, wholeReq15995())
+		if herr != nil {
+			t.Fatalf("handler err after admitted gate: %v", herr)
+		}
+		t.Fatalf("whole ShowConfig ADMITTED at handler for restricted class; output:\n%s", resp.Output)
+	}
+	// Open control through the same handler path renders.
+	octx, err := s.authorizeRPCContext(ctxWithPeerUID(uidOpen15995), show14707Method("ShowConfig"), wholeReq15995())
+	if err != nil {
+		t.Fatalf("open whole authorize: %v", err)
+	}
+	resp, herr := s.ShowConfig(octx, wholeReq15995())
+	if herr != nil {
+		t.Fatalf("open whole handler: %v", herr)
+	}
+	if !strings.Contains(resp.Output, "ipsec") {
+		t.Errorf("open whole render lost ipsec:\n%s", resp.Output)
+	}
+}
+
+
+func wholeReq15995() *pb.ShowConfigRequest {
+	return &pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE}
+}

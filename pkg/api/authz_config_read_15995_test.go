@@ -255,3 +255,26 @@ func TestRESTWholePricesWithSnapshotCfg15995(t *testing.T) {
 		t.Error("REST whole show with current cfg admitted (control broken)")
 	}
 }
+
+// Fold 6 handler-level witness (REST): whole GET /config/show through
+// the real HTTP surface. The store restricts ancuser's class, so the
+// whole render must 403 through middleware+handler — an admitted
+// handler execution (the stale-pairing shape) would answer 200 with
+// the tree size in Content-Length.
+func TestRESTWholeShowHandlerRestricted15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	_, base := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(uid15995REST)})
+	if code, body := get14707(t, base, "/api/v1/config/show"); code != http.StatusForbidden {
+		t.Errorf("whole GET /config/show (handler) = %d, want 403: %s", code, body)
+	}
+	// Open control renders the whole tree through the handler.
+	_, baseOpen := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(4261)})
+	if code, body := get14707(t, baseOpen, "/api/v1/config/show"); code != http.StatusOK || !strings.Contains(body, "ipsec") {
+		t.Errorf("open whole GET (handler) = %d, want 200 with ipsec: %s", code, body)
+	}
+}
