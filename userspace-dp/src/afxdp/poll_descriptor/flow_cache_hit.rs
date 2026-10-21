@@ -249,6 +249,51 @@ pub(super) fn stage_flow_cache_hit(
                 cached.decision.resolution,
             )
         };
+        // #16222 DISC (scratch observability, debug-log builds only):
+        // per-tuple dump for starved-tuple diagnosis — seeded decision
+        // kind, stamp owner RG, stored resolution, cache outcome per
+        // packet. Tuple-gated on the live split-RG shape
+        // (10.0.61.102 -> 172.16.80.200:5211) so the log stays bounded
+        // to the starved streams; compiled out in non-debug builds.
+        #[cfg(feature = "debug-log")]
+        {
+            let k = &flow.forward_key;
+            let is_starved_tuple = k.src_ip == std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 102))
+                && k.dst_ip == std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 200))
+                && k.dst_port == 5211;
+            if is_starved_tuple {
+                debug_log!(
+                    "DISC16222 tuple={}:{}->{}:{} proto={} ingress_if={} packet_fabric_ingress={} fabric_link_ingress={} seeded_kind={:?} stamp_owner_rg={} stored_resolution={:?} egress_if={} local_owner_rg={} invalid_reason={:?} outcome={}",
+                    k.src_ip,
+                    k.src_port,
+                    k.dst_ip,
+                    k.dst_port,
+                    k.protocol,
+                    meta.ingress_ifindex,
+                    packet_fabric_ingress,
+                    fabric_link_ingress,
+                    cached.decision.resolution.disposition,
+                    cached.stamp.owner_rg_id,
+                    cached.decision.resolution.disposition,
+                    cached.decision.resolution.egress_ifindex,
+                    crate::afxdp::forwarding::owner_rg_for_resolution(
+                        worker_ctx.forwarding,
+                        cached.decision.resolution
+                    ),
+                    invalid_reason,
+                    if neighbor_mac_stale
+                        || (fabric_link_ingress
+                            && cached.decision.resolution.disposition
+                                == ForwardingDisposition::FabricRedirect)
+                        || invalid_reason.is_some()
+                    {
+                        "evict"
+                    } else {
+                        "serve"
+                    },
+                );
+            }
+        }
         // evict and re-resolve on the slow path.
         if neighbor_mac_stale
             || (fabric_link_ingress

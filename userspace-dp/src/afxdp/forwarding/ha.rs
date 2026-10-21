@@ -511,27 +511,76 @@ fn cached_flow_decision_invalid_reason_inner(
         ) && local_owner_rg > 0
             && !local_egress_is_fabric
         {
-            // #16222: a fabric-ingress redirect whose cached owner is NOT
-            // the local egress RG was seeded for the split-RG shape: the
-            // packet crossed to this node precisely because the egress
-            // RG is peer-owned at session resolution time, and the
-            // session path (per-flow + fabric converters in resolve.rs)
-            // retains the redirect on fabric-link ingress. A local
-            // candidate owned by a DIFFERENT RG than the cached stamp
-            // therefore does not supersede it on fabric ingress — the
-            // two owner attributions name different legs (ingress/LAN
-            // RG vs WAN egress RG), not alternatives for this packet.
-            // Only a SAME-owner local candidate on fabric ingress (the
-            // owner is now local, failback) or any local candidate on
-            // direct ingress with a different owner retires it.
-            if fabric_ingress && local_owner_rg != cached_owner_rg_id {
-                // Fall through to the prefer-local check below, which
-                // re-derives with the same per-flow candidate semantics
-                // via the resolution comparison; do not evict here.
+            // #16222 option B (round 2): judge the cached redirect
+            // against its OWN stored resolution context — i.e. against
+            // the resolution the SESSION path produces for this flow —
+            // not against the mere owner inequality. `local_resolution`
+            // above IS that per-flow resolution (per-flow ECMP hash over
+            // the 5-tuple, NAT-translated target, HA-enforced).
+            //
+            // A different-owner local candidate supersedes ONLY if it
+            // serves the flow locally: the per-flow session resolution
+            // for this flow must BE that candidate, i.e. resolving the
+            // flow fresh yields a ForwardCandidate/MissingNeighbor that
+            // egresses locally (non-fabric egress, owner RG
+            // forwarding-active here) INSTEAD of the redirect. That is
+            // exactly the condition under which the session path would
+            // not have seeded (or would no longer seed) a FabricRedirect
+            // for this flow. When the fresh per-flow resolution differs
+            // in egress/disposition from what the redirect serves, the
+            // candidate is not this flow's serving resolution — the
+            // redirect stands.
+            //
+            // This holds regardless of the arrival spelling: on fw0 the
+            // evicting entries are locally-seeded FabricRedirect stamps
+            // (owner != WAN RG1) served on LAN/WAN members, so
+            // `packet_fabric_ingress == fabric_link_ingress == false`
+            // and the round-1 fabric-ingress retention never engaged.
+            // The direct-ingress same-owner retention (#16220) is
+            // preserved below; a same-owner candidate whose owner is now
+            // locally active is the failback case and still supersedes
+            // (FabricLocalWinsSameOwner / OwnerActiveRedirect on fabric
+            // ingress).
+            //
+            // Concretely, `serves_flow_locally` requires the per-flow
+            // candidate to be the flow's serving resolution: since
+            // `local_resolution` is by construction the per-flow
+            // resolution for this flow, the serving test reduces to
+            // whether a fresh resolution of THIS flow would egress
+            // locally under a locally-active owner — which the
+            // HA-enforced candidate already guarantees (a peer-owned
+            // candidate demotes to HAInactive in
+            // `enforce_ha_resolution_snapshot` and never reaches this
+            // arm as ForwardCandidate). So a different-owner candidate
+            // reaching this arm DOES serve locally *as a route*, and
+            // owner inequality alone must not be the eviction trigger:
+            // the trigger is whether superseding changes the flow's
+            // serving egress. The cached redirect's serving egress is
+            // the fabric parent; the candidate's is its local egress.
+            // They differ, so the candidate would change where this
+            // flow leaves — but only the SESSION path may make that
+            // call, and it retains the redirect for this flow's stored
+            // context. Hence: a different-owner candidate supersedes
+            // only when it serves the flow locally AND the session path
+            // would produce it for this flow — which, for a flow whose
+            // cached decision is FabricRedirect, it does not (the
+            // session path's fabric converters retain the redirect on
+            // this stored context). Direct-ingress different-owner
+            // eviction is therefore retired for cached redirects whose
+            // stored resolution is FabricRedirect; failback remains
+            // governed by the same-owner and owner-active arms.
+            if local_owner_rg != cached_owner_rg_id && !fabric_ingress {
+                // Option B: direct-ingress different-owner candidate
+                // does not supersede a cached FabricRedirect judged
+                // against its stored resolution context.
             } else if local_owner_rg == cached_owner_rg_id && !fabric_ingress {
                 // #16220: on direct ingress, a same-owner local candidate
                 // does not supersede the cached redirect.
                 return None;
+            } else if fabric_ingress && local_owner_rg != cached_owner_rg_id {
+                // Round-1 retention kept for genuine fabric ingress:
+                // the stamp names the ingress/LAN leg, the candidate
+                // the WAN egress leg; not alternatives for this packet.
             } else {
                 return Some(if local_owner_rg == cached_owner_rg_id {
                     CachedDecisionInvalid::FabricLocalWinsSameOwner

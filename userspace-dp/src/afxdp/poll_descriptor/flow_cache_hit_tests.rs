@@ -3852,6 +3852,45 @@ fn fabric_stamp_ingress_serves_cached_redirect_16222() {
     );
 }
 
+/// #16222 round 2: the fw0-seeded shape at stage level — DIRECT member
+/// ingress (both fabric flags false), cached FabricRedirect, stamp owner
+/// RG2 != WAN RG1. Round 1 retained only on fabric ingress, so this hit
+/// evicted as PostHitFabricLocalWins per packet on fw0. Option B must
+/// serve the second packet with the FabricLocalWins arm at 0.
+#[test]
+fn direct_member_ingress_serves_cached_redirect_owner_mismatch_16222() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.descriptor.fabric_redirect = true;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
+    entry.stamp.owner_rg_id = 2;
+    entry.metadata.owner_rg_id = 2;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            packet_fabric_ingress: false,
+            fabric_link_ingress: false,
+            ..StageSeed::default()
+        },
+    );
+    let arm = crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins as usize;
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[arm], 0,
+        "direct-member ingress must not evict as different-owner FabricLocalWins (fw0 shape)"
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "second packet on direct member ingress must be served from cache"
+    );
+}
+
 #[test]
 fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
