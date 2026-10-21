@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Route every slog record through the bounded per-client syslog writer
+    instead of a synchronous Send for non-event callers: a blackholed
+    TCP/TLS collector could park arbitrary daemon goroutines (commit,
+    reconcile, API handlers) behind the client mutex for the write/dial
+    timeout. Slog records now queue (depth 128, 64 KiB each), overflow
+    drops and counts with a rate-limited warning, and a record emitted
+    from inside a client's own writer loop is dropped and counted
+    rather than re-queued (#16083).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Render Kea DHCP configs 0640 root:_kea instead of 0644 in a 0755
     directory: the rendered kea-dhcp{4,6}.conf carries the full
     static-reservation inventory (MAC, IP, hostname), previously
