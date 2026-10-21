@@ -21,6 +21,11 @@ type restConfigReadSnapshots struct {
 	NodeID  int
 	// Present: gate captured a snapshot; nil Primary = priced absence.
 	Present bool
+	// Renders records that the gated route's handler renders FROM
+	// these snapshots (compare arms). Distinct from Present so a
+	// captured-but-not-rendered snapshot cannot be mistaken for
+	// the render source.
+	Renders bool
 }
 
 func restConfigReadSnapshotsFrom(r *http.Request) (restConfigReadSnapshots, bool) {
@@ -117,24 +122,56 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 				snaps.NodeID = nid
 				snaps.Primary = tree
 			}
-			return snaps, config.AuthorizeConfigShowWhole(priceCfg, class,
-				config.ConfigShowDisplaySuffix(restShowFormat(format)))
+			return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class,
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), snaps.Primary)
 		}
 	case "GET /api/v1/config":
 		// Typed compiled-config render; whole tree, no display format.
-		return restConfigReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class, "")
+		// The handler renders ActiveConfig regardless of ?target=, so
+		// always price the ACTIVE tree (#15994 fold 4).
+		snaps, priceCfg := s.activeWholeSnap15994(cfg)
+		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", snaps.Primary)
 	case "GET /api/v1/config/export":
 		if format == "" {
 			format = "set" // configExportHandler's default
 		}
-		return restConfigReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class,
-			config.ConfigShowDisplaySuffix(restShowFormat(format)))
+		snaps, priceCfg := s.activeWholeSnap15994(cfg)
+		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class,
+			config.ConfigShowDisplaySuffix(restShowFormat(format)), snaps.Primary)
 	case "GET /api/v1/config/search":
-		// Line search over the whole active render.
-		return restConfigReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class, "")
+		// Line search over the whole active render (active only,
+		// regardless of ?target= — see /config above).
+		snaps, priceCfg := s.activeWholeSnap15994(cfg)
+		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", snaps.Primary)
 	case "GET /api/v1/config/compare":
-		// REST compare has no ?path= selector: whole-tree diff.
-		return restConfigReadSnapshots{}, config.AuthorizeConfigShowCompare(cfg, class)
+		// REST compare: ?rollback?N selects the rollback baseline
+		// (configCompareHandler): rollback>0 diffs slot vs candidate,
+		// rollback=0 (absent) diffs candidate vs active. Price the
+		// REQUESTED arms — never a different baseline — and attach
+		// the priced arms for the handler to render (#15994 fold2-1).
+		rollbackN, okRollback := queryIntStrict(r, "rollback", 0)
+		if !okRollback || s == nil || s.store == nil {
+			return restConfigReadSnapshots{}, config.AuthorizeConfigShowCompare(cfg, class)
+		}
+		snaps := restConfigReadSnapshots{Present: true, NodeID: -1}
+		priceCfg := cfg
+		if rollbackN > 0 {
+			scfg, slot, candidate, nid, _, _ := s.store.RollbackCompareSnapshot(rollbackN, false)
+			if scfg != nil {
+				priceCfg = scfg
+			}
+			snaps.NodeID = nid
+			snaps.Primary, snaps.Other = slot, candidate
+			snaps.Renders = candidate != nil
+			return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, slot, candidate)
+		}
+		scfg, active, candidate, _ := s.store.CompareSnapshot()
+		if scfg != nil {
+			priceCfg = scfg
+		}
+		snaps.Primary, snaps.Other = active, candidate
+		snaps.Renders = candidate != nil
+		return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, active, candidate)
 	case "GET /api/v1/config/show-rollback":
 		// #15942 H2-04: ?path= scopes the render (the handler honours
 		// it), so the gate prices that subtree, not the whole tree.
@@ -172,6 +209,27 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 	}
 	return restConfigReadSnapshots{}, nil
 }
+
+// activeWholeSnap15994 captures the ACTIVE tree + its own cfg for
+// the active-only whole-render routes (#15994 fold 4): handlers for
+// /config, /config/export and /config/search always render active,
+// so a ?target=candidate selector must never price the candidate.
+func (s *Server) activeWholeSnap15994(cfg *config.Config) (restConfigReadSnapshots, *config.Config) {
+	snaps := restConfigReadSnapshots{Present: true, NodeID: -1}
+	priceCfg := cfg
+	if s != nil && s.store != nil {
+		scfg, tree, nid, _ := s.store.ShowConfigSnapshot("active")
+		if scfg != nil {
+			priceCfg = scfg
+		}
+		snaps.NodeID = nid
+		snaps.Primary = tree
+	}
+	return snaps, priceCfg
+}
+
+// _ = config (import guard for tooling).
+var _ = config.ConfigShowDisplaySuffix
 
 // restShowFormat maps a REST ?format= spelling to the shared gate's
 // display spelling. REST uses "text" for the hierarchical form; the

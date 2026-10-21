@@ -65,15 +65,44 @@ import (
 // arm, whose operational pair was charged on the full command line).
 // displaySuffix is "display set" / "display json" / "display xml" /
 // "display inheritance", or "" for the hierarchical form.
+// #15994: group content is effective config. Group bodies are authored
+// under the literal `groups <name> ...` definition spelling, so the
+// joined-path evaluation alone never sees the `security ...` subtree
+// the body materializes — and the scoped renders disclose it.
+// readSpellings15994 returns every spelling the read gate prices:
+// the authored (definition) path followed by the effective path it
+// materializes, recursively unwrapping nested `groups <name>`
+// containers. Ancestor spellings `groups` / `groups <name>` carry
+// only the definition spelling here; the descendant walk admits
+// those only when the class's rules admit every effective path the
+// render actually contains (see authorizeConfigRenderedDescendants).
+func readSpellings15994(path []string) [][]string {
+	out := [][]string{append([]string(nil), path...)}
+	if len(path) >= 2 && path[0] == "groups" {
+		for _, sub := range readSpellings15994(path[2:]) {
+			out = append(out, sub)
+		}
+	}
+	return out
+}
+
 func AuthorizeConfigShowPath(cfg *Config, class string, path []string, displaySuffix string) error {
 	if class == "" {
 		return nil
 	}
-	joined := strings.Join(path, " ")
-	if err := authorizeConfigReadPath(cfg, class, joined); err != nil {
-		return err
+	for _, spelling := range readSpellings15994(path) {
+		if len(spelling) == 0 {
+			continue
+		}
+		joined := strings.Join(spelling, " ")
+		if err := authorizeConfigReadPath(cfg, class, joined); err != nil {
+			return err
+		}
+		if err := authorizeShowCommand(cfg, class, "show configuration "+joined, displaySuffix); err != nil {
+			return err
+		}
 	}
-	return authorizeShowCommand(cfg, class, "show configuration "+joined, displaySuffix)
+	return nil
 }
 
 // AuthorizeConfigShowPathRendered adjudicates an explicit subtree read
@@ -101,7 +130,10 @@ func AuthorizeConfigShowPathRendered(cfg *Config, class string, path []string, d
 	if err := AuthorizeConfigShowPath(cfg, class, path, displaySuffix); err != nil {
 		return err
 	}
-	return authorizeConfigRenderedDescendants(cfg, class, path, trees)
+	if err := authorizeRenderedDescendantsGroups(cfg, class, path, trees); err != nil {
+		return err
+	}
+	return authorizeOpDescendantsGroups(cfg, class, path, displaySuffix, trees)
 }
 
 // AuthorizeExpandedConfigShowPathRendered is AuthorizeConfigShowPathRendered
@@ -119,6 +151,18 @@ func AuthorizeExpandedConfigShowPathRendered(cfg *Config, class string, path []s
 		return nil
 	}
 	if err := AuthorizeConfigShowPath(cfg, class, path, displaySuffix); err != nil {
+		return err
+	}
+	// Fold2-4: run BOTH walks regardless of which pair restricts —
+	// the raw-tree groups walk (unwrapping + ancestors) AND the
+	// expanded descendant walk AND the op-descendant walk. Skipping
+	// the groups walk when config rules exist (the old shape) left
+	// `groups G … | display inheritance` unpriced on the effective
+	// spelling.
+	if err := authorizeRenderedDescendantsGroups(cfg, class, path, trees); err != nil {
+		return err
+	}
+	if err := authorizeOpDescendantsGroups(cfg, class, path, displaySuffix, trees); err != nil {
 		return err
 	}
 	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
@@ -417,6 +461,172 @@ func AuthorizeConfigShowWhole(cfg *Config, class string, displaySuffix string) e
 	return authorizeShowCommand(cfg, class, "show configuration", displaySuffix)
 }
 
+// --- #15994 whole-tree groups entries (op verdict always carried) ---
+
+// authorizeWholeGroups checks whether a whole-render substitution
+// is available for trees: every tree either carries group stanzas
+// (priced by the contained+expanded walks) or is groupless (then
+// the blanket refusal stands). Returns (substitute, error): when
+// substitute is false the caller must return its base refusal.
+func authorizeWholeGroups(cfg *Config, class string, trees []*ConfigTree) (bool, error) {
+	anyGroups := false
+	for _, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		if treeHasGroupStanzas14981(tree) {
+			anyGroups = true
+		}
+	}
+	if !anyGroups {
+		return false, nil
+	}
+	for _, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		// Root scope: every root node + subtree, definitions and
+		// unwrapped spellings included (fix for the nil-path
+		// navigatePath no-match bug in the first fold).
+		if err := authorizeRenderedDescendantsGroups(cfg, class, nil, []*ConfigTree{tree}); err != nil {
+			return false, err
+		}
+		if err := authorizeConfigReadExpanded15994(cfg, class, tree); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// authorizeConfigReadExpanded15994 prices every effective (group-
+// expanded) set line of tree, no wholeErr shortcut: any denied
+// effective path refuses. Definition lines are NOT skipped — the
+// render prints them, and a deny on `groups` must refuse (fold 3).
+func authorizeConfigReadExpanded15994(cfg *Config, class string, tree *ConfigTree) error {
+	if tree == nil {
+		return nil
+	}
+	lines, err := ExpandedMutationLines(tree)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+			"the group expansion cannot be resolved for adjudication: %w", class, err)
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if err := authorizeConfigReadPath(cfg, class, strings.Join(fields[1:], " ")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AuthorizeConfigShowWholeAtTree adjudicates a whole-tree read whose
+// render discloses trees: the config whole-refusal substitutes the
+// contained+expanded pricing when the class admits every contained
+// path; the operational bare command (with display suffix) is ALWAYS
+// re-charged afterwards, so an op-only deny (e.g. `display set`)
+// can never be substituted away (fold B1). A groupless tree keeps
+// the blanket refusal.
+func AuthorizeConfigShowWholeAtTree(cfg *Config, class string, displaySuffix string, trees ...*ConfigTree) error {
+	if class == "" {
+		return nil
+	}
+	base := AuthorizeConfigShowWhole(cfg, class, displaySuffix)
+	if base == nil {
+		// Fold3: whole renders serialize every path; when any
+		// rendered tree carries `groups` stanzas, price the
+		// effective op commands — the bare bare-command verdict
+		// alone would wave through a path-scoped op deny
+		// (`^show configuration security`) for content authored
+		// as a group body. Only runs when groups present, so
+		// groupless renders keep the pre-fold behavior exactly.
+		var hasGroups bool
+		for _, tree := range trees {
+			if tree != nil && treeHasGroupStanzas14981(tree) {
+				hasGroups = true
+				break
+			}
+		}
+		if hasGroups {
+			if err := authorizeOpDescendantsGroups(cfg, class, nil, displaySuffix, trees); err != nil {
+				return err
+			}
+			// Also price every effective path expanded (covers
+			// applied bodies materialized outside `groups` nodes).
+			if err := authorizeConfigReadExpanded15994(cfg, class, firstTree15994(trees)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	substitute, err := authorizeWholeGroups(cfg, class, trees)
+	if err != nil || !substitute {
+		return base
+	}
+	return authorizeShowCommand(cfg, class, "show configuration", displaySuffix)
+}
+
+// firstTree15994 returns the first non-nil tree, or nil.
+func firstTree15994(trees []*ConfigTree) *ConfigTree {
+	for _, t := range trees {
+		if t != nil {
+			return t
+		}
+	}
+	return nil
+}
+
+// AuthorizeConfigShowCompareAtTree adjudicates an unscoped candidate
+// diff over both arms, with the same fold-3 op pricing as WholeAtTree.
+func AuthorizeConfigShowCompareAtTree(cfg *Config, class string, old, new *ConfigTree) error {
+	if class == "" {
+		return nil
+	}
+	trees := []*ConfigTree{old, new}
+	var hasGroups bool
+	for _, tree := range trees {
+		if tree != nil && treeHasGroupStanzas14981(tree) {
+			hasGroups = true
+			break
+		}
+	}
+	base := AuthorizeConfigShowCompare(cfg, class)
+	if base == nil {
+		if hasGroups {
+			return authorizeOpDescendantsGroups(cfg, class, nil, "", trees)
+		}
+		return nil
+	}
+	substitute, err := authorizeWholeGroups(cfg, class, trees)
+	if err != nil || !substitute {
+		return base
+	}
+	return authorizeShowCommand(cfg, class, "show configuration", "")
+}
+
+// AuthorizeConfigShowRollbackAtTree adjudicates an unscoped rollback
+// render over tree, with the same fold-3 op pricing as WholeAtTree.
+func AuthorizeConfigShowRollbackAtTree(cfg *Config, class string, tree *ConfigTree, displaySuffix string) error {
+	if class == "" {
+		return nil
+	}
+	base := AuthorizeConfigShowRollback(cfg, class, displaySuffix)
+	if base == nil {
+		if tree != nil && treeHasGroupStanzas14981(tree) {
+			return authorizeOpDescendantsGroups(cfg, class, nil, displaySuffix, []*ConfigTree{tree})
+		}
+		return nil
+	}
+	substitute, err := authorizeWholeGroups(cfg, class, []*ConfigTree{tree})
+	if err != nil || !substitute {
+		return base
+	}
+	return authorizeShowCommand(cfg, class, "show configuration", displaySuffix)
+}
+
 // AuthorizeConfigShowCompare adjudicates a candidate diff render
 // (ShowCompare, both arms). The diff discloses candidate content under
 // arbitrary paths, so a configuration-restricted class is refused, as
@@ -479,14 +689,289 @@ func AuthorizeConfigShowSystemPath(cfg *Config, class string, path []string, com
 	if class == "" {
 		return nil
 	}
-	joined := strings.Join(path, " ")
-	if err := authorizeConfigReadPath(cfg, class, joined); err != nil {
-		return err
+	for _, spelling := range readSpellings15994(path) {
+		if len(spelling) == 0 {
+			continue
+		}
+		joined := strings.Join(spelling, " ")
+		if err := authorizeConfigReadPath(cfg, class, joined); err != nil {
+			return err
+		}
+		if err := authorizeShowCommand(cfg, class, "show configuration "+joined, ""); err != nil {
+			return err
+		}
 	}
 	return authorizeShowCommand(cfg, class, command, "")
 }
 
-// AuthorizeConfigShowSystemPathRendered is AuthorizeConfigShowSystemPath
+// AuthorizeConfigPathOnlyWithOp15994 is AuthorizeConfigPathOnly plus the
+// operational (`*-commands`) pair on every effective spelling (#15994):
+// the CLI operational `show configuration …` arm already charged the
+// literal line through checkCommandRegex, but never the unwrapped
+// effective command (`show configuration security` for
+// `show configuration groups G security`). Charging it against the
+// shorter string again is not double-charging: the literal verdict
+// and the effective verdict judge different strings, and both must
+// admit. displaySuffix is "set"/"json"/"xml"/"inheritance" or "".
+func AuthorizeConfigPathOnlyWithOp15994(cfg *Config, class string, path []string, displaySuffix string) error {
+	if err := AuthorizeConfigPathOnly(cfg, class, path); err != nil {
+		return err
+	}
+	for _, spelling := range readSpellings15994(path) {
+		if len(spelling) == 0 {
+			continue
+		}
+		if err := authorizeShowCommand(cfg, class, "show configuration "+strings.Join(spelling, " "), displaySuffix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AuthorizeConfigPathOnlyRenderedWithOp15994 is
+// AuthorizeConfigPathOnlyWithOp15994 plus the rendered-descendant
+// price (#15995), for the CLI operational arm.
+func AuthorizeConfigPathOnlyRenderedWithOp15994(cfg *Config, class string, path []string, displaySuffix string, trees ...*ConfigTree) error {
+	if err := AuthorizeConfigPathOnlyWithOp15994(cfg, class, path, displaySuffix); err != nil {
+		return err
+	}
+	if class == "" {
+		return nil
+	}
+	if err := authorizeRenderedDescendantsGroups(cfg, class, path, trees); err != nil {
+		return err
+	}
+	return authorizeOpDescendantsGroups(cfg, class, path, displaySuffix, trees)
+}
+
+// AuthorizeExpandedConfigPathOnlyRenderedWithOp15994 is the
+// `| display inheritance` twin (expanded trees).
+func AuthorizeExpandedConfigPathOnlyRenderedWithOp15994(cfg *Config, class string, path []string, displaySuffix string, nodeID int, trees ...*ConfigTree) error {
+	if err := AuthorizeConfigPathOnlyWithOp15994(cfg, class, path, displaySuffix); err != nil {
+		return err
+	}
+	if class == "" {
+		return nil
+	}
+	// Fold2-4: both walks regardless of which pair restricts.
+	if err := authorizeRenderedDescendantsGroups(cfg, class, path, trees); err != nil {
+		return err
+	}
+	if err := authorizeOpDescendantsGroups(cfg, class, path, displaySuffix, trees); err != nil {
+		return err
+	}
+	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	if !ok {
+		return nil
+	}
+	expanded, err := expandRenderedTrees15995(class, path, nodeID, trees)
+	if err != nil {
+		return err
+	}
+	return authorizeConfigRenderedDescendantsWithRules(class, rules, path, expanded)
+}
+
+// --- #15994 helpers (groups pricing onto the #15995 Rendered gate) ---
+
+// authorizeRenderedDescendantsGroups is authorizeConfigRenderedDescendants
+// with the groups rewrite: every rendered complete path (trail,
+// terminal, descendants — built by navigateRenderedMatches and the
+// recursive authorizeRenderedNodeGroups walk) is also priced under
+// its group-unwrapped spelling(s). Root scope (empty path) prices
+// every root node and its whole subtree.
+func authorizeRenderedDescendantsGroups(cfg *Config, class string, path []string, trees []*ConfigTree) error {
+	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid configuration regex: %w", class, err)
+	}
+	if !ok {
+		return nil
+	}
+	for _, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		if len(path) == 0 {
+			for _, root := range tree.Children {
+				for _, mp := range renderedNodePaths(nil, root) {
+					if err := authorizeRenderedPath(class, rules, path, mp); err != nil {
+						return err
+					}
+					if err := authorizeRenderedNodeGroups(cfg, class, rules, mp, root); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+		}
+		matches := navigateRenderedMatches(tree.Children, path)
+		if len(matches) == 0 && isAncestorGroupsScope(path) {
+			// Restricted-only by construction (this helper is
+			// config-restricted-gated): an unresolvable groups
+			// scope on a restricted read cannot be priced.
+			return fmt.Errorf("permission denied: login class %q denies configuration under \"groups\" "+
+				"(scope %q cannot be resolved in the render for adjudication)", class, strings.Join(path, " "))
+		}
+		for _, m := range matches {
+			for _, anc := range trailPathsBeyondRequest(path, m) {
+				if err := authorizeRenderedPath(class, rules, path, anc); err != nil {
+					return err
+				}
+				if err := authorizeConfigReadPathUnwrapped(cfg, class, anc); err != nil {
+					return err
+				}
+			}
+			for _, mp := range renderedNodePaths(parentPathOf(m), m.node) {
+				if err := authorizeRenderedPath(class, rules, path, mp); err != nil {
+					return err
+				}
+				if err := authorizeConfigReadPathUnwrapped(cfg, class, mp); err != nil {
+					return err
+				}
+				if strings.Join(mp, " ") != strings.Join(m.path, " ") {
+					if err := authorizeRenderedNodeGroups(cfg, class, rules, mp, m.node); err != nil {
+						return err
+					}
+				}
+			}
+			if err := authorizeRenderedNodeGroups(cfg, class, rules, m.path, m.node); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// authorizeRenderedNodeGroups prices every descendant below n,
+// recursively, on the config pair — the #15995 recursive walk with
+// group-unwrapped spellings added per rendered path.
+func authorizeRenderedNodeGroups(cfg *Config, class string, rules CompiledLoginRegexes, prefix []string, n *Node) error {
+	for _, child := range n.Children {
+		for _, childPath := range renderedNodePaths(prefix, child) {
+			joined := strings.Join(childPath, " ")
+			if decision := rules.Evaluate(joined); !decision.Allowed {
+				return fmt.Errorf("permission denied: login class %q denies configuration under %q (%s); "+
+					"the requested subtree %q renders that descendant, so the ancestor read is refused — "+
+					"request an allowed subtree instead (#15994)",
+					class, configAuditRoot(joined), decision.Reason, configAuditRoot(strings.Join(prefix, " ")))
+			}
+			if err := authorizeConfigReadPathUnwrapped(cfg, class, childPath); err != nil {
+				return err
+			}
+			if err := authorizeRenderedNodeGroups(cfg, class, rules, childPath, child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// authorizeConfigReadPathUnwrapped prices path under its group-
+// unwrapped spellings (no-op when path has no `groups` prefix).
+func authorizeConfigReadPathUnwrapped(cfg *Config, class string, path []string) error {
+	for _, spelling := range readSpellings15994(path) {
+		if len(spelling) == 0 {
+			continue
+		}
+		joined := strings.Join(spelling, " ")
+		if joined == strings.Join(path, " ") {
+			continue
+		}
+		if err := authorizeConfigReadPath(cfg, class, joined); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isAncestorGroupsScope reports whether path is `groups` or
+// `groups <name>` — a scope whose value is the group bodies it holds.
+func isAncestorGroupsScope(path []string) bool {
+	return len(path) <= 2 && len(path) >= 1 && path[0] == "groups"
+}
+
+// authorizeOpDescendantsGroups charges the operational pair on the
+// effective command for every rendered path under path that passes
+// through a `groups` container (#15994 fold, ancestors op-arm).
+// Literal paths were already charged by the caller's command
+// verdict; only the group alias needs pricing here.
+func authorizeOpDescendantsGroups(cfg *Config, class string, path []string, displaySuffix string, trees []*ConfigTree) error {
+	_, ok, err := OperationalLoginRegexesFor(cfg, class)
+	if err != nil {
+		return fmt.Errorf("permission denied: login class %q has an invalid command regex: %w", class, err)
+	}
+	if !ok {
+		return nil
+	}
+	for _, tree := range trees {
+		if tree == nil {
+			continue
+		}
+		if len(path) == 0 {
+			for _, root := range tree.Children {
+				for _, mp := range renderedNodePaths(nil, root) {
+					if err := authorizeOpPath15994(cfg, class, mp, displaySuffix); err != nil {
+						return err
+					}
+					if err := authorizeOpNode15994(cfg, class, mp, displaySuffix, root); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+		}
+		for _, m := range navigateRenderedMatches(tree.Children, path) {
+			for _, mp := range renderedNodePaths(parentPathOf(m), m.node) {
+				if err := authorizeOpPath15994(cfg, class, mp, displaySuffix); err != nil {
+					return err
+				}
+				if err := authorizeOpNode15994(cfg, class, mp, displaySuffix, m.node); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// authorizeOpNode15994 prices every descendant of n (prefix =
+// rendered path of n) on the operational pair via authorizeOpPath15994.
+func authorizeOpNode15994(cfg *Config, class string, prefix []string, displaySuffix string, n *Node) error {
+	for _, child := range n.Children {
+		for _, childPath := range renderedNodePaths(prefix, child) {
+			if err := authorizeOpPath15994(cfg, class, childPath, displaySuffix); err != nil {
+				return err
+			}
+			if err := authorizeOpNode15994(cfg, class, childPath, displaySuffix, child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// authorizeOpPath15994 charges `show configuration <effective>` on
+// the operational pair when path's group-unwrapped spelling differs
+// from path itself — i.e. path passes through a `groups` container.
+func authorizeOpPath15994(cfg *Config, class string, path []string, displaySuffix string) error {
+	for _, spelling := range readSpellings15994(path) {
+		if len(spelling) == 0 {
+			continue
+		}
+		joined := strings.Join(spelling, " ")
+		if joined == strings.Join(path, " ") {
+			continue
+		}
+		if err := authorizeShowCommand(cfg, class, "show configuration "+joined, displaySuffix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // priced over the rendered descendants of path in trees (#15995 fold):
 // `show system login` and `show system root-authentication` print the
 // whole subtree at path, so a denied strict descendant refuses the
@@ -500,7 +985,7 @@ func AuthorizeConfigShowSystemPathRendered(cfg *Config, class string, path []str
 	if class == "" {
 		return nil
 	}
-	return authorizeConfigRenderedDescendants(cfg, class, path, trees)
+	return authorizeRenderedDescendantsGroups(cfg, class, path, trees)
 }
 
 // AuthorizeConfigShowRescue adjudicates `show system configuration
@@ -556,7 +1041,15 @@ func AuthorizeConfigPathOnly(cfg *Config, class string, path []string) error {
 	if class == "" {
 		return nil
 	}
-	return authorizeConfigReadPath(cfg, class, strings.Join(path, " "))
+	for _, spelling := range readSpellings15994(path) {
+		if len(spelling) == 0 {
+			continue
+		}
+		if err := authorizeConfigReadPath(cfg, class, strings.Join(spelling, " ")); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AuthorizeConfigPathOnlyRendered is AuthorizeConfigPathOnly plus the
@@ -570,7 +1063,7 @@ func AuthorizeConfigPathOnlyRendered(cfg *Config, class string, path []string, t
 	if err := AuthorizeConfigPathOnly(cfg, class, path); err != nil {
 		return err
 	}
-	return authorizeConfigRenderedDescendants(cfg, class, path, trees)
+	return authorizeRenderedDescendantsGroups(cfg, class, path, trees)
 }
 
 // AuthorizeExpandedConfigPathOnlyRendered is AuthorizeConfigPathOnly
@@ -583,6 +1076,11 @@ func AuthorizeExpandedConfigPathOnlyRendered(cfg *Config, class string, path []s
 		return nil
 	}
 	if err := AuthorizeConfigPathOnly(cfg, class, path); err != nil {
+		return err
+	}
+	// Fold2-4: groups walk regardless of which pair restricts (no
+	// op walk — already charged on the full command line).
+	if err := authorizeRenderedDescendantsGroups(cfg, class, path, trees); err != nil {
 		return err
 	}
 	rules, ok, err := ConfigurationLoginRegexesFor(cfg, class)
