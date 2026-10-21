@@ -213,8 +213,13 @@ func (s *KernelSelfRecovery) consumeLease() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("open kernel-roll lock: %w", err)
 	}
+	// Close on EVERY return path (success, busy, error): registered
+	// before the chmod so its failure path is covered too. Defers run
+	// LIFO, so the explicit LOCK_UN defer below fires first and this
+	// Close second — unlock-then-close, never the reverse leak where
+	// busy/error returns dropped the fd until GC.
+	defer lock.Close()
 	if err := lock.Chmod(0o600); err != nil {
-		lock.Close()
 		return false, fmt.Errorf("tighten kernel-roll lock to 0600: %w", err)
 	}
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {

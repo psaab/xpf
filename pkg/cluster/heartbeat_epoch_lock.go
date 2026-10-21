@@ -157,13 +157,16 @@ func withEpochFileLock(path string, fn func()) {
 			"protection is lost)", "path", path, "err", err)
 		return
 	}
+	// Close on EVERY return path: registered before the chmod so its
+	// failure path is covered too (a chmod-error return must not leak
+	// the fd). Defers run LIFO, so the LOCK_UN defer fires first.
+	defer f.Close()
 	if err := f.Chmod(0o600); err != nil {
 		slog.Warn("cluster: HA epoch state lock tighten to 0600 failed; SKIPPING the persist "+
 			"(the wall-clock epoch is already in use; only backward-clock-step "+
 			"protection is lost)", "path", path, "err", err)
 		return
 	}
-	defer f.Close()
 	if err := acquireEpochFileLock(int(f.Fd()), path); err != nil {
 		slog.Warn("cluster: HA epoch state lock failed; SKIPPING the persist "+
 			"(the wall-clock epoch is already in use; only backward-clock-step "+
