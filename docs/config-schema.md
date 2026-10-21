@@ -13444,6 +13444,37 @@ checks bracketed, mixed key/body, and nested block spellings in both action
 orders, strict rejection, tolerant warnings and fail-closed compilation, and
 single-action controls.
 
+### #15998 — Invalid `default-policy` value beside a valid one
+
+The #11821/#12821 censuses count only the three valid spellings
+(`permit-all`/`deny-all`/`reject-all`), and `compilePolicies` previously had
+no default arm, so a garbage second `default-policy` value — arriving via
+duplicate `security` roots or group restatement on tolerant `Load`/
+`SyncApply` — left an earlier `permit-all` standing as the device-wide
+no-match default. A single invalid value alone was already safe (the
+compiler initializes the default to deny-all, #3065); the fail-open needed
+a valid value anywhere plus an invalid value anywhere. The gate now
+censuses **every** authored token of every `default-policy` stanza
+(trailing keys, child names, child key tails, and nested children; only
+the stanza root's own name is exempt, so a nested `default-policy` child
+is itself an invalid token), and a quoted-empty (`""`) or missing value
+counts as invalid rather than being skipped. Strict compilation rejects
+naming the invalid value(s); tolerant compilation warns and forces
+deny-all — both in the `compilePolicies` default arm and in the
+post-dispatch reset, the latter covering group-expanded trees. Repeated
+valid or identical values remain accepted.
+
+Regression coverage: `pkg/config/compiler_default_policy_invalid_15998_test.go`
+(`TestInvalidSecondDefaultPolicyFailsClosed15998` — duplicate-root,
+same-block, flat, and both-orders shapes; `TestInvalidTrailingTokenInOneStanzaFailsClosed15998`
+— bracket/packed/nested invalid tokens inside one stanza;
+`TestEmptyDefaultPolicyTokenFailsClosed15998` — quoted-empty and
+missing-value stanzas; `TestNestedDefaultPolicyChildFailsClosed15998` —
+nested `default-policy` children; plus single-invalid and valid/identical
+controls in `TestSingleInvalidDefaultPolicyAloneIsDeny15998` and
+`TestValidDefaultPoliciesUnaffected15998`), each checking strict rejection,
+the tolerant `#15998` warning, and fail-closed `deny-all` compilation.
+
 ### #12823 — Inline `default-policy` overrides group choices
 
 `default-policy` is represented as a valued leaf for flat-set support, while
