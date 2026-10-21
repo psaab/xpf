@@ -36,21 +36,32 @@ func pathHasSecretIndex(fullPath []string) bool {
 	return len(secretIndices(fullPath)) > 0
 }
 
+// nameOnlyArg marks a string argument that is ALREADY a name-only
+// rendering (produced by redactSecretPath / redactedLocName): stanza
+// and leaf NAMES, never candidate values. redactArgsOnSecretLeaf
+// exempts marked args (fold 7, GLM F2 — unmarked, the #8437 site's
+// name-only prefix and every schemaPathErrorf `joined` prefix were
+// redacted as if operands, collapsing locations to <redacted>).
+type nameOnlyArg string
+
 // redactArgsOnSecretLeaf replaces EVERY string argument with
-// SecretRedacted when fullPath is secret-indexed (fold 6). String
-// args on a secret leaf are operator operands (extra/trailing/
-// modifier tokens); non-string args (counts, args-arity) are kept.
-// Defect-class format text is untouched, so diagnostics keep their
-// class ("unknown modifier <redacted>").
+// SecretRedacted when fullPath is secret-indexed (fold 6), EXCEPT
+// nameOnlyArg-marked ones. String args on a secret leaf are
+// operator operands (extra/trailing/modifier tokens); non-string
+// args (counts, args-arity) are kept. Defect-class format text is
+// untouched, so diagnostics keep their class.
 func redactArgsOnSecretLeaf(fullPath []string, args []interface{}) []interface{} {
 	if !pathHasSecretIndex(fullPath) {
 		return args
 	}
 	out := make([]interface{}, len(args))
 	for i, a := range args {
-		if _, ok := a.(string); ok {
+		switch v := a.(type) {
+		case nameOnlyArg:
+			out[i] = string(v)
+		case string:
 			out[i] = SecretRedacted
-		} else {
+		default:
 			out[i] = a
 		}
 	}
@@ -64,13 +75,14 @@ func schemaErrorf(fullPath []string, format string, args ...interface{}) error {
 }
 
 // schemaPathErrorf is schemaErrorf for the common walker shape: the
-// message is "<joined redacted path>: <formatted detail>". fullPath is
-// the complete key path of the leaf the detail describes.
+// message is "<joined redacted path>: <formatted detail>". The
+// joined prefix is name-only by construction (redactSecretPath),
+// so it is marked and never operand-redacted.
 func schemaPathErrorf(fullPath []string, format string, args ...interface{}) error {
 	joined := strings.Join(redactSecretPath(fullPath), " ")
 	args = redactArgsOnSecretLeaf(fullPath, args)
 	detail := fmt.Sprintf(format, args...)
-	return schemaErrorf(fullPath, "%s: %s", joined, detail)
+	return schemaErrorf(fullPath, "%s: %s", nameOnlyArg(joined), detail)
 }
 
 // SchemaValidate is the #1319 typed-leaf gate that runs at commit-check
@@ -314,12 +326,15 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 				return fieldScrub(zoneErr.keyword)
 			}(),
 		}
-		// GLM F1: re-scrub the RENDERED rebuilt error; if rendering
-		// reassembled a secret, neutralize the keyword field (the
-		// only operator-derived field) and re-render.
-		if scrubSecretValuesText(values, rebuilt.Error()) != rebuilt.Error() {
-			rebuilt.keyword = SecretRedacted
-			rebuilt.path = scrubSecretValuesText(values, rebuilt.path)
+		// Fold 7 (GLM B1): ALWAYS carry the scrubbed FINAL render.
+		// Field-wise neutralization cannot repair a secret spanning
+		// path-suffix + fixed template head (the keyword is innocent
+		// there); carrying scrubSecretValuesText(rebuilt.Error())
+		// in render makes reassembly impossible by construction,
+		// while errors.As classification is preserved by the type.
+		rebuilt.render = scrubSecretValuesText(values, rebuilt.Error())
+		if wholeEq {
+			rebuilt.render = SecretRedacted
 		}
 		return rebuilt
 	}
@@ -340,10 +355,9 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 				return fieldScrub(polErr.content)
 			}(),
 		}
-		if scrubSecretValuesText(values, rebuilt.Error()) != rebuilt.Error() {
-			rebuilt.keyword = SecretRedacted
-			rebuilt.content = scrubSecretValuesText(values, rebuilt.content)
-			rebuilt.path = scrubSecretValuesText(values, rebuilt.path)
+		rebuilt.render = scrubSecretValuesText(values, rebuilt.Error())
+		if wholeEq {
+			rebuilt.render = SecretRedacted
 		}
 		return rebuilt
 	}
@@ -1010,7 +1024,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 				"`%s` statement is then silently dropped from the compiled config "+
 				"while `show configuration` still displays it. Add the missing `;` "+
 				"(#8437)",
-				strings.Join(redactSecretPath(append(append([]string(nil), path...), keyword)), " "),
+				nameOnlyArg(strings.Join(redactSecretPath(append(append([]string(nil), path...), keyword)), " ")),
 				tok, keyword, keyword, tok)
 		}
 	}
@@ -1985,11 +1999,19 @@ func typedLeafErrorf(path []string, format string, args ...interface{}) error {
 	// belt exit scrub cannot see short/vocabulary tokens (`abc`,
 	// `password`) — construction is the only sound layer for them.
 	if len(path) > 0 && isSecretLeaf(strings.Join(redactSecretPath(path), " "), path[len(path)-1:]) {
+		// Copy before mutating (GLM residual): never corrupt a
+		// caller's spread slice. nameOnlyArg args pass through.
+		cp := make([]interface{}, len(args))
 		for i, a := range args {
-			if _, ok := a.(string); ok {
-				args[i] = SecretRedacted
+			if _, isName := a.(nameOnlyArg); isName {
+				cp[i] = a
+			} else if _, ok := a.(string); ok {
+				cp[i] = SecretRedacted
+			} else {
+				cp[i] = a
 			}
 		}
+		args = cp
 	}
 	detail := fmt.Sprintf(format, args...)
 	return &typedLeafSchemaError{

@@ -8,9 +8,18 @@ import (
 type unknownSecurityZoneChildSchemaError struct {
 	path    string
 	keyword string
+	// render, when set, is the pre-scrubbed final text Error()
+	// returns (#16090 fold 7): a classification-preserving wrapper
+	// carrying the scrubbed rendered string, so no combination of
+	// path/template/keyword fields can reassemble a secret at
+	// render time.
+	render string
 }
 
 func (e *unknownSecurityZoneChildSchemaError) Error() string {
+	if e.render != "" {
+		return e.render
+	}
 	return fmt.Sprintf("%s: unknown configuration keyword %q under closed-world subtree", e.path, e.keyword)
 }
 

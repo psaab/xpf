@@ -532,17 +532,49 @@ func TestBeltDoesNotAliasInput16090(t *testing.T) {
 	}
 }
 
-// GLM F1 witness: a rebuilt wrapper must be re-scrubbed on render —
-// its keyword field carrying the secret must not survive Error().
+// GLM B1/F1 witness (reshaped fold 7): the keyword is INNOCENT
+// (`bogus`); the secret spans path-suffix + fixed template head
+// (`security-zone trust: unknown`). Fold-6's witness put the canary
+// in keyword — a shape fold-5 already neutralized, hence
+// test-only-green. This shape is RED without the fold-7 render
+// carry (final render contains the span verbatim).
 func TestRebuiltWrapperRescrubbedOnRender16090(t *testing.T) {
-	const canary = "CLASSCANARY16090"
-	tree := &ConfigTree{Children: []*Node{{Keys: []string{"system", "services", "dynamic-dns", "provider", "p", "password", canary}}}}
-	got := scrubSchemaErrorSecrets(tree, &unknownSecurityZoneChildSchemaError{path: "security zones trust", keyword: canary})
-	if !IsUnknownSecurityZoneChildSchemaError(got) {
-		t.Fatalf("classification lost: %T %v", got, got)
+	const secret = "security-zone trust: unknown"
+	text := `system { services { dynamic-dns { provider p { password "` + secret + `"; } } } } ` +
+		`security { zones { security-zone trust { bogus; } } }`
+	err := SchemaValidate(parseHier(t, text), nil)
+	if err == nil || !IsUnknownSecurityZoneChildSchemaError(err) {
+		t.Fatalf("fixture not on unknown-zone branch: %v", err)
 	}
-	if strings.Contains(got.Error(), canary) {
-		t.Errorf("rebuilt wrapper re-printed secret on render: %v (GLM F1)", got)
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("zone wrapper reassembled path+template span secret: %v (GLM B1)", err)
+	}
+	// Policies arm, same span class (GLM probe P1 shape, direct).
+	const secret2 = "untrust policy: child"
+	tree := &ConfigTree{Children: []*Node{
+		{Keys: []string{"system", "services", "dynamic-dns", "provider", "p", "password", secret2}},
+	}}
+	got := scrubSchemaErrorSecrets(tree, &unknownSecurityPoliciesChildSchemaError12217{
+		path: "security policies from-zone trust to-zone untrust policy", keyword: "bogus", content: "x"})
+	if !IsUnknownSecurityPoliciesChildSchemaError12217(got) {
+		t.Fatalf("policies classification lost: %T %v", got, got)
+	}
+	if strings.Contains(got.Error(), secret2) {
+		t.Errorf("policies wrapper reassembled span secret: %v (GLM B1/P1)", got)
+	}
+	// Fused-statement location (GLM F2): the #8437 error on a secret
+	// leaf keeps its stanza location while the operand stays absent.
+	ferr := SchemaValidate(parseHier(t, "system { services { dynamic-dns { provider p { password firstvalue backend; } } } }"), nil)
+	if ferr == nil {
+		t.Fatal("fused fixture must be rejected")
+	}
+	for _, want := range []string{"dynamic-dns", "provider", "names a SIBLING"} {
+		if !strings.Contains(ferr.Error(), want) {
+			t.Errorf("fused diagnostic lost %q: %v (GLM F2)", want, ferr)
+		}
+	}
+	if strings.Contains(ferr.Error(), "backend") {
+		t.Errorf("fused diagnostic still echoes operand: %v", ferr)
 	}
 }
 
