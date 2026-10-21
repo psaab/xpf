@@ -571,7 +571,7 @@ func (d *Daemon) pushConfigToPeerWithAuthorization(
 	if auth != nil {
 		queued = ss.QueueConfigWithPeerSnapshotProtocolAtGeneration(
 			configText, ancestry, reservedGen, auth.state,
-			userspace.MinProtocolMultiZoneScopedPolicy, auth.peerConnEpoch,
+			auth.minProtocol, auth.peerConnEpoch,
 			func() uint64 { return d.syncPeerConnEpoch.Load() })
 	} else {
 		queued = ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen)
@@ -810,7 +810,7 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		if auth != nil {
 			queued = ss.QueueConfigWithPeerSnapshotProtocolAtGeneration(
 				configText, ancestry, reservedGen, auth.state,
-				userspace.MinProtocolMultiZoneScopedPolicy, auth.peerConnEpoch,
+				auth.minProtocol, auth.peerConnEpoch,
 				func() uint64 { return d.syncPeerConnEpoch.Load() })
 		} else {
 			queued = ss.QueueConfigWithAncestryAtGeneration(configText, ancestry, reservedGen)

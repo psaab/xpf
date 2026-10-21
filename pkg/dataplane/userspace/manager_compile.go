@@ -31,6 +31,17 @@ var ErrPersistentSourceNATProtocolIncompatible = errors.New("userspace persisten
 // the multi-zone SHAPE rather than the action so it covers both directions.
 var ErrScopedGlobalZoneSetProtocolIncompatible = errors.New("userspace scoped-global zone-set snapshot protocol incompatible")
 
+// ErrNAT64RoutingInstanceListProtocolIncompatible is the #16049
+// required-protocol gate sentinel: the committed config carries a
+// NAT64 rule-set whose `from routing-instance` scope holds MORE THAN
+// ONE routing-instance, and the running helper's accepted
+// ConfigSnapshotProtocolVersion predates the v64 contract in which
+// the plural from_routing_instances snapshot field is authoritative.
+// Such a helper reads only the singular (first) member and TRUNCATES
+// the scope — traffic from the dropped routing-instances is never
+// translated. Same fail-closed shape as the #5488 zone-set gate.
+var ErrNAT64RoutingInstanceListProtocolIncompatible = errors.New("userspace NAT64 routing-instance list snapshot protocol incompatible")
+
 // ErrEgressZoneProtocolIncompatible is the #6722 required-protocol gate
 // sentinel: the RUNNING helper advertises a ConfigSnapshotProtocolVersion that
 // is not this binary's, so the two do not agree on what the interface rows mean.
@@ -122,6 +133,7 @@ var requiredProtocolGateSentinels = []error{
 	ErrPolicySchedulerProtocolIncompatible,
 	ErrPersistentSourceNATProtocolIncompatible,
 	ErrScopedGlobalZoneSetProtocolIncompatible,
+	ErrNAT64RoutingInstanceListProtocolIncompatible,
 	ErrEgressZoneProtocolIncompatible,
 	ErrSecureTunnelProtocolIncompatible,
 	ErrPMechProtocolIncompatible,
@@ -1604,6 +1616,66 @@ func (m *Manager) ensureScopedGlobalZoneSetProtocolLocked(cfg *config.Config) er
 	)
 }
 
+// ConfigHasMultiRoutingInstanceNAT64 reports whether cfg carries a
+// NAT64 rule-set scoped to MORE THAN ONE routing-instance — the shape
+// a pre-v64 reader truncates to the singular. Exported for the #16049
+// cross-chassis gate in pkg/daemon; thin wrapper over the same
+// predicate that arms the local gate (drift would desync the two).
+func ConfigHasMultiRoutingInstanceNAT64(cfg *config.Config) bool {
+	return configHasMultiRoutingInstanceNAT64(cfg)
+}
+
+func configHasMultiRoutingInstanceNAT64(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rs := range cfg.Security.NAT.NAT64 {
+		if rs == nil {
+			continue
+		}
+		n := len(rs.FromRoutingInstances)
+		if n == 0 && rs.FromRoutingInstance != "" {
+			n = 1
+		}
+		if n > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureNAT64RoutingInstanceListProtocolLocked is the #16049
+// fail-closed half of the v64 bump, sibling of the #5488 zone-set
+// gate: a pre-v64 helper reads only the singular from_routing_instance
+// and truncates a multi-RI scope, so the commit aborts (helper
+// disarmed by the caller) instead of reporting success against a
+// dataplane that never translates the dropped RIs' traffic.
+func (m *Manager) ensureNAT64RoutingInstanceListProtocolLocked(cfg *config.Config) error {
+	if !configHasMultiRoutingInstanceNAT64(cfg) {
+		return nil
+	}
+	if m.lastStatus.ConfigSnapshotProtocolVersion >= MinProtocolNAT64RoutingInstanceList {
+		return nil
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+		m.recordHelperStatusLocked(&status)
+		if status.ConfigSnapshotProtocolVersion >= MinProtocolNAT64RoutingInstanceList {
+			return nil
+		}
+	}
+	if m.noHelperVersionObservedLocked() {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: helper config snapshot protocol version %d < required %d for multi-routing-instance NAT64 scopes "+
+			"(an older helper reads only the singular from-routing-instance and would TRUNCATE the scope)",
+		ErrNAT64RoutingInstanceListProtocolIncompatible,
+		m.lastStatus.ConfigSnapshotProtocolVersion,
+		MinProtocolNAT64RoutingInstanceList,
+	)
+}
+
 // ensureSecureTunnelProtocolLocked is the fail-closed half of the #5619/#6691
 // protocol bumps — v5 (the SecureTunnel field), v6 (the every-owner refusal
 // rule) and v7 (the fabric parent's verdict). It compares against
@@ -1856,7 +1928,7 @@ func (m *Manager) ensureRequiredSnapshotProtocolLocked(snap *ConfigSnapshot) err
 	if err := m.ensureScopedGlobalZoneSetProtocolLocked(cfg); err != nil {
 		return err
 	}
-	if err := m.ensurePMechProtocolLocked(snap); err != nil {
+	if err := m.ensureNAT64RoutingInstanceListProtocolLocked(cfg); err != nil {
 		return err
 	}
 	// Between the existing pair, secure-tunnel runs before egress-zone. Since

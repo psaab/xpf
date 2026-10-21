@@ -484,11 +484,19 @@ const (
 	// the same treatment. Never renumber it: it names a historical wire fact.
 	MinProtocolMultiZoneScopedPolicy = 4
 
+	// MinProtocolNAT64RoutingInstanceList is the FIRST snapshot protocol
+	// version that can represent a NAT64 multi-routing-instance scope —
+	// the plural from_routing_instances field landed in the v64 bump
+	// (#16049). A peer/helper below it reads only the singular
+	// from_routing_instance and TRUNCATES `from routing-instance [a b]`
+	// to its last member. Per-feature IMMUTABLE floor (#6648 discipline):
+	// never renumber; it names a historical wire fact.
+	MinProtocolNAT64RoutingInstanceList = 64
+
 	// MinProtocolPMech is the FIRST snapshot version whose table-254 route
 	// inventory and per-tunnel explicit selector membership can support D22+
 	// P-MECH worker adjudication. This historical feature floor is immutable.
 	MinProtocolPMech = 46
-
 	// The remaining per-feature floors (#6648). Each names the FIRST snapshot
 	// protocol version whose wire representation carries that feature, and each
 	// is IMMUTABLE: it is a historical fact about the wire, not a tracking
