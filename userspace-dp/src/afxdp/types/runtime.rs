@@ -1064,6 +1064,13 @@ pub(in crate::afxdp) struct DebugPollCounters {
     ///
     /// Counted once per revoked session, not per dropped packet.
     pub(in crate::afxdp) policy_revoked_sessions: u64,
+    /// #16215: established sessions revoked because the stored source-NAT
+    /// translation is no longer expressible by the live NAT configuration
+    /// (the StaleSourceNat sibling of `policy_revoked_sessions`). Before
+    /// this counter the reason was counted nowhere operator-visible, so a
+    /// first-hit revalidation blackhole after an RG move was invisible.
+    /// Counted once per revoked session, not per dropped packet.
+    pub(in crate::afxdp) snat_revoked_sessions: u64,
     /// #9519: packets DROPPED because they hit an established session from a
     /// zone other than the one that admitted it, and their own zone's policy
     /// does not permit them. Per packet, not per session: nothing is revoked,

@@ -675,6 +675,29 @@ fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
     );
 }
 
+/// #16215: the StaleSourceNat sibling of the #10021 boundary test above.
+#[test]
+fn refresh_status_publishes_snat_revoked_sessions_total_16215() {
+    let mut coordinator = Coordinator::new();
+    let live = Arc::new(BindingLiveState::new());
+    live.snat_revoked_sessions.store(4, Ordering::Relaxed);
+    coordinator.workers.live.insert(0, live);
+    let mut state = crate::server::state::ServerState {
+        status: Default::default(),
+        snapshot: None,
+        afxdp: coordinator,
+        state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
+        snapshot_policy_mismatch_total: 0,
+    };
+    assert_eq!(state.status.snat_revoked_sessions_total, 0);
+    crate::server::helpers::status::refresh_status(&mut state);
+    assert_eq!(
+        state.status.snat_revoked_sessions_total, 4,
+        "refresh_status must publish the live per-binding SNAT-revocation sum (#16215)"
+    );
+}
+
 /// #14619: a current helper with an EMPTY zone-counter store must still
 /// publish its layout version. The pre-fix publisher stamped 0 whenever
 /// no non-zero row existed (fresh boot, post-clear, idle HA secondary),

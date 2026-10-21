@@ -61,6 +61,26 @@ pub(in crate::afxdp) fn cluster_terminal_peer_owned_egress_rg(
     rg > 0 && ha_state.get(&rg).is_none_or(|g| !g.is_forwarding_active(now_secs))
 }
 
+/// #16216: is this DiscardRoute a demoted cluster-terminal row whose
+/// would-be egress RG is peer-owned RIGHT NOW? The demotion in
+/// `enforce_ha_resolution_snapshot` preserves the FIB's
+/// `source_ifindex` stamp, so a row demoted while the attribution
+/// missed (no live member at lookup time) can still be rescued once
+/// the packet reaches a fabric converter: if the stamped egress's RG
+/// is not forwarding-active locally, the destination is served by
+/// the peer and the packet must cross the fabric instead of dropping.
+/// Operator discards never carry the stamp (`source_ifindex == 0`)
+/// and never rescue.
+pub(in crate::afxdp) fn discard_route_is_cluster_terminal_peer_owned(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: &ForwardingResolution,
+) -> bool {
+    resolution.disposition == ForwardingDisposition::DiscardRoute
+        && cluster_terminal_peer_owned_egress_rg(forwarding, ha_state, now_secs, resolution)
+}
+
 pub(in crate::afxdp) fn enforce_ha_resolution(
     forwarding: &ForwardingState,
     ha_state: &Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
@@ -97,6 +117,18 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
     // (locally-owned, standalone, or no sibling) it stays the terminal
     // drop the lookup selected. Operator discard/reject rows never
     // reach here: only cluster_terminal rows produce this disposition.
+    //
+    // #16216: the demotion must keep the cluster-terminal provenance
+    // (`source_ifindex`, the would-be egress the FIB stamped before
+    // zeroing the egress). The pre-fix demotion zeroed it with the
+    // MTUs, so the stranded DiscardRoute was indistinguishable from an
+    // operator discard and no later stage could rescue it: on the
+    // split node the attribution can miss at lookup time (no live
+    // member, suppressed connected prefix), yet the packet must still
+    // cross the fabric to the owner that now serves the destination.
+    // `source_ifindex` is consulted only on the DiscardRoute shape and
+    // only by the fabric-rescue converters, so operator discards
+    // (which never carry the stamp) are bit-identical.
     if resolution.disposition == ForwardingDisposition::ClusterTerminalHAInactive {
         if ha_state.is_empty() {
             return resolution;

@@ -491,8 +491,10 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
                 )
             };
         } else {
-            decision.resolution = redirect_session_via_fabric_if_needed(
+            decision.resolution = redirect_session_via_fabric_if_needed_at(
                 forwarding,
+                ha_state,
+                now_secs,
                 enforced_resolution,
                 fabric_link_ingress,
                 resolved.metadata.ingress_zone,
@@ -738,8 +740,10 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
             )
         };
     } else {
-        decision.resolution = redirect_session_via_fabric_if_needed(
+        decision.resolution = redirect_session_via_fabric_if_needed_at(
             forwarding,
+            ha_state,
+            now_secs,
             enforced_resolution,
             fabric_link_ingress,
             resolved.metadata.ingress_zone,
@@ -784,10 +788,38 @@ pub(in crate::afxdp) fn redirect_session_via_fabric_if_needed(forwarding: &Forwa
 resolution: ForwardingResolution,
 fabric_ingress: bool,
 ingress_zone: u16,) -> ForwardingResolution {
-    if !matches!(
+    redirect_session_via_fabric_if_needed_at(
+        forwarding,
+        &BTreeMap::new(),
+        0,
+        resolution,
+        fabric_ingress,
+        ingress_zone,
+    )
+}
+
+/// #16216: as `redirect_session_via_fabric_if_needed`, plus the rescue
+/// of a DiscardRoute that carries cluster-terminal provenance. The HA
+/// demotion preserves the FIB's `source_ifindex` stamp; when that
+/// would-be egress's RG is peer-owned at conversion time, the packet
+/// belongs to the peer — redirect it across the fabric so the new
+/// owner creates (or hits) the authoritative session there, instead
+/// of dropping on the split node forever. Operator discards carry no
+/// stamp and never rescue; a fabric-ingress packet never re-redirects.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn redirect_session_via_fabric_if_needed_at(forwarding: &ForwardingState,
+ha_state: &BTreeMap<i32, HAGroupRuntime>,
+now_secs: u64,
+resolution: ForwardingResolution,
+fabric_ingress: bool,
+ingress_zone: u16,) -> ForwardingResolution {
+    let rescuable = matches!(
         resolution.disposition,
         ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive
-    ) {
+    ) || crate::afxdp::forwarding::discard_route_is_cluster_terminal_peer_owned(
+        forwarding, ha_state, now_secs, &resolution,
+    );
+    if !rescuable {
         return resolution;
     }
     if fabric_ingress {

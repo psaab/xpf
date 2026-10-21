@@ -83,6 +83,10 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	c.emitConstMetric(ch, c.userspacePolicyRevokedSessions,
 		prometheus.CounterValue,
 		float64(status.PolicyRevokedSessionsTotal))
+	// #16215: stale source-NAT revocations, the StaleSourceNat sibling.
+	c.emitConstMetric(ch, c.userspaceSnatRevokedSessions,
+		prometheus.CounterValue,
+		float64(status.SnatRevokedSessionsTotal))
 	// #11503: process-global unzoned-policy cause counters are exported as
 	// direction-specific packet-denial totals.
 	c.emitConstMetric(ch, c.userspaceUnzonedIngressDenied,

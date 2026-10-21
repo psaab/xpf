@@ -3662,6 +3662,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     .policy_revoked_sessions
                                     .fetch_add(1, Ordering::Relaxed);
                             }
+                            // #16215: a StaleSourceNat revocation was
+                            // previously counted nowhere operator-visible
+                            // (only the debug fold carried ZonePolicy), so
+                            // a failover blackhole caused by first-hit SNAT
+                            // revalidation was invisible in production.
+                            // Count it once per revoked session, like its
+                            // ZonePolicy sibling.
+                            if revocation.reason
+                                == policy_revalidation::PolicyRevocationReason::StaleSourceNat
+                            {
+                                telemetry.dbg.snat_revoked_sessions += 1;
+                                binding
+                                    .live
+                                    .snat_revoked_sessions
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -9890,6 +9906,45 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 .forwarding
                                 .egress_zone_id(intended_egress_ifindex);
                         }
+                        decision.resolution = redirect;
+                    }
+                }
+                // #16216: the DiscardRoute twin of the safety net above.
+                // A cluster-terminal row demoted to DiscardRoute (its
+                // peer-owned attribution missed at lookup time) still
+                // belongs to the peer owner: convert it with the same
+                // zone identity the net above computes, so the frame
+                // crosses the fabric instead of taking the terminal
+                // DiscardRoute arm and seeding a flow-cache deny that
+                // would strand every retransmit. Operator discards carry
+                // no provenance stamp and are untouched.
+                if decision.resolution.disposition == ForwardingDisposition::DiscardRoute
+                    && !fabric_link_ingress
+                    && crate::afxdp::forwarding::discard_route_is_cluster_terminal_peer_owned(
+                        worker_ctx.forwarding,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        &decision.resolution,
+                    )
+                {
+                    let arrival_logical = resolve_ingress_logical_ifindex(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                    )
+                    .unwrap_or(meta.ingress_ifindex as i32);
+                    let zone_id = session_ingress_zone.or_else(|| {
+                        worker_ctx
+                            .forwarding
+                            .ifindex_to_zone_id
+                            .get(&arrival_logical)
+                            .copied()
+                    });
+                    if let Some(redirect) = resolve_fabric_redirect_for_ingress_identity(
+                        worker_ctx.forwarding,
+                        zone_id,
+                        fabric_nat_scope_ifindex_for_redirect,
+                    ) {
                         decision.resolution = redirect;
                     }
                 }

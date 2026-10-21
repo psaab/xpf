@@ -404,6 +404,7 @@ pub(crate) fn run() -> Result<(), String> {
             neg_neigh_fast_fail_total: 0,
             pending_neigh_duplicate_drops_total: 0,
             policy_revoked_sessions_total: 0,
+            snat_revoked_sessions_total: 0,
             snapshot_policy_mismatch_total: 0,
             last_snapshot_policy_count: 0,
             unzoned_ingress_denied_total: 0,

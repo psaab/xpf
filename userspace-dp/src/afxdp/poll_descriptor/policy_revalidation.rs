@@ -1326,37 +1326,55 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     {
         return None;
     }
-    // #16109: judge the packet's re-resolved decision, not a stored
-    // terminal one. A peer-synced row can still carry its standby-side
-    // terminal resolution on the hitting worker (a peer worker whose
-    // RefreshOwnerRGS has not landed, or a row materialized after the
-    // refresh): stored egress 0 with DiscardRoute /
-    // ClusterTerminalHAInactive names no egress interface, so the
-    // stored line below can only answer `forwarding.egress.get(&0)`
-    // miss = invalid = revoke-and-delete — a live session deleted at
-    // its first packet on the new owner. Substituting the RESOLUTION
-    // (egress identity only; the NAT decision, metadata and key are
-    // untouched) makes the validator judge exactly the decision this
-    // packet is being forwarded with. A genuinely withdrawn rule
-    // still revokes: the zone pair is read off the live egress, and
-    // the translation geometry must match a live rule. Scoped to
-    // peer-synced rows with a locally-forwarding re-resolution under
-    // their active owner RG; every other row judges its stored
-    // decision exactly as before. Copy-on-write: the caller owns the
-    // hit decision by value, so no other row is mutated (the stored
-    // row is rewritten by RefreshOwnerRGS, or re-resolved again on
-    // the next stale hit — never per-packet on the fast path).
-    let forward_decision = if forward_origin.is_peer_synced()
+    // #16215: judge the packet's re-resolved decision, not a stored
+    // terminal one — on EVERY node, not only the activating one. A
+    // peer-synced row can still carry its standby-side terminal
+    // resolution on the hitting worker (a peer worker whose
+    // RefreshOwnerRGS has not landed, a row materialized after the
+    // refresh, or — the fw0 shape — a locally-authored row demoted to
+    // SyncImport by DemoteOwnerRGS whose demote re-resolution demoted
+    // the cluster-terminal FIB row to plain DiscardRoute): stored
+    // egress 0 with DiscardRoute / ClusterTerminalHAInactive names no
+    // egress interface, so the stored line below can only answer
+    // `forwarding.egress.get(&0)` miss = invalid = revoke-and-delete —
+    // a live session deleted at its first packet after an RG move.
+    // Substituting the RESOLUTION (egress identity only; the NAT
+    // decision, metadata and key are untouched) makes the validator
+    // judge exactly the decision this packet is being forwarded with.
+    // FORWARD hits only: on a reverse hit the packet's decision is the
+    // REPLY's egress (the LAN side), which must never stand in for the
+    // forward row's WAN egress — judging the forward SNAT against the
+    // LAN egress reads the wrong zone pair and revokes valid
+    // translations. Reverse hits keep the stored forward decision.
+    // A genuinely withdrawn rule still revokes: the zone pair is read
+    // off the live egress, and the translation geometry must match a
+    // live rule. Scoped to peer-synced rows with a locally-forwarding
+    // re-resolution; every other row judges its stored decision
+    // exactly as before. Copy-on-write: the caller owns the hit
+    // decision by value, so no other row is mutated (the stored row
+    // is rewritten by RefreshOwnerRGS, or re-resolved again on the
+    // next stale hit — never per-packet on the fast path).
+    //
+    // The terminal-stored decline above runs first, so this
+    // substitution is unreachable while the stored row is terminal:
+    // the decline is what keeps a terminal row whose rule was
+    // withdrawn alive until it gains a real resolution, and judging
+    // the packet's terminal copy of that same row would revoke it
+    // here on the egress-0 miss. The substitution therefore covers
+    // the non-terminal stored shapes (a real egress whose stored
+    // geometry no longer matches the packet's re-resolved egress);
+    // revocation stays a FRESH decision's verdict in both arms.
+    let forward_decision = if !metadata.is_reverse
+        && forward_origin.is_peer_synced()
         && decision.resolution.egress_ifindex > 0
         && matches!(
             decision.resolution.disposition,
             ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
         )
-        && matches!(
+        && !matches!(
             forward_decision.resolution.disposition,
             ForwardingDisposition::DiscardRoute | ForwardingDisposition::ClusterTerminalHAInactive
         )
-        && forward_decision.resolution.egress_ifindex <= 0
     {
         let mut judged = forward_decision;
         judged.resolution = decision.resolution;

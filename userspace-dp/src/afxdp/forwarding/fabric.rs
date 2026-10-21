@@ -886,10 +886,39 @@ pub(in crate::afxdp) fn redirect_via_fabric_if_needed(
     ingress_ifindex: i32,
     ingress_zone_id: Option<u16>,
 ) -> ForwardingResolution {
-    if !matches!(
+    redirect_via_fabric_if_needed_at(
+        forwarding,
+        &BTreeMap::new(),
+        0,
+        resolution,
+        ingress_ifindex,
+        ingress_zone_id,
+    )
+}
+
+/// #16216: as `redirect_via_fabric_if_needed`, plus the rescue of a
+/// DiscardRoute carrying cluster-terminal provenance (the demotion
+/// preserved the FIB's `source_ifindex` stamp; see
+/// `discard_route_is_cluster_terminal_peer_owned`). A peer-owned
+/// would-be egress means the packet belongs to the peer owner:
+/// redirect it across the fabric instead of stranding it as a drop
+/// on the split node. Operator discards never carry the stamp and
+/// never rescue; fabric ingress never re-redirects.
+pub(in crate::afxdp) fn redirect_via_fabric_if_needed_at(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: ForwardingResolution,
+    ingress_ifindex: i32,
+    ingress_zone_id: Option<u16>,
+) -> ForwardingResolution {
+    let rescuable = matches!(
         resolution.disposition,
         ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive
-    ) {
+    ) || super::discard_route_is_cluster_terminal_peer_owned(
+        forwarding, ha_state, now_secs, &resolution,
+    );
+    if !rescuable {
         return resolution;
     }
     if ingress_is_fabric(forwarding, ingress_ifindex) {

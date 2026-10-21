@@ -342,6 +342,10 @@ type ProcessStatus struct {
 	// Counts revoked SESSIONS, not dropped packets; exported separately from
 	// packet-drop totals. Omit on older helpers for wire compatibility.
 	PolicyRevokedSessionsTotal uint64 `json:"policy_revoked_sessions_total,omitempty"`
+	// #16215: cumulative established-session revocations by stale
+	// source-NAT revalidation. Counts revoked SESSIONS, not dropped
+	// packets. Omit on older helpers for wire compatibility.
+	SnatRevokedSessionsTotal uint64 `json:"snat_revoked_sessions_total,omitempty"`
 	// HARDENING (#15742 follow-up): cumulative snapshot applies the helper
 	// REFUSED because Summary.PolicyCount disagreed with the policies the
 	// snapshot carried (policy_count>0 with an empty policy set is the
