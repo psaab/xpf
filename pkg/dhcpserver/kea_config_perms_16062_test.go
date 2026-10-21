@@ -283,3 +283,155 @@ func TestRenderUnresolvedThenPreSeed_WarnsExactlyOnce(t *testing.T) {
 		t.Fatalf("warnings after second preseed = %v, want still exactly one", warnings)
 	}
 }
+
+// TestWriteKeaConfig_KeaUIDWider_KeepsUID pins fold-2 arm (2): an
+// existing file owned by the Kea uid, wider than 0640, with gid ==
+// kea-gid must keep the Kea UID (pure preserve) — never an explicit
+// WithOwner(euid, gid) that reverts the operator's _kea uid to root.
+// The test process plays the Kea user (uid/gid = euid/egid, which IS
+// installable), so pre-fold code took the WithOwner arm and landed
+// uid=euid by accident of identity; the recorder distinguishes the
+// arms: pre-fold requests one WithOwner option, post-fold one
+// WithPreserveExisting option. RED-on-revert: option count/type flips.
+func TestWriteKeaConfig_KeaUIDWider_KeepsUID(t *testing.T) {
+	prev := writeKeaConfigFile
+	var gotOpts []fsatomic.Option
+	writeKeaConfigFile = func(path string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+		gotOpts = append([]fsatomic.Option(nil), opts...)
+		return fsatomic.WriteFileAtomic(path, data, perm, opts...)
+	}
+	defer func() { writeKeaConfigFile = prev }()
+
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "kea-dhcp4.conf")
+	if err := os.WriteFile(conf, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(conf, 0o644); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+
+	euid, egid := os.Geteuid(), os.Getegid()
+	m := New()
+	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return euid, egid, true })
+
+	if _, err := m.writeKeaConfig(conf, map[string]any{"Dhcp4": map[string]any{}}); err != nil {
+		t.Fatalf("writeKeaConfig: %v", err)
+	}
+	if len(gotOpts) != 1 {
+		t.Fatalf("write requested %d options, want exactly 1 (WithPreserveExisting)", len(gotOpts))
+	}
+	fi, err := os.Stat(conf)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if int(st.Uid) != euid || int(st.Gid) != egid {
+		t.Fatalf("owner after render = %d:%d, want Kea uid preserved %d:%d", st.Uid, st.Gid, euid, egid)
+	}
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode after render = %04o, want capped 0640", fi.Mode().Perm())
+	}
+}
+
+// TestWriteKeaConfig_KeaUIDWider_RootKeepsUID is the definitive arm-(2)
+// cell, root-only: a file genuinely owned by a DIFFERENT (Kea) uid at
+// 0644 with the Kea gid must keep that uid after render. Pre-fold code
+// requested WithOwner(0, kea-gid) and landed uid 0 (root), failing the
+// uid assertion; post-fold preserve keeps the Kea uid.
+func TestWriteKeaConfig_KeaUIDWider_RootKeepsUID(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root-only: needs a file owned by a uid other than the process")
+	}
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "kea-dhcp4.conf")
+	if err := os.WriteFile(conf, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// "Kea user" = uid 14242, group = process egid (installable as root).
+	const keaUID = 14242
+	egid := os.Getegid()
+	if err := os.Chown(conf, keaUID, egid); err != nil {
+		t.Fatalf("chown seed to Kea uid: %v", err)
+	}
+	if err := os.Chmod(conf, 0o644); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+
+	m := New()
+	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return keaUID, egid, true })
+
+	if _, err := m.writeKeaConfig(conf, map[string]any{"Dhcp4": map[string]any{}}); err != nil {
+		t.Fatalf("writeKeaConfig: %v", err)
+	}
+	fi, err := os.Stat(conf)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if int(st.Uid) != keaUID {
+		t.Fatalf("uid after render = %d, want preserved Kea uid %d (not reverted to root)", st.Uid, keaUID)
+	}
+	if int(st.Gid) != egid {
+		t.Fatalf("gid after render = %d, want %d", st.Gid, egid)
+	}
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode after render = %04o, want capped 0640", fi.Mode().Perm())
+	}
+}
+
+// TestWriteKeaConfig_KeaUIDWiderForeignGID_Preserves pins fold-2 arm
+// (3): non-root process + Kea-uid-owned file wider than 0640 + foreign
+// (non-installable) gid must NOT fail the apply. Pure preserve keeps
+// owner-read (capped 0640 keeps the owner arm), so the Kea reader is
+// never stranded and DHCP is never stranded for a mode-only gain.
+// RED-on-revert: the pre-fold branch returned an error here and
+// writeKeaConfig failed.
+//
+// Unprivileged construction: the "Kea uid" is the process euid and the
+// file's gid is the egid — but the RESOLVED Kea gid is a foreign
+// 14243, so st.Gid (egid) != kea-gid while the gid is non-installable
+// for this process (not egid-as-Kea-gid, not supplementary, not root).
+func TestWriteKeaConfig_KeaUIDWiderForeignGID_Preserves(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can always install the Kea gid; the non-installable arm needs a non-root process")
+	}
+	euid := os.Geteuid()
+	const foreignKeaGID = 14243
+	if keaGIDInstallable(foreignKeaGID) {
+		t.Skip("foreign Kea gid is installable for this process (supplementary group); arm unreachable")
+	}
+
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "kea-dhcp4.conf")
+	if err := os.WriteFile(conf, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(conf, 0o644); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+
+	m := New()
+	// Kea uid == process euid (file is Kea-uid-owned); Kea gid is
+	// foreign — the file's egid is therefore a "foreign gid" relative
+	// to the resolved Kea group.
+	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return euid, foreignKeaGID, true })
+
+	if _, err := m.writeKeaConfig(conf, map[string]any{"Dhcp4": map[string]any{}}); err != nil {
+		t.Fatalf("writeKeaConfig must not fail the apply for a mode-only gain: %v", err)
+	}
+	fi, err := os.Stat(conf)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if int(st.Uid) != euid {
+		t.Fatalf("uid after render = %d, want preserved Kea uid %d", st.Uid, euid)
+	}
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode after render = %04o, want capped 0640 (owner-read survives)", fi.Mode().Perm())
+	}
+	if fi.Mode().Perm()&0o400 == 0 {
+		t.Fatalf("capped mode %04o lost owner-read; Kea reader would be stranded", fi.Mode().Perm())
+	}
+}

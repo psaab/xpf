@@ -1823,28 +1823,34 @@ var writeKeaConfigFile = func(path string, data []byte, perm os.FileMode, opts .
 // one service reader, the Kea runtime user, so the file needs only its
 // primary group — never its uid.
 //
-//   - Existing file owned by the Kea uid (operator-chowned root→_kea,
-//     or a distro-shipped config): pure preserve — ownership untouched,
-//     mode capped at 0640 by fsatomic. An explicit (0, gid) here would
-//     silently revert the operator's uid.
-//   - Otherwise, when the Kea group resolves and this process may
-//     install it: explicit owner (0, kea-gid) — fresh files are
-//     root:_kea from first install, and a foreign-gid 0644 file
-//     migrates its group (uid 0; xpfd is the file's author).
+//   - Existing file owned by the Kea uid, mode within 0640: pure
+//     preserve — ownership untouched, mode capped at 0640 by fsatomic.
+//   - Existing file owned by the Kea uid, wider than 0640: applied
+//     mode-only. When the group already is the Kea group, or when this
+//     process may install it, the write preserves just like above
+//     (fsatomic never re-stamps a Kea-uid owner to root): only the
+//     mode caps. When the group is foreign and this process may NOT
+//     install the Kea group (non-root), the write is STILL pure
+//     preserve (#16101 fold-2): the Kea uid reads via the OWNER arm
+//     (capped 0640 keeps owner-read), so tightening cannot strand the
+//     reader — failing the whole apply for a mode-only gain would
+//     strand DHCP instead. Group migration for Kea-uid files happens
+//     only where the gid actually installs.
+//   - Otherwise (root- or foreign-owned), when the Kea group resolves
+//     and this process may install it: explicit owner (euid, kea-gid)
+//     — fresh files are root:_kea from first install (euid is 0 in
+//     production), and a foreign-gid 0644 file migrates its group.
 //   - Otherwise (non-root, unresolved, or foreign non-installable gid):
-//     no owner pin — plain 0640. Root may still tighten a foreign-gid
-//     file in this arm (root always installs), but a non-root process
-//     cannot, and failing the apply would strand DHCP for a mode-only
-//     gain; the file is still never world-readable.
+//     no owner pin — plain 0640; the file is still never world-readable.
 //
 // Installability is judged from the same single resolution: root can
 // always chgrp; a non-root process only to its egid/supplementary
 // groups, and fsatomic SKIPS the fchown entirely when the temp inode
 // already carries the requested owner — so pinning (0, gid) as non-root
 // (uid 0 ≠ process uid) would attempt a uid-changing fchown and fail
-// EPERM even when gid == egid. The pin therefore carries uid 0 only as
-// root; a non-root pin carries the process uid, which fsatomic then
-// skips or installs as a pure group change.
+// EPERM even when gid == egid. The pin therefore carries the process
+// euid (0 in production), which fsatomic then skips or installs as a
+// pure group change.
 func (m *Manager) keaConfigWriteOpts(path string) ([]fsatomic.Option, error) {
 	uid, gid, ok := m.resolveKeaOwner()
 	if !ok {
@@ -1859,13 +1865,13 @@ func (m *Manager) keaConfigWriteOpts(path string) ([]fsatomic.Option, error) {
 			// has Stat_t.
 			return nil, fmt.Errorf("kea config %s: cannot determine existing ownership (no Stat_t); refusing to choose a write owner (#16062)", path)
 		}
-		if int(st.Uid) == uid && (fi.Mode().Perm()&^keaConfigPerm) == 0 {
-			return []fsatomic.Option{fsatomic.WithPreserveExisting()}, nil
-		}
-		if int(st.Uid) == uid && !keaGIDInstallable(gid) && int(st.Gid) != gid {
-			return nil, fmt.Errorf("kea config %s: owned by the Kea user (uid %d) at mode %04o wider than %04o, but the Kea group %d cannot be installed by this process; refusing to tighten into a Kea-unreadable file (#16062)", path, uid, fi.Mode().Perm(), keaConfigPerm, gid)
-		}
-		if int(st.Uid) == uid && int(st.Gid) == gid {
+		if int(st.Uid) == uid {
+			// Kea-uid-owned in every sub-arm: pure preserve. Mode
+			// caps at 0640 (owner-read survives the cap, so the
+			// reader is never stranded); ownership — including a
+			// foreign group this process cannot migrate — is left
+			// untouched rather than reverting the uid to root or
+			// failing the apply (#16101 fold-2).
 			return []fsatomic.Option{fsatomic.WithPreserveExisting()}, nil
 		}
 	}
