@@ -949,7 +949,7 @@ fn build_fallible_forwarding_state(
             let vid = u16::try_from(mirror.ingress_vlan_id).unwrap_or(0);
             state
                 .mirror_configs_scoped
-                .insert((mirror.ingress_ifindex, vid), cfg);
+                .insert((mirror.ingress_ifindex, vid, mirror.ingress_unit), cfg);
         } else {
             state.mirror_configs.insert(mirror.ingress_ifindex, cfg);
         }

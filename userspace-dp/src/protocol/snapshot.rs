@@ -1005,6 +1005,12 @@ pub(crate) struct MirrorConfigSnapshot {
     pub ingress_vlan_id: i32,
     #[serde(rename = "unit_scoped", default)]
     pub unit_scoped: bool,
+    /// #16063: logical unit number of the named unit. The VID is 0 for
+    /// every tunnel unit sharing one netdev, so a unit-scoped row also
+    /// carries its unit number; the resolver matches only packets whose
+    /// resolved logical ingress is that unit.
+    #[serde(rename = "ingress_unit", default)]
+    pub ingress_unit: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

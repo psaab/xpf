@@ -48,10 +48,44 @@ func TestBuildMirrorConfigSnapshotsUnit0VsBarePhysical15113(t *testing.T) {
 	// Sorted instance order: span-bare, span-tagged, span-unit0.
 	want := []MirrorConfigSnapshot{
 		{IngressIfindex: 12, OutputIfindex: 22, Rate: 0, IngressVLANID: 0, UnitScoped: false},
-		{IngressIfindex: 13100, OutputIfindex: 22, Rate: 0, IngressVLANID: 100, UnitScoped: true},
+		{IngressIfindex: 13100, OutputIfindex: 22, Rate: 0, IngressVLANID: 100, UnitScoped: true, IngressUnit: 1},
 		{IngressIfindex: 11, OutputIfindex: 22, Rate: 0, IngressVLANID: 0, UnitScoped: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("mirror snapshots = %+v, want distinct unit-scoped rows %+v", got, want)
+	}
+}
+
+// #16063 (SI-5): wg0.0 and wg0.1 share the wg0 netdev (ifindex 42) and
+// both carry VLANID 0 — the VID cannot tell tunnel units apart. A
+// mirror input naming wg0.1 only must carry IngressUnit 1 so the Rust
+// resolver matches only wg0.1 inner packets; wg0.0 inner packets on
+// the same (ifindex, VID 0) must be absent from the analyzer.
+func TestBuildMirrorConfigSnapshotsTunnelUnitScope16063(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"wg0": {Name: "wg0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}, 1: {Number: 1}}},
+	}
+	cfg.ForwardingOptions.PortMirroring = &config.PortMirroringConfig{
+		Instances: map[string]*config.PortMirrorInstance{
+			"span-wg1": {
+				Name:   "span-wg1",
+				Input:  []string{"wg0.1"},
+				Output: "ge-0/0/9.0",
+			},
+		},
+	}
+	interfaces := []InterfaceSnapshot{
+		{Name: "wg0", LinuxName: "wg0", Ifindex: 42},
+		{Name: "wg0.0", LinuxName: "wg0", Ifindex: 42, IsUnit: true, VLANID: 0},
+		{Name: "wg0.1", LinuxName: "wg0", Ifindex: 42, IsUnit: true, VLANID: 0},
+		{Name: "ge-0/0/9.0", LinuxName: "ge-0-0-9.0", Ifindex: 22},
+	}
+	got, excl := buildMirrorConfigSnapshots(cfg, interfaces)
+	want := []MirrorConfigSnapshot{
+		{IngressIfindex: 42, OutputIfindex: 22, Rate: 0, IngressVLANID: 0, UnitScoped: true, IngressUnit: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mirror snapshots = %+v excl=%+v, want wg0.1-only unit-scoped row %+v", got, excl, want)
 	}
 }

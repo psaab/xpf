@@ -570,7 +570,9 @@ const (
 	// from_routing_instances; the golden moves.
 	// Version 65 (#16059) adds InterfaceSnapshot TunnelMode; it is a
 	// field of an EXISTING walked struct, so the golden below moves.
-	snapshotShapeVersion8892 = 65
+	// Version 66 (#16063, after #16049 took 64 and #16059 took 65) adds
+	// MirrorConfigSnapshot ingress_unit; the golden moves.
+	snapshotShapeVersion8892 = 66
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
