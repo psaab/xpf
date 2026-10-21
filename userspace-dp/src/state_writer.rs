@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -34,6 +35,29 @@ fn sync_all(f: &File) -> io::Result<()> {
 #[inline]
 fn sync_all(f: &File) -> io::Result<()> {
     real_sync_all(f)
+}
+
+/// Mode for every state-file temp, and therefore for the published state file
+/// (`finalize_durably` renames the temp onto the destination, carrying the
+/// temp's mode). The persisted payload clones the entire snapshot — topology,
+/// policy, NAT, routes, tunnel endpoints — so it is owner-only, asserted at
+/// creation rather than inherited from the process umask (#16048). With
+/// `create_new` (O_EXCL) the temp is always freshly created here, so
+/// `.mode()` always applies: `0o600 & !umask` can only narrow it further,
+/// never widen it past 0600. Both transports create their temps through
+/// [`open_state_temp`] so neither can drift from this mode.
+const STATE_FILE_MODE: u32 = 0o600;
+
+/// Create one write's private temp file with [`STATE_FILE_MODE`]. This is
+/// the single creation site for both transports (io_uring and the sync
+/// fallback); a temp created any other way would silently fall back to
+/// `0666 & umask` (0644 under umask 022) and publish that mode on rename.
+fn open_state_temp(tmp: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(STATE_FILE_MODE)
+        .open(tmp)
 }
 
 /// A writer's *process instance* identity: its pid PLUS its process start time
@@ -418,7 +442,7 @@ fn persist_with_io_uring(ring: &mut RingWriter, path: &str, data: Vec<u8>) -> Io
     // publishes onto `path` (last-writer-wins on the final file is acceptable;
     // crossed bytes under a successful rename are not, #2705).
     let tmp = temporary_path(path);
-    let file = match OpenOptions::new().create_new(true).write(true).open(&tmp) {
+    let file = match open_state_temp(&tmp) {
         Ok(f) => f,
         Err(e) => {
             // The temp was never created — nothing is on disk and the buffer is
@@ -476,10 +500,7 @@ fn persist_with_io_uring(ring: &mut RingWriter, path: &str, data: Vec<u8>) -> Io
 fn persist_sync(path: &str, data: &[u8]) -> Result<(), String> {
     // See persist_with_io_uring: O_EXCL unique temp, atomic rename publish.
     let tmp = temporary_path(path);
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&tmp)
+    let mut file = open_state_temp(&tmp)
         .map_err(|e| format!("open temp state file {}: {e}", tmp.display()))?;
     let result = (|| {
         {

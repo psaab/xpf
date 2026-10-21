@@ -165,6 +165,107 @@ fn fallback_persist_fsyncs_file_and_parent_dir() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// Decisive regression (#16048): the published state file — and any temp that
+// could be observed before the rename — must be owner-only 0600, not
+// `0666 & umask` (0644 under umask 022). The parent dir is forced to 0755
+// and the process umask to 000 (the worst case the issue allows: a
+// pre-existing 0755 dir plus a hostile umask) so this test cannot pass by
+// inheriting a restrictive ambient umask. Removing `.mode(0o600)` from
+// `open_state_temp` makes both results 0666 here,
+// turning both transport assertions RED. umask is process-global, so
+// the value is restored on every exit path via the guard below (the same
+// restore-on-drop discipline as SyncGuard/PidGuard above).
+struct UmaskGuard(libc::mode_t);
+
+impl UmaskGuard {
+    fn install(mask: libc::mode_t) -> Self {
+        // SAFETY: umask(2) always succeeds; it only swaps the mask.
+        Self(unsafe { libc::umask(mask) })
+    }
+}
+
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: umask(2) always succeeds; restoring the prior mask.
+        unsafe { libc::umask(self.0) };
+    }
+}
+
+fn file_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).expect("stat file").permissions().mode() & 0o777
+}
+
+#[test]
+fn persisted_state_file_is_0600_under_umask_000_in_0755_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmpdir();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod dir 0755");
+    let _umask = UmaskGuard::install(0);
+
+    // Sync transport: pre-create the destination world-readable. The atomic
+    // rename must REPLACE it with the temp's 0600 mode, not preserve the
+    // destination's old (readable) mode.
+    let dest = dir.join("state.json");
+    fs::write(&dest, b"previous world-readable state").unwrap();
+    fs::set_permissions(&dest, fs::Permissions::from_mode(0o644)).expect("chmod dest 0644");
+    persist_sync(dest.to_str().unwrap(), b"sync state").expect("sync persist");
+    assert_eq!(
+        file_mode(&dest),
+        0o600,
+        "sync-published state file must be 0600 under umask 000 in a 0755 dir"
+    );
+    assert_eq!(fs::read(&dest).unwrap(), b"sync state");
+
+    // The temp itself is 0600 from creation: a leaked/orphaned temp (crash
+    // between create and rename) must never be world-readable either.
+    let tmp = dir.join("state.json.inflight.tmp");
+    let _tmp_file = open_state_temp(&tmp).expect("create state temp");
+    assert_eq!(
+        file_mode(&tmp),
+        0o600,
+        "state temp file must be created 0600, not 0666 & umask"
+    );
+    drop(_tmp_file);
+    let _ = fs::remove_file(&tmp);
+
+    // io_uring transport: same published mode through the other creator.
+    // Skip (not pass silently) only when the kernel cannot provide a ring,
+    // mirroring the demotion test — the sync assertions above still ran.
+    let ring = match crate::io_uring_write::RingWriter::new(8) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("io_uring unavailable on this kernel; sync mode assertions already ran");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+    let ring_dest = dir.join("state-ring.json");
+    fs::write(&ring_dest, b"previous world-readable state").unwrap();
+    fs::set_permissions(&ring_dest, fs::Permissions::from_mode(0o644))
+        .expect("chmod ring dest 0644");
+    let mut mode = WriteMode::IoUring(ring);
+    let outcome = persist_with_mode(
+        &mut mode,
+        ring_dest.to_str().unwrap(),
+        b"ring state".to_vec(),
+    );
+    assert!(
+        outcome.result.is_ok(),
+        "io_uring persist failed: {:?}",
+        outcome.result
+    );
+    assert_eq!(
+        file_mode(&ring_dest),
+        0o600,
+        "io_uring-published state file must be 0600 under umask 000 in a 0755 dir"
+    );
+    assert_eq!(fs::read(&ring_dest).unwrap(), b"ring state");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn finalize_durably_fsyncs_file_and_parent_dir() {
     // Drive the shared finalizer directly so the test pins the contract
