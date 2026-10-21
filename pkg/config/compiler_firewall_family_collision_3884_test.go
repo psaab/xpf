@@ -293,6 +293,81 @@ firewall {
 	}
 }
 
+// #15997 fold 2: definitions differing ONLY in unexported term semantics must
+// stay quarantined — JSON dropped unknownChildren / routing-instance
+// conflict. Cell A: one body carries an unknown term child (#10294), the
+// other is a clean accept with identical exported fields.
+func TestFirewallFilterUnknownChildrenDifferNotIdentical15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    accept;
+                }
+            }
+        }
+        filter blockX {
+            term t1 {
+                bogus-child;
+                then {
+                    accept;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; !ok {
+		t.Fatalf("unknownChildren-differing duplicate must stay quarantined: %v", cfg.Firewall.CollidingNames)
+	}
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; ok {
+		t.Fatal("quarantined blockX must be omitted from FiltersInet")
+	}
+}
+
+// Cell B: one body steers to two conflicting routing-instance targets
+// (#11814, routingInstanceTargetConflict set), the other to one target,
+// with identical exported RoutingInstance/Action.
+func TestFirewallFilterRIConflictDifferNotIdentical15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    routing-instance RI-A;
+                }
+            }
+        }
+        filter blockX {
+            term t1 {
+                then {
+                    routing-instance RI-A;
+                    routing-instance RI-B;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; !ok {
+		t.Fatalf("RI-conflict-differing duplicate must stay quarantined: %v", cfg.Firewall.CollidingNames)
+	}
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; ok {
+		t.Fatal("quarantined blockX must be omitted from FiltersInet")
+	}
+}
+
 // A filter name shared between family inet and family inet6 is NOT a collision:
 // inet6 has its own dest map (FiltersInet6), so the two coexist. This legitimate
 // dual-stack case (the same filter name for the V4 and V6 path) must commit

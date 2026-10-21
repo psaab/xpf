@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -1088,15 +1087,7 @@ func effectiveFirewallInstances15997(tree *ConfigTree, colliding map[string]stru
 						if f == nil {
 							continue
 						}
-						// Deep-compare via deterministic rendering of the
-						// effective struct (JSON drops unexported internals
-						// that do not affect matching; resolved values are
-						// exported).
-						data, err := json.Marshal(f)
-						if err != nil {
-							continue
-						}
-						key := pool + "|" + string(data)
+						key := pool + "|" + firewallFilterEffectiveKey15997(f)
 						if forms[inst.name] == nil {
 							forms[inst.name] = map[string]struct{}{}
 						}
@@ -1107,6 +1098,32 @@ func effectiveFirewallInstances15997(tree *ConfigTree, colliding map[string]stru
 		}
 	}
 	return forms
+}
+
+// firewallFilterEffectiveKey15997 is a deterministic deep key over the FULL
+// compiled filter semantics, including unexported term fields
+// (unknownChildren, nameless, routingInstanceTargetFirst/Conflict) that
+// encoding/json silently drops. Two definitions differing only there are
+// NOT identical — e.g. one carrying an unknown child (#10294 strict-reject /
+// tolerant warn) or conflicting routing-instance targets (#11814) — and
+// must stay quarantined. fmt %#v renders unexported fields and is
+// deterministic for the value types used here (slices in authored order,
+// pointers followed). FlexMatch pointers are followed by %#v.
+func firewallFilterEffectiveKey15997(f *FirewallFilter) string {
+	if f == nil {
+		return "<nil>"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "name=%q ifaceSpecific=%v terms=%d;", f.Name, f.InterfaceSpecific, len(f.Terms))
+	for _, t := range f.Terms {
+		if t == nil {
+			b.WriteString("term=nil;")
+			continue
+		}
+		// %#v on the term struct covers every field including unexported.
+		fmt.Fprintf(&b, "term=%#v;", *t)
+	}
+	return b.String()
 }
 
 // pruneIdenticalFirewallCollisions15997 drops colliding names whose every
