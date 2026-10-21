@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Render Kea DHCP configs 0640 root:_kea instead of 0644 in a 0755
+    directory: the rendered kea-dhcp{4,6}.conf carries the full
+    static-reservation inventory (MAC, IP, hostname), previously
+    readable by any local account. Every render now lands 0640 with
+    the Kea runtime group installed before the rename, tightening a
+    pre-existing 0644 file on the next apply; fresh config directories
+    are created 0750. Kea (running as _kea) retains group-read; other
+    local accounts are denied (#16062).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Cap fsatomic preserved mode at the caller perm: WithPreserveExisting
     lifted an existing file's mode wholesale, so a legacy 0644 frr.conf
     stayed world-readable after every managed apply despite the FRR

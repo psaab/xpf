@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -264,6 +265,12 @@ type Manager struct {
 	keaOwnerUID    int
 	keaOwnerGID    int
 	keaOwnerOK     bool
+	// keaOwnerWarnOnce guards the absent-user warning INDEPENDENTLY of
+	// keaOwnerOnce (#16101 fold): the lookup cache may be populated
+	// silently by a config render, so the pre-seed warning must key off
+	// the resolution OUTCOME (unresolved) at pre-seed time, not off
+	// which caller happened to run the lookup first.
+	keaOwnerWarnOnce sync.Once
 }
 
 // SetLeaseSyncEnabled toggles emission of the Kea control-socket + lease_cmds
@@ -1752,19 +1759,145 @@ func (m *Manager) addLeaseSyncStanza(dhcp map[string]any, family int) {
 	}
 }
 
+// keaConfigPerm is the mode of every rendered Kea config (#16062). The
+// config carries the full static-reservation inventory (MAC ↔ IP ↔
+// hostname), harvestable by any local account for later spoofing, so it
+// must never be world-readable: 0640 with group-read for the Kea runtime
+// group, mirroring the configstore 0700/0600 discipline and the frr.conf
+// 0640 discipline (#16046). fsatomic enforces this perm on EVERY write
+// (the target inode is replaced), so a pre-existing 0644 file is
+// tightened on the next render with no separate chmod.
+const keaConfigPerm os.FileMode = 0o640
+
+// keaConfigDirPerm is the mode writeKeaConfig requests for the config
+// directory. Fresh dirs are created 0750 (no world traversal to even
+// stat the config); a pre-existing dir keeps its mode (MkdirAll does not
+// tighten), so the file perm above is the protective invariant.
+const keaConfigDirPerm os.FileMode = 0o750
+
 func (m *Manager) writeKeaConfig(path string, keaCfg map[string]any) ([]byte, error) {
 	data, err := json.MarshalIndent(keaCfg, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, keaConfigDirPerm); err != nil {
 		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
 	// AtomicGeneratedConfig (#1894): regenerated on apply; Kea must
 	// never parse a torn file, but the apply path pays no fsync.
-	if err := fsatomic.WriteFileAtomic(path, data, 0644); err != nil {
+	//
+	// #16062: 0640 root:_kea on every render, including tightening a
+	// pre-existing 0644 file (fsatomic replaces the inode at this perm).
+	// The group is the resolved Kea runtime user's primary gid (_kea on
+	// the Debian appliance base, kea on RHEL-family — the same lookup the
+	// memfile pre-seed uses, #2450), installed via WithOwner BEFORE the
+	// rename so the file never appears root:root. When a group install is
+	// not possible (non-root process, unresolved group, or a gid this
+	// process may not chgrp to) the write is plain 0640: still never
+	// world-readable, and a dev/test host without Kea has no reader to
+	// strand. Production xpfd runs as root with Kea installed, so the
+	// group always installs there.
+	opts, err := m.keaConfigWriteOpts(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeKeaConfigFile(path, data, keaConfigPerm, opts...); err != nil {
 		return nil, err
 	}
 	return data, nil
+}
+
+// writeKeaConfigFile installs one rendered Kea config. It is a package
+// var so a test can record the requested perm/owner without needing root
+// to perform a real fchown to a foreign gid. Production is a thin
+// fsatomic.WriteFileAtomic pass-through; the atomic-owner behavior
+// itself is exercised by fsatomic's own WithOwner tests.
+var writeKeaConfigFile = func(path string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+	return fsatomic.WriteFileAtomic(path, data, perm, opts...)
+}
+
+// keaConfigWriteOpts decides the ownership fsatomic installs for one Kea
+// config write (#16062). It is the narrowed decision for a READ-ONLY
+// config (Kea never writes it, unlike the RW memfile): there is exactly
+// one service reader, the Kea runtime user, so the file needs only its
+// primary group — never its uid.
+//
+//   - Existing file owned by the Kea uid, mode within 0640: pure
+//     preserve — ownership untouched, mode capped at 0640 by fsatomic.
+//   - Existing file owned by the Kea uid, wider than 0640: applied
+//     mode-only, pure preserve in every sub-arm. When the group
+//     already is the Kea group, or when this process may install it,
+//     preserve suffices: fsatomic caps the mode and never re-stamps a
+//     Kea-uid owner. When the group is foreign and this process may
+//     NOT install the Kea group (non-root), the write is STILL pure
+//     preserve (#16101 fold-2): the Kea uid reads via the OWNER arm
+//     (capped 0640 keeps owner-read), so tightening cannot strand the
+//     reader — failing the whole apply for a mode-only gain would
+//     strand DHCP instead. Kea-uid files NEVER group-migrate in this
+//     writer: their group, foreign or not, is left exactly as found.
+//   - Otherwise (root- or foreign-owned), when the Kea group resolves
+//     and this process may install it: explicit owner (euid, kea-gid)
+//     — fresh files are root:_kea from first install (euid is 0 in
+//     production), and a foreign-gid 0644 file migrates its group.
+//   - Otherwise (non-root, unresolved, or foreign non-installable gid):
+//     no owner pin — plain 0640; the file is still never world-readable.
+//
+// Installability is judged from the same single resolution: root can
+// always chgrp; a non-root process only to its egid/supplementary
+// groups, and fsatomic SKIPS the fchown entirely when the temp inode
+// already carries the requested owner — so pinning (0, gid) as non-root
+// (uid 0 ≠ process uid) would attempt a uid-changing fchown and fail
+// EPERM even when gid == egid. The pin therefore carries the process
+// euid (0 in production), which fsatomic then skips or installs as a
+// pure group change.
+func (m *Manager) keaConfigWriteOpts(path string) ([]fsatomic.Option, error) {
+	uid, gid, ok := m.resolveKeaOwner()
+	if !ok {
+		return nil, nil
+	}
+	if fi, err := os.Stat(path); err == nil {
+		st, isStat := fi.Sys().(*syscall.Stat_t)
+		if !isStat {
+			// Cannot prove ownership: fail closed rather than risk
+			// publishing 0640 root:root (Kea-unreadable) or reverting
+			// an operator's _kea ownership. Linux appliance always
+			// has Stat_t.
+			return nil, fmt.Errorf("kea config %s: cannot determine existing ownership (no Stat_t); refusing to choose a write owner (#16062)", path)
+		}
+		if int(st.Uid) == uid {
+			// Kea-uid-owned in every sub-arm: pure preserve. Mode
+			// caps at 0640 (owner-read survives the cap, so the
+			// reader is never stranded); ownership — including a
+			// foreign group this process cannot migrate — is left
+			// untouched rather than reverting the uid to root or
+			// failing the apply (#16101 fold-2).
+			return []fsatomic.Option{fsatomic.WithPreserveExisting()}, nil
+		}
+	}
+	if !keaGIDInstallable(gid) {
+		return nil, nil
+	}
+	// Root pins uid 0 (root:_kea); a non-root pin carries the process
+	// uid so fsatomic skips the fchown or installs a pure group change
+	// instead of attempting a uid change it must refuse (EPERM).
+	return []fsatomic.Option{fsatomic.WithOwner(os.Geteuid(), gid)}, nil
+}
+
+// keaGIDInstallable reports whether this process may chgrp a file to
+// gid: root, own egid, or a supplementary group.
+func keaGIDInstallable(gid int) bool {
+	if os.Geteuid() == 0 || gid == os.Getegid() {
+		return true
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return false
+	}
+	for _, g := range groups {
+		if g == gid {
+			return true
+		}
+	}
+	return false
 }

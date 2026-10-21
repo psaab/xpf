@@ -4,7 +4,19 @@ Manages Kea DHCPv4/v6 server config and lifecycle. Generates
 `/etc/kea/kea-dhcp{4,6}.conf` from the typed config and reloads the
 `kea-dhcp{4,6}-server` units via systemd. Config writes are
 AtomicGeneratedConfig (#1894): `fsatomic.WriteFileAtomic` — Kea never
-parses a torn file, no fsync on the apply path.
+parses a torn file, no fsync on the apply path. **Config file perm
+0640 root:_kea (#16062):** the rendered config carries the full
+static-reservation inventory (MAC ↔ IP ↔ hostname), so every render —
+fresh or over a pre-existing file — lands 0640 with the Kea runtime
+group (`_kea` Debian/Ubuntu, `kea` RHEL-family; the #2450 cached
+resolution) installed via `fsatomic.WithOwner` before the rename, and a
+legacy 0644 file is tightened on the next render (fsatomic replaces the
+inode at the requested perm). A file already owned by the Kea uid keeps
+its ownership (pure preserve). When no group can be installed (non-root
+process, unresolved Kea user) the write is plain 0640 — never
+world-readable. Fresh config dirs are created 0750. Config-apply path
+only (per-apply, not hot/dataplane); the added cost is one stat + the
+cached owner resolution per render.
 
 ## Entry points
 
