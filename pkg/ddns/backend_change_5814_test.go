@@ -404,7 +404,7 @@ func TestDHCPBackendFingerprintIdentity_5814(t *testing.T) {
 
 	// The TSIG SECRET is excluded — a different secret, same identity, same fp.
 	withSecret := *base
-	withSecret.TSIGSecret = config.Secret("super-secret-key-material")
+	withSecret.TSIGSecret = config.NewSecret("super-secret-key-material")
 	if got := fp(&withSecret); got != fpBase {
 		t.Errorf("fingerprint changed when only the TSIG secret differs: %q vs %q "+
 			"(secret must never be hashed in)", got, fpBase)

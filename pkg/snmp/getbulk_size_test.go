@@ -267,7 +267,7 @@ func v3GetBulkAgent(t *testing.T, ifs []IfData) (a *Agent, authKey, engineID []b
 	t.Helper()
 	a = NewAgentWithBootsPath(&config.SNMPConfig{
 		V3Users: map[string]*config.SNMPv3User{
-			"alice": {Name: "alice", AuthProtocol: "sha", AuthPassword: config.Secret("authpassword123")},
+			"alice": {Name: "alice", AuthProtocol: "sha", AuthPassword: config.NewSecret("authpassword123")},
 		},
 	}, t.TempDir()+"/eb")
 	a.SetIfDataFn(func() []IfData { return ifs })

@@ -566,7 +566,7 @@ func validateFRRAuthValuesStrict(cfg *Config) error {
 		"the whitespace/control characters from the value"
 
 	checkKey := func(scope, field string, s Secret) error {
-		if s == "" {
+		if s.Reveal() == "" {
 			return nil
 		}
 		if i := frrTokenUnsafeIndex(s.Reveal()); i >= 0 {

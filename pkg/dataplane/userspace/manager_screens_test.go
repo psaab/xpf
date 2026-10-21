@@ -261,7 +261,7 @@ func TestBuildScreenSnapshotsMarksSynCookieMode(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Flow.SynFloodProtectionMode = "syn-cookie"
 	cfg.System.RootAuthentication = &config.RootAuthConfig{
-		EncryptedPassword: "$6$rounds=5000$salt$hash",
+		EncryptedPassword: config.NewSecret("$6$rounds=5000$salt$hash"),
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"trust": {Name: "trust", ScreenProfile: "flood"},

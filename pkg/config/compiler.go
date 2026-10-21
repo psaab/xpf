@@ -256,17 +256,17 @@ func apiAuthHasUsableCredential(a *APIAuthConfig) bool {
 		return false
 	}
 	for _, u := range a.Users {
-		if u != nil && u.Password != "" {
+		if u != nil && u.Password.Reveal() != "" {
 			return true
 		}
 	}
 	for _, k := range a.APIKeys {
-		if k != "" {
+		if k.Reveal() != "" {
 			return true
 		}
 	}
 	for _, k := range a.Keys {
-		if k != nil && k.Secret != "" {
+		if k != nil && k.Secret.Reveal() != "" {
 			return true
 		}
 	}
@@ -297,20 +297,20 @@ func validateAPIAuthNoEmptySecretsStrict(cfg *Config) error {
 		return nil
 	}
 	for _, u := range wm.APIAuth.Users {
-		if u != nil && u.Password == "" {
+		if u != nil && u.Password.Reveal() == "" {
 			return fmt.Errorf(
 				"system services web-management api-auth user %q has an empty password — an empty Basic secret is not a valid credential and would authenticate any request presenting `%s:` with no password (an auth bypass on an off-loopback bind); set a non-empty password or remove the user (#5636)",
 				u.Username, u.Username)
 		}
 	}
 	for _, k := range wm.APIAuth.APIKeys {
-		if k == "" {
+		if k.Reveal() == "" {
 			return fmt.Errorf(
 				"system services web-management api-auth has an empty api-key — an empty api-key is not a valid credential and would authenticate any request presenting an empty Bearer / X-API-Key token (an auth bypass on an off-loopback bind); set a non-empty api-key or remove it (#5636)")
 		}
 	}
 	for _, k := range wm.APIAuth.Keys {
-		if k != nil && k.Secret == "" {
+		if k != nil && k.Secret.Reveal() == "" {
 			return fmt.Errorf("system services web-management api-auth key %q has an empty secret (#5636)", k.Name)
 		}
 	}

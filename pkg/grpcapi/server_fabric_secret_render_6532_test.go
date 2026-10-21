@@ -338,8 +338,8 @@ func fabricAPIAuthVerifierSentinels(t *testing.T, s *Server) []string {
 		t.Fatalf("compiled API-auth credentials = users:%d legacy keys:%d named keys:%d, want 1/1/0",
 			len(apiAuth.Users), len(apiAuth.APIKeys), len(apiAuth.Keys))
 	}
-	passwordVerifier := string(apiAuth.Users[0].Password)
-	keyVerifier := string(apiAuth.APIKeys[0])
+	passwordVerifier := apiAuth.Users[0].Password.Reveal()
+	keyVerifier := apiAuth.APIKeys[0].Reveal()
 	if !config.VerifyAPIAuthSecret(passwordVerifier, fabricAPIAuthUserPasswordSentinel) {
 		t.Fatal("compiled API-auth user verifier does not match the staged password")
 	}
@@ -607,8 +607,8 @@ func dispatcherTopics(t *testing.T) []string {
 //
 //  1. Reveal(), the explicit cleartext accessor.
 //  2. A CONVERSION. config.Secret is `type Secret string`
-//     (pkg/config/secret.go), so `string(x.PSK)`, `[]byte(x.PSK)` or
-//     `"p " + string(x.PSK)` yields the raw value without reaching String().
+//     (pkg/config/secret.go), so `x.PSK.Reveal()`, `[]byte(x.PSK)` or
+//     `"p " + x.PSK.Reveal()` yields the raw value without reaching String().
 //
 // Both matter most for the renderers the in-process sweep cannot drive:
 // wireguard / ipsec-statistics / bfd-peers short-circuit on a nil dataplane,
@@ -769,7 +769,7 @@ func TestSecretUnwrapScannerDetectsBothForms(t *testing.T) {
 		},
 		{
 			name: "string conversion",
-			src:  "package p\nfunc f(x T) { _ = string(x.PSK) }\n",
+			src:  "package p\nfunc f(x T) { _ = x.PSK.Reveal() }\n",
 			want: `field "PSK" to string(...)`,
 		},
 		{
@@ -789,7 +789,7 @@ func TestSecretUnwrapScannerDetectsBothForms(t *testing.T) {
 		},
 		{
 			name: "conversion nested in a call argument",
-			src:  "package p\nfunc f(x T) { g(\"%s\", string(x.PSK)) }\n",
+			src:  "package p\nfunc f(x T) { g(\"%s\", x.PSK.Reveal()) }\n",
 			want: `"PSK"`,
 		},
 		{

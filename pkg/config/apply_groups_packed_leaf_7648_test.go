@@ -64,10 +64,10 @@ func TestGroupCompactSpellingMergesIntoAnExistingPeer7648(t *testing.T) {
 	if u == nil {
 		t.Fatal("no user compiled")
 	}
-	if string(u.AuthPassword) != "groupsecret" {
+	if u.AuthPassword.Reveal() != "groupsecret" {
 		t.Errorf("AuthPassword = %q, want \"groupsecret\": the group's COMPACT value was "+
 			"dropped against an existing same-name peer, while the BLOCK spelling of the "+
-			"same group merges (#7648)", string(u.AuthPassword))
+			"same group merges (#7648)", u.AuthPassword.Reveal())
 	}
 }
 
@@ -93,9 +93,9 @@ func TestGroupCompactAndBlockSpellingsAgree7648(t *testing.T) {
 	if cu == nil || bu == nil {
 		t.Fatal("a user failed to compile on one of the two spellings")
 	}
-	if string(cu.AuthPassword) != string(bu.AuthPassword) || cu.AuthProtocol != bu.AuthProtocol {
+	if cu.AuthPassword.Reveal() != bu.AuthPassword.Reveal() || cu.AuthProtocol != bu.AuthProtocol {
 		t.Errorf("the two spellings of ONE group disagree: compact {%q,%q} vs block {%q,%q}",
-			cu.AuthProtocol, string(cu.AuthPassword), bu.AuthProtocol, string(bu.AuthPassword))
+			cu.AuthProtocol, cu.AuthPassword.Reveal(), bu.AuthProtocol, bu.AuthPassword.Reveal())
 	}
 }
 
@@ -116,10 +116,10 @@ func TestInlineValueStillBeatsTheGroup7648(t *testing.T) {
 	if u == nil {
 		t.Fatal("no user compiled")
 	}
-	if string(u.AuthPassword) != "localsecret" {
+	if u.AuthPassword.Reveal() != "localsecret" {
 		t.Errorf("AuthPassword = %q, want \"localsecret\": apply-groups precedence says "+
 			"the INLINE value wins over the group's, and expanding the packed tail must "+
-			"not change that (#7648)", string(u.AuthPassword))
+			"not change that (#7648)", u.AuthPassword.Reveal())
 	}
 }
 
@@ -139,7 +139,7 @@ apply-groups g1;`
 	if err != nil {
 		t.Fatalf("group-only inheritance must compile: %v", err)
 	}
-	if u := cfg.System.SNMP.V3Users["ops"]; u == nil || string(u.AuthPassword) != "groupsecret" {
+	if u := cfg.System.SNMP.V3Users["ops"]; u == nil || u.AuthPassword.Reveal() != "groupsecret" {
 		t.Errorf("group-only inheritance regressed: %+v", u)
 	}
 }
@@ -168,10 +168,10 @@ func TestBothCompactSpellingsStillLetInlineWin7648(t *testing.T) {
 	if u == nil {
 		t.Fatal("no user compiled")
 	}
-	if string(u.AuthPassword) != "localsecret" {
+	if u.AuthPassword.Reveal() != "localsecret" {
 		t.Errorf("AuthPassword = %q, want \"localsecret\": with BOTH sides compact the "+
 			"local peer is a leaf carrying its value on Keys, so expanding the group's "+
 			"tail into its empty Children would adopt the GROUP's value and invert "+
-			"apply-groups precedence (#7648)", string(u.AuthPassword))
+			"apply-groups precedence (#7648)", u.AuthPassword.Reveal())
 	}
 }

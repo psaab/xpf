@@ -13,7 +13,9 @@ import (
 // (config.DecodeJunos9Secret) so the same decoder applies at compile to
 // every Junos-reversible routing secret leaf as well as IKE PSKs.
 // normalizePSK remains the IKE call shape: decode a
-// `$9$` value, pass anything else through verbatim, error on malformed.
+// `$9$` value, pass anything else through verbatim, error on malformed
+// — including a `$9$` value that decodes to zero bytes (#15990), so a
+// decoded-empty PSK can never reach `secret = ""`.
 
 func normalizePSK(secret string) (string, error) {
 	return config.DecodeJunos9Secret(secret)

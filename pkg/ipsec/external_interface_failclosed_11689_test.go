@@ -53,8 +53,8 @@ func TestRenderConfigFailsClosedOnUnresolvableExternalInterface_11689(t *testing
 						"missing": {Name: "missing", Address: "203.0.113.1", ExternalIface: tc.iface + ".0"},
 					},
 					VPNs: map[string]*config.IPsecVPN{
-						"missing-vpn": {PSK: "fixture-secret", Gateway: "missing", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
-						"healthy":     {PSK: "fixture-secret", Gateway: "203.0.113.2", LocalID: "10.0.3.0/24", RemoteID: "10.0.4.0/24"},
+						"missing-vpn": {PSK: config.NewSecret("fixture-secret"), Gateway: "missing", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
+						"healthy":     {PSK: config.NewSecret("fixture-secret"), Gateway: "203.0.113.2", LocalID: "10.0.3.0/24", RemoteID: "10.0.4.0/24"},
 					},
 				}},
 			}
@@ -112,8 +112,8 @@ func TestRenderedVPNSetMatchesProductionRenderAndReplayFallback_13124(t *testing
 				"fallback-gw": {Name: "fallback-gw", Address: "2001:db8::1", ExternalIface: "wan0.0"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"vpn-unres":    {PSK: "fixture-secret", Gateway: "unres-gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
-				"vpn-fallback": {PSK: "fixture-secret", Gateway: "fallback-gw", LocalID: "10.0.3.0/24", RemoteID: "10.0.4.0/24"},
+				"vpn-unres":    {PSK: config.NewSecret("fixture-secret"), Gateway: "unres-gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
+				"vpn-fallback": {PSK: config.NewSecret("fixture-secret"), Gateway: "fallback-gw", LocalID: "10.0.3.0/24", RemoteID: "10.0.4.0/24"},
 			},
 		}},
 	}
@@ -174,7 +174,7 @@ func TestRenderConfigKeepsResolvedExternalInterfaceLocalBind_11689(t *testing.T)
 				"gw": {Name: "gw", Address: "203.0.113.1", ExternalIface: "wan0.0"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {PSK: "fixture-secret", Gateway: "gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
+				"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
 			},
 		}},
 	}
@@ -198,7 +198,7 @@ func TestExpectedLoadedConnsExternalInterfaceMissRemainsUnvalidatable_11689(t *t
 			"gw": {Name: "gw", Address: "203.0.113.1", ExternalIface: "xpf-11689-kernel00.0"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret", Gateway: "gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
+			"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
 		},
 	}}}
 	if _, err := ExpectedLoadedConns(cfg); !errors.Is(err, ErrGenerationUnvalidatable) {

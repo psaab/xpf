@@ -59,7 +59,7 @@ const bracedControl14409 = `protocols { bgp { group G1 { peer-as 65001;
 func TestBGPNeighborPackedAuthKey14409(t *testing.T) {
 	// Control: braced spelling installs the key.
 	ctrl := bgpNeighborsStrict14409(t, bracedControl14409)
-	if got := string(ctrl[0].AuthPassword); got != "NEIGHBORKEY" {
+	if got := ctrl[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 		t.Fatalf("control (braced) AuthPassword = %q, want NEIGHBORKEY", got)
 	}
 	if !ctrl[0].Passive {
@@ -70,7 +70,7 @@ func TestBGPNeighborPackedAuthKey14409(t *testing.T) {
 	// #8662 fold never fires for this line).
 	a := bgpNeighborsStrict14409(t, `protocols { bgp { group G1 { peer-as 65001;
 		neighbor 10.0.0.1 passive authentication-key NEIGHBORKEY; } } }`)
-	if got := string(a[0].AuthPassword); got != "NEIGHBORKEY" {
+	if got := a[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 		t.Errorf("fixture A (passive head) AuthPassword = %q, want NEIGHBORKEY", got)
 	}
 	if !a[0].Passive {
@@ -82,7 +82,7 @@ func TestBGPNeighborPackedAuthKey14409(t *testing.T) {
 	b := bgpNeighborsStrict14409(t, `protocols { bgp { group G1 { peer-as 65001;
 		neighbor 10.0.0.1 peer-as 65001 authentication-key NEIGHBORKEY;
 		export EP; } } }`)
-	if got := string(b[0].AuthPassword); got != "NEIGHBORKEY" {
+	if got := b[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 		t.Errorf("fixture B (peer-as head + group export) AuthPassword = %q, want NEIGHBORKEY", got)
 	}
 	if b[0].PeerAS != 65001 {
@@ -246,10 +246,10 @@ func TestBGPNeighborPackedSpellingDifferential14409(t *testing.T) {
 			}
 			// Positive control: the braced spelling must install the key,
 			// otherwise this row cannot observe the field.
-			if got := string(bn[0].AuthPassword); got != "NEIGHBORKEY" {
+			if got := bn[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 				t.Fatalf("braced control AuthPassword = %q, want NEIGHBORKEY (row cannot observe)", got)
 			}
-			if got := string(pn[0].AuthPassword); got != "NEIGHBORKEY" {
+			if got := pn[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 				t.Errorf("packed AuthPassword = %q, want NEIGHBORKEY (braced installs it)", got)
 			}
 			h.check(t, pn[0])
@@ -272,7 +272,7 @@ func TestBGPNeighborPackedSpellingDifferential14409(t *testing.T) {
 				neighbor 10.0.0.1 peer-as 65001 authentication-key NEIGHBORKEY;
 				%s } } }`, sib)
 			ns := bgpNeighborsStrict14409(t, text)
-			if got := string(ns[0].AuthPassword); got != "NEIGHBORKEY" {
+			if got := ns[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 				t.Errorf("with following sibling %q: AuthPassword = %q, want NEIGHBORKEY", sib, got)
 			}
 		})
@@ -282,7 +282,7 @@ func TestBGPNeighborPackedSpellingDifferential14409(t *testing.T) {
 	// A router AS is required for strict compile, hence local-as here.
 	cfg := bgpNeighborsStrictCompile14409(t, `protocols { bgp { local-as 65000; group G1 { peer-as 65001;
 		neighbor 10.0.0.1 passive authentication-key NEIGHBORKEY; } } }`)
-	if got := string(cfg.Protocols.BGP.Neighbors[0].AuthPassword); got != "NEIGHBORKEY" {
+	if got := cfg.Protocols.BGP.Neighbors[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 		t.Errorf("strict CompileConfig fixture A AuthPassword = %q, want NEIGHBORKEY", got)
 	}
 
@@ -298,7 +298,7 @@ func TestBGPNeighborPackedSpellingDifferential14409(t *testing.T) {
 	if !mixed[0].Passive {
 		t.Errorf("mixed braced+packed: Passive = false, want true")
 	}
-	if got := string(mixed[0].AuthPassword); got != "NEIGHBORKEY" {
+	if got := mixed[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 		t.Errorf("mixed braced+packed: AuthPassword = %q, want NEIGHBORKEY", got)
 	}
 	// Controls that must stay green:
@@ -306,7 +306,7 @@ func TestBGPNeighborPackedSpellingDifferential14409(t *testing.T) {
 	// - neighbor with no key stays keyless (no invented key)
 	noKey := bgpNeighborsStrict14409(t, `protocols { bgp { group G1 { peer-as 65001;
 		neighbor 10.0.0.1 passive; } } }`)
-	if got := string(noKey[0].AuthPassword); got != "" {
+	if got := noKey[0].AuthPassword.Reveal(); got != "" {
 		t.Errorf("no-key control AuthPassword = %q, want empty", got)
 	}
 	if !noKey[0].Passive {
@@ -315,13 +315,13 @@ func TestBGPNeighborPackedSpellingDifferential14409(t *testing.T) {
 	// - group key still applies as fallback when neighbor has no own key
 	grp := bgpNeighborsStrict14409(t, `protocols { bgp { group G1 { peer-as 65001; authentication-key GROUPKEY;
 		neighbor 10.0.0.1 passive; } } }`)
-	if got := string(grp[0].AuthPassword); got != "GROUPKEY" {
+	if got := grp[0].AuthPassword.Reveal(); got != "GROUPKEY" {
 		t.Errorf("group-key fallback AuthPassword = %q, want GROUPKEY", got)
 	}
 	// - group key must NOT override an explicit packed neighbor key
 	over := bgpNeighborsStrict14409(t, `protocols { bgp { group G1 { peer-as 65001; authentication-key GROUPKEY;
 		neighbor 10.0.0.1 passive authentication-key NEIGHBORKEY; } } }`)
-	if got := string(over[0].AuthPassword); got != "NEIGHBORKEY" {
+	if got := over[0].AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 		t.Errorf("neighbor-over-group AuthPassword = %q, want NEIGHBORKEY", got)
 	}
 }

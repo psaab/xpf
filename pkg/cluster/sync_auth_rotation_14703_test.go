@@ -191,8 +191,8 @@ func TestSessionSyncHitlessKeyRotationAcceptRing(t *testing.T) {
 func TestSessionSyncRotationRingFromManager(t *testing.T) {
 	m := NewManager(0, 22)
 	m.UpdateConfig(&config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret(rot14703KeyB),
-		ControlLinkAuthKeyAlt: config.Secret(rot14703KeyA),
+		ControlLinkAuthKey:    config.NewSecret(string(rot14703KeyB)),
+		ControlLinkAuthKeyAlt: config.NewSecret(string(rot14703KeyA)),
 	})
 	s := NewSessionSync(":0", ":0", nil)
 	s.SetAuthProvider(m)
@@ -207,7 +207,7 @@ func TestSessionSyncRotationRingFromManager(t *testing.T) {
 
 	// Finalize: the retired key leaves the ring.
 	m.UpdateConfig(&config.ClusterConfig{
-		ControlLinkAuthKey: config.Secret(rot14703KeyB),
+		ControlLinkAuthKey: config.NewSecret(string(rot14703KeyB)),
 	})
 	keys = s.authAcceptedKeys()
 	if len(keys) != 1 || !bytes.Equal(keys[0], rot14703KeyB) {

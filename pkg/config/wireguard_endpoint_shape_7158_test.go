@@ -112,7 +112,7 @@ func TestWireguardEndpointShapeMatchesTheSharedFixture_7158(t *testing.T) {
 func TestWireguardHostnamePeerStillGetsAllowedIPsValidation_7158(t *testing.T) {
 	tc := &TunnelConfig{
 		WgListenPort:      51820,
-		WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"),
+		WgLocalPrivkeyHex: NewSecret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"),
 		WgPeers: []WgPeerConfig{{
 			PublicKeyHex: "3234c2b228336f93d91937d8cf5704b76a02ac6d1c7ad02a4c06c0af18ae1b8d",
 			Endpoint:     "ddns.example.com:51820",
@@ -148,7 +148,7 @@ func TestWireguardMixedFamilyGateUnchangedByHostnames_7158(t *testing.T) {
 		}
 	}
 	// Mixed LITERALS still reject — unchanged behaviour.
-	mixed := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
+	mixed := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
 		peer(1, "203.0.113.7:51820"),
 		peer(2, "[2001:db8::1]:51820"),
 	}}
@@ -160,7 +160,7 @@ func TestWireguardMixedFamilyGateUnchangedByHostnames_7158(t *testing.T) {
 
 	// A hostname alongside a literal does NOT trip the gate: its family is
 	// unknowable at commit, so it neither constrains nor is constrained.
-	withHostname := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
+	withHostname := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
 		peer(3, "203.0.113.7:51820"),
 		peer(4, "ddns.example.com:51820"),
 	}}
@@ -170,7 +170,7 @@ func TestWireguardMixedFamilyGateUnchangedByHostnames_7158(t *testing.T) {
 	}
 
 	// And two hostnames are fine together.
-	twoHostnames := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
+	twoHostnames := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
 		peer(5, "a.example.com:51820"),
 		peer(6, "b.example.com:51820"),
 	}}

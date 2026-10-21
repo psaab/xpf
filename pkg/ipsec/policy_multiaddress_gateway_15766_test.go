@@ -210,7 +210,7 @@ func TestIKEGatewayMultiAddressCompileValidateAndRender(t *testing.T) {
 	t.Run("direct multi-address gateway renders no pinned remote id", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "gw", PSK: "k", EstablishTunnels: "immediately"},
+				"tun": {Gateway: "gw", PSK: config.NewSecret("k"), EstablishTunnels: "immediately"},
 			},
 			Gateways: map[string]*config.IPsecGateway{
 				"gw": {Name: "gw", Address: "203.0.113.1, 203.0.113.2", LocalAddress: "198.51.100.1"},
@@ -235,7 +235,7 @@ func TestIKEGatewayMultiAddressCompileValidateAndRender(t *testing.T) {
 	t.Run("inline multi-address endpoint renders no pinned remote id", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "203.0.113.1,203.0.113.2", PSK: "k"},
+				"tun": {Gateway: "203.0.113.1,203.0.113.2", PSK: config.NewSecret("k")},
 			},
 		}
 		text, _, err := m.renderConfig(cfg)

@@ -584,9 +584,9 @@ func TestInitV3Users(t *testing.T) {
 			"admin": {
 				Name:         "admin",
 				AuthProtocol: "sha",
-				AuthPassword: "authpass123",
+				AuthPassword: config.NewSecret("authpass123"),
 				PrivProtocol: "aes128",
-				PrivPassword: "privpass456",
+				PrivPassword: config.NewSecret("privpass456"),
 			},
 		},
 	})
@@ -621,7 +621,7 @@ func TestInitV3Users_NilConfig(t *testing.T) {
 func TestV3Discovery(t *testing.T) {
 	a := NewAgent(&config.SNMPConfig{
 		V3Users: map[string]*config.SNMPv3User{
-			"test": {Name: "test", AuthProtocol: "sha", AuthPassword: "testpass"},
+			"test": {Name: "test", AuthProtocol: "sha", AuthPassword: config.NewSecret("testpass")},
 		},
 	})
 	resp := a.buildV3Discovery(42)

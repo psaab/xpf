@@ -135,7 +135,7 @@ func TestRoutingConfigParsing(t *testing.T) {
 	if vpn.RemoteID != "10.1.0.0/24" {
 		t.Errorf("vpn remote-identity: %s", vpn.RemoteID)
 	}
-	if vpn.PSK != "secret123" {
+	if vpn.PSK.Reveal() != "secret123" {
 		t.Errorf("vpn psk: %s", vpn.PSK)
 	}
 	parser2 := NewParser(output)
@@ -1135,13 +1135,13 @@ func TestOSPFAuthSetSyntax(t *testing.T) {
 	if ifaces[0].AuthKeyID != 1 {
 		t.Errorf("trust0 AuthKeyID: got %d, want 1", ifaces[0].AuthKeyID)
 	}
-	if ifaces[0].AuthKey != "secret123" {
+	if ifaces[0].AuthKey.Reveal() != "secret123" {
 		t.Errorf("trust0 AuthKey: got %q, want secret123", ifaces[0].AuthKey)
 	}
 	if ifaces[1].AuthType != "simple" {
 		t.Errorf("dmz0 AuthType: got %q, want simple", ifaces[1].AuthType)
 	}
-	if ifaces[1].AuthKey != "plainpw" {
+	if ifaces[1].AuthKey.Reveal() != "plainpw" {
 		t.Errorf("dmz0 AuthKey: got %q, want plainpw", ifaces[1].AuthKey)
 	}
 }
@@ -1169,7 +1169,7 @@ func TestBGPAuthSetSyntax(t *testing.T) {
 	if len(bgp.Neighbors) != 1 {
 		t.Fatalf("neighbors: got %d, want 1", len(bgp.Neighbors))
 	}
-	if bgp.Neighbors[0].AuthPassword != "bgpSecret" {
+	if bgp.Neighbors[0].AuthPassword.Reveal() != "bgpSecret" {
 		t.Errorf("AuthPassword: got %q, want bgpSecret", bgp.Neighbors[0].AuthPassword)
 	}
 }
@@ -1197,10 +1197,10 @@ func TestBGPNeighborAuthOverride(t *testing.T) {
 	if len(bgp.Neighbors) != 2 {
 		t.Fatalf("neighbors: got %d, want 2", len(bgp.Neighbors))
 	}
-	if bgp.Neighbors[0].AuthPassword != "neighborKey" {
+	if bgp.Neighbors[0].AuthPassword.Reveal() != "neighborKey" {
 		t.Errorf("neighbor[0] AuthPassword: got %q, want neighborKey", bgp.Neighbors[0].AuthPassword)
 	}
-	if bgp.Neighbors[1].AuthPassword != "groupKey" {
+	if bgp.Neighbors[1].AuthPassword.Reveal() != "groupKey" {
 		t.Errorf("neighbor[1] AuthPassword: got %q, want groupKey", bgp.Neighbors[1].AuthPassword)
 	}
 }
@@ -1512,7 +1512,7 @@ func TestISISAuthSetSyntax(t *testing.T) {
 	if isis.AuthType != "md5" {
 		t.Errorf("AuthType: got %q, want md5", isis.AuthType)
 	}
-	if isis.AuthKey != "isisSecret" {
+	if isis.AuthKey.Reveal() != "isisSecret" {
 		t.Errorf("AuthKey: got %q, want isisSecret", isis.AuthKey)
 	}
 }
@@ -1544,7 +1544,7 @@ func TestISISInterfaceAuthSetSyntax(t *testing.T) {
 	if trust.AuthType != "md5" {
 		t.Errorf("trust0 AuthType: got %q, want md5", trust.AuthType)
 	}
-	if trust.AuthKey != "ifaceSecret" {
+	if trust.AuthKey.Reveal() != "ifaceSecret" {
 		t.Errorf("trust0 AuthKey: got %q, want ifaceSecret", trust.AuthKey)
 	}
 	if trust.Metric != 100 {
@@ -1554,7 +1554,7 @@ func TestISISInterfaceAuthSetSyntax(t *testing.T) {
 	if dmz.AuthType != "simple" {
 		t.Errorf("dmz0 AuthType: got %q, want simple", dmz.AuthType)
 	}
-	if dmz.AuthKey != "plainpw" {
+	if dmz.AuthKey.Reveal() != "plainpw" {
 		t.Errorf("dmz0 AuthKey: got %q, want plainpw", dmz.AuthKey)
 	}
 }
@@ -3776,7 +3776,7 @@ func TestWireGuardTunnelSetSyntax(t *testing.T) {
 	if tc.WgListenPort != 51820 {
 		t.Errorf("WgListenPort = %d, want 51820", tc.WgListenPort)
 	}
-	if tc.WgLocalPrivkeyHex != "a01010101010101010101010101010101010101010101010101010101010101a" {
+	if tc.WgLocalPrivkeyHex.Reveal() != "a01010101010101010101010101010101010101010101010101010101010101a" {
 		t.Errorf("WgLocalPrivkeyHex not parsed: %q", tc.WgLocalPrivkeyHex)
 	}
 	if len(tc.WgPeers) != 1 {

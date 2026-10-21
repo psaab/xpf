@@ -32,7 +32,7 @@ func TestResolveSurfaceABackendFailsClosedOnCachedSourceBindError(t *testing.T) 
 		Backend:  "dyndns2",
 		Server:   "https://dyn.example.net/nic/update",
 		Username: "u",
-		Password: config.Secret("pw"),
+		Password: config.NewSecret("pw"),
 		// A configured-but-unhonorable source binding: clientFor resolves the
 		// bindConfig, fails to parse the address, and returns (unbound client,
 		// error). The publish must NOT egress via that unbound client.
@@ -72,7 +72,7 @@ func TestResolveSurfaceABackendNoSourceUsesDefaultClient(t *testing.T) {
 		Backend:  "dyndns2",
 		Server:   "https://dyn.example.net/nic/update",
 		Username: "u",
-		Password: config.Secret("pw"),
+		Password: config.NewSecret("pw"),
 		// No SourceAddress: bindConfig is the zero value, clientFor returns
 		// (default client, nil error) — the operator never asked for a source.
 	}

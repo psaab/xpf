@@ -154,11 +154,11 @@ func TestLeaseAndSurfaceAAgreeOnOneServer6755(t *testing.T) {
 func TestAuthorityOmitsCredentials6755(t *testing.T) {
 	a := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
 		Backend: "rfc2136", UpdateServer: "ns1.example.net:53",
-		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.Secret("SECRET-ONE"),
+		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.NewSecret("SECRET-ONE"),
 	})
 	b := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
 		Backend: "rfc2136", UpdateServer: "ns1.example.net:53",
-		TSIGKeyName: "k2", TSIGAlgorithm: "hmac-sha512", TSIGSecret: config.Secret("SECRET-TWO"),
+		TSIGKeyName: "k2", TSIGAlgorithm: "hmac-sha512", TSIGSecret: config.NewSecret("SECRET-TWO"),
 	})
 	if a != b {
 		t.Error("TSIG material changed the authority fingerprint: two keys for the same " +

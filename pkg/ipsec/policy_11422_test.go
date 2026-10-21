@@ -35,7 +35,7 @@ func TestExplicitRouteBasedSelectorsDefaultEachEmptySide11422(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			vpn := &config.IPsecVPN{PSK: "fixture-secret",
+			vpn := &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"),
 				BindInterface: "st0.0",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"to-peer": {LocalIP: tc.local, RemoteIP: tc.remote},

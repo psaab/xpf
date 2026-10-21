@@ -15,7 +15,7 @@ func isisIfaceAuth9496(authType, key string) string {
 	return m.generateProtocols(nil, nil, nil, nil, &config.ISISConfig{
 		NET:        "49.0001.0100.0000.0001.00",
 		Level:      "level-2",
-		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: authType, AuthKey: config.Secret(key)}},
+		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: authType, AuthKey: config.NewSecret(key)}},
 	}, "", 0, nil, nil)
 }
 

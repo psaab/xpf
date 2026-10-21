@@ -20,7 +20,7 @@ func TestBuildTunnelEndpointSnapshotsDropsRemovedWireguard(t *testing.T) {
 				Name:              "wg0",
 				Mode:              "wireguard",
 				WgListenPort:      51820,
-				WgLocalPrivkeyHex: "a01010101010101010101010101010101010101010101010101010101010101a",
+				WgLocalPrivkeyHex: config.NewSecret("a01010101010101010101010101010101010101010101010101010101010101a"),
 				WgPeers: []config.WgPeerConfig{{
 					PublicKeyHex: "b02020202020202020202020202020202020202020202020202020202020202b",
 					AllowedIPs:   []string{"10.77.0.0/24"},
@@ -115,7 +115,7 @@ func TestBuildTunnelEndpointSnapshotsInterfaceLevelWireguardMultiUnitSingleEndpo
 				Name:              "wg0",
 				Mode:              "wireguard",
 				WgListenPort:      51820,
-				WgLocalPrivkeyHex: "a01010101010101010101010101010101010101010101010101010101010101a",
+				WgLocalPrivkeyHex: config.NewSecret("a01010101010101010101010101010101010101010101010101010101010101a"),
 				WgPeers: []config.WgPeerConfig{{
 					PublicKeyHex: "b02020202020202020202020202020202020202020202020202020202020202b",
 					AllowedIPs:   []string{"10.77.0.0/24"},

@@ -347,6 +347,24 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #15990: a `$9$` pre-shared-key that does not decode (garbage, or
+	// `$9$i`/`$9$!` decoding to zero bytes) previously committed on the
+	// strength of its non-empty ENCODED form and rendered `secret = ""`
+	// (decode-to-empty) or a render-time skip (garbage). Strict on
+	// commit / commit-check; lenient on load / peer-sync (warn, and the
+	// pkg/ipsec render belt skips the VPN so no empty or undecodable
+	// secret loads). Runs after the #14139 presence gate: the
+	// decoded-form presence test counts a malformed key as present, so
+	// this gate's refusal names the actual defect.
+	if err := validateIPsecPSKJunos9Strict(cfg); err != nil {
+		if opts.lenientIPsecPSKJunos9 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec malformed $9$ pre-shared key (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #15752 (G18-02/03): a pubkey VPN with no effective local-certificate
 	// (gateway, else ike-policy) renders credential-less pubkey; an unknown
 	// gateway identity type renders verbatim as an IP/FQDN identity.

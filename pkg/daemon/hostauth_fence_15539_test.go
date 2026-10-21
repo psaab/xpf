@@ -122,7 +122,7 @@ func aliceCfg15539() *config.Config {
 	cfg.System.Login = &config.LoginConfig{Users: []*config.LoginUser{{
 		Name:              "alice",
 		Class:             "super-user",
-		EncryptedPassword: config.Secret(testHash15539),
+		EncryptedPassword: config.NewSecret(testHash15539),
 		SSHKeys:           []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI15539 alice@xpf"},
 	}}}
 	return cfg

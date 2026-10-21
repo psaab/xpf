@@ -53,12 +53,12 @@ func TestPackedAuthFirstCompilesAuthPriv14411(t *testing.T) {
 		t.Fatalf("packed authPriv user was rejected: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS12345" {
-		t.Fatalf("auth half wrong: auth=%q authpw set=%v", u.AuthProtocol, string(u.AuthPassword) != "")
+	if u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() != "APASS12345" {
+		t.Fatalf("auth half wrong: auth=%q authpw set=%v", u.AuthProtocol, u.AuthPassword.Reveal() != "")
 	}
-	if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
+	if u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() != "PPASS12345" {
 		t.Fatalf("packed second (privacy) protocol was dropped: priv=%q privpw set=%v — the user compiles authNoPriv while written authPriv",
-			u.PrivProtocol, string(u.PrivPassword) != "")
+			u.PrivProtocol, u.PrivPassword.Reveal() != "")
 	}
 }
 
@@ -74,8 +74,8 @@ func TestPackedPrivFirstCompilesAuthPriv14411(t *testing.T) {
 		t.Fatalf("packed priv-first authPriv user was rejected: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS12345" ||
-		u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
+	if u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() != "APASS12345" ||
+		u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() != "PPASS12345" {
 		t.Fatalf("packed priv-first user compiled weaker/differently than written: auth=%q priv=%q", u.AuthProtocol, u.PrivProtocol)
 	}
 }
@@ -96,7 +96,7 @@ func TestPackedRunOnFlatAndInstanceLines14411(t *testing.T) {
 			t.Fatalf("flat packed authPriv user was rejected: %v", err)
 		}
 		u := user14411(t, cfg, "bob")
-		if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
+		if u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() != "PPASS12345" {
 			t.Fatalf("flat packed second protocol dropped: priv=%q", u.PrivProtocol)
 		}
 	})
@@ -107,7 +107,7 @@ func TestPackedRunOnFlatAndInstanceLines14411(t *testing.T) {
 			t.Fatalf("instance-line packed user was rejected: %v", err)
 		}
 		u := user14411(t, cfg, "carol")
-		if u.AuthProtocol != "sha" || u.PrivProtocol != "des" || string(u.PrivPassword) != "PPASS12345" {
+		if u.AuthProtocol != "sha" || u.PrivProtocol != "des" || u.PrivPassword.Reveal() != "PPASS12345" {
 			t.Fatalf("instance-line packed user compiled weaker than written: auth=%q priv=%q", u.AuthProtocol, u.PrivProtocol)
 		}
 	})
@@ -125,8 +125,8 @@ func TestPackedPasswordValueSpellingAKeywordIsNotReparsed14411(t *testing.T) {
 		t.Fatalf("password value spelling a keyword was rejected: %v", err)
 	}
 	u := user14411(t, cfg, "dave")
-	if string(u.AuthPassword) != "privacy-aes128" || u.PrivProtocol != "" {
-		t.Fatalf("password value was re-parsed as a protocol keyword: authpw=%q priv=%q", string(u.AuthPassword), u.PrivProtocol)
+	if u.AuthPassword.Reveal() != "privacy-aes128" || u.PrivProtocol != "" {
+		t.Fatalf("password value was re-parsed as a protocol keyword: authpw=%q priv=%q", u.AuthPassword.Reveal(), u.PrivProtocol)
 	}
 }
 
@@ -207,8 +207,8 @@ func TestWrappedPlacementCompilesWrittenLevelLenient14411(t *testing.T) {
 		t.Fatalf("tolerant path rejected the wrapped config: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS12345" ||
-		u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
+	if u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() != "APASS12345" ||
+		u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() != "PPASS12345" {
 		t.Fatalf("wrapped user compiled weaker than written on the tolerant path: auth=%q priv=%q", u.AuthProtocol, u.PrivProtocol)
 	}
 }
@@ -229,7 +229,7 @@ func TestFlatLinePackedRunIsNotMisplaced14411(t *testing.T) {
 		t.Fatalf("packed flat line rejected as misplaced: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
+	if u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() != "PPASS12345" {
 		t.Fatalf("packed flat line compiled weaker than written: priv=%q", u.PrivProtocol)
 	}
 }

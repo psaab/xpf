@@ -22,26 +22,26 @@ func TestOSPFAuthTokenFirst11462(t *testing.T) {
 	}{
 		{
 			name:     "md5 whitespace key",
-			authType: "md5", key: " \t ", keyID: 1,
+			authType: "md5", key: config.NewSecret(" \t "), keyID: 1,
 			modeLine:  " ip ospf authentication message-digest\n",
 			keyPrefix: " ip ospf message-digest-key ", wantWarn: true,
 		},
 		{
 			name:     "md5 valid key",
-			authType: "md5", key: "s3cret", keyID: 1,
+			authType: "md5", key: config.NewSecret("s3cret"), keyID: 1,
 			modeLine:  " ip ospf authentication message-digest\n",
 			keyPrefix: " ip ospf message-digest-key ",
 			keyLine:   " ip ospf message-digest-key 1 md5 s3cret\n",
 		},
 		{
 			name:     "simple whitespace key",
-			authType: "simple", key: " \t ",
+			authType: "simple", key: config.NewSecret(" \t "),
 			modeLine:  " ip ospf authentication\n",
 			keyPrefix: " ip ospf authentication-key ", wantWarn: true,
 		},
 		{
 			name:     "simple valid key",
-			authType: "simple", key: "s3cret",
+			authType: "simple", key: config.NewSecret("s3cret"),
 			modeLine:  " ip ospf authentication\n",
 			keyPrefix: " ip ospf authentication-key ",
 			keyLine:   " ip ospf authentication-key s3cret\n",
@@ -65,7 +65,7 @@ func TestOSPFAuthTokenFirst11462(t *testing.T) {
 				if count := strings.Count(logs.String(), "OMITTING a routing authentication line"); count != 1 {
 					t.Errorf("warning count = %d, want exactly one; logs: %s", count, logs.String())
 				}
-				if strings.Contains(logs.String(), string(tc.key)) {
+				if strings.Contains(logs.String(), tc.key.Reveal()) {
 					t.Errorf("warning exposed secret: %s", logs.String())
 				}
 				if strings.Contains(got, tc.modeLine) || strings.Contains(got, tc.keyPrefix) {

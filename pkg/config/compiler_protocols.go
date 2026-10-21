@@ -364,12 +364,12 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 									}
 									iface.AuthKeyID = keyID
 								}
-								key := Secret("")
+								key := NewSecret("")
 								keyPresent := false
 								for _, kc := range authChild.Children {
 									if kc.Name() == "key" {
-										candidate := Secret(nodeVal(kc))
-										if keyPresent && key != "" && candidate != "" &&
+										candidate := NewSecret(nodeVal(kc))
+										if keyPresent && key.Reveal() != "" && candidate.Reveal() != "" &&
 											decodedOSPFMD5Key15935(key) != decodedOSPFMD5Key15935(candidate) {
 											// #15935: two different keys
 											// inside ONE md5 stanza are a
@@ -400,9 +400,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 									if iface.AuthMD5Keys[i].ID != keyID {
 										continue
 									}
-									if iface.AuthMD5Keys[i].Key == "" && key != "" {
+									if iface.AuthMD5Keys[i].Key.Reveal() == "" && key.Reveal() != "" {
 										iface.AuthMD5Keys[i].Key = key
-									} else if iface.AuthMD5Keys[i].Key != "" && key != "" && decodedOSPFMD5Key15935(iface.AuthMD5Keys[i].Key) != decodedOSPFMD5Key15935(key) {
+									} else if iface.AuthMD5Keys[i].Key.Reveal() != "" && key.Reveal() != "" && decodedOSPFMD5Key15935(iface.AuthMD5Keys[i].Key) != decodedOSPFMD5Key15935(key) {
 										// #15935: same key-id restated with a
 										// DIFFERENT non-empty key is a
 										// conflicting duplicate Junos rejects,
@@ -423,7 +423,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 								}
 							case "simple-password":
 								iface.AuthType = "simple"
-								iface.AuthKey = Secret(nodeVal(authChild))
+								iface.AuthKey = NewSecret(nodeVal(authChild))
 							}
 						}
 					case "bfd-liveness-detection":
@@ -873,7 +873,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 									FamilyInet:              inheritInet,
 									FamilyInet6:             inheritInet6,
 									GroupName:               groupInst.name,
-									AuthPassword:            Secret(groupAuthKey),
+									AuthPassword:            NewSecret(groupAuthKey),
 									BFD:                     groupBFD,
 									BFDInterval:             groupBFDInterval,
 									BFDMultiplier:           groupBFDMultiplier,
@@ -1149,7 +1149,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 				proto.RIP.Redistribute = append(proto.RIP.Redistribute, firewallMatchValues(child)...)
 			case "authentication-key":
 				if v := nodeVal(child); v != "" {
-					proto.RIP.AuthKey = Secret(v)
+					proto.RIP.AuthKey = NewSecret(v)
 				}
 			case "authentication-type":
 				if v := nodeVal(child); v != "" {
@@ -1222,7 +1222,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 				proto.ISIS.Export = append(proto.ISIS.Export, firewallMatchValues(child)...)
 			case "authentication-key":
 				if v := nodeVal(child); v != "" {
-					proto.ISIS.AuthKey = Secret(v)
+					proto.ISIS.AuthKey = NewSecret(v)
 				}
 			case "authentication-type":
 				if v := nodeVal(child); v != "" {
@@ -1320,7 +1320,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 								}
 							}
 						case "authentication-key":
-							iface.AuthKey = Secret(nodeVal(prop))
+							iface.AuthKey = NewSecret(nodeVal(prop))
 						case "authentication-type":
 							iface.AuthType = nodeVal(prop)
 						case "bfd-liveness-detection":

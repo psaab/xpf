@@ -164,7 +164,7 @@ func TestV3SetRequest_NotWritable(t *testing.T) {
 	bootsPath := filepath.Join(t.TempDir(), "snmp-engineboots")
 	a := NewAgentWithBootsPath(&config.SNMPConfig{
 		V3Users: map[string]*config.SNMPv3User{
-			userName: {Name: userName, AuthProtocol: authPro, AuthPassword: authPW},
+			userName: {Name: userName, AuthProtocol: authPro, AuthPassword: config.NewSecret(authPW)},
 		},
 	}, bootsPath)
 

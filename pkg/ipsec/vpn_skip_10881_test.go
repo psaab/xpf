@@ -83,7 +83,7 @@ func TestMalformedJunosPSKSkipsVPNAndStillTerminatesRemovedSA10881(t *testing.T)
 		"bad-gw": {Name: "bad-gw", Address: "10.0.2.1", IKEPolicy: "bad-pol"},
 	}
 	next.IKEPolicies = map[string]*config.IKEPolicy{
-		"bad-pol": {Name: "bad-pol", Proposals: []string{"bad-prop"}, PSK: config.Secret("$9$garbage")},
+		"bad-pol": {Name: "bad-pol", Proposals: []string{"bad-prop"}, PSK: config.NewSecret("$9$garbage")},
 	}
 	next.IKEProposals = map[string]*config.IKEProposal{
 		"bad-prop": {
@@ -95,7 +95,7 @@ func TestMalformedJunosPSKSkipsVPNAndStillTerminatesRemovedSA10881(t *testing.T)
 		},
 	}
 	next.VPNs["bad"].Gateway = "bad-gw"
-	next.VPNs["bad"].PSK = ""
+	next.VPNs["bad"].PSK = config.NewSecret("")
 	if err := m.Apply(next); err != nil {
 		t.Fatalf("Apply with one malformed PSK must preserve healthy VPNs: %v", err)
 	}

@@ -197,7 +197,9 @@ all files stay in `package ipsec`, so the public API is unchanged.
 - `crypto.go` — Junos `$9$` pre-shared-key decryption entry point
   (`normalizePSK`, delegating to `config.DecodeJunos9Secret`). The
   decoder itself lives in pkg/config (#15051) so the same decoding
-  applies at compile to routing authentication keys.
+  applies at compile to routing authentication keys. A `$9$` value
+  that decodes to zero bytes (#15990) is malformed there, so the
+  render belt skips the VPN instead of emitting `secret = ""`.
 - `policy.go` — swanctl config generation (`renderConfig`/`generateConfig`,
   traffic-selector resolution, value sanitizers, identity formatting,
   `authMethodToSwan`, `xfrmiIfID`) plus XFRM bind-interface preparation
@@ -700,7 +702,8 @@ all files stay in `package ipsec`, so the public API is unchanged.
     secret are omitted — rather than emitting a proposal-less connection.
     Healthy VPNs always render, so one bad reference never zeroes a healthy
     tunnel. An unsupported auth-method token is also logged and skips only that
-    VPN (`errProposalUnresolved`); a malformed Junos `$9$` PSK similarly omits
+    VPN (`errProposalUnresolved`); a malformed Junos `$9$` PSK (including one
+    that decodes to zero bytes, #15990) similarly omits
     both its connection and secret instead of aborting the entire render.
 - **Predefined proposal-set expansion (#4297, fable-167 V-1).** Junos
   `security ike policy P proposal-set <set>` and the `security ipsec policy`

@@ -62,10 +62,10 @@ func TestPackedOSPFInterfaceKeepsItsAuthentication7653(t *testing.T) {
 			"activates the interface with NO authentication while the configuration "+
 			"text authorises one (#7653)", iface.AuthType)
 	}
-	if string(iface.AuthKey) != "secret" {
+	if iface.AuthKey.Reveal() != "secret" {
 		t.Errorf("packed spelling compiled AuthKey=%q, want \"secret\"; an AuthType "+
 			"with an empty key renders an authentication line with no credential",
-			string(iface.AuthKey))
+			iface.AuthKey.Reveal())
 	}
 
 	// Same-run reference: the expanded spelling is the meaning the packed one
@@ -74,10 +74,10 @@ func TestPackedOSPFInterfaceKeepsItsAuthentication7653(t *testing.T) {
 	// that is merely self-consistent.
 	ref := compilePacked7653(t, expanded)
 	rIface := ref.Protocols.OSPF.Areas[0].Interfaces[0]
-	if iface.AuthType != rIface.AuthType || string(iface.AuthKey) != string(rIface.AuthKey) {
+	if iface.AuthType != rIface.AuthType || iface.AuthKey.Reveal() != rIface.AuthKey.Reveal() {
 		t.Errorf("packed {%q,%q} != expanded {%q,%q}: the two spellings of one "+
-			"configuration compile differently", iface.AuthType, string(iface.AuthKey),
-			rIface.AuthType, string(rIface.AuthKey))
+			"configuration compile differently", iface.AuthType, iface.AuthKey.Reveal(),
+			rIface.AuthType, rIface.AuthKey.Reveal())
 	}
 }
 
@@ -114,7 +114,7 @@ func TestPackedSNMPv3UserKeepsItsCredential7653(t *testing.T) {
 	if u.AuthProtocol != "sha256" {
 		t.Errorf("packed user compiled AuthProtocol=%q, want \"sha256\" (#7653)", u.AuthProtocol)
 	}
-	if string(u.AuthPassword) == "" {
+	if u.AuthPassword.Reveal() == "" {
 		t.Error("packed user compiled with an EMPTY AuthPassword. The user is still " +
 			"registered, and minimum-security enforcement keys on key presence, so a " +
 			"noAuthNoPriv request naming \"ops\" bypasses the authentication the " +
@@ -150,15 +150,15 @@ func TestExpandedSpellingsAreUnchanged7653(t *testing.T) {
     interface ge-0/0/0.0 { authentication { simple-password "secret"; } hello-interval 7; }
 } } }`)
 	i := ospf.Protocols.OSPF.Areas[0].Interfaces[0]
-	if i.AuthType != "simple" || string(i.AuthKey) != "secret" || i.HelloInterval != 7 {
+	if i.AuthType != "simple" || i.AuthKey.Reveal() != "secret" || i.HelloInterval != 7 {
 		t.Errorf("expanded OSPF interface regressed: AuthType=%q AuthKey=%q Hello=%d",
-			i.AuthType, string(i.AuthKey), i.HelloInterval)
+			i.AuthType, i.AuthKey.Reveal(), i.HelloInterval)
 	}
 
 	snmp := compilePacked7653(t, `snmp { v3 { usm { local-engine {
     user ops { authentication-sha256 { authentication-password "s3cretpass"; } }
 } } } }`)
-	if u := snmp.System.SNMP.V3Users["ops"]; u == nil || u.AuthProtocol != "sha256" || string(u.AuthPassword) == "" {
+	if u := snmp.System.SNMP.V3Users["ops"]; u == nil || u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() == "" {
 		t.Errorf("expanded SNMPv3 user regressed: %+v", u)
 	}
 }

@@ -51,7 +51,7 @@ func TestSurfaceADDNSFlatSetCompiles(t *testing.T) {
 		t.Fatal("provider corp-2136 not compiled")
 	}
 	if p.Backend != "rfc2136" || p.UpdateServer != "192.0.2.53" ||
-		p.TSIGKeyName != "k1" || p.TSIGAlgorithm != "hmac-sha256" || p.TSIGSecret != "c2VjcmV0" {
+		p.TSIGKeyName != "k1" || p.TSIGAlgorithm != "hmac-sha256" || p.TSIGSecret.Reveal() != "c2VjcmV0" {
 		t.Fatalf("provider corp-2136 mismatch: %+v", p)
 	}
 	// The secret must be redacted in String() (logging hygiene).

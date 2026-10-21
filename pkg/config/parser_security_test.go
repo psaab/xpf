@@ -1797,7 +1797,7 @@ func TestIKEAdvancedFeatures(t *testing.T) {
 	if len(ikePol.Proposals) != 1 || ikePol.Proposals[0] != "ike-phase1" {
 		t.Errorf("IKE policy proposals = %q", ikePol.Proposals)
 	}
-	if ikePol.PSK != "secret123" {
+	if ikePol.PSK.Reveal() != "secret123" {
 		t.Errorf("IKE policy PSK = %q", ikePol.PSK)
 	}
 	gw := cfg.Security.IPsec.Gateways["remote-gw"]
@@ -2105,7 +2105,7 @@ func TestIKEAdvancedSetSyntax(t *testing.T) {
 	if ikePol == nil {
 		t.Fatal("missing IKE policy")
 	}
-	if ikePol.PSK != "mysecret" {
+	if ikePol.PSK.Reveal() != "mysecret" {
 		t.Errorf("PSK = %q", ikePol.PSK)
 	}
 	gw := cfg.Security.IPsec.Gateways["gw1"]
@@ -4199,7 +4199,7 @@ func TestIPsecAggressiveModeSetSyntax(t *testing.T) {
 	if ikePol.Mode != "aggressive" {
 		t.Errorf("IKE policy mode = %q, want %q", ikePol.Mode, "aggressive")
 	}
-	if ikePol.PSK != "secret123" {
+	if ikePol.PSK.Reveal() != "secret123" {
 		t.Errorf("IKE policy PSK = %q, want %q", ikePol.PSK, "secret123")
 	}
 	gw := cfg.Security.IPsec.Gateways["gw1"]

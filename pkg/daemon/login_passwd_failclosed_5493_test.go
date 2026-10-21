@@ -254,7 +254,7 @@ func TestApplyRejectsMalformedAuthorizedKeys10725(t *testing.T) {
 
 			cfg := &config.Config{System: config.SystemConfig{
 				RootAuthentication: &config.RootAuthConfig{
-					EncryptedPassword: config.Secret("$6$rounds=5000$abc$def"),
+					EncryptedPassword: config.NewSecret("$6$rounds=5000$abc$def"),
 					SSHKeys:           []string{tc.key},
 				},
 			}}

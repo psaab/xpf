@@ -99,7 +99,7 @@ func renderUsers6992(users []*LoginUser) string {
 	parts := make([]string, 0, len(users))
 	for _, u := range users {
 		parts = append(parts, fmt.Sprintf("{name=%s uid=%d class=%s pw=%q keys=%v}",
-			u.Name, u.UID, u.Class, string(u.EncryptedPassword), u.SSHKeys))
+			u.Name, u.UID, u.Class, u.EncryptedPassword.Reveal(), u.SSHKeys))
 	}
 	return strings.Join(parts, " ")
 }

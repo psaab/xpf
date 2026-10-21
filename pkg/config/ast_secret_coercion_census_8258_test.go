@@ -23,7 +23,7 @@ import (
 // it. `SNMPCommunity.Name` is declared `string`. It becomes a `Secret` only
 // inside `MarshalJSON`/`MarshalYAML`, by conversion:
 //
-//	return json.Marshal(alias{Name: Secret(c.Name), ...})
+//	return json.Marshal(alias{Name: NewSecret(c.Name), ...})
 //
 // So the typed route DOES redact it, exactly as if the field were declared
 // `Secret` — and the reflection census cannot see it, because at the type level
@@ -42,7 +42,7 @@ import (
 // the whole population.
 //
 // This file closes the gap by enumerating the OTHER route with `go/ast` rather
-// than a regex — a conversion `Secret(x.F)` inside a method is a syntactic
+// than a regex — a conversion `NewSecret(x.F)` inside a method is a syntactic
 // fact, so it can be extracted precisely instead of pattern-matched. Both
 // censuses feed the same map, so a leaf enrolled by either route is verified
 // the same way.
@@ -92,8 +92,13 @@ func secretCoercionCensus(t *testing.T) []string {
 				if !ok || len(call.Args) != 1 {
 					return true
 				}
+				// #15990 fold: Secret is no longer a string kind, so the
+				// coercion form is the constructor call NewSecret(x.F)
+				// (and, in packages that qualify it, config.NewSecret).
+				// The pre-codemod conversion spelling Secret(x.F) is gone;
+				// match the constructor that now performs the coercion.
 				ident, ok := call.Fun.(*ast.Ident)
-				if !ok || ident.Name != "Secret" {
+				if !ok || (ident.Name != "NewSecret" && ident.Name != "Secret") {
 					return true
 				}
 				sel, ok := call.Args[0].(*ast.SelectorExpr)

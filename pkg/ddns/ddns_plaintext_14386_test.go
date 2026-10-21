@@ -20,7 +20,7 @@ func TestDDNS14386Dyndns2RefusesCredentialedPlaintext(t *testing.T) {
 	// Typed credentials over http:// non-loopback.
 	if _, err := newDyndns2Backend(&config.DDNSProvider{
 		Name: "p", Backend: "dyndns2", Server: "http://updates.example/nic/update",
-		Username: "bob", Password: config.Secret("s3cr3t-value"),
+		Username: "bob", Password: config.NewSecret("s3cr3t-value"),
 	}, nil); err == nil {
 		t.Fatal("credentialed dyndns2 http:// must be refused at construction")
 	} else if strings.Contains(err.Error(), "s3cr3t-value") {
@@ -36,8 +36,8 @@ func TestDDNS14386Dyndns2RefusesCredentialedPlaintext(t *testing.T) {
 	}
 	// Controls: https credentialed, bare host, uncredentialed http.
 	for _, p := range []*config.DDNSProvider{
-		{Name: "p", Backend: "dyndns2", Server: "https://updates.example/nic/update", Username: "bob", Password: config.Secret("x")},
-		{Name: "p", Backend: "dyndns2", Server: "updates.example", Username: "bob", Password: config.Secret("x")},
+		{Name: "p", Backend: "dyndns2", Server: "https://updates.example/nic/update", Username: "bob", Password: config.NewSecret("x")},
+		{Name: "p", Backend: "dyndns2", Server: "updates.example", Username: "bob", Password: config.NewSecret("x")},
 		{Name: "p", Backend: "dyndns2", Server: "http://updates.example/nic/update"},
 	} {
 		if _, err := newDyndns2Backend(p, nil); err != nil {
@@ -48,10 +48,10 @@ func TestDDNS14386Dyndns2RefusesCredentialedPlaintext(t *testing.T) {
 
 func TestDDNS14386GenericRefusesCredentialedPlaintext(t *testing.T) {
 	cases := []*config.DDNSProvider{
-		{Name: "g", Backend: "generic", URLTemplate: "http://host.example/update?hostname=%h&myip=%i&user=%u&pass=%p", Username: "u", Password: config.Secret("p")},
+		{Name: "g", Backend: "generic", URLTemplate: "http://host.example/update?hostname=%h&myip=%i&user=%u&pass=%p", Username: "u", Password: config.NewSecret("p")},
 		{Name: "g", Backend: "generic", URLTemplate: "http://host.example/update?token=LITERALTOKEN"},
 		{Name: "g", Backend: "generic", URLTemplate: "http://user:pass@host.example/upd?ip=%i"},
-		{Name: "g", Backend: "generic", URLTemplate: "http://host.example/upd?ip=%i", Username: "u", Password: config.Secret("p")},
+		{Name: "g", Backend: "generic", URLTemplate: "http://host.example/upd?ip=%i", Username: "u", Password: config.NewSecret("p")},
 	}
 	for _, p := range cases {
 		if _, err := newGenericBackend(p, nil); err == nil {
@@ -83,7 +83,7 @@ func TestDDNS14386LoopbackHTTPStillWorks(t *testing.T) {
 	defer srv.Close()
 	b, err := newDyndns2Backend(&config.DDNSProvider{
 		Name: "test", Backend: "dyndns2", Server: srv.URL,
-		Username: "u1", Password: config.Secret("p1"),
+		Username: "u1", Password: config.NewSecret("p1"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("loopback credentialed http must construct: %v", err)

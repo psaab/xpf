@@ -66,7 +66,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 		if u == nil {
 			continue
 		}
-		if u.AuthProtocol != "" && string(u.AuthPassword) == "" {
+		if u.AuthProtocol != "" && u.AuthPassword.Reveal() == "" {
 			return fmt.Errorf("snmp v3 usm local-engine user %q names authentication "+
 				"protocol %q but carries no authentication-password. The agent derives "+
 				"its per-user minimum security level from the DERIVED KEY, so a user with "+
@@ -94,7 +94,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 				"and password, or remove the privacy protocol (#9155)",
 				name, u.PrivProtocol, name)
 		}
-		if u.PrivProtocol != "" && string(u.PrivPassword) == "" {
+		if u.PrivProtocol != "" && u.PrivPassword.Reveal() == "" {
 			return fmt.Errorf("snmp v3 usm local-engine user %q names privacy protocol %q "+
 				"but carries no privacy-password. With no privacy key the agent applies no "+
 				"privacy floor, so an authNoPriv request naming %q is answered with an "+
@@ -109,7 +109,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 		// passphrase is recovered after a handful of guesses. Reject at
 		// commit, naming the user and the length -- never the passphrase
 		// itself, which must not leak into an error string.
-		if pw := string(u.AuthPassword); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
+		if pw := u.AuthPassword.Reveal(); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
 			return fmt.Errorf("snmp v3 usm local-engine user %q authentication-password "+
 				"is too short: %d characters, minimum %d. The agent answers SNMPv3 "+
 				"authentication challenges online with no per-user lockout, so a short "+
@@ -117,7 +117,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 				"characters. Set a longer `authentication-password` (#16084)",
 				name, utf8.RuneCountInString(pw), snmpv3MinPassphraseRunes, snmpv3MinPassphraseRunes)
 		}
-		if pw := string(u.PrivPassword); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
+		if pw := u.PrivPassword.Reveal(); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
 			return fmt.Errorf("snmp v3 usm local-engine user %q privacy-password "+
 				"is too short: %d characters, minimum %d. The agent answers SNMPv3 "+
 				"authentication challenges online with no per-user lockout, so a short "+

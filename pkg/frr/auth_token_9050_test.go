@@ -12,7 +12,7 @@ func bgpWithPassword9050(pw string) string {
 	return m.generateProtocols(nil, nil, &config.BGPConfig{
 		LocalAS: 65000,
 		Neighbors: []*config.BGPNeighbor{
-			{Address: "10.0.0.1", PeerAS: 65001, AuthPassword: config.Secret(pw)},
+			{Address: "10.0.0.1", PeerAS: 65001, AuthPassword: config.NewSecret(pw)},
 		},
 	}, nil, nil, "", 0, nil, nil)
 }

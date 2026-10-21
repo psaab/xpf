@@ -498,7 +498,7 @@ func TestGenericTransportFailureRedactsPasswordInPath(t *testing.T) {
 		Backend:     "generic",
 		URLTemplate: "https://prov.example/update/%p",
 		Username:    "u",
-		Password:    config.Secret(pathSentinel),
+		Password:    config.NewSecret(pathSentinel),
 	}, client)
 	if err != nil {
 		t.Fatalf("newGenericBackend: %v; the template must be ACCEPTED or this test is vacuous", err)
@@ -549,7 +549,7 @@ func TestGenericTransportFailureRedactsPasswordInHost(t *testing.T) {
 		Backend:     "generic",
 		URLTemplate: "https://[fe80::1%25%p]/update",
 		Username:    "u",
-		Password:    config.Secret(hostSentinel),
+		Password:    config.NewSecret(hostSentinel),
 	}, client)
 	if err != nil {
 		t.Fatalf("newGenericBackend: %v; the template must be ACCEPTED or this test is vacuous", err)
@@ -935,7 +935,7 @@ func TestBackendBuildRequestErrorsWithholdCredentials(t *testing.T) {
 		{"duckdns", func() error {
 			b, err := newDuckDNSBackend(&config.DDNSProvider{
 				Name: "duck", Backend: "duckdns", Server: poisonedServer,
-				APIToken: config.Secret("tok"),
+				APIToken: config.NewSecret("tok"),
 			}, client)
 			if err != nil {
 				return err
@@ -945,7 +945,7 @@ func TestBackendBuildRequestErrorsWithholdCredentials(t *testing.T) {
 		{"cloudflare", func() error {
 			b, err := newCloudflareBackend(&config.DDNSProvider{
 				Name: "cf", Backend: "cloudflare", Server: poisonedServer,
-				Zone: "example.com", APIToken: config.Secret("tok"),
+				Zone: "example.com", APIToken: config.NewSecret("tok"),
 			}, client)
 			if err != nil {
 				return err
@@ -956,7 +956,7 @@ func TestBackendBuildRequestErrorsWithholdCredentials(t *testing.T) {
 			b, err := newRoute53Backend(&config.DDNSProvider{
 				Name: "r53", Backend: "route53", Server: poisonedServer,
 				HostedZoneID: "Z123", AWSAccessKeyID: "AKID",
-				AWSSecretAccessKey: config.Secret("sek"), AWSRegion: "us-east-1",
+				AWSSecretAccessKey: config.NewSecret("sek"), AWSRegion: "us-east-1",
 			}, client)
 			if err != nil {
 				return err

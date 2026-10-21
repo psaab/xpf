@@ -285,7 +285,7 @@ func TestProposalBuilders_ECPGroupAcrossAllSites(t *testing.T) {
 				"esp1": {Name: "esp1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256"},
 			},
 		}
-		vpn := &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "pol1"}
+		vpn := &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"), IPsecPolicy: "pol1"}
 		if got, _, err := resolveESPSettings(cfg, vpn); err != nil || got != "aes256-sha256-"+gc.suffix {
 			t.Errorf("resolveESPSettings PFS override (group %d) = (%q, %v), want %q",
 				gc.group, got, err, "aes256-sha256-"+gc.suffix)
@@ -300,7 +300,7 @@ func TestGenerateConfig_JunosGCM(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "gcm"},
+			"tun1": {PSK: config.NewSecret("fixture-secret"), Gateway: "172.16.0.1", IPsecPolicy: "gcm"},
 		},
 		Proposals: map[string]*config.IPsecProposal{
 			"gcm": {Name: "gcm", EncryptionAlg: "aes-256-gcm", DHGroup: 14},
@@ -352,7 +352,7 @@ func TestGenerateConfig_PSKWithQuote(t *testing.T) {
 			"site-a": {
 				LocalAddr:     "10.0.1.1",
 				Gateway:       "10.0.2.1",
-				PSK:           `pa"ss`,
+				PSK:           config.NewSecret(`pa"ss`),
 				BindInterface: "st0.0",
 			},
 		},
@@ -376,7 +376,7 @@ func TestGenerateConfig_PSKWithBackslash(t *testing.T) {
 			"site-a": {
 				LocalAddr:     "10.0.1.1",
 				Gateway:       "10.0.2.1",
-				PSK:           `pa\ss`,
+				PSK:           config.NewSecret(`pa\ss`),
 				BindInterface: "st0.0",
 			},
 		},
@@ -396,7 +396,7 @@ func TestGenerateConfig_PSKTrailingBackslash(t *testing.T) {
 			"site-a": {
 				LocalAddr:     "10.0.1.1",
 				Gateway:       "10.0.2.1",
-				PSK:           `pass\`,
+				PSK:           config.NewSecret(`pass\`),
 				BindInterface: "st0.0",
 			},
 		},
@@ -415,7 +415,7 @@ func TestGenerateConfig_IdentityWithCommaQuoted(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", PSK: "k"},
+			"tun": {Gateway: "gw", PSK: config.NewSecret("k")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw": {
@@ -499,8 +499,8 @@ func TestGenerateConfig_PSKIDSelectors_TwoVPNs(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"vpn-a": {Gateway: "gw-a", PSK: "psk-alpha"},
-			"vpn-b": {Gateway: "gw-b", PSK: "psk-bravo"},
+			"vpn-a": {Gateway: "gw-a", PSK: config.NewSecret("psk-alpha")},
+			"vpn-b": {Gateway: "gw-b", PSK: config.NewSecret("psk-bravo")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			// Same local firewall, two distinct remote peers.
@@ -553,7 +553,7 @@ func TestGenerateConfig_PSKIDSelectors_ExplicitIDs(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"vpn": {Gateway: "gw", PSK: "k"},
+			"vpn": {Gateway: "gw", PSK: config.NewSecret("k")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw": {
@@ -593,7 +593,7 @@ func TestGenerateConfig_PSKIDSelectors_SingleVPN(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"solo": {Gateway: "10.0.2.1", PSK: "onlysecret", BindInterface: "st0.0"},
+			"solo": {Gateway: "10.0.2.1", PSK: config.NewSecret("onlysecret"), BindInterface: "st0.0"},
 		},
 	}
 	blocks := parseSecretBlocks(t, m.generateConfig(cfg))
@@ -620,7 +620,7 @@ func TestGenerateConfig_PSKIDSelectors_ResponderWithIDAndCert(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"roadwarrior": {Gateway: "gw-dyn", PSK: "dynsecret"},
+			"roadwarrior": {Gateway: "gw-dyn", PSK: config.NewSecret("dynsecret")},
 			"cert-vpn":    {Gateway: "gw-cert"},
 		},
 		Gateways: map[string]*config.IPsecGateway{

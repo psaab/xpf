@@ -22,8 +22,8 @@ func keyedBeaconManager(t *testing.T, signing, additional string) *Manager {
 	t.Helper()
 	m := NewManager(beaconTestNode, beaconTestCluster)
 	m.UpdateConfig(&config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret(signing),
-		ControlLinkAuthKeyAlt: config.Secret(additional),
+		ControlLinkAuthKey:    config.NewSecret(signing),
+		ControlLinkAuthKeyAlt: config.NewSecret(additional),
 	})
 	if len(m.controlLinkAcceptedKeys()) == 0 {
 		t.Fatal("fixture broken: keyed manager accepted no keys")

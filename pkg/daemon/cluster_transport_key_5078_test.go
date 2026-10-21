@@ -54,7 +54,7 @@ func TestAuthKeyChangeDoesNotRestartClusterComms_5078(t *testing.T) {
 			FabricPeerAddress:  "10.99.1.2",
 			Fabric1Interface:   "fab1",
 			Fabric1PeerAddress: "10.99.2.2",
-			ControlLinkAuthKey: config.Secret(key),
+			ControlLinkAuthKey: config.NewSecret(key),
 		}
 		return cfg
 	}
@@ -182,7 +182,7 @@ func TestKeyCommitDoesNotRestartCommsAtTheCallSite_5078(t *testing.T) {
 
 	t.Run("key_commit_must_not_restart", func(t *testing.T) {
 		keyed := transport()
-		keyed.Chassis.Cluster.ControlLinkAuthKey = config.Secret("a-real-cluster-psk-5078")
+		keyed.Chassis.Cluster.ControlLinkAuthKey = config.NewSecret("a-real-cluster-psk-5078")
 
 		before := gen()
 		// The tail returns reconcile errors in this stripped-down harness; the
@@ -224,7 +224,7 @@ func TestKeyCommitDoesNotRestartCommsAtTheCallSite_5078(t *testing.T) {
 	// is configured --
 	//
 	//	keyed := cfg != nil && cfg.Chassis.Cluster != nil &&
-	//		cfg.Chassis.Cluster.ControlLinkAuthKey != ""
+	//		cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal() != ""
 	//	if !keyed && d.activeClusterTransport != (clusterTransportKey{}) && ...
 	//
 	// -- left the ENTIRE pkg/daemon package green, both subtests above
@@ -254,7 +254,7 @@ func TestKeyCommitDoesNotRestartCommsAtTheCallSite_5078(t *testing.T) {
 	// Tracked as #6878. Do not read "must still restart" as bound end to end.
 	t.Run("keyed_endpoint_change_must_still_restart", func(t *testing.T) {
 		movedKeyed := transport()
-		movedKeyed.Chassis.Cluster.ControlLinkAuthKey = config.Secret("a-real-cluster-psk-5078")
+		movedKeyed.Chassis.Cluster.ControlLinkAuthKey = config.NewSecret("a-real-cluster-psk-5078")
 		movedKeyed.Chassis.Cluster.PeerAddress = "10.99.0.9"
 
 		// NOTE: there is deliberately no "seat a keyed active transport" step

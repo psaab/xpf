@@ -85,7 +85,7 @@ func TestResolveAPIBindsDisablesClearHTTPWithAPIAuth_10826(t *testing.T) {
 				DefaultExpiresAt: expires,
 				Users: []*config.APIAuthUser{{
 					Username:  "admin",
-					Password:  config.Secret(password),
+					Password:  config.NewSecret(password),
 					Class:     "read-only",
 					ExpiresAt: expires,
 				}},

@@ -3858,7 +3858,7 @@ func TestRIPAuthSetSyntax(t *testing.T) {
 	if rip.AuthType != "md5" {
 		t.Errorf("AuthType: got %q, want md5", rip.AuthType)
 	}
-	if rip.AuthKey != "ripSecret" {
+	if rip.AuthKey.Reveal() != "ripSecret" {
 		t.Errorf("AuthKey: got %q, want ripSecret", rip.AuthKey)
 	}
 }

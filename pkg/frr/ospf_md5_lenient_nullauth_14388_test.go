@@ -98,21 +98,21 @@ func TestOSPFMD5SurvivingKeyControls14388(t *testing.T) {
 	}{
 		{
 			name:      "valid single",
-			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKey: "s3cr3t-md5", AuthKeyID: 1},
+			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKey: config.NewSecret("s3cr3t-md5"), AuthKeyID: 1},
 			wantBlock: true,
 			wantKey:   " ip ospf message-digest-key 1 md5 s3cr3t-md5\n",
 		},
 		{
 			name: "mixed out-of-range plus valid via AuthMD5Keys",
-			iface: &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 1, AuthKey: "good-key",
-				AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 0, Key: "bad-key"}, {ID: 1, Key: "good-key"}}},
+			iface: &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 1, AuthKey: config.NewSecret("good-key"),
+				AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 0, Key: config.NewSecret("bad-key")}, {ID: 1, Key: config.NewSecret("good-key")}}},
 			wantBlock:  true,
 			wantKey:    " ip ospf message-digest-key 1 md5 good-key\n",
 			forbidKeys: []string{"bad-key"},
 		},
 		{
 			name:      "simple unaffected",
-			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "simple", AuthKey: "plainpw"},
+			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "simple", AuthKey: config.NewSecret("plainpw")},
 			wantBlock: true,
 			wantKey:   " ip ospf authentication-key plainpw\n",
 		},
@@ -128,12 +128,12 @@ func TestOSPFMD5SurvivingKeyControls14388(t *testing.T) {
 		},
 		{
 			name:      "md5 unsafe secret only",
-			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKey: "has space", AuthKeyID: 1},
+			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKey: config.NewSecret("has space"), AuthKeyID: 1},
 			wantBlock: false,
 		},
 		{
 			name:      "md5 all out-of-range direct",
-			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKey: "s3cr3t-md5", AuthKeyID: 256},
+			iface:     &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKey: config.NewSecret("s3cr3t-md5"), AuthKeyID: 256},
 			wantBlock: false,
 		},
 	}
@@ -171,8 +171,8 @@ func TestOSPFMD5SurvivingKeyControls14388(t *testing.T) {
 func TestOSPFMD5NoSurvivingKeyOmitsVRFInterface14388(t *testing.T) {
 	ospf := &config.OSPFConfig{RouterID: "1.1.1.1", Areas: []*config.OSPFArea{{
 		ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-			{Name: "eth0", AuthType: "md5", AuthKey: "s3cr3t-md5", AuthKeyID: 0},
-			{Name: "eth1", AuthType: "md5", AuthKey: "good", AuthKeyID: 2},
+			{Name: "eth0", AuthType: "md5", AuthKey: config.NewSecret("s3cr3t-md5"), AuthKeyID: 0},
+			{Name: "eth1", AuthType: "md5", AuthKey: config.NewSecret("good"), AuthKeyID: 2},
 		},
 	}}}
 	got := New().generateProtocols(ospf, nil, nil, nil, nil, "vrf-tenant", 0, nil, nil)

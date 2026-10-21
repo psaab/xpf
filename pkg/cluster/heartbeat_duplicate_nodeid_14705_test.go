@@ -44,8 +44,8 @@ func TestRecvLoop_DuplicateNodeIDHeartbeatRequiresHMAC_14705(t *testing.T) {
 		t.Helper()
 		mgr := NewManager(nodeID, clusterID)
 		mgr.UpdateConfig(&config.ClusterConfig{
-			ControlLinkAuthKey:    config.Secret(signKey),
-			ControlLinkAuthKeyAlt: config.Secret(altKey),
+			ControlLinkAuthKey:    config.NewSecret(signKey),
+			ControlLinkAuthKeyAlt: config.NewSecret(altKey),
 		})
 		if len(mgr.controlLinkAcceptedKeys()) == 0 {
 			t.Fatal("fixture broken: keyed manager accepted no keys")

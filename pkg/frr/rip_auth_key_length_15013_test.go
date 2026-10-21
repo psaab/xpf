@@ -25,7 +25,7 @@ func TestRIPOverlongKeyDoesNotEnroll15013(t *testing.T) {
 	m := New()
 	rip := &config.RIPConfig{
 		AuthType:   "md5",
-		AuthKey:    config.Secret("12345678901234567"), // 17 chars
+		AuthKey:    config.NewSecret("12345678901234567"), // 17 chars
 		Interfaces: []string{"trust0"},
 	}
 	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
@@ -41,7 +41,7 @@ func TestRIPOverlongKeyDoesNotEnroll15013(t *testing.T) {
 
 	// Control: exactly 16 characters enrolls with mode + string.
 	logs.Reset()
-	rip.AuthKey = config.Secret("1234567890123456")
+	rip.AuthKey = config.NewSecret("1234567890123456")
 	got = m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 	for _, w := range []string{"router rip\n", " network trust0\n", " ip rip authentication mode md5\n", " ip rip authentication string 1234567890123456\n"} {
 		if !strings.Contains(got, w) {
@@ -59,7 +59,7 @@ func TestRIPOverlongKeyDoesNotEnroll15013(t *testing.T) {
 	}
 
 	// Control: no auth at all still enrolls plain RIP.
-	rip.AuthType, rip.AuthKey = "", ""
+	rip.AuthType, rip.AuthKey = "", config.NewSecret("")
 	got = m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 	if !strings.Contains(got, " network trust0\n") || strings.Contains(got, "ip rip authentication") {
 		t.Errorf("plain RIP no longer enrolls cleanly:\n%s", got)
@@ -72,14 +72,14 @@ func TestRIPOverlongKeyDoesNotEnrollVRF15013(t *testing.T) {
 	m := New()
 	rip := &config.RIPConfig{
 		AuthType:   "md5",
-		AuthKey:    config.Secret("12345678901234567"),
+		AuthKey:    config.NewSecret("12345678901234567"),
 		Interfaces: []string{"trust0"},
 	}
 	got := m.generateProtocols(nil, nil, nil, rip, nil, "VRF-A", 0, nil, nil)
 	if strings.Contains(got, "network trust0") || strings.Contains(got, "ip rip authentication") {
 		t.Fatalf("over-long VRF RIP key enrolled trust0:\n%s", got)
 	}
-	rip.AuthKey = config.Secret("1234567890123456")
+	rip.AuthKey = config.NewSecret("1234567890123456")
 	got = m.generateProtocols(nil, nil, nil, rip, nil, "VRF-A", 0, nil, nil)
 	if !strings.Contains(got, " network trust0\n") || !strings.Contains(got, " ip rip authentication string 1234567890123456\n") {
 		t.Errorf("16-char VRF RIP key no longer enrolls:\n%s", got)

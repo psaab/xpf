@@ -340,10 +340,10 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 		}
 		seen[canonicalWireguardPubkeyHex(p.PublicKeyHex)] = struct{}{}
 
-		if p.PresharedKeyHex != "" && !isWireguardKeyHex(string(p.PresharedKeyHex)) {
+		if p.PresharedKeyHex.Reveal() != "" && !isWireguardKeyHex(p.PresharedKeyHex.Reveal()) {
 			return fmt.Errorf("peer %q has an invalid preshared key (expected 64 hex chars / 32 bytes)", p.PublicKeyHex)
 		}
-		if p.PresharedKeyHex != "" && isDegenerateWireguardKeyHex(string(p.PresharedKeyHex)) {
+		if p.PresharedKeyHex.Reveal() != "" && isDegenerateWireguardKeyHex(p.PresharedKeyHex.Reveal()) {
 			return fmt.Errorf("peer %q has a degenerate preshared key (an all-zero, repeated-byte, or small-order value is a publicly known constant, not a secret; generate a fresh random preshared key or omit it)", p.PublicKeyHex)
 		}
 

@@ -166,7 +166,7 @@ func TestProviderBindConfigInvalidSourceErrors(t *testing.T) {
 
 	// And the backend constructors must surface it (degrade to no-op upstream).
 	if _, err := newCloudflareBackend(&config.DDNSProvider{
-		Name: "p", APIToken: config.Secret("t"), Zone: "example.net",
+		Name: "p", APIToken: config.NewSecret("t"), Zone: "example.net",
 		SourceAddress: "not-an-ip",
 	}, nil); err == nil {
 		t.Fatal("cloudflare with malformed source-address must error")

@@ -46,8 +46,8 @@ func TestOneLineAuthPrivKeepsBothCredentials9155R02(t *testing.T) {
 	if u == nil {
 		t.Fatal("user alice did not compile at all")
 	}
-	if u.AuthProtocol != "sha256" || string(u.AuthPassword) == "" {
-		t.Errorf("auth half lost: proto=%q pw_len=%d", u.AuthProtocol, len(string(u.AuthPassword)))
+	if u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() == "" {
+		t.Errorf("auth half lost: proto=%q pw_len=%d", u.AuthProtocol, len(u.AuthPassword.Reveal()))
 	}
 	if u.PrivProtocol != "aes128" {
 		t.Fatalf("PRIVACY SILENTLY DROPPED: privProto=%q — the operator configured "+
@@ -55,7 +55,7 @@ func TestOneLineAuthPrivKeepsBothCredentials9155R02(t *testing.T) {
 			"authNoPriv. Both #9155 gates are blind to this because the protocol "+
 			"they key on was discarded before they ran", u.PrivProtocol)
 	}
-	if string(u.PrivPassword) == "" {
+	if u.PrivPassword.Reveal() == "" {
 		t.Error("privacy protocol survived but its password did not; the derived " +
 			"privacy key would be nil and the #9155 runtime floor would refuse the user")
 	}
@@ -93,9 +93,9 @@ func TestOneLineAuthOnlyStaysAuthNoPriv9155R02(t *testing.T) {
 	if u == nil {
 		t.Fatal("user bob did not compile")
 	}
-	if u.PrivProtocol != "" || string(u.PrivPassword) != "" {
+	if u.PrivProtocol != "" || u.PrivPassword.Reveal() != "" {
 		t.Errorf("a privacy configuration appeared from nowhere: proto=%q pw_len=%d",
-			u.PrivProtocol, len(string(u.PrivPassword)))
+			u.PrivProtocol, len(u.PrivPassword.Reveal()))
 	}
 }
 

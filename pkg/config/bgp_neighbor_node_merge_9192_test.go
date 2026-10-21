@@ -128,7 +128,7 @@ func TestBGPNeighborMergeUnionsEveryField9192(t *testing.T) {
 		{"default-originate", "default-originate", func(n *BGPNeighbor) string { return fmt.Sprint(n.DefaultOriginate) }, "true"},
 		{"remove-private", "remove-private", func(n *BGPNeighbor) string { return fmt.Sprint(n.RemovePrivateAS) }, "true"},
 		{"loops", "loops 3", func(n *BGPNeighbor) string { return fmt.Sprint(n.AllowASIn) }, "3"},
-		{"authentication-key", "authentication-key sekret", func(n *BGPNeighbor) string { return string(n.AuthPassword) }, "sekret"},
+		{"authentication-key", "authentication-key sekret", func(n *BGPNeighbor) string { return n.AuthPassword.Reveal() }, "sekret"},
 		{"import", "import PS", func(n *BGPNeighbor) string { return fmt.Sprint(n.Import) }, "[PS]"},
 		{"export", "export PX", func(n *BGPNeighbor) string { return fmt.Sprint(n.Export) }, "[PX]"},
 	} {

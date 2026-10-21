@@ -28,15 +28,18 @@ import (
 // authentication-key leaf in the typed config at all. If either gains
 // an enforced auth leaf it must be added to the walk below.
 //
-// Strict commit REFUSES a malformed `$9$` value. The tolerant
+// Strict commit REFUSES a malformed `$9$` value — including one that
+// decodes to zero bytes (`$9$i`/`$9$!`, #15990). The tolerant
 // load/peer-sync paths keep the original blob and warn (#1960): a
 // persisted config an older binary accepted must still boot, and the
 // render belts (pkg/frr authTokenOrOmit / #14977 fail-closed sites)
-// then see the undecodable blob. Decoding happens in place on the
-// compiled *Config, so every renderer downstream of compile receives
-// plaintext without knowing `$9$` exists, and the AST the operator
-// authored is never rewritten — `show configuration` still displays
-// the `$9$` form Junos displays.
+// withhold it via its Junos9Undecodable provenance — it is omitted,
+// never rendered. Compilation consumes the one decode and records
+// Junos9Decoded provenance on the compiled Secret, so every renderer
+// downstream receives plaintext without interpreting it as another
+// `$9$` value (decoded plaintext may itself begin `$9$`). The AST the
+// operator authored is never rewritten — `show configuration` still
+// displays the `$9$` form Junos displays.
 //
 // Portions of the $9$ decoder are adapted from the MIT-licensed
 // github.com/nadddy/jcrypt project:
@@ -87,7 +90,12 @@ func init() {
 
 // DecodeJunos9Secret decodes a Junos `$9$`-obfuscated secret to its
 // plaintext. A value without the `$9$` prefix is returned unchanged.
-// A malformed `$9$` value returns errInvalidJunos9Secret.
+// A malformed `$9$` value returns errInvalidJunos9Secret — including
+// a well-formed prefix that decodes to zero bytes (`$9$i` / `$9$!`,
+// #15990): an empty decoded credential is never legitimate, and
+// returning ("", nil) let every presence gate that tests the ENCODED
+// form store NewSecret("") — BGP rendered its neighbor passwordless and
+// IPsec rendered `secret = ""`.
 func DecodeJunos9Secret(secret string) (string, error) {
 	if !strings.HasPrefix(secret, junos9Magic) {
 		return secret, nil
@@ -130,6 +138,15 @@ func decodeJunos9(secret string) (string, error) {
 		}
 		out = append(out, junos9GapDecode(gaps, decode))
 	}
+	if len(out) == 0 {
+		// #15990: the first char's skip consumed the whole rest
+		// (`$9$i`, `$9$!`), so zero nibble groups remain and the loop
+		// never ran. Zero bytes is not a credential — malformed, like
+		// every other undecodable shape, so strict rejects it and the
+		// tolerant path retains it as Junos9Undecodable for the render
+		// belts to withhold (never NewSecret("")).
+		return "", errInvalidJunos9Secret
+	}
 	return string(out), nil
 }
 
@@ -167,9 +184,15 @@ func decodeJunos9AtCompile(cfg *Config, lenient bool) ([]string, error) {
 	}
 	var warnings []string
 	decode := func(scope, field string, s *Secret) error {
-		if s == nil || *s == "" {
+		if s == nil || s.Reveal() == "" {
+
 			return nil
 		}
+		// Consume the decoder exactly once at compile. The compiled
+		// value is plaintext (possibly plaintext that itself begins
+		// `$9$`); no downstream renderer may interpret it as another
+		// encoded value.
+		s.SetJunos9Provenance(Junos9Decoded)
 		raw := s.Reveal()
 		if !strings.HasPrefix(raw, junos9Magic) {
 			return nil
@@ -181,11 +204,16 @@ func decodeJunos9AtCompile(cfg *Config, lenient bool) ([]string, error) {
 				"valid $9$ value (#15051)", scope, field)
 			if lenient {
 				warnings = append(warnings, msg+" (downgraded to warning on tolerant path)")
+				// Tolerant path retains the authored blob. Mark it as
+				// failed decode, rather than decoded plaintext, so the
+				// FRR belt can withhold it without decoding twice.
+				s.SetJunos9Provenance(Junos9Undecodable)
 				return nil
 			}
 			return errors.New(msg)
 		}
-		*s = Secret(decoded)
+		*s = NewSecret(decoded)
+		s.SetJunos9Provenance(Junos9Decoded)
 		return nil
 	}
 	// OSPF keeps a legacy single-key view (AuthKey/AuthKeyID) beside
@@ -201,6 +229,10 @@ func decodeJunos9AtCompile(cfg *Config, lenient bool) ([]string, error) {
 			}
 			if iface.AuthMD5Keys[i].ID == iface.AuthKeyID &&
 				iface.AuthKey.Reveal() == before {
+				// Copy the md5 key's Secret wholesale: the Junos9
+				// provenance FIELD travels with the value (Decoded for
+				// a successful decode, Undecodable for a retained
+				// tolerant blob). Never stamp a literal provenance here.
 				iface.AuthKey = iface.AuthMD5Keys[i].Key
 			}
 		}

@@ -75,9 +75,9 @@ func TestEngineID_USMKeysDivergeAcrossClones(t *testing.T) {
 				"monitor": {
 					Name:         "monitor",
 					AuthProtocol: "sha256",
-					AuthPassword: config.Secret("auth-password-123"),
+					AuthPassword: config.NewSecret("auth-password-123"),
 					PrivProtocol: "aes128",
-					PrivPassword: config.Secret("priv-password-456"),
+					PrivPassword: config.NewSecret("priv-password-456"),
 				},
 			},
 		}

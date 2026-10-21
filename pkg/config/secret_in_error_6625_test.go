@@ -137,7 +137,7 @@ func TestSecretLeafKeywordsExistInSchema(t *testing.T) {
 // a spurious one merely costs a diagnostic.
 //
 // The list here is deliberately independent of the production set — it is
-// derived from the leaves the compiler wraps in Secret() — so the two must
+// derived from the leaves the compiler wraps in NewSecret() — so the two must
 // agree rather than one being read off the other.
 //
 // FAIL-ON-REVERT: remove any of these from secretLeafKeywords.

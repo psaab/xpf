@@ -20,7 +20,7 @@ var (
 func TestValidateWireguardRejectsMixedCaseDuplicatePeerPubkey(t *testing.T) {
 	tc := &TunnelConfig{
 		WgListenPort:      51820,
-		WgLocalPrivkeyHex: Secret(wg14690Priv),
+		WgLocalPrivkeyHex: NewSecret(wg14690Priv),
 		WgPeers: []WgPeerConfig{
 			{PublicKeyHex: wg14690Lower, AllowedIPs: []string{"10.90.0.0/24"}},
 			{PublicKeyHex: wg14690Upper, AllowedIPs: []string{"10.91.0.0/24"}},
@@ -62,7 +62,7 @@ func TestValidateWireguardRejectsMixedCaseDuplicatePeerPubkeyStrictCompile(t *te
 func TestWireguardMixedCaseMergedEmitExactlyOne(t *testing.T) {
 	// (a) Two units authoring case-variants of one non-inherited key.
 	ifcCross := &InterfaceConfig{
-		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: Secret(wg14690Priv),
+		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret(wg14690Priv),
 			WgPeers: []WgPeerConfig{{PublicKeyHex: wg14690PeerX, AllowedIPs: []string{"10.100.0.0/24"}}}},
 		Units: map[int]*InterfaceUnit{
 			1: {Number: 1, Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgPeers: []WgPeerConfig{{PublicKeyHex: wg14690Lower, AllowedIPs: []string{"10.90.0.0/24"}}}}},
@@ -74,10 +74,10 @@ func TestWireguardMixedCaseMergedEmitExactlyOne(t *testing.T) {
 	}
 	// (b) Issue emit cell: interface lower + unit upper => exactly one emitted peer.
 	ifc := &InterfaceConfig{
-		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: Secret(wg14690Priv),
+		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret(wg14690Priv),
 			WgPeers: []WgPeerConfig{{PublicKeyHex: wg14690Lower, AllowedIPs: []string{"10.90.0.0/24"}}}},
 		Units: map[int]*InterfaceUnit{
-			1: {Number: 1, Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: Secret(wg14690Priv),
+			1: {Number: 1, Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret(wg14690Priv),
 				WgPeers: []WgPeerConfig{
 					{PublicKeyHex: wg14690Lower, AllowedIPs: []string{"10.90.0.0/24"}},
 					{PublicKeyHex: wg14690Upper, AllowedIPs: []string{"10.91.0.0/24"}},
@@ -101,7 +101,7 @@ func TestWireguardMixedCaseMergedEmitExactlyOne(t *testing.T) {
 
 func TestWireguardMixedCasePrefixOwnerCanonical(t *testing.T) {
 	ifc := &InterfaceConfig{
-		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: Secret(wg14690Priv),
+		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret(wg14690Priv),
 			WgPeers: []WgPeerConfig{{PublicKeyHex: wg14690Lower, AllowedIPs: []string{"10.90.0.0/24"}}}},
 		Units: map[int]*InterfaceUnit{
 			1: {Number: 1, Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgPeers: []WgPeerConfig{{PublicKeyHex: wg14690Upper, AllowedIPs: []string{"10.90.0.0/24"}}}}},
@@ -112,7 +112,7 @@ func TestWireguardMixedCasePrefixOwnerCanonical(t *testing.T) {
 	}
 	other := "358ca6d9d6515c4e5b2166b183d9cd1efacfb2ee6d1337cf525843c940b022ff"
 	ifc2 := &InterfaceConfig{
-		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: Secret(wg14690Priv),
+		Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgListenPort: 51820, WgLocalPrivkeyHex: NewSecret(wg14690Priv),
 			WgPeers: []WgPeerConfig{{PublicKeyHex: wg14690Lower, AllowedIPs: []string{"10.90.0.0/24"}}}},
 		Units: map[int]*InterfaceUnit{
 			1: {Number: 1, Tunnel: &TunnelConfig{Name: "wg0", Mode: "wireguard", WgPeers: []WgPeerConfig{{PublicKeyHex: other, AllowedIPs: []string{"10.90.0.0/24"}}}}},

@@ -242,7 +242,7 @@ func TestUpdateConfig_RaceWithServe(t *testing.T) {
 			"public": {Name: "public", Authorization: "read-only"},
 		},
 		V3Users: map[string]*config.SNMPv3User{
-			"admin": {Name: "admin", AuthProtocol: "sha", AuthPassword: "pw-pw-pw-pw-pw"},
+			"admin": {Name: "admin", AuthProtocol: "sha", AuthPassword: config.NewSecret("pw-pw-pw-pw-pw")},
 		},
 	})
 
@@ -258,7 +258,7 @@ func TestUpdateConfig_RaceWithServe(t *testing.T) {
 				"public": {Name: "public", Authorization: "read-write"},
 			},
 			V3Users: map[string]*config.SNMPv3User{
-				"admin": {Name: "admin", AuthProtocol: "md5", AuthPassword: "other-pw-1234"},
+				"admin": {Name: "admin", AuthProtocol: "md5", AuthPassword: config.NewSecret("other-pw-1234")},
 			},
 		}
 		ro := &config.SNMPConfig{

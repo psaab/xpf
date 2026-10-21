@@ -10,7 +10,7 @@ import (
 func vpnCfg9495(names ...string) *config.IPsecConfig {
 	cfg := &config.IPsecConfig{
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"pol": {Name: "pol", Proposals: []string{"prop"}, PSK: "secret-9495"},
+			"pol": {Name: "pol", Proposals: []string{"prop"}, PSK: config.NewSecret("secret-9495")},
 		},
 		IKEProposals: map[string]*config.IKEProposal{
 			"prop": {Name: "prop", AuthMethod: "pre-shared-keys", EncryptionAlg: "aes-256-cbc", AuthAlg: "sha-256", DHGroup: 14},
@@ -21,7 +21,7 @@ func vpnCfg9495(names ...string) *config.IPsecConfig {
 		VPNs: map[string]*config.IPsecVPN{},
 	}
 	for _, n := range names {
-		cfg.VPNs[n] = &config.IPsecVPN{PSK: "fixture-secret", Name: n, Gateway: "gw"}
+		cfg.VPNs[n] = &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"), Name: n, Gateway: "gw"}
 	}
 	return cfg
 }

@@ -67,7 +67,7 @@ func TestDDNSProviderMarshalJSONRedactsURLs_6703(t *testing.T) {
 		URLTemplate:  "https://tmpl.example/upd?token=TOKENSECRET&host=%h",
 		CheckIPURL:   "https://checkip.example/plain",
 		Username:     "operator",
-		Password:     Secret("PASSWORDSECRET"),
+		Password:     NewSecret("PASSWORDSECRET"),
 		OKResponse:   "good",
 	}
 	b, err := json.Marshal(p)

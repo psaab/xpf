@@ -61,7 +61,7 @@ func TestFabricAuth11676_ReadOnlyRolloutGraceExpires(t *testing.T) {
 
 func TestFabricAuth11676_DelayedFirstReadUsesKeyConfigTime(t *testing.T) {
 	manager := cluster.NewManager(0, 1)
-	manager.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	manager.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 	configuredAt := manager.ControlLinkAuthKeyConfiguredAt()
 	if configuredAt.IsZero() {
 		t.Fatal("keyed cluster config did not publish its configuration time")

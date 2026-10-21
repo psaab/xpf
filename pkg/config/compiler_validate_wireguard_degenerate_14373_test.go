@@ -140,7 +140,7 @@ func TestWireguardDegenerateValidatorDirect14373(t *testing.T) {
 	base := func() *TunnelConfig {
 		return &TunnelConfig{
 			WgListenPort:      51820,
-			WgLocalPrivkeyHex: Secret(wg14373ValidPriv),
+			WgLocalPrivkeyHex: NewSecret(wg14373ValidPriv),
 			WgPeers: []WgPeerConfig{{
 				PublicKeyHex: wg14373ValidPeer,
 				AllowedIPs:   []string{"10.73.0.2/32"},
@@ -151,7 +151,7 @@ func TestWireguardDegenerateValidatorDirect14373(t *testing.T) {
 		t.Fatalf("valid random keys must pass the validator, got: %v", err)
 	}
 	zeroPriv := base()
-	zeroPriv.WgLocalPrivkeyHex = Secret(strings.Repeat("0", 64))
+	zeroPriv.WgLocalPrivkeyHex = NewSecret(strings.Repeat("0", 64))
 	if err := validateOneWireguardTunnel(zeroPriv); err == nil {
 		t.Fatal("all-zero private key must be refused by validateOneWireguardTunnel")
 	}
@@ -161,7 +161,7 @@ func TestWireguardDegenerateValidatorDirect14373(t *testing.T) {
 		t.Fatal("all-zero peer public key must be refused by validateOneWireguardTunnel")
 	}
 	zeroPSK := base()
-	zeroPSK.WgPeers[0].PresharedKeyHex = Secret(strings.Repeat("0", 64))
+	zeroPSK.WgPeers[0].PresharedKeyHex = NewSecret(strings.Repeat("0", 64))
 	if err := validateOneWireguardTunnel(zeroPSK); err == nil {
 		t.Fatal("explicit all-zero preshared key must be refused by validateOneWireguardTunnel")
 	}

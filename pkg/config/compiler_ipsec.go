@@ -111,14 +111,14 @@ func accumulateGatewayAddresses(gw *IPsecGateway, values []string) {
 func classifyPSKQualifier(qualifier, value string) (Secret, bool, string) {
 	switch qualifier {
 	case "ascii-text":
-		return Secret(value), false, ""
+		return NewSecret(value), false, ""
 	case "hexadecimal":
 		if !validHexPSK(value) {
-			return Secret(value), true, value
+			return NewSecret(value), true, value
 		}
-		return Secret(value), true, ""
+		return NewSecret(value), true, ""
 	default:
-		return Secret(value), false, qualifier
+		return NewSecret(value), false, qualifier
 	}
 }
 
@@ -429,7 +429,7 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 				} else if value != "" {
 					// Defensive: an unqualified single-value leaf
 					// keeps the legacy ASCII behaviour.
-					pol.PSK = Secret(value)
+					pol.PSK = NewSecret(value)
 					pol.PSKHex = false
 					pol.PSKQualifierInvalidSpec = ""
 				}
@@ -893,7 +893,7 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 				if qualifier, value, qualified := pskQualifierValue(p); qualified {
 					vpn.PSK, vpn.PSKHex, vpn.PSKQualifierInvalidSpec = classifyPSKQualifier(qualifier, value)
 				} else {
-					vpn.PSK = Secret(value)
+					vpn.PSK = NewSecret(value)
 					vpn.PSKHex = false
 					vpn.PSKQualifierInvalidSpec = ""
 				}

@@ -160,9 +160,9 @@ func TestDerivedKeyTable9155(t *testing.T) {
 				"u": {
 					Name:         "u",
 					AuthProtocol: tc.authProto,
-					AuthPassword: config.Secret(tc.authPw),
+					AuthPassword: config.NewSecret(tc.authPw),
 					PrivProtocol: tc.privProto,
-					PrivPassword: config.Secret(tc.privPw),
+					PrivPassword: config.NewSecret(tc.privPw),
 				},
 			}}
 			users := a.deriveV3Users(cfg)

@@ -373,7 +373,7 @@ func runCloudflare(t *testing.T, u string) error {
 	t.Helper()
 	b, err := newCloudflareBackend(&config.DDNSProvider{
 		Name: "cf", Backend: "cloudflare", Zone: "example.net",
-		APIToken: config.Secret("cf-token"), Server: u,
+		APIToken: config.NewSecret("cf-token"), Server: u,
 	}, &http.Client{})
 	if err != nil {
 		t.Fatalf("build cloudflare backend: %v", err)
@@ -385,7 +385,7 @@ func runRoute53(t *testing.T, u string) error {
 	t.Helper()
 	b, err := newRoute53Backend(&config.DDNSProvider{
 		Name: "r53", Backend: "route53", HostedZoneID: "Z123",
-		AWSAccessKeyID: "AKID", AWSSecretAccessKey: config.Secret("aws-secret"),
+		AWSAccessKeyID: "AKID", AWSSecretAccessKey: config.NewSecret("aws-secret"),
 		Server: u,
 	}, &http.Client{})
 	if err != nil {
@@ -398,7 +398,7 @@ func runDyndns2(t *testing.T, u string) error {
 	t.Helper()
 	b, err := newDyndns2Backend(&config.DDNSProvider{
 		Name: "dd2", Backend: "dyndns2", Server: u,
-		Username: "u", Password: config.Secret("p"),
+		Username: "u", Password: config.NewSecret("p"),
 	}, &http.Client{})
 	if err != nil {
 		t.Fatalf("build dyndns2 backend: %v", err)
@@ -409,7 +409,7 @@ func runDyndns2(t *testing.T, u string) error {
 func runDuckDNS(t *testing.T, u string) error {
 	t.Helper()
 	b, err := newDuckDNSBackend(&config.DDNSProvider{
-		Name: "duck", Backend: "duckdns", APIToken: config.Secret("duck-token"),
+		Name: "duck", Backend: "duckdns", APIToken: config.NewSecret("duck-token"),
 		Server: u,
 	}, &http.Client{})
 	if err != nil {

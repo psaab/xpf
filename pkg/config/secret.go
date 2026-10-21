@@ -43,19 +43,70 @@ var errRedactedSecretIngest = errors.New(
 // ingest is ever added it fails loudly instead of silently loading
 // "<redacted>" as a key.
 //
-// Secret keeps the underlying string kind (it is a named string type, not a
-// struct) so it stays comparable — usable as a map key and directly
-// comparable to "" for present/absent checks at call sites.
-type Secret string
+// Secret keeps a string value for the credential itself, so existing
+// Reveal(), marshal, and raw-string conversions keep their meaning.
+// Junos9 carries the single-decode provenance for routing credentials:
+// it is deliberately a VALUE field, not a side-band registry, so every
+// struct copy (daemon protocol filtering, ifname resolution, OSPF
+// union, renderer temporaries) carries the adjudication with the
+// credential by construction.
+//
+// Equality note: Secret values compare with == on BOTH the credential
+// bytes and Junos9 provenance. That is intentional for provenance-aware
+// dedupe/conflict checks (a decoded "$9$..." plaintext is not the same
+// adjudicated value as an unprocessed blob with identical bytes), and
+// it can only differ where compile has stamped a field — every other
+// construction site leaves the zero value (Junos9Unprocessed), so
+// pre-existing == "" / map-key behavior for ordinary secrets is
+// unchanged (zero Secret{} equals NewSecret("")).
+type Secret struct {
+	value  string
+	Junos9 Junos9Provenance
+}
 
 // SecretRedacted is the sentinel emitted in place of a non-empty Secret on
 // JSON/YAML marshal.
 const SecretRedacted = "<redacted>"
 
+// NewSecret builds an unstamped credential (Junos9Unprocessed).
+// Construction sites that previously wrote NewSecret(v) use this so a bare
+// value can never accidentally claim a compile adjudication.
+func NewSecret(v string) Secret { return Secret{value: v} }
+
+// Junos9Provenance records whether a routing credential has consumed
+// the single Junos `$9$` decode owned by decodeJunos9AtCompile.
+type Junos9Provenance uint8
+
+const (
+	// Junos9Unprocessed is the zero value: compile has not adjudicated
+	// the value. Directly constructed renderer inputs use this state;
+	// a leading `$9$` is unresolved authored material, never plaintext.
+	Junos9Unprocessed Junos9Provenance = iota
+	// Junos9Decoded means the value is plaintext after exactly one
+	// compile-time decode (or was plaintext to begin with), even if the
+	// plaintext itself begins `$9$`.
+	Junos9Decoded
+	// Junos9Undecodable means tolerant compilation retained an authored
+	// blob that failed its one decode attempt; renderers must omit it.
+	Junos9Undecodable
+)
+
+// Provenance reports this credential's compile adjudication. The zero
+// value (Junos9Unprocessed) is what every non-compile construction gets.
+func (s Secret) Provenance() Junos9Provenance { return s.Junos9 }
+
+// SetJunos9Provenance stamps the compile adjudication onto this field.
+// Compile-only: renderers read Provenance and must never stamp.
+func (s *Secret) SetJunos9Provenance(p Junos9Provenance) {
+	if s != nil {
+		s.Junos9 = p
+	}
+}
+
 // String redacts a non-empty Secret for %v/%s/slog formatting (logging
 // hygiene). An empty Secret renders as "" so absence stays distinguishable.
 func (s Secret) String() string {
-	if s == "" {
+	if s.value == "" {
 		return ""
 	}
 	return SecretRedacted
@@ -292,11 +343,10 @@ func isAllDigits(s string) bool {
 }
 
 // Reveal returns the real cleartext value. It is the canonical, audited way
-// to read the secret; render/reconcile paths must call it explicitly. (A raw
-// string(s) conversion also yields the cleartext — Secret is a string newtype
-// — but Reveal is deliberately greppable so an audit can find every cleartext
-// access; prefer it, and never feed the result into a log line.)
-func (s Secret) Reveal() string { return string(s) }
+// to read the secret; render/reconcile paths must call it explicitly. Reveal
+// is deliberately greppable so an audit can find every cleartext access;
+// never feed the result into a log line.)
+func (s Secret) Reveal() string { return s.value }
 
 // MarshalJSON redacts the secret. An empty Secret marshals to "" so that
 // unset/empty stays distinguishable from a present-but-redacted value; a
@@ -304,7 +354,7 @@ func (s Secret) Reveal() string { return string(s) }
 // required so redaction fires for a Secret used as a struct field, inside a
 // []Secret slice, and as a map value.
 func (s Secret) MarshalJSON() ([]byte, error) {
-	if s == "" {
+	if s.value == "" {
 		return []byte(`""`), nil
 	}
 	return json.Marshal(SecretRedacted)
@@ -324,7 +374,7 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 	if v == SecretRedacted {
 		return errRedactedSecretIngest
 	}
-	*s = Secret(v)
+	*s = NewSecret(v)
 	return nil
 }
 
@@ -334,7 +384,7 @@ func (s *Secret) UnmarshalJSON(b []byte) error {
 // surface at no cost. A value receiver keeps redaction firing in slices and
 // map values.
 func (s Secret) MarshalYAML() (any, error) {
-	if s == "" {
+	if s.value == "" {
 		return "", nil
 	}
 	return SecretRedacted, nil
@@ -358,7 +408,7 @@ func (s *Secret) UnmarshalYAML(value *yaml.Node) error {
 	if v == SecretRedacted {
 		return errRedactedSecretIngest
 	}
-	*s = Secret(v)
+	*s = NewSecret(v)
 	return nil
 }
 

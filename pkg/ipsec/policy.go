@@ -390,6 +390,20 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 					"vpn", name, "detail", err.Error())
 				continue
 			}
+			if decoded == "" {
+				// #15990 render belt: a key that decodes to zero
+				// bytes must never be stored — the secrets block
+				// would emit `secret = ""`, which strongSwan
+				// rejects at load and which is never a legitimate
+				// credential. (Unreachable for `$9$` values since
+				// the #15990 decoder fix; kept so no future decoder
+				// change can reintroduce the empty emission.)
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: pre-shared key "+
+					"decodes to an empty secret — replace it with a valid key",
+					"vpn", name)
+				continue
+			}
 			decodedPSKs[name] = decoded
 			if secretHex {
 				hexPSKs[name] = true

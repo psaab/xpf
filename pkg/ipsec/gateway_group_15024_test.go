@@ -32,11 +32,11 @@ func gatewayGroupCfg15024() *config.IPsecConfig {
 			"prop1": {Name: "prop1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"vpn1": {PSK: "secret-one", Name: "vpn1", Gateway: "gw", IPsecPolicy: "ipsec-pol",
+			"vpn1": {PSK: config.NewSecret("secret-one"), Name: "vpn1", Gateway: "gw", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": {Name: "ts1", LocalIP: "10.1.0.0/24", RemoteIP: "10.9.1.0/24"},
 				}},
-			"vpn2": {PSK: "secret-two", Name: "vpn2", Gateway: "gw", IPsecPolicy: "ipsec-pol",
+			"vpn2": {PSK: config.NewSecret("secret-two"), Name: "vpn2", Gateway: "gw", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts2": {Name: "ts2", LocalIP: "10.2.0.0/24", RemoteIP: "10.9.2.0/24"},
 				}},

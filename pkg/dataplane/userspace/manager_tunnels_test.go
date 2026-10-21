@@ -223,7 +223,7 @@ func TestBuildTunnelEndpointSnapshotsPopulatesWireGuard(t *testing.T) {
 				Name:              "wg0",
 				Mode:              "wireguard",
 				WgListenPort:      51820,
-				WgLocalPrivkeyHex: privHex,
+				WgLocalPrivkeyHex: config.NewSecret(privHex),
 				WgPeers: []config.WgPeerConfig{{
 					PublicKeyHex:  peerHex,
 					AllowedIPs:    []string{"10.0.0.0/24", "10.0.1.0/24"},
@@ -295,7 +295,7 @@ func TestBuildTunnelEndpointSnapshotsResolvesWireguardRIByKernelIdentity10196(t 
 				Name:              "gr-0-0-0",
 				Mode:              "wireguard",
 				WgListenPort:      51820,
-				WgLocalPrivkeyHex: privHex,
+				WgLocalPrivkeyHex: config.NewSecret(privHex),
 				WgPeers: []config.WgPeerConfig{{
 					PublicKeyHex: peerHex,
 					Endpoint:     "[2001:db8::1]:51820",
@@ -335,7 +335,7 @@ func TestBuildTunnelEndpointSnapshotsCarriesSharedUnitWireguardScope10196(t *tes
 				Name:              "wg0",
 				Mode:              "wireguard",
 				WgListenPort:      51820,
-				WgLocalPrivkeyHex: privHex,
+				WgLocalPrivkeyHex: config.NewSecret(privHex),
 				WgPeers: []config.WgPeerConfig{{
 					PublicKeyHex: peerHex,
 					Endpoint:     "203.0.113.1:51820",

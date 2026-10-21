@@ -2378,8 +2378,8 @@ func TestGenerateProtocols_OSPFMD5Auth(t *testing.T) {
 			{
 				ID: "0.0.0.0",
 				Interfaces: []*config.OSPFInterface{
-					{Name: "trust0", AuthType: "md5", AuthKey: "secret123", AuthKeyID: 5},
-					{Name: "dmz0", AuthType: "simple", AuthKey: "plainpw"},
+					{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("secret123"), AuthKeyID: 5},
+					{Name: "dmz0", AuthType: "simple", AuthKey: config.NewSecret("plainpw")},
 				},
 			},
 		},
@@ -2407,7 +2407,7 @@ func TestGenerateProtocols_OSPFMD5AuthUnsetKeyIDOmitted11794(t *testing.T) {
 		Areas: []*config.OSPFArea{{
 			ID: "0.0.0.0",
 			Interfaces: []*config.OSPFInterface{{
-				Name: "trust0", AuthType: "md5", AuthKey: "key1",
+				Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("key1"),
 			}},
 		}},
 	}
@@ -2423,7 +2423,7 @@ func TestGenerateProtocols_BGPPassword(t *testing.T) {
 	bgp := &config.BGPConfig{
 		LocalAS: 65001,
 		Neighbors: []*config.BGPNeighbor{
-			{Address: "10.0.2.1", PeerAS: 65002, AuthPassword: "bgpSecret"},
+			{Address: "10.0.2.1", PeerAS: 65002, AuthPassword: config.NewSecret("bgpSecret")},
 			{Address: "10.0.3.1", PeerAS: 65003},
 		},
 	}
@@ -2577,7 +2577,7 @@ func TestGenerateProtocols_ISISAuth(t *testing.T) {
 		NET:      "49.0001.0100.0000.0001.00",
 		Level:    "level-2",
 		AuthType: "md5",
-		AuthKey:  "isisSecret",
+		AuthKey:  config.NewSecret("isisSecret"),
 		Interfaces: []*config.ISISInterface{
 			{Name: "trust0"},
 		},
@@ -2601,7 +2601,7 @@ func TestGenerateProtocols_ISISAuthClear(t *testing.T) {
 		NET:      "49.0001.0100.0000.0001.00",
 		Level:    "level-2",
 		AuthType: "simple",
-		AuthKey:  "plainpw",
+		AuthKey:  config.NewSecret("plainpw"),
 		Interfaces: []*config.ISISInterface{
 			{Name: "trust0"},
 		},
@@ -2657,8 +2657,8 @@ func TestGenerateProtocols_ISISInterfaceAuth(t *testing.T) {
 		NET:   "49.0001.0100.0000.0001.00",
 		Level: "level-2",
 		Interfaces: []*config.ISISInterface{
-			{Name: "trust0", AuthType: "md5", AuthKey: "ifaceSecret"},
-			{Name: "dmz0", AuthType: "simple", AuthKey: "plainpw"},
+			{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("ifaceSecret")},
+			{Name: "dmz0", AuthType: "simple", AuthKey: config.NewSecret("plainpw")},
 		},
 	}
 	got := m.generateProtocols(nil, nil, nil, nil, isis, "", 0, nil, nil)
@@ -2678,7 +2678,7 @@ func TestGenerateProtocols_RIPAuth(t *testing.T) {
 	rip := &config.RIPConfig{
 		Interfaces: []string{"trust0", "dmz0"},
 		AuthType:   "md5",
-		AuthKey:    "ripSecret",
+		AuthKey:    config.NewSecret("ripSecret"),
 	}
 	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 
@@ -2700,7 +2700,7 @@ func TestGenerateProtocols_RIPAuthText(t *testing.T) {
 	rip := &config.RIPConfig{
 		Interfaces: []string{"trust0"},
 		AuthType:   "simple",
-		AuthKey:    "plainpw",
+		AuthKey:    config.NewSecret("plainpw"),
 	}
 	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 
@@ -5182,7 +5182,7 @@ func TestGenerateProtocols_NewlineFreeTextDoesNotInject(t *testing.T) {
 				// above so both belts stay observable.
 				Address:      "10.0.0.2",
 				PeerAS:       65002,
-				AuthPassword: "pw\nagentx",
+				AuthPassword: config.NewSecret("pw\nagentx"),
 			},
 		},
 	}

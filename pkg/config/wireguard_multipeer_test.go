@@ -757,7 +757,7 @@ func TestWireguardPresharedKeyCompiles(t *testing.T) {
 	if len(tc.WgPeers) != 1 {
 		t.Fatalf("WgPeers = %d, want 1", len(tc.WgPeers))
 	}
-	if got := string(tc.WgPeers[0].PresharedKeyHex); got != wgKeyC {
+	if got := tc.WgPeers[0].PresharedKeyHex.Reveal(); got != wgKeyC {
 		t.Errorf("PresharedKeyHex = %q, want %q", got, wgKeyC)
 	}
 }
@@ -770,12 +770,12 @@ func TestTunnelConfigStringRedactsSecrets(t *testing.T) {
 		Name:              "wg0",
 		Mode:              "wireguard",
 		WgListenPort:      51820,
-		WgLocalPrivkeyHex: Secret(wgKeyA),
+		WgLocalPrivkeyHex: NewSecret(wgKeyA),
 		WgPeers: []WgPeerConfig{{
 			PublicKeyHex:    wgKeyB,
 			AllowedIPs:      []string{"10.1.0.0/16"},
 			Endpoint:        "203.0.113.1:51820",
-			PresharedKeyHex: Secret(wgKeyC),
+			PresharedKeyHex: NewSecret(wgKeyC),
 		}},
 	}
 	s := tc.String()

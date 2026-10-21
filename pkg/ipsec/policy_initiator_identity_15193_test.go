@@ -45,7 +45,7 @@ import (
 func initiatorCfg15193(gw *config.IPsecGateway, psk string) *config.IPsecConfig {
 	return &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: gw.Name, PSK: config.Secret(psk), EstablishTunnels: "immediately"},
+			"tun": {Gateway: gw.Name, PSK: config.NewSecret(psk), EstablishTunnels: "immediately"},
 		},
 		Gateways:  map[string]*config.IPsecGateway{gw.Name: gw},
 		Proposals: map[string]*config.IPsecProposal{},
@@ -196,8 +196,8 @@ func TestInitiatorDefaultIdentity15193(t *testing.T) {
 	t.Run("two default-shape VPNs keep peer isolation under shared initiator owner", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"a": {Gateway: "gw-a", PSK: "secret-a"},
-				"b": {Gateway: "gw-b", PSK: "secret-b"},
+				"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+				"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
 			},
 			Gateways: map[string]*config.IPsecGateway{
 				"gw-a": {Name: "gw-a", Address: "203.0.113.1"},

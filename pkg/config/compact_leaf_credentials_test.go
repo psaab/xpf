@@ -72,8 +72,8 @@ func TestOSPFInterfaceAuthCompactSpelling_6818(t *testing.T) {
 			t.Errorf("%s spelling: AuthType = %q, want \"simple\" -- the adjacency would "+
 				"form UNAUTHENTICATED", name, iface.AuthType)
 		}
-		if string(iface.AuthKey) != secret {
-			t.Errorf("%s spelling: AuthKey = %q, want %q", name, string(iface.AuthKey), secret)
+		if iface.AuthKey.Reveal() != secret {
+			t.Errorf("%s spelling: AuthKey = %q, want %q", name, iface.AuthKey.Reveal(), secret)
 		}
 	}
 }
@@ -103,10 +103,10 @@ func TestOSPFInterfaceMD5CompactSpelling_6818(t *testing.T) {
 		if iface.AuthKeyID != 7 {
 			t.Errorf("%s spelling: AuthKeyID = %d, want 7", name, iface.AuthKeyID)
 		}
-		if string(iface.AuthKey) != secret {
+		if iface.AuthKey.Reveal() != secret {
 			t.Errorf("%s spelling: AuthKey = %q, want %q -- md5 nests deeper than the "+
 				"other forms and the key is the part that gets lost",
-				name, string(iface.AuthKey), secret)
+				name, iface.AuthKey.Reveal(), secret)
 		}
 	}
 }
@@ -137,17 +137,17 @@ func TestSNMPv3CredentialCompactSpelling_6822(t *testing.T) {
 		if u.AuthProtocol != "sha256" {
 			t.Errorf("%s spelling: AuthProtocol = %q, want \"sha256\"", name, u.AuthProtocol)
 		}
-		if string(u.AuthPassword) != "s3cretpass" {
+		if u.AuthPassword.Reveal() != "s3cretpass" {
 			t.Errorf("%s spelling: AuthPassword = %q, want \"s3cretpass\" -- the user is "+
 				"registered as REQUIRING SHA-256 with an empty credential",
-				name, string(u.AuthPassword))
+				name, u.AuthPassword.Reveal())
 		}
 		if u.PrivProtocol != "aes128" {
 			t.Errorf("%s spelling: PrivProtocol = %q, want \"aes128\"", name, u.PrivProtocol)
 		}
-		if string(u.PrivPassword) != "p4ssphrase" {
+		if u.PrivPassword.Reveal() != "p4ssphrase" {
 			t.Errorf("%s spelling: PrivPassword = %q, want \"p4ssphrase\"",
-				name, string(u.PrivPassword))
+				name, u.PrivPassword.Reveal())
 		}
 	}
 }
@@ -421,10 +421,10 @@ func TestPackedTailCompilesLikeTheNestedSpelling_6818(t *testing.T) {
 			`protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { authentication { md5 7 { key "k"; } } } } } }`)
 		for name, cfg := range map[string]*Config{"packed": compact, "nested": block} {
 			iface := ospfIface6818(t, cfg, name)
-			if string(iface.AuthKey) != "k" {
+			if iface.AuthKey.Reveal() != "k" {
 				t.Errorf("%s: AuthKey = %q, want \"k\" — the guard must not refuse an "+
 					"attachment the grammar allows, or the empty-MD5-key defect returns",
-					name, string(iface.AuthKey))
+					name, iface.AuthKey.Reveal())
 			}
 		}
 	})

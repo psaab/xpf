@@ -643,7 +643,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					}
 				}
 				if authoredAuth {
-					user.EncryptedPassword = ""
+					user.EncryptedPassword = NewSecret("")
 				}
 				for _, prop := range userProps {
 					switch prop.Name() {
@@ -682,7 +682,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						for _, authChild := range prop.Children {
 							switch authChild.Name() {
 							case "encrypted-password":
-								user.EncryptedPassword = Secret(nodeVal(authChild))
+								user.EncryptedPassword = NewSecret(nodeVal(authChild))
 							case "ssh-ed25519", "ssh-rsa", "ssh-dsa":
 								// #8863: read EVERY value; see sshKeyValues.
 								user.SSHKeys = append(user.SSHKeys, sshKeyValues(authChild)...)
@@ -756,7 +756,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			for _, prop := range child.Children {
 				switch prop.Name() {
 				case "encrypted-password":
-					sys.RootAuthentication.EncryptedPassword = Secret(nodeVal(prop))
+					sys.RootAuthentication.EncryptedPassword = NewSecret(nodeVal(prop))
 				case "ssh-ed25519", "ssh-rsa", "ssh-dsa":
 					// #8863: read EVERY value, not slot 0. These leaves are
 					// multi:true, so repeated `set` lines for one key type
@@ -1513,7 +1513,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						}
 						auth.Users = append(auth.Users, &APIAuthUser{
 							Username:  inst.name,
-							Password:  Secret(nodeVal(pwNode)),
+							Password:  NewSecret(nodeVal(pwNode)),
 							Class:     class,
 							ExpiresAt: expires,
 						})
@@ -1525,7 +1525,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				// api-auth; named keys can override both.
 				for _, ch := range authNode.FindChildren("api-key") {
 					for _, key := range multiLeafAuthoredValues(ch) {
-						auth.APIKeys = append(auth.APIKeys, Secret(key))
+						auth.APIKeys = append(auth.APIKeys, NewSecret(key))
 					}
 				}
 				for _, inst := range namedInstances(authNode.FindChildren("key")) {
@@ -1543,7 +1543,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					}
 					auth.Keys = append(auth.Keys, &APIAuthKey{
 						Name:      inst.name,
-						Secret:    Secret(nodeVal(secretNode)),
+						Secret:    NewSecret(nodeVal(secretNode)),
 						Class:     class,
 						ExpiresAt: expires,
 					})
@@ -1859,30 +1859,30 @@ func compileDDNSProvider(name string, nodes ...*Node) *DDNSProvider {
 		ReverseZone:          props["reverse-zone"],
 		TSIGKeyName:          props["tsig-key"],
 		TSIGAlgorithm:        props["tsig-algorithm"],
-		TSIGSecret:           Secret(props["tsig-secret"]),
+		TSIGSecret:           NewSecret(props["tsig-secret"]),
 		SourceAddress:        props["source-address"],
 		DestinationInterface: props["destination-interface"],
 		RoutingInstance:      props["routing-instance"],
 		Server:               props["server"],
 		Username:             props["username"],
-		Password:             Secret(props["password"]),
+		Password:             NewSecret(props["password"]),
 		URLTemplate:          props["url-template"],
 		OKResponse:           props["ok-response"],
-		APIToken:             Secret(props["api-token"]),
+		APIToken:             NewSecret(props["api-token"]),
 		Zone:                 props["zone"],
 		AWSAccessKeyID:       props["aws-access-key"],
-		AWSSecretAccessKey:   Secret(props["aws-secret-key"]),
+		AWSSecretAccessKey:   NewSecret(props["aws-secret-key"]),
 		AWSRegion:            props["aws-region"],
 		HostedZoneID:         props["hosted-zone-id"],
 		CheckIPURL:           props["checkip-url"],
 		CheckIPAllowlist:     props["checkip-allowlist"],
 	}
 	if p.Backend == "" && p.UpdateServer == "" && p.ForwardZone == "" && p.ReverseZone == "" && p.TSIGKeyName == "" &&
-		p.TSIGAlgorithm == "" && p.TSIGSecret == "" && p.SourceAddress == "" &&
+		p.TSIGAlgorithm == "" && p.TSIGSecret.Reveal() == "" && p.SourceAddress == "" &&
 		p.DestinationInterface == "" && p.RoutingInstance == "" &&
-		p.Server == "" && p.Username == "" && p.Password == "" &&
-		p.URLTemplate == "" && p.OKResponse == "" && p.APIToken == "" &&
-		p.Zone == "" && p.AWSAccessKeyID == "" && p.AWSSecretAccessKey == "" &&
+		p.Server == "" && p.Username == "" && p.Password.Reveal() == "" &&
+		p.URLTemplate == "" && p.OKResponse == "" && p.APIToken.Reveal() == "" &&
+		p.Zone == "" && p.AWSAccessKeyID == "" && p.AWSSecretAccessKey.Reveal() == "" &&
 		p.AWSRegion == "" && p.HostedZoneID == "" && p.CheckIPURL == "" &&
 		p.CheckIPAllowlist == "" {
 		return nil
@@ -3960,27 +3960,27 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 				case "authentication-md5":
 					user.AuthProtocol = "md5"
 					if pw := prop.FindChild("authentication-password"); pw != nil {
-						user.AuthPassword = Secret(nodeVal(pw))
+						user.AuthPassword = NewSecret(nodeVal(pw))
 					}
 				case "authentication-sha":
 					user.AuthProtocol = "sha"
 					if pw := prop.FindChild("authentication-password"); pw != nil {
-						user.AuthPassword = Secret(nodeVal(pw))
+						user.AuthPassword = NewSecret(nodeVal(pw))
 					}
 				case "authentication-sha256":
 					user.AuthProtocol = "sha256"
 					if pw := prop.FindChild("authentication-password"); pw != nil {
-						user.AuthPassword = Secret(nodeVal(pw))
+						user.AuthPassword = NewSecret(nodeVal(pw))
 					}
 				case "privacy-des":
 					user.PrivProtocol = "des"
 					if pw := prop.FindChild("privacy-password"); pw != nil {
-						user.PrivPassword = Secret(nodeVal(pw))
+						user.PrivPassword = NewSecret(nodeVal(pw))
 					}
 				case "privacy-aes128":
 					user.PrivProtocol = "aes128"
 					if pw := prop.FindChild("privacy-password"); pw != nil {
-						user.PrivPassword = Secret(nodeVal(pw))
+						user.PrivPassword = NewSecret(nodeVal(pw))
 					}
 				}
 			}
@@ -4005,27 +4005,27 @@ func applySNMPv3ProtocolChildren14411(children []*Node, user *SNMPv3User) {
 		case "authentication-md5":
 			user.AuthProtocol = "md5"
 			if pw := prop.FindChild("authentication-password"); pw != nil {
-				user.AuthPassword = Secret(nodeVal(pw))
+				user.AuthPassword = NewSecret(nodeVal(pw))
 			}
 		case "authentication-sha":
 			user.AuthProtocol = "sha"
 			if pw := prop.FindChild("authentication-password"); pw != nil {
-				user.AuthPassword = Secret(nodeVal(pw))
+				user.AuthPassword = NewSecret(nodeVal(pw))
 			}
 		case "authentication-sha256":
 			user.AuthProtocol = "sha256"
 			if pw := prop.FindChild("authentication-password"); pw != nil {
-				user.AuthPassword = Secret(nodeVal(pw))
+				user.AuthPassword = NewSecret(nodeVal(pw))
 			}
 		case "privacy-des":
 			user.PrivProtocol = "des"
 			if pw := prop.FindChild("privacy-password"); pw != nil {
-				user.PrivPassword = Secret(nodeVal(pw))
+				user.PrivPassword = NewSecret(nodeVal(pw))
 			}
 		case "privacy-aes128":
 			user.PrivProtocol = "aes128"
 			if pw := prop.FindChild("privacy-password"); pw != nil {
-				user.PrivPassword = Secret(nodeVal(pw))
+				user.PrivPassword = NewSecret(nodeVal(pw))
 			}
 		}
 	}
@@ -4069,9 +4069,9 @@ func parseSNMPv3UserKeys(keys []string, user *SNMPv3User) {
 		}
 		if i+2 < len(keys) && keys[i+1] == passwordLeaf {
 			if passwordLeaf == "authentication-password" {
-				user.AuthPassword = Secret(keys[i+2])
+				user.AuthPassword = NewSecret(keys[i+2])
 			} else {
-				user.PrivPassword = Secret(keys[i+2])
+				user.PrivPassword = NewSecret(keys[i+2])
 			}
 		}
 		if i+1 < len(keys) && keys[i+1] == passwordLeaf {
@@ -4361,14 +4361,14 @@ func compileChassis(node *Node, ch *ChassisConfig) error {
 	// logged here.
 	if n := clusterNode.FindChild("authentication-key"); n != nil {
 		if v := nodeVal(n); v != "" {
-			ch.Cluster.ControlLinkAuthKey = Secret(v)
+			ch.Cluster.ControlLinkAuthKey = NewSecret(v)
 		}
 	}
 	// #6630: the additional ACCEPTED key that makes a rotation rolling. Same
 	// Secret treatment; never signed with, only verified against.
 	if n := clusterNode.FindChild("additional-authentication-key"); n != nil {
 		if v := nodeVal(n); v != "" {
-			ch.Cluster.ControlLinkAuthKeyAlt = Secret(v)
+			ch.Cluster.ControlLinkAuthKeyAlt = NewSecret(v)
 		}
 	}
 	if n := clusterNode.FindChild("control-interface"); n != nil {

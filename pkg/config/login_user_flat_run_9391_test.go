@@ -122,7 +122,7 @@ func TestLoginUserAuthenticationBodyIsUntouched9391(t *testing.T) {
 	if u.Class != "super-user" || u.UID != 2001 {
 		t.Fatalf("the run expansion regressed: uid=%d class=%q", u.UID, u.Class)
 	}
-	if u.EncryptedPassword == "" {
+	if u.EncryptedPassword.Reveal() == "" {
 		t.Errorf("the authentication body must still reach the reader; got an empty " +
 			"password, so lifting out of `authentication` would have changed what the " +
 			"lenient path compiles relative to what #6662 rejects")

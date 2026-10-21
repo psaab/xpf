@@ -47,7 +47,7 @@ func renderableTwoVPN() *config.IPsecConfig {
 			},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"ikepol": {Name: "ikepol", Proposals: []string{"ikeprop"}, PSK: config.Secret("ike-psk")},
+			"ikepol": {Name: "ikepol", Proposals: []string{"ikeprop"}, PSK: config.NewSecret("ike-psk")},
 		},
 		Proposals: map[string]*config.IPsecProposal{
 			"espprop": {Name: "espprop", Protocol: "esp", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128"},
@@ -60,8 +60,8 @@ func renderableTwoVPN() *config.IPsecConfig {
 			"gw-sibling": {Name: "gw-sibling", Address: "192.0.2.2", IKEPolicy: "ikepol"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"target":  {PSK: "fixture-secret", Name: "target", Gateway: "gw-target", IPsecPolicy: "esppol"},
-			"sibling": {PSK: "fixture-secret", Name: "sibling", Gateway: "gw-sibling", IPsecPolicy: "esppol"},
+			"target":  {PSK: config.NewSecret("fixture-secret"), Name: "target", Gateway: "gw-target", IPsecPolicy: "esppol"},
+			"sibling": {PSK: config.NewSecret("fixture-secret"), Name: "sibling", Gateway: "gw-sibling", IPsecPolicy: "esppol"},
 		},
 	}
 }

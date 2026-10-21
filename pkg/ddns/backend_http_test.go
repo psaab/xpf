@@ -46,7 +46,7 @@ func TestDyndns2GoodAndNochg(t *testing.T) {
 
 	b, err := newDyndns2Backend(&config.DDNSProvider{
 		Name: "test", Backend: "dyndns2", Server: srv.URL,
-		Username: "u1", Password: config.Secret("p1"),
+		Username: "u1", Password: config.NewSecret("p1"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("newDyndns2Backend: %v", err)
@@ -192,7 +192,7 @@ func TestDyndns2DeleteIssuesOfflineRequest(t *testing.T) {
 
 	b, err := newDyndns2Backend(&config.DDNSProvider{
 		Name: "test", Backend: "dyndns2", Server: srv.URL,
-		Username: "u1", Password: config.Secret("p1"),
+		Username: "u1", Password: config.NewSecret("p1"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("newDyndns2Backend: %v", err)

@@ -58,18 +58,18 @@ func (u *OSPFInterfaceUnion12186) mergeMD5Key12186(key OSPFMD5Key12186, conflict
 		if u.MD5Keys[i].ID != key.ID {
 			continue
 		}
-		if u.MD5Keys[i].Key == "" {
+		if u.MD5Keys[i].Key.Reveal() == "" {
 			u.MD5Keys[i].Key = key.Key
-			if u.AuthKeyID == key.ID && u.AuthKey == "" {
+			if u.AuthKeyID == key.ID && u.AuthKey.Reveal() == "" {
 				u.AuthKey = key.Key
 			}
-		} else if key.Key != "" && u.MD5Keys[i].Key != key.Key {
+		} else if key.Key.Reveal() != "" && u.MD5Keys[i].Key.Reveal() != key.Key.Reveal() {
 			conflicts = appendOSPFConflict12186(conflicts, "authentication md5 key")
 		}
 		return conflicts
 	}
 	u.MD5Keys = append(u.MD5Keys, key)
-	if u.AuthKeyID == key.ID && u.AuthKey == "" {
+	if u.AuthKeyID == key.ID && u.AuthKey.Reveal() == "" {
 		u.AuthKey = key.Key
 	}
 	return conflicts
@@ -114,10 +114,10 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 	if src.AuthType != "" && src.AuthType == u.AuthType {
 		switch src.AuthType {
 		case "simple":
-			if src.AuthKey != "" {
-				if u.AuthKey == "" {
+			if src.AuthKey.Reveal() != "" {
+				if u.AuthKey.Reveal() == "" {
 					u.AuthKey = src.AuthKey
-				} else if u.AuthKey != src.AuthKey {
+				} else if u.AuthKey.Reveal() != src.AuthKey.Reveal() {
 					conflicts = appendOSPFConflict12186(conflicts, "authentication simple-password")
 				}
 			}
@@ -130,8 +130,8 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 				conflicts = u.mergeMD5Key12186(
 					OSPFMD5Key12186{ID: src.AuthKeyID, Key: src.AuthKey}, conflicts)
 			} else {
-				for _, key := range src.AuthMD5Keys {
-					conflicts = u.mergeMD5Key12186(key, conflicts)
+				for i := range src.AuthMD5Keys {
+					conflicts = u.mergeMD5Key12186(src.AuthMD5Keys[i], conflicts)
 				}
 			}
 		}
@@ -148,10 +148,10 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 	// typed fragments keep their own key handling above; if a later
 	// fragment supplies a type, that type's key handling governs and
 	// the renderer then requires a renderable typed key (#14977).
-	if u.AuthType == "" && src.AuthKey != "" {
-		if u.AuthKey == "" {
+	if u.AuthType == "" && src.AuthKey.Reveal() != "" {
+		if u.AuthKey.Reveal() == "" {
 			u.AuthKey = src.AuthKey
-		} else if u.AuthKey != src.AuthKey {
+		} else if u.AuthKey.Reveal() != src.AuthKey.Reveal() {
 			conflicts = appendOSPFConflict12186(conflicts, "authentication-key")
 		}
 	}

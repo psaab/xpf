@@ -72,7 +72,7 @@ func TestDuckDNSWithdrawSiblingProtected(t *testing.T) {
 
 	b, err := newDuckDNSBackend(&config.DDNSProvider{
 		Name: "duck", Backend: "duckdns", Server: srv.URL,
-		APIToken: config.Secret("tok-abc"),
+		APIToken: config.NewSecret("tok-abc"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("newDuckDNSBackend: %v", err)
@@ -109,7 +109,7 @@ func TestDyndns2WithdrawSiblingProtected(t *testing.T) {
 
 	b, err := newDyndns2Backend(&config.DDNSProvider{
 		Name: "dd2", Backend: "dyndns2", Server: srv.URL,
-		Username: "u", Password: config.Secret("p"),
+		Username: "u", Password: config.NewSecret("p"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("newDyndns2Backend: %v", err)
@@ -162,7 +162,7 @@ func duckScope(fqdn string, family Family, serverURL string) SurfaceAScope {
 		Source: AddressSourceInterface,
 		Provider: &config.DDNSProvider{
 			Name: "duck", Backend: "duckdns", Server: serverURL,
-			APIToken: config.Secret("tok-abc"),
+			APIToken: config.NewSecret("tok-abc"),
 		},
 	}
 }
