@@ -156,11 +156,18 @@ type CLI struct {
 	// priced generation is the rendered generation. Set by the gate
 	// (permissions_config_read_14707.go) at dispatch entry, cleared when
 	// the dispatch returns. Keys: "active", "candidate", "slot",
-	// "other". Nil outside a gated config-read dispatch — handlers fall
-	// back to the store renderers (ungated/superuser paths).
+	// "other". Presence (a non-nil map) records that a snapshot was
+	// captured even when its tree is absent (nil): handlers render the
+	// priced absence, never re-resolve the live store (fold 3).
 	renderSnapshots15995 map[string]*config.ConfigTree
-	version              string
-	startTime            time.Time
+	// renderPath15995 is the exact path the gate priced for the
+	// in-flight dispatch (config-mode edit-cursor fold included), and
+	// renderComparePath15995 its compare twin. Handlers render the
+	// priced path, not a re-read cursor (fold 3 PATH-TOCTOU).
+	renderPath15995        []string
+	renderComparePath15995 []string
+	version                string
+	startTime              time.Time
 
 	vrrpMgr *vrrp.Manager
 

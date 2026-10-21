@@ -614,7 +614,20 @@ Three consequences an operator should know:
   spellings (`show conf …`) are resolved before the gate, exactly
   as the handler resolves them. Authorization and rendering share
   one deep-copy snapshot taken under the store lock, so the priced
-  generation is the rendered generation. The operational pair is
+  generation is the rendered generation: the snapshot carries an
+  explicit captured/absent state (an absent candidate or rollback
+  slot at pricing renders absent — never a later live tree), the
+  compiled policy and its tree are captured in the same lock
+  acquisition (no promotion-A rules over promotion-B data), the
+  priced path itself (CLI edit cursor folded in) travels with the
+  snapshot, and REST HEAD prices exactly as GET. Candidate-baseline
+  rollback compares still require a candidate ("not in
+  configuration mode"), as the store helper always did. Measured
+  cost (control plane only): one whole-tree deep copy is
+  ~2.1 ms / ~300 KB / ~2.8k allocs for a 500-zone (~1,500-node)
+  tree on the review host (single BenchmarkClone measurement);
+  unrestricted classes skip the descendant walk but still pay the
+  snapshot clone on gated surfaces. The operational pair is
   still charged once on the requested command; a descendant is not
   a command spelling the operator typed.
 

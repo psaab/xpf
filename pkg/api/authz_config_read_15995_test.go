@@ -136,3 +136,56 @@ func TestRESTShowAncestorDeniedDescendant15995(t *testing.T) {
 		t.Errorf("control: open-view GET ?path=security = %d, want 200 with ipsec: %s", code, body)
 	}
 }
+
+// Fold 3 (3): HEAD reaches the GET handler through the mux, so HEAD
+// must price as GET at the *-configuration gate. Pre-fix the gate
+// switched on the raw method and HEAD skipped concealment entirely
+// (status/Content-Length oracle: denied subtree answered 200).
+func TestRESTHeadPricesAsGet15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(strings.Replace(config15995REST, "ancestor-15995-rest", "ancestor-15995-rest-b", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	_, base := authzServer(t, Config{
+		Addr:         "127.0.0.1:8080",
+		Store:        store,
+		PeerLookupFn: fixedPeerUID(uid15995REST),
+	})
+	head := func(p string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodHead, base+p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("HEAD %s: %v", p, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for _, route := range []string{
+		"/api/v1/config/show?path=security",
+		"/api/v1/config/show",
+		"/api/v1/config/show-rollback?n=1&path=security",
+	} {
+		if code := head(route); code != http.StatusForbidden {
+			t.Errorf("HEAD %s = %d, want 403 (must price as GET, #15995 fold3-3)", route, code)
+		}
+	}
+	if code := head("/api/v1/config/show?path=security%20zones"); code != http.StatusOK {
+		t.Errorf("HEAD allowed sibling = %d, want 200", code)
+	}
+}

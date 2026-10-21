@@ -146,6 +146,7 @@ func (c *CLI) handleShow(args []string) error {
 		// this dispatch was gated (restricted class). Ungated classes
 		// keep the store renderers.
 		snap := c.renderSnapshot15995("active")
+		captured := c.snapshotsCaptured15995()
 		formatName := ""
 		switch format {
 		case displayPipeJSON:
@@ -159,9 +160,9 @@ func (c *CLI) handleShow(args []string) error {
 		switch format {
 		case displayPipeJSON, displayPipeSet, displayPipeXML:
 			switch {
-			case snap != nil && redact:
+			case captured && redact:
 				output = configstore.RenderShowRedacted(snap, cfgPath, formatName)
-			case snap != nil:
+			case captured:
 				output = configstore.RenderShowCleartext(snap, cfgPath, formatName)
 			case redact && format == displayPipeJSON:
 				output = c.store.ShowActiveJSONRedacted(cfgPath)
@@ -185,9 +186,9 @@ func (c *CLI) handleShow(args []string) error {
 		case displayPipeInheritance:
 			var inhErr error
 			switch {
-			case snap != nil && redact:
+			case captured && redact:
 				output, inhErr = configstore.RenderShowInheritanceRedacted(snap, cfgPath, c.store.NodeID())
-			case snap != nil:
+			case captured:
 				output, inhErr = configstore.RenderShowInheritanceCleartext(snap, cfgPath, c.store.NodeID())
 			case redact:
 				output, inhErr = c.store.ShowActiveInheritanceRedacted(cfgPath)
@@ -202,9 +203,9 @@ func (c *CLI) handleShow(args []string) error {
 			}
 		default:
 			switch {
-			case snap != nil && redact:
+			case captured && redact:
 				output = configstore.RenderShowRedacted(snap, cfgPath, "text")
-			case snap != nil:
+			case captured:
 				output = configstore.RenderShowCleartext(snap, cfgPath, "text")
 			case redact:
 				output = c.store.ShowActiveRedacted(cfgPath)

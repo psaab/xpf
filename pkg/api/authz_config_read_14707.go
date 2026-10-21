@@ -19,6 +19,8 @@ type restConfigReadSnapshots struct {
 	Primary *config.ConfigTree
 	Other   *config.ConfigTree
 	NodeID  int
+	// Present: gate captured a snapshot; nil Primary = priced absence.
+	Present bool
 }
 
 func restConfigReadSnapshotsFrom(r *http.Request) (restConfigReadSnapshots, bool) {
@@ -49,7 +51,14 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		return restConfigReadSnapshots{}, nil
 	}
 	format := r.URL.Query().Get("format")
-	route := r.Method + " " + r.URL.Path
+	// Fold 3: canonicalize the safe method exactly as readPermissionFor
+	// does (#9134): HEAD reaches the GET handler through the mux, so
+	// HEAD must price as GET or it skips *-configuration concealment.
+	method := r.Method
+	if method != http.MethodGet && isSafeHTTPMethod(method) {
+		method = http.MethodGet
+	}
+	route := method + " " + r.URL.Path
 	switch route {
 	case "GET /api/v1/config/show":
 		// #15657 V48-02: ?path= selects the subtree (the gRPC
@@ -63,19 +72,26 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 			}
 			var trees []*config.ConfigTree
 			nodeID := -1
+			priceCfg := cfg
 			if s.store != nil {
-				trees = s.store.ShowConfigTrees(target)
-				nodeID = s.store.NodeID()
+				scfg, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+				if scfg != nil {
+					priceCfg = scfg
+				}
+				nodeID = nid
+				if tree != nil {
+					trees = []*config.ConfigTree{tree}
+				}
 			}
-			snaps := restConfigReadSnapshots{NodeID: nodeID}
+			snaps := restConfigReadSnapshots{NodeID: nodeID, Present: true}
 			if len(trees) > 0 {
 				snaps.Primary = trees[0]
 			}
 			if restShowFormat(format) == "inheritance" {
-				return snaps, config.AuthorizeExpandedConfigShowPathRendered(cfg, class, path,
+				return snaps, config.AuthorizeExpandedConfigShowPathRendered(priceCfg, class, path,
 					config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees...)
 			}
-			return snaps, config.AuthorizeConfigShowPathRendered(cfg, class, path,
+			return snaps, config.AuthorizeConfigShowPathRendered(priceCfg, class, path,
 				config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
 		}
 		return restConfigReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class,
@@ -106,22 +122,27 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		n, _ := queryIntStrict(r, "n", 1)
 		var trees []*config.ConfigTree
 		nodeID := -1
+		priceCfg := cfg
 		if s.store != nil {
-			if tree := s.store.RollbackTree(n); tree != nil {
+			scfg, tree, nid, _, _ := s.store.RollbackSnapshot(n)
+			if scfg != nil {
+				priceCfg = scfg
+			}
+			nodeID = nid
+			if tree != nil {
 				trees = []*config.ConfigTree{tree}
 			}
-			nodeID = s.store.NodeID()
 		}
-		snaps := restConfigReadSnapshots{NodeID: nodeID}
+		snaps := restConfigReadSnapshots{NodeID: nodeID, Present: true}
 		if len(trees) > 0 {
 			snaps.Primary = trees[0]
 		}
 		if restShowFormat(format) == "inheritance" {
-			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(cfg, class,
+			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class,
 				strings.Fields(r.URL.Query().Get("path")),
 				config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees...)
 		}
-		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(cfg, class,
+		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, class,
 			strings.Fields(r.URL.Query().Get("path")),
 			config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
 	}

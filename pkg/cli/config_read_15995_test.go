@@ -334,3 +334,43 @@ security {
 		t.Errorf("config-mode expanded zones render wrong:\n%s", out)
 	}
 }
+
+// Fold 3 PATH-TOCTOU + stash-key: the config-mode gate folds the edit
+// cursor into the priced path and stashes the priced candidate; the
+// handler must render THAT path from THAT candidate even if the cursor
+// moves and the live candidate changes after the gate. Pre-fold the
+// candidate was stashed under "other" while the handler read
+// "candidate" (live render), and the handler re-read GetEditPath.
+func TestCLIConfigModePricedPathAndSnapshot15995(t *testing.T) {
+	store := cli15995Store(t)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	defer store.ExitConfigure()
+	c := &CLI{store: store, userClass: "ancestor-view"}
+
+	// Price at cursor [security] with typed zones: allowed.
+	store.SetEditPath([]string{"security"})
+	if err := c.checkConfigShowRegex([]string{"zones"}); err != nil {
+		t.Fatalf("gate zones at [security]: %v", err)
+	}
+	// Move the cursor to the denied ipsec subtree and edit the live
+	// candidate AFTER pricing. Rendering must stay on the priced
+	// path/snapshot: zones content, no ipsec, no post-price marker.
+	store.SetEditPath([]string{"security", "ipsec"})
+	if err := store.SetFromInput("security zones security-zone trust description POST-PRICE-CLI-15995"); err != nil {
+		t.Fatalf("post-price edit: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := c.handleConfigShow([]string{"zones"}); err != nil {
+			t.Fatalf("handleConfigShow: %v", err)
+		}
+	})
+	if !strings.Contains(out, "ZONE-DESC-15995") {
+		t.Errorf("priced-path render lost zones content:\n%s", out)
+	}
+	if strings.Contains(out, "ipsec") || strings.Contains(out, "POST-PRICE-CLI-15995") {
+		t.Errorf("handler rendered re-read cursor / live candidate instead of priced path+snapshot:\n%s", out)
+	}
+	store.SetEditPath(nil)
+}

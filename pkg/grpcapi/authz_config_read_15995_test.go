@@ -190,6 +190,64 @@ func TestShowConfigRendersPricedSnapshot15995(t *testing.T) {
 	}
 }
 
+// Fold 3 (2): a candidate absent at pricing must render absent even if
+// a candidate appears before the handler runs — never the live tree.
+func TestShowConfigAbsentCandidateRendersAbsent15995(t *testing.T) {
+	s := ancestor15995Server(t)
+	// Exit config mode so no candidate exists at pricing time.
+	s.store.ExitConfigure()
+	req := &pb.ShowConfigRequest{Target: pb.ConfigTarget_CANDIDATE, Path: []string{"security", "zones"}}
+	ctx, err := s.authorizeRPCContext(ctxWithPeerUID(uidAncestor15995), show14707Method("ShowConfig"), req)
+	if err != nil {
+		t.Fatalf("authorize absent candidate: %v", err)
+	}
+	// Another session stages a candidate AFTER pricing.
+	if err := s.store.EnterConfigure(); err != nil {
+		t.Fatalf("enter configure: %v", err)
+	}
+	defer s.store.ExitConfigure()
+	if err := s.store.SetFromInput("security zones security-zone trust description LATE-CANDIDATE-15995"); err != nil {
+		t.Fatalf("stage late candidate: %v", err)
+	}
+	resp, herr := s.ShowConfig(ctx, req)
+	if herr != nil {
+		t.Fatalf("ShowConfig: %v", herr)
+	}
+	if strings.Contains(resp.Output, "LATE-CANDIDATE-15995") || strings.Contains(resp.Output, "ZONE-DESC-15995") {
+		t.Errorf("handler rendered live candidate created after pricing (priced absence violated):\n%s", resp.Output)
+	}
+}
+
+// Fold 3 (4): candidate-baseline rollback compare with NO candidate
+// must return the store's mode error, not a removals diff; the
+// active-baseline twin (no candidate needed) still diffs.
+func TestShowCompareNoCandidateMode15995(t *testing.T) {
+	s := ancestor15995Server(t)
+	s.store.ExitConfigure() // no candidate
+	ctx := ctxWithPeerUID(uidAncestor15995)
+	// Authorization itself admits (scoped path, allowed zones); the
+	// handler must then refuse the candidate-baseline compare.
+	actx, err := s.authorizeRPCContext(ctx, show14707Method("ShowCompare"),
+		&pb.ShowCompareRequest{RollbackN: 1, Path: []string{"security", "zones"}})
+	if err != nil {
+		t.Fatalf("authorize scoped rollback compare: %v", err)
+	}
+	if _, herr := s.ShowCompare(actx, &pb.ShowCompareRequest{RollbackN: 1, Path: []string{"security", "zones"}}); herr == nil {
+		t.Error("ShowCompare rollback-vs-candidate with no candidate SUCCEEDED (want mode error, #15995 fold3-4)")
+	} else if !strings.Contains(herr.Error(), "not in configuration mode") {
+		t.Errorf("ShowCompare no-candidate error = %v, want mode error", herr)
+	}
+	// Active-baseline twin succeeds without a candidate.
+	bctx, err := s.authorizeRPCContext(ctx, show14707Method("ShowCompare"),
+		&pb.ShowCompareRequest{RollbackN: 1, ActiveBaseline: true, Path: []string{"security", "zones"}})
+	if err != nil {
+		t.Fatalf("authorize active-baseline compare: %v", err)
+	}
+	if _, herr := s.ShowCompare(bctx, &pb.ShowCompareRequest{RollbackN: 1, ActiveBaseline: true, Path: []string{"security", "zones"}}); herr != nil {
+		t.Errorf("active-baseline compare without candidate refused: %v", herr)
+	}
+}
+
 func TestShowCompareRollbackAncestorDeniedDescendant15995(t *testing.T) {
 	s := ancestor15995Server(t)
 	ctx := ctxWithPeerUID(uidAncestor15995)

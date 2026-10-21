@@ -995,7 +995,10 @@ func (s *Server) authorizeRESTReadSnapshots(r *http.Request, required config.Log
 	if err != nil {
 		return r, p, err
 	}
-	if snaps.Primary != nil {
+	// Fold 3: attach whenever a snapshot was captured — a nil Primary
+	// is a priced absence the handler must render, not a cue to
+	// re-resolve the live store.
+	if snaps.Present {
 		r = withRESTConfigReadSnapshots(r, snaps)
 	}
 	return r, p, nil

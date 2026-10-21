@@ -389,25 +389,25 @@ func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 	case "", "active":
 		switch format {
 		case "", "text":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "text")
 			} else {
 				output = s.store.ShowActiveRedacted(path)
 			}
 		case "set":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "set")
 			} else {
 				output = s.store.ShowActiveSetRedacted(path)
 			}
 		case "json":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "json")
 			} else {
 				output = s.store.ShowActiveJSONRedacted(path)
 			}
 		case "xml":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "xml")
 			} else {
 				output = s.store.ShowActiveXMLRedacted(path)
@@ -415,7 +415,7 @@ func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 		case "inheritance":
 			var inh string
 			var err error
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				inh, err = configstore.RenderShowInheritanceRedacted(snaps.Primary, path, snaps.NodeID)
 			} else {
 				inh, err = s.store.ShowActiveInheritanceRedacted(path)
@@ -433,25 +433,25 @@ func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 	case "candidate":
 		switch format {
 		case "", "text":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "text")
 			} else {
 				output = s.store.ShowCandidateRedacted(path)
 			}
 		case "set":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "set")
 			} else {
 				output = s.store.ShowCandidateSetRedacted(path)
 			}
 		case "json":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "json")
 			} else {
 				output = s.store.ShowCandidateJSONRedacted(path)
 			}
 		case "xml":
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				output = configstore.RenderShowRedacted(snaps.Primary, path, "xml")
 			} else {
 				output = s.store.ShowCandidateXMLRedacted(path)
@@ -459,7 +459,7 @@ func (s *Server) configShowHandler(w http.ResponseWriter, r *http.Request) {
 		case "inheritance":
 			var inh string
 			var err error
-			if hasSnaps && snaps.Primary != nil {
+			if hasSnaps && snaps.Present {
 				inh, err = configstore.RenderShowInheritanceRedacted(snaps.Primary, path, snaps.NodeID)
 			} else {
 				inh, err = s.store.ShowCandidateInheritanceRedacted(path)
@@ -722,7 +722,15 @@ func (s *Server) configShowRollbackHandler(w http.ResponseWriter, r *http.Reques
 	path := strings.Fields(r.URL.Query().Get("path"))
 
 	// #15995 fold: render the priced slot snapshot when the gate ran.
-	if snaps, ok := restConfigReadSnapshotsFrom(r); ok && snaps.Primary != nil {
+	// Fold 3: captured nil Primary = slot absent at pricing — surface
+	// the slot error, never render a later live slot.
+	if snaps, ok := restConfigReadSnapshotsFrom(r); ok && snaps.Present && snaps.Primary == nil {
+		if err := s.store.RollbackSnapshotErr(n); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if snaps, ok := restConfigReadSnapshotsFrom(r); ok && snaps.Present {
 		var snapOut string
 		var snapErr error
 		switch format {

@@ -17,12 +17,17 @@ type configReadSnapshotsKey struct{}
 
 // configReadSnapshots is the snapshot set for one config-read RPC.
 // Primary is the ShowConfig target / rollback slot tree; Other is the
-// second compare arm. Nil trees render nothing, mirroring the store
-// renderers' nil-source defaults.
+// second compare arm. Present records that the gate DID capture a
+// snapshot (fold 3): a captured snapshot whose Primary is nil means
+// the target/slot was ABSENT at pricing — the handler must render
+// that absence (empty / slot error), never re-resolve the live store,
+// where a later candidate/slot could carry unpriced content. Absent
+// Present (ungated/superuser) keeps the store renderers.
 type configReadSnapshots struct {
 	Primary *config.ConfigTree
 	Other   *config.ConfigTree
 	NodeID  int
+	Present bool
 }
 
 func configReadSnapshotsFrom(ctx context.Context) (configReadSnapshots, bool) {
@@ -89,44 +94,66 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		// requested path — the handler renders the whole subtree.
 		// For display inheritance the rendered subtree is the
 		// apply-groups-expanded tree, so price that expansion.
+		// Fold 3: capture policy+tree atomically (ShowConfigSnapshot)
+		// and price with THAT cfg, so a commit between the authz
+		// cfg read and the tree read cannot pair old rules with new
+		// data. Present marks the capture even when the tree is
+		// absent (nil): the handler renders the absence.
 		target := "candidate"
 		if r.GetTarget() == pb.ConfigTarget_ACTIVE {
 			target = "active"
 		}
 		var trees []*config.ConfigTree
 		nodeID := -1
+		priceCfg := cfg
 		if s.store != nil {
-			trees = s.store.ShowConfigTrees(target)
-			nodeID = s.store.NodeID()
+			scfg, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+			if scfg != nil {
+				priceCfg = scfg
+			}
+			nodeID = nid
+			if tree != nil {
+				trees = []*config.ConfigTree{tree}
+			}
 		}
-		snaps := configReadSnapshots{NodeID: nodeID}
+		snaps := configReadSnapshots{NodeID: nodeID, Present: true}
 		if len(trees) > 0 {
 			snaps.Primary = trees[0]
 		}
 		if r.GetFormat() == pb.ConfigFormat_INHERITANCE {
-			return snaps, config.AuthorizeExpandedConfigShowPathRendered(cfg, class, r.GetPath(), suffix, nodeID, trees...)
+			return snaps, config.AuthorizeExpandedConfigShowPathRendered(priceCfg, class, r.GetPath(), suffix, nodeID, trees...)
 		}
-		return snaps, config.AuthorizeConfigShowPathRendered(cfg, class, r.GetPath(), suffix, trees...)
+		return snaps, config.AuthorizeConfigShowPathRendered(priceCfg, class, r.GetPath(), suffix, trees...)
 	case "ShowCompare":
 		r, okReq := req.(*pb.ShowCompareRequest)
 		if !okReq || r == nil {
 			return configReadSnapshots{}, config.AuthorizeConfigShowCompare(cfg, class)
 		}
 		// #15995: a scoped compare discloses descendants on BOTH arms.
+		// Fold 3: atomic policy+arms capture; Present distinguishes a
+		// captured absent candidate (Other nil) from no capture.
 		var trees []*config.ConfigTree
-		snaps := configReadSnapshots{}
+		snaps := configReadSnapshots{Present: true}
+		priceCfg := cfg
 		if s.store != nil {
 			if r.GetActiveBaseline() || r.GetRollbackN() > 0 {
-				slot, other := s.store.RollbackCompareTrees(int(r.GetRollbackN()), r.GetActiveBaseline())
+				scfg, slot, other, nid, _, _ := s.store.RollbackCompareSnapshot(int(r.GetRollbackN()), r.GetActiveBaseline())
+				if scfg != nil {
+					priceCfg = scfg
+				}
+				snaps.NodeID = nid
 				trees = []*config.ConfigTree{slot, other}
 				snaps.Primary, snaps.Other = slot, other
 			} else {
-				active, candidate := s.store.CompareTrees()
+				scfg, active, candidate, _ := s.store.CompareSnapshot()
+				if scfg != nil {
+					priceCfg = scfg
+				}
 				trees = []*config.ConfigTree{active, candidate}
 				snaps.Primary, snaps.Other = active, candidate
 			}
 		}
-		return snaps, config.AuthorizeConfigShowCompareAtPathRendered(cfg, class, r.GetPath(), trees...)
+		return snaps, config.AuthorizeConfigShowCompareAtPathRendered(priceCfg, class, r.GetPath(), trees...)
 	case "ShowRollback":
 		r, okReq := req.(*pb.ShowRollbackRequest)
 		if !okReq || r == nil {
@@ -139,23 +166,31 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		}
 		// #15995: price the rollback slot's rendered descendants.
 		// Display inheritance prices the expanded slot tree.
+		// Fold 3: atomic capture; an unresolved slot prices as
+		// absent (Primary nil, Present) and the handler surfaces
+		// the slot error from the live store without rendering it.
 		var trees []*config.ConfigTree
 		nodeID := -1
+		priceCfg := cfg
 		if s.store != nil {
-			if tree := s.store.RollbackTree(int(r.GetN())); tree != nil {
+			scfg, tree, nid, _, _ := s.store.RollbackSnapshot(int(r.GetN()))
+			if scfg != nil {
+				priceCfg = scfg
+			}
+			nodeID = nid
+			if tree != nil {
 				trees = []*config.ConfigTree{tree}
 			}
-			nodeID = s.store.NodeID()
 		}
-		snaps := configReadSnapshots{NodeID: nodeID}
+		snaps := configReadSnapshots{NodeID: nodeID, Present: true}
 		if len(trees) > 0 {
 			snaps.Primary = trees[0]
 		}
 		if r.GetFormat() == pb.ConfigFormat_INHERITANCE {
-			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(cfg, class, r.GetPath(),
+			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class, r.GetPath(),
 				config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), nodeID, trees...)
 		}
-		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(cfg, class, r.GetPath(),
+		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, class, r.GetPath(),
 			config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), trees...)
 	}
 	return configReadSnapshots{}, nil

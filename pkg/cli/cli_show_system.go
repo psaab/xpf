@@ -927,7 +927,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 					return fmt.Errorf("usage: show system rollback compare <N> (0 = active configuration)")
 				}
 				var diff string
-				if slotSnap := c.renderSnapshot15995("slot"); slotSnap != nil {
+				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
 					other := c.renderSnapshot15995("other")
 					if redact {
 						diff = configstore.RenderCompareRedacted(slotSnap, other, nil, true)
@@ -1011,7 +1011,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 					comparePath = nil
 				}
 				var diff string
-				if slotSnap := c.renderSnapshot15995("slot"); slotSnap != nil {
+				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
 					other := c.renderSnapshot15995("other")
 					if redact {
 						diff = configstore.RenderCompareRedacted(slotSnap, other, comparePath, true)
@@ -1048,9 +1048,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 				switch rbFormat {
 				case displayPipeSet, displayPipeJSON, displayPipeXML:
 					switch {
-					case slotSnap != nil && redact:
+					case c.snapshotsCaptured15995() && redact:
 						content = configstore.RenderShowRedacted(slotSnap, rbPath, rbFormatName)
-					case slotSnap != nil:
+					case c.snapshotsCaptured15995():
 						content = configstore.RenderShowCleartext(slotSnap, rbPath, rbFormatName)
 					case redact && rbFormat == displayPipeSet:
 						content, err = c.store.ShowRollbackSetRedactedPath(n, rbPath)
@@ -1067,9 +1067,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 					}
 				case displayPipeInheritance:
 					switch {
-					case slotSnap != nil && redact:
+					case c.snapshotsCaptured15995() && redact:
 						content, err = configstore.RenderShowInheritanceRedacted(slotSnap, rbPath, c.store.NodeID())
-					case slotSnap != nil:
+					case c.snapshotsCaptured15995():
 						content, err = configstore.RenderShowInheritanceCleartext(slotSnap, rbPath, c.store.NodeID())
 					case redact:
 						content, err = c.store.ShowRollbackInheritanceRedactedPath(n, rbPath)
@@ -1091,7 +1091,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 				// #15942 H2-04: bare form, optionally scoped to the
 				// pre-pipe subtree path (rbPath, empty = whole tree).
 				var content string
-				if slotSnap := c.renderSnapshot15995("slot"); slotSnap != nil {
+				if slotSnap := c.renderSnapshot15995("slot"); c.snapshotsCaptured15995() {
 					if redact {
 						content = configstore.RenderShowRedacted(slotSnap, rbPath, "text")
 					} else {

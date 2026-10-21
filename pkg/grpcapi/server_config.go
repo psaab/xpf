@@ -416,11 +416,14 @@ func (s *Server) ShowConfig(ctx context.Context, req *pb.ShowConfigRequest) (*pb
 	// #15995 fold: when the gate authorized this call it stashed the
 	// priced snapshot in ctx — render THAT generation. Handlers reached
 	// without the gate (direct/superuser calls) keep the store renderers.
+	// Fold 3: a captured snapshot with nil Primary is a priced ABSENCE:
+	// render empty (the candidate/slot did not exist at pricing), never
+	// fall through to the live store.
 	var path []string
 	if len(req.Path) > 0 {
 		path = req.Path
 	}
-	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Primary != nil {
+	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
 		return showConfigSnapshotResponse(snaps.Primary, snaps.NodeID, path, req.Format)
 	}
 	var output string
@@ -484,15 +487,22 @@ func (s *Server) ShowCompare(ctx context.Context, req *pb.ShowCompareRequest) (*
 			"invalid rollback_n %d: must be non-negative (0 = candidate vs active)", req.RollbackN)
 	}
 	// #15995 fold: render the priced snapshot arms when the gate ran.
-	if snaps, ok := configReadSnapshotsFrom(ctx); ok && (snaps.Primary != nil || snaps.Other != nil) {
-		hasCandidate := true
-		if !req.ActiveBaseline && req.RollbackN == 0 {
-			// Candidate-vs-active: Other is the candidate arm.
-			hasCandidate = snaps.Other != nil
+	// Fold 3: a captured absent candidate arm is the priced absence.
+	// Candidate-baseline compares (RollbackN>=0, !ActiveBaseline)
+	// require a candidate exactly as the live store helper does
+	// ("not in configuration mode"); only the active-baseline arm
+	// deliberately diffs without one.
+	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
+		if !req.ActiveBaseline && snaps.Other == nil {
+			if req.RollbackN > 0 && snaps.Primary == nil {
+				return nil, status.Errorf(codes.InvalidArgument, "rollback slot %d not found", req.RollbackN)
+			}
+			return nil, status.Errorf(codes.InvalidArgument, "not in configuration mode")
 		}
 		if req.RollbackN > 0 && snaps.Primary == nil {
 			return nil, status.Errorf(codes.InvalidArgument, "rollback slot %d not found", req.RollbackN)
 		}
+		hasCandidate := snaps.Other != nil || req.ActiveBaseline
 		return &pb.ShowCompareResponse{Output: configstore.RenderCompareRedacted(snaps.Primary, snaps.Other, req.Path, hasCandidate)}, nil
 	}
 	// #15657 V45-03: the operational baseline diffs the rollback slot
@@ -529,7 +539,15 @@ func (s *Server) ShowRollback(ctx context.Context, req *pb.ShowRollbackRequest) 
 		path = req.Path
 	}
 	// #15995 fold: render the priced slot snapshot when the gate ran.
-	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Primary != nil {
+	// Fold 3: captured nil Primary = slot absent at pricing — surface
+	// the live slot lookup error, never render a later live slot.
+	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
+		if snaps.Primary == nil {
+			if err := s.store.RollbackSnapshotErr(int(req.N)); err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+			}
+			return &pb.ShowRollbackResponse{Output: ""}, nil
+		}
 		resp, err := showConfigSnapshotResponse(snaps.Primary, snaps.NodeID, path, req.Format)
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "%v", err)

@@ -214,46 +214,30 @@ func authorizeConfigRenderedDescendants(cfg *Config, class string, path []string
 // The requested path need not spell the matched node in full:
 // navigatePath also matches a terminal PREFIX of a multi-key node
 // (`security policies from-zone trust` selects the node keyed
-// `from-zone trust to-zone untrust`), and the renderer prints that
-// node's complete keys and subtree. The rendered node's complete path
-// is therefore priced first, and every descendant below it is priced
-// under that complete prefix — a deny anchored on the full multi-key
-// spelling cannot be escaped by truncating the selector.
+// `from-zone trust to-zone untrust`), AND descends through an
+// intermediate multi-key node on its first spelled pair alone
+// (`… from-zone trust policy p1` selects the policy under the node
+// keyed `from-zone trust to-zone untrust`). The renderer prints every
+// matched node's complete keys, so pricing rebuilds each rendered
+// path from the actual descent trail (navigateRenderedMatches):
+// every intermediate node's full Keys, then the terminal node's full
+// Keys. A deny anchored on any complete rendered spelling cannot be
+// escaped by truncating the selector at any depth.
 func authorizeConfigRenderedDescendantsWithRules(class string, rules CompiledLoginRegexes, path []string, trees []*ConfigTree) error {
 	for _, tree := range trees {
 		if tree == nil {
 			continue
 		}
-		matches, width := navigatePathWidth(tree.Children, path)
-		for _, m := range matches {
-			renderedPath := renderedNodePath(path, width, m)
-			if err := authorizeRenderedPath(class, rules, path, renderedPath); err != nil {
+		for _, m := range navigateRenderedMatches(tree.Children, path) {
+			if err := authorizeRenderedPath(class, rules, path, m.path); err != nil {
 				return err
 			}
-			if err := authorizeRenderedNode(class, rules, renderedPath, m); err != nil {
+			if err := authorizeRenderedNode(class, rules, m.path, m.node); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
-}
-
-// renderedNodePath reconstructs the complete config path of a node
-// matched by navigatePathWidth: the tokens before the terminal match
-// (path[:len(path)-width]) followed by the node's full Keys. width is
-// how many trailing request tokens the terminal match consumed.
-func renderedNodePath(path []string, width int, m *Node) []string {
-	if m == nil {
-		return append([]string(nil), path...)
-	}
-	if width < 0 {
-		width = 0
-	}
-	if width > len(path) {
-		width = len(path)
-	}
-	out := append([]string(nil), path[:len(path)-width]...)
-	return append(out, m.Keys...)
 }
 
 // authorizeRenderedPath prices one complete rendered path, skipping the

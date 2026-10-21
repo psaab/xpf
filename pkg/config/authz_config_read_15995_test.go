@@ -378,3 +378,56 @@ func TestConfigShowKeywordOnlySelectorPricesInstances15995(t *testing.T) {
 		t.Error("[system login user] ALLOWED though it renders denied user admin (#15995 F1)")
 	}
 }
+
+// Fold 3 (1): the omitted keys can sit in an INTERMEDIATE node, not
+// just the terminal one. `… from-zone trust policy p1` descends
+// through the node keyed `from-zone trust to-zone untrust` on its
+// first pair alone; pricing must restore the intermediate node's
+// complete keys or a deny on the full context+policy path misses.
+func TestConfigShowIntermediateMultiKey15995(t *testing.T) {
+	tree, errs := NewParser(`security {
+    policies {
+        from-zone trust to-zone untrust {
+            policy p1 {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+            }
+        }
+        from-zone trust to-zone trust {
+            policy p1 {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+            }
+        }
+    }
+}`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("intermediate fixture parse: %v", errs)
+	}
+	// Premise: the truncated selector renders the denied policy.
+	trunc := []string{"security", "policies", "from-zone", "trust", "policy", "p1"}
+	if out := tree.FormatPathRedacted(trunc); !strings.Contains(out, "p1") {
+		t.Fatalf("premise broken: truncated selector renders nothing:\n%s", out)
+	}
+	denyPolicy := cfg15995(t, "", "^security policies from-zone trust to-zone untrust policy p1")
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited",
+		[]string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "p1"}, "", tree); err == nil {
+		t.Error("canonical complete selector ALLOWED (control should refuse)")
+	}
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", trunc, "", tree); err == nil {
+		t.Error("truncated intermediate selector ALLOWED though it renders the denied policy (#15995 fold3-1)")
+	}
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", trunc, "display set", tree); err == nil {
+		t.Error("truncated intermediate selector (display set) ALLOWED (#15995 fold3-1)")
+	}
+	// Deny on the intermediate context itself, truncated selector.
+	denyCtx := cfg15995(t, "", "^security policies from-zone trust to-zone untrust")
+	if err := AuthorizeConfigShowPathRendered(denyCtx, "limited", trunc, "", tree); err == nil {
+		t.Error("context-deny: truncated selector ALLOWED (#15995 fold3-1)")
+	}
+	// Allowed sibling context via the same truncated shape still renders.
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited",
+		[]string{"security", "policies", "from-zone", "trust", "to-zone", "trust", "policy", "p1"}, "", tree); err != nil {
+		t.Errorf("allowed sibling policy refused: %v", err)
+	}
+}

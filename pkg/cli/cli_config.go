@@ -532,11 +532,16 @@ func (c *CLI) handleConfigShow(args []string) error {
 			var comparePath []string
 			comparePath = append(comparePath, c.store.GetEditPath()...)
 			comparePath = append(comparePath, path...)
+			// Fold 3 PATH-TOCTOU: the gate folded the cursor at
+			// pricing time; render the priced path, not a re-read.
+			if c.snapshotsCaptured15995() && c.renderComparePath15995 != nil {
+				comparePath = c.renderComparePath15995
+			}
 			if len(pipeRest) == 1 {
 				activeSnap := c.renderSnapshot15995("active")
 				candSnap := c.renderSnapshot15995("candidate")
 				switch {
-				case activeSnap != nil || candSnap != nil:
+				case c.snapshotsCaptured15995():
 					if redact {
 						fmt.Print(configstore.RenderCompareRedacted(activeSnap, candSnap, comparePath, candSnap != nil))
 					} else {
@@ -558,10 +563,8 @@ func (c *CLI) handleConfigShow(args []string) error {
 				}
 				var diff string
 				slotSnap := c.renderSnapshot15995("slot")
-				candSnap := c.renderSnapshot15995("candidate")
-				_ = candSnap
 				switch {
-				case slotSnap != nil:
+				case c.snapshotsCaptured15995():
 					// Gate stashed (slot, candidate) via
 					// setRenderSnapshots15995: slot in "slot",
 					// candidate in "other".
@@ -592,8 +595,12 @@ func (c *CLI) handleConfigShow(args []string) error {
 	}
 
 	// Build path from editPath + args before the pipe (used by all formats).
+	// Fold 3 PATH-TOCTOU: when the gate ran, render its priced path
+	// (cursor folded at gate time), not a second GetEditPath read.
 	var displayPath []string
-	{
+	if c.snapshotsCaptured15995() && c.renderPath15995 != nil {
+		displayPath = append(displayPath, c.renderPath15995...)
+	} else {
 		editPath := c.store.GetEditPath()
 		displayPath = append(displayPath, editPath...)
 		for _, a := range args {
@@ -605,6 +612,7 @@ func (c *CLI) handleConfigShow(args []string) error {
 	}
 
 	candSnap := c.renderSnapshot15995("candidate")
+	captured := c.snapshotsCaptured15995()
 	formatName := ""
 	switch format {
 	case displayPipeJSON:
@@ -618,9 +626,9 @@ func (c *CLI) handleConfigShow(args []string) error {
 	switch format {
 	case displayPipeJSON, displayPipeSet, displayPipeXML:
 		switch {
-		case candSnap != nil && redact:
+		case captured && redact:
 			output = configstore.RenderShowRedacted(candSnap, displayPath, formatName)
-		case candSnap != nil:
+		case captured:
 			output = configstore.RenderShowCleartext(candSnap, displayPath, formatName)
 		case redact && format == displayPipeJSON:
 			output = c.store.ShowCandidateJSONRedacted(displayPath)
@@ -644,9 +652,9 @@ func (c *CLI) handleConfigShow(args []string) error {
 	case displayPipeInheritance:
 		var inhErr error
 		switch {
-		case candSnap != nil && redact:
+		case captured && redact:
 			output, inhErr = configstore.RenderShowInheritanceRedacted(candSnap, displayPath, c.store.NodeID())
-		case candSnap != nil:
+		case captured:
 			output, inhErr = configstore.RenderShowInheritanceCleartext(candSnap, displayPath, c.store.NodeID())
 		case redact:
 			output, inhErr = c.store.ShowCandidateInheritanceRedacted(displayPath)
@@ -662,9 +670,9 @@ func (c *CLI) handleConfigShow(args []string) error {
 	default:
 		// Show scoped to path (editPath + args), or the whole candidate.
 		switch {
-		case candSnap != nil && redact:
+		case captured && redact:
 			output = configstore.RenderShowRedacted(candSnap, displayPath, "text")
-		case candSnap != nil:
+		case captured:
 			output = configstore.RenderShowCleartext(candSnap, displayPath, "text")
 		case redact:
 			output = c.store.ShowCandidateRedacted(displayPath)
