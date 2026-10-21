@@ -671,13 +671,14 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		m.publishNilDirectionLocked()
 	}
 
-	// #16072: a metrics-gate-only change (same credentials, flag toggled) is
-	// not a credential revocation, so neither publish above fires for it. An
-	// ADDITION is a tightening and lands now (ReplaceMetricsRequireAuth also
-	// tightens retired legs); a REMOVAL is a loosening and is deferred to the
-	// sanctioned publish below, like a credential grant.
-	if next.Auth != nil && next.MetricsRequireAuth &&
-		(m.srv.LiveAuth() == nil || !m.srv.LiveAuth().MetricsRequireAuth) {
+	// #16072: the gate intent is independent of the credential snapshot, so
+	// publish it even when next.Auth is nil (all credentials filtered by
+	// expiry/tolerant load): an ADDITION is a tightening and lands now
+	// (ReplaceMetricsRequireAuth also tightens retired legs); a REMOVAL is
+	// a loosening and is deferred to the sanctioned publish below, like a
+	// credential grant. Keyed on MetricsGate(), never on LiveAuth, so
+	// credential filtering cannot nil-drop it.
+	if next.MetricsRequireAuth && !m.srv.MetricsGate() {
 		m.srv.ReplaceMetricsRequireAuth(true)
 	}
 
@@ -786,11 +787,12 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	if next.Auth != nil && !sanctioned && m.liveLegsSanctionedLocked(next) {
 		m.srv.ReplaceAuth(next.Auth)
 	}
-	// #16072 deferred half: a metrics-gate-ONLY removal withheld above lands
-	// here once every live leg is named by next, mirroring the credential
-	// grant. An addition already landed above (tightening).
-	if next.Auth != nil && !next.MetricsRequireAuth &&
-		m.srv.LiveAuth() != nil && m.srv.LiveAuth().MetricsRequireAuth &&
+	// #16072 deferred half: a gate-ONLY removal withheld above lands here
+	// once every live leg is named by next, mirroring the credential grant.
+	// Keyed on MetricsGate() so it fires even when the credential snapshot
+	// is nil (the gate outlived its credentials). An addition already
+	// landed above (tightening).
+	if !next.MetricsRequireAuth && m.srv.MetricsGate() &&
 		m.liveLegsSanctionedLocked(next) {
 		m.srv.ReplaceMetricsRequireAuth(false)
 	}

@@ -28,9 +28,10 @@ type AuthConfig struct {
 	// the credential snapshot so the live swap (ReplaceAuth) and the
 	// retired-leg pin/tighten publish it exactly like a credential change.
 	// It has no effect on a non-loopback listener, where /metrics already
-	// requires credentials (#4162), and no effect when the snapshot is nil
-	// (no api-auth at all: dynamicAuthMiddleware passes through, so an
-	// operator who wants the gate must also configure a credential).
+	// requires credentials (#4162). The authoritative gate intent also
+	// lives outside the snapshot (Server.metricsGate): if credential
+	// filtering nils the snapshot, a gated /metrics fails closed (401)
+	// rather than reopening — see dynamicAuthMiddleware.
 	MetricsRequireAuth bool
 }
 

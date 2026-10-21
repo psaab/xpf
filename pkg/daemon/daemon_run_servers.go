@@ -499,16 +499,20 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 					slog.Warn("dropping named api-auth key with invalid verifier, scope, or expiry", "issue", "10826")
 				}
 			}
+			// #16072 fold: stamp the Cfg-level gate UNCONDITIONALLY, even
+			// when no usable credential survives filtering (expiry,
+			// tolerant load). The gate intent must not be nil-dropped
+			// with Auth: the API server fails /metrics closed from it.
+			apiCfg.MetricsRequireAuth = wm.APIAuth.MetricsRequireAuth
 			// Only enable auth when at least one usable credential survived.
 			if len(authCfg.Users) > 0 || len(authCfg.APIKeys) > 0 {
 				apiCfg.Auth = authCfg
-				// #16072: stamp the Cfg-level gate too, so NewServer and the
-				// reconciler agree even if a future wiring forgets the flag
-				// inside the snapshot.
-				apiCfg.MetricsRequireAuth = wm.APIAuth.MetricsRequireAuth
 				slog.Info("HTTP API authentication enabled", "users", len(authCfg.Users), "api_keys", len(authCfg.APIKeys))
 			} else if len(wm.APIAuth.Users)+len(wm.APIAuth.APIKeys)+len(wm.APIAuth.Keys) > 0 {
 				slog.Warn("HTTP API api-auth configured with no usable credentials; ignoring (#10826)")
+			}
+			if apiCfg.MetricsRequireAuth && apiCfg.Auth == nil {
+				slog.Warn("api-auth metrics-require-auth has no usable credential; loopback /metrics will fail closed (401) until a credential is committed (#16072)")
 			}
 		}
 		// Never publish a configured api-auth identity on a clear HTTP

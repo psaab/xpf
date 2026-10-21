@@ -62,6 +62,66 @@ func TestResolveAPIBindsStampsMetricsGate16072(t *testing.T) {
 	}
 }
 
+// TestResolveAPIBindsGateSurvivesExpiredCredentials16072 is the fold
+// witness at the daemon/API boundary: a gated config whose only
+// credential has expired (ordinary lifecycle: bounded expiries, restart
+// or re-apply after expiry) must keep the gate intent in
+// api.Config.MetricsRequireAuth even though Auth is nil, and a server
+// built from that config must fail /metrics closed while /health stays
+// open.
+//
+// FAIL-ON-REVERT: stamping the Cfg-level gate only inside the
+// usable-credential branch makes apiCfg.MetricsRequireAuth false here
+// and the served /metrics returns 200.
+func TestResolveAPIBindsGateSurvivesExpiredCredentials16072(t *testing.T) {
+	password, err := config.HashAPIAuthSecret("0123456789ab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().Add(-time.Hour)
+	cfg := &config.Config{}
+	cfg.System.Services = &config.SystemServicesConfig{
+		WebManagement: &config.WebManagementConfig{
+			HTTPS: true,
+			APIAuth: &config.APIAuthConfig{
+				DefaultClass:       "read-only",
+				DefaultExpiresAt:   expired,
+				MetricsRequireAuth: true,
+				Users: []*config.APIAuthUser{{
+					Username:  "admin",
+					Password:  config.Secret(password),
+					Class:     "read-only",
+					ExpiresAt: expired,
+				}},
+			},
+		},
+	}
+	d := &Daemon{}
+	apiCfg := api.Config{Addr: "127.0.0.1:8080"}
+	d.resolveAPIBinds(&apiCfg, cfg)
+	if apiCfg.Auth != nil {
+		t.Fatalf("Auth = %+v, want nil (the only credential expired)", apiCfg.Auth)
+	}
+	if !apiCfg.MetricsRequireAuth {
+		t.Fatal("gate intent was nil-dropped with the expired credential; /metrics would reopen")
+	}
+	if !apiCfg.TLS {
+		t.Fatal("HTTPS leg lost while resolving the expired-credential config")
+	}
+
+	// End to end: the resolved config carries Auth=nil + gate on; a
+	// server built from exactly that shape must retain the intent
+	// (the served 401 half is pinned in pkg/api by
+	// TestLoopbackMetricsGateSurvivesCredentialLoss16072).
+	srv := api.NewServer(apiCfg)
+	if !srv.MetricsGate() {
+		t.Fatal("server dropped the gate intent from a nil-Auth resolved config; /metrics would reopen")
+	}
+	if srv.LiveAuth() != nil {
+		t.Fatalf("LiveAuth = %+v, want nil for the expired-credential config", srv.LiveAuth())
+	}
+}
+
 func TestMgmtMetricsGateOnlyToggle16072(t *testing.T) {
 	reg := newFakeReg()
 	m := newTestMgmt(reg)
@@ -86,8 +146,8 @@ func TestMgmtMetricsGateOnlyToggle16072(t *testing.T) {
 	if err := m.reconcileTo(gated); err != nil {
 		t.Fatalf("gate-add reconcile: %v", err)
 	}
-	if !m.srv.LiveAuth().MetricsRequireAuth {
-		t.Fatal("gate-only addition was not published to the live snapshot")
+	if !m.srv.LiveAuth().MetricsRequireAuth || !m.srv.MetricsGate() {
+		t.Fatal("gate-only addition was not published to the live snapshot/intent")
 	}
 	if m.cur.addr != "127.0.0.1:8080" {
 		t.Fatalf("gate toggle rebound the listener: cur=%q", m.cur.addr)
@@ -99,7 +159,26 @@ func TestMgmtMetricsGateOnlyToggle16072(t *testing.T) {
 	if err := m.reconcileTo(ungated); err != nil {
 		t.Fatalf("gate-remove reconcile: %v", err)
 	}
-	if m.srv.LiveAuth().MetricsRequireAuth {
+	if m.srv.LiveAuth().MetricsRequireAuth || m.srv.MetricsGate() {
 		t.Fatal("gate-only removal was not published on the converged endpoint")
+	}
+
+	// Fold witness at the reconciler: gate on with NO credentials at all
+	// (every credential filtered) still publishes the intent, and its
+	// removal still lands — neither is nil-dropped with the snapshot.
+	gatedNil := cfgFor(reg, "127.0.0.1:8080", false, "", nil)
+	gatedNil.MetricsRequireAuth = true
+	if err := m.reconcileTo(gatedNil); err != nil {
+		t.Fatalf("gate-add nil-auth reconcile: %v", err)
+	}
+	if !m.srv.MetricsGate() {
+		t.Fatal("gate intent was nil-dropped when the credential snapshot went nil")
+	}
+	ungatedNil := cfgFor(reg, "127.0.0.1:8080", false, "", nil)
+	if err := m.reconcileTo(ungatedNil); err != nil {
+		t.Fatalf("gate-remove nil-auth reconcile: %v", err)
+	}
+	if m.srv.MetricsGate() {
+		t.Fatal("gate removal was not published with a nil credential snapshot")
 	}
 }

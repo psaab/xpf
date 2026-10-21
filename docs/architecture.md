@@ -395,12 +395,15 @@ editing cmdtree.
     api-auth metrics-require-auth`: loopback `/metrics` then requires a
     valid api-auth credential (Basic, Bearer, or X-API-Key — the local
     Prometheus scraper presents one), while `/health` stays exempt and the
-    default posture is unchanged. The gate rides inside the credential
-    snapshot, so it publishes through the same live swap as a credential
-    change (addition immediately, removal only once every live leg is
-    named by the committed config; a retired leg only ever tightens).
-    Strict commit rejects the leaf without a usable api-auth credential,
-    where it would otherwise be silently inert.
+    default posture is unchanged. The gate intent lives independently
+    of the credential snapshot, so it survives credential filtering:
+    if every credential expires or is filtered out (restart, tolerant
+    load, HA sync), loopback `/metrics` fails closed (401) instead of
+    reopening, while `/health` stays exempt. It publishes through the
+    same live swap discipline as a credential change (addition
+    immediately, removal only once every live leg is named by the
+    committed config; a retired leg only ever tightens). Strict commit
+    also rejects the leaf without a usable api-auth credential.
   - **Cross-site mutation guard (CSRF, #5055).** HTTP Basic auth is an
     *ambient* browser credential (`WWW-Authenticate: Basic`) — once a browser
     is challenged it reattaches the cached credentials to every request to the

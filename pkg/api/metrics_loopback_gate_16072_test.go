@@ -109,10 +109,61 @@ func TestLoopbackMetricsGateDynamicSwap16072(t *testing.T) {
 	metricsGateRequest(t, s2.httpServer().Handler, "/metrics", nil, http.StatusUnauthorized)
 	metricsGateRequest(t, s2.httpServer().Handler, "/metrics", map[string]string{"Authorization": basic}, http.StatusOK)
 
-	// Nil auth passes through regardless of the flag: there is no credential
-	// for the gate to require (strict commit rejects this combination).
+	// Nil auth WITH the gate intent fails closed (fold witness): the gate
+	// survives credential filtering that nils the snapshot, so /metrics
+	// 401s while /health stays open. (An ungated nil snapshot still passes
+	// through — see the s4 case below.)
 	s3 := NewServer(Config{Addr: "127.0.0.1:8080", MetricsRequireAuth: true})
-	metricsGateRequest(t, s3.httpServer().Handler, "/metrics", nil, http.StatusOK)
+	metricsGateRequest(t, s3.httpServer().Handler, "/metrics", nil, http.StatusUnauthorized)
+	metricsGateRequest(t, s3.httpServer().Handler, "/health", nil, http.StatusOK)
+
+	s4 := NewServer(Config{Addr: "127.0.0.1:8080"})
+	metricsGateRequest(t, s4.httpServer().Handler, "/metrics", nil, http.StatusOK)
+}
+
+// TestLoopbackMetricsGateSurvivesCredentialLoss16072 is the fold witness:
+// a gate committed with a valid credential must not reopen when the
+// credential snapshot is later lost (expiry/filtering publishes nil, or
+// the gate is toggled with no snapshot at all). /metrics fails closed;
+// /health stays exempt; other paths keep the nil pass-through.
+//
+// FAIL-ON-REVERT: reverting the Server.metricsGate independence (gate only
+// inside AuthConfig, nil pass-through) makes the post-loss /metrics cases
+// return 200.
+func TestLoopbackMetricsGateSurvivesCredentialLoss16072(t *testing.T) {
+	resetTLSSeams(t)
+	auth := &AuthConfig{
+		Users:              map[string]string{"admin": "secret123"},
+		MetricsRequireAuth: true,
+	}
+	s := NewServer(Config{Addr: "127.0.0.1:8080", Auth: auth})
+	handler := s.httpServer().Handler
+	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:secret123"))
+	metricsGateRequest(t, handler, "/metrics", nil, http.StatusUnauthorized)
+	metricsGateRequest(t, handler, "/metrics", map[string]string{"Authorization": basic}, http.StatusOK)
+
+	// Credential loss: the snapshot goes nil (as resolveAPIBinds publishes
+	// when every credential expired/was filtered). The gate must NOT reopen.
+	s.ReplaceAuth(nil)
+	metricsGateRequest(t, handler, "/metrics", nil, http.StatusUnauthorized)
+	metricsGateRequest(t, handler, "/metrics", map[string]string{"Authorization": basic}, http.StatusUnauthorized)
+	metricsGateRequest(t, handler, "/health", nil, http.StatusOK)
+	// Non-metrics paths keep the nil pass-through (loopback clamp posture):
+	// a 404 from the mux, not a 401 from the gate.
+	metricsGateRequest(t, handler, "/not-a-route", nil, http.StatusNotFound)
+
+	// Credentials return (still gated): the scraper works again.
+	s.ReplaceAuth(auth)
+	metricsGateRequest(t, handler, "/metrics", map[string]string{"Authorization": basic}, http.StatusOK)
+	metricsGateRequest(t, handler, "/metrics", nil, http.StatusUnauthorized)
+
+	// Gate toggled with no snapshot at all: still fails closed, and the
+	// removal (published by the reconciler only when sanctioned) reopens.
+	s.ReplaceAuth(nil)
+	s.ReplaceMetricsRequireAuth(true)
+	metricsGateRequest(t, handler, "/metrics", nil, http.StatusUnauthorized)
+	s.ReplaceMetricsRequireAuth(false)
+	metricsGateRequest(t, handler, "/metrics", nil, http.StatusOK)
 }
 
 func TestMetricsGateRetainedIntersection16072(t *testing.T) {
