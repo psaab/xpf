@@ -91,13 +91,22 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 	if len(full) == 0 {
 		return config.AuthorizeConfigShowWhole(cfg, c.userClass, displaySuffix14707(suffix))
 	}
-	// #15995: config-mode show renders the candidate subtree.
+	// #15995: config-mode show renders the candidate subtree;
+	// | display inheritance renders its apply-groups expansion
+	// (cli_config.go RenderShowInheritance* on the candidate
+	// snapshot), so price the EXPANDED candidate — the operational
+	// helper's twin branch (checkShowConfigurationRead).
 	var trees []*config.ConfigTree
+	nodeID := -1
 	if c.store != nil {
 		trees = c.store.ShowConfigTrees("candidate")
 		if len(trees) > 0 {
 			c.setRenderSnapshots15995(nil, trees[0])
 		}
+		nodeID = c.store.NodeID()
+	}
+	if displaySuffix14707(suffix) == "inheritance" {
+		return config.AuthorizeExpandedConfigShowPathRendered(cfg, c.userClass, full, displaySuffix14707(suffix), nodeID, trees...)
 	}
 	return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, full, displaySuffix14707(suffix), trees...)
 }

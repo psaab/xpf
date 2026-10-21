@@ -262,3 +262,75 @@ security {
 		t.Errorf("expanded zones render lost content:\n%s", out)
 	}
 }
+
+// Fold 2 twin: config-mode `show … | display inheritance` renders the
+// candidate's apply-groups expansion (cli_config.go), so the gate must
+// price the EXPANDED candidate, exactly as the operational helper does.
+// Pre-fold this arm priced the raw candidate unconditionally.
+func TestCLIConfigModeInheritanceGroupDescendant15995(t *testing.T) {
+	text := `
+system {
+    host-name cli-15995-inh-cm;
+    login {
+        class ancestor-view {
+            permissions [ view configure ];
+            deny-configuration "^security ipsec";
+        }
+        user ancuser { class ancestor-view; }
+    }
+}
+groups {
+    G {
+        security {
+            ipsec { vpn vpn1 { bind-interface st0.0; pre-shared-key ascii-text dummy15995; } }
+        }
+    }
+}
+apply-groups G;
+security {
+    zones { security-zone trust { description "ZONE-DESC-15995"; } }
+}
+`
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(text); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	// Re-enter config mode: config-mode show renders the candidate
+	// (initially the just-committed tree).
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	defer store.ExitConfigure()
+	c := &CLI{store: store, userClass: "ancestor-view"}
+
+	// Ordinary config-mode render is the control: raw candidate has
+	// no security ipsec child, so it renders (zones only).
+	out := captureStdout(t, func() {
+		if err := c.dispatchConfig("show security"); err != nil {
+			t.Errorf("config-mode raw [security] refused: %v", err)
+		}
+	})
+	if strings.Contains(out, "ipsec") {
+		t.Fatalf("premise broken: raw config-mode render carries ipsec:\n%s", out)
+	}
+	// The inheritance arm expands the group into security: refused.
+	if err := c.dispatchConfig("show security | display inheritance"); err == nil {
+		t.Error("config-mode inheritance [security] ALLOWED though expanded candidate carries ipsec (#15995 Fold2)")
+	}
+	// Allowed sibling still renders expanded.
+	out = captureStdout(t, func() {
+		if err := c.dispatchConfig("show security zones | display inheritance"); err != nil {
+			t.Errorf("config-mode expanded zones refused: %v", err)
+		}
+	})
+	if !strings.Contains(out, "ZONE-DESC-15995") || strings.Contains(out, "ipsec") {
+		t.Errorf("config-mode expanded zones render wrong:\n%s", out)
+	}
+}
