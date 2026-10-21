@@ -215,71 +215,211 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	if err == nil || tree == nil {
 		return err
 	}
-	values := collectSecretValues(tree)
+	allValues := collectSecretValues(tree)
+	values := beltSecretValues(allValues)
 	msg := err.Error()
-	scrubbed := scrubSecretValuesText(values, msg)
-	if scrubbed == msg {
-		return err
+	// Whole-string equality (reviewer cross-field shape): if the
+	// entire rendered error EQUALS a secret value, no substring
+	// needle can fire (the delimiters are the string boundaries).
+	// Neutralize before any classification rebuild.
+	for _, v := range allValues {
+		if v != "" && msg == v {
+			return fmt.Errorf("%s", SecretRedacted)
+		}
+		if v != "" && msg == strconv.Quote(v) {
+			return fmt.Errorf("%s", strconv.Quote(SecretRedacted))
+		}
 	}
+	// (Cross-field completion is handled in the wrapper arms via
+	// fieldCompletesValue: a rebuilt field can complete a secret
+	// value across the path/keyword boundary even when the value
+	// never occurs as one substring of the rendered text.)
+	scrubbed := scrubSecretValuesText(values, msg)
 	scrubText := func(s string) string { return scrubSecretValuesText(values, s) }
-	// Preserve error classifications callers dispatch on (fold 3, F3):
-	// rebuilding a changed error as a bare fmt.Errorf would strip
-	// errors.As/errors.Is identities (typed-leaf, unknown-zone /
-	// policies child, redaction-placeholder / redacted-URL ingest)
-	// and misroute tolerant-ingress log classification. Structured
-	// wrappers are rebuilt field-by-field with scrubbed text so
-	// Error() renders the scrubbed message under the same type;
-	// %w-carrying ingest errors are re-wrapped around their sentinel.
-	// Fold 4 (F3): EVERY field is scrubbed, including keyword — a
-	// wrapper rebuilt from an unscrubbed keyword re-prints a secret
-	// literal that happens to collide with an unknown child keyword.
-	// Any other changed, unclassified error is returned as plain text.
+	fieldScrub := func(s string) string {
+		out := scrubText(s)
+		for _, v := range allValues {
+			if out == v {
+				return SecretRedacted
+			}
+		}
+		return out
+	}
+	// Classify FIRST (fold 5): wrapper fields are rebuilt from
+	// scrubbed parts even when the rendered message happens to be
+	// unchanged — an unscrubbed field (keyword/content/at-path) can
+	// re-print a secret the message scrub never saw as free text,
+	// including a complete secret value spanning the whole rendered
+	// string. Only the fallthrough plain-text case may return err
+	// unchanged.
 	if IsTypedLeafSchemaError(err) {
+		if scrubbed == msg {
+			return err
+		}
 		return &typedLeafSchemaError{msg: scrubbed}
 	}
 	var zoneErr *unknownSecurityZoneChildSchemaError
 	if errors.As(err, &zoneErr) {
 		return &unknownSecurityZoneChildSchemaError{
-			path:    scrubText(zoneErr.path),
-			keyword: scrubText(zoneErr.keyword),
+			path: scrubText(zoneErr.path),
+			keyword: func() string {
+				if fieldCompletesValue(allValues, msg, zoneErr.keyword) {
+					return SecretRedacted
+				}
+				return fieldScrub(zoneErr.keyword)
+			}(),
 		}
 	}
 	var polErr *unknownSecurityPoliciesChildSchemaError12217
 	if errors.As(err, &polErr) {
 		return &unknownSecurityPoliciesChildSchemaError12217{
-			path:    scrubText(polErr.path),
-			keyword: scrubText(polErr.keyword),
-			content: scrubText(polErr.content),
+			path: scrubText(polErr.path),
+			keyword: func() string {
+				if fieldCompletesValue(allValues, msg, polErr.keyword) {
+					return SecretRedacted
+				}
+				return fieldScrub(polErr.keyword)
+			}(),
+			content: func() string {
+				if fieldCompletesValue(allValues, msg, polErr.content) {
+					return SecretRedacted
+				}
+				return fieldScrub(polErr.content)
+			}(),
 		}
 	}
 	var topErr *unknownTopLevelStanzaSchemaError
 	if errors.As(err, &topErr) {
+		if scrubbed == msg {
+			return err
+		}
 		return &unknownTopLevelStanzaSchemaError{msg: scrubbed}
 	}
 	if IsRedactionPlaceholderIngestError(err) {
-		return fmt.Errorf("%w (at %q)", errRedactionPlaceholderIngest, extractAtPath(scrubbed))
+		return fmt.Errorf("%w (at %s)", errRedactionPlaceholderIngest,
+			neutralizeLoc(allValues, extractLocName(err)))
 	}
 	if errors.Is(err, errRedactedURLIngest) {
-		return fmt.Errorf("%w (at %q)", errRedactedURLIngest, extractAtPath(scrubbed))
+		return fmt.Errorf("%w (at %s)", errRedactedURLIngest,
+			neutralizeLoc(allValues, extractLocName(err)))
+	}
+	if scrubbed == msg {
+		return err
 	}
 	return fmt.Errorf("%s", scrubbed)
 }
 
-// extractAtPath returns the "(at %q)" payload of a scrubbed ingest
-// error without its sentinel prefix, for re-wrapping. The scrubbed
-// text is "<sentinel> (at \"<path>\")"; the path is already scrubbed.
-func extractAtPath(scrubbed string) string {
+// fieldCompletesValue reports whether printing field (a wrapper's
+// keyword/content) would complete a secret value: the value contains
+// the field, and the remainder of the value shares a verbatim run
+// of >= 8 chars with the rendered message — the rest of the value
+// is already on the page and this field is the missing piece
+// (reviewer cross-field shape: secret `trust: unknown configuration
+// keyword "bogus"` completed by path `... trust` + keyword `bogus`).
+// Narrow by construction: wrapper fields only, never free text.
+func fieldCompletesValue(allValues []string, msg, field string) bool {
+	if field == "" {
+		return false
+	}
+	for _, v := range allValues {
+		i := strings.Index(v, field)
+		if i < 0 {
+			continue
+		}
+		rest := v[:i] + v[i+len(field):]
+		for start := range rest {
+			if start+8 <= len(rest) && strings.Contains(msg, rest[start:start+8]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// neutralizeLoc scrubs a guard "(at ...)" location: belt-scrub its
+// text, and if the (unquoted) location equals or contains a secret
+// value, drop the value-bearing part. Guard locations built by the
+// current code are name-only, so this fires only for foreign/old
+// error shapes.
+func neutralizeLoc(allValues []string, loc string) string {
+	out := scrubSecretValuesText(beltSecretValues(allValues), loc)
+	inner := out
+	if unq, err := strconv.Unquote(inner); err == nil {
+		inner = unq
+	}
+	for _, v := range allValues {
+		if v != "" && strings.Contains(inner, v) {
+			// Keep only the name prefix before the value.
+			if i := strings.Index(inner, v); i > 0 {
+				return strings.TrimSpace(inner[:i])
+			}
+			return ""
+		}
+	}
+	return out
+}
+
+// beltSecretValues filters collected values to the belt's remit
+// (fold 5): raw values of length >= 4 that are not public vocabulary.
+// A secret whose literal IS a common word or a leaf/keyword name
+// (e.g. the plaintext "password" pasted into encrypted-password)
+// must not mangle every public diagnostic containing that word —
+// construction-time value-freedom is the guarantee for those; the
+// belt exists for high-entropy operands that escaped construction.
+// "Public vocabulary" = every keyword in the schema grammar plus
+// the secret-registry keywords: a value equal to any of them is a
+// word the diagnostics legitimately print.
+func beltSecretValues(values []string) []string {
+	out := values[:0]
+	for _, v := range values {
+		if len(v) < 4 {
+			continue
+		}
+		if isPublicVocabulary(v) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// isPublicVocabulary reports whether s is public vocabulary for the
+// belt: a secret-registry keyword, or a word inside public
+// diagnostic sentences. It must NOT reference setSchema:
+// beltSecretValues -> scrubSecretTokens -> schemaErrorf is named by
+// schema initializers (validateSecurityLogHostNode15270), so any
+// path from here to setSchema is an initialization cycle (proven by
+// the compiler). The schema-keyword direction is handled
+// structurally instead: paths render from redactSecretPath (names
+// only) and wrapper keywords are vocabulary by construction, so
+// the belt only needs to suppress common-word VALUES.
+func isPublicVocabulary(s string) bool {
+	if secretLeafKeywords[s] {
+		return true
+	}
+	if _, ok := secretLeafKeywordsByRoot[s]; ok {
+		return true
+	}
+	switch s {
+	case "set", "commands", "security", "zones", "zone", "trust", "untrust",
+		"system", "services", "provider", "policy", "policies":
+		return true
+	}
+	return false
+}
+
+// extractLocName returns the name-only "(at ...)" location from a
+// guard error built by checkRedactionPlaceholder, for re-wrapping
+// without re-embedding any rendered path. Guard errors built by the
+// current code already carry names only; the fallback is empty.
+func extractLocName(err error) string {
+	msg := err.Error()
 	const marker = "(at "
-	i := strings.LastIndex(scrubbed, marker)
+	i := strings.LastIndex(msg, marker)
 	if i < 0 {
-		return scrubbed
+		return ""
 	}
-	rest := scrubbed[i+len(marker):]
-	rest = strings.TrimSuffix(rest, ")")
-	if unq, err := strconv.Unquote(rest); err == nil {
-		return unq
-	}
-	return strings.Trim(rest, "\"")
+	return strings.TrimSuffix(msg[i+len(marker):], ")")
 }
 
 // walkContext carries the per-walk validation inputs: the (always-nil in
@@ -1816,22 +1956,19 @@ func typedLeafErrorf(path []string, format string, args ...interface{}) error {
 // schemaPathErrorf, so any secret token of the leaf (not just tok)
 // appearing anywhere in the message is scrubbed at the shared choke
 // point.
-// scrubSecretTokens replaces every secret-indexed token of fullPath
-// occurring in msg with SecretRedacted. Shared by schemaErrorf and
-// the typed-leaf helpers so replacement semantics stay identical.
-//
-// #16066 fold 3 (F1): matching is FORMATTING-AWARE. Formatters render
-// operands with %q, which Go-escapes quotes, backslashes and control
-// characters, so the raw token no longer occurs verbatim in the
-// rendered text and a raw-only ReplaceAll silently misses it. Each
-// secret token is therefore replaced in BOTH its raw form and its
-// strconv.Quote form (the exact rendering %q produces for a string).
-// The sentinel itself is never rescanned (single pass per form via
-// ReplaceAll on distinct needles; SecretRedacted contains no secret
-// token characters that could reintroduce a needle).
+// scrubSecretTokens replaces secret-indexed tokens of fullPath
+// occurring in msg. Fold 5 restricts it to the belt remit, same as
+// the exit scrub: values shorter than 4 chars or equal to public
+// vocabulary (leaf/keyword names) are NOT substituted — the
+// plaintext "password" pasted as a value must not mangle the public
+// word `password` in diagnostics (the validator's value-free text
+// is the guarantee there; see beltSecretValues). Longer values are
+// replaced in raw and strconv.Quote forms (fold 3, formatting-aware:
+// %q escapes quote/backslash/control, hiding the raw form).
 func scrubSecretTokens(fullPath []string, msg string) string {
 	if idx := secretIndices(fullPath); len(idx) > 0 {
 		seen := make(map[string]bool, len(idx))
+		var vals []string
 		for _, i := range idx {
 			if i < 0 || i >= len(fullPath) {
 				continue
@@ -1841,6 +1978,9 @@ func scrubSecretTokens(fullPath []string, msg string) string {
 				continue
 			}
 			seen[tok] = true
+			vals = append(vals, tok)
+		}
+		for _, tok := range beltSecretValues(vals) {
 			msg = strings.ReplaceAll(msg, tok, SecretRedacted)
 			if q := strconv.Quote(tok); q != tok {
 				msg = strings.ReplaceAll(msg, q, strconv.Quote(SecretRedacted))
@@ -1975,7 +2115,7 @@ func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 		reason := "<redacted>"
 		if err != nil {
 			reason = err.Error()
-			if tok != "" {
+			if tok != "" && !isPublicVocabulary(tok) {
 				reason = strings.ReplaceAll(reason, tok, "<redacted>")
 			}
 		}

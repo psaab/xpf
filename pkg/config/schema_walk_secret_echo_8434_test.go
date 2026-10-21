@@ -354,6 +354,69 @@ func TestEmbeddedPlaceholderNeverEchoesInnerSecret16066(t *testing.T) {
 	}
 }
 
+// #16090 fold 5 (reviewer witness 1): twice-escaped embedded PSK.
+// The payload reaches the guard TWICE-escaped (its inner tokens were
+// strconv.Quote'd, then the whole command Quote'd again). String
+// scrubbing cannot win this race — the guard must never embed the
+// payload in the first place (names-only location). Post-fix the
+// SchemaValidate error contains neither CANARY nor the payload.
+func TestEmbeddedTwiceEscapedSecretNeverEchoed16090(t *testing.T) {
+	const secret = `pa"ssCANARY16090`
+	inner := `set security ike policy p1 pre-shared-key ` + strconv.Quote(secret) + ` ` + strconv.Quote(SecretDataPlaceholder)
+	outer := `set event-options policy p1 then change-configuration commands ` + strconv.Quote(inner)
+	tree := embeddedIngest15209FlatTree(t,
+		`set event-options policy p1 events ping_test_failed`, outer)
+	if guard := checkRedactionPlaceholder(tree); guard == nil || !IsRedactionPlaceholderIngestError(guard) {
+		t.Fatalf("premise: placeholder guard must reject the embedded command: %v", guard)
+	}
+	err := SchemaValidate(tree, nil)
+	if err == nil || !IsRedactionPlaceholderIngestError(err) {
+		t.Fatalf("schema gate lost placeholder classification: %v", err)
+	}
+	if strings.Contains(err.Error(), "CANARY16090") {
+		t.Errorf("twice-escaped inner credential survived: %v (#16090 fold 5)", err)
+	}
+}
+
+// #16090 fold 5 (reviewer witness 2): the literal word `password` as
+// the plaintext value of encrypted-password. `password` is public
+// vocabulary (a leaf keyword), so the belt must NOT substitute it —
+// the diagnostic must stay readable: leaf name and defect class
+// intact, typed-leaf classification intact.
+func TestCommonWordSecretKeepsPublicDiagnostics16090(t *testing.T) {
+	text := `system { root-authentication { encrypted-password password; } }`
+	err := SchemaValidate(parseHier(t, text), nil)
+	if err == nil {
+		t.Fatal("fixture: plaintext must be rejected")
+	}
+	if !IsTypedLeafSchemaError(err) {
+		t.Fatalf("lost typed-leaf classification: %v", err)
+	}
+	got := err.Error()
+	if !strings.Contains(got, "encrypted-password") {
+		t.Errorf("public leaf keyword lost (common-word belt mangling): %s (#16090 fold 5)", got)
+	}
+	if !strings.Contains(got, "not an encrypted password hash") {
+		t.Errorf("public crypt-hash defect class lost: %s (#16090 fold 5)", got)
+	}
+}
+
+// #16090 fold 5 (reviewer witness 3): an unrelated public zone path
+// must survive when a secret value coincides with one of its words.
+// password value `security` must not mangle the `security zones`
+// path in the unknown-zone error (classification + path intact).
+func TestCoincidentSecretDoesNotManglePublicPath16090(t *testing.T) {
+	text := `system { services { dynamic-dns { provider p { password security; } } } } ` +
+		`security { zones { security-zone trust { bogus; } } }`
+	err := SchemaValidate(parseHier(t, text), nil)
+	if err == nil || !IsUnknownSecurityZoneChildSchemaError(err) {
+		t.Fatalf("fixture not on unknown-zone branch: %v", err)
+	}
+	if !strings.Contains(err.Error(), "security zones security-zone trust") {
+		t.Errorf("unrelated public path mangled by coincident secret: %v (#16090 fold 5)", err)
+	}
+}
+
 // #16066 fold 4 (F3): a secret literal colliding with an unknown
 // closed-world child keyword. The unknown-zone wrapper rebuilds its
 // message from path+keyword; if keyword is left unscrubbed, Error()
