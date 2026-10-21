@@ -677,6 +677,10 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 					valueExamples: []string{"super-user", "operator", "read-only"},
 					treeValidator: validateLoginClassRef, children: nil},
 				"expires": {desc: "Default API credential expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", valueType: ValueDate, validator: ValidateAPIAuthExpiry, children: nil},
+				// #16072: opt-in gate for loopback /metrics. A flag leaf (no
+				// args); its presence requires a valid api-auth credential
+				// for /metrics even on a literal loopback bind.
+				"metrics-require-auth": {desc: "Require api-auth credentials for /metrics even on a loopback bind", children: nil},
 				// #11544: this credential body is leaf-complete; reject typos
 				// rather than silently discarding a password or policy field.
 				"user": {desc: "Basic-auth user name for the REST API", args: 1, placeholder: "<username>",

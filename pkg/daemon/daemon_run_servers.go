@@ -427,13 +427,14 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 		// API authentication
 		if wm.APIAuth != nil {
 			authCfg := &api.AuthConfig{
-				Users:         make(map[string]string),
-				UserClasses:   make(map[string]string),
-				UserExpires:   make(map[string]time.Time),
-				APIKeys:       make(map[string]bool),
-				APIKeyNames:   make(map[string]string),
-				APIKeyClasses: make(map[string]string),
-				APIKeyExpires: make(map[string]time.Time),
+				Users:              make(map[string]string),
+				UserClasses:        make(map[string]string),
+				UserExpires:        make(map[string]time.Time),
+				APIKeys:            make(map[string]bool),
+				APIKeyNames:        make(map[string]string),
+				APIKeyClasses:      make(map[string]string),
+				APIKeyExpires:      make(map[string]time.Time),
+				MetricsRequireAuth: wm.APIAuth.MetricsRequireAuth,
 			}
 			defaultClass := wm.APIAuth.DefaultClass
 			if defaultClass == "" {
@@ -501,6 +502,10 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 			// Only enable auth when at least one usable credential survived.
 			if len(authCfg.Users) > 0 || len(authCfg.APIKeys) > 0 {
 				apiCfg.Auth = authCfg
+				// #16072: stamp the Cfg-level gate too, so NewServer and the
+				// reconciler agree even if a future wiring forgets the flag
+				// inside the snapshot.
+				apiCfg.MetricsRequireAuth = wm.APIAuth.MetricsRequireAuth
 				slog.Info("HTTP API authentication enabled", "users", len(authCfg.Users), "api_keys", len(authCfg.APIKeys))
 			} else if len(wm.APIAuth.Users)+len(wm.APIAuth.APIKeys)+len(wm.APIAuth.Keys) > 0 {
 				slog.Warn("HTTP API api-auth configured with no usable credentials; ignoring (#10826)")

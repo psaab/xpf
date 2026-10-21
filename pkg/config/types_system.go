@@ -594,6 +594,9 @@ type APIAuthConfig struct {
 	Keys             []*APIAuthKey  // named bearer/X-API-Key identities
 	DefaultClass     string
 	DefaultExpiresAt time.Time
+	// MetricsRequireAuth opts loopback /metrics into api-auth credential
+	// gating (#16072): `web-management api-auth metrics-require-auth`.
+	MetricsRequireAuth bool
 }
 
 // APIKeyCount returns the total number of legacy and named API-key credentials.

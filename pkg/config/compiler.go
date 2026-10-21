@@ -192,6 +192,14 @@ func validateWebManagementAuthStrict(cfg *Config) error {
 	}
 	wm := cfg.System.Services.WebManagement
 	authed := apiAuthHasUsableCredential(wm.APIAuth)
+	// #16072: the loopback /metrics gate needs a credential to check against.
+	// Without one the runtime snapshot is nil and dynamicAuthMiddleware passes
+	// every request through, so the gate would be silently inert. Reject at
+	// strict commit; the tolerant path downgrades this with the rest of the
+	// web-management auth family.
+	if wm.APIAuth != nil && wm.APIAuth.MetricsRequireAuth && !authed {
+		return fmt.Errorf("system services web-management api-auth metrics-require-auth requires at least one usable api-auth credential — without one there is no credential for loopback /metrics to require, so the gate would be silently inert; configure `set system services web-management api-auth {user <name> password <pw> | api-key <key>}` or remove metrics-require-auth (#16072)")
+	}
 	// An API-auth credential is never accepted over the clear HTTP leg. The
 	// runtime disables that leg when it sees api-auth; reject the explicit
 	// configuration at strict commit and downgrade it to a warning on tolerant
