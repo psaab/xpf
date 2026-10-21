@@ -94,3 +94,98 @@ func TestGatewaylessPSK15989(t *testing.T) {
 		}
 	})
 }
+
+// collisionCfg15989 is the #15989-fold name collision: a skipped
+// gateway-less PSK VPN named "aaa" and a healthy VPN "site" referencing
+// the addressed IKE gateway also named "aaa". The healthy render is
+// connection "aaa" with only child "site"; the skipped VPN must never
+// borrow that connection in name-based projections.
+func collisionCfg15989(sitePSK string) *config.IPsecConfig {
+	return &config.IPsecConfig{
+		VPNs: map[string]*config.IPsecVPN{
+			"aaa":  {Gateway: "", PSK: "gwless-secret", BindInterface: "st0.0", EstablishTunnels: "immediately"},
+			"site": {Gateway: "aaa", PSK: config.Secret(sitePSK), BindInterface: "st0.1", EstablishTunnels: "immediately"},
+		},
+		Gateways: map[string]*config.IPsecGateway{
+			"aaa": {Name: "aaa", Address: "203.0.113.1", LocalAddress: "198.51.100.10"},
+		},
+		Proposals: map[string]*config.IPsecProposal{},
+	}
+}
+
+// TestGatewaylessNameCollision15989 pins the fold: name projections must
+// derive from actually-rendered per-VPN membership, not connection-name
+// presence. On tolerant load / HA sync (strict commit refuses the
+// gateway-less VPN), the skipped "aaa" must be absent from
+// ConnectionNamesForVPN/RenderedVPNSet, ExpectedLoadedConns must equal
+// the actual parsed render (child "site" only, concrete endpoints), and
+// a changed live "aaa" connection must re-initiate child "site", never
+// the unrendered child "aaa".
+func TestGatewaylessNameCollision15989(t *testing.T) {
+	cfg := collisionCfg15989("site-secret")
+	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+
+	text, rendered, err := m.renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if !rendered["aaa"] {
+		t.Fatalf("healthy gateway connection aaa must render, rendered=%v:\n%s", rendered, text)
+	}
+	doc := parseSwanctlDoc(t, text)
+	conn := doc.at(t, "connections", "aaa")
+	conn.requireSetting(t, "local_addrs", "198.51.100.10")
+	conn.requireSetting(t, "remote_addrs", "203.0.113.1")
+	children := conn.at(t, "children")
+	if got := children.childNames(); len(got) != 1 || got[0] != "site" {
+		t.Fatalf("actual rendered children = %v, want [site]:\n%s", got, text)
+	}
+
+	full := &config.Config{}
+	full.Security.IPsec = *cfg
+	if got := ConnectionNamesForVPN(full); got["aaa"] != "" || got["site"] != "aaa" {
+		t.Fatalf("ConnectionNamesForVPN = %v, want only site->aaa (skipped aaa absent)", got)
+	}
+	if got := RenderedVPNSet(full); got["aaa"] || !got["site"] {
+		t.Fatalf("RenderedVPNSet = %v, want site only (skipped aaa absent)", got)
+	}
+	if idx := BuildSANameIndex(cfg); len(idx["aaa"]) != 1 || idx["aaa"][0] != "site" {
+		t.Fatalf("BuildSANameIndex[aaa] = %v, want [site] (skipped aaa unindexed)", idx["aaa"])
+	}
+
+	want, err := expectedLoadedConns(cfg, nil)
+	if err != nil {
+		t.Fatalf("expectedLoadedConns: %v", err)
+	}
+	lc := want["aaa"]
+	if lc == nil {
+		t.Fatalf("ExpectedLoadedConns missing connection aaa: %v", want)
+	}
+	if len(lc.Children) != 1 || lc.Children[0] != "site" {
+		t.Fatalf("ExpectedLoadedConns children = %v, want [site] (actual render)", lc.Children)
+	}
+	if len(lc.RemoteAddrs) != 1 || lc.RemoteAddrs[0] != "203.0.113.1" {
+		t.Fatalf("ExpectedLoadedConns remote = %v, want [203.0.113.1] (actual render)", lc.RemoteAddrs)
+	}
+	if len(lc.LocalAddrs) != 1 || lc.LocalAddrs[0] != "198.51.100.10" {
+		t.Fatalf("ExpectedLoadedConns local = %v, want [198.51.100.10] (actual render)", lc.LocalAddrs)
+	}
+
+	// Changed live connection "aaa": terminate it, then re-initiate the
+	// rendered child "site" — never the skipped VPN's unrendered child.
+	rec := &swanctlRecorder{}
+	rm := newRecordingManager(t, rec)
+	if err := rm.Apply(collisionCfg15989("old-secret")); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+	rec.listSAs = liveSAForVPN("site", "aaa")
+	if err := rm.Apply(collisionCfg15989("rotated-secret")); err != nil {
+		t.Fatalf("changed Apply: %v", err)
+	}
+	if got := rec.terminateCalls(); len(got) != 1 || got[0] != "aaa" {
+		t.Fatalf("terminate calls = %v, want [aaa]", got)
+	}
+	if got := rec.initiateCalls(); len(got) != 1 || got[0] != "site" {
+		t.Fatalf("initiate calls = %v, want [site] (never skipped aaa)", got)
+	}
+}

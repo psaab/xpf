@@ -1127,9 +1127,21 @@ func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, cha
 	for _, name := range terminated {
 		terminatedSet[name] = true
 	}
+	// Membership is per-VPN (#15989 fold): a VPN the renderer skipped
+	// (e.g. a gateway-less PSK) must never initiate, and must not mark
+	// its connection done and suppress a healthy member that shares
+	// the connection name. A failed membership render falls back to
+	// the name-only walk (prior behavior).
+	var members map[string]bool
+	if _, _, m, err := (&Manager{}).renderConfigMembers(ipsecCfg); err == nil {
+		members = m
+	}
 	var errs []error
 	done := make(map[string]bool)
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
+		if members != nil && !members[name] {
+			continue
+		}
 		vpn := ipsecCfg.VPNs[name]
 		_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
 		connName := gatewayKeyFor(ipsecCfg, name, vpn, gw)

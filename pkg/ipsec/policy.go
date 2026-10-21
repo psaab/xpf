@@ -93,8 +93,26 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // stale child SA is torn down (#5494). Returning the rendered set is the
 // single source of truth for "what is actually loaded", so the skip logic
 // here can never drift from the teardown diff in promoteConnNames.
+// renderConfig is renderConfigMembers with only the connection set
+// returned; see renderedMembers for the per-VPN membership contract.
 func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string]bool, error) {
-	return m.renderConfigWithExternalInterfaceFailClosed(ipsecCfg, true)
+	text, rendered, _, err := m.renderConfigMembers(ipsecCfg)
+	return text, rendered, err
+}
+
+// renderedMembers reports, per configured VPN name, whether that VPN
+// survived the render and contributed a child to its connection
+// (#15989 fold). Connection-name membership alone (rendered[conn]) is
+// NOT proof a given VPN survived: a gateway-less VPN skipped by the
+// #15989 belt maps to its own name, which may equal a healthy named
+// gateway's connection rendered for a sibling VPN, and name-based
+// projections (ConnectionNamesForVPN, ExpectedLoadedConns,
+// re-initiation) would then falsely treat the skipped VPN as loaded.
+// Every projection must consult this set, never rendered[conn] alone.
+//
+// renderConfigMembers is the fail-closed render plus the membership set.
+func (m *Manager) renderConfigMembers(ipsecCfg *config.IPsecConfig) (string, map[string]bool, map[string]bool, error) {
+	return m.renderConfigMembersWithExternalInterfaceFailClosed(ipsecCfg, true)
 }
 
 // renderConfigForConfigOnly is for projections that cannot consult live
@@ -103,12 +121,19 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 // unvalidatable, while SA-name and selector-fence projections stay
 // conservative. Production config always uses renderConfig above.
 func (m *Manager) renderConfigForConfigOnly(ipsecCfg *config.IPsecConfig) (string, map[string]bool, error) {
-	return m.renderConfigWithExternalInterfaceFailClosed(ipsecCfg, false)
+	text, rendered, _, err := m.renderConfigMembersForConfigOnly(ipsecCfg)
+	return text, rendered, err
 }
 
-func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
+// renderConfigMembersForConfigOnly is the config-only membership
+// variant (see renderConfigMembers).
+func (m *Manager) renderConfigMembersForConfigOnly(ipsecCfg *config.IPsecConfig) (string, map[string]bool, map[string]bool, error) {
+	return m.renderConfigMembersWithExternalInterfaceFailClosed(ipsecCfg, false)
+}
+
+func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 	ipsecCfg *config.IPsecConfig, failClosedExternalInterface bool,
-) (string, map[string]bool, error) {
+) (string, map[string]bool, map[string]bool, error) {
 	var b strings.Builder
 
 	b.WriteString("# xpf managed config - do not edit\n\n")
@@ -118,13 +143,16 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 	// connection that was never written.
 	skipped := make(map[string]bool)
 
+	// renderedMembers accumulates the names of VPNs that survived every
+	// skip check and contributed a child (see renderConfigMembers).
+	renderedMembers := make(map[string]bool)
+
 	// rendered accumulates the sanitized connection name (gateway name for
 	// a named-gateway group, VPN name for inline/empty endpoints, #15024)
 	// of every connection emitted into connections{}. This is the
 	// authoritative "loaded connection set" Apply diffs against
 	// prevConnNames (#5494).
 	rendered := make(map[string]bool)
-
 	// decodedPSKs caches validated values for the secrets block, keyed by
 	// VPN name. A malformed key skips its VPN before emitting a connection.
 	decodedPSKs := make(map[string]string, len(ipsecCfg.VPNs))
@@ -218,7 +246,7 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 					"vpn", name, "detail", err.Error())
 				continue
 			}
-			return "", nil, fmt.Errorf("vpn %s: %w", name, err)
+			return "", nil, nil, fmt.Errorf("vpn %s: %w", name, err)
 		}
 
 		// #4298 (V-2): a proposal with `protocol ah` (Authentication Header)
@@ -323,7 +351,7 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 					"vpn", name, "detail", err.Error())
 				continue
 			}
-			return "", nil, fmt.Errorf("vpn %s: %w", name, err)
+			return "", nil, nil, fmt.Errorf("vpn %s: %w", name, err)
 		}
 		// Normalize the effective PSK before emitting the connection. A bad
 		// Junos $9$ value must leave this VPN out of the rendered set, so Apply
@@ -486,6 +514,7 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			rendered[connKey] = true
 		}
 		gc.children = append(gc.children, enriched...)
+		renderedMembers[name] = true
 		if d, ok := decodedPSKs[name]; ok {
 			// #15027: a hex PSK joins the group's list as its
 			// render token `0x<hex>` so dedupe and emission keep
@@ -681,7 +710,7 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 	}
 	b.WriteString("}\n")
 
-	return b.String(), rendered, nil
+	return b.String(), rendered, renderedMembers, nil
 }
 
 // resolveRemoteAddr resolves the swanctl remote_addrs value for a VPN, plus
@@ -760,28 +789,31 @@ func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 // ConnectionNamesForVPN maps each VPN in ipsecCfg to the swanctl connection
 // name its surviving render contributes to (#15024): the gateway name for a
 // named-gateway group, else the VPN name. VPNs the renderer skips are absent.
-// It renders once (production fail-closed via PrepareConfig) — callers must
-// not re-derive the grouping.
+// Membership is per-VPN (renderedMembers), never rendered[conn] alone: a
+// skipped VPN whose own name equals a healthy named gateway's connection
+// must not inherit that connection (#15989 fold). It renders once
+// (production fail-closed via PrepareConfig) — callers must not re-derive
+// the grouping.
 func ConnectionNamesForVPN(cfg *config.Config) map[string]string {
 	if cfg == nil {
 		return nil
 	}
 	ipsecCfg := PrepareConfig(cfg)
-	_, rendered, err := (&Manager{}).renderConfig(ipsecCfg)
+	_, _, members, err := (&Manager{}).renderConfigMembers(ipsecCfg)
 	if err != nil {
 		return nil
 	}
 	out := make(map[string]string)
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
+		if !members[name] {
+			continue
+		}
 		vpn := ipsecCfg.VPNs[name]
 		_, _, gw, ok := resolveRemoteAddr(ipsecCfg, vpn)
 		if !ok {
 			continue
 		}
-		key := gatewayKeyFor(ipsecCfg, name, vpn, gw)
-		if rendered[key] {
-			out[name] = key
-		}
+		out[name] = gatewayKeyFor(ipsecCfg, name, vpn, gw)
 	}
 	return out
 }
@@ -989,56 +1021,44 @@ type SANameIndex map[string][]string
 
 // BuildSANameIndex indexes the SA names ipsecCfg renders.
 //
-// Eligibility is the RENDERER's, decided ONE VPN AT A TIME. Each VPN is rendered
-// on its own, sharing every other section of ipsecCfg:
+// Eligibility is the RENDERER's, decided per VPN by the whole-config
+// render's membership set (renderedMembers, #15989 fold):
 //
 //   - the renderer SKIPS it (an unrenderable gateway, an unresolved
 //     ike-policy chain, an unusable DH group, an unsupported auth method,
 //     a malformed PSK, an AH proposal, a section-breaking name, an
-//     unresolved ipsec-policy chain, an invalid bind-interface, or an
-//     explicit selector set with no renderable children): it loads nothing
-//     and contributes no name, so it cannot make a loaded VPN's name look
-//     ambiguous;
-//   - it renders: its connection name and every child the renderer emits for it
-//     (effectiveTrafficSelectors + sanitizeSwanctlValue, the render's own
-//     expansion) are indexed;
-//   - its render FAILS outright: its names are indexed anyway. Keeping them can
-//     only ADD candidates to a name, and a caller that requires every candidate
-//     (the HA attribution) can only become stricter: it may skip an initiate,
-//     never cause one. Dropping them could turn a collision this VPN takes part
-//     in back into a single answer. The daemon indexes the config strongSwan has
-//     LOADED, whose whole render succeeded, so this case arises only before the
-//     first load in a process, when it falls back to the promoted config.
+//     unresolved ipsec-policy chain, an invalid bind-interface, an
+//     explicit selector set with no renderable children, or a
+//     gateway-less/responder-only PSK with no peer identity): it loads
+//     nothing and contributes no name, so it cannot make a loaded VPN's
+//     name look ambiguous — even when its own name equals a healthy
+//     sibling's gateway connection;
+//   - it renders: its connection name and every child the renderer emits
+//     for it (effectiveTrafficSelectors + sanitizeSwanctlValue, the
+//     render's own expansion) are indexed.
 //
-// Rendering per VPN is also what keys eligibility by VPN identity: two VPN names
-// that sanitise to one connection name cannot borrow each other's result. And one
-// broken VPN cannot empty the index, which a single whole-config render would.
-//
-// Building renders every VPN and repeats the render's skip warnings, so build once
-// per config, not per name. ipsecCfg is only read. The active config is indexed
-// without PrepareConfig because that can block on DNS; the config-only render
-// projection retains external-interface candidates whose local bind is resolved
-// only at apply time.
+// Building renders every VPN and repeats the render's skip warnings, so
+// build once per config, not per name. ipsecCfg is only read. The active
+// config is indexed without PrepareConfig because that can block on DNS;
+// the config-only render projection retains external-interface
+// candidates whose local bind is resolved only at apply time.
 func BuildSANameIndex(ipsecCfg *config.IPsecConfig) SANameIndex {
 	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
 		return nil
 	}
 	// Render the WHOLE config once (#15024): grouping is a whole-config
 	// property — a per-VPN render cannot know its connection is shared.
-	_, rendered, _ := (&Manager{}).renderConfigForConfigOnly(ipsecCfg)
+	// Membership is per-VPN (#15989 fold): a skipped VPN must not borrow
+	// a sibling's rendered connection that happens to share its name.
+	_, _, members, _ := (&Manager{}).renderConfigMembersForConfigOnly(ipsecCfg)
 	idx := make(SANameIndex)
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
-		vpn := ipsecCfg.VPNs[name]
-		one := *ipsecCfg
-		one.VPNs = map[string]*config.IPsecVPN{name: vpn}
-		if _, r, err := (&Manager{}).renderConfigForConfigOnly(&one); err == nil && len(r) == 0 {
+		if !members[name] {
 			continue
 		}
+		vpn := ipsecCfg.VPNs[name]
 		_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
 		conn := gatewayKeyFor(ipsecCfg, name, vpn, gw)
-		if len(rendered) > 0 && !rendered[conn] {
-			continue
-		}
 		idx.add(conn, name)
 		for _, child := range effectiveTrafficSelectors(name, vpn) {
 			idx.add(sanitizeSwanctlValue(child.Name), name)
