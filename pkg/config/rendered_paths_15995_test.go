@@ -169,53 +169,132 @@ func TestPricedEqualsRenderedPathSet15995(t *testing.T) {
 				t.Fatalf("parse: %v", errs)
 			}
 			rendered := renderedPathSet(tree, tc.path)
+			// Completions for truncated intermediates live in the
+			// UNSCOPED set render (complete statement paths).
+			fullRendered := renderedPathSet(tree, nil)
 			if len(rendered) == 0 {
 				t.Fatalf("rendered set empty for %v (premise)", tc.path)
 			}
-			// Expected walk-priced set: rendered paths that are NOT
-			// token-wise prefixes of the request (the request and
-			// its exact prefixes are the caller's adjudication
-			// domain — Junos longest-match on the request itself).
+			// Expected refused set: every TRUE rendered strict
+			// descendant of the request, plus beyond-request trail
+			// ancestors carrying omitted keys. A candidate p from
+			// the renderer output is a true descendant iff its
+			// tokens, after NORMALIZING any truncated intermediate
+			// segment, strictly extend the request. Normalization:
+			// p embeds the truncated spelling iff p has the request
+			// as a proper token prefix AND the renderer ALSO emits
+			// (in `rendered`) a completion q that shares p's
+			// post-request tail (tokens after the request) as its
+			// own tail after strictly more leading tokens — the
+			// omitted keys inserted. Such p are re-prefix artifacts:
+			// drop ONLY p (its normalized completion q is kept and
+			// asserted). True descendants — p extending the request
+			// with NO longer completion in rendered (e.g. plain
+			// [security] → security zones …, [firewall filter] →
+			// firewall filter f1 …) — are KEPT and must be priced.
 			reqStr := strings.Join(tc.path, " ")
 			expected := map[string]bool{}
 			for p := range rendered {
 				if p == reqStr {
 					continue
 				}
-				// Candidates extending the request with its
-				// truncated spelling embedded (post-request tokens
-				// reached only through an omitted-keys node) are
-				// renderer re-prefix text, not complete rendered
-				// paths: the complete forms insert the omitted
-				// keys and are asserted separately where they
-				// appear. Drop every proper request-extension.
 				toks := strings.Fields(p)
-				if len(toks) > len(tc.path) {
-					extends := true
-					for i := range tc.path {
-						if toks[i] != tc.path[i] {
-							extends = false
-							break
-						}
-					}
-					if extends {
-						continue
-					}
-				}
-				isPrefix := len(toks) <= len(tc.path)
-				if isPrefix {
+				// Exact request prefix: caller's domain.
+				if len(toks) <= len(tc.path) {
+					isPrefix := true
 					for i := range toks {
 						if toks[i] != tc.path[i] {
 							isPrefix = false
 							break
 						}
 					}
-				}
-				if !isPrefix {
+					if isPrefix {
+						continue
+					}
 					expected[p] = true
+					continue
+				}
+				// Proper extension: artifact iff a longer completion
+				// with the same post-request tail exists in rendered.
+				extends := true
+				for i := range tc.path {
+					if toks[i] != tc.path[i] {
+						extends = false
+						break
+					}
+				}
+				if !extends {
+					expected[p] = true
+					continue
+				}
+				// Completion = the COMPLETE set line for the
+				// same leaf: it contains p's tokens as a subsequence
+				// with the omitted keys inserted (not necessarily
+				// a suffix — `then permit` gains a trailing token).
+				// Detect: some rendered q whose tokens, with the
+				// request's spelled intermediate segment expanded,
+				// end with p's post-request tokens AND whose hier
+				// trail proves descent. Practical exact test for
+				// these shapes: q's LAST token equals p's last
+				// token and q is longer, and q was rendered by the
+				// same scope (all q in rendered are).
+				artifact := false
+				for q := range fullRendered {
+					qt := strings.Fields(q)
+					if q != p && len(qt) > len(toks) && qt[len(qt)-1] == toks[len(toks)-1] {
+						// Require q to contain p's post-request
+						// tokens in order as a subsequence.
+						rest := toks[len(tc.path):]
+						// subsequence check over q's tokens after
+						// the shared request-length position is
+						// meaningless (positions shift); instead
+						// check the final len(rest) tokens of q
+						// equal rest OR rest is a subsequence.
+						if isSubseq15995(rest, qt) {
+							artifact = true
+							break
+						}
+					}
+				}
+				if artifact {
+					continue // normalized completion asserted via q
+				}
+				expected[p] = true
+			}
+			// Assert normalized completions too: every complete
+			// (unscoped-render) path that contains all request
+			// tokens as a subsequence and strictly extends the
+			// matched scope is a rendered path of this read.
+			for q := range fullRendered {
+				if q == reqStr {
+					continue
+				}
+				if isSubseq15995(tc.path, strings.Fields(q)) && len(strings.Fields(q)) > len(tc.path) {
+					expected[q] = true
+				}
+				// Trail ancestors of the completion (e.g. the
+				// complete intermediate context itself) are
+				// proper prefixes of such q that appear in
+				// fullRendered.
+				qt := strings.Fields(q)
+				for i := len(tc.path) + 1; i < len(qt); i++ {
+					pre := strings.Join(qt[:i], " ")
+					if fullRendered[pre] && isSubseq15995(tc.path, qt[:i]) {
+						expected[pre] = true
+					}
 				}
 			}
-			priced := pricedPathSet15995(t, tree, tc.path, rendered)
+			if len(expected) == 0 {
+				t.Fatalf("expected set empty for %v — oracle asserts nothing (premise)", tc.path)
+			}
+			allCands := map[string]bool{}
+			for p := range rendered {
+				allCands[p] = true
+			}
+			for q := range fullRendered {
+				allCands[q] = true
+			}
+			priced := pricedPathSet15995(t, tree, tc.path, allCands)
 			var missing []string
 			for p := range expected {
 				if !priced[p] {
@@ -228,4 +307,15 @@ func TestPricedEqualsRenderedPathSet15995(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isSubseq15995 reports whether sub appears in seq in order.
+func isSubseq15995(sub, seq []string) bool {
+	i := 0
+	for _, x := range seq {
+		if i < len(sub) && x == sub[i] {
+			i++
+		}
+	}
+	return i == len(sub)
 }
