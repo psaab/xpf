@@ -116,34 +116,47 @@ func TestPackedTailCredentialWarns10707_14412(t *testing.T) {
 	}
 }
 
-// Controls: the CHILD-node forms keep their existing #10707 warnings.
-func TestPackedTailCredentialChildControlsKeep10707_14412(t *testing.T) {
-	cases := []struct {
-		name, src, token string
-	}{
-		{
-			name: "ospf interface misplaced child",
-			src: `protocols { ospf { area 0.0.0.0 {
-				interface ge-0/0/0.0 { passive; authentication-key SECRET14412; } } } }`,
-			token: "authentication-key",
-		},
-		{
-			name: "isis interface case-variant child",
-			src: `protocols { isis { net 49.0001.0000.0000.0001.00;
-				interface ge-0/0/0.0 { Authentication-Key SECRET14412; authentication-type md5; } } }`,
-			token: "Authentication-Key",
-		},
+// Controls: the CHILD-node (braced) forms are NOT warn-only at compile.
+// #16108 re-verification: the OSPF braced `authentication-key` is a
+// refusal stub (#14402), so SchemaValidate rejects it (never a #10707
+// warning — exact-case children of a stanza resolve, so the open-world
+// walker stays silent by design); the IS-IS case-variant child's
+// `authentication-type md5` without a (case-exact) key strict-rejects via
+// #14399 and warns on the lenient path. The original #14412 assertion
+// (warn-only via CompileConfig) was never satisfiable on master.
+func TestPackedTailCredentialChildControls16108(t *testing.T) {
+	// OSPF braced child: exact-case refusal stub — strict reject naming
+	// the token, no secret echo; compile must not be silent either.
+	ospfSrc := `protocols { ospf { area 0.0.0.0 {
+		interface ge-0/0/0.0 { passive; authentication-key SECRET14412; } } } }`
+	if err := SchemaValidate(parseHier14412(t, ospfSrc), nil); err == nil ||
+		!strings.Contains(err.Error(), "authentication-key") {
+		t.Fatalf("ospf braced authentication-key must strict-reject (#14402), got: %v", err)
+	} else if strings.Contains(err.Error(), "SECRET14412") {
+		t.Fatalf("strict error must not echo the secret value, got: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parseHier14412(t, tc.src))
-			if err != nil {
-				t.Fatalf("child control must stay warn-only at compile, got: %v", err)
-			}
-			if !hasWarning14412(cfg, tc.token) {
-				t.Fatalf("child-node form lost its #10707 warning for %q; warnings=%v", tc.token, cfg.Warnings)
-			}
-		})
+	// CompileConfig alone does not schema-gate (#14402 premise: "compiler
+	// doesn't gate, schema is gate"); the decisive channel is above.
+	// IS-IS case-variant child: lenient compile warns (#10707 for the
+	// case-variant key and/or #14399 for the keyless type); strict
+	// compile rejects via #14399. Never silently accepted.
+	isisSrc := `protocols { isis { net 49.0001.0000.0000.0001.00;
+		interface ge-0/0/0.0 { Authentication-Key SECRET14412; authentication-type md5; } } }`
+	cfg, err := CompileConfigLenient(parseHier14412(t, isisSrc))
+	if err != nil {
+		t.Fatalf("isis lenient compile must warn, not error: %v", err)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "Authentication-Key") || strings.Contains(w, "#14399") {
+			found = true
+		}
+		if strings.Contains(w, "SECRET14412") {
+			t.Fatalf("warning must not echo the secret value: %q", w)
+		}
+	}
+	if !found {
+		t.Fatalf("isis case-variant child lost its warning; warnings=%v", cfg.Warnings)
 	}
 }
 
@@ -193,6 +206,53 @@ func TestPackedTailCredentialValidPackedTails14412(t *testing.T) {
 				t.Fatalf("valid packed tail drew a #10707 warning for %q; warnings=%v", tc.token, cfg.Warnings)
 			}
 		})
+	}
+}
+
+// Fold (#16108 review): a credential-spelled token in a VALUE position of
+// a nested packed grammar is consumed, not a dropped head. The OSPF MD5
+// key may literally be the bare token `authentication-key`
+// (`authentication md5 1 key authentication-key`); the pre-fold predicate
+// scanned every tail token against the interface grammar and rejected it
+// as a dropped refusal stub. Assert strict acceptance, no #10707 warning,
+// and that the compiled key is preserved verbatim. The reported dropped
+// head (`passive authentication-key SECRET`) stays rejected by
+// TestPackedTailCredentialStrictReject14412 above.
+func TestPackedTailCredentialValuePosition16108(t *testing.T) {
+	src := `protocols { ospf { area 0.0.0.0 {
+		interface ge-0/0/0.0 authentication md5 1 key authentication-key; } } }`
+	if err := SchemaValidate(parseHier14412(t, src), nil); err != nil {
+		t.Fatalf("SchemaValidate rejected credential value in value position: %v (#16108)", err)
+	}
+	cfg, err := CompileConfig(parseHier14412(t, src))
+	if err != nil {
+		t.Fatalf("CompileConfig rejected credential value in value position: %v (#16108)", err)
+	}
+	if hasWarning14412(cfg, "authentication-key") {
+		t.Fatalf("credential value drew a #10707 warning; warnings=%v (#16108)", cfg.Warnings)
+	}
+	if cfg.Protocols.OSPF == nil || len(cfg.Protocols.OSPF.Areas) == 0 ||
+		len(cfg.Protocols.OSPF.Areas[0].Interfaces) == 0 {
+		t.Fatalf("no ospf interface compiled: %+v", cfg.Protocols)
+	}
+	iface := cfg.Protocols.OSPF.Areas[0].Interfaces[0]
+	if iface.AuthType != "md5" || iface.AuthKey.Reveal() != "authentication-key" {
+		t.Fatalf("compiled AuthType=%q AuthKey=%q, want md5/authentication-key (#16108)",
+			iface.AuthType, iface.AuthKey.Reveal())
+	}
+	// Same for the simple-password value position.
+	src2 := `protocols { ospf { area 0.0.0.0 {
+		interface ge-0/0/0.0 authentication simple-password authentication-key; } } }`
+	if err := SchemaValidate(parseHier14412(t, src2), nil); err != nil {
+		t.Fatalf("SchemaValidate rejected simple-password value: %v (#16108)", err)
+	}
+	cfg2, err := CompileConfig(parseHier14412(t, src2))
+	if err != nil {
+		t.Fatalf("CompileConfig rejected simple-password value: %v (#16108)", err)
+	}
+	if cfg2.Protocols.OSPF.Areas[0].Interfaces[0].AuthKey.Reveal() != "authentication-key" {
+		t.Fatalf("simple-password AuthKey=%q, want authentication-key (#16108)",
+			cfg2.Protocols.OSPF.Areas[0].Interfaces[0].AuthKey.Reveal())
 	}
 }
 
