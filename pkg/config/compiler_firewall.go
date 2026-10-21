@@ -800,6 +800,14 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					filter.Terms = append(filter.Terms, term)
 				}
 
+				// #15997: a name recorded as colliding on the tolerant path
+				// is quarantined out of BOTH pools — neither the discard nor
+				// the accept winner stays enforceable. A referencing hook
+				// then dangles and the #3296 snapshot-integrity backstop
+				// refuses it fail-closed.
+				if _, colliding := fw.CollidingNames[filter.Name]; colliding {
+					continue
+				}
 				for _, dest := range dests {
 					dest[filter.Name] = filter
 				}
@@ -847,17 +855,20 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 //
 // Strict path (commit / commit-check, lenient=false): the first collision is a
 // hard compile error naming the offending filter and its families. Lenient path
-// (load / peer-sync, lenient=true): every collision is returned as a warning and
-// compilation continues with the existing last-write-wins behavior, so an
-// already-persisted or peer-synced config that an older binary silently accepted
-// still BOOTS (#1960 / #3261 fail-closed-on-load doctrine).
+// (load / peer-sync, lenient=true): every collision is returned as a warning
+// plus the colliding-name set; compileExpanded stamps it on
+// Firewall.CollidingNames and compileFirewall omits those names from both
+// pools (#15997), so no last-write-wins winner stays enforceable. Identical-
+// body duplicates are excluded by the caller-side prune. Compilation still
+// succeeds so an already-persisted config BOOTS (#1960 / #3261).
 //
 // The traversal mirrors compileFirewall's family/filter walk exactly (BOTH AST
 // shapes: hierarchical `family inet { filter ... }` and the set-command
 // `family { inet { filter ... } }`), and aggregates across every top-level
 // `firewall {}` block because compileFirewall compiles each into the same
 // fw.FiltersInet map — a collision split across two blocks is just as real.
-func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]string, error) {
+func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]string, map[string]struct{}, error) {
+	colliding := map[string]struct{}{}
 	// filterFamilies[name] = the ordered set of DISTINCT non-inet6 families that
 	// define a filter of this name (all folding into the shared FiltersInet pool).
 	filterFamilies := map[string][]string{}
@@ -973,9 +984,10 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 				"(#8426)",
 			name, strings.Join(fams, ", "))
 		if !lenient {
-			return nil, fmt.Errorf("%s", msg)
+			return nil, nil, fmt.Errorf("%s", msg)
 		}
-		warnings = append(warnings, msg)
+		colliding[name] = struct{}{}
+		warnings = append(warnings, msg+"; the colliding name is quarantined from both filter pools on tolerant loads (#15997)")
 	}
 	for _, name := range order {
 		fams := filterFamilies[name]
@@ -990,9 +1002,10 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 				"Junos namespaces filters per family, so rename one of them (#3884)",
 			name, strings.Join(fams, ", "))
 		if !lenient {
-			return nil, fmt.Errorf("%s", msg)
+			return nil, nil, fmt.Errorf("%s", msg)
 		}
-		warnings = append(warnings, msg)
+		colliding[name] = struct{}{}
+		warnings = append(warnings, msg+"; the colliding name is quarantined from both filter pools on tolerant loads (#15997)")
 	}
 	// #4287 any+inet6 cross-check: a `family any` filter now folds into the
 	// FiltersInet6 pool as well, so a name shared with a distinct `family inet6`
@@ -1021,11 +1034,61 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 				"the other (fail-open); rename one of them",
 			name)
 		if !lenient {
-			return nil, fmt.Errorf("%s", msg)
+			return nil, nil, fmt.Errorf("%s", msg)
 		}
-		warnings = append(warnings, msg)
+		colliding[name] = struct{}{}
+		warnings = append(warnings, msg+"; the colliding name is quarantined from both filter pools on tolerant loads (#15997)")
 	}
-	return warnings, nil
+	if len(colliding) == 0 {
+		colliding = nil
+	}
+	return warnings, colliding, nil
+}
+
+// pruneIdenticalFirewallCollisions15997 drops colliding names whose every
+// definition is byte-identical: an identical-body duplicate has one
+// unambiguous meaning, so last-write-wins is harmless and the name stays
+// enforceable (#15997 decisive check). Any name with two differing bodies
+// (or a body that cannot be canonicalised) stays quarantined.
+func pruneIdenticalFirewallCollisions15997(tree *ConfigTree, colliding map[string]struct{}) map[string]struct{} {
+	if len(colliding) == 0 || tree == nil {
+		return colliding
+	}
+	permitted := firewallFamilyPermitted9017()
+	bodies := map[string]map[string]struct{}{}
+	for _, fwNode := range tree.Children {
+		if fwNode.Name() != "firewall" {
+			continue
+		}
+		for _, familyNode := range fwNode.FindChildren("family") {
+			for _, m := range firewallFamilyMembers9883(familyNode) {
+				if firewallFamilyQuarantined9883(m, permitted) {
+					continue
+				}
+				for _, inst := range namedInstances(m.AfNode.FindChildren("filter")) {
+					if _, want := colliding[inst.name]; !want {
+						continue
+					}
+					body := (&ConfigTree{Children: []*Node{inst.node}}).FormatSet()
+					if bodies[inst.name] == nil {
+						bodies[inst.name] = map[string]struct{}{}
+					}
+					bodies[inst.name][body] = struct{}{}
+				}
+			}
+		}
+	}
+	out := map[string]struct{}{}
+	for name := range colliding {
+		if len(bodies[name]) == 1 {
+			continue // identical-body duplicate: unaffected
+		}
+		out[name] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // validateFirewallFilterDuplicateTermsAST rejects a repeated term name

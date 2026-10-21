@@ -67,7 +67,7 @@ func TestValidateFirewallFilterFamilyCollisionsAST_EmptyKeysNoPanic(t *testing.T
 		}
 	}()
 	nodes := malformedFirewallFamilyTree()
-	if _, err := validateFirewallFilterFamilyCollisionsAST(nodes, false); err != nil {
+	if _, _, err := validateFirewallFilterFamilyCollisionsAST(nodes, false); err != nil {
 		// A malformed node producing an error is fine — the requirement is
 		// "no panic", not "no error".
 		t.Logf("validator returned an error for the malformed node (acceptable): %v", err)

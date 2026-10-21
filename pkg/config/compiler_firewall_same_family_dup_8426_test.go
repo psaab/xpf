@@ -92,12 +92,9 @@ firewall {
 	}
 }
 
-// Lenient path (load / peer-sync): an already-persisted config an older binary
-// accepted must still BOOT, warning instead of refusing — the convention #3884
-// and the #5180 duplicate-block gate both follow.
-//
-// It also pins the surviving behaviour, which is the fail-open itself: the
-// accept is what remains.
+// Lenient path (load / peer-sync): an already-persisted config must still
+// BOOT, warning instead of refusing, but #15997 quarantines the colliding
+// name out of both pools so the accept winner is not enforceable.
 func TestDuplicateSameFamilyFilterLenientWarns8426(t *testing.T) {
 	tree := parseHier(t, `
 firewall {
@@ -135,9 +132,11 @@ firewall {
 		t.Fatalf("expected an #8426 same-family duplicate warning on the lenient path, "+
 			"got: %v", cfg.Warnings)
 	}
-	if _, ok := cfg.Firewall.FiltersInet["blockX"]; !ok {
-		t.Fatal("the lenient path must preserve the historical last-write-wins result, " +
-			"not drop the filter")
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; !ok {
+		t.Fatalf("same-family colliding name not quarantined: %v", cfg.Firewall.CollidingNames)
+	}
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; ok {
+		t.Fatal("colliding blockX must be omitted from FiltersInet (#15997 quarantine)")
 	}
 }
 

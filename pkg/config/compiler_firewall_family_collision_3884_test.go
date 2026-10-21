@@ -104,11 +104,10 @@ firewall {
 	}
 }
 
-// Lenient path (load / peer-sync): the collision must downgrade to a warning so
-// an already-persisted or peer-synced config an older binary silently accepted
-// still BOOTS. The last-write-wins map is preserved — and it is precisely the
-// fail-open: the `family inet` discard has been silently replaced by the
-// `family any` accept.
+// Lenient path (load / peer-sync): the collision downgrades to a warning so
+// an already-persisted or peer-synced config still BOOTS, but #15997
+// quarantines the colliding name out of BOTH pools — neither the discard
+// nor the accept winner stays enforceable.
 func TestFirewallFilterCrossFamilyNameCollisionLenientWarns(t *testing.T) {
 	tree := parseHier(t, `
 firewall {
@@ -147,15 +146,52 @@ firewall {
 	if !found {
 		t.Fatalf("expected a #3884 cross-family collision warning on the lenient path, got: %v", cfg.Warnings)
 	}
-	// The last-write-wins behavior is deliberately unchanged on the lenient path:
-	// the filter still lands in fw.FiltersInet under its single shared name, and
-	// it is the accept that survived — the exact fail-open the strict gate blocks.
-	f, ok := cfg.Firewall.FiltersInet["blockX"]
-	if !ok {
-		t.Fatal("lenient path: expected blockX to remain in FiltersInet (last-write-wins preserved)")
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; !ok {
+		t.Fatalf("colliding name not quarantined: %v", cfg.Firewall.CollidingNames)
 	}
-	if len(f.Terms) != 1 || f.Terms[0].Action != "accept" {
-		t.Fatalf("lenient path: expected the fail-open accept to survive last-write-wins, got %+v", f.Terms)
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; ok {
+		t.Fatal("lenient path: colliding blockX must be omitted from FiltersInet (#15997 quarantine)")
+	}
+	if _, ok := cfg.Firewall.FiltersInet6["blockX"]; ok {
+		t.Fatal("lenient path: colliding blockX must be omitted from FiltersInet6 (#15997 quarantine)")
+	}
+}
+
+// #15997: identical-body duplicates are unaffected — one unambiguous meaning,
+// so the name stays enforceable on the tolerant path.
+func TestFirewallFilterIdenticalDuplicateUnaffected15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+    family any {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; ok {
+		t.Fatalf("identical-body duplicate must not be quarantined: %v", cfg.Firewall.CollidingNames)
+	}
+	f, ok := cfg.Firewall.FiltersInet["blockX"]
+	if !ok || len(f.Terms) != 1 || f.Terms[0].Action != "discard" {
+		t.Fatalf("identical-body duplicate must stay enforceable as discard, got %+v ok=%v", f, ok)
 	}
 }
 

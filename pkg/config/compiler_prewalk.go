@@ -306,10 +306,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
-	fwFilterFamilyWarnings, err := validateFirewallFilterFamilyCollisionsAST(
+	fwFilterFamilyWarnings, fwColliding, err := validateFirewallFilterFamilyCollisionsAST(
 		tree.Children, opts.lenientFirewallFilterFamilyCollisions)
 	if err != nil {
 		return nil, err
+	}
+	if opts.firewallFilterCollisions != nil {
+		*opts.firewallFilterCollisions = fwColliding
 	}
 
 	// #15192 (D07-01): duplicate term name inside ONE firewall filter.
