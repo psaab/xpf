@@ -568,6 +568,7 @@ pub(super) fn apply_snapshot(
         snapshot_installed: true,
         config_generation: snapshot.generation,
         fib_generation: snapshot.fib_generation,
+        neighbor_generation: 0,
     };
     // #7010: the destructive prune of the policy / NAT hit counters USED to be
     // here, above `bring_up_workers`. It moved to

@@ -931,6 +931,7 @@ fn from_forward_decision_round_trip() {
         snapshot_installed: true,
         config_generation: 10,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1104,6 +1105,7 @@ fn make_v4_round_trip_inputs() -> (
         snapshot_installed: true,
         config_generation: 10,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1587,6 +1589,7 @@ fn make_v6_round_trip_inputs() -> (
         snapshot_installed: true,
         config_generation: 10,
         fib_generation: 3,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -1882,6 +1885,7 @@ fn from_forward_decision_returns_none_for_non_cacheable() {
         snapshot_installed: true,
         config_generation: 1,
         fib_generation: 1,
+        neighbor_generation: 0,
     };
     // NoRoute is not cacheable.
     let decision = make_decision(ForwardingDisposition::NoRoute);
@@ -1921,6 +1925,7 @@ fn fabric_redirect_cache_entry_uses_flow_owner_rg_for_epoch_invalidation() {
         snapshot_installed: true,
         config_generation: 1,
         fib_generation: 1,
+        neighbor_generation: 0,
     };
     let decision = SessionDecision {
         resolution: ForwardingResolution {

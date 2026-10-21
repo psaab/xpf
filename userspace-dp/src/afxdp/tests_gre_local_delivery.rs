@@ -1148,6 +1148,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
             snapshot_installed: true,
             config_generation: 7,
             fib_generation: 9,
+            neighbor_generation: 0,
         },
         123_000_000_000,
         123,
