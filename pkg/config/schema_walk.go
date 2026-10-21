@@ -1651,9 +1651,32 @@ func IsTypedLeafSchemaError(err error) bool {
 // typedLeafErrorf builds a commit-check error scoped to the leaf's
 // consumed config path, e.g. "class-of-service schedulers be
 // transmit-rate: missing value". path already includes the leaf keyword.
+//
+// #16066 (Codex fold on #16090): on a SECRET leaf this must stay
+// value-free like typedLeafInvalidErrorf. Several call sites format an
+// operator token with %q — the additional-token arms
+// ("unknown modifier %q") in validateTypedLeaf/validateModifierChild
+// quote whatever follows a VALID first value, so a plaintext pasted as
+// an extra token of `encrypted-password` reached tolerant-ingress logs
+// verbatim even though the validator itself never echoes. When the
+// leaf is secret (same isSecretLeaf registry test as #8434, so dual-use
+// keywords stay resolved by root), any string argument equal to a
+// non-keyword path-irrelevant token is replaced with <redacted> before
+// formatting; in practice every %q argument at these sites is an
+// operator token, so it is redacted unconditionally for secret leaves
+// while the defect class ("unknown modifier") survives. Non-secret
+// leaves keep quoting the token — that diagnostic is the point there.
 func typedLeafErrorf(path []string, format string, args ...interface{}) error {
+	joined := strings.Join(redactSecretPath(path), " ")
+	if len(path) > 0 && isSecretLeaf(joined, path[len(path)-1:]) {
+		for i, a := range args {
+			if _, ok := a.(string); ok {
+				args[i] = SecretRedacted
+			}
+		}
+	}
 	return &typedLeafSchemaError{
-		msg: fmt.Sprintf("%s: %s", strings.Join(redactSecretPath(path), " "), fmt.Sprintf(format, args...)),
+		msg: fmt.Sprintf("%s: %s", joined, fmt.Sprintf(format, args...)),
 	}
 }
 

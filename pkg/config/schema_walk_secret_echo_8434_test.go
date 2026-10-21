@@ -71,6 +71,64 @@ func TestSecretLeafValueNeverEchoedInCommitError8434(t *testing.T) {
 	}
 }
 
+// #16066 fold (Codex on #16090): the ADDITIONAL-token arm. When the first
+// encrypted-password value is a VALID hash, validateTypedLeaf accepts it
+// and then formats any extra token via typedLeafErrorf("unknown modifier
+// %q") — which (pre-fold) quoted a plaintext pasted as that extra token
+// straight into the schema error that tolerant ingress logs. The token
+// must never appear; the "unknown modifier" defect class must survive.
+// RED pre-fold with the canary quoted in the error.
+func TestSecretLeafExtraTokenNeverEchoed16066(t *testing.T) {
+	const validHash = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"
+	for _, tc := range []struct {
+		name string
+		cfg  string
+	}{
+		{
+			name: "login user encrypted-password extra token",
+			cfg: `system {
+    login {
+        user alice {
+            authentication {
+                encrypted-password "` + validHash + `" "` + secretCanary8434 + `";
+            }
+        }
+    }
+}`,
+		},
+		{
+			name: "root-authentication encrypted-password extra token",
+			cfg: `system {
+    root-authentication {
+        encrypted-password "` + validHash + `" "` + secretCanary8434 + `";
+    }
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := parseHier(t, tc.cfg)
+			err := SchemaValidate(tree, nil)
+			if err == nil {
+				t.Fatal("fixture must produce a validation error (extra token), " +
+					"or this cell proves nothing")
+			}
+			if strings.Contains(err.Error(), secretCanary8434) {
+				t.Errorf("the commit error echoed the additional credential token "+
+					"of a secret leaf (#16066): %v", err)
+			}
+			if !strings.Contains(err.Error(), "unknown modifier") {
+				t.Errorf("the error lost its defect-class diagnostic: %v", err)
+			}
+		})
+	}
+	// Positive control: typedLeafErrorf on a NON-secret leaf still quotes
+	// its token, so the redaction stays registry-scoped (not blanket).
+	ctrl := typedLeafErrorf([]string{"system", "host-name"}, "unknown modifier %q", "bogusmod")
+	if !strings.Contains(ctrl.Error(), `"bogusmod"`) {
+		t.Errorf("non-secret leaf must keep its quoted modifier diagnostic; got: %v", ctrl)
+	}
+}
+
 // POSITIVE CONTROL on the instrument: a NON-secret leaf must still quote its
 // value. Without this, a change that redacted every validation error would pass
 // the cell above while destroying every ordinary diagnostic.
