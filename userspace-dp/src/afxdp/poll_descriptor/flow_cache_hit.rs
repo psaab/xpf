@@ -243,6 +243,14 @@ pub(super) fn stage_flow_cache_hit(
                 cached.decision.resolution,
             )
         {
+            // #16220: attribute the arm — neighbor-MAC staleness vs the
+            // HA/fabric decision revalidation — so a retention failure
+            // names its cause in the per-binding counters.
+            let arm = if neighbor_mac_stale {
+                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac
+            } else {
+                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDecisionInvalid
+            };
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
@@ -254,7 +262,7 @@ pub(super) fn stage_flow_cache_hit(
             // published `flow_cache_hits` counts packets the cache actually
             // served, and a neighbor-MAC / HA churn event shows up as the
             // hit-rate drop it is instead of hiding inside the hit count.
-            flow_state.flow_cache.reclassify_hit_as_miss();
+            flow_state.flow_cache.reclassify_hit_as_miss_arm(arm);
             // Fall through to slow path for full HA resolution / re-resolve
             // the current neighbor MAC (#3048) / fabric redirect.
             return FlowCacheOutcome::FallThrough;
@@ -276,7 +284,9 @@ pub(super) fn stage_flow_cache_hit(
                 flow_state
                     .flow_cache
                     .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-                flow_state.flow_cache.reclassify_hit_as_miss();
+                flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded,
+                );
                 return FlowCacheOutcome::FallThrough;
             }
             if cached_decision.resolution.disposition == ForwardingDisposition::PolicyDenied
@@ -288,7 +298,9 @@ pub(super) fn stage_flow_cache_hit(
                 flow_state
                     .flow_cache
                     .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-                flow_state.flow_cache.reclassify_hit_as_miss();
+                flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDenySuperseded,
+                );
                 return FlowCacheOutcome::FallThrough;
             }
             cached_descriptor.input_filter_counters.for_each(|counter| {
@@ -462,7 +474,9 @@ pub(super) fn stage_flow_cache_hit(
             flow_state
                 .flow_cache
                 .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-            flow_state.flow_cache.reclassify_hit_as_miss();
+            flow_state.flow_cache.reclassify_hit_as_miss_arm(
+                crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDead,
+            );
             return FlowCacheOutcome::FallThrough;
         }
         // #3779: TTL/hop-limit check BEFORE any egress side effect. The slow

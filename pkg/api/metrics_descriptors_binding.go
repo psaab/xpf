@@ -11,6 +11,11 @@ func (c *xpfCollector) initBindingDescriptors() {
 			"compute the structural CoV ceiling per docs/fairness-regimes.md (#1219).",
 		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 	)
+	c.bindingFlowCacheEvictionsArm = prometheus.NewDesc(
+		"xpf_userspace_binding_flow_cache_evictions_total",
+		"Flow-cache evictions on this binding by eviction arm (#16220).",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface", "arm"}, nil,
+	)
 	c.bindingFlowCacheCapacity = prometheus.NewDesc(
 		"xpf_userspace_binding_flow_cache_capacity",
 		"Flow-cache capacity published by the userspace helper for this binding.",

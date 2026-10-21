@@ -911,8 +911,9 @@ type xpfCollector struct {
 	// fairness-eval to compute Cstruct + observed_CoV per
 	// docs/fairness-regimes.md). Refreshed at the helper's ~65ms
 	// debug-state tick.
-	bindingActiveFlowCount   *prometheus.Desc
-	bindingFlowCacheCapacity *prometheus.Desc
+	bindingActiveFlowCount       *prometheus.Desc
+	bindingFlowCacheCapacity     *prometheus.Desc
+	bindingFlowCacheEvictionsArm *prometheus.Desc
 	// #13299: UMEM capacity and frame inventories are distinct from
 	// in-flight utilization; fill-ring inventory is intentionally idle.
 	bindingUMEMTotalFrames         *prometheus.Desc
@@ -1650,6 +1651,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerColdPathLayoutUnknownTotal
 	ch <- c.bindingActiveFlowCount
 	ch <- c.bindingFlowCacheCapacity
+	ch <- c.bindingFlowCacheEvictionsArm
 	ch <- c.bindingUMEMTotalFrames
 	ch <- c.bindingUMEMInflightFrames
 	ch <- c.bindingPendingFillFrames

@@ -144,6 +144,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.flow_cache_hits = snap.flow_cache_hits;
     binding.flow_cache_misses = snap.flow_cache_misses;
     binding.flow_cache_evictions = snap.flow_cache_evictions;
+    binding.flow_cache_evictions_by_arm = snap.flow_cache_evictions_by_arm.clone();
     binding.flow_cache_collision_evictions = snap.flow_cache_collision_evictions;
     // #1219: bridge active_flow_count from BindingLiveSnapshot
     // into BindingStatus so it reaches the wire-visible status.
@@ -430,6 +431,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.flow_cache_hits = 0;
     binding.flow_cache_misses = 0;
     binding.flow_cache_evictions = 0;
+    binding.flow_cache_evictions_by_arm = Vec::new();
     binding.flow_cache_collision_evictions = 0;
     binding.active_flow_count = 0;
     binding.flow_cache_capacity = 0;

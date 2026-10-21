@@ -907,6 +907,8 @@ struct StageRun {
     /// IMMEDIATELY after the call — before the `cached_observed_bytes`
     /// probe below, whose `lookup` would itself move them.
     flow_cache_tallies: (u64, u64, u64),
+    /// #16220: per-arm eviction tallies, read at the same instant.
+    flow_cache_evictions_by_arm: [u64; crate::afxdp::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
     tx_pipeline: WorkerTxPipeline,
     tx_counters: WorkerTxCounters,
     /// #14945 (3): the TARGET binding's pipeline/counters on a
@@ -1256,6 +1258,7 @@ fn run_stage_seeded(
         flow_state.flow_cache.misses,
         flow_state.flow_cache.evictions,
     );
+    let flow_cache_evictions_by_arm = flow_state.flow_cache.evictions_by_arm;
     // #6304: lift the staged TX bytes out of the UMEM before the mapping dies
     // with this function's frame.
     let target_tx_frame = target_binding
@@ -1291,6 +1294,7 @@ fn run_stage_seeded(
         outcome,
         session_lookup_miss_counts: sessions.lookup_miss_counts(),
         flow_cache_tallies,
+        flow_cache_evictions_by_arm,
         tx_pipeline: tx_pipeline_state,
         tx_counters: tx_counters_state,
         target_tx_pipeline: target_binding.tx_pipeline,
@@ -5413,3 +5417,72 @@ fn cached_drop_counts_forward_build_failure_15958() {
     assert!(run.scratch.scratch_forwards.is_empty());
     assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
 }
+/// #16220: a peer-synced (SyncImport) session seeded into the flow cache
+/// must serve its SECOND packet as a cache hit. This is the unit shape of
+/// the PR #16217 no-failover regression (0 hits / 6.9M evictions): build
+/// the session via the changed peer-synced import path, insert its entry
+/// (as the slow-path seed does after a successful hit), then drive the
+/// live hit stage — the packet must be Consumed as a hit with no eviction
+/// arm moving.
+#[test]
+fn peer_synced_import_second_packet_hits_16220() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    // Peer-synced import provenance: owner RG 1 (the fixture's active RG).
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            session: Some((1_000_000, PROTO_TCP, 0x10)),
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "second packet of a peer-synced flow must be served from the flow cache"
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1, "must count exactly one hit");
+    assert_eq!(run.flow_cache_tallies.1, 0, "must not count a miss");
+    assert_eq!(run.flow_cache_tallies.2, 0, "must not evict");
+    assert_eq!(
+        run.flow_cache_evictions_by_arm,
+        [0; crate::afxdp::flow_cache::FLOW_CACHE_EVICTION_ARM_COUNT],
+        "no eviction arm may move on a healthy peer-synced hit"
+    );
+}
+
+/// #16220: the neighbor-MAC-stale rejection must attribute to the
+/// PostHitNeighborMac arm (and not the HA/decision arm), so the live
+/// per-arm counters can name the culprit without perf.
+#[test]
+fn neighbor_mac_stale_attributes_to_neighbor_arm_16220() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.neighbor_shard = 0;
+    entry.neighbor_mac_epoch = 0xDEAD_BEEF;
+    let run = run_stage_with_entry(&fixture, &frame, meta, entry, 0);
+    assert!(matches!(run.outcome, FlowCacheOutcome::FallThrough));
+    assert_eq!(run.flow_cache_tallies.2, 1, "exactly one eviction");
+    assert_eq!(
+        run.flow_cache_evictions_by_arm
+            [crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac as usize],
+        1,
+        "neighbor-MAC staleness must attribute to its own arm"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm
+            [crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDecisionInvalid as usize],
+        0,
+        "neighbor-MAC staleness must not attribute to the decision arm"
+    );
+}
+

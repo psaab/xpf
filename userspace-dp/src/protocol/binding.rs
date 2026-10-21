@@ -560,6 +560,10 @@ pub(crate) struct BindingStatus {
     pub flow_cache_misses: u64,
     #[serde(rename = "flow_cache_evictions", default)]
     pub flow_cache_evictions: u64,
+    /// #16220: per-arm breakdown of `flow_cache_evictions`, indexed by
+    /// `FlowCacheEvictionArm` ordinal (see afxdp flow_cache). Length 11.
+    #[serde(rename = "flow_cache_evictions_by_arm", default)]
+    pub flow_cache_evictions_by_arm: Vec<u64>,
     /// #918: collision-driven subset of `flow_cache_evictions`. An
     /// insert that displaced a different-key entry from the LRU way
     /// of a full set increments this; stale-on-lookup evictions do
