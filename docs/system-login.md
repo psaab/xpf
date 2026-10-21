@@ -593,6 +593,21 @@ Three consequences an operator should know:
   unaffected. The decision is shared (`AuthorizeConfigShow*` in
   `pkg/config`) so the surfaces cannot drift.
 
+  Residual closed by #15995: a subtree render discloses every
+  descendant of the requested path, so pricing only the requested
+  path was not the render's price — `deny-configuration
+  "^security ipsec"` did not match a request for `security`, yet
+  `ShowConfig ["security"]` (and the scoped compare/rollback and CLI
+  twins) rendered the ipsec subtree. An explicit subtree read now
+  also adjudicates every rendered descendant of the tree(s) that
+  will actually be rendered (active/candidate, both compare arms,
+  the rollback slot): a strict descendant the `*-configuration`
+  pair denies — or an `allow-configuration` allowlist does not
+  cover — refuses the ancestor read (request an allowed subtree,
+  e.g. `security zones`, instead). The operational pair is still
+  charged once on the requested command; a descendant is not a
+  command spelling the operator typed.
+
   Residual closed by #14987: on the CLI the same decision now reaches
   the `show system …` spellings that render configuration —
   `show system rollback [compare] <N>`, `show system login`,

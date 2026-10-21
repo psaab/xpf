@@ -42,6 +42,68 @@ func (s *Store) ShowActivePath(path []string) string {
 	return s.active.FormatPath(path)
 }
 
+// ShowConfigTrees returns the rendered trees for a ShowConfig target:
+// the active tree for target "active", the candidate tree otherwise
+// (mirroring ShowConfig's target switch). The returned trees are the
+// store's live trees, NOT clones: callers must treat them as read-only
+// and only for the duration of one authorization/render decision
+// (#15995 descendant pricing walks them under no store lock, so the
+// walk must not mutate and must tolerate a concurrent commit swapping
+// the store's pointers — the walk reads the snapshot it was handed).
+func (s *Store) ShowConfigTrees(target string) []*config.ConfigTree {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if target == "active" {
+		if s.active == nil {
+			return nil
+		}
+		return []*config.ConfigTree{s.active}
+	}
+	if s.candidate == nil {
+		return nil
+	}
+	return []*config.ConfigTree{s.candidate}
+}
+
+// CompareTrees returns both arms of a candidate compare: (active,
+// candidate). Either may be nil; a nil arm renders nothing.
+func (s *Store) CompareTrees() (active, candidate *config.ConfigTree) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.active, s.candidate
+}
+
+// RollbackCompareTrees returns both arms of a rollback compare:
+// (rollback slot n, candidate) for the candidate baseline, or
+// (rollback slot n, active) when activeBaseline is set (the
+// operational `show system rollback compare` shape). A slot that
+// cannot be resolved yields a nil first arm.
+func (s *Store) RollbackCompareTrees(n int, activeBaseline bool) (slot, other *config.ConfigTree) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return nil, nil
+	}
+	if activeBaseline {
+		return tree, s.active
+	}
+	return tree, s.candidate
+}
+
+// RollbackTree returns the tree a scoped rollback render of slot n
+// will disclose (n == 0 is the active configuration), or nil when the
+// slot cannot be resolved (the render then fails on its own error).
+func (s *Store) RollbackTree(n int) *config.ConfigTree {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tree, err := s.rollbackTree(n)
+	if err != nil {
+		return nil
+	}
+	return tree
+}
+
 // ShowCandidateSet returns the candidate configuration as flat set commands.
 func (s *Store) ShowCandidateSet() string {
 	s.mu.RLock()

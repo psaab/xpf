@@ -61,13 +61,34 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		if len(r.GetPath()) == 0 {
 			return config.AuthorizeConfigShowWhole(cfg, class, suffix)
 		}
-		return config.AuthorizeConfigShowPath(cfg, class, r.GetPath(), suffix)
+		// #15995: price every rendered descendant, not just the
+		// requested path — the handler renders the whole subtree.
+		target := "candidate"
+		if r.GetTarget() == pb.ConfigTarget_ACTIVE {
+			target = "active"
+		}
+		var trees []*config.ConfigTree
+		if s.store != nil {
+			trees = s.store.ShowConfigTrees(target)
+		}
+		return config.AuthorizeConfigShowPathRendered(cfg, class, r.GetPath(), suffix, trees...)
 	case "ShowCompare":
 		r, okReq := req.(*pb.ShowCompareRequest)
 		if !okReq || r == nil {
 			return config.AuthorizeConfigShowCompare(cfg, class)
 		}
-		return config.AuthorizeConfigShowCompareAtPath(cfg, class, r.GetPath())
+		// #15995: a scoped compare discloses descendants on BOTH arms.
+		var trees []*config.ConfigTree
+		if s.store != nil {
+			if r.GetActiveBaseline() || r.GetRollbackN() > 0 {
+				slot, other := s.store.RollbackCompareTrees(int(r.GetRollbackN()), r.GetActiveBaseline())
+				trees = []*config.ConfigTree{slot, other}
+			} else {
+				active, candidate := s.store.CompareTrees()
+				trees = []*config.ConfigTree{active, candidate}
+			}
+		}
+		return config.AuthorizeConfigShowCompareAtPathRendered(cfg, class, r.GetPath(), trees...)
 	case "ShowRollback":
 		r, okReq := req.(*pb.ShowRollbackRequest)
 		if !okReq || r == nil {
@@ -78,8 +99,15 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 			}
 			return nil
 		}
-		return config.AuthorizeConfigShowRollbackAtPath(cfg, class, r.GetPath(),
-			config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())))
+		// #15995: price the rollback slot's rendered descendants.
+		var trees []*config.ConfigTree
+		if s.store != nil {
+			if tree := s.store.RollbackTree(int(r.GetN())); tree != nil {
+				trees = []*config.ConfigTree{tree}
+			}
+		}
+		return config.AuthorizeConfigShowRollbackAtPathRendered(cfg, class, r.GetPath(),
+			config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), trees...)
 	}
 	return nil
 }

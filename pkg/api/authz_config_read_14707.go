@@ -32,8 +32,17 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		// #15657 V48-02: ?path= selects the subtree (the gRPC
 		// ShowConfigRequest.Path twin); absent = whole-tree render.
 		if path := strings.Fields(r.URL.Query().Get("path")); len(path) > 0 {
-			return config.AuthorizeConfigShowPath(cfg, class, path,
-				config.ConfigShowDisplaySuffix(restShowFormat(format)))
+			// #15995: price every rendered descendant of the target tree.
+			target := "candidate"
+			if t := strings.TrimSpace(r.URL.Query().Get("target")); t == "" || strings.EqualFold(t, "active") {
+				target = "active"
+			}
+			var trees []*config.ConfigTree
+			if s.store != nil {
+				trees = s.store.ShowConfigTrees(target)
+			}
+			return config.AuthorizeConfigShowPathRendered(cfg, class, path,
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
 		}
 		return config.AuthorizeConfigShowWhole(cfg, class,
 			config.ConfigShowDisplaySuffix(restShowFormat(format)))
@@ -50,13 +59,24 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		// Line search over the whole active render.
 		return config.AuthorizeConfigShowWhole(cfg, class, "")
 	case "GET /api/v1/config/compare":
+		// REST compare has no ?path= selector: whole-tree diff.
 		return config.AuthorizeConfigShowCompare(cfg, class)
 	case "GET /api/v1/config/show-rollback":
 		// #15942 H2-04: ?path= scopes the render (the handler honours
 		// it), so the gate prices that subtree, not the whole tree.
-		return config.AuthorizeConfigShowRollbackAtPath(cfg, class,
+		// #15995: price the slot's rendered descendants too. An
+		// unparseable n renders nothing (the handler 400s); price the
+		// active tree (slot 0) as the conservative stand-in.
+		n, _ := queryIntStrict(r, "n", 1)
+		var trees []*config.ConfigTree
+		if s.store != nil {
+			if tree := s.store.RollbackTree(n); tree != nil {
+				trees = []*config.ConfigTree{tree}
+			}
+		}
+		return config.AuthorizeConfigShowRollbackAtPathRendered(cfg, class,
 			strings.Fields(r.URL.Query().Get("path")),
-			config.ConfigShowDisplaySuffix(restShowFormat(format)))
+			config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
 	}
 	return nil
 }

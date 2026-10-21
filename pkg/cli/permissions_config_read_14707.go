@@ -35,6 +35,9 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 	// compare with an explicit/edit path renders only that subtree, so
 	// it is adjudicated as a path read; a bare compare is a whole-tree
 	// render (AuthorizeConfigShowCompare).
+	// #15995: a scoped compare discloses rendered descendants on both
+	// arms, so price them against the candidate/active (or rollback
+	// slot/candidate) trees the handler will diff.
 	for i, a := range args {
 		if a == "|" && i+1 < len(args) && args[i+1] == "compare" {
 			var comparePath []string
@@ -42,7 +45,20 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 				comparePath = append(comparePath, c.store.GetEditPath()...)
 			}
 			comparePath = append(comparePath, args[:i]...)
-			return config.AuthorizeConfigShowCompareAtPath(cfg, c.userClass, comparePath)
+			var trees []*config.ConfigTree
+			if c.store != nil {
+				rest := args[i+1:]
+				if len(rest) == 3 && rest[1] == "rollback" {
+					if n, err := strconv.Atoi(rest[2]); err == nil && n >= 0 {
+						slot, other := c.store.RollbackCompareTrees(n, false)
+						trees = []*config.ConfigTree{slot, other}
+					}
+				} else {
+					active, candidate := c.store.CompareTrees()
+					trees = []*config.ConfigTree{active, candidate}
+				}
+			}
+			return config.AuthorizeConfigShowCompareAtPathRendered(cfg, c.userClass, comparePath, trees...)
 		}
 		if a != "|" {
 			continue
@@ -73,7 +89,12 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 	if len(full) == 0 {
 		return config.AuthorizeConfigShowWhole(cfg, c.userClass, displaySuffix14707(suffix))
 	}
-	return config.AuthorizeConfigShowPath(cfg, c.userClass, full, displaySuffix14707(suffix))
+	// #15995: config-mode show renders the candidate subtree.
+	var trees []*config.ConfigTree
+	if c.store != nil {
+		trees = c.store.ShowConfigTrees("candidate")
+	}
+	return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, full, displaySuffix14707(suffix), trees...)
 }
 
 // checkShowSystemConfigRead adjudicates operational config renders
@@ -129,9 +150,16 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			// #15657 V48-02: display formats carry an optional
 			// pre-pipe subtree path; a path render is priced as a
 			// path read, a whole render as a rollback read.
+			// #15995: price the slot's rendered descendants.
 			suffix := config.ConfigShowDisplaySuffix(displaySuffix14707("display " + displayFormatName(format)))
 			if len(rbPath) > 0 {
-				return config.AuthorizeConfigShowPath(cfg, c.userClass, rbPath, suffix)
+				var trees []*config.ConfigTree
+				if c.store != nil {
+					if tree := c.store.RollbackTree(n); tree != nil {
+						trees = []*config.ConfigTree{tree}
+					}
+				}
+				return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, rbPath, suffix, trees...)
 			}
 			return config.AuthorizeConfigShowRollback(cfg, c.userClass, suffix)
 		}
@@ -139,8 +167,14 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			if len(pipe) == 1 && pipe[0] == "compare" {
 				// #15942 H2-04: `N <path> | compare` diffs only that
 				// subtree against active; price the path, not the
-				// whole-tree rollback.
-				return config.AuthorizeConfigShowRollbackAtPath(cfg, c.userClass, rbPath, "")
+				// whole-tree rollback. #15995: price rendered
+				// descendants on both arms (slot + active).
+				var trees []*config.ConfigTree
+				if c.store != nil {
+					slot, other := c.store.RollbackCompareTrees(n, true)
+					trees = []*config.ConfigTree{slot, other}
+				}
+				return config.AuthorizeConfigShowRollbackAtPathRendered(cfg, c.userClass, rbPath, "", trees...)
 			}
 			return nil // handler syntax error; renders nothing
 		}
@@ -155,7 +189,13 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 		// nothing, so they need no adjudication here (splitDisplayPipe
 		// already separated them as rbPath; the handler validates).
 		if len(rbPath) > 0 {
-			return config.AuthorizeConfigShowPath(cfg, c.userClass, rbPath, "")
+			var trees []*config.ConfigTree
+			if c.store != nil {
+				if tree := c.store.RollbackTree(n); tree != nil {
+					trees = []*config.ConfigTree{tree}
+				}
+			}
+			return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, rbPath, "", trees...)
 		}
 		return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 	case "login":
@@ -223,7 +263,12 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 	// the configuration pair by passing a class whose operational
 	// verdict the caller already took: AuthorizeConfigShowPath checks
 	// both, so call the path arm via the config-only helper below.
-	return config.AuthorizeConfigPathOnly(cfg, c.userClass, path)
+	// #15995: price rendered descendants of the active tree too.
+	var trees []*config.ConfigTree
+	if c.store != nil {
+		trees = c.store.ShowConfigTrees("active")
+	}
+	return config.AuthorizeConfigPathOnlyRendered(cfg, c.userClass, path, trees...)
 }
 
 // displaySuffix14707 converts "display set" to the format spelling the
