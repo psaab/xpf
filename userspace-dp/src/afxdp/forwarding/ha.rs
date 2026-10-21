@@ -372,6 +372,43 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
     .is_none()
 }
 
+/// #16222: per-flow twin of `cached_flow_decision_invalid_reason` — the
+/// production hit path judges the cached redirect against the SAME
+/// resolution the session path produces for this flow (per-flow ECMP
+/// hash over the 5-tuple; `target_ip` is already the NAT-translated
+/// target). `fabric_link_ingress` is the physical parent/overlay arrival
+/// identity, OR-ed into the ingress flag for the retention decision:
+/// the session path retains the redirect on fabric-link ingress
+/// (resolve.rs), so revalidation must not supersede it there either.
+/// The destination-only entry point remains for flow-less fixtures only.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    flow_key: Option<&crate::session::SessionKey>,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> Option<CachedDecisionInvalid> {
+    cached_flow_decision_invalid_reason_inner(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        cached_owner_rg_id,
+        fabric_ingress || fabric_link_ingress,
+        flow_key,
+        target_ip,
+        install_table,
+        resolution,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
     forwarding: &ForwardingState,
@@ -380,6 +417,33 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
     now_secs: u64,
     cached_owner_rg_id: i32,
     fabric_ingress: bool,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> Option<CachedDecisionInvalid> {
+    cached_flow_decision_invalid_reason_inner(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        cached_owner_rg_id,
+        fabric_ingress,
+        None,
+        target_ip,
+        install_table,
+        resolution,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cached_flow_decision_invalid_reason_inner(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    fabric_ingress: bool,
+    flow_key: Option<&crate::session::SessionKey>,
     target_ip: IpAddr,
     install_table: Option<&str>,
     resolution: ForwardingResolution,
@@ -401,30 +465,43 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
         return Some(CachedDecisionInvalid::OwnerActiveRedirect);
     }
     if resolution.disposition == ForwardingDisposition::FabricRedirect {
-        let local_resolution = enforce_ha_resolution_snapshot(
-            forwarding,
-            ha_state,
-            now_secs,
-            match install_table {
-                Some(table) => {
-                    super::lookup_forwarding_resolution_in_table_with_dynamic(
-                        forwarding,
-                        dynamic_neighbors,
-                        target_ip,
-                        Some(table),
-                    )
-                    .resolution
-                }
-                None => {
-                    lookup_forwarding_resolution_with_dynamic(
-                        forwarding,
-                        dynamic_neighbors,
-                        target_ip,
-                    )
-                    .resolution
-                }
-            },
-        );
+        // #16222: judge the cached redirect against the SAME resolution
+        // the session path produces for this flow. With a flow key the
+        // local candidate uses the per-flow ECMP hash
+        // (`lookup_..._for_flow*`, fib.rs #2734); without one it falls
+        // back to the destination-only hash (flow-less fixtures only).
+        // `target_ip` is already the NAT-translated target
+        // (`resolution_target_for_session` at the caller).
+        let local_lookup = match (install_table, flow_key) {
+            (Some(table), Some(key)) => {
+                super::lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+                    forwarding,
+                    dynamic_neighbors,
+                    target_ip,
+                    key,
+                    table,
+                )
+            }
+            (Some(table), None) => super::lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+                Some(table),
+            ),
+            (None, Some(key)) => super::lookup_forwarding_resolution_with_dynamic_for_flow(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+                key,
+            ),
+            (None, None) => lookup_forwarding_resolution_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+            ),
+        };
+        let local_resolution =
+            enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local_lookup.resolution);
         let local_owner_rg = owner_rg_for_resolution(forwarding, local_resolution);
         let local_egress_is_fabric = local_resolution.egress_ifindex > 0
             && ingress_is_fabric(forwarding, local_resolution.egress_ifindex);
@@ -434,28 +511,52 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
         ) && local_owner_rg > 0
             && !local_egress_is_fabric
         {
-            // #16220: on direct ingress, a same-owner local candidate does
-            // not supersede the cached redirect — the redirect was seeded
-            // for exactly this split-RG shape and the slow path recomputes
-            // it; only a DIFFERENT local owner (or fabric ingress, where
-            // the packet already crossed) retires it.
-            if local_owner_rg == cached_owner_rg_id && !fabric_ingress {
+            // #16222: a fabric-ingress redirect whose cached owner is NOT
+            // the local egress RG was seeded for the split-RG shape: the
+            // packet crossed to this node precisely because the egress
+            // RG is peer-owned at session resolution time, and the
+            // session path (per-flow + fabric converters in resolve.rs)
+            // retains the redirect on fabric-link ingress. A local
+            // candidate owned by a DIFFERENT RG than the cached stamp
+            // therefore does not supersede it on fabric ingress — the
+            // two owner attributions name different legs (ingress/LAN
+            // RG vs WAN egress RG), not alternatives for this packet.
+            // Only a SAME-owner local candidate on fabric ingress (the
+            // owner is now local, failback) or any local candidate on
+            // direct ingress with a different owner retires it.
+            if fabric_ingress && local_owner_rg != cached_owner_rg_id {
+                // Fall through to the prefer-local check below, which
+                // re-derives with the same per-flow candidate semantics
+                // via the resolution comparison; do not evict here.
+            } else if local_owner_rg == cached_owner_rg_id && !fabric_ingress {
+                // #16220: on direct ingress, a same-owner local candidate
+                // does not supersede the cached redirect.
                 return None;
-            }
-            return Some(if local_owner_rg == cached_owner_rg_id {
-                CachedDecisionInvalid::FabricLocalWinsSameOwner
             } else {
-                CachedDecisionInvalid::FabricLocalWins
-            });
+                return Some(if local_owner_rg == cached_owner_rg_id {
+                    CachedDecisionInvalid::FabricLocalWinsSameOwner
+                } else {
+                    CachedDecisionInvalid::FabricLocalWins
+                });
+            }
         }
     }
+    // #16222: the prefer-local probe below is the generic fabric-ingress
+    // supersession for non-redirect resolutions. For a FabricRedirect it
+    // would re-derive the same local candidate the block above already
+    // judged and evict as FabricIngressLocalWins even when that block
+    // deliberately retained the redirect (different-owner fabric
+    // ingress). The redirect arm is fully decided above; skip the probe
+    // for it so the retention is not undone under a second arm name.
     if fabric_ingress
-        && prefer_local_forward_candidate_for_fabric_ingress(
+        && resolution.disposition != ForwardingDisposition::FabricRedirect
+        && prefer_local_forward_candidate_for_fabric_ingress_for_flow(
             forwarding,
             ha_state,
             dynamic_neighbors,
             now_secs,
             true,
+            flow_key,
             target_ip,
             install_table,
             resolution,

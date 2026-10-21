@@ -996,6 +996,77 @@ pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(
 
     resolution
 }
+/// #16222: per-flow twin of `prefer_local_forward_candidate_for_fabric_ingress`
+/// for the flow-cache revalidation path: the probe uses the per-flow ECMP
+/// hash so it judges the same candidate the session path would produce.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress_for_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    fabric_ingress: bool,
+    flow_key: Option<&crate::session::SessionKey>,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+) -> ForwardingResolution {
+    if resolution.disposition == ForwardingDisposition::TableUnavailable {
+        return resolution;
+    }
+    if !fabric_ingress || matches!(resolution.disposition, ForwardingDisposition::LocalDelivery) {
+        return resolution;
+    }
+    let current_owner_rg = owner_rg_for_resolution(forwarding, resolution);
+    let current_egress_is_fabric =
+        resolution.egress_ifindex > 0 && ingress_is_fabric(forwarding, resolution.egress_ifindex);
+    if !current_egress_is_fabric
+        && current_owner_rg > 0
+        && resolution.disposition != ForwardingDisposition::FabricRedirect
+    {
+        return resolution;
+    }
+    let local_lookup = match (install_table, flow_key) {
+        (Some(table), Some(key)) => {
+            lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+                key,
+                table,
+            )
+        }
+        (Some(table), None) => lookup_forwarding_resolution_in_table_with_dynamic(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            Some(table),
+        ),
+        (None, Some(key)) => lookup_forwarding_resolution_with_dynamic_for_flow(
+            forwarding,
+            dynamic_neighbors,
+            target_ip,
+            key,
+        ),
+        (None, None) => {
+            lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip)
+        }
+    };
+    let local_resolution =
+        enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, local_lookup.resolution);
+    let local_owner_rg = owner_rg_for_resolution(forwarding, local_resolution);
+    let local_egress_is_fabric = local_resolution.egress_ifindex > 0
+        && ingress_is_fabric(forwarding, local_resolution.egress_ifindex);
+    if matches!(
+        local_resolution.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) && local_owner_rg > 0
+        && !local_egress_is_fabric
+    {
+        return local_resolution;
+    }
+    resolution
+}
 
 /// #7770: does this session-MISS packet qualify to leave a PUNT SEED behind?
 ///
