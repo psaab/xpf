@@ -24,6 +24,14 @@ xpf (0.0.0) unstable; urgency=medium
     value-scoped fallback rather than being orphaned. Route 53 cannot
     distinguish identical RRset values, so its withdraw stays
     value-scoped; that limitation is now documented (#16086).
+  * Route every slog record through the bounded per-client syslog writer
+    instead of a synchronous Send for non-event callers: a blackholed
+    TCP/TLS collector could park arbitrary daemon goroutines (commit,
+    reconcile, API handlers) behind the client mutex for the write/dial
+    timeout. Slog records now queue (depth 128, 64 KiB each), overflow
+    drops and counts with a rate-limited warning, and a record emitted
+    from inside a client's own writer loop is dropped and counted
+    rather than re-queued (#16083).
 
 xpf (0.0.0) unstable; urgency=medium
 

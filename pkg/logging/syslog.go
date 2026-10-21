@@ -17,8 +17,8 @@ import (
 )
 
 // Resilience defaults for synchronous syslog writes. They bound a direct
-// Send call and the dedicated per-client EventReader writer; EventReader itself
-// only performs a bounded, non-blocking queue handoff (#11697).
+// Send call and the dedicated per-client writer; EventReader and every slog
+// caller (#16083) only perform a bounded, non-blocking queue handoff (#11697).
 //
 // #9025: UDP is NOT exempt. A connected-UDP Write can block indefinitely on a
 // full socket send buffer (ENOBUFS / a congested or down egress path parks the
@@ -26,13 +26,22 @@ import (
 // (#4423 H07) already documents the same kernel behavior.
 //
 // #9025 fixed unbounded writes; #11697 moves EventReader writes to bounded
-// queues so a slow collector cannot stall HA sync and telemetry. Deadlines and
-// reconnect cooldown still bound the writer goroutine and synchronous callers.
+// queues so a slow collector cannot stall HA sync and telemetry; #16083
+// routes every SyslogSlogHandler record through the same queue. Deadlines
+// and reconnect cooldown still bound the writer goroutine and synchronous
+// callers.
 const (
 	// syslogEventQueueDepth bounds per-client writes handed off by the shared
 	// EventStream reader. The reader must keep processing HA deltas even when a
 	// collector stops reading; a full queue drops rather than blocking.
 	syslogEventQueueDepth = 128
+	// syslogEventQueueMaxBytes bounds one queued slog message (#16083):
+	// depth × bytes caps the in-memory backlog per client (~8 MiB) so a
+	// record flood against a blackholed collector cannot grow daemon RSS
+	// without bound. Larger records are dropped and counted, matching the
+	// queue-overflow contract. EventReader records are exempt: the
+	// dataplane bounds them.
+	syslogEventQueueMaxBytes = 64 * 1024
 	// defaultWriteTimeout caps one synchronous conn.Write before it is treated
 	// as a write failure (drop, with reconnect armed). EventReader writes run
 	// on their per-client worker, not the shared reader.
@@ -153,10 +162,21 @@ type SyslogClient struct {
 	// the live kernel name through syslogHostnameFn on every Send (#15231).
 	hostnameFn15231 func() (string, error)
 
-	// eventWriter is created lazily only for EventReader fanout. Direct Send
+	// eventWriter is the bounded per-client writer for EventReader fanout
+	// and (from SyslogSlogHandler) every slog record (#16083). Direct Send
 	// callers keep their synchronous contract.
 	eventWriterMu sync.Mutex
 	eventWriter   atomic.Pointer[syslogEventWriter]
+
+	// inWriter marks that this goroutine is a syslogEventWriter.run loop
+	// (#16083). Set for the lifetime of the loop so SyslogSlogHandler.Handle
+	// can drop-and-count a record emitted from inside a client's own send
+	// path (e.g. a drop warning) instead of re-queueing it onto the writer
+	// that would have to deliver it; the writer is the goroutine parked on
+	// the collector, so a re-queued warning would only crowd real records.
+	// A goroutine-local context — not a handler-global flag — so unrelated
+	// concurrent loggers are unaffected.
+	inWriter goroutineContext
 
 	// closed is set atomically by Close() before it closes the active socket.
 	// Send/SendBinary/Connect/reconnect check it both before and after any
@@ -194,15 +214,25 @@ type syslogEventWrite struct {
 	isBinary bool
 }
 
-// syslogEventWriter moves network writes off EventReader.ProcessRawEvent while
-// retaining FIFO order for each client. Queue overflow is counted without
-// logging on the reader goroutine: slog can itself forward to syslog.
+// syslogEventWriter moves network writes off EventReader.ProcessRawEvent and
+// off every slog caller (#16083) while retaining FIFO order for each client.
+// Queue overflow is counted without logging on the enqueueing goroutine:
+// slog can itself forward to syslog.
 type syslogEventWriter struct {
 	client  *SyslogClient
 	queue   chan syslogEventWrite
 	stopCh  chan struct{}
 	mu      sync.Mutex
 	dropped atomic.Uint64
+	// slogDropped counts slog-handler records dropped from inside run()
+	// (#16083); folded into DroppedWrites so the loss stays observable
+	// even though no warning can be emitted for it.
+	slogDropped atomic.Uint64
+	// slogWarnMu guards slogWarnTime: the ≤1/s gate for the self-drop
+	// warning emitted when a SlogHandler record overflows the queue
+	// (#16083). A leaf lock released before slog.Warn.
+	slogWarnMu   sync.Mutex
+	slogWarnTime time.Time
 }
 
 func newSyslogEventWriter(client *SyslogClient) *syslogEventWriter {
@@ -215,22 +245,66 @@ func newSyslogEventWriter(client *SyslogClient) *syslogEventWriter {
 	return w
 }
 
-func (w *syslogEventWriter) enqueue(item syslogEventWrite) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	select {
-	case <-w.stopCh:
-		w.dropped.Add(1)
-		return false
-	default:
+// enqueue offers an item without blocking. kind is the producer class
+// (#16083): oversize slog records are counted as writer drops, and a full
+// queue warns for slog records at most once a second (from a non-writer
+// goroutine) so a blackholed collector cannot silently swallow daemon
+// logs.
+func (w *syslogEventWriter) enqueue(kind enqueueKind, item syslogEventWrite) bool {
+	// The warn runs outside w.mu: it re-enters the handler, whose
+	// per-client check is cheap, but holding the retire lock across a
+	// slog call would stall concurrent enqueues on logging I/O (the
+	// #14191 shape). Only the channel handoff holds mu.
+	warn := false
+	ok := func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		select {
+		case <-w.stopCh:
+			w.dropped.Add(1)
+			return false
+		default:
+		}
+		if kind == enqueueSlog && len(item.message) > syslogEventQueueMaxBytes {
+			w.dropped.Add(1)
+			warn = true
+			return false
+		}
+		select {
+		case w.queue <- item:
+			return true
+		default:
+			w.dropped.Add(1)
+			warn = kind == enqueueSlog
+			return false
+		}
+	}()
+	if warn {
+		w.warnSlogQueueDrop()
 	}
-	select {
-	case w.queue <- item:
-		return true
-	default:
-		w.dropped.Add(1)
-		return false
+	return ok
+}
+
+// warnSlogQueueDrop emits the ≤1/s warning for a slog record lost to the
+// bounded queue (#16083). It runs only from a non-writer goroutine (the
+// writer goroutine's own drops are counted silently by noteSlogHandlerDrop)
+// and never under w.mu; the slogWarnMu gate is released before slog.Warn.
+// The warning names the loss class — the shipped records have no remote
+// copy — and carries the counters an operator watches.
+func (w *syslogEventWriter) warnSlogQueueDrop() {
+	now := time.Now()
+	w.slogWarnMu.Lock()
+	if !w.slogWarnTime.IsZero() && now.Sub(w.slogWarnTime) < time.Second {
+		w.slogWarnMu.Unlock()
+		return
 	}
+	w.slogWarnTime = now
+	w.slogWarnMu.Unlock()
+	c := w.client
+	slog.Warn("syslog slog record dropped: writer queue full or record too large",
+		"addr", c.remoteAddr,
+		"dropped_writes", c.DroppedWrites(),
+		"queue_depth", syslogEventQueueDepth)
 }
 
 func (w *syslogEventWriter) stop() {
@@ -252,6 +326,8 @@ func (w *syslogEventWriter) stop() {
 }
 
 func (w *syslogEventWriter) run() {
+	w.client.inWriter.enter()
+	defer w.client.inWriter.exit()
 	for {
 		select {
 		case item := <-w.queue:
@@ -297,6 +373,17 @@ func (s *SyslogClient) eventWriterForReader() *syslogEventWriter {
 	return writer
 }
 
+// enqueueKind is the producer class for syslogEventWriter.enqueue (#16083).
+// EventReader records keep the count-only overflow contract; slog-handler
+// records carry the bounded-memory defence and the rate-limited overflow
+// warning, because daemon logs have no other remote copy once enqueued.
+type enqueueKind int
+
+const (
+	enqueueEvent enqueueKind = iota
+	enqueueSlog
+)
+
 // SendFromEventReader queues a text message for this client and returns
 // immediately. False means the bounded per-client queue was full or retired;
 // DroppedWrites reports it. Direct Send calls retain their synchronous API.
@@ -304,6 +391,39 @@ func (s *SyslogClient) eventWriterForReader() *syslogEventWriter {
 // pre-#15699 behavior for callers without an event timestamp.
 func (s *SyslogClient) SendFromEventReader(severity int, message string) bool {
 	return s.SendFromEventReaderAt(time.Time{}, severity, message)
+}
+
+// sendFromSlog is the SyslogSlogHandler entry point (#16083): every slog
+// record, not just EventReader-marked ones, takes the bounded queue so a
+// slow collector can only drop-and-count, never park the logging
+// goroutine. The record's own time is carried so the wire header keeps
+// the log instant under backlog (parity with #15699).
+func (s *SyslogClient) sendFromSlog(at time.Time, severity int, message string) bool {
+	writer := s.eventWriterForReader()
+	if writer == nil {
+		s.droppedWrites.Add(1)
+		return false
+	}
+	return writer.enqueue(enqueueSlog, syslogEventWrite{ts: at, severity: severity, message: message})
+}
+
+// fromSyslogWriter reports whether the calling goroutine is this client's
+// writer loop (#16083).
+func (s *SyslogClient) fromSyslogWriter() bool {
+	return s.inWriter.active()
+}
+
+// noteSlogHandlerDrop counts a slog-handler record dropped because it was
+// emitted from inside this client's own writer loop (#16083). No warning
+// is emitted: warning from the writer would itself be such a record, and
+// the writer is the goroutine parked on the collector. DroppedWrites is
+// the observable.
+func (s *SyslogClient) noteSlogHandlerDrop() {
+	if writer := s.eventWriter.Load(); writer != nil {
+		writer.slogDropped.Add(1)
+		return
+	}
+	s.droppedWrites.Add(1)
 }
 
 // SendFromEventReaderAt is SendFromEventReader with the dataplane
@@ -317,7 +437,7 @@ func (s *SyslogClient) SendFromEventReaderAt(ts time.Time, severity int, message
 		s.droppedWrites.Add(1)
 		return false
 	}
-	return writer.enqueue(syslogEventWrite{ts: ts, severity: severity, message: message})
+	return writer.enqueue(enqueueEvent, syslogEventWrite{ts: ts, severity: severity, message: message})
 }
 
 // SendBinaryFromEventReader queues an immutable copy of a binary record for
@@ -330,7 +450,7 @@ func (s *SyslogClient) SendBinaryFromEventReader(data []byte) bool {
 		return false
 	}
 	copyData := append([]byte(nil), data...)
-	return writer.enqueue(syslogEventWrite{binary: copyData, isBinary: true})
+	return writer.enqueue(enqueueEvent, syslogEventWrite{binary: copyData, isBinary: true})
 }
 
 // now returns the client's clock (overridable in tests).
@@ -914,11 +1034,11 @@ type pendingDropWarn struct {
 // #8597: the #2287 fix moved the drop WARNING out from under the lock but left
 // two `slog.Debug("... reconnecting")` emits on the same failure path under it.
 // Under `xpfd --debug` those records are enabled, so slog.Default() — a
-// SyslogSlogHandler in the daemon — synchronously forwards them to this same
-// client's Send, which re-locks the already-held s.mu on the same goroutine and
-// wedges the caller (the dataplane event reader) forever. The #2287 cells could
-// not see it because their base handler sits at Info, where slog.Debug
-// short-circuits before reaching the handler.
+// SyslogSlogHandler in the daemon — reached this same client's send path
+// while s.mu was held (a synchronous re-entry before #16083); keeping the
+// capture/emit-after-unlock shape means no slog call of any kind runs under
+// s.mu. The #2287 cells could not see it because their base handler sits at
+// Info, where slog.Debug short-circuits before reaching the handler.
 type pendingDebug struct {
 	msg string
 	err error
@@ -995,7 +1115,7 @@ func (r dropReason) String() string {
 func (s *SyslogClient) DroppedWrites() uint64 {
 	dropped := s.droppedWrites.Load()
 	if writer := s.eventWriter.Load(); writer != nil {
-		dropped += writer.dropped.Load()
+		dropped += writer.dropped.Load() + writer.slogDropped.Load()
 	}
 	return dropped
 }

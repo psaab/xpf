@@ -806,17 +806,16 @@ func (d *Daemon) applyAggregator(er *logging.EventReader, cfg *config.Config) {
 // aggregatorFlushJoinTimeout bounds how long stopAggregator waits for the
 // session-aggregation final flush to complete before proceeding to teardown
 // (#6395). The cancel below triggers SessionAggregator.Run's #5313 ctx.Done
-// final flush, which forwards the pending report SYNCHRONOUSLY through the
-// syslog client (logFn -> er.ForwardLogMsg); a stream-syslog sink allows up to
-// defaultWriteTimeout (~4s) PER line (pkg/logging/syslog.go), so a stalled or
-// unreachable collector could otherwise block this join for many seconds. Since
+// final flush, which forwards the pending report through `er.ForwardLogMsg`.
+// Since #16083 the syslog branch queues on the bounded per-client writer, so
+// a stalled collector drops-and-counts instead of blocking the join; the
+// bound remains the belt for the synchronous local-writer branch. Since
 // stopAggregator runs BEFORE the HA takeover fence in runShutdownSequence, an
 // unbounded wait can push the whole stop past the systemd 20s TimeoutStopSec
 // (test/incus/xpfd.service) and get the process SIGKILLed before the peer
 // takeover fence runs. 3s is comfortably under a single write timeout and well
 // under both the #5643 applyCloseoutDrainTimeout (5s) and the fence's share of
 // the stop budget, so a stalled sink can never starve the fence.
-const aggregatorFlushJoinTimeout = 3 * time.Second
 
 // stopAggregator cancels the live session-aggregation generation and JOINS its
 // flush goroutine (and any still-flushing retired generation) at shutdown. The
@@ -827,14 +826,15 @@ const aggregatorFlushJoinTimeout = 3 * time.Second
 // never enabled there is no cancel and the WaitGroup is empty.
 //
 // The join is BOUNDED by aggregatorFlushJoinTimeout (#6395): the final flush
-// forwards synchronously through the syslog client, so a stalled/unreachable
-// sink would otherwise block this wait — which precedes the HA takeover fence —
-// long enough to blow the systemd stop budget and get SIGKILLed before the
-// fence runs. On the happy path the flush completes in milliseconds and the
-// select returns immediately; on a stalled sink we log a warning and PROCEED to
-// teardown, dropping the partial report (the acceptable fallback — a missed
-// fence is worse). The join goroutine is left to finish late: the process is
-// exiting, so leaking the flush's remaining lifetime is harmless.
+// forwards through `er.ForwardLogMsg` — queued for syslog since #16083, still
+// synchronous for local writers — so a stalled sink would otherwise block
+// this wait — which precedes the HA takeover fence — long enough to blow the
+// systemd stop budget and get SIGKILLed before the fence runs. On the happy
+// path the flush completes in milliseconds and the select returns
+// immediately; on a stalled sink we log a warning and PROCEED to teardown,
+// dropping the partial report (the acceptable fallback — a missed fence is
+// worse). The join goroutine is left to finish late: the process is exiting,
+// so leaking the flush's remaining lifetime is harmless.
 //
 // aggReconMu is held only to latch the flag and read+clear the handles, then
 // RELEASED before the join: SessionAggregator.Run does not take aggReconMu, so

@@ -487,13 +487,21 @@ func (er *EventReader) ReplaceSyslogClients(clients []*SyslogClient) {
 
 // ForwardLogMsg sends a pre-formatted message to all configured syslog clients
 // and local log writers. Used by the aggregation reporter.
+//
+// #16083: the syslog branch queues through the same bounded per-client
+// writer as every slog record — the aggregation reporter's goroutine (and
+// the shutdown final-flush join bounded by #6395) must not park on a
+// blackholed collector for a write/dial timeout per line either. The local
+// writers keep their synchronous Send: ForwardLogMsg's callers rely on the
+// error aggregation (Debug below), and LocalLogWriter.Send is a local file
+// write, not a collector stall.
 func (er *EventReader) ForwardLogMsg(severity int, msg string) {
 	er.syslogMu.RLock()
 	clients := er.syslogClients
 	er.syslogMu.RUnlock()
 	for _, c := range clients {
 		if c.ShouldSend(severity) {
-			_ = c.Send(severity, msg)
+			_ = c.SendFromEventReader(severity, msg)
 		}
 	}
 
