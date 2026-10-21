@@ -45,12 +45,28 @@ func asRootOwned16054(t *testing.T) {
 func writeHelper16054(t *testing.T, dir, mode string) string {
 	t.Helper()
 	p := filepath.Join(dir, "xpf-userspace-dp")
-	var m os.FileMode = 0o755
+	m := os.FileMode(0o755)
 	if mode == "writable" {
 		m = 0o777
 	}
 	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), m); err != nil {
 		t.Fatal(err)
+	}
+	if mode == "writable" {
+		// WriteFile's mode is umask-filtered (0777 under umask 022
+		// lands as 0755, silently disarming the writability guard
+		// under test). Chmod is not umask-filtered; assert the bits
+		// actually landed before exercising findBinary.
+		if err := os.Chmod(p, m); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got&0o022 == 0 {
+			t.Fatalf("writable fixture %s has mode %s, want group/world-writable bits set", p, got)
+		}
 	}
 	return p
 }
