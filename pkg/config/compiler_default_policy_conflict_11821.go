@@ -171,3 +171,111 @@ func hasConflictingDefaultPolicyStanzas11821(nodes []*Node) bool {
 	})
 	return found
 }
+
+// --- #15998: an invalid default-policy value beside a valid one -------------
+//
+// defaultPolicyActions12821 and walkConflictingDefaultPolicyStanzas11821 count
+// only the three valid spellings, and compilePolicies' switch previously had
+// no default arm — so `permit-all` followed by a garbage value (via duplicate
+// roots or group restatement on Load/SyncApply) left the earlier permit
+// standing. A single invalid value alone is safe (init is PolicyDeny); the
+// fail-open needs a valid value anywhere plus an invalid value anywhere.
+//
+// The census below walks EVERY authored token of every default-policy
+// stanza (trailing Keys, child names, child key tails, nested children) —
+// not only the compiler's selected action — so a bracket list like
+// `default-policy [ permit-all permit-al ]` or a packed tail like
+// `default-policy { permit-all permit-al; }` is also caught.
+
+// defaultPolicyTokens15998 returns every authored value token inside one
+// default-policy node, mirroring defaultPolicyActions12821's traversal but
+// keeping unsupported tokens instead of discarding them.
+func defaultPolicyTokens15998(node *Node) []string {
+	var tokens []string
+	var collect func(n *Node, root bool)
+	collect = func(n *Node, root bool) {
+		if n == nil {
+			return
+		}
+		if len(n.Keys) > 0 {
+			// Only the stanza ROOT's identity is exempt. A DESCENDANT
+			// node also named `default-policy` is an authored invalid
+			// token in its own right (#15998 fold 3): exempting every
+			// node with that name dropped
+			// `default-policy { permit-all { default-policy; } }`
+			// from the census and left permit-all standing tolerant.
+			if root {
+				// root name is the stanza keyword, not a value
+			} else {
+				tokens = append(tokens, n.Name())
+			}
+			tokens = append(tokens, n.Keys[1:]...)
+		}
+		for _, child := range n.Children {
+			collect(child, false)
+		}
+	}
+	collect(node, true)
+	return tokens
+}
+
+// invalidDefaultPolicyTokens15998 collects every invalid authored token
+// across all default-policy stanzas, in author order.
+func invalidDefaultPolicyTokens15998(nodes []*Node) []string {
+	var invalid []string
+	for _, security := range nodes {
+		if security == nil || security.Name() != "security" {
+			continue
+		}
+		for _, policies := range security.Children {
+			if policies == nil || policies.Name() != "policies" {
+				continue
+			}
+			for _, stanza := range policies.Children {
+				if stanza == nil || stanza.Name() != "default-policy" {
+					continue
+				}
+				toks := defaultPolicyTokens15998(stanza)
+				if len(toks) == 0 {
+					// Missing-value stanza (`default-policy;` with no
+					// keys/children): an authored stanza carrying NO valid
+					// action is invalid (#15998 fold 2), distinct from an
+					// absent stanza (deny init).
+					invalid = append(invalid, "")
+					continue
+				}
+				for _, tok := range toks {
+					// An empty token (quoted "") is INVALID, never
+					// skipped (#15998 fold 2): skipping it left the
+					// selected permit-all standing fail-open.
+					switch tok {
+					case "permit-all", "deny-all", "reject-all":
+					default:
+						invalid = append(invalid, tok)
+					}
+				}
+			}
+		}
+	}
+	return invalid
+}
+
+// hasInvalidDefaultPolicyValue15998 reports whether any default-policy stanza
+// carries any authored token that is not a valid action.
+func hasInvalidDefaultPolicyValue15998(nodes []*Node) bool {
+	return len(invalidDefaultPolicyTokens15998(nodes)) > 0
+}
+
+func validateInvalidDefaultPolicy15998(nodes []*Node, lenient bool) ([]string, error) {
+	invalid := invalidDefaultPolicyTokens15998(nodes)
+	if len(invalid) == 0 {
+		return nil, nil
+	}
+	diagnostic := fmt.Sprintf(
+		"security policies default-policy: invalid value(s) %q are not permit-all, deny-all or reject-all (#15998)",
+		invalid)
+	if !lenient {
+		return nil, fmt.Errorf("%s", diagnostic)
+	}
+	return []string{diagnostic + "; tolerant compilation uses deny-all"}, nil
+}
