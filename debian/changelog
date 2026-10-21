@@ -1,5 +1,19 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Refuse a disputed per-unit host-inbound override on a shared ifindex:
+    when configured logical units collapsed onto one netdev carried
+    different effective host-inbound overrides, the dataplane's flat
+    per-ifindex insert was last-writer-wins, so a low-trust unit inherited
+    its sibling's management admission (for example ssh) purely by
+    snapshot row order. The override is now refused for the whole ifindex
+    and an empty fail-closed sentinel is installed with a build warning,
+    mirroring the contested-zone backstop; ICMP error/PMTUD/ND control
+    traffic is unaffected. Units whose overrides agree, a single
+    configured unit, and units on distinct ifindexes are unchanged
+    (#16057).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Union NAT64 `from routing-instance [ a b ]` lists instead of
     last-wins: compileNAT64 now stamps every member onto the one
     authored rule-set, the strict gate checks every member (a
