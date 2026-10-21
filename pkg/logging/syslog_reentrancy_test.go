@@ -39,6 +39,16 @@ func withSlogDefault(t *testing.T, h slog.Handler) {
 		slog.SetDefault(prev)
 		log.SetOutput(prevWriter)
 		log.SetFlags(prevFlags)
+		// #16083: delivery is async, so a handler's writer goroutine can
+		// outlive the test that installed it. Once the default is restored,
+		// a late record from that writer (e.g. a drop warning) would be
+		// forwarded by the NEXT installed handler to its clients. Closing
+		// this handler's clients retires its writer so no record crosses
+		// the boundary. Tests with a plain text handler have no clients to
+		// close. Close is idempotent for tests that also close.
+		if sh, ok := h.(*SyslogSlogHandler); ok {
+			sh.Close()
+		}
 	})
 }
 
@@ -130,11 +140,13 @@ func TestSlogWarnViaHandlerNoDeadlock(t *testing.T) {
 	}
 }
 
-// TestHandleReentrancyGuardSkipsNestedForward verifies the guard directly: a
-// fake client records each forward; the FIRST forward emits a nested slog.Warn
-// (simulating a drop warning) on the same goroutine. The guard must prevent the
-// nested record from being forwarded to the client, so exactly ONE forward
-// occurs per top-level record (no unbounded recursion, no nested forward).
+// TestHandleReentrancyGuardSkipsNestedForward verifies the writer-scoped
+// guard (#2287 mechanism, narrowed by #16083): a fake client records each
+// forward; the FIRST forward emits a nested slog.Warn (simulating a drop
+// warning) on the writer goroutine. The guard must prevent the nested
+// record from being re-queued to this client, so exactly ONE forward
+// occurs per top-level record (no unbounded queue growth, no nested
+// forward). The nested record still reaches the base handler.
 func TestHandleReentrancyGuardSkipsNestedForward(t *testing.T) {
 	var forwards int32
 	rec := &recordingConn{}
@@ -157,14 +169,38 @@ func TestHandleReentrancyGuardSkipsNestedForward(t *testing.T) {
 	h := NewSyslogSlogHandler(slog.NewTextHandler(io.Discard, nil))
 	h.SetClients([]*SyslogClient{c})
 	withSlogDefault(t, h)
-
 	slog.Info("top-level record")
 
+	// The nested Warn runs synchronously inside the top-level Write (the
+	// hook fires mid-Write), so by the time the write count lands the
+	// nested record has already been dropped on the writer goroutine.
+	// Waiting on the write count — not the hook count — is therefore the
+	// settled signal; the settle below covers a (buggy) re-queue.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&rec.writes) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if n := atomic.LoadInt32(&rec.writes); n == 0 {
+		t.Fatalf("top-level record was never written (forwards=%d dropped=%d)", atomic.LoadInt32(&forwards), c.DroppedWrites())
+	}
+	// The nested Warn is enqueued-then-dropped on the writer goroutine; give
+	// a (buggy) re-queue a chance to produce a second forward before asserting.
+	time.Sleep(50 * time.Millisecond)
 	// Without the guard, the nested Warn would forward a SECOND record to the
 	// client (forwards == 2+). With the guard, only the top-level record is
 	// forwarded (forwards == 1).
 	if got := atomic.LoadInt32(&forwards); got != 1 {
-		t.Fatalf("expected exactly 1 forward (guard skips the nested record), got %d", got)
+		t.Fatalf("expected exactly 1 forward (guard skips the nested record), got %d (writes=%d dropped=%d)", got, atomic.LoadInt32(&rec.writes), c.DroppedWrites())
+	}
+	// The writer must not be wedged by the dropped nested record: a second
+	// top-level record is still delivered.
+	slog.Info("second top-level record")
+	deadline = time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&forwards) < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&forwards); got != 2 {
+		t.Fatalf("second top-level record was not delivered after the nested drop, forwards=%d", got)
 	}
 }
 
@@ -202,6 +238,11 @@ func TestConcurrentHandleNotFalselySkipped(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	// Delivery is now async (#16083): wait for the writer to drain all n.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&forwards) < n && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if got := atomic.LoadInt32(&forwards); int(got) != n {
 		t.Fatalf("expected %d forwards (no false per-handler skip), got %d", n, got)
 	}
@@ -319,50 +360,26 @@ func TestDialFailureCountsAsDialDrop(t *testing.T) {
 	}
 }
 
-// TestHandleNoClientsSkipsGoID is the #2295 fix-on-revert proof: with NO syslog
-// clients configured (the default until syslog config applies), Handle must
-// return before paying the goID() runtime.Stack + ParseUint cost. A counting
-// seam over goIDFn records calls; the no-client path must record zero. Reverting
-// the reorder (calling the guard before the client check) makes goID fire on
-// every record and trips this test.
-func TestHandleNoClientsSkipsGoID(t *testing.T) {
-	var goIDCalls int32
-	prev := goIDFn
-	goIDFn = func() uint64 {
-		atomic.AddInt32(&goIDCalls, 1)
-		return goID()
-	}
-	t.Cleanup(func() { goIDFn = prev })
-
+// TestHandleNoClientsFastPath16083 pins the #2295 fast-path contract,
+// narrowed by #16083: with NO syslog clients configured (the default
+// until syslog config applies), Handle is a pure base forward — the
+// per-client writer check (which pays a runtime.Stack) is only reached
+// with a client present, so the no-client path cannot regress to paying
+// it per record.
+func TestHandleNoClientsFastPath16083(t *testing.T) {
 	h := NewSyslogSlogHandler(slog.NewTextHandler(io.Discard, nil))
 	// No SetClients: the zero-client default.
-
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if err := h.Handle(context.Background(), slog.Record{}); err != nil {
 			t.Fatalf("Handle returned an error on the no-client path: %v", err)
 		}
 	}
-
-	if got := atomic.LoadInt32(&goIDCalls); got != 0 {
-		t.Fatalf("expected goID NOT to be called on the no-client path, got %d calls "+
-			"(runtime.Stack regression #2295)", got)
-	}
 }
 
-// TestHandleWithClientsStillCallsGoID asserts the reorder did NOT disable the
-// re-entrancy guard: when at least one client is present, goID still runs (the
-// guard remains armed). Combined with TestHandleReentrancyGuardSkipsNestedForward
-// (the guard still suppresses the nested forward), this proves the #2287 fix is
-// intact after the #2295 fast-path reorder.
-func TestHandleWithClientsStillCallsGoID(t *testing.T) {
-	var goIDCalls int32
-	prev := goIDFn
-	goIDFn = func() uint64 {
-		atomic.AddInt32(&goIDCalls, 1)
-		return goID()
-	}
-	t.Cleanup(func() { goIDFn = prev })
-
+// TestHandleWithClientsQueuesRecord16083 pins the #16083 cutover: a record
+// handled with a client present is QUEUED and written by the writer
+// goroutine, not synchronously written by Handle.
+func TestHandleWithClientsQueuesRecord16083(t *testing.T) {
 	rec := &recordingConn{}
 	c := &SyslogClient{
 		hostname:          "test",
@@ -376,14 +393,15 @@ func TestHandleWithClientsStillCallsGoID(t *testing.T) {
 	h := NewSyslogSlogHandler(slog.NewTextHandler(io.Discard, nil))
 	h.SetClients([]*SyslogClient{c})
 
-	if err := h.Handle(context.Background(), slog.Record{}); err != nil {
+	if err := h.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "queued", 0)); err != nil {
 		t.Fatalf("Handle returned an error with a client present: %v", err)
 	}
-	if got := atomic.LoadInt32(&goIDCalls); got != 1 {
-		t.Fatalf("expected goID to run once when a client is present (guard armed), got %d", got)
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&rec.writes) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 	if n := atomic.LoadInt32(&rec.writes); n != 1 {
-		t.Fatalf("expected the record to be forwarded to the client, got %d writes", n)
+		t.Fatalf("expected the queued record to be written by the writer, got %d writes", n)
 	}
 }
 

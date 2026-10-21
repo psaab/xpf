@@ -6,14 +6,16 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 )
 
 type eventReaderSlogContextKey struct{}
 
 var eventReaderSlogContext = context.WithValue(context.Background(), eventReaderSlogContextKey{}, true)
 
-// eventReaderSlogInfo marks firewall event logs so their remote syslog copies
-// use the bounded writer instead of blocking the shared EventReader goroutine.
+// eventReaderSlogInfo marks firewall event logs from the EventReader; their
+// remote syslog copies use the same bounded per-client writer as every other
+// slog record (#16083).
 func eventReaderSlogInfo(message string, args ...any) {
 	slog.Default().Log(eventReaderSlogContext, slog.LevelInfo, message, args...)
 }
@@ -31,14 +33,6 @@ var suppressSystemSyslogContext = context.WithValue(eventReaderSlogContext, supp
 // EventReader's stream clients but not this slog sink.
 func eventReaderSlogInfoSuppressSystemSyslog(message string, args ...any) {
 	slog.Default().Log(suppressSystemSyslogContext, slog.LevelInfo, message, args...)
-}
-
-func isEventReaderSlogContext(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	eventReader, _ := ctx.Value(eventReaderSlogContextKey{}).(bool)
-	return eventReader
 }
 
 func isSuppressSystemSyslogContext(ctx context.Context) bool {
@@ -65,15 +59,6 @@ type SyslogSlogHandler struct {
 	shared *syslogClientSet
 	attrs  []slog.Attr
 	groups []string
-	// forwarding is the set of goroutine IDs currently inside the
-	// syslog-forwarding section of Handle. It is the re-entrancy guard
-	// (#2287): if a client's Send emits an slog record (e.g. a drop warning),
-	// slog routes it back through this handler on the SAME goroutine; the
-	// guard skips re-forwarding it to syslog so no under-lock or transitive
-	// slog call can wedge the daemon. Forwarding to the base handler (stderr)
-	// stays unconditional. Shared by pointer across WithAttrs/WithGroup
-	// derivatives so a nested Handle through a derived handler is also caught.
-	forwarding *sync.Map // map[uint64]struct{}
 }
 
 // syslogClientSet is the shared, mutex-guarded client slice behind every member
@@ -86,7 +71,7 @@ type syslogClientSet struct {
 
 // NewSyslogSlogHandler wraps a base slog.Handler with syslog forwarding.
 func NewSyslogSlogHandler(base slog.Handler) *SyslogSlogHandler {
-	return &SyslogSlogHandler{base: base, shared: &syslogClientSet{}, forwarding: &sync.Map{}}
+	return &SyslogSlogHandler{base: base, shared: &syslogClientSet{}}
 }
 
 // loadShared returns the lineage's client set, or nil for a zero-value handler
@@ -150,7 +135,9 @@ func (h *SyslogSlogHandler) Clients() []*SyslogClient {
 	return append([]*SyslogClient(nil), s.clients...)
 }
 
-// Close closes all syslog clients.
+// Close closes all syslog clients. Queued writer records are discarded
+// and counted (the reconfigure path: a client swap must not wait on the
+// old collector).
 func (h *SyslogSlogHandler) Close() {
 	s := h.loadShared()
 	if s == nil {
@@ -166,15 +153,55 @@ func (h *SyslogSlogHandler) Close() {
 	}
 }
 
+// The ShutdownTimeout deadline is a TOTAL bound across all clients, so
+// one stalled collector cannot multiply it per client; each client still
+// gets at least a minimal slice so a healthy one is not starved to zero.
+const slogShutdownClientMinSlice = 10 * time.Millisecond
+
+// ShutdownTimeout orderly-closes the handler for process exit (#16083
+// fold): each client's queued backlog is delivered bounded by the TOTAL
+// timeout (shared deadline, drained concurrently so one hung collector
+// cannot starve healthy ones), then the clients are closed. Whatever a
+// client cannot deliver in its share is discarded and counted by the
+// writer's drop accounting — never silently lost, never unbounded.
+// ShutdownTimeout is the daemon-exit path; Close remains the reconfigure
+// path. Nil-safe and idempotent (a second call finds no clients).
+func (h *SyslogSlogHandler) ShutdownTimeout(timeout time.Duration) {
+	s := h.loadShared()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	clients := s.clients
+	s.clients = nil
+	s.mu.Unlock()
+
+	if timeout <= 0 {
+		for _, c := range clients {
+			c.Close()
+		}
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		remaining := time.Until(deadline)
+		if remaining < slogShutdownClientMinSlice {
+			remaining = slogShutdownClientMinSlice
+		}
+		wg.Add(1)
+		go func(c *SyslogClient, budget time.Duration) {
+			defer wg.Done()
+			c.CloseTimeout(budget)
+		}(c, remaining)
+	}
+	wg.Wait()
+}
+
 // Enabled implements slog.Handler.
 func (h *SyslogSlogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.base.Enabled(ctx, level)
 }
-
-// goIDFn resolves the current goroutine ID. It is a package var so tests can
-// install a counting seam to assert the no-client fast path never pays the
-// runtime.Stack cost (#2295). Production always uses goID.
-var goIDFn = goID
 
 // Handle implements slog.Handler.
 func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
@@ -185,18 +212,15 @@ func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 	// #14612: a record marked suppress-system-syslog (a `then log`-only
 	// FILTER_LOG hit) has already reached the local log via the base
 	// handler above; it must not be copied to the `system syslog host`
-	// clients. Return before the client snapshot / re-entrancy guard so
-	// the suppressed path pays neither.
+	// clients.
 	if isSuppressSystemSyslogContext(ctx) {
 		return err
 	}
 
-	// Snapshot the client set first. With no syslog clients configured (the
-	// default until syslog config applies) there is nothing to forward, so
-	// return before paying for the re-entrancy guard's goID() — runtime.Stack +
-	// ParseUint per record is wasted work on the common no-client path (#2295).
-	// The set is shared across the lineage (#9916 F-056); the snapshot is taken
-	// under the shared lock and the sends run outside it, as before.
+	// Snapshot the client set. With no syslog clients configured (the
+	// default until syslog config applies) there is nothing to forward.
+	// The set is shared across the lineage (#9916 F-056); the snapshot is
+	// taken under the shared lock and the sends run outside it, as before.
 	var clients []*SyslogClient
 	if s := h.loadShared(); s != nil {
 		s.mu.RLock()
@@ -208,36 +232,26 @@ func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 		return err
 	}
 
-	// Re-entrancy guard (#2287): if this goroutine is already inside the
-	// syslog-forwarding section (a client Send emitted an slog record that
-	// routed back here), skip re-forwarding to syslog. Defense-in-depth so no
-	// under-lock or transitive slog call from the send path can wedge the
-	// daemon by recursing into a client's Send. Only reached when clients are
-	// present, so goID() runs only when there is something to forward (#2295).
-	if h.forwarding != nil {
-		gid := goIDFn()
-		if _, busy := h.forwarding.Load(gid); busy {
-			return err
-		}
-		h.forwarding.Store(gid, struct{}{})
-		defer h.forwarding.Delete(gid)
-	}
-
-	// Forward to syslog clients. Firewall events use the per-client bounded
-	// writer because they originate on the shared EventReader goroutine; other
-	// slog callers retain the synchronous Send contract.
+	// Forward to syslog clients through the bounded per-client writer
+	// (#16083). Non-event slog callers previously did a synchronous Send, so
+	// a blackholed TCP/TLS collector could park arbitrary daemon goroutines
+	// (commit/apply, reconcile, API handlers) behind the client mutex for
+	// the write/dial timeout. A record the writer goroutine fails to
+	// deliver — or one enqueued from inside that writer's own send path
+	// (e.g. a drop warning) — is dropped and counted rather than
+	// synchronously re-delivered, so Handle never blocks on the collector
+	// and a nested record can never wedge the writer.
 	severity := slogLevelToSyslog(r.Level)
 	msg := formatRecord(r, h.attrs, h.groups)
-	eventReader := isEventReaderSlogContext(ctx)
 	for _, c := range clients {
 		if !c.ShouldSend(severity) {
 			continue
 		}
-		if eventReader {
-			_ = c.SendFromEventReader(severity, msg)
-		} else {
-			c.Send(severity, msg)
+		if c.fromSyslogWriter() {
+			c.noteSlogHandlerDrop()
+			continue
 		}
+		_ = c.sendFromSlog(r.Time, severity, msg)
 	}
 
 	return err
@@ -246,22 +260,20 @@ func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 // WithAttrs implements slog.Handler.
 func (h *SyslogSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &SyslogSlogHandler{
-		base:       h.base.WithAttrs(attrs),
-		shared:     h.loadOrAllocShared(), // share the client set (#9916 F-056)
-		attrs:      append(append([]slog.Attr{}, h.attrs...), attrs...),
-		groups:     h.groups,
-		forwarding: h.forwarding, // share the re-entrancy guard (#2287)
+		base:   h.base.WithAttrs(attrs),
+		shared: h.loadOrAllocShared(), // share the client set (#9916 F-056)
+		attrs:  append(append([]slog.Attr{}, h.attrs...), attrs...),
+		groups: h.groups,
 	}
 }
 
 // WithGroup implements slog.Handler.
 func (h *SyslogSlogHandler) WithGroup(name string) slog.Handler {
 	return &SyslogSlogHandler{
-		base:       h.base.WithGroup(name),
-		shared:     h.loadOrAllocShared(), // share the client set (#9916 F-056)
-		attrs:      h.attrs,
-		groups:     append(append([]string{}, h.groups...), name),
-		forwarding: h.forwarding, // share the re-entrancy guard (#2287)
+		base:   h.base.WithGroup(name),
+		shared: h.loadOrAllocShared(), // share the client set (#9916 F-056)
+		attrs:  h.attrs,
+		groups: append(append([]string{}, h.groups...), name),
 	}
 }
 

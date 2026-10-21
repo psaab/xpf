@@ -3,13 +3,14 @@ package daemon
 // daemon_aggregator_flush_bound_6395_test.go — #6395 regression coverage.
 //
 // stopAggregator's cancel triggers SessionAggregator.Run's #5313 ctx.Done final
-// flush, which forwards the pending report SYNCHRONOUSLY through the syslog
-// client (logFn -> er.ForwardLogMsg). A stream-syslog sink allows up to
-// defaultWriteTimeout (~4s) PER line, so a stalled/unreachable collector makes
-// that forward block. stopAggregator runs in runShutdownSequence BEFORE the HA
-// takeover fence, so before #6395 the plain `d.aggWg.Wait()` join was UNBOUNDED:
-// a stalled sink could delay the fence long enough to blow the systemd 20s
-// TimeoutStopSec and get the process SIGKILLed before the peer takeover ran.
+// flush, which forwards the pending report through `er.ForwardLogMsg`. Before
+// #16083 the syslog branch was synchronous (up to defaultWriteTimeout ~4s per
+// line against a stalled collector); it now queues on the bounded writer, and
+// the synchronous local-writer branch remains. stopAggregator runs in
+// runShutdownSequence BEFORE the HA takeover fence, so before #6395 the plain
+// `d.aggWg.Wait()` join was UNBOUNDED: a stalled sink could delay the fence
+// long enough to blow the systemd 20s TimeoutStopSec and get the process
+// SIGKILLed before the peer takeover ran.
 //
 // The join is now bounded by aggregatorFlushJoinTimeout. These tests prove the
 // bound fires on a stalled flush (RED-on-revert: reverting to a plain

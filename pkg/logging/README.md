@@ -279,9 +279,25 @@ for direct callers, while `logEvent` uses `SendFromEventReader` /
 `file.Write`+`rotate()` (generation renames, directory fsync, reopen) runs on
 the reader goroutine that also carries HA session sync. Binary records are
 copied into the bounded `asyncAuditWriter` queue (4096 per writer); overflow
-or a retired writer drops and counts via `DroppedWrites()`. Firewall-event slog records emitted by that reader
-carry an internal context marker so `SyslogSlogHandler` uses the same queue;
-ordinary slog callers keep synchronous forwarding. Each queue is bounded to 128
+or a retired writer drops and counts via `DroppedWrites()`. Every slog
+record — firewall-event records from that reader and ordinary daemon
+records alike — takes the same per-client queue through
+`SyslogSlogHandler` (#16083): a synchronous `Send` there parked arbitrary
+daemon goroutines behind a blackholed collector. Each queue is bounded
+to 128 records; slog records additionally cap at 64 KiB each (~8 MiB per
+client), overflow drops and counts, and a slog-side overflow warns at
+most once a second. A record emitted from inside a client's own writer
+loop (e.g. a drop warning) is dropped and counted, never re-queued.
+
+**Orderly shutdown drain (#16083 fold).** `Close` still retires a writer
+by discarding and counting its queue (the reconfigure path — a swap must
+not wait on the old collector). Process exit uses
+`SyslogSlogHandler.ShutdownTimeout`: each client's backlog is delivered
+behind a flush barrier within one shared total deadline (daemon: 2s at
+the very end of `runShutdownSequence`, after `shutdown complete`), then
+closed; whatever cannot be delivered is discarded and counted, so an
+accepted record is never silently lost at exit. `DroppedWrites` is the
+observable for the undelivered remainder.
 
 **Write deadlines still apply to the writer and direct callers (#9025).** They
 apply to UDP too — a connected-UDP `Write` can block indefinitely on a full
@@ -639,29 +655,28 @@ bounded by this deadline.
   Debug-level base handler, and carries a control cell asserting Debug
   really is enabled there — without it the deadlock cells would pass
   whether or not the emit sits under the lock.
-- **Handler re-entrancy guard (#2287).** As defense-in-depth,
-  `SyslogSlogHandler.Handle` tracks the set of goroutine IDs currently
-  inside its syslog-forwarding section. If a client `Send` emits any
-  slog record (drop warning or otherwise) that routes back through the
-  handler on the SAME goroutine, the nested record is NOT re-forwarded
-  to syslog — so no present or future under-lock/transitive slog call
-  from the send path can wedge the daemon by recursing into a client's
-  `Send`. The guard is per-goroutine (not a per-handler flag), so
-  concurrent `Handle` calls on different goroutines are never falsely
-  skipped. Forwarding to the base handler (stderr) stays unconditional,
-  even on a re-entrant call, so records are never lost from local logs.
-  `Handle` snapshots the client set FIRST and returns before the guard
-  when there are no clients (the default until syslog config applies), so
-  the guard's `goID()` (`runtime.Stack` + `ParseUint`) never runs on the
-  common no-client path (#2295) — only when a record is actually being
-  forwarded to at least one client.
+- **Writer-scoped re-entrancy drop (#2287, narrowed #16083).** The
+  handler-wide goroutine guard is gone: Handle no longer synchronously
+  enters a client's `Send`, so it cannot recurse. What remains is
+  per-client and writer-scoped — a record emitted from inside a
+  client's own writer loop (a drop warning from `SendAt`/`SendBinary`)
+  is dropped and counted instead of re-queued onto the writer that
+  would have to deliver it. The check is per-client goroutine context,
+  not a handler flag, so concurrent records for other clients queue
+  normally. Forwarding to the base handler (stderr) stays unconditional,
+  so records are never lost from local logs. `Handle` snapshots the
+  client set first and returns before any per-client check when there
+  are no clients (the default until syslog config applies), so the
+  common no-client path pays no `runtime.Stack` (#2295).
 
-`DroppedWrites()` includes transport write failures and EventReader queue
-overflow/retirement. `DroppedDials()` counts post-write-failure reconnect dial
-failures; `DroppedCooldown()` counts reconnects suppressed by cooldown. Transport
-warnings are rate-limited to ≤1/s so a flapping target cannot spam the log
-(CLAUDE.md logging rules). Queue-overflow drops are counted without a reader-side
-warning because `slog` can synchronously forward to syslog.
+`DroppedWrites()` includes transport write failures, bounded-queue
+overflow/retirement (EventReader and slog records), writer-loop self-drops,
+and oversize slog records. `DroppedDials()` counts post-write-failure
+reconnect dial failures; `DroppedCooldown()` counts reconnects suppressed
+by cooldown. Transport warnings are rate-limited to ≤1/s so a flapping
+target cannot spam the log (CLAUDE.md logging rules). EventReader queue
+overflow is counted without a reader-side warning; slog overflow warns
+≤1/s from the logging goroutine (#16083).
 
 **#9165 — every transport counts a write failure, and the counters have
 a reader.** Two halves, both of which had to be true for the defect to be
@@ -705,15 +720,18 @@ counter, not the level.
 Tests (`syslog_resilience_test.go`, `syslog_reentrancy_test.go`) use
 deterministic fakes — a deadline-honouring conn, an always-fail conn, a
 timeout conn, a recording conn, a controllable clock, and a dial seam
-(`dialFn`/`nowFn`) — plus a `goIDFn` seam — with no sleeps. The hang
+(`dialFn`/`nowFn`) — with no sleeps for the transport cells. The hang
 test fails if the write deadline is removed; the cooldown test fails if
 the cooldown gate is removed; the accept-then-reset test (#2302) fails
 (sees a 50-dial storm) if the cooldown is not armed on a
-dial-success-then-write-failure; the re-entrancy test deadlocks (and
-times out) if the drop warning is moved back under `s.mu` or the handler
-guard is removed; the timeout-drop test fails (sees a dial) if a write
-timeout reconnects; the no-client test (#2295) fails (sees `goID` calls)
-if `Handle` runs the re-entrancy guard before the client check. The
+dial-success-then-write-failure; the re-entrancy test fails if the drop
+warning is moved back under `s.mu` or the writer-scoped drop is removed;
+the timeout-drop test fails (sees a dial) if a write timeout reconnects;
+the no-client test (#2295) pins the fast path structurally (per-client
+check, never reached without clients). The #16083 cells
+(`syslog_slog_async_16083_test.go`) fail if a non-event record is written
+synchronously: Handle parks on the stalled collector instead of
+returning from the queue handoff.
 lazy-connect tests (`syslog_lazy_connect_3351_test.go`) fail if the
 constructor reverts to dropping a TCP/TLS client when the receiver is
 down at apply (`got nil` — stream permanently disabled) or if a lazy
@@ -1025,8 +1043,9 @@ with no valueType and no validator, so any string reached the dialer's resolver.
   wire decision instant, not the worker's dequeue `time.Now()`.
   Explicit stamps are normalized to local time (the location the
   pre-#15699 `time.Now()` stamps carried); a zero stamp falls back to
-  now, so direct `Send` callers (aggregator, slog handler) keep
-  receive-time headers. Binary records already embed `rec.Time`.
+  now, so direct `Send` callers keep receive-time headers; slog-handler
+  records carry `r.Time` through the queue (#16083). Binary records
+  already embed `rec.Time`.
   Pins: `event_decision_time_15699_test.go`.
 - **SESSION_CLOSE log lines carry no `action` (#2513).** A session close
   is a termination event, not a forwarding decision, so it has no
