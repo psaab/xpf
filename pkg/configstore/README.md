@@ -295,6 +295,7 @@ inline archive-site-password warning in #651).
   the `grpc.MaxRecvMsgSize` / `http.MaxBytesReader` transport caps for the
   HA peer-sync path and any non-transport caller. Real configs are well
   under 1 MiB, so the ceiling never rejects a legitimate config.
+- **Flat-load node budget (#15999):** all flat replay verbs (LoadSet, LoadMerge flat + hierarchical-lowered, LoadOverride flat) plus the single Set path enforce the shared `config.MaxParseNodes` (200,000) budget in parser units (`1+len(Keys)` per node). Final contract: work caps only pre-replay (line count; per-line parser-token bound; single oversized line refused unapplied); gross transient work accumulates per-line CREATION charges (existing-leaf re-sets 0 by path identity, new suffix segments charged, annotate/activate 0, deactivate +1) capped at 2× budget; adjudication is RESULT-based at the end only (refuse iff final > cap and no progress vs base), with no intermediate refusal — order-independent mixed repair passes. Candidate stays pristine via clone-discard on refusal.
 - **Parse diagnostics do not echo input text (#10723 F4).** `ParseError` retains
   its detailed message for trusted programmatic inspection, but its `Error()`
   string contains only the line and column. Parser messages can embed the

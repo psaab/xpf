@@ -69,8 +69,15 @@ func (s *Store) setAsQuotedGroupedPlantClass(sessionID, plantClass string, path 
 		return fmt.Errorf("not in configuration mode")
 	}
 	before := s.candidate.Clone()
+	if len(path) > config.MaxParseNodes {
+		return fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+	}
 	if err := s.candidate.SetPathQuotedGrouped(path, quoted, grouped, closed...); err != nil {
 		return err
+	}
+	if s.candidate.NodeCount() > config.MaxParseNodes {
+		s.candidate = before
+		return fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
 	s.touchConfigLockLocked()       // #4476: refresh the config-lock idle lease
@@ -613,21 +620,8 @@ func parseOverrideContent(content string) (*config.ConfigTree, error) {
 	// Flat: replay onto an EMPTY tree. Starting from the candidate would make
 	// this a merge, which is the other verb.
 	tree := &config.ConfigTree{}
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		// #3442 M3, same rule as the merge path: once flat format is
-		// selected, every non-comment line MUST carry a recognized verb.
-		// Otherwise ParseSetVerb treats free text as a bare `set` path and
-		// materializes a junk node — which is the #7527 defect one layer down.
-		if !hasFlatVerb(trimmed) {
-			return nil, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
-		}
-		if err := applyEditLine(tree, trimmed); err != nil {
-			return nil, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-		}
+	if _, err := replayFlatLines15999(tree, lines); err != nil {
+		return nil, err
 	}
 	return tree, nil
 }
@@ -688,17 +682,8 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 		// instead — the bare-path default in ParseSetVerb is reserved for
 		// internal callers that prepend the verb themselves (SetEdit, Deactivate,
 		// Activate, ...).
-		for i, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			if !hasFlatVerb(trimmed) {
-				return fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
-			}
-			if err := applyEditLine(working, trimmed); err != nil {
-				return fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-			}
+		if _, err := replayFlatLines15999(working, lines); err != nil {
+			return err
 		}
 	} else {
 		// #15718: parse the RAW body so /* ... */ comments attach as
@@ -726,14 +711,13 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 		// the deactivate verb (#2008 H1) to preserve Inactive — applying it as
 		// a plain set would silently re-activate the node.
 		setLines := strings.Split(tree.FormatSetForLoadMerge(), "\n")
-		for _, line := range setLines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			if err := applyEditLine(working, trimmed); err != nil {
-				return fmt.Errorf("merge: %w", err)
-			}
+		if _, err := replayFlatLinesMode15999(working, setLines, false); err != nil {
+			// Hierarchical branch: parent behavior wrapped the RAW
+			// applyEditLine error with "merge:" (no scrub) — restoring
+			// it greens the #12516 diagnostics. The lines here are
+			// FormatSet-generated from an already-parsed tree, not
+			// raw operator input.
+			return fmt.Errorf("merge: %w", err)
 		}
 	}
 
@@ -800,6 +784,127 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 	default: // "set" (or a bare, unprefixed path)
 		return tree.SetPathQuotedGrouped(path, quoted, grouped, closed)
 	}
+}
+
+// replayFlatLines15999 applies flat lines to working with the shared node
+// budget enforced AS YOU BUILD (#15999 fold): the >budget line-count guard
+// fires BEFORE any replay (all verbs refuse in <1s — per-line charging
+// alone crossed only after ~25k lines of sibling-search work), each line
+// is charged its token-count upper bound BEFORE its cost is paid, plus an
+// exact recount every 256 lines and at the end.
+
+func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, error) {
+	return replayFlatLinesMode15999(working, lines, true)
+}
+
+// replayFlatLinesMode15999 is replayFlatLines15999 with scrub control:
+// scrub=true wraps line errors via scrubLoadLineError (flat operator
+// input — raw lines can carry secrets, #14718). scrub=false returns the
+// raw applyEditLine error and is used ONLY for hierarchical LoadMerge
+// lowering, where lines are FormatSet-generated from an already-parsed
+// tree. Raw errors there can contain config PATH tokens — the authored
+// path keywords/values exactly as written in the source config (e.g.
+// #12516 refusals echo joinKeysProvGrouped(path)). That is paths-only
+// in the #14718 sense distinguished by scrubLoadLineError: the error
+// carries the line's own path, which the caller already supplied as
+// hierarchical config (not a denied class's redacted show output
+// recovered line-by-line); no separate secret VALUE beyond what the
+// author wrote in that path is synthesized. Restoring parent behavior
+// byte-identically (merge: %w) is the deliberate disposition; the flat
+// path keeps scrubbing because its lines are raw operator input.
+// flatVerb15999 classifies a line's verb via the same tokenizer the replay
+// uses (strings.Fields — tabs and any whitespace split, #15999 fold), never
+// literal "delete " prefixes.
+func flatVerb15999(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func isShrinkVerb15999(line string) bool {
+	switch flatVerb15999(line) {
+	case "delete", "deactivate":
+		return true
+	}
+	return false
+}
+
+func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub bool) (int, error) {
+	// FINAL CONTRACT v3 (#15999): no mode flags, NO intermediate
+	// result adjudication. Bounds: (a) FINAL result only — refuse
+	// iff final > cap AND final >= base (no progress); (b) transient
+	// WORK bound — cumWork accumulates PER-LINE positive charges
+	// continuously (2*fields upper bound of units a growing line can
+	// create; annotate/activate 0, deactivate +1, delete 0), refusing
+	// at 2*cap regardless of insert+delete churn inside any window
+	// (net-at-recount would stay 0 under churn — gross is bounded);
+	// (c) single line fields > cap refuses unapplied; (d) line-count
+	// work cap pre-replay. Periodic recounts reconcile the tree count
+	// for the final check only, never adjudicate. Clone discarded on
+	// refusal keeps the candidate pristine.
+	nonEmpty := 0
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			nonEmpty++
+		}
+	}
+	if nonEmpty > config.MaxParseNodes {
+		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds work budget %d (#15999)", nonEmpty, config.MaxParseNodes)
+	}
+	baseExact := working.NodeCount()
+	cumWork := 0
+	count := 0
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !hasFlatVerb(line) {
+			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
+		}
+		// Charge from the PARSER's tokenization (quoted string = 1
+		// token), reusing the edit-line parser — strings.Fields
+		// would count 200k words inside one quoted value and
+		// refuse a ~3-unit line.
+		_, path, _, _, _, perr := config.ParseSetVerbGroupedClosed(line)
+		toks := len(path) + 1 // +verb
+		if perr != nil {
+			toks = len(strings.Fields(line)) + 1 // fail-safe upper bound
+		}
+		if toks-1 > config.MaxParseNodes {
+			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+		}
+		charge := 2 * toks
+		switch flatVerb15999(line) {
+		case "annotate", "activate", "delete":
+			charge = 0
+		case "deactivate":
+			charge = 1
+		default: // set/edit: charge = NEW NODES created (path identity)
+			if perr == nil {
+				charge = working.CreationCharge15999(path)
+			}
+		}
+		cumWork += charge
+		if cumWork > 2*config.MaxParseNodes {
+			return count, fmt.Errorf("line %d: flat load exceeds transient work budget %d (#15999)", i+1, 2*config.MaxParseNodes)
+		}
+		if err := applyEditLine(working, line); err != nil {
+			if scrub {
+				return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
+			}
+			return count, err
+		}
+		count++
+	}
+	final := working.NodeCount()
+	if final > config.MaxParseNodes && final >= baseExact {
+		return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+	}
+	return count, nil
 }
 
 // loadLineError is the scrubbed form of a flat-load line failure (#14718).
@@ -875,24 +980,13 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 		return 0, fmt.Errorf("parse error: %w", err)
 	}
 	working := s.candidate.Clone()
-	count := 0
-	for i, line := range strings.Split(flatContent, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		// #3442 M4: a non-blank, non-comment line that is not a recognized
-		// verb is malformed input (e.g. "sett system host-name fw"). Previously
-		// LoadSet silently `continue`d on it, so REST/gRPC/CLI returned OK while
-		// dropping the intended command — the operator could commit a config
-		// missing it. Fail with a line-numbered error instead.
-		if !hasFlatVerb(line) {
-			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
-		}
-		if err := applyEditLine(working, line); err != nil {
-			return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-		}
-		count++
+	// #15999: shared node budget in parser units (1+len(Keys) per node),
+	// enforced inside replayFlatLines15999 (line-count guard first, then
+	// charge-as-you-build).
+	lines := strings.Split(flatContent, "\n")
+	count, err := replayFlatLines15999(working, lines)
+	if err != nil {
+		return count, err
 	}
 	config.StampChangedEventPlantClasses(s.candidate, working, plantClass)
 	s.candidate = working

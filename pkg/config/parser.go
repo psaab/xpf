@@ -84,6 +84,95 @@ const maxParseErrors = 64
 // so a key-dense statement reached ~4x this bound at the input cap.
 const maxParseNodes = 200_000
 
+// MaxParseNodes is the shared AST node budget (#15999): the hierarchical
+// parser enforces it via maxParseNodes, and flat `set` replay (LoadSet /
+// SetPath) must enforce the same budget — it previously capped only bytes,
+// so ~16 MiB of short set lines built several times this many nodes under
+// the store lock.
+const MaxParseNodes = maxParseNodes
+
+// NodeCount returns the tree size in the parser's budget units (nil-safe):
+// 1 + len(Keys) per node (#15195), the same unit maxParseNodes charges.
+// Counting nodes alone would let one key-dense flat line (e.g.
+// `set unknown <200k tokens>`) sail past the shared budget as "1 node".
+func (t *ConfigTree) NodeCount() int {
+	if t == nil {
+		return 0
+	}
+	return countNodeUnits(t.Children)
+}
+
+func countNodeUnits(nodes []*Node) int {
+	n := 0
+	for _, x := range nodes {
+		if x == nil {
+			continue
+		}
+		n += 1 + len(x.Keys) + countNodeUnits(x.Children)
+	}
+	return n
+}
+
+// CreationCharge15999 returns parser units a set line CREATES by PATH
+// identity: resolve strictly; unresolved suffix segments each create
+// ~1 node + its keys (charge = 2*len(suffix) as chain bound). Fully
+// resolved to an existing leaf = 0 (value swap in place — alternating
+// fw1/fw2 charge 0). Subsumes prefix cases (unresolved tails charge).
+func (t *ConfigTree) CreationCharge15999(path []string) int {
+	if t == nil || len(path) == 0 {
+		return 0
+	}
+	children := t.Children
+	pos := 0
+	var deepest *Node
+	lastConsumed, lastKeys := 0, 0
+	for pos < len(path) {
+		found := false
+		for _, child := range children {
+			consumed := matchNodeKeysFull(child, path, pos)
+			if consumed > 0 {
+				deepest = child
+				lastConsumed, lastKeys = consumed, len(child.Keys)
+				children = child.Children
+				pos += consumed
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+	if pos >= len(path) {
+		if deepest != nil && deepest.IsLeaf && lastConsumed == lastKeys {
+			return 0
+		}
+		return 2
+	}
+	// Unresolved suffix. BUT a set whose path diverges only in the
+	// terminal VALUE of an existing leaf (fw1 -> fw2: navigation
+	// consumed system + host-name container, suffix is just the new
+	// value) replaces that leaf in place (ast_edit single-value
+	// replace) — creation 0. Detect: deepest is a container whose
+	// children include a leaf with the same leading keys as the
+	// suffix head... simpler: if the unresolved suffix is a single
+	// segment and deepest has any leaf child, the edit targets that
+	// leaf's value slot. Charge by suffix otherwise.
+	// Value-swap: navigation stopped at the leaf's PARENT because
+	// the leaf node itself carries [host-name fw1] as one node —
+	// deepest is `system`, unresolved suffix is [host-name fw2]
+	// (2 segments). If deepest has a leaf child whose FIRST key
+	// equals the suffix head, the edit replaces that leaf's value.
+	if deepest != nil && !deepest.IsLeaf && len(path)-pos >= 1 {
+		for _, ch := range deepest.Children {
+			if ch.IsLeaf && len(ch.Keys) > 0 && ch.Keys[0] == path[pos] {
+				return 0
+			}
+		}
+	}
+	return 2 * (len(path) - pos)
+}
+
 // Parser implements a recursive descent parser for Junos configuration syntax.
 type Parser struct {
 	lexer  *Lexer
