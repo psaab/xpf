@@ -52,6 +52,14 @@ func acquireDaemonLockAt(path string) (*daemonLockLease, error) {
 	if err != nil {
 		return nil, fmt.Errorf("daemon lock: open %s: %w", path, err)
 	}
+	// #16050: assert 0600 BEFORE the flock, like every other lock site —
+	// a pre-existing 0644 file (shell first-creator) must not be flocked
+	// while still world-readable. On failure we do not yet hold the
+	// lock, so a plain Close is the whole cleanup.
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("daemon lock: tighten %s to 0600: %w", path, err)
+	}
 	if err := flockFn(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		ownerPID := readDaemonLockPID(f)
 		_ = f.Close()
@@ -62,11 +70,6 @@ func acquireDaemonLockAt(path string) (*daemonLockLease, error) {
 			return nil, fmt.Errorf("%w; use the 'cli' binary for remote commands, or 'systemctl restart xpfd' to restart the daemon", ErrDaemonAlreadyRunning)
 		}
 		return nil, fmt.Errorf("daemon lock: flock %s: %w", path, err)
-	}
-	if err := f.Chmod(0o600); err != nil {
-		lease := &daemonLockLease{file: f}
-		lease.release()
-		return nil, fmt.Errorf("daemon lock: tighten %s to 0600: %w", path, err)
 	}
 	if err := writeDaemonLockPID(f); err != nil {
 		lease := &daemonLockLease{file: f}
