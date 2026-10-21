@@ -41,6 +41,55 @@ func TestInvalidSecondDefaultPolicyFailsClosed15998(t *testing.T) {
 	}
 }
 
+// #15998 fold: an invalid token anywhere in ONE stanza — bracket list,
+// packed tail, nested child — must also fail closed, not only an invalid
+// *selected* action in a separate stanza. The selected action stays
+// permit-all in every case below.
+func TestInvalidTrailingTokenInOneStanzaFailsClosed15998(t *testing.T) {
+	cases := []struct{ name, text, invalid string }{
+		{"bracket list permit then typo", "security { policies { default-policy [ permit-all permit-al ]; } }", "permit-al"},
+		{"packed block permit then typo", "security { policies { default-policy { permit-all permit-al; } } }", "permit-al"},
+		{"flat key with typo block body", "security { policies { default-policy permit-all { permit-al; } } }", "permit-al"},
+		{"nested child typo", "security { policies { default-policy { permit-all { permit-al; } } } }", "permit-al"},
+		{"bracket deny then typo still invalid", "security { policies { default-policy [ deny-all bogus ]; } }", "bogus"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			if err == nil {
+				t.Fatal("strict compile accepted invalid trailing default-policy token")
+			}
+			if !strings.Contains(err.Error(), tc.invalid) || !strings.Contains(err.Error(), "#15998") {
+				t.Fatalf("strict error %q does not name %q / #15998", err, tc.invalid)
+			}
+			for _, compile := range []struct {
+				name string
+				fn   func(*ConfigTree) (*Config, error)
+			}{
+				{"lenient", CompileConfigLenient},
+				{"node lenient", func(tr *ConfigTree) (*Config, error) { return CompileConfigForNodeLenient(tr, 0) }},
+			} {
+				cfg, err := compile.fn(defaultPolicyTree11821(t, tc.text))
+				if err != nil {
+					t.Fatalf("%s compile: %v", compile.name, err)
+				}
+				if cfg.Security.DefaultPolicy != PolicyDeny {
+					t.Fatalf("%s: invalid trailing token compiled as %v, want deny-all", compile.name, cfg.Security.DefaultPolicy)
+				}
+				found := false
+				for _, w := range cfg.Warnings {
+					if strings.Contains(w, "#15998") && strings.Contains(w, tc.invalid) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("%s: missing #15998 warning naming %q: %v", compile.name, tc.invalid, cfg.Warnings)
+				}
+			}
+		})
+	}
+}
+
 func TestSingleInvalidDefaultPolicyAloneIsDeny15998(t *testing.T) {
 	cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, "security { policies { default-policy { bogus; } } }"))
 	if err != nil {

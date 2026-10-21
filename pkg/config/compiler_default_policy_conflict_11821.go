@@ -175,16 +175,46 @@ func hasConflictingDefaultPolicyStanzas11821(nodes []*Node) bool {
 // --- #15998: an invalid default-policy value beside a valid one -------------
 //
 // defaultPolicyActions12821 and walkConflictingDefaultPolicyStanzas11821 count
-// only the three valid spellings, and compilePolicies' switch has no default
-// arm — so `permit-all` followed by a garbage value (via duplicate roots or
-// group restatement on Load/SyncApply) left the earlier permit standing.
-// A single invalid value alone is safe (init is PolicyDeny); the fail-open
-// needs a valid value anywhere plus an invalid value anywhere.
+// only the three valid spellings, and compilePolicies' switch previously had
+// no default arm — so `permit-all` followed by a garbage value (via duplicate
+// roots or group restatement on Load/SyncApply) left the earlier permit
+// standing. A single invalid value alone is safe (init is PolicyDeny); the
+// fail-open needs a valid value anywhere plus an invalid value anywhere.
+//
+// The census below walks EVERY authored token of every default-policy
+// stanza (trailing Keys, child names, child key tails, nested children) —
+// not only the compiler's selected action — so a bracket list like
+// `default-policy [ permit-all permit-al ]` or a packed tail like
+// `default-policy { permit-all permit-al; }` is also caught.
 
-// hasInvalidDefaultPolicyValue15998 reports whether any default-policy stanza
-// carries a non-empty value that is not a valid action. Empty stanzas carry
-// no value and are not invalid here (cardinality gates own them).
-func hasInvalidDefaultPolicyValue15998(nodes []*Node) bool {
+// defaultPolicyTokens15998 returns every authored value token inside one
+// default-policy node, mirroring defaultPolicyActions12821's traversal but
+// keeping unsupported tokens instead of discarding them.
+func defaultPolicyTokens15998(node *Node) []string {
+	var tokens []string
+	var collect func(*Node)
+	collect = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if len(n.Keys) > 0 {
+			if n.Name() != "default-policy" {
+				tokens = append(tokens, n.Name())
+			}
+			tokens = append(tokens, n.Keys[1:]...)
+		}
+		for _, child := range n.Children {
+			collect(child)
+		}
+	}
+	collect(node)
+	return tokens
+}
+
+// invalidDefaultPolicyTokens15998 collects every invalid authored token
+// across all default-policy stanzas, in author order.
+func invalidDefaultPolicyTokens15998(nodes []*Node) []string {
+	var invalid []string
 	for _, security := range nodes {
 		if security == nil || security.Name() != "security" {
 			continue
@@ -197,53 +227,32 @@ func hasInvalidDefaultPolicyValue15998(nodes []*Node) bool {
 				if stanza == nil || stanza.Name() != "default-policy" {
 					continue
 				}
-				if len(stanza.Children) > 1 {
-					continue // #11367 ambiguous block owns this shape
-				}
-				action := defaultPolicyAction11821(stanza)
-				if action == "" {
-					continue
-				}
-				switch action {
-				case "permit-all", "deny-all", "reject-all":
-				default:
-					return true
+				for _, tok := range defaultPolicyTokens15998(stanza) {
+					if tok == "" {
+						continue
+					}
+					switch tok {
+					case "permit-all", "deny-all", "reject-all":
+					default:
+						invalid = append(invalid, tok)
+					}
 				}
 			}
 		}
 	}
-	return false
+	return invalid
+}
+
+// hasInvalidDefaultPolicyValue15998 reports whether any default-policy stanza
+// carries any authored token that is not a valid action.
+func hasInvalidDefaultPolicyValue15998(nodes []*Node) bool {
+	return len(invalidDefaultPolicyTokens15998(nodes)) > 0
 }
 
 func validateInvalidDefaultPolicy15998(nodes []*Node, lenient bool) ([]string, error) {
-	if !hasInvalidDefaultPolicyValue15998(nodes) {
+	invalid := invalidDefaultPolicyTokens15998(nodes)
+	if len(invalid) == 0 {
 		return nil, nil
-	}
-	// Collect the invalid tokens for the diagnostic.
-	var invalid []string
-	for _, security := range nodes {
-		if security == nil || security.Name() != "security" {
-			continue
-		}
-		for _, policies := range security.Children {
-			if policies == nil || policies.Name() != "policies" {
-				continue
-			}
-			for _, stanza := range policies.Children {
-				if stanza == nil || stanza.Name() != "default-policy" || len(stanza.Children) > 1 {
-					continue
-				}
-				action := defaultPolicyAction11821(stanza)
-				if action == "" {
-					continue
-				}
-				switch action {
-				case "permit-all", "deny-all", "reject-all":
-				default:
-					invalid = append(invalid, action)
-				}
-			}
-		}
 	}
 	diagnostic := fmt.Sprintf(
 		"security policies default-policy: invalid value(s) %q are not permit-all, deny-all or reject-all (#15998)",
