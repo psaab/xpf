@@ -1,12 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Scope tunnel-unit port mirroring per logical unit: a mirror input
-    naming wg0.1 previously keyed on (ifindex, VID 0) alone, so every
-    sibling tunnel unit sharing the wg0 netdev (wg0.0 included) was
-    mirrored to the analyzer. Mirror snapshots now carry the ingress
-    unit number and the dataplane matches a unit-scoped row only for
-    packets whose resolved logical ingress is that unit (#16063).
-
+  * Refuse port mirroring of one tunnel unit on a shared netdev: a
+    mirror input naming wg0.1 previously keyed on (ifindex, VID 0)
+    alone, so every sibling tunnel unit sharing the wg0 netdev (wg0.0
+    included) was mirrored to the analyzer, and packet metadata
+    carries no per-unit identity to do better. Such inputs are now
+    refused with a recorded exclusion (mirroring the bare device,
+    for all units, still works); unambiguous units keep per-unit
+    keying via the new ingress-unit scope (#16063).
 
 xpf (0.0.0) unstable; urgency=medium
 

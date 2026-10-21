@@ -71,16 +71,17 @@ pub(in crate::afxdp) fn resolve_mirror_config(
     // maps native traffic to its unit, whose scoped row is keyed by
     // the parent bind ifindex here, so check both the raw and the
     // logical bind keys at VID 0 and at the packet VID.
-    // #16063: the scoped key also carries the logical unit number.
-    // Every tunnel unit on one netdev has VID 0, so (ifindex, VID)
-    // alone mirrors sibling tunnel units; the unit is recovered from
-    // the resolved logical ifindex's configured name. A packet whose
-    // logical ingress cannot be named matches no scoped row.
-    if let Some(unit) = forwarding
-        .ifindex_to_config_name
+    // #16063: a unit-scoped row whose (ifindex, VID) is shared by
+    // sibling tunnel units is never published by the Go builder (it
+    // refuses the input), so a scoped row here always keys a unit the
+    // packet's VID + logical resolution can identify (VLAN units, unit
+    // 0). Match the packet's unit when its logical ingress is a unit
+    // row; otherwise fall through to the bare table only.
+    let unit = forwarding
+        .ingress_unit_by_logical
         .get(&logical_ifindex)
-        .and_then(|name| logical_unit_number(name))
-    {
+        .copied();
+    if let Some(unit) = unit {
         if let Some(cfg) = forwarding
             .mirror_configs_scoped
             .get(&(ingress_ifindex, ingress_vlan_id, unit))
@@ -101,14 +102,6 @@ pub(in crate::afxdp) fn resolve_mirror_config(
         .get(&logical_ifindex)
         .or_else(|| forwarding.mirror_configs.get(&ingress_ifindex))
         .copied()
-}
-
-/// #16063: the logical unit number named by a configured interface
-/// name (`wg0.1` -> 1), or `None` for a bare interface name. Mirrors
-/// the `logical_unit_number` parse in forwarding_build/interfaces.rs.
-fn logical_unit_number(name: &str) -> Option<i32> {
-    name.rsplit_once('.')
-        .and_then(|(_, unit)| unit.parse::<i32>().ok())
 }
 
 #[inline]

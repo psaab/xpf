@@ -566,9 +566,9 @@ const (
 	// is a field of an EXISTING walked struct, so the golden below moves.
 	// Version 63 (#15932) adds NAT64RuleSnapshot from_zones; the
 	// golden moves.
-	// Version 64 (#16063) adds MirrorConfigSnapshot ingress_unit; the
-	// golden moves.
-	snapshotShapeVersion8892 = 64
+	// Version 65 (#16063, after #16117 took 64) adds MirrorConfigSnapshot
+	// ingress_unit; the golden moves.
+	snapshotShapeVersion8892 = 65
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

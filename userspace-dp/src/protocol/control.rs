@@ -292,10 +292,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // fail-closed, but the explicit flag is the durable record.
 // v62 -> v63 (#15932): NAT64RuleSnapshot carries from_zones; a v62
 // helper ignores it and scopes to the singular from_zone only.
-// v63 -> v64 (#16063): MirrorConfigSnapshot carries ingress_unit; a
-// v63 helper keys a tunnel unit-scoped mirror by (ifindex, VID 0)
-// alone and mirrors every sibling tunnel unit — the defect.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 64;
+// v64 -> v65 (#16063; after #16117 took v64): MirrorConfigSnapshot
+// carries ingress_unit; a v64 helper keys a tunnel unit-scoped mirror
+// by (ifindex, VID 0) alone and mirrors every sibling — the defect.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 65;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

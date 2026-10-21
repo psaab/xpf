@@ -122,12 +122,8 @@ fn unit0_scoped_mirror_does_not_match_tagged_sibling_15113() {
     let mut forwarding = ForwardingState::default();
     forwarding.ingress_logical_ifindex.insert((11, 0), 11);
     forwarding.ingress_logical_ifindex.insert((11, 100), 11100);
-    forwarding
-        .ifindex_to_config_name
-        .insert(11, "ge-0/0/1.0".to_string());
-    forwarding
-        .ifindex_to_config_name
-        .insert(11100, "ge-0/0/1.1".to_string());
+    forwarding.ingress_unit_by_logical.insert(11, 0);
+    forwarding.ingress_unit_by_logical.insert(11100, 1);
     forwarding.mirror_configs_scoped.insert(
         (11, 0, 0),
         MirrorRuntimeConfig {
@@ -168,9 +164,7 @@ fn unit0_scoped_mirror_does_not_match_tagged_sibling_15113() {
     // Tagged-unit control: scoped VID 100 matches only VID 100.
     let mut tagged = ForwardingState::default();
     tagged.ingress_logical_ifindex.insert((11, 100), 11100);
-    tagged
-        .ifindex_to_config_name
-        .insert(11100, "ge-0/0/1.1".to_string());
+    tagged.ingress_unit_by_logical.insert(11100, 1);
     tagged.mirror_configs_scoped.insert(
         (11, 100, 1),
         MirrorRuntimeConfig {
@@ -189,59 +183,76 @@ fn unit0_scoped_mirror_does_not_match_tagged_sibling_15113() {
 }
 
 #[test]
-fn tunnel_unit1_scoped_mirror_does_not_match_unit0_sibling_16063() {
-    // #16063 (SI-5): wg0.0 and wg0.1 share the wg0 netdev (ifindex 42)
-    // and both carry VID 0 — there is no VLAN tag on a tunnel inner
-    // packet to tell them apart. A mirror scoped to wg0.1 must not
-    // capture wg0.0 inner packets. The unit identity comes from the
-    // resolved logical ingress's configured name: the provider FIB (not
-    // captured in ForwardingState) sends unit-1 traffic to its
-    // connected prefix on logical 1001 and unit-0 traffic to 1000, so
-    // the state models them as distinct logical ifindexes named wg0.1 /
-    // wg0.0 arriving on the shared bind ifindex 42.
-    let mut forwarding = ForwardingState::default();
-    forwarding.ingress_logical_ifindex.insert((42, 0), 1001);
-    forwarding
-        .ifindex_to_config_name
-        .insert(1001, "wg0.1".to_string());
-    forwarding
-        .ifindex_to_config_name
-        .insert(1000, "wg0.0".to_string());
-    forwarding.mirror_configs_scoped.insert(
-        (42, 0, 1),
-        MirrorRuntimeConfig {
+fn tunnel_units_sharing_ifindex_have_no_unit_identity_16063() {
+    // #16063 (SI-5) production shape, built through the real
+    // forwarding builder — NOT hand-seeded logical indices: wg0 base +
+    // wg0.0 + wg0.1 all on ifindex 42, VID 0 (the Go builder's rows for
+    // an interface-level WireGuard tunnel; TunnelNameMap maps every
+    // unit onto the one netdev). The poll path's packet metadata is
+    // (42, VID 0) for inner packets of BOTH units (decap rebinds to the
+    // endpoint's single logical ifindex), so no per-packet unit
+    // identity exists: `ingress_unit_by_logical` must carry NO entry
+    // for 42, and a (hand-built, builder-refused) wg0.1 scoped row must
+    // match neither unit's packet. The Go builder refuses the wg0.1
+    // input outright; this pins the Rust half of that refusal.
+    use crate::protocol::snapshot::InterfaceSnapshot as SnapIface;
+    let snapshot = crate::protocol::snapshot::ConfigSnapshot {
+        interfaces: vec![
+            SnapIface {
+                name: "wg0".to_string(),
+                linux_name: "wg0".to_string(),
+                ifindex: 42,
+                tunnel: true,
+                ..SnapIface::default()
+            },
+            SnapIface {
+                name: "wg0.0".to_string(),
+                linux_name: "wg0".to_string(),
+                ifindex: 42,
+                parent_ifindex: 42,
+                is_unit: Some(true),
+                tunnel: true,
+                ..SnapIface::default()
+            },
+            SnapIface {
+                name: "wg0.1".to_string(),
+                linux_name: "wg0".to_string(),
+                ifindex: 42,
+                parent_ifindex: 42,
+                is_unit: Some(true),
+                tunnel: true,
+                ..SnapIface::default()
+            },
+            SnapIface {
+                name: "ge-0/0/9.0".to_string(),
+                linux_name: "ge-0-0-9".to_string(),
+                ifindex: 22,
+                is_unit: Some(true),
+                ..SnapIface::default()
+            },
+        ],
+        mirror_configs: vec![MirrorConfigSnapshot {
+            ingress_ifindex: 42,
             output_ifindex: 22,
             rate: 0,
-        },
+            ingress_vlan_id: 0,
+            unit_scoped: true,
+            ingress_unit: 1,
+        }],
+        ..crate::protocol::snapshot::ConfigSnapshot::default()
+    };
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
+    assert!(
+        !forwarding.ingress_unit_by_logical.contains_key(&42),
+        "shared tunnel ifindex 42 must have no per-unit identity: {:?}",
+        forwarding.ingress_unit_by_logical
     );
     let mut counter = 0;
-    // wg0.1 inner packet: its FIB egress is logical 1001 (wg0.1).
+    // The only metadata a wg0.0 or wg0.1 inner packet can present.
     assert_eq!(
         select_mirror_config(&forwarding, 42, 0, &mut counter),
-        Some(MirrorRuntimeConfig {
-            output_ifindex: 22,
-            rate: 0
-        }),
-        "wg0.1 scoped row must mirror wg0.1 inner packets"
-    );
-    // wg0.0 inner packet arrives on the same (42, VID 0) but its
-    // logical ingress resolves to unit 0: no mirror.
-    let mut sibling = ForwardingState::default();
-    sibling.ingress_logical_ifindex.insert((42, 0), 1000);
-    sibling
-        .ifindex_to_config_name
-        .insert(1000, "wg0.0".to_string());
-    sibling.mirror_configs_scoped.insert(
-        (42, 0, 1),
-        MirrorRuntimeConfig {
-            output_ifindex: 22,
-            rate: 0,
-        },
-    );
-    assert_eq!(
-        select_mirror_config(&sibling, 42, 0, &mut counter),
         None,
-        "wg0.1 scoped row must not mirror wg0.0 sibling inner packets"
+        "a wg0.1 scoped row on shared ifindex 42 must mirror neither sibling"
     );
 }
 
@@ -425,11 +436,9 @@ fn live_mirror_requires_exact_queue_when_output_is_multiqueue() {
 fn live_mirror_queue_full_drops_before_enqueue() {
     let target_live = Arc::new(BindingLiveState::new());
     target_live.set_max_pending_tx(1);
-    assert!(
-        target_live
-            .try_enqueue_tx_owned(test_tx_request(0x11, 22))
-            .is_ok()
-    );
+    assert!(target_live
+        .try_enqueue_tx_owned(test_tx_request(0x11, 22))
+        .is_ok());
     let mut mirror_targets = MirrorTargetMap::default();
     mirror_targets.insert(
         &BindingIdentity {
@@ -523,11 +532,9 @@ fn live_mirror_queue_full_reserves_headroom_above_mirror_limit() {
     let target_live = Arc::new(BindingLiveState::new());
     target_live.set_max_pending_tx(MIRROR_PENDING_LIMIT * 2);
     for _ in 0..MIRROR_PENDING_LIMIT {
-        assert!(
-            target_live
-                .try_enqueue_tx_owned(test_tx_request(0x11, 22))
-                .is_ok()
-        );
+        assert!(target_live
+            .try_enqueue_tx_owned(test_tx_request(0x11, 22))
+            .is_ok());
     }
     let mut mirror_targets = MirrorTargetMap::default();
     mirror_targets.insert(
@@ -731,11 +738,9 @@ fn sampled_live_mirror_queue_full_advances_sampler_for_selected_6114() {
     let ingress_live = BindingLiveState::new();
     let target_live = Arc::new(BindingLiveState::new());
     target_live.set_max_pending_tx(1);
-    assert!(
-        target_live
-            .try_enqueue_tx_owned(test_tx_request(0x33, 22))
-            .is_ok()
-    );
+    assert!(target_live
+        .try_enqueue_tx_owned(test_tx_request(0x33, 22))
+        .is_ok());
     let mut mirror_targets = MirrorTargetMap::default();
     mirror_targets.insert(
         &BindingIdentity {
@@ -826,11 +831,9 @@ fn flow_cache_nonsampled_does_not_reserve_full_queue_6114() {
     let target_live = Arc::new(BindingLiveState::new());
     // Drive the cross-worker clone queue to its admission cap.
     target_live.set_max_pending_tx(1);
-    assert!(
-        target_live
-            .try_enqueue_tx_owned(test_tx_request(0x33, 22))
-            .is_ok()
-    );
+    assert!(target_live
+        .try_enqueue_tx_owned(test_tx_request(0x33, 22))
+        .is_ok());
     let mut mirror_targets = MirrorTargetMap::default();
     mirror_targets.insert(
         &BindingIdentity {
@@ -1092,10 +1095,31 @@ fn tagged_mirror_frame(vid: Option<u16>) -> Vec<u8> {
 fn mirror_vlan_snapshot(ingress_frame_vid: Option<u16>) -> (ConfigSnapshot, Vec<u8>) {
     let snapshot = ConfigSnapshot {
         interfaces: vec![
-            InterfaceSnapshot { ifindex: 6, parent_ifindex: 0, vlan_id: 0, ..InterfaceSnapshot::default() },
-            InterfaceSnapshot { ifindex: 20080, parent_ifindex: 6, vlan_id: 80, ..InterfaceSnapshot::default() },
-            InterfaceSnapshot { ifindex: 22, parent_ifindex: 0, vlan_id: 0, hardware_addr: "02:00:00:00:00:16".to_string(), ..InterfaceSnapshot::default() },
-            InterfaceSnapshot { ifindex: 200, parent_ifindex: 22, vlan_id: 90, ..InterfaceSnapshot::default() },
+            InterfaceSnapshot {
+                ifindex: 6,
+                parent_ifindex: 0,
+                vlan_id: 0,
+                ..InterfaceSnapshot::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 20080,
+                parent_ifindex: 6,
+                vlan_id: 80,
+                ..InterfaceSnapshot::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 22,
+                parent_ifindex: 0,
+                vlan_id: 0,
+                hardware_addr: "02:00:00:00:00:16".to_string(),
+                ..InterfaceSnapshot::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 200,
+                parent_ifindex: 22,
+                vlan_id: 90,
+                ..InterfaceSnapshot::default()
+            },
         ],
         mirror_configs: vec![MirrorConfigSnapshot {
             ingress_ifindex: 20080,
@@ -1111,10 +1135,26 @@ fn mirror_vlan_snapshot(ingress_frame_vid: Option<u16>) -> (ConfigSnapshot, Vec<
 }
 
 fn assert_mirror_frame_vid90(frame: &[u8], original_payload_len: usize) {
-    assert_eq!(&frame[12..14], &[0x81, 0x00], "clone must carry an 802.1Q tag");
-    assert_eq!(u16::from_be_bytes([frame[14], frame[15]]) & 0x0fff, 90, "clone VID must be output unit 90, not ingress");
-    assert_eq!(&frame[16..18], &[0x08, 0x00], "inner ethertype must follow the output tag");
-    assert_eq!(&frame[18..], &[0x45u8; 62][..], "payload must be preserved byte-for-byte");
+    assert_eq!(
+        &frame[12..14],
+        &[0x81, 0x00],
+        "clone must carry an 802.1Q tag"
+    );
+    assert_eq!(
+        u16::from_be_bytes([frame[14], frame[15]]) & 0x0fff,
+        90,
+        "clone VID must be output unit 90, not ingress"
+    );
+    assert_eq!(
+        &frame[16..18],
+        &[0x08, 0x00],
+        "inner ethertype must follow the output tag"
+    );
+    assert_eq!(
+        &frame[18..],
+        &[0x45u8; 62][..],
+        "payload must be preserved byte-for-byte"
+    );
 }
 
 #[test]
@@ -1122,11 +1162,32 @@ fn sampled_live_mirror_rewrites_ingress_vlan_to_output_vlan_15114() {
     let ingress_live = BindingLiveState::new();
     let target_live = Arc::new(BindingLiveState::new());
     let mut mirror_targets = MirrorTargetMap::default();
-    mirror_targets.insert(&BindingIdentity { slot: 9, queue_id: 0, worker_id: 1, interface: Arc::<str>::from("mirror-out"), ifindex: 22 }, target_live.clone());
+    mirror_targets.insert(
+        &BindingIdentity {
+            slot: 9,
+            queue_id: 0,
+            worker_id: 1,
+            interface: Arc::<str>::from("mirror-out"),
+            ifindex: 22,
+        },
+        target_live.clone(),
+    );
     let (snapshot, frame) = mirror_vlan_snapshot(Some(80));
     let forwarding = build_forwarding_state(&snapshot);
     let mut sample_counter = 0;
-    let result = enqueue_sampled_mirror_clone_to_live(&ingress_live, &mirror_targets, &forwarding, 6, 80, 0, &mut sample_counter, &frame, test_meta(), None, 0);
+    let result = enqueue_sampled_mirror_clone_to_live(
+        &ingress_live,
+        &mirror_targets,
+        &forwarding,
+        6,
+        80,
+        0,
+        &mut sample_counter,
+        &frame,
+        test_meta(),
+        None,
+        0,
+    );
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
@@ -1140,11 +1201,32 @@ fn sampled_live_mirror_pushes_output_vlan_for_untagged_ingress_15114() {
     let ingress_live = BindingLiveState::new();
     let target_live = Arc::new(BindingLiveState::new());
     let mut mirror_targets = MirrorTargetMap::default();
-    mirror_targets.insert(&BindingIdentity { slot: 9, queue_id: 0, worker_id: 1, interface: Arc::<str>::from("mirror-out"), ifindex: 22 }, target_live.clone());
+    mirror_targets.insert(
+        &BindingIdentity {
+            slot: 9,
+            queue_id: 0,
+            worker_id: 1,
+            interface: Arc::<str>::from("mirror-out"),
+            ifindex: 22,
+        },
+        target_live.clone(),
+    );
     let (snapshot, frame) = mirror_vlan_snapshot(None);
     let forwarding = build_forwarding_state(&snapshot);
     let mut sample_counter = 0;
-    let result = enqueue_sampled_mirror_clone_to_live(&ingress_live, &mirror_targets, &forwarding, 6, 80, 0, &mut sample_counter, &frame, test_meta(), None, 0);
+    let result = enqueue_sampled_mirror_clone_to_live(
+        &ingress_live,
+        &mirror_targets,
+        &forwarding,
+        6,
+        80,
+        0,
+        &mut sample_counter,
+        &frame,
+        test_meta(),
+        None,
+        0,
+    );
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
@@ -1154,19 +1236,47 @@ fn sampled_live_mirror_pushes_output_vlan_for_untagged_ingress_15114() {
 
 #[test]
 fn same_worker_mirror_rewrites_ingress_vlan_to_output_vlan_15114() {
-    let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0), BindingWorker::new_for_mirror_test(1, 0, 22, 0)];
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
     let lookup = WorkerBindingLookup::from_bindings(&bindings);
     let (snapshot, frame) = mirror_vlan_snapshot(Some(80));
     let forwarding = build_forwarding_state(&snapshot);
     let mirror_targets = MirrorTargetMap::default();
     let (left, rest) = bindings.split_at_mut(0);
     let (ingress, right) = rest.split_first_mut().expect("ingress binding");
-    let result = enqueue_mirror_clone(left, 0, ingress, right, &lookup, &mirror_targets, &forwarding, MirrorRuntimeConfig { output_ifindex: 200, rate: 0 }, 0, &frame, test_meta(), None, 0);
+    let result = enqueue_mirror_clone(
+        left,
+        0,
+        ingress,
+        right,
+        &lookup,
+        &mirror_targets,
+        &forwarding,
+        MirrorRuntimeConfig {
+            output_ifindex: 200,
+            rate: 0,
+        },
+        0,
+        &frame,
+        test_meta(),
+        None,
+        0,
+    );
     assert_eq!(result, MirrorCloneResult::Enqueued);
     let target = &bindings[1];
-    let req = target.tx_pipeline.pending_tx_prepared.front().expect("mirror prepared request");
+    let req = target
+        .tx_pipeline
+        .pending_tx_prepared
+        .front()
+        .expect("mirror prepared request");
     assert_eq!(req.egress_ifindex, 200);
-    let out = target.umem.area().slice(req.offset as usize, req.len as usize).expect("mirror frame");
+    let out = target
+        .umem
+        .area()
+        .slice(req.offset as usize, req.len as usize)
+        .expect("mirror frame");
     assert_mirror_frame_vid90(out, frame.len());
 }
 #[test]
@@ -1393,10 +1503,20 @@ fn cross_worker_mirror_setup(
     );
     let binding_lookup = WorkerBindingLookup::default(); // empty -> None -> else branch
     let mut forwarding = ForwardingState::default();
-    forwarding
-        .mirror_configs
-        .insert(11, MirrorRuntimeConfig { output_ifindex: 22, rate });
-    (ingress, binding_lookup, mirror_targets, forwarding, target_live)
+    forwarding.mirror_configs.insert(
+        11,
+        MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate,
+        },
+    );
+    (
+        ingress,
+        binding_lookup,
+        mirror_targets,
+        forwarding,
+        target_live,
+    )
 }
 
 /// #5167 FAIL-ON-REVERT: a NON-sampled cross-worker packet must NOT reserve the
@@ -1412,11 +1532,9 @@ fn cross_worker_nonsampled_does_not_reserve_full_queue_5167() {
         cross_worker_mirror_setup(2);
     // Drive the cross-worker clone queue to its admission cap.
     target_live.set_max_pending_tx(1);
-    assert!(
-        target_live
-            .try_enqueue_tx_owned(test_tx_request(0x33, 22))
-            .is_ok()
-    );
+    assert!(target_live
+        .try_enqueue_tx_owned(test_tx_request(0x33, 22))
+        .is_ok());
     // rate=2 + counter=1 -> mirror_sample_allows == false (this packet is NOT
     // selected).
     ingress.mirror_sample_counter = 1;
@@ -1470,11 +1588,9 @@ fn cross_worker_sampled_reports_queue_full_5167() {
     let (mut ingress, lookup, mirror_targets, forwarding, target_live) =
         cross_worker_mirror_setup(2);
     target_live.set_max_pending_tx(1);
-    assert!(
-        target_live
-            .try_enqueue_tx_owned(test_tx_request(0x33, 22))
-            .is_ok()
-    );
+    assert!(target_live
+        .try_enqueue_tx_owned(test_tx_request(0x33, 22))
+        .is_ok());
     // rate=2 + counter=0 -> selected.
     ingress.mirror_sample_counter = 0;
 
@@ -1502,7 +1618,10 @@ fn cross_worker_sampled_reports_queue_full_5167() {
         Some(MirrorCloneResult::QueueFullCrossWorker),
         "a selected packet on a full queue must report cross-worker pressure",
     );
-    assert_eq!(ingress.mirror_sample_counter, 1, "the selected packet consumed a sample");
+    assert_eq!(
+        ingress.mirror_sample_counter, 1,
+        "the selected packet consumed a sample"
+    );
 }
 
 /// #5167 positive: a SELECTED cross-worker packet on a non-full queue clones to
@@ -1536,7 +1655,10 @@ fn cross_worker_sampled_enqueues_clone_5167() {
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
     let req = queued.pop_front().expect("cross-worker mirror clone");
-    assert!(req.mirror_clone, "cloned request must carry mirror identity");
+    assert!(
+        req.mirror_clone,
+        "cloned request must carry mirror identity"
+    );
     assert_eq!(req.bytes, frame);
 }
 
@@ -1667,7 +1789,9 @@ fn mirror_clone_obeys_analyzer_output_filter_and_filter_removal_restores_it() {
             pkt_len: frame.len() as u16,
             ..ForwardPacketMeta::default()
         },
-        Some(&crate::afxdp::tx::test_support::test_session_key(12345, 443)),
+        Some(&crate::afxdp::tx::test_support::test_session_key(
+            12345, 443,
+        )),
         0,
     );
     assert_eq!(
@@ -1707,7 +1831,9 @@ fn mirror_clone_obeys_analyzer_output_filter_and_filter_removal_restores_it() {
             pkt_len: frame.len() as u16,
             ..ForwardPacketMeta::default()
         },
-        Some(&crate::afxdp::tx::test_support::test_session_key(12345, 443)),
+        Some(&crate::afxdp::tx::test_support::test_session_key(
+            12345, 443,
+        )),
         0,
     );
     assert_eq!(

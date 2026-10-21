@@ -625,6 +625,7 @@ fn build_fallible_forwarding_state(
         &excluded_local_v6,
     )?;
     interfaces::populate_egress(snapshot, &mut state, &iface_ctx)?;
+    state.ingress_unit_by_logical = interfaces::ingress_unit_by_logical(snapshot);
     // #6458/#13181: include each admitted member row's RG, not inherited
     // parent ingress aliases.
     interfaces::populate_zone_to_rgs(snapshot, &mut state);
