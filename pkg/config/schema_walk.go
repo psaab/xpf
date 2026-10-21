@@ -27,7 +27,38 @@ import (
 // pass through byte-identical. Validators that return their own
 // errors (ValidateCryptHash, #16066) must still be value-free at the
 // source; this is the walker-level net for formatter-built text.
+// pathHasSecretIndex reports whether fullPath carries any
+// secret-indexed token (fold 6): the CONSTRUCTION-TIME test for
+// "this error's operands sit ON a known secret leaf". Unlike the
+// belt, it has no length/vocabulary exception — on a secret leaf,
+// operands are operator values and are dropped unconditionally.
+func pathHasSecretIndex(fullPath []string) bool {
+	return len(secretIndices(fullPath)) > 0
+}
+
+// redactArgsOnSecretLeaf replaces EVERY string argument with
+// SecretRedacted when fullPath is secret-indexed (fold 6). String
+// args on a secret leaf are operator operands (extra/trailing/
+// modifier tokens); non-string args (counts, args-arity) are kept.
+// Defect-class format text is untouched, so diagnostics keep their
+// class ("unknown modifier <redacted>").
+func redactArgsOnSecretLeaf(fullPath []string, args []interface{}) []interface{} {
+	if !pathHasSecretIndex(fullPath) {
+		return args
+	}
+	out := make([]interface{}, len(args))
+	for i, a := range args {
+		if _, ok := a.(string); ok {
+			out[i] = SecretRedacted
+		} else {
+			out[i] = a
+		}
+	}
+	return out
+}
+
 func schemaErrorf(fullPath []string, format string, args ...interface{}) error {
+	args = redactArgsOnSecretLeaf(fullPath, args)
 	msg := fmt.Sprintf(format, args...)
 	return fmt.Errorf("%s", scrubSecretTokens(fullPath, msg))
 }
@@ -37,6 +68,7 @@ func schemaErrorf(fullPath []string, format string, args ...interface{}) error {
 // the complete key path of the leaf the detail describes.
 func schemaPathErrorf(fullPath []string, format string, args ...interface{}) error {
 	joined := strings.Join(redactSecretPath(fullPath), " ")
+	args = redactArgsOnSecretLeaf(fullPath, args)
 	detail := fmt.Sprintf(format, args...)
 	return schemaErrorf(fullPath, "%s: %s", joined, detail)
 }
@@ -220,14 +252,14 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	msg := err.Error()
 	// Whole-string equality (reviewer cross-field shape): if the
 	// entire rendered error EQUALS a secret value, no substring
-	// needle can fire (the delimiters are the string boundaries).
-	// Neutralize before any classification rebuild.
+	// needle can fire. Compute the neutralized text but DO NOT
+	// return it bare (fold 6): classification below must preserve
+	// the wrapper/sentinel even on an exact match.
+	wholeEq := false
 	for _, v := range allValues {
-		if v != "" && msg == v {
-			return fmt.Errorf("%s", SecretRedacted)
-		}
-		if v != "" && msg == strconv.Quote(v) {
-			return fmt.Errorf("%s", strconv.Quote(SecretRedacted))
+		if v != "" && (msg == v || msg == strconv.Quote(v)) {
+			wholeEq = true
+			break
 		}
 	}
 	// (Cross-field completion is handled in the wrapper arms via
@@ -235,6 +267,9 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	// value across the path/keyword boundary even when the value
 	// never occurs as one substring of the rendered text.)
 	scrubbed := scrubSecretValuesText(values, msg)
+	if wholeEq {
+		scrubbed = SecretRedacted
+	}
 	scrubText := func(s string) string { return scrubSecretValuesText(values, s) }
 	fieldScrub := func(s string) string {
 		out := scrubText(s)
@@ -252,6 +287,16 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	// including a complete secret value spanning the whole rendered
 	// string. Only the fallthrough plain-text case may return err
 	// unchanged.
+	// Classify FIRST (fold 5/6): wrapper fields are rebuilt from
+	// scrubbed parts even when the rendered message happens to be
+	// unchanged — an unscrubbed field can re-print a secret the
+	// message scrub never saw as free text. Whole-string-equality
+	// neutralization (above) only sets the scrubbed TEXT; it never
+	// returns early, so classification survives an exact match.
+	// GLM F1: each rebuilt wrapper's rendered Error() is re-scrubbed
+	// per-arm below — path+template+keyword can reassemble a secret
+	// verbatim across field boundaries even when each field alone
+	// was clean.
 	if IsTypedLeafSchemaError(err) {
 		if scrubbed == msg {
 			return err
@@ -260,7 +305,7 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	}
 	var zoneErr *unknownSecurityZoneChildSchemaError
 	if errors.As(err, &zoneErr) {
-		return &unknownSecurityZoneChildSchemaError{
+		rebuilt := &unknownSecurityZoneChildSchemaError{
 			path: scrubText(zoneErr.path),
 			keyword: func() string {
 				if fieldCompletesValue(allValues, msg, zoneErr.keyword) {
@@ -269,10 +314,18 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 				return fieldScrub(zoneErr.keyword)
 			}(),
 		}
+		// GLM F1: re-scrub the RENDERED rebuilt error; if rendering
+		// reassembled a secret, neutralize the keyword field (the
+		// only operator-derived field) and re-render.
+		if scrubSecretValuesText(values, rebuilt.Error()) != rebuilt.Error() {
+			rebuilt.keyword = SecretRedacted
+			rebuilt.path = scrubSecretValuesText(values, rebuilt.path)
+		}
+		return rebuilt
 	}
 	var polErr *unknownSecurityPoliciesChildSchemaError12217
 	if errors.As(err, &polErr) {
-		return &unknownSecurityPoliciesChildSchemaError12217{
+		rebuilt := &unknownSecurityPoliciesChildSchemaError12217{
 			path: scrubText(polErr.path),
 			keyword: func() string {
 				if fieldCompletesValue(allValues, msg, polErr.keyword) {
@@ -287,6 +340,12 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 				return fieldScrub(polErr.content)
 			}(),
 		}
+		if scrubSecretValuesText(values, rebuilt.Error()) != rebuilt.Error() {
+			rebuilt.keyword = SecretRedacted
+			rebuilt.content = scrubSecretValuesText(values, rebuilt.content)
+			rebuilt.path = scrubSecretValuesText(values, rebuilt.path)
+		}
+		return rebuilt
 	}
 	var topErr *unknownTopLevelStanzaSchemaError
 	if errors.As(err, &topErr) {
@@ -370,7 +429,10 @@ func neutralizeLoc(allValues []string, loc string) string {
 // the secret-registry keywords: a value equal to any of them is a
 // word the diagnostics legitimately print.
 func beltSecretValues(values []string) []string {
-	out := values[:0]
+	// Fresh slice (GLM F3): values[:0] would alias and corrupt the
+	// caller's collectSecretValues result, which wrapper arms still
+	// read via allValues after this call.
+	out := make([]string, 0, len(values))
 	for _, v := range values {
 		if len(v) < 4 {
 			continue
@@ -383,16 +445,18 @@ func beltSecretValues(values []string) []string {
 	return out
 }
 
+// (Vocabulary derivation is documented at isPublicVocabulary.)
+
 // isPublicVocabulary reports whether s is public vocabulary for the
-// belt: a secret-registry keyword, or a word inside public
-// diagnostic sentences. It must NOT reference setSchema:
-// beltSecretValues -> scrubSecretTokens -> schemaErrorf is named by
-// schema initializers (validateSecurityLogHostNode15270), so any
-// path from here to setSchema is an initialization cycle (proven by
-// the compiler). The schema-keyword direction is handled
-// structurally instead: paths render from redactSecretPath (names
-// only) and wrapper keywords are vocabulary by construction, so
-// the belt only needs to suppress common-word VALUES.
+// belt: a secret-registry keyword or a schema-grammar keyword (from
+// schemaGrammarKeywords, populated in schema.go init — never walked
+// from here; setSchema references would be an init cycle). NOTE
+// (fold 6): validator fixed-sentence words are NOT vocabulary —
+// exempting them let operands equal to those words (e.g. the
+// plaintext `plaintext` itself) slip through scrubSecretTokens.
+// The one place a validator sentence appears for a secret leaf,
+// typedLeafInvalidErrorf's reason, is fully masked on its secret
+// branch before the belt ever sees it.
 func isPublicVocabulary(s string) bool {
 	if secretLeafKeywords[s] {
 		return true
@@ -400,12 +464,7 @@ func isPublicVocabulary(s string) bool {
 	if _, ok := secretLeafKeywordsByRoot[s]; ok {
 		return true
 	}
-	switch s {
-	case "set", "commands", "security", "zones", "zone", "trust", "untrust",
-		"system", "services", "provider", "policy", "policies":
-		return true
-	}
-	return false
+	return schemaGrammarKeywords[s]
 }
 
 // extractLocName returns the name-only "(at ...)" location from a
@@ -1919,6 +1978,19 @@ func IsTypedLeafSchemaError(err error) bool {
 // class ("unknown modifier") survives; non-secret leaves keep
 // quoting the token — that diagnostic is the point there.
 func typedLeafErrorf(path []string, format string, args ...interface{}) error {
+	// Fold 6: operands ON a secret leaf are dropped unconditionally.
+	// The caller passes only the leaf PATH (the extra token is not
+	// in it), so when isSecretLeaf holds for the leaf keyword, every
+	// string arg is an operand of this leaf and is replaced. The
+	// belt exit scrub cannot see short/vocabulary tokens (`abc`,
+	// `password`) — construction is the only sound layer for them.
+	if len(path) > 0 && isSecretLeaf(strings.Join(redactSecretPath(path), " "), path[len(path)-1:]) {
+		for i, a := range args {
+			if _, ok := a.(string); ok {
+				args[i] = SecretRedacted
+			}
+		}
+	}
 	detail := fmt.Sprintf(format, args...)
 	return &typedLeafSchemaError{
 		msg: schemaPathErrorf(path, "%s", detail).Error(),
@@ -2104,20 +2176,21 @@ func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 	joined := strings.Join(redactSecretPath(path), " ")
 	fullPath := append(append([]string(nil), path...), tok)
 	if len(path) > 0 && isSecretLeaf(joined, path[len(path)-1:]) {
-		// Redact the value INSIDE the reason rather than discarding the
-		// reason. Validators may echo it themselves, so they are a second
-		// leak site, but the sentence after the value is the whole
-		// diagnostic. Dropping it told the operator only that something
-		// was invalid, and TestLoginUserEncryptedPasswordSchemaGate caught
-		// that: it asserts the reason still says "plaintext". (#16066 made
-		// ValidateCryptHash itself value-free; this stays as defense in
-		// depth for every present/future secret-leaf validator.)
+		// Fold 6: keep only the validator reason's FIXED PREFIX —
+		// the text before its first operand-bearing word — rather
+		// than substring-masking with the raw token. Masking rewrote
+		// the validator's own fixed words when the token equaled
+		// one (`password` in "encrypted password hash", `plaintext`
+		// in "plaintext is not allowed"). The crypt validator's
+		// sentence shape is "not an encrypted password hash — ...";
+		// everything from the first secret-equal word onward is
+		// dropped, so no operand (short, vocabulary, or otherwise)
+		// can ride the reason, and the fixed head survives verbatim.
+		// (If the sentence has no secret-equal word, it is kept
+		// whole: it cannot contain the token as a word.)
 		reason := "<redacted>"
 		if err != nil {
-			reason = err.Error()
-			if tok != "" && !isPublicVocabulary(tok) {
-				reason = strings.ReplaceAll(reason, tok, "<redacted>")
-			}
+			reason = fixedReasonPrefix(err.Error(), tok)
 		}
 		detail := fmt.Sprintf("invalid value <redacted>: %s", reason)
 		return &typedLeafSchemaError{
@@ -2128,6 +2201,28 @@ func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 	return &typedLeafSchemaError{
 		msg: fmt.Sprintf("%s: %s", joined, scrubSecretTokens(fullPath, detail)),
 	}
+}
+
+// fixedReasonPrefix returns the prefix of a validator sentence up to
+// (excluding) the first occurrence of tok as a standalone word, or
+// the whole sentence when tok never occurs as a word. On secret
+// leaves this keeps a validator's fixed head ("not an encrypted
+// password hash") verbatim while no operand — including the token
+// itself when it coincides with a fixed word — rides the tail.
+func fixedReasonPrefix(sentence, tok string) string {
+	if tok == "" || sentence == "" {
+		return sentence
+	}
+	for _, w := range strings.Fields(sentence) {
+		if w == tok {
+			idx := strings.Index(sentence, tok)
+			if idx > 0 {
+				return strings.TrimRight(sentence[:idx], " —-")
+			}
+			return "<redacted>"
+		}
+	}
+	return sentence
 }
 
 // checkUnknownTopLevelStanza rejects a root keyword the schema does not model

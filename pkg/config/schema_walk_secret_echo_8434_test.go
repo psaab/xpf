@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -396,7 +397,12 @@ func TestCommonWordSecretKeepsPublicDiagnostics16090(t *testing.T) {
 	if !strings.Contains(got, "encrypted-password") {
 		t.Errorf("public leaf keyword lost (common-word belt mangling): %s (#16090 fold 5)", got)
 	}
-	if !strings.Contains(got, "not an encrypted password hash") {
+	// Fixed HEAD of the defect class survives verbatim; the tail
+	// after the operand-coinciding word (`password` inside the
+	// validator's own sentence, when the secret IS that word) is
+	// dropped by design — that drop is the fold-6 no-embed
+	// guarantee, not mangling.
+	if !strings.Contains(got, "not an encrypted") {
 		t.Errorf("public crypt-hash defect class lost: %s (#16090 fold 5)", got)
 	}
 }
@@ -414,6 +420,129 @@ func TestCoincidentSecretDoesNotManglePublicPath16090(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "security zones security-zone trust") {
 		t.Errorf("unrelated public path mangled by coincident secret: %v (#16090 fold 5)", err)
+	}
+}
+
+// #16090 fold 6: SHORT and VOCABULARY extra tokens after a valid hash.
+// The belt filters len<4 and vocabulary values, and the construction
+// scrub sees no secret in the leaf path alone (the token is not in
+// it) — so these survived unchanged. At construction, operands ON a
+// known secret leaf are now dropped unconditionally. Witnesses:
+// extra tokens `abc` (short) and `password` (vocabulary) must never
+// appear as the quoted modifier operand; defect class survives.
+// Non-secret control still quotes its token.
+func TestSecretLeafShortVocabExtraTokensNeverEchoed16090(t *testing.T) {
+	const validHash = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"
+	for _, tok := range []string{"abc", "password"} {
+		t.Run(tok, func(t *testing.T) {
+			tree := &ConfigTree{Children: []*Node{{
+				Keys: []string{"system"},
+				Children: []*Node{{
+					Keys: []string{"root-authentication"},
+					Children: []*Node{{
+						Keys: []string{"encrypted-password", validHash, tok},
+					}},
+				}},
+			}}}
+			err := SchemaValidate(tree, nil)
+			if err == nil {
+				t.Fatal("extra-token fixture must be rejected")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, strconv.Quote(tok)) {
+				t.Errorf("extra token %q appeared as quoted operand: %v (#16090 fold 6)", tok, err)
+			}
+			if tok == "abc" && strings.Contains(msg, "abc") {
+				t.Errorf("short extra token appeared anywhere: %v (#16090 fold 6)", err)
+			}
+			if !strings.Contains(msg, "unknown modifier") {
+				t.Errorf("defect class lost: %v", err)
+			}
+			if !strings.Contains(msg, "<redacted>") {
+				t.Errorf("expected redacted operand placeholder: %v", err)
+			}
+		})
+	}
+	// Non-secret control: same formatter on host-name still quotes.
+	ctrl := typedLeafErrorf([]string{"system", "host-name"}, "unknown modifier %q", "abc")
+	if !strings.Contains(ctrl.Error(), `"abc"`) {
+		t.Errorf("non-secret control must still quote its token; got: %v", ctrl)
+	}
+	ctrl2 := typedLeafErrorf([]string{"system", "host-name"}, "unknown modifier %q", "password")
+	if !strings.Contains(ctrl2.Error(), `"password"`) {
+		t.Errorf("non-secret control must still quote vocabulary token; got: %v", ctrl2)
+	}
+}
+
+// #16090 fold 6 statics (1): vocabulary derives from the schema
+// registry. `encrypted-password plaintext` — the validator's fixed
+// sentence "plaintext is not allowed" and the leaf/stanza names
+// must survive; only the operand is redacted. A hand vocabulary
+// list omitted these words and ate them.
+func TestVocabularyWordsSurviveDiagnostics16090(t *testing.T) {
+	text := `system { root-authentication { encrypted-password plaintext; } }`
+	err := SchemaValidate(parseHier(t, text), nil)
+	if err == nil {
+		t.Fatal("plaintext fixture must be rejected")
+	}
+	got := err.Error()
+	for _, want := range []string{"root-authentication", "encrypted-password", "not an encrypted password hash"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("vocabulary word %q lost from diagnostic: %s (#16090 fold 6)", want, got)
+		}
+	}
+	if !IsTypedLeafSchemaError(err) {
+		t.Errorf("typed classification lost: %v", err)
+	}
+}
+
+// #16090 fold 6 statics (2): whole-error-equals-secret must keep
+// its classification. A placeholder error whose entire text would
+// be neutralized still classifies as the placeholder sentinel
+// after the scrub — the whole-eq shortcut must not return a bare
+// error before the wrapper arms.
+func TestWholeEqSecretKeepsClassification16090(t *testing.T) {
+	const canary = "CLASSCANARY16090"
+	tree := &ConfigTree{Children: []*Node{{Keys: []string{"system", "services", "dynamic-dns", "provider", "p", "password", canary}}}}
+	got := scrubSchemaErrorSecrets(tree, &typedLeafSchemaError{msg: canary})
+	if !IsTypedLeafSchemaError(got) {
+		t.Errorf("whole-eq typed error lost classification: %T %v", got, got)
+	}
+	if strings.Contains(got.Error(), canary) {
+		t.Errorf("whole-eq secret retained: %v", got)
+	}
+	got2 := scrubSchemaErrorSecrets(tree, fmt.Errorf("%w (at %q)", errRedactionPlaceholderIngest, "x "+canary))
+	if !IsRedactionPlaceholderIngestError(got2) {
+		t.Errorf("placeholder classification lost: %T %v", got2, got2)
+	}
+	if strings.Contains(got2.Error(), canary) {
+		t.Errorf("placeholder canary retained: %v", got2)
+	}
+}
+
+// GLM F3 witness: beltSecretValues must not alias its input.
+func TestBeltDoesNotAliasInput16090(t *testing.T) {
+	in := []string{"password", "highentropyvalue1", "abc", "anotherSecret99"}
+	before := append([]string(nil), in...)
+	_ = beltSecretValues(in)
+	for i := range before {
+		if in[i] != before[i] {
+			t.Fatalf("belt aliased input: in=%v before=%v (GLM F3)", in, before)
+		}
+	}
+}
+
+// GLM F1 witness: a rebuilt wrapper must be re-scrubbed on render —
+// its keyword field carrying the secret must not survive Error().
+func TestRebuiltWrapperRescrubbedOnRender16090(t *testing.T) {
+	const canary = "CLASSCANARY16090"
+	tree := &ConfigTree{Children: []*Node{{Keys: []string{"system", "services", "dynamic-dns", "provider", "p", "password", canary}}}}
+	got := scrubSchemaErrorSecrets(tree, &unknownSecurityZoneChildSchemaError{path: "security zones trust", keyword: canary})
+	if !IsUnknownSecurityZoneChildSchemaError(got) {
+		t.Fatalf("classification lost: %T %v", got, got)
+	}
+	if strings.Contains(got.Error(), canary) {
+		t.Errorf("rebuilt wrapper re-printed secret on render: %v (GLM F1)", got)
 	}
 }
 
