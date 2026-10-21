@@ -868,52 +868,40 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
 		isShrink := isShrinkVerb15999(line)
-		applied := false
 		if !isShrink {
-			// PRE-CHARGE by tokens BEFORE building. When charged
-			// crosses: (a) exact recount fits -> reconcile; (b)
-			// REPLACEMENT: trial-apply on a clone and recount — a
-			// same-leaf replacement whose RESULT fits must pass
-			// (near-cap 199,997 witness); genuine over-cap addition
-			// fails the trial and refuses before the real tree is
-			// touched. Trial is O(tree), already paid periodically.
+			// PRE-CHARGE by tokens BEFORE building. At crossing use
+			// DELTA accounting (no clone, no build of the new line):
+			// net = tokCharge - units the target path ALREADY
+			// occupies (OccupiedUnits, O(subtree)); refuse iff
+			// exact + net > cap. Same-leaf replacements have
+			// occupied ~= their own units, net ~0, so repeated
+			// near-cap replacements neither refuse nor recount
+			// the whole tree per line (exact is cached/refreshed
+			// at the 256-line recount).
 			tokCharge := len(strings.Fields(line)) + 1
 			if charged+tokCharge > config.MaxParseNodes {
 				exact := working.NodeCount()
-				if exact+tokCharge <= config.MaxParseNodes {
-					charged = exact
-				} else {
-					trial := working.Clone()
-					if terr := applyEditLine(trial, line); terr != nil {
-						if scrub {
-							return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(terr))
-						}
-						return count, terr
-					}
-					if trial.NodeCount() > config.MaxParseNodes {
-						return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
-					}
-					if err := applyEditLine(working, line); err != nil {
-						if scrub {
-							return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-						}
-						return count, err
-					}
-					applied = true
-					charged = working.NodeCount()
+				occupied := 0
+				if _, path, _, _, _, perr := config.ParseSetVerbGroupedClosed(line); perr == nil {
+					occupied = working.OccupiedUnits(path)
 				}
-			}
-			if !applied {
+				net := tokCharge - occupied
+				if net < 0 {
+					net = 0
+				}
+				if exact+net > config.MaxParseNodes {
+					return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+				}
+				charged = exact + net
+			} else {
 				charged += tokCharge
 			}
 		}
-		if !applied {
-			if err := applyEditLine(working, line); err != nil {
-				if scrub {
-					return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-				}
-				return count, err
+		if err := applyEditLine(working, line); err != nil {
+			if scrub {
+				return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
 			}
+			return count, err
 		}
 		count++
 		if count%256 == 0 {

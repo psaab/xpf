@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -272,13 +273,20 @@ func TestNearCapReplacementResultAware15999(t *testing.T) {
 		t.Fatalf("fixture over cap: %d", before)
 	}
 	// Repeated re-sets cross cumulative charge many times over; final
-	// count unchanged, so LoadSet must accept.
+	// count unchanged, so LoadSet must accept. Delta accounting must
+	// keep this fast (no per-line clone — quadratic at 200k units).
 	var b strings.Builder
 	for range 300 {
 		b.WriteString("set system host-name fw1\n")
 	}
-	if _, err := s.LoadSet(b.String()); err != nil {
+	start := time.Now()
+	_, err := s.LoadSet(b.String())
+	elapsed := time.Since(start)
+	if err != nil {
 		t.Fatalf("near-cap same-leaf replacement refused: %v (before=%d)", err, before)
+	}
+	if elapsed > 60*time.Second {
+		t.Fatalf("near-cap replacements too slow (clone-per-line?): %v", elapsed)
 	}
 	if got := s.candidate.NodeCount(); got != before {
 		t.Fatalf("replacement changed count: %d -> %d", before, got)

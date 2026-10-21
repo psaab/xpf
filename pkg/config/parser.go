@@ -113,6 +113,21 @@ func countNodeUnits(nodes []*Node) int {
 	return n
 }
 
+// OccupiedUnits returns the parser-unit size (1+len(Keys) per node) of
+// the subtree at path, or 0 if the path does not resolve. Used for
+// delta accounting: a replacement edit's net cost is its token charge
+// minus what its target already occupies. O(subtree), no clone.
+func (t *ConfigTree) OccupiedUnits(path []string) int {
+	if t == nil || len(path) == 0 {
+		return 0
+	}
+	node, err := t.findNode(path)
+	if err != nil || node == nil {
+		return 0
+	}
+	return countNodeUnits([]*Node{node})
+}
+
 // Parser implements a recursive descent parser for Junos configuration syntax.
 type Parser struct {
 	lexer  *Lexer
