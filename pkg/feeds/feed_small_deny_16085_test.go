@@ -175,6 +175,93 @@ func TestMalformedSingleDropRefused16085(t *testing.T) {
 	}
 }
 
+// TestMalformedDropInstalledAfterGrowth16085 is the Opus2 fold: after ordinary
+// growth (E -> E+X, clean, below floors), installed (E+X, 11) diverges from
+// the epoch (E, 10). A degraded candidate retaining the full epoch but dropping
+// the installed X must still be refused, with the tuple naming the INSTALLED
+// set (old 11, installed hash), not the epoch. Comparing against the epoch
+// (the pre-fold code) installs E and unenforces X.
+func TestMalformedDropInstalledAfterGrowth16085(t *testing.T) {
+	updates := 0
+	m, server, fs := newShrinkFeed11059(t, "small-grown-16085", retainForever, func() error {
+		updates++
+		return nil
+	})
+	epoch := prefixes16085(10)
+	installed := append(append([]string(nil), epoch...), "198.18.161.0/32")
+	server.set(body16085(epoch), http.StatusOK)
+	m.fetchFeed(context.Background(), fs)
+	server.set(body16085(installed), http.StatusOK)
+	m.fetchFeed(context.Background(), fs)
+	if got := len(m.GetPrefixes(fs.name)); got != 11 {
+		t.Fatalf("growth install: got %d, want 11", got)
+	}
+	if updates != 2 {
+		t.Fatalf("growth published %d updates, want 2", updates)
+	}
+	installedHash := m.AllFeeds()[fs.name].Hash
+	if installedHash == "" {
+		t.Fatal("installed hash empty after growth")
+	}
+
+	// Candidate: epoch only; X corrupted into a malformed line.
+	candidate := append(append([]string(nil), epoch...), "corrupted-x-line")
+	server.set(body16085(candidate), http.StatusOK)
+	m.fetchFeed(context.Background(), fs)
+	if got := m.GetPrefixes(fs.name); len(got) != 11 {
+		t.Fatalf("malformed drop of post-epoch installed prefix installed: got %d %v, want 11 retained", len(got), got)
+	}
+	info := m.AllFeeds()[fs.name]
+	if !info.ShrinkRefused || info.ShrinkCandidateOldCount != 11 || info.ShrinkCandidateNewCount != 10 ||
+		info.ShrinkBaselineHash != installedHash {
+		t.Fatalf("refusal tuple does not bind installed set (old=11, installed hash): %+v hash=%q", info, installedHash)
+	}
+	if !strings.Contains(info.LastError, "dropped 1 of 11 installed prefixes") {
+		t.Fatalf("refusal error does not name installed loss: %q", info.LastError)
+	}
+	if updates != 2 {
+		t.Fatalf("refused post-epoch candidate published: updates=%d, want 2", updates)
+	}
+
+	// Net-growth variant: E+Y+Z+garbage drops installed X while growing.
+	server.set(body16085(append(append([]string(nil), epoch...),
+		"198.18.162.0/32", "198.18.163.0/32", "corrupted-x-line")), http.StatusOK)
+	m.fetchFeed(context.Background(), fs)
+	if got := len(m.GetPrefixes(fs.name)); got != 11 {
+		t.Fatalf("net-growth malformed drop of X installed: got %d, want 11 retained", got)
+	}
+	info = m.AllFeeds()[fs.name]
+	if !info.ShrinkRefused || info.ShrinkCandidateOldCount != 11 || info.ShrinkCandidateNewCount != 12 {
+		t.Fatalf("net-growth refusal tuple = %+v, want old=11 new=12 refused", info)
+	}
+}
+
+// TestMalformedGrowthAfterCleanReductionInstalls16085 is the false-refusal
+// arm: after a clean reduction E(10) -> S(7) the epoch stays E while installed
+// is S. A degraded candidate S+Y+garbage retains every INSTALLED prefix and
+// adds one; it drops only long-gone epoch prefixes and must install.
+func TestMalformedGrowthAfterCleanReductionInstalls16085(t *testing.T) {
+	m, server, fs := newShrinkFeed11059(t, "small-reduced-grow-16085", retainForever, nil)
+	epoch := prefixes16085(10)
+	server.set(body16085(epoch), http.StatusOK)
+	m.fetchFeed(context.Background(), fs)
+	reduced := epoch[:7]
+	server.set(body16085(reduced), http.StatusOK)
+	m.fetchFeed(context.Background(), fs)
+	if got := len(m.GetPrefixes(fs.name)); got != 7 {
+		t.Fatalf("clean reduction: got %d, want 7", got)
+	}
+	grown := append(append([]string(nil), reduced...), "198.18.161.0/32", "garbage-line")
+	server.set(body16085(grown), http.StatusOK)
+	m.fetchFeed(context.Background(), fs)
+	if got := len(m.GetPrefixes(fs.name)); got != 8 {
+		t.Fatalf("degraded growth preserving installed set was refused: got %d, want 8 installed", got)
+	}
+	if info := m.AllFeeds()[fs.name]; info.ShrinkRefused || !info.Degraded || info.InvalidLines != 1 {
+		t.Fatalf("degraded growth status = %+v, want installed degraded(1), not refused", info)
+	}
+}
+
 // TestMalformedFirstFetchInstalls16085: with no installed set, nothing was
 // previously enforced, so a degraded first body still bootstraps its valid
 // subset (marked degraded) — the guard must not wedge never-fetched feeds.
@@ -243,6 +330,23 @@ func TestMalformedColdBootstrapNotRefused16085(t *testing.T) {
 	}
 	if info := m2.AllFeeds()["cold-malformed-16085"]; info.ShrinkRefused {
 		t.Fatalf("degraded cold bootstrap was refused (malformed guard leaked to no-snapshot path): %+v", info)
+	}
+	// Second, changed degraded fetch: retains all 60 installed prefixes and
+	// adds a 61st (plus garbage). Installed (60) now diverges from the restored
+	// epoch (100); comparing against the epoch would falsely refuse this pure
+	// growth. It must install.
+	cand2 := append(append([]string(nil), seedRes.prefixes[:60]...),
+		"198.18.200.1/32", "junk-again")
+	res2, err := parseFeed(strings.NewReader(body16085(cand2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.installSnapshot(fs2, res2)
+	if got := len(m2.GetPrefixes("cold-malformed-16085")); got != 61 {
+		t.Fatalf("post-bootstrap degraded growth preserving installed set: got %d, want 61 installed", got)
+	}
+	if info := m2.AllFeeds()["cold-malformed-16085"]; info.ShrinkRefused {
+		t.Fatalf("post-bootstrap degraded growth falsely refused against restored epoch: %+v", info)
 	}
 }
 

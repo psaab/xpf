@@ -2125,15 +2125,18 @@ func shrinkGuardTrippedWithThresholds(oldCount, newCount int, thresholds shrinkG
 // passes every default floor (old 10 < 32, drop 3 < 16, retained 7/10 >= 50%),
 // so the reduced set installed and silently stopped enforcing 3 prefixes.
 //
-// The comparison baseline is the INSTALLED set (fs.prefixes / churnBaseline's
-// fallback), not the epoch: with no epoch, retainedPrefixCount(churnBaseline,
-// candidate) < len(churnBaseline) is exactly "an installed prefix is gone".
-// Any dropped installed prefix trips — no size, drop, or percentage floor —
-// because a malformed line is never evidence the provider intended to withdraw
-// that prefix. A degraded candidate that ADDS or ROTATES above the installed
-// set without dropping an installed prefix does not trip here; the large-feed
-// shrink/churn guards (and the #14395 epoch guard, whose baseline may differ
-// from the installed set) govern those candidates unchanged.
+// The comparison baseline is the currently INSTALLED set (fs.prefixes), NOT
+// the epoch: an ordinary growth or clean reduction installs a set that
+// diverges from the epoch (which only rebases on bootstrap/acknowledgement,
+// #14395), so comparing against the epoch would both miss a corrupted
+// installed prefix added after the epoch and falsely refuse degraded growth
+// that drops only long-gone epoch prefixes. The epoch is used only as a
+// fallback when nothing is installed. Any dropped installed prefix trips —
+// no size, drop, or percentage floor — because a malformed line is never
+// evidence the provider intended to withdraw that prefix. A degraded
+// candidate that ADDS or ROTATES above the installed set without dropping an
+// installed prefix does not trip here; the large-feed shrink/churn guards
+// (including the #14395 epoch guard) govern those candidates unchanged.
 func malformedShrinkTripped16085(invalidLines int, installed, candidate []string) bool {
 	if invalidLines <= 0 || len(installed) == 0 {
 		return false
@@ -2275,13 +2278,16 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	// enforcing the corrupted prefixes. Malformed lines are not evidence
 	// of an intended withdrawal, so any installed prefix they remove
 	// trips this guard; the refusal reuses the exact-candidate
-	// acknowledgement workflow below. Live snapshots only: a candidate
-	// with no installed set drops nothing previously enforced, and a
-	// remembered-baseline (cold/recreated/post-drop) first fetch keeps
-	// the #14994 floors — refusing it here on malformed lines alone
-	// could wedge a legitimate small feed whose first body is degraded.
+	// acknowledgement workflow below. The baseline is the INSTALLED set
+	// (fs.prefixes), never the epoch: installed and epoch diverge after
+	// ordinary growth / clean reduction, and only an installed prefix was
+	// actually enforced. Live snapshots only: a candidate with no installed
+	// set drops nothing previously enforced, and a remembered-baseline
+	// (cold/recreated/post-drop) first fetch keeps the #14994 floors —
+	// refusing it here on malformed lines alone could wedge a legitimate
+	// small feed whose first body is degraded.
 	malformedTripped := fs.hasSnapshot && baselineHash != res.hash &&
-		malformedShrinkTripped16085(res.invalidLines, churnBaseline, res.prefixes)
+		malformedShrinkTripped16085(res.invalidLines, fs.prefixes, res.prefixes)
 	bootstrapDiffersFromHighWater := !fs.hasSnapshot && fs.shrinkHighWaterCount > 0 &&
 		len(res.prefixes) <= fs.shrinkHighWaterCount &&
 		(len(res.prefixes) < fs.shrinkHighWaterCount || res.hash != fs.shrinkHighWaterHash)
@@ -2337,16 +2343,15 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 			candidateReason += " and "
 		}
 		candidateReason += "malformed lines dropped previously-enforced prefixes"
-		// The ack tuple must bind the INSTALLED baseline the candidate was
-		// measured against (churnBaseline falls back to fs.prefixes, whose
-		// hash is fs.hash). When an epoch exists its prefixes may differ
-		// from the installed set, but the malformed guard compares the
-		// candidate with the installed set — binding the epoch hash here
-		// would name a baseline the candidate was never compared with,
-		// and AcknowledgeFeedShrink's currency check requires the
-		// installed hash (or live epoch hash) anyway.
+		// The ack tuple binds the INSTALLED baseline the candidate was
+		// measured against: fs.hash (the installed set's digest) with the
+		// installed count. Binding the epoch hash/count here would pair a
+		// hash the candidate was never compared with a count from a
+		// different set once installed and epoch have diverged (ordinary
+		// growth / clean reduction), and AcknowledgeFeedShrink's currency
+		// check requires the installed hash anyway.
 		baselineHash = fs.hash
-		candidateOldCount = len(churnBaseline)
+		candidateOldCount = oldCount
 	}
 	if refusedAfterDrop {
 		baselineHash = fs.shrinkBaselineHash
@@ -2397,7 +2402,7 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 			case malformedTripped:
 				ferr = fmt.Errorf(
 					"malformed lines dropped previously-enforced prefixes: candidate %d prefixes with %d invalid line(s) dropped %d of %d installed prefixes; retaining last-good snapshot",
-					newCount, res.invalidLines, len(churnBaseline)-retainedPrefixCount(churnBaseline, res.prefixes), len(churnBaseline))
+					newCount, res.invalidLines, len(fs.prefixes)-retainedPrefixCount(fs.prefixes, res.prefixes), len(fs.prefixes))
 			default:
 				ferr = fmt.Errorf(
 					"content overlap below floor: candidate %d prefixes retain less than %d%% of the %d currently installed prefixes; retaining last-good snapshot",
