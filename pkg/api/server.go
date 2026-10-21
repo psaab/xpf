@@ -698,6 +698,12 @@ type Server struct {
 	// test injects a fake so the make-before-break reconcile is exercised without
 	// binding real ports.
 	listen func(network, address string) (net.Listener, error)
+	// connGate bounds concurrent accepted connections across every REST
+	// leg (#16081, conn_bound_16081.go). An atomic pointer because bare
+	// &Server{} test fixtures never install one (nil = unwrapped/no-op)
+	// while NewServer always does; reads happen on the accept path, which
+	// must not take lifeMu.
+	connGate atomic.Pointer[apiConnGate]
 	// peerLookupFn is Config.PeerLookupFn; nil means authz.LookupPeer (#5561).
 	peerLookupFn func(client, server net.Addr) authz.PeerIdentity
 	// peerLocalityFn is Config.PeerLocalityFn; nil means
@@ -925,6 +931,10 @@ func NewServer(cfg Config) *Server {
 	if s.listen == nil {
 		s.listen = net.Listen
 	}
+	// #16081: bound concurrent connections across every REST leg. Installed
+	// here (not lazily) so every NewServer-built server — Start legs,
+	// reconcile legs and the Run/serveBound path alike — shares one gate.
+	s.connGate.Store(newAPIConnGate(apiMaxConnsTotal))
 	// #5561: the peer-identity resolver behind the authorization gate. nil
 	// means the real kernel socket-table lookup (authz.LookupPeer), and nil
 	// PeerLocalityFn means the real fresh enumeration
@@ -1530,6 +1540,7 @@ func (s *Server) bindListeners() (httpLn, httpsLn net.Listener, err error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("api: bind HTTP listener %q: %w", hs.Addr, err)
 	}
+	httpLn = s.boundListener(httpLn)
 	if ss := s.httpsServer(); ss != nil {
 		httpsLn, err = s.listen("tcp", ss.Addr)
 		if err != nil {
@@ -1538,6 +1549,7 @@ func (s *Server) bindListeners() (httpLn, httpsLn net.Listener, err error) {
 			httpLn.Close()
 			return nil, nil, fmt.Errorf("api: bind HTTPS listener %q: %w", ss.Addr, err)
 		}
+		httpsLn = s.boundListener(httpsLn)
 	}
 	return httpLn, httpsLn, nil
 }
