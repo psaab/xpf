@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -187,6 +188,91 @@ func assertFusedTokenDisposition16066(t *testing.T, leaf string, err error) {
 // value. Without this, a change that redacted every validation error would pass
 // the cell above while destroying every ordinary diagnostic.
 //
+
+// #16066 fold 3 (F1): Go-escaped %q operands. An extra token after a
+// valid encrypted-password hash is rendered by typedLeafErrorf with
+// %q, which escapes quotes/backslashes/newlines — the raw token no
+// longer occurs verbatim, so a raw-only scrub misses it. Each token
+// below carries a distinctive fragment; neither the raw fragment nor
+// its strconv.Quote rendering may survive in the SchemaValidate
+// error. The non-secret control (same formatter, host-name leaf via
+// typedLeafErrorf directly) must still quote its escaped token.
+func TestSecretLeafEscapedExtraTokenNeverEchoed16066(t *testing.T) {
+	const validHash = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"
+	cases := []struct {
+		name  string
+		token string
+		frag  string
+	}{
+		{"quote", `pa"ss16066`, `pa"ss16066`},
+		{"backslash", `pa\ss16066`, `pa\ss16066`},
+		{"newline", "pa\nss16066", "pa\nss16066"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Build the AST directly: the config lexer cannot author a
+			// bare quote/backslash/newline token without escapes, and
+			// testing the lexer is not the point — the formatter's %q
+			// rendering of an arbitrary token value is. Keys mirror the
+			// hierarchical parse of `encrypted-password "<hash>" <tok>;`.
+			tree := &ConfigTree{Children: []*Node{{
+				Keys: []string{"system"},
+				Children: []*Node{{
+					Keys: []string{"root-authentication"},
+					Children: []*Node{{
+						Keys: []string{"encrypted-password", validHash, tc.token},
+					}},
+				}},
+			}}}
+			err := SchemaValidate(tree, nil)
+			if err == nil {
+				t.Fatal("fixture must produce a validation error (extra token)")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, tc.frag) {
+				t.Errorf("error leaked the raw secret fragment %q: %v (#16066 fold 3)", tc.frag, err)
+			}
+			// The %q (strconv.Quote) rendering of the secret must not
+			// survive: after scrub it may only appear as "<redacted>".
+			if q := strconv.Quote(tc.token); strings.Contains(msg, q) {
+				t.Errorf("error leaked the quoted secret form %s: %v (#16066 fold 3)", q, err)
+			}
+			if q := strconv.Quote(tc.frag); q != strconv.Quote(SecretRedacted) && strings.Contains(msg, q) && tc.frag != tc.token {
+				t.Errorf("error leaked the quoted secret fragment %s: %v (#16066 fold 3)", q, err)
+			}
+			if !strings.Contains(msg, "unknown modifier") {
+				t.Errorf("error lost its defect-class diagnostic: %v", err)
+			}
+		})
+	}
+	// Non-secret control: typedLeafErrorf on host-name still quotes.
+	ctrl := typedLeafErrorf([]string{"system", "host-name"}, "unknown modifier %q", `pa"ss`)
+	if !strings.Contains(ctrl.Error(), strconv.Quote(`pa"ss`)) {
+		t.Errorf("non-secret control must keep its quoted escaped token; got: %v", ctrl)
+	}
+}
+
+// #16066 fold 3 (F2): the pre-walk redaction-placeholder guard. A
+// secret leaf carrying an ordinary canary operand BEFORE the
+// ##SECRET-DATA## placeholder made findRedactionPlaceholder embed
+// the canary in its returned path, and checkRedactionPlaceholder
+// quoted it — returned before the exit scrub. The error must still
+// classify as IsRedactionPlaceholderIngestError but omit the canary.
+func TestPlaceholderGuardNeverEchoesPrecedingSecret16066(t *testing.T) {
+	const canary = "CANARYPRE16066"
+	text := "system { services { dynamic-dns { provider p { password \"" + canary + "\" \"##SECRET-DATA##\"; } } } }"
+	err := SchemaValidate(parseHier(t, text), nil)
+	if err == nil {
+		t.Fatal("placeholder fixture must be rejected")
+	}
+	if !IsRedactionPlaceholderIngestError(err) {
+		t.Fatalf("error lost its placeholder classification: %v", err)
+	}
+	if strings.Contains(err.Error(), canary) {
+		t.Errorf("placeholder error echoed the preceding secret operand: %v (#16066 fold 3)", err)
+	}
+}
+
 // Asserted DIRECTLY on typedLeafInvalidErrorf rather than through a config
 // fixture. The first draft used `system host-name "bad name with spaces"`,
 // which compiles cleanly — so the cell SKIPPED, and a skipped control has no

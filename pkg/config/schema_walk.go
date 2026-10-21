@@ -148,15 +148,20 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) er
 	// stored configuration as a side effect of validating it.
 	tree = normalizeCompactForValidation(tree)
 	if err := validateStaticRouteQNHTails12813(tree.Children); err != nil {
-		return err
+		return scrubSchemaErrorSecrets(tree, err)
 	}
 	// #4060: reject the raw-AST redaction placeholder ("##SECRET-DATA##") on
 	// commit-ingest. This is the symmetric guard for #4051 display redaction:
 	// the value is a display artifact, never a valid configured secret.
 	// compileTreeLenient preserves this placeholder-specific error while other
 	// legacy typed-leaf violations continue to follow the tolerant policy.
+	// Fold 3 (F2): this return (and the QNH one above) previously bypassed
+	// the exit scrub; findRedactionPlaceholder embeds the raw flattened
+	// path, which can carry a PRECEDING secret operand on the same leaf.
+	// scrubSchemaErrorSecrets re-wraps the %w sentinel, preserving
+	// IsRedactionPlaceholderIngestError / IsRedactedURLIngestError.
 	if err := checkRedactionPlaceholder(tree); err != nil {
-		return err
+		return scrubSchemaErrorSecrets(tree, err)
 	}
 	refs := collectSchemaRefs(tree)
 	if defsSource != nil {
@@ -219,11 +224,7 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 				continue
 			}
 			full := append(append([]string(nil), base...), n.Keys...)
-			for _, i := range secretIndices(full) {
-				if i >= 0 && i < len(full) && full[i] != "" {
-					scrubbed = strings.ReplaceAll(scrubbed, full[i], SecretRedacted)
-				}
-			}
+			scrubbed = scrubSecretTokens(full, scrubbed)
 			walk(n.Children, full)
 		}
 	}
@@ -231,11 +232,83 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	if scrubbed == msg {
 		return err
 	}
-	// Preserve the typed-leaf classification tolerant ingress keys on.
+	// Preserve error classifications callers dispatch on (fold 3, F3):
+	// rebuilding a changed error as a bare fmt.Errorf would strip
+	// errors.As/errors.Is identities (typed-leaf, unknown-zone /
+	// policies child, redaction-placeholder / redacted-URL ingest)
+	// and misroute tolerant-ingress log classification. Structured
+	// wrappers are rebuilt field-by-field with scrubbed text so
+	// Error() renders the scrubbed message under the same type;
+	// %w-carrying ingest errors are re-wrapped around their sentinel.
+	// Any other changed, unclassified error is returned as plain text.
 	if IsTypedLeafSchemaError(err) {
 		return &typedLeafSchemaError{msg: scrubbed}
 	}
+	var zoneErr *unknownSecurityZoneChildSchemaError
+	if errors.As(err, &zoneErr) {
+		return &unknownSecurityZoneChildSchemaError{
+			path:    scrubSecretTokensForText(tree, zoneErr.path),
+			keyword: zoneErr.keyword,
+		}
+	}
+	var polErr *unknownSecurityPoliciesChildSchemaError12217
+	if errors.As(err, &polErr) {
+		return &unknownSecurityPoliciesChildSchemaError12217{
+			path:    scrubSecretTokensForText(tree, polErr.path),
+			keyword: polErr.keyword,
+			content: scrubSecretTokensForText(tree, polErr.content),
+		}
+	}
+	var topErr *unknownTopLevelStanzaSchemaError
+	if errors.As(err, &topErr) {
+		return &unknownTopLevelStanzaSchemaError{msg: scrubbed}
+	}
+	if IsRedactionPlaceholderIngestError(err) {
+		return fmt.Errorf("%w (at %q)", errRedactionPlaceholderIngest, extractAtPath(scrubbed))
+	}
+	if errors.Is(err, errRedactedURLIngest) {
+		return fmt.Errorf("%w (at %q)", errRedactedURLIngest, extractAtPath(scrubbed))
+	}
 	return fmt.Errorf("%s", scrubbed)
+}
+
+// extractAtPath returns the "(at %q)" payload of a scrubbed ingest
+// error without its sentinel prefix, for re-wrapping. The scrubbed
+// text is "<sentinel> (at \"<path>\")"; the path is already scrubbed.
+func extractAtPath(scrubbed string) string {
+	const marker = "(at "
+	i := strings.LastIndex(scrubbed, marker)
+	if i < 0 {
+		return scrubbed
+	}
+	rest := scrubbed[i+len(marker):]
+	rest = strings.TrimSuffix(rest, ")")
+	if unq, err := strconv.Unquote(rest); err == nil {
+		return unq
+	}
+	return strings.Trim(rest, "\"")
+}
+
+// scrubSecretTokensForText scrubs every secret token in tree from a
+// free-text fragment (used when rebuilding structured error fields).
+func scrubSecretTokensForText(tree *ConfigTree, text string) string {
+	if tree == nil || text == "" {
+		return text
+	}
+	out := text
+	var walk func(nodes []*Node, base []string)
+	walk = func(nodes []*Node, base []string) {
+		for _, n := range nodes {
+			if n == nil {
+				continue
+			}
+			full := append(append([]string(nil), base...), n.Keys...)
+			out = scrubSecretTokens(full, out)
+			walk(n.Children, full)
+		}
+	}
+	walk(tree.Children, nil)
+	return out
 }
 
 // walkContext carries the per-walk validation inputs: the (always-nil in
@@ -1775,6 +1848,16 @@ func typedLeafErrorf(path []string, format string, args ...interface{}) error {
 // scrubSecretTokens replaces every secret-indexed token of fullPath
 // occurring in msg with SecretRedacted. Shared by schemaErrorf and
 // the typed-leaf helpers so replacement semantics stay identical.
+//
+// #16066 fold 3 (F1): matching is FORMATTING-AWARE. Formatters render
+// operands with %q, which Go-escapes quotes, backslashes and control
+// characters, so the raw token no longer occurs verbatim in the
+// rendered text and a raw-only ReplaceAll silently misses it. Each
+// secret token is therefore replaced in BOTH its raw form and its
+// strconv.Quote form (the exact rendering %q produces for a string).
+// The sentinel itself is never rescanned (single pass per form via
+// ReplaceAll on distinct needles; SecretRedacted contains no secret
+// token characters that could reintroduce a needle).
 func scrubSecretTokens(fullPath []string, msg string) string {
 	if idx := secretIndices(fullPath); len(idx) > 0 {
 		seen := make(map[string]bool, len(idx))
@@ -1782,9 +1865,14 @@ func scrubSecretTokens(fullPath []string, msg string) string {
 			if i < 0 || i >= len(fullPath) {
 				continue
 			}
-			if tok := fullPath[i]; tok != "" && !seen[tok] {
-				seen[tok] = true
-				msg = strings.ReplaceAll(msg, tok, SecretRedacted)
+			tok := fullPath[i]
+			if tok == "" || seen[tok] {
+				continue
+			}
+			seen[tok] = true
+			msg = strings.ReplaceAll(msg, tok, SecretRedacted)
+			if q := strconv.Quote(tok); q != tok {
+				msg = strings.ReplaceAll(msg, q, strconv.Quote(SecretRedacted))
 			}
 		}
 	}
