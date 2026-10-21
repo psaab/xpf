@@ -1261,9 +1261,10 @@ func TestGenerateConfig_JunosObfuscatedPSK(t *testing.T) {
 // credential). The VPN must now be SKIPPED — no connection, no secret
 // — while a healthy VPN on another gateway still renders.
 //
-// FAIL-ON-REVERT: restoring the decoder's ("", nil) for decode-to-empty
-// makes normalizePSK succeed with "", so the bad VPN renders with
-// `secret = ""` and every assertion below fires.
+// This pins the pkg/ipsec render BELT independently of the decoder:
+// reverting only the policy.go decoded-empty belt makes the bad VPN
+// render again. (Restoring the decoder's ("", nil) also fires it
+// end-to-end because normalizePSK then succeeds with "".)
 func TestGenerateConfig_DecodeToEmptyPSKSkipped15990(t *testing.T) {
 	for _, empty := range []string{"$9$i", "$9$!"} {
 		m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}

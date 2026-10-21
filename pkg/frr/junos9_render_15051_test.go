@@ -67,16 +67,17 @@ func TestJunos9MalformedBGPRefusedBeforeRender15051(t *testing.T) {
 
 // #15990: `$9$i` decodes to ZERO bytes. Strict commit refuses it before
 // render; the tolerant pipeline retains the warned blob in the compiled
-// config, so the FRR belt must resolve it through the decoder and
-// withhold the enclosing capability. For BGP, the affected neighbor is
+// config, so the FRR belt must withhold the enclosing capability via
+// its Junos9Undecodable provenance. For BGP, the affected neighbor is
 // not declared; for RIP, no interface is enrolled. The literal blob
 // must never reach frr.conf as an authentication key.
 //
-// FAIL-ON-REVERT: removing the decoder resolution from authTokenOrOmit
-// renders `password $9$i` / `ip rip authentication string $9$i` and
-// enrolls both adjacencies, so the neighbor/network assertions fire.
-// Restoring decode-to-empty as ("", nil) makes strict compile accept
-// the key and store Secret(""), firing the strict assertions.
+// FAIL-ON-REVERT: reverting the provenance-aware belt to unconditional
+// token passthrough renders `password $9$i` / `ip rip authentication
+// string $9$i` and enrolls both adjacencies, so the neighbor/network
+// assertions fire. Restoring decode-to-empty as ("", nil) makes strict
+// compile accept the key and store Secret(""), firing the strict
+// assertions.
 func TestJunos9DecodeToEmptyBGPNotRenderedPasswordless15990(t *testing.T) {
 	buildTree := func(t *testing.T, cmds []string) *config.ConfigTree {
 		t.Helper()
@@ -183,6 +184,150 @@ func TestJunos9DecodeToEmptyBGPNotRenderedPasswordless15990(t *testing.T) {
 				t.Errorf("RIP control did not render decoded enrollment (#15990):\n%s", out)
 			}
 		})
+	}
+}
+
+// #15990 fold-2 witness: decoding happens exactly once, at compile.
+// The valid authored value `$9$Qzzzz36BIErlK` decodes in one pass to
+// the token-safe plaintext `$9$`. That plaintext must render verbatim;
+// it must not be mistaken for another encoded blob, rejected as
+// malformed, or decoded to a different key. Before provenance was
+// recorded, authTokenOrOmit decoded the compiled plaintext again and
+// dropped the valid BGP neighbor / RIP enrollment.
+func TestJunos9PrefixedPlaintextRendersOnce15990(t *testing.T) {
+	const outer = "$9$Qzzzz36BIErlK"
+	if decoded, err := config.DecodeJunos9Secret(outer); err != nil || decoded != "$9$" {
+		t.Fatalf("one-pass vector = %q, %v; want %q", decoded, err, "$9$")
+	}
+	buildTree := func(t *testing.T, cmds []string) *config.ConfigTree {
+		t.Helper()
+		tree := &config.ConfigTree{}
+		for _, cmd := range cmds {
+			path, err := config.ParseSetCommand(cmd)
+			if err != nil {
+				t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+			}
+			if err := tree.SetPath(path); err != nil {
+				t.Fatalf("SetPath(%q): %v", cmd, err)
+			}
+		}
+		return tree
+	}
+	m := New()
+
+	for _, strict := range []bool{true, false} {
+		mode := "tolerant"
+		compile := config.CompileConfigLenient
+		if strict {
+			mode = "strict"
+			compile = config.CompileConfig
+		}
+		t.Run(mode+" bgp", func(t *testing.T) {
+			cfg, err := compile(buildTree(t, []string{
+				"set protocols bgp local-as 65001",
+				"set protocols bgp group g1 neighbor 10.0.0.9 peer-as 65001",
+				`set protocols bgp group g1 neighbor 10.0.0.9 authentication-key "` + outer + `"`,
+			}))
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+			if got := cfg.Protocols.BGP.Neighbors[0].AuthPassword.Reveal(); got != "$9$" {
+				t.Fatalf("compiled AuthPassword = %q, want one-pass plaintext %q", got, "$9$")
+			}
+			got := m.generateProtocols(cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.BGP, cfg.Protocols.RIP, cfg.Protocols.ISIS, "", 0, nil, nil)
+			if !strings.Contains(got, "neighbor 10.0.0.9 password $9$\n") {
+				t.Errorf("prefixed plaintext was not rendered exactly once (#15990):\n%s", got)
+			}
+		})
+		t.Run(mode+" rip", func(t *testing.T) {
+			cfg, err := compile(buildTree(t, []string{
+				"set protocols rip authentication-type md5",
+				`set protocols rip authentication-key "` + outer + `"`,
+				"set protocols rip neighbor ge-0/0/3",
+			}))
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+			if got := cfg.Protocols.RIP.AuthKey.Reveal(); got != "$9$" {
+				t.Fatalf("compiled RIP AuthKey = %q, want one-pass plaintext %q", got, "$9$")
+			}
+			got := m.generateProtocols(cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.BGP, cfg.Protocols.RIP, cfg.Protocols.ISIS, "", 0, nil, nil)
+			if !strings.Contains(got, " network ge-0/0/3\n") || !strings.Contains(got, " ip rip authentication string $9$\n") {
+				t.Errorf("prefixed RIP plaintext was not enrolled exactly once (#15990):\n%s", got)
+			}
+		})
+	}
+}
+
+// #15990 fold-2: the same one-pass `$9$`-prefixed plaintext witness for
+// the OSPF and IS-IS credentials, driven through the real compile ->
+// generateProtocols pipeline (including the OSPF union and its
+// field-bound provenance rebind), plus the tolerant fail-closed shapes.
+func TestJunos9PrefixedPlaintextOSPFISIS15990(t *testing.T) {
+	const outer = "$9$Qzzzz36BIErlK"
+	buildTree := func(t *testing.T, cmds []string) *config.ConfigTree {
+		t.Helper()
+		tree := &config.ConfigTree{}
+		for _, cmd := range cmds {
+			path, err := config.ParseSetCommand(cmd)
+			if err != nil {
+				t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+			}
+			if err := tree.SetPath(path); err != nil {
+				t.Fatalf("SetPath(%q): %v", cmd, err)
+			}
+		}
+		return tree
+	}
+	cmds := []string{
+		`set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 authentication md5 1 key "` + outer + `"`,
+		`set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password "` + outer + `"`,
+		"set protocols isis authentication-type md5",
+		`set protocols isis authentication-key "` + outer + `"`,
+		"set protocols isis interface ge-0/0/2.0 authentication-type md5",
+		`set protocols isis interface ge-0/0/2.0 authentication-key "` + outer + `"`,
+	}
+	m := New()
+	for _, tc := range []struct {
+		name    string
+		compile func(*config.ConfigTree) (*config.Config, error)
+	}{
+		{"strict", config.CompileConfig},
+		{"tolerant", config.CompileConfigLenient},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := tc.compile(buildTree(t, cmds))
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+			got := m.generateProtocols(cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.BGP, cfg.Protocols.RIP, cfg.Protocols.ISIS, "", 0, nil, nil)
+			for _, want := range []string{
+				" ip ospf message-digest-key 1 md5 $9$\n",
+				" ip ospf authentication-key $9$\n",
+				" area-password md5 $9$\n",
+				" isis password md5 $9$\n",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q (decoded exactly once):\n%s", want, got)
+				}
+			}
+		})
+	}
+	// Tolerant malformed/decoded-empty OSPF + IS-IS stays withheld.
+	bad := []string{
+		`set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 authentication md5 1 key "$9$i"`,
+		`set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 authentication simple-password "$9$garbage"`,
+		"set protocols isis authentication-type md5",
+		`set protocols isis authentication-key "$9$i"`,
+	}
+	cfg, err := config.CompileConfigLenient(buildTree(t, bad))
+	if err != nil {
+		t.Fatalf("lenient bad compile: %v", err)
+	}
+	got := m.generateProtocols(cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.BGP, cfg.Protocols.RIP, cfg.Protocols.ISIS, "", 0, nil, nil)
+	if strings.Contains(got, "ge-0/0/0.0") || strings.Contains(got, "ge-0/0/1.0") ||
+		strings.Contains(got, "router isis") || strings.Contains(got, "$9$") {
+		t.Errorf("tolerant malformed OSPF/IS-IS credentials rendered (#15990):\n%s", got)
 	}
 }
 

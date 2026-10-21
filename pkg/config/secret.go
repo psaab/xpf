@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -51,6 +52,57 @@ type Secret string
 // SecretRedacted is the sentinel emitted in place of a non-empty Secret on
 // JSON/YAML marshal.
 const SecretRedacted = "<redacted>"
+
+// Junos9Provenance records whether a routing credential has consumed
+// the single Junos `$9$` decode owned by decodeJunos9AtCompile.
+type Junos9Provenance uint8
+
+const (
+	// Junos9Unprocessed means compile has not adjudicated the value.
+	// Directly constructed renderer inputs use this conservative state:
+	// a leading `$9$` is unresolved authored material, never plaintext.
+	Junos9Unprocessed Junos9Provenance = iota
+	// Junos9Decoded means the value is plaintext after exactly one
+	// compile-time decode (or was plaintext to begin with), even if the
+	// plaintext itself begins `$9$`.
+	Junos9Decoded
+	// Junos9Undecodable means tolerant compilation retained an authored
+	// blob that failed its one decode attempt; renderers must omit it.
+	Junos9Undecodable
+)
+
+// junos9Provenance is the identity-keyed compile-provenance
+// registry. Secret itself must remain a plain string (copies of the
+// compiled structs are pervasive), so provenance cannot live in the
+// value: two credentials with identical bytes but different authorship
+// (a literal plaintext "$9$..." vs a failed tolerated decode of the
+// same bytes) must not collide. Registration therefore binds the
+// address of the compiled field, and lookup happens only while the
+// caller still holds that field — exactly the render-belt path, which
+// reads cfg fields in place. SetJunos9Provenance is compile-only.
+var junos9Provenance sync.Map // map[*Secret]Junos9Provenance
+
+// SetJunos9Provenance records the compile provenance of the credential
+// stored in s. Calling it again for a different value stored in the
+// same field replaces the record.
+func (s *Secret) SetJunos9Provenance(p Junos9Provenance) {
+	if s != nil {
+		junos9Provenance.Store(s, p)
+	}
+}
+
+// Provenance reports the compile provenance bound to this field, or
+// Junos9Unprocessed when compile never adjudicated it (directly
+// constructed or copied values).
+func (s *Secret) Provenance() Junos9Provenance {
+	if s == nil {
+		return Junos9Unprocessed
+	}
+	if p, ok := junos9Provenance.Load(s); ok {
+		return p.(Junos9Provenance)
+	}
+	return Junos9Unprocessed
+}
 
 // String redacts a non-empty Secret for %v/%s/slog formatting (logging
 // hygiene). An empty Secret renders as "" so absence stays distinguishable.

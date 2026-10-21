@@ -56,13 +56,11 @@ import (
 // lives at the callers in protocols_render.go.
 //
 // #15990 extends the same belt to Junos `$9$` credentials on the
-// tolerant path. Strict compilation decodes valid values and refuses
-// malformed ones before render, but a persisted config can retain a
-// warned, literal `$9$...` blob. A decodable value is rendered as its
-// decoded plaintext; an undecodable or decoded-empty value is not a
-// credential at all and must be omitted so the caller withholds the
-// enclosing capability instead of activating the adjacency with the
-// publicly recognizable blob as its key.
+// tolerant path, without decoding twice. Compilation owns the one
+// decode and records provenance on the compiled Secret: decoded values
+// are plaintext even when they begin `$9$`; a retained tolerant blob
+// is marked undecodable and omitted. Only a directly constructed,
+// unprocessed renderer input takes the belt's decode fallback.
 
 // frrAuthTokenUnsafe reports whether s cannot be emitted as a single vtysh
 // token. It mirrors config.frrTokenUnsafeIndex's character set deliberately: a
@@ -78,16 +76,39 @@ func frrAuthTokenUnsafe(s string) bool {
 	return false
 }
 
-// decodedAuthSecret resolves a configured routing credential through
-// its Junos `$9$` decoded form. Non-`$9$` values pass through byte-for-
-// byte. A `$9$` value that decodes successfully supplies its plaintext;
-// one that is malformed or decodes to zero bytes supplies no credential.
-func decodedAuthSecret(s string) (string, bool) {
-	decoded, err := config.DecodeJunos9Secret(s)
-	if err != nil || decoded == "" {
+// resolvedAuthSecret applies the single-decode provenance contract to
+// a compiled routing credential:
+//
+//   - Junos9Decoded: reveal the compile plaintext verbatim, even when
+//     that plaintext begins `$9$`; it has already consumed its decode.
+//   - Junos9Undecodable: tolerant compilation retained a failed blob;
+//     no credential is available.
+//   - Junos9Unprocessed: a directly constructed renderer input has no
+//     compile provenance. Only non-`$9$` plaintext is safe to consume;
+//     a leading `$9$` is unresolved authored material. A valid direct
+//     blob is decoded for this render, while a malformed/decoded-empty
+//     blob supplies no credential. This fallback never writes back, so
+//     it cannot mark a direct value as compiled plaintext.
+func resolvedAuthSecret(s *config.Secret) (string, bool) {
+	if s == nil {
 		return "", false
 	}
-	return decoded, true
+	raw := s.Reveal()
+	switch s.Provenance() {
+	case config.Junos9Decoded:
+		if raw == "" {
+			return "", false
+		}
+		return raw, true
+	case config.Junos9Undecodable:
+		return "", false
+	default:
+		decoded, err := config.DecodeJunos9Secret(raw)
+		if err != nil || decoded == "" {
+			return "", false
+		}
+		return decoded, true
+	}
 }
 
 // authTokenOrOmit returns the value to interpolate and whether the caller may
@@ -95,12 +116,16 @@ func decodedAuthSecret(s string) (string, bool) {
 //
 // The warning names the protocol and the length and NEVER the value: this is an
 // auth secret, and the log is not 0640.
-func authTokenOrOmit(kind, s string) (string, bool) {
-	resolved, ok := decodedAuthSecret(s)
+func authTokenOrOmit(kind string, s *config.Secret) (string, bool) {
+	resolved, ok := resolvedAuthSecret(s)
 	if !ok {
+		secretLen := 0
+		if s != nil {
+			secretLen = len(*s)
+		}
 		slog.Warn("frr: OMITTING a routing authentication line whose Junos $9$ secret cannot be decoded to a non-empty credential (#15990) — the adjacency will not authenticate; re-set the key",
 			"protocol", kind,
-			"secret_len", len(s))
+			"secret_len", secretLen)
 		return "", false
 	}
 	if !frrAuthTokenUnsafe(resolved) {

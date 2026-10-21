@@ -332,9 +332,48 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				renderedAreaByInterface[iface.Name] = state
 			}
 		}
+		// The render loop holds map values by copy, and field-bound
+		// provenance does not survive a struct copy. The union fields
+		// above were populated by Merge from the ORIGINAL compiled
+		// interfaces (state.settings.Merge ran on those addresses), so
+		// rebind from the still-live source fields matched by interface
+		// name and key ID/value before resolving.
+		rebindOSPFProvenance := func(state *ospfRenderV2State12186) {
+			for _, area := range ospf.Areas {
+				if area == nil || ospfAreaIdentity11400(area.ID) != state.area.key {
+					continue
+				}
+				for _, src := range area.Interfaces {
+					if src == nil || src.Name != state.settings.Name {
+						continue
+					}
+					if state.settings.AuthKey == src.AuthKey {
+						state.settings.AuthKey.SetJunos9Provenance(src.AuthKey.Provenance())
+					}
+					for i := range state.settings.MD5Keys {
+						mk := &state.settings.MD5Keys[i]
+						matched := false
+						for j := range src.AuthMD5Keys {
+							if src.AuthMD5Keys[j].ID == mk.ID && src.AuthMD5Keys[j].Key == mk.Key {
+								mk.Key.SetJunos9Provenance(src.AuthMD5Keys[j].Key.Provenance())
+								matched = true
+							}
+						}
+						if !matched && len(src.AuthMD5Keys) == 0 && src.AuthKeyID == mk.ID && src.AuthKey == mk.Key {
+							mk.Key.SetJunos9Provenance(src.AuthKey.Provenance())
+						}
+					}
+				}
+			}
+		}
 		for _, name := range interfaceOrder {
-			state := renderedAreaByInterface[name]
-			iface := state.settings.OSPFInterface
+			st := renderedAreaByInterface[name]
+			state := &st
+			rebindOSPFProvenance(state)
+			// Provenance is field-bound: keep the union value (not a
+			// copy of its embedded OSPFInterface) so credential lookups
+			// resolve against the union fields the Merge wrote.
+			iface := &state.settings.OSPFInterface
 			// #14388 (DR6-H4): decide MD5 survivability BEFORE emitting the
 			// interface header. If AuthType is md5 but no key survives
 			// (all key-ids out of 1..255, all secrets empty, or all secrets
@@ -347,7 +386,8 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			var md5Block strings.Builder
 			if iface.AuthType == "md5" {
 				authEmitted := false
-				for _, key := range state.settings.MD5Keys {
+				for i := range state.settings.MD5Keys {
+					key := &state.settings.MD5Keys[i]
 					if key.Key == "" {
 						continue
 					}
@@ -356,7 +396,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 							"interface", sanitizeFRRValue(iface.Name), "key_id", key.ID)
 						continue
 					}
-					tok, ok := authTokenOrOmit("ospf-md5", key.Key.Reveal())
+					tok, ok := authTokenOrOmit("ospf-md5", &key.Key)
 					if !ok {
 						continue
 					}
@@ -400,7 +440,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 						"interface", sanitizeFRRValue(iface.Name), "authentication_type", iface.AuthType)
 					continue
 				}
-				tok, ok := authTokenOrOmit("ospf-simple", iface.AuthKey.Reveal())
+				tok, ok := authTokenOrOmit("ospf-simple", &iface.AuthKey)
 				if !ok {
 					slog.Warn("frr: omitting OSPF interface with an unrenderable simple authentication key; refusing to activate it unauthenticated (#14977)",
 						"interface", sanitizeFRRValue(iface.Name))
@@ -648,7 +688,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			// the unauthenticated-session window, and every loop below
 			// inherits the exclusion so none can activate it.
 			if n.AuthPassword != "" {
-				if _, ok := authTokenOrOmit("bgp", n.AuthPassword.Reveal()); !ok {
+				if _, ok := authTokenOrOmit("bgp", &n.AuthPassword); !ok {
 					slog.Warn("frr: omitting BGP neighbor with an unrenderable authentication password; refusing to establish it unauthenticated (#14977)",
 						"neighbor", sanitizeFRRValue(n.Address))
 					continue
@@ -772,7 +812,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				fmt.Fprintf(&b, " neighbor %s ebgp-multihop %d\n", n.Address, frrClampInt("bgp ebgp-multihop", n.MultihopTTL, 255))
 			}
 			if n.AuthPassword != "" {
-				if tok, ok := authTokenOrOmit("bgp", n.AuthPassword.Reveal()); ok {
+				if tok, ok := authTokenOrOmit("bgp", &n.AuthPassword); ok {
 					fmt.Fprintf(&b, " neighbor %s password %s\n", n.Address, tok)
 				}
 			}
@@ -1204,7 +1244,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		}
 		ripAuthTok14977, ripAuthTokOK14977 := "", true
 		if rip.AuthKey != "" {
-			ripAuthTok14977, ripAuthTokOK14977 = authTokenOrOmit("rip", rip.AuthKey.Reveal())
+			ripAuthTok14977, ripAuthTokOK14977 = authTokenOrOmit("rip", &rip.AuthKey)
 		}
 		ripUnrecognized14977 := rip.AuthKey != "" && config.AuthTypeUnrecognized(rip.AuthType)
 		// #15013 (A12-01): an over-long key (>16 characters) is
@@ -1213,7 +1253,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		// unrenderable-token arm: omit RIP enrollment entirely
 		ripResolvedKey15990, ripResolvedOK15990 := "", true
 		if rip.AuthKey != "" {
-			ripResolvedKey15990, ripResolvedOK15990 = decodedAuthSecret(rip.AuthKey.Reveal())
+			ripResolvedKey15990, ripResolvedOK15990 = resolvedAuthSecret(&rip.AuthKey)
 		}
 		ripKeyTooLong15013 := rip.AuthKey != "" && ripResolvedOK15990 && len([]rune(ripResolvedKey15990)) > config.MaxRIPAuthKeyLen
 		if ripKeyTooLong15013 {
@@ -1299,7 +1339,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		if isis.AuthKey != "" {
 			if config.AuthTypeUnrecognized(isis.AuthType) {
 				isisGlobalAuthBad14977 = true
-			} else if tok, ok := authTokenOrOmit("isis-global", isis.AuthKey.Reveal()); ok {
+			} else if tok, ok := authTokenOrOmit("isis-global", &isis.AuthKey); ok {
 				isisGlobalTok14977 = tok
 			} else {
 				isisGlobalAuthBad14977 = true
@@ -1318,7 +1358,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			if iface.AuthKey != "" {
 				if config.AuthTypeUnrecognized(iface.AuthType) {
 					bad = true
-				} else if tok, ok := authTokenOrOmit("isis-interface", iface.AuthKey.Reveal()); ok {
+				} else if tok, ok := authTokenOrOmit("isis-interface", &iface.AuthKey); ok {
 					isisIfaceTok14977[iface.Name] = tok
 				} else {
 					bad = true

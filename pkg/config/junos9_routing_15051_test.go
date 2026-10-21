@@ -131,9 +131,9 @@ func TestJunos9MalformedRefusedAtStrictCommit15051(t *testing.T) {
 		leaf  string
 	}{
 		{"bgp", []string{
-		"set protocols bgp local-as 65001",
-		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
-		"set protocols bgp group g1 neighbor 10.0.0.1 authentication-key \"" + junos9Bad15051 + "\"",
+			"set protocols bgp local-as 65001",
+			"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
+			"set protocols bgp group g1 neighbor 10.0.0.1 authentication-key \"" + junos9Bad15051 + "\"",
 		}, "authentication-key"},
 		{"ospf-md5", []string{
 			"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0 authentication md5 1 key \"" + junos9Bad15051 + "\"",
@@ -156,9 +156,9 @@ func TestJunos9MalformedRefusedAtStrictCommit15051(t *testing.T) {
 		}, "authentication-key"},
 		{"routing-instance-bgp", []string{
 			"set routing-instances VRF-A instance-type vrf",
-		"set routing-instances VRF-A protocols bgp local-as 65001",
-		"set routing-instances VRF-A protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
-		"set routing-instances VRF-A protocols bgp group g1 neighbor 10.0.0.1 authentication-key \"" + junos9Bad15051 + "\"",
+			"set routing-instances VRF-A protocols bgp local-as 65001",
+			"set routing-instances VRF-A protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
+			"set routing-instances VRF-A protocols bgp group g1 neighbor 10.0.0.1 authentication-key \"" + junos9Bad15051 + "\"",
 		}, "authentication-key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,8 +320,9 @@ func TestJunos9DecodeToEmptyRejected15990(t *testing.T) {
 	}
 
 	// Tolerant path (#1960): the persisted decode-to-empty blob still
-	// boots, is kept verbatim (never silently emptied), and warns — so
-	// the render belts see the undecodable blob, not Secret("").
+	// boots, is kept verbatim (never silently emptied), and warns. The
+	// render belts withhold it via Junos9Undecodable provenance, so it
+	// is omitted — never rendered as a credential.
 	cfg, err := CompileConfigLenient(buildTree(t, []string{
 		"set protocols rip authentication-type md5",
 		`set protocols rip authentication-key "$9$i"`,
