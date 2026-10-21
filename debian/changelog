@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Stop DDNS withdraw from deleting foreign same-content records:
+    Cloudflare records xpf creates now carry an `xpf-managed` comment
+    ownership tag, publish no longer adopts an untagged same-content
+    record as its own (it creates its own tagged row alongside), and
+    withdraw deletes only tagged/self-created rows, so a second
+    publisher's identical record at the same name survives. Records
+    published before tagging withdraw through a logged value-scoped
+    fallback rather than being orphaned. Route 53 cannot distinguish
+    identical RRset values, so its withdraw stays value-scoped; that
+    limitation is now documented (#16086).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Render Kea DHCP configs 0640 root:_kea instead of 0644 in a 0755
     directory: the rendered kea-dhcp{4,6}.conf carries the full
     static-reservation inventory (MAC, IP, hostname), previously

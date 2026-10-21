@@ -12814,10 +12814,20 @@ reserved for whole-dataplane selection where a rewrite shim
       `?domains=<label>&token=&ip=`/`&ipv6=`; success on the literal `OK` body
       (`KO` ⇒ hard error); withdraw ⇒ `&clear=true` (removes both A and AAAA).
     - cloudflare: `api-token` (Bearer), `zone` (zone NAME; the zone id is
-      resolved at update time).
+      resolved at update time). Records xpf creates carry an `xpf-managed`
+      comment ownership tag (#16086): publish never adopts an untagged
+      same-content record as its own, and withdraw deletes only tagged (or
+      self-created) rows — a foreign publisher's identical record at the
+      same name survives. Pre-tagging legacy records withdraw through a
+      logged value-scoped fallback.
     - route53: `aws-access-key`, `aws-secret-key`, `aws-region` (default
       us-east-1), `hosted-zone-id` (SigV4-signed `ChangeResourceRecordSets`
-      UPSERT/DELETE).
+      UPSERT/DELETE). Route 53 RRset members carry no per-value provenance,
+      so the #16086 protection cannot apply to an IDENTICAL foreign value:
+      withdraw strips xpf's value, and a foreign publisher holding the same
+      value at the same name+type loses that shared datum until it
+      republishes (distinct foreign values are preserved). Do not point
+      two autonomous publishers at the same Route 53 name+type+value.
     - generic templated (config-only — no Go code per provider): `url-template`
       (`%h` host, `%i` IP, `%u` user, `%p` pass, `%%` literal; quote the value —
       `?`/`&`/`%` need quoting in a `set` command), `ok-response`

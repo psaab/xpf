@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -41,6 +43,37 @@ type cloudflareBackend struct {
 	token   string // revealed at construction; never logged
 	zone    string // zone NAME (e.g. example.net); id resolved at update time
 	client  *http.Client
+
+	// created tracks the (zoneID, recordID) of rows THIS backend instance
+	// POSTed, keyed "zoneID/id" (#16086 A10-16). It is the "self-created"
+	// half of the withdraw ownership test for rows that predate the
+	// comment tag or whose provider drops the comment: those rows are
+	// untagged, so only this in-process memory proves xpf created them.
+	// Losing it (restart, or a rebuilt backend — backends are resolved
+	// per reconcile) demotes those rows to the legacy value-scoped
+	// fallback in DeleteLease, WITH a warning; it can never promote a
+	// foreign row.
+	mu      sync.Mutex
+	created map[string]struct{}
+}
+
+func (b *cloudflareBackend) trackCreated(zoneID, id string) {
+	if id == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.created == nil {
+		b.created = map[string]struct{}{}
+	}
+	b.created[zoneID+"/"+id] = struct{}{}
+}
+
+func (b *cloudflareBackend) selfCreated(zoneID, id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.created[zoneID+"/"+id]
+	return ok
 }
 
 // newCloudflareBackend resolves a provider-catalog entry into a live Cloudflare
@@ -115,7 +148,24 @@ type cfRecord struct {
 	Name    string `json:"name"`
 	Content string `json:"content"`
 	TTL     int    `json:"ttl"`
+	Comment string `json:"comment"`
 }
+
+// cfOwnedComment is the Cloudflare record-comment tag xpf stamps on every
+// record it CREATES (POST) — the only durable ownership proof Cloudflare
+// offers: unlike Route 53's RRset, a Cloudflare row is individually
+// addressable, and its free-form comment rides with the row (#16086 A10-16).
+// A row xpf PATCHes is deliberately NOT re-tagged: xpf can only reach its
+// own prior row or a same-content row via value equality, which is exactly
+// the ambiguous case — claiming a foreign row by stamping it would repeat
+// the withdraw bug on the publish side. DeleteLease therefore deletes a
+// same-content row ONLY when it carries this tag or was created by this
+// backend instance; an untagged same-content row is a legacy/foreign
+// candidate handled by the logged value-scoped fallback (see DeleteLease).
+const cfOwnedComment = "xpf-managed"
+
+// cfOwnedByTag reports whether a Cloudflare row carries xpf's ownership tag.
+func cfOwnedByTag(r cfRecord) bool { return r.Comment == cfOwnedComment }
 
 // maxCFErrors bounds how many envelope errors are rendered. The array length is
 // PROVIDER-CHOSEN, so without this the per-message cap is defeated by repetition
@@ -289,21 +339,24 @@ func (b *cloudflareBackend) listRecords(ctx context.Context, zoneID, rtype, fqdn
 // an API-ordering artifact, not a statement of ownership (mirrors the
 // content-scoped DELETE, #2770). The precedence is:
 //
-//  1. A row already carrying the NEW content with the desired TTL → no write to
-//     the live row (idempotent re-publish; extra ban-avoidance on top of the
-//     engine's change-detection), but xpf's stale PREVIOUS row (if any) is
-//     still DELETEd (#10715: the pre-fix early return leaked it when the
-//     desired new row coexisted with the known previous value).
+//  1. A PROVEN-owned row (comment-tagged, or created by this instance)
+//     already carrying the NEW content with the desired TTL → no write to
+//     the live row (idempotent re-publish), but xpf's stale PREVIOUS row
+//     (if any) is still DELETEd (#10715). An UNTAGGED same-content row does
+//     NOT satisfy this arm (#16086 A10-16): it may be a foreign publisher's
+//     identical record, so xpf falls through and POSTs its own tagged row
+//     to coexist with it (when no stale previous row needs renumbering).
 //  2. A row carrying the NEW content with the WRONG TTL → PATCH that row in
 //     place (#9067), then DELETE xpf's stale previous row if one survived
-//     alongside (#10715: the pre-fix arm overwrote prevID, converging the
-//     live row and leaking the stale one).
+//     alongside (#10715). The PATCH payload carries no comment, so it never
+//     claims a row by stamping it.
 //  3. Else a row carrying xpf's PREVIOUS published value (rec.PrevAddr) → PATCH
 //     that row in place. This is the renumber of xpf's OWN record; the foreign
 //     row (if any) is left untouched.
-//  4. Else no xpf-owned row exists at this name → POST a NEW record. Any foreign
-//     record at the name survives (never PATCH recs[0], which would rewrite a
-//     foreign value to xpf's address — the #3739 H11 bug).
+//  4. Else no xpf-owned row exists at this name → POST a NEW record stamped
+//     with the cfOwnedComment ownership tag and tracked as self-created. Any
+//     foreign record at the name survives (never PATCH recs[0], which would
+//     rewrite a foreign value to xpf's address — the #3739 H11 bug).
 //
 // Degenerate cases stay correct: a first publish (no prev, empty name) POSTs;
 // a first publish onto a name that already carries only a foreign record also
@@ -337,13 +390,32 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 	var prevIDs []string
 	sameContentID := ""
 	sameContentCorrect := false
+	// A same-content row xpf can PROVE it owns (comment tag, or created by
+	// this backend instance). Only a proven-owned row may satisfy the
+	// idempotent no-write arm: an untagged same-content row may be a
+	// foreign publisher's identical record (#16086 A10-16), and treating
+	// it as ours both skips creating xpf's own tagged row and pairs with
+	// an untagged withdraw fallback that would delete it.
+	sameOwnedCorrect := false
+	sameOwnedWrongTTL := false
 	for _, r := range recs {
 		if r.Content == content {
+			if cfOwnedByTag(r) || b.selfCreated(zoneID, r.ID) {
+				if r.TTL == ttl {
+					sameOwnedCorrect = true
+					continue
+				}
+				sameContentID = r.ID
+				sameOwnedWrongTTL = true
+				continue
+			}
 			if r.TTL == ttl {
 				sameContentCorrect = true
 				continue
 			}
-			sameContentID = r.ID
+			if sameContentID == "" {
+				sameContentID = r.ID
+			}
 			continue
 		}
 		if prevSet[r.Content] {
@@ -360,13 +432,45 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 		"content": content,
 		"ttl":     ttl,
 	}
-	if sameContentCorrect {
+	// postPayload stamps the ownership tag on CREATE only (see
+	// cfOwnedComment). PATCHes reuse payload (no comment key), so a PATCH
+	// never claims a row and never strips a genuine tag's ownership info.
+	postPayload := map[string]any{
+		"type":    rec.ForwardType,
+		"name":    name,
+		"content": content,
+		"ttl":     ttl,
+		"comment": cfOwnedComment,
+	}
+	if sameOwnedCorrect {
 		for _, id := range prevIDs {
 			if _, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+id, nil); err != nil {
 				return err
 			}
 		}
 		return nil
+	}
+	if !sameOwnedWrongTTL && sameContentCorrect && len(prevIDs) > 0 {
+		// An untagged row already carries the new content AND xpf's stale
+		// previous row survives (#10715 shape, untagged flavour): delete
+		// the stale previous row(s), then fall through past the
+		// same-content PATCH target (sameContentID cleared below) so the
+		// POST arm creates xpf's own tagged row for the new value.
+		for _, id := range prevIDs {
+			if _, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+id, nil); err != nil {
+				return err
+			}
+		}
+		prevIDs = nil
+		prevID = ""
+	}
+	if !sameOwnedWrongTTL && sameContentCorrect {
+		// The only same-content row is untagged and unproven: it may be a
+		// foreign publisher's identical record (#16086). Do NOT adopt it
+		// as proof of publish — fall through to POST xpf's own tagged
+		// row so the records coexist and a later withdraw can tell them
+		// apart.
+		sameContentID = ""
 	}
 	targetID := prevID
 	if sameContentID != "" {
@@ -386,10 +490,15 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 		}
 		return err
 	}
-	_, err = b.do(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", payload)
+	env, err := b.do(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", postPayload)
 	if err != nil {
 		return err
 	}
+	var created cfRecord
+	if len(env.Result) > 0 {
+		_ = json.Unmarshal(env.Result, &created)
+	}
+	b.trackCreated(zoneID, created.ID)
 	for _, id := range prevIDs {
 		if _, err = b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+id, nil); err != nil {
 			return err
@@ -399,18 +508,31 @@ func (b *cloudflareBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord)
 }
 
 // DeleteLease removes the firewall's OWN A/AAAA from Cloudflare: resolve zone
-// id, list every record for the FQDN+type, and DELETE only the rows whose
-// content equals the owned address (rec.Addr.Unmap().String()).
+// id, list every record for the FQDN+type, and DELETE only the rows xpf can
+// prove it owns whose content equals the owned address
+// (rec.Addr.Unmap().String()).
 //
-// This honours the Surface A sole-delete-authority boundary
-// (withdrawOwnedLocked re-derives the delete from the EXACT owned tuple): xpf
-// never deletes a name+value it did not record. recs[0] is an API-ordering
-// artifact, so a content-blind delete of the first match would clobber a value
-// a human/automation later set on the same name (#2770). Multiple owned rows
-// with the same content are all removed (not just the first). A record that is
-// already gone — or where no row matches the owned content (ownership conflict)
-// — is a success no-op: the wire is already in (or never reached) the desired
-// state, and deleting a foreign value would itself be the bug.
+// OWNERSHIP (#16086 A10-16): content equality alone is NOT ownership — a
+// foreign publisher can hold an identical name+type+value row (redundant
+// appliances), and the pre-fix withdraw deleted EVERY same-content row,
+// killing the victim's name until its forced refresh. A same-content row is
+// deleted only when xpf can prove ownership: it carries the cfOwnedComment
+// tag (stamped on CREATE), or this backend instance created it (tracked in
+// b.created). Any other same-content row is left alone whenever a proven
+// row exists.
+//
+// LEGACY VALUE-SCOPED FALLBACK, logged: when NO same-content row is provably
+// xpf's — the steady state for records published before the tag existed (or
+// after a restart dropped b.created before those records were re-tagged) —
+// withdraw falls back to the pre-#16086 value-scoped delete (every
+// same-content row) and warns. Skipping the delete instead would orphan
+// xpf's own legacy record forever once local ownership is dropped. The
+// fallback is therefore still value-scoped and can still delete a foreign
+// same-content record; it exists only for untagged rows, fires loudly, and
+// shrinks to zero as records are re-created with the tag. A row with a
+// DIFFERENT value is never touched in either mode (#2770 ownership
+// conflict = success no-op), honouring the Surface A sole-delete-authority
+// boundary. Already-gone is likewise a success no-op.
 func (b *cloudflareBackend) DeleteLease(ctx context.Context, rec LeaseDNSRecord) error {
 	zoneID, err := b.resolveZoneID(ctx)
 	if err != nil {
@@ -422,10 +544,28 @@ func (b *cloudflareBackend) DeleteLease(ctx context.Context, rec LeaseDNSRecord)
 	if err != nil {
 		return err
 	}
+	var proven, unproven []cfRecord
 	for _, r := range recs {
 		if r.Content != owned {
 			continue
 		}
+		if cfOwnedByTag(r) || b.selfCreated(zoneID, r.ID) {
+			proven = append(proven, r)
+		} else {
+			unproven = append(unproven, r)
+		}
+	}
+	targets := proven
+	if len(targets) == 0 && len(unproven) > 0 {
+		slog.Warn("ddns cloudflare: withdrawing by value-scoped fallback; "+
+			"no xpf-tagged record found, deleting every untagged same-content row "+
+			"(legacy record published before ownership tagging, or a foreign "+
+			"same-content record cannot be distinguished)",
+			"provider", b.name, "fqdn", name, "type", rec.ForwardType,
+			"addr", owned, "rows", len(unproven))
+		targets = unproven
+	}
+	for _, r := range targets {
 		if _, err := b.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+r.ID, nil); err != nil {
 			return err
 		}
