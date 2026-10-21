@@ -130,7 +130,7 @@ func (t *ConfigTree) LineOccupancy(path []string) (matchedUnits int, fullPath bo
 	for pos < len(path) {
 		found := false
 		for _, child := range children {
-			consumed := matchNodeKeys(child, path, pos)
+			consumed := matchNodeKeysFull(child, path, pos)
 			if consumed > 0 {
 				matchedUnits += 1 + len(child.Keys)
 				children = child.Children
