@@ -887,17 +887,13 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			// charge = max(0, lineToks-leafToks) (small). Absent/
 			// container targets charge full (twin-add creates).
 			if perr == nil {
-				kind, _, leafKeys := working.LineOccupancy(path)
+				kind, _, _ := working.LineOccupancy(path)
 				if kind == config.LineTargetLeaf {
-					// toks includes verb+path; leaf replacement
-					// creates only keys beyond the existing leaf's.
-					charge = (toks - 1) - leafKeys
-					if charge < 0 {
-						charge = 0
-					}
-					if charge > 1 && toks-leafKeys <= 1 {
-						charge = 1
-					}
+					// Existence keys the charge: full path resolves
+					// to an existing leaf -> creation is ZERO
+					// regardless of depth (token arithmetic over-
+					// charged deep paths 6/line for zero creation).
+					charge = 0
 				}
 			}
 		}

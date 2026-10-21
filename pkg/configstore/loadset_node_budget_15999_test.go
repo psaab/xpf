@@ -594,3 +594,22 @@ func TestIdenticalResetsCreationCharge15999(t *testing.T) {
 		t.Fatalf("distinct growing sets must refuse: err=%v", err)
 	}
 }
+
+// Deep-leaf identical re-sets: existence keys the charge (0), so 66,667
+// deep re-sets (and the 200k shallow cell above) are accepted.
+func TestDeepIdenticalResetsAccepted15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet("set security address-book global address deep 10.0.0.1/32"); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for range 66_667 {
+		b.WriteString("set security address-book global address deep 10.0.0.1/32\n")
+	}
+	if _, err := s.LoadSet(b.String()); err != nil {
+		t.Fatalf("66,667 deep identical re-sets refused: %v", err)
+	}
+}
