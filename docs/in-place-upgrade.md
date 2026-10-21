@@ -904,7 +904,12 @@ target. Read-only status (`xpfd upgrade kernel status`) stays lock-free.
   exclusive flock can be taken on a readable `O_RDONLY` fd: the pre-fix
   0755/0644 pair let any local user flock the upgrade lock and block all
   upgrades indefinitely. The shipped unit also sets
-  `RuntimeDirectory=xpf`/`RuntimeDirectoryMode=0750`/`UMask=0027`.
+  `RuntimeDirectory=xpf`/`RuntimeDirectoryMode=0750`/`UMask=0027` and
+  `RuntimeDirectoryPreserve=yes` — preserve so stopping xpfd cannot
+  unlink `/run/xpf/upgrade.lock` while the upgrade runner holds its
+  flock across the stop (a removed path would let a second process
+  flock a new inode and split the mutex mid-cutover); only the
+  directory survives a stop, and `/run` tmpfs still clears it at boot.
 - Owner metadata (PID, subcommand, target, start time) is written into
   the lock file after the flock succeeds, so a busy acquirer's error
   NAMES the current owner.

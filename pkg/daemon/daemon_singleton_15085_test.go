@@ -106,18 +106,26 @@ func TestDaemonLockTightensPermissiveModes16050(t *testing.T) {
 // directives, parsing test/incus/xpfd.service (the source debian/rules
 // stages) as in TestUnitRestartForceExitStatus15084: RuntimeDirectory=xpf
 // at 0750 plus UMask=0027, so no file created under /run/xpf by the
-// daemon or a shell first-creator it spawns lands world-readable.
-// RED-on-revert: deleting any of the three directives fails here.
+// daemon or a shell first-creator it spawns lands world-readable, and
+// RuntimeDirectoryPreserve=yes so systemd does NOT remove /run/xpf at
+// unit stop — the upgrade runner holds an open flock on
+// /run/xpf/upgrade.lock across stopping xpfd, and removing the path
+// would unlink the locked inode and let a second process flock a new
+// inode, splitting the mutex mid-cutover.
+// RED-on-revert: deleting any of the four directives fails here.
 func TestUnitRuntimeDirectoryHardened16050(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "xpfd.service"))
 	if err != nil {
 		t.Fatalf("read shipped unit: %v", err)
 	}
-	var runtimeDir, runtimeMode, umask string
+	var runtimeDir, runtimeMode, runtimePreserve, umask string
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#") {
 			continue
+		}
+		if v, ok := strings.CutPrefix(line, "RuntimeDirectoryPreserve="); ok {
+			runtimePreserve = v
 		}
 		if v, ok := strings.CutPrefix(line, "RuntimeDirectory="); ok {
 			runtimeDir = v
@@ -134,6 +142,9 @@ func TestUnitRuntimeDirectoryHardened16050(t *testing.T) {
 	}
 	if m, err := strconv.ParseUint(runtimeMode, 8, 32); err != nil || m != 0o750 {
 		t.Errorf("RuntimeDirectoryMode = %q, want 0750 (#16050)", runtimeMode)
+	}
+	if runtimePreserve != "yes" {
+		t.Errorf("RuntimeDirectoryPreserve = %q, want \"yes\" so stopping xpfd cannot unlink the held upgrade lock path (#16050)", runtimePreserve)
 	}
 	if m, err := strconv.ParseUint(umask, 8, 32); err != nil || m != 0o027 {
 		t.Errorf("UMask = %q, want 0027 (#16050)", umask)

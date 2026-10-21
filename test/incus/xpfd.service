@@ -13,6 +13,15 @@ Type=simple
 # any other file the daemon or its children create under /run/xpf.
 RuntimeDirectory=xpf
 RuntimeDirectoryMode=0750
+# #16050 fold: systemd would otherwise REMOVE /run/xpf at unit stop —
+# while the upgrade runner holds an open flock on
+# /run/xpf/upgrade.lock across stopping xpfd, so the path would be
+# unlinked and a second process could flock a NEW inode, splitting
+# the mutex mid-cutover. Preserve keeps the directory (and the lock
+# path) alive across stops; it does not preserve lock semantics
+# across a reboot — /run is tmpfs, the dir is recreated empty at
+# boot, and flock state is per-boot by design (see pkg/upgrade/lock).
+RuntimeDirectoryPreserve=yes
 UMask=0027
 ExecStart=/usr/local/sbin/xpfd
 Restart=on-failure
