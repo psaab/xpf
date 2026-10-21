@@ -1826,16 +1826,16 @@ var writeKeaConfigFile = func(path string, data []byte, perm os.FileMode, opts .
 //   - Existing file owned by the Kea uid, mode within 0640: pure
 //     preserve — ownership untouched, mode capped at 0640 by fsatomic.
 //   - Existing file owned by the Kea uid, wider than 0640: applied
-//     mode-only. When the group already is the Kea group, or when this
-//     process may install it, the write preserves just like above
-//     (fsatomic never re-stamps a Kea-uid owner to root): only the
-//     mode caps. When the group is foreign and this process may NOT
-//     install the Kea group (non-root), the write is STILL pure
+//     mode-only, pure preserve in every sub-arm. When the group
+//     already is the Kea group, or when this process may install it,
+//     preserve suffices: fsatomic caps the mode and never re-stamps a
+//     Kea-uid owner. When the group is foreign and this process may
+//     NOT install the Kea group (non-root), the write is STILL pure
 //     preserve (#16101 fold-2): the Kea uid reads via the OWNER arm
 //     (capped 0640 keeps owner-read), so tightening cannot strand the
 //     reader — failing the whole apply for a mode-only gain would
-//     strand DHCP instead. Group migration for Kea-uid files happens
-//     only where the gid actually installs.
+//     strand DHCP instead. Kea-uid files NEVER group-migrate in this
+//     writer: their group, foreign or not, is left exactly as found.
 //   - Otherwise (root- or foreign-owned), when the Kea group resolves
 //     and this process may install it: explicit owner (euid, kea-gid)
 //     — fresh files are root:_kea from first install (euid is 0 in

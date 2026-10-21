@@ -284,15 +284,16 @@ func TestRenderUnresolvedThenPreSeed_WarnsExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestWriteKeaConfig_KeaUIDWider_KeepsUID pins fold-2 arm (2): an
-// existing file owned by the Kea uid, wider than 0640, with gid ==
-// kea-gid must keep the Kea UID (pure preserve) — never an explicit
-// WithOwner(euid, gid) that reverts the operator's _kea uid to root.
-// The test process plays the Kea user (uid/gid = euid/egid, which IS
-// installable), so pre-fold code took the WithOwner arm and landed
-// uid=euid by accident of identity; the recorder distinguishes the
-// arms: pre-fold requests one WithOwner option, post-fold one
-// WithPreserveExisting option. RED-on-revert: option count/type flips.
+// TestWriteKeaConfig_KeaUIDWider_KeepsUID covers fold-2 arm (2) at
+// gid == kea-gid: an existing Kea-uid-owned file wider than 0640 keeps
+// the Kea uid and caps to 0640. NOTE: this cell is NOT decisive for
+// the fold — with gid == kea-gid the pre-fold code already took the
+// preserve arm (its `st.Gid == gid` branch), so it passes pre-fold
+// too. It is retained as an end-state pin. The decisive arm-(2) cell
+// is TestWriteKeaConfig_KeaUIDWiderForeignGID_RootDistinguishes
+// (file gid is the resolved Kea gid but foreign to the seed owner —
+// see there), and the decisive fold-2 cell overall is
+// TestWriteKeaConfig_KeaUIDWiderForeignGID_Preserves.
 func TestWriteKeaConfig_KeaUIDWider_KeepsUID(t *testing.T) {
 	prev := writeKeaConfigFile
 	var gotOpts []fsatomic.Option
@@ -334,11 +335,13 @@ func TestWriteKeaConfig_KeaUIDWider_KeepsUID(t *testing.T) {
 	}
 }
 
-// TestWriteKeaConfig_KeaUIDWider_RootKeepsUID is the definitive arm-(2)
-// cell, root-only: a file genuinely owned by a DIFFERENT (Kea) uid at
-// 0644 with the Kea gid must keep that uid after render. Pre-fold code
-// requested WithOwner(0, kea-gid) and landed uid 0 (root), failing the
-// uid assertion; post-fold preserve keeps the Kea uid.
+// TestWriteKeaConfig_KeaUIDWider_RootKeepsUID covers arm (2) as root
+// with gid == kea-gid. Like the unprivileged cell above it is NOT
+// decisive pre-fold: gid == the resolved Kea gid takes the pre-fold
+// preserve arm, so it passes pre-fold too. Retained as an end-state
+// pin (genuinely foreign Kea uid 14242 preserved, mode capped 0640).
+// The decisive root cell is
+// TestWriteKeaConfig_KeaUIDWiderForeignGID_RootDistinguishes below.
 func TestWriteKeaConfig_KeaUIDWider_RootKeepsUID(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root-only: needs a file owned by a uid other than the process")
@@ -374,6 +377,60 @@ func TestWriteKeaConfig_KeaUIDWider_RootKeepsUID(t *testing.T) {
 	}
 	if int(st.Gid) != egid {
 		t.Fatalf("gid after render = %d, want %d", st.Gid, egid)
+	}
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode after render = %04o, want capped 0640", fi.Mode().Perm())
+	}
+}
+
+// TestWriteKeaConfig_KeaUIDWiderForeignGID_RootDistinguishes is THE
+// decisive fold-2 arm-(2) cell (root-only). Seed: Chown(conf, 14242,
+// 14243) at 0644; the lookup resolves the Kea user as (uid 14242,
+// gid 14244). The file is Kea-UID-owned and wider than 0640, but its
+// gid (14243) differs from the resolved Kea gid (14244) — so the
+// pre-fold same-gid preserve arm does NOT apply.
+//
+// Pre-fold: uid == kea-uid, gid != kea-gid, root can install → fell
+// to WithOwner(0, 14244) and landed uid 0 (root): RED on the uid
+// assertion. Head: Kea-uid-owned ⇒ pure preserve ⇒ uid stays 14242,
+// gid stays 14243 (Kea-uid files never group-migrate), mode 0640.
+func TestWriteKeaConfig_KeaUIDWiderForeignGID_RootDistinguishes(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root-only: needs chown to a foreign uid/gid")
+	}
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "kea-dhcp4.conf")
+	if err := os.WriteFile(conf, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	const (
+		keaUID  = 14242
+		seedGID = 14243 // file gid: foreign to the resolved Kea gid
+		keaGID  = 14244 // resolved Kea gid (lookup result)
+	)
+	if err := os.Chown(conf, keaUID, seedGID); err != nil {
+		t.Fatalf("chown seed: %v", err)
+	}
+	if err := os.Chmod(conf, 0o644); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+
+	m := New()
+	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return keaUID, keaGID, true })
+
+	if _, err := m.writeKeaConfig(conf, map[string]any{"Dhcp4": map[string]any{}}); err != nil {
+		t.Fatalf("writeKeaConfig: %v", err)
+	}
+	fi, err := os.Stat(conf)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if int(st.Uid) != keaUID {
+		t.Fatalf("uid after render = %d, want preserved Kea uid %d (pre-fold reverted to 0/root)", st.Uid, keaUID)
+	}
+	if int(st.Gid) != seedGID {
+		t.Fatalf("gid after render = %d, want untouched seed gid %d (Kea-uid files never migrate)", st.Gid, seedGID)
 	}
 	if fi.Mode().Perm() != 0o640 {
 		t.Fatalf("mode after render = %04o, want capped 0640", fi.Mode().Perm())
