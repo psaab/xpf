@@ -876,6 +876,7 @@
     "routing_instance": "",
     "rx_queues": 0,
     "tunnel": false,
+    "tunnel_mode": "",
     "unit_count": 0,
     "vlan_id": 0,
     "zone": ""
@@ -907,7 +908,9 @@
     "deterministic_host_base_v6": "",
     "deterministic_host_prefix_len": 0,
     "from_routing_instance": "",
+    "from_routing_instances": [],
     "from_zone": "",
+    "from_zones": [],
     "name": "",
     "no_v6_frag_header": false,
     "pool_addresses": [],

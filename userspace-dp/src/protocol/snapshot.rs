@@ -142,6 +142,16 @@ pub(crate) struct InterfaceSnapshot {
     pub unit_count: usize,
     #[serde(default)]
     pub tunnel: bool,
+    /// #16059 (fold 2): the tunnel MODE decided by the Go builder for this
+    /// row ("gre"/"ip6gre"/"wireguard"/"ipip"/"" ), mirroring the unit's
+    /// own tunnel stanza mode, else the interface-level mode it inherits.
+    /// Name shape cannot answer this — WireGuard is legally configured on
+    /// `gr-0/0/0` names — so the #16059 GRE-input exemption keys on this
+    /// field, never on the `gr-` prefix. Additive with serde default:
+    /// absent (old Go / tests) decodes to "", which is NOT GRE, so the
+    /// conflict gate refuses — fail-closed. Protocol v65.
+    #[serde(rename = "tunnel_mode", default)]
+    pub tunnel_mode: String,
     /// #6691: the Go control plane resolved that this row's netdev IS a
     /// route-based IPsec tunnel device, so this plane must not bind it.
     ///

@@ -330,21 +330,29 @@ fn parse_filter_table(
 /// their input filter being shadowed is a decided model with a
 /// commit-time advisory (`gre_unit_filter_shadow_10816.go`), NOT an
 /// ambiguity this gate may refuse — rejecting it would brick configs
-/// #10816 deliberately admits. The interface snapshot carries no tunnel
-/// MODE (only `tunnel: bool`), so GRE input rows are identified the way
-/// the Go advisory identifies its scope's subject: tunnel rows whose
-/// interface name is a GRE device (`gr-*`, the only name the Go GRE
-/// emitter produces; a renamed GRE device falls back to refusing, which
-/// is fail-closed). Every other arm — WG input/output, GRE output, and
-/// non-tunnel shared ifindexes — has no designed winner, so it refuses.
+/// #10816 deliberately admits. The discriminator is the snapshot's
+/// `tunnel_mode` (threaded from the Go builder at protocol v65: unit
+/// stanza mode, else inherited interface mode) — NEVER name shape,
+/// because WireGuard is legally configured on `gr-0/0/0` names. For the
+/// exempt class the assignment is FIRST-wins (see
+/// `resolve_interface_filter`), matching the #10816 winner. Every
+/// other arm — WG input/output, GRE output, and non-tunnel shared
+/// ifindexes — has no designed winner, so it refuses.
 fn assign_interface_filters(
     state: &mut FilterState,
     interfaces: &[crate::InterfaceSnapshot],
 ) -> Result<(), SnapshotIntegrityError> {
-    // #10816: GRE input on tunnel rows keeps first-sorting-wins; exempt
-    // it from the conflict gate (see fn doc). GRE devices are `gr-*`.
+    // #10816 (fold 2): GRE input keeps first-sorting-wins. The
+    // discriminator is the snapshot's tunnel MODE — never name shape:
+    // WireGuard is legally configured on `gr-0/0/0` names, so a `gr-`
+    // prefix test would exempt WG rows (the bug this fold fixes).
+    // `tunnel_mode` is the mode the Go builder decided (unit stanza,
+    // else inherited interface mode); "" (absent/old) is not GRE, so
+    // the gate refuses — fail-closed. First-wins is implemented in
+    // `resolve_interface_filter` via `first_wins` below: the assignment
+    // loop's later insert must not overwrite the first row's filter.
     let is_gre_input = |iface: &crate::InterfaceSnapshot, direction: &str| {
-        direction == "input" && iface.tunnel && iface.name.starts_with("gr-")
+        direction == "input" && matches!(iface.tunnel_mode.as_str(), "gre" | "ip6gre")
     };
     // (ifindex, family, direction) -> (first interface name, filter name)
     let mut first_by_hook: rustc_hash::FxHashMap<(i32, &'static str, &'static str), (&str, &str)> =
@@ -400,6 +408,7 @@ fn assign_interface_filters(
                 "inet",
                 "input",
                 &iface.filter_input_v4,
+                is_gre_input(iface, "input"),
             )?;
         }
         if !iface.filter_output_v4.is_empty() {
@@ -410,6 +419,7 @@ fn assign_interface_filters(
                 "inet",
                 "output",
                 &iface.filter_output_v4,
+                false,
             )?;
         }
         if !iface.filter_input_v6.is_empty() {
@@ -420,6 +430,7 @@ fn assign_interface_filters(
                 "inet6",
                 "input",
                 &iface.filter_input_v6,
+                is_gre_input(iface, "input"),
             )?;
         }
         if !iface.filter_output_v6.is_empty() {
@@ -430,6 +441,7 @@ fn assign_interface_filters(
                 "inet6",
                 "output",
                 &iface.filter_output_v6,
+                false,
             )?;
         }
     }
@@ -463,10 +475,19 @@ fn resolve_interface_filter(
     family: &'static str,
     direction: &'static str,
     filter_name: &str,
+    first_wins: bool,
 ) -> Result<(), SnapshotIntegrityError> {
     let key = qualify_filter_key(family, filter_name);
     if let Some(filter) = filters.get(&key) {
-        fast_map.insert(iface.ifindex, filter.clone());
+        // #16059 fold 2 (#10816): GRE-input rows are first-wins — the
+        // first row in snapshot order owns the shared key; a later
+        // sibling must not overwrite it (plain insert was last-wins,
+        // which silently reversed the #10816 winner).
+        if first_wins {
+            fast_map.entry(iface.ifindex).or_insert_with(|| filter.clone());
+        } else {
+            fast_map.insert(iface.ifindex, filter.clone());
+        }
         return Ok(());
     }
     Err(SnapshotIntegrityError::MissingFilterRef {

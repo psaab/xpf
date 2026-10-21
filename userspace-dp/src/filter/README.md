@@ -1011,10 +1011,14 @@ snapshot with `InterfaceFilterSharedIfindexConflict` when two
 non-base rows (`is_unit != Some(false)`) disagree on a configured hook;
 identical names and single-claimant shapes stay valid, and known base
 rows (which carry no Go filter fields) are excluded. EXCEPTION: GRE
-input on `gr-*` tunnel rows is exempt — #10816 decided GRE decap
-attributes a shared identity to the first-sorting row by design (with
-its commit advisory), so rejecting it would brick admitted configs.
-WG input/output, GRE output, and non-tunnel shared ifindexes refuse.
+input is exempt — #10816 decided GRE decap attributes a shared
+identity to the first-sorting row by design (with its commit
+advisory), so rejecting it would brick admitted configs. The
+discriminator is the snapshot `tunnel_mode` field (protocol v65,
+threaded from the Go builder), never name shape — WireGuard is
+legally configured on `gr-0/0/0` names. For the exempt class the
+assignment is first-wins, matching the #10816 winner. WG
+input/output, GRE output, and non-tunnel shared ifindexes refuse.
 The #6236 aggregate-from-final-map rule below still governs the
 remaining last-wins cases (known-base duplicates). A Go commit
 advisory (`wg_unit_filter_shadow_16059.go`) warns for the WG shape at

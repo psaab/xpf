@@ -295,7 +295,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v63 -> v64 (#16049): NAT64RuleSnapshot carries
 // from_routing_instances; a v63 helper ignores it and scopes to
 // the singular from_routing_instance only.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 64;
+// v64 -> v65 (#16059): InterfaceSnapshot carries tunnel_mode; a v64
+// helper decodes "" (not-GRE) and would refuse GRE-input shapes
+// #10816 admits.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 65;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
