@@ -292,7 +292,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // fail-closed, but the explicit flag is the durable record.
 // v62 -> v63 (#15932): NAT64RuleSnapshot carries from_zones; a v62
 // helper ignores it and scopes to the singular from_zone only.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 63;
+// v63 -> v64 (#16049): NAT64RuleSnapshot carries
+// from_routing_instances; a v63 helper ignores it and scopes to
+// the singular from_routing_instance only.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 64;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

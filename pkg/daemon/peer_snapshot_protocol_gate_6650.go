@@ -21,11 +21,19 @@ var ErrPeerSnapshotProtocolIncompatible = errors.New("cluster peer cannot repres
 var ErrPeerSnapshotProtocolAuthorizationStale = errors.New("cluster peer snapshot authorization became stale")
 
 // peerSnapshotProtocolAuthorization binds the decision to the capability
-// observation and daemon connection epoch that produced it.
+// observation and daemon connection epoch that produced it. minProtocol
+// is the STRICTEST per-feature floor the authorized config needs
+// (multi-zone scoped policy v4 and/or NAT64 multi-RI v64), so the
+// queue boundary revalidates against the same requirement.
 type peerSnapshotProtocolAuthorization struct {
 	session       *cluster.SessionSync
 	state         cluster.PeerSnapshotState
 	peerConnEpoch uint64
+	minProtocol   uint16
+	// nat64RI / multiZone mark which feature(s) the config carries,
+	// for the operator-facing refusal reason.
+	nat64RI   bool
+	multiZone bool
 }
 
 // peerSnapshotProtocolCommitPreflight refuses a candidate that a connected
@@ -44,7 +52,9 @@ func (d *Daemon) peerSnapshotProtocolAuthorizationForConfig(
 		return nil, nil
 	}
 	clustered := d.cluster != nil && cand.Chassis.Cluster != nil && cand.Chassis.Cluster.ConfigSync
-	if !clustered || !userspace.ConfigHasMultiZoneScopedPolicy(cand) {
+	hasMultiZone := clustered && userspace.ConfigHasMultiZoneScopedPolicy(cand)
+	hasNAT64RI := clustered && userspace.ConfigHasMultiRoutingInstanceNAT64(cand)
+	if !hasMultiZone && !hasNAT64RI {
 		return nil, nil
 	}
 	ss := d.getSessionSync()
@@ -52,12 +62,22 @@ func (d *Daemon) peerSnapshotProtocolAuthorizationForConfig(
 	if ss != nil {
 		state = ss.SnapshotPeerSnapshotProtocol()
 	}
+	minProtocol := uint16(0)
+	if hasMultiZone {
+		minProtocol = userspace.MinProtocolMultiZoneScopedPolicy
+	}
+	if hasNAT64RI && uint16(userspace.MinProtocolNAT64RoutingInstanceList) > minProtocol {
+		minProtocol = uint16(userspace.MinProtocolNAT64RoutingInstanceList)
+	}
 	auth := &peerSnapshotProtocolAuthorization{
 		session:       ss,
 		state:         state,
 		peerConnEpoch: d.syncPeerConnEpoch.Load(),
+		minProtocol:   minProtocol,
+		nat64RI:       hasNAT64RI,
+		multiZone:     hasMultiZone,
 	}
-	err := peerSnapshotProtocolDecision(true, state.Connected, true, state.Version)
+	err := peerSnapshotProtocolDecision(true, state.Connected, hasMultiZone, hasNAT64RI, state.Version)
 	return auth, err
 }
 
@@ -93,8 +113,8 @@ func (d *Daemon) revalidatePeerSnapshotAuthorization(
 		current = ss.SnapshotPeerSnapshotProtocol()
 	}
 	if ss != auth.session || currentEpoch != auth.peerConnEpoch || current != auth.state {
-		if current.Connected && current.Version < userspace.MinProtocolMultiZoneScopedPolicy {
-			err := peerSnapshotProtocolDecision(true, true, true, current.Version)
+		if current.Connected && current.Version < auth.minProtocol {
+			err := peerSnapshotProtocolDecisionForAuth(auth, current.Version)
 			d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, err.Error())
 			return false, err
 		}
@@ -107,12 +127,22 @@ func (d *Daemon) revalidatePeerSnapshotAuthorization(
 	if !current.Connected {
 		return false, nil
 	}
-	if current.Version < userspace.MinProtocolMultiZoneScopedPolicy {
-		err := peerSnapshotProtocolDecision(true, true, true, current.Version)
+	if current.Version < auth.minProtocol {
+		err := peerSnapshotProtocolDecisionForAuth(auth, current.Version)
 		d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, err.Error())
 		return false, err
 	}
 	return true, nil
+}
+
+// peerSnapshotProtocolDecisionForAuth renders the refusal for the
+// feature(s) the authorized config actually carries. A NAT64-RI auth
+// captured the v64 floor; a multi-zone-only auth captured v4. When
+func peerSnapshotProtocolDecisionForAuth(auth *peerSnapshotProtocolAuthorization, peerProto uint16) error {
+	if auth == nil {
+		return nil
+	}
+	return peerSnapshotProtocolDecision(true, true, auth.multiZone, auth.nat64RI, peerProto)
 }
 
 // peerSnapshotProtocolDecision is the gate's whole decision, split out from the
@@ -120,27 +150,40 @@ func (d *Daemon) revalidatePeerSnapshotAuthorization(
 // driven into the "connected, advertising v3" state from outside pkg/cluster —
 // its connection state is unexported — so a method-only gate would be testable
 // mainly in the arms that return nil, which is the half that proves least.
-func peerSnapshotProtocolDecision(clustered, peerConnected, hasMultiZone bool, peerProto uint16) error {
-	if !clustered || !peerConnected || !hasMultiZone {
-		return nil
-	}
-	if peerProto >= userspace.MinProtocolMultiZoneScopedPolicy {
+// hasNAT64RI (#16049) arms the v64 NAT64 multi-RI floor alongside the
+// v4 multi-zone floor; the strictest applicable floor governs.
+func peerSnapshotProtocolDecision(clustered, peerConnected, hasMultiZone, hasNAT64RI bool, peerProto uint16) error {
+	if !clustered || !peerConnected || (!hasMultiZone && !hasNAT64RI) {
 		return nil
 	}
 	// peerProto == 0 is a CONNECTED peer that advertised nothing, i.e. a build
-	// predating #6650 — which necessarily predates v4 too. Say so explicitly
-	// rather than printing "version 0", which reads like a decode bug.
+	// predating #6650 — which necessarily predates every floor too. Say so
+	// explicitly rather than printing "version 0", which reads like a decode bug.
 	peerDesc := fmt.Sprintf("%d", peerProto)
 	if peerProto == 0 {
 		peerDesc = "pre-#6650 (advertises no version)"
 	}
-	return fmt.Errorf(
-		"%w: this config contains a multi-zone scoped policy, which needs config-snapshot "+
-			"protocol %d; the cluster peer is at %s and would read only the first zone of the "+
-			"scope, silently NARROWING the policy on that node. Upgrade the peer, then re-commit "+
-			"(or express the policy as one rule per zone, which both nodes represent identically)",
-		ErrPeerSnapshotProtocolIncompatible,
-		userspace.MinProtocolMultiZoneScopedPolicy,
-		peerDesc,
-	)
+	if hasNAT64RI && peerProto < uint16(userspace.MinProtocolNAT64RoutingInstanceList) {
+		return fmt.Errorf(
+			"%w: this config contains a NAT64 rule-set scoped to multiple routing-instances, which needs config-snapshot "+
+				"protocol %d; the cluster peer is at %s and would recompile the config text with last-routing-instance-wins, "+
+				"silently TRUNCATING the NAT64 scope on that node. Upgrade the peer, then re-commit "+
+				"(or scope each NAT64 rule-set to a single routing-instance, which both nodes represent identically)",
+			ErrPeerSnapshotProtocolIncompatible,
+			userspace.MinProtocolNAT64RoutingInstanceList,
+			peerDesc,
+		)
+	}
+	if hasMultiZone && peerProto < userspace.MinProtocolMultiZoneScopedPolicy {
+		return fmt.Errorf(
+			"%w: this config contains a multi-zone scoped policy, which needs config-snapshot "+
+				"protocol %d; the cluster peer is at %s and would read only the first zone of the "+
+				"scope, silently NARROWING the policy on that node. Upgrade the peer, then re-commit "+
+				"(or express the policy as one rule per zone, which both nodes represent identically)",
+			ErrPeerSnapshotProtocolIncompatible,
+			userspace.MinProtocolMultiZoneScopedPolicy,
+			peerDesc,
+		)
+	}
+	return nil
 }

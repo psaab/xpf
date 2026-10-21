@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Union NAT64 `from routing-instance [ a b ]` lists instead of
+    last-wins: compileNAT64 now stamps every member onto the one
+    authored rule-set, the strict gate checks every member (a
+    nonexistent first RI previously committed clean), the snapshot
+    carries from_routing_instances (protocol 63->64) and the Rust
+    matcher unions it — one allocator per (prefix, pool) preserved
+    (#16049).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Refuse a malformed-line feed candidate that drops a previously-enforced
     prefix at any feed size: the drastic-shrink guard's default floors
     (old >= 32, drop >= 16, retain >= 50%) left small deny feeds wholly

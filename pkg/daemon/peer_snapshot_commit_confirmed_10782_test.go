@@ -77,6 +77,65 @@ func commitConfirmedSnapshotGateDaemon10782(t *testing.T, peerVersion uint16, co
 	return d, store, &pushes
 }
 
+// nat64SnapshotGateDaemon16049 mirrors the 10782 harness but seeds a
+// multi-RI NAT64 rule-set instead of the multi-zone global policy, so
+// the #16049 v64 floor race cells exercise the same commit-confirmed
+// machinery with the NAT64 shape.
+func nat64SnapshotGateDaemon16049(t *testing.T, peerVersion uint16, connected bool) (*Daemon, *configstore.Store, *int) {
+	t.Helper()
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "config"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	seed := func(step string) {
+		t.Helper()
+		if err := store.SetFromInput(step); err != nil {
+			t.Fatalf("set %q: %v", step, err)
+		}
+	}
+	for _, step := range []string{
+		"system host-name OLD",
+		"chassis cluster cluster-id 1",
+		"chassis cluster authentication-key test-cluster-psk-16049",
+		"chassis cluster node 0",
+		"chassis cluster redundancy-group 0 node 0 priority 200",
+		"chassis cluster redundancy-group 0 node 1 priority 100",
+		"chassis cluster configuration-synchronize",
+		"routing-instances blue instance-type virtual-router",
+		"routing-instances red instance-type virtual-router",
+		"security nat source pool p64 address 100.64.0.1/32",
+	} {
+		seed(step)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("commit baseline: %v", err)
+	}
+	for _, step := range []string{
+		"security nat nat64 rule-set rs1 prefix 64:ff9b::/96",
+		"security nat nat64 rule-set rs1 source-pool p64",
+		"security nat nat64 rule-set rs1 from routing-instance [ blue red ]",
+	} {
+		seed(step)
+	}
+	ss := cluster.NewSessionSync(":0", ":0", nil)
+	ss.SetConnectedForTesting(connected)
+	ss.SetPeerSnapshotProtocolVersionForTesting(peerVersion)
+	d := &Daemon{
+		applySem:    semaphore.NewWeighted(1),
+		store:       store,
+		cluster:     clusterOwningRG0(t),
+		sessionSync: ss,
+	}
+	d.syncPeerConnected.Store(connected)
+	if connected {
+		d.syncPeerConnEpoch.Store(1)
+	}
+	d.applyBodyForTest = func(*config.Config) {}
+	pushes := 0
+	d.syncPeerForTest = func() { pushes++ }
+	return d, store, &pushes
+}
+
 func TestCommitConfirmedUsesPeerSnapshotProtocolGate10782(t *testing.T) {
 	t.Run("disconnected peer does not freeze commit", func(t *testing.T) {
 		d, store, pushes := commitConfirmedSnapshotGateDaemon10782(t, 0, false)
@@ -260,4 +319,87 @@ func TestCommitConfirmedPeerSnapshotProtocolFloor10782(t *testing.T) {
 		}
 	})
 
+}
+
+// #16049 NAT64-specific race cells (mirrors of the 10782 multi-zone
+// cells, with the NAT64 multi-RI shape and the v64 floor):
+//
+//  1. Connected v63 peer refuses at commit preflight before promotion.
+//  2. Peer downgrades v64 -> v63 BETWEEN preflight and queue write:
+//     authorization revalidation withholds the push, retains the
+//     deferral alarm, and does not claim the push marker.
+func TestCommitConfirmedNAT64PeerSnapshotProtocolFloor16049(t *testing.T) {
+	t.Run("connected v63 peer refuses before promotion", func(t *testing.T) {
+		d, store, pushes := nat64SnapshotGateDaemon16049(t, 63, true)
+		_, err := d.commitConfirmedAndApply(t.Context(), configstore.InternalCommitter(), 1, peerSyncAlways)
+		if !errors.Is(err, ErrPeerSnapshotProtocolIncompatible) {
+			t.Fatalf("commit confirmed with a connected v63 peer must be refused by #16049; got %v", err)
+		}
+		if got := len(store.ActiveConfig().Security.NAT.NAT64); got != 0 {
+			t.Fatalf("refused commit-confirmed promoted %d NAT64 rule-sets; want none", got)
+		}
+		if store.IsConfirmPending() {
+			t.Fatal("refused commit-confirmed armed a rollback timer")
+		}
+		if *pushes != 0 {
+			t.Fatalf("refused commit-confirmed pushed %d configs to the peer; want none", *pushes)
+		}
+	})
+
+	t.Run("connected v64 peer remains allowed", func(t *testing.T) {
+		d, store, pushes := nat64SnapshotGateDaemon16049(t,
+			uint16(userspace.MinProtocolNAT64RoutingInstanceList), true)
+		_, err := d.commitConfirmedAndApply(t.Context(), configstore.InternalCommitter(), 1, peerSyncAlways)
+		if err != nil {
+			t.Fatalf("commit confirmed with a v64 peer must succeed: %v", err)
+		}
+		if got := len(store.ActiveConfig().Security.NAT.NAT64); got != 1 {
+			t.Fatalf("capable peer commit-confirmed promoted %d NAT64 rule-sets; want 1", got)
+		}
+		if *pushes != 1 {
+			t.Fatalf("successful commit-confirmed pushed %d configs to the peer; want 1", *pushes)
+		}
+		if err := store.ConfirmCommit(); err != nil {
+			t.Fatalf("clear test confirm timer: %v", err)
+		}
+	})
+
+	t.Run("v64 to v63 downgrade between preflight and queue withholds", func(t *testing.T) {
+		d, store, pushes := nat64SnapshotGateDaemon16049(t,
+			uint16(userspace.MinProtocolNAT64RoutingInstanceList), true)
+		ss := d.getSessionSync()
+		d.applyBodyForTest = func(*config.Config) {
+			// Model v64 disconnecting and a v63 process reconnecting
+			// after preflight but before the queue boundary.
+			ss.SetConnectedForTesting(false)
+			d.syncPeerConnected.Store(false)
+			ss.SetPeerSnapshotProtocolVersionForTesting(0)
+			d.syncPeerConnEpoch.Add(1)
+			ss.SetPeerSnapshotProtocolVersionForTesting(63)
+			ss.SetConnectedForTesting(true)
+			d.syncPeerConnected.Store(true)
+		}
+		_, err := d.commitConfirmedAndApply(t.Context(), configstore.InternalCommitter(), 1, peerSyncAlways)
+		if !errors.Is(err, ErrPeerSnapshotProtocolIncompatible) {
+			t.Fatalf("preflight authorization survived a v64->v63 reconnect: %v", err)
+		}
+		if got := len(store.ActiveConfig().Security.NAT.NAT64); got != 1 {
+			t.Fatalf("commit-confirmed did not retain its local promotion after the queue deferral; NAT64=%d", got)
+		}
+		if *pushes != 0 {
+			t.Fatalf("stale preflight authorization pushed %d configs to the v63 peer; want none", *pushes)
+		}
+		d.configSyncMu.Lock()
+		marked := d.configSyncHasPushed
+		d.configSyncMu.Unlock()
+		if marked {
+			t.Fatal("stale preflight authorization claimed the config-sync marker")
+		}
+		if alarm := d.peerSnapshotProtocolDeferredAlarm(); !strings.Contains(alarm, "Config sync deferred") {
+			t.Fatalf("stale preflight authorization did not raise the deferral alarm: %q", alarm)
+		}
+		if err := store.ConfirmCommitAs(""); err != nil {
+			t.Fatalf("ConfirmCommitAs after queue-boundary deferral: %v", err)
+		}
+	})
 }

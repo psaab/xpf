@@ -356,6 +356,12 @@ pub(crate) struct NAT64RuleSnapshot {
     pub from_zones: Vec<String>,
     #[serde(rename = "from_routing_instance", default)]
     pub from_routing_instance: String,
+    /// #16049: the full authored routing-instance list. Empty = fall
+    /// back to `from_routing_instance`. An old control plane omits it
+    /// and the rule keeps its singular scope; the v64 protocol bump
+    /// fences the pairing.
+    #[serde(rename = "from_routing_instances", default)]
+    pub from_routing_instances: Vec<String>,
     #[serde(rename = "source_addresses", default)]
     pub source_addresses: Vec<String>,
     #[serde(rename = "source_constrained", default)]

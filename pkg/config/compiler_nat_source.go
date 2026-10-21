@@ -429,12 +429,13 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 	for _, inst := range namedInstances(node.FindChildren("rule-set")) {
 		rs := &NAT64RuleSet{Name: inst.name}
 
-		// #15678/#15932: from-scope (zone | routing-instance). Reuse the
+		// #15678/#15932/#16049: from-scope (zone | routing-instance). Reuse the
 		// shared NAT scope reader so the packed-header shape (`rule-set rs
 		// from zone trust { ... }`) and bracket lists behave exactly as the
 		// other NAT rule-sets. Exactly one authored rule-set is kept: a
-		// same-kind list unions into FromZones (zone) or, for a single
-		// routing-instance, FromRoutingInstance. compileNAT64 never
+		// same-kind list unions into FromZones (zone) or
+		// FromRoutingInstances (routing-instance), first value also in the
+		// singular mirror. compileNAT64 never
 		// Cartesian-expands into snapshot siblings — the dataplane owns
 		// one PortAllocator per (prefix, pool) snapshot, so expanding
 		// would double-mint one pool across zones. A mixed-kind clause is
@@ -443,10 +444,14 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 		// this single rule-set (the pre-#15932 posture), never an OR.
 		fromScopes, _ := collectNATScopes(inst.node, false, "nat64")
 		seenZone := make(map[string]bool)
+		seenRI := make(map[string]bool)
 		for _, s := range fromScopes {
 			switch s.kind {
 			case "routing-instance":
-				rs.FromRoutingInstance = s.value
+				if s.value != "" && !seenRI[s.value] {
+					seenRI[s.value] = true
+					rs.FromRoutingInstances = append(rs.FromRoutingInstances, s.value)
+				}
 			default: // "zone"
 				if s.value != "" && !seenZone[s.value] {
 					seenZone[s.value] = true
@@ -456,6 +461,9 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 		}
 		if len(rs.FromZones) > 0 {
 			rs.FromZone = rs.FromZones[0]
+		}
+		if len(rs.FromRoutingInstances) > 0 {
+			rs.FromRoutingInstance = rs.FromRoutingInstances[0]
 		}
 
 		// #9792: a packed one-line run reaches this reader on the lenient path

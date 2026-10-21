@@ -65,3 +65,27 @@ func TestBuildNAT64SnapshotsCarriesZoneList15932(t *testing.T) {
 		t.Fatalf("FromZones = %v, want [trust untrust]", snaps[0].FromZones)
 	}
 }
+
+// #16049: the snapshot builder folds a hand-built rule-set's
+// FromRoutingInstances list (plus its singular) into the plural wire
+// field so the dataplane unions every authored routing-instance.
+func TestBuildNAT64SnapshotsCarriesRIList16049(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.NAT.SourcePools = map[string]*config.NATPool{
+		"p64": {Name: "p64", Addresses: []string{"100.64.0.1/32"}},
+	}
+	cfg.Security.NAT.NAT64 = []*config.NAT64RuleSet{{
+		Name: "rs1", Prefix: "64:ff9b::/96", SourcePool: "p64",
+		FromRoutingInstance: "blue", FromRoutingInstances: []string{"blue", "red"},
+	}}
+	snaps := buildNAT64Snapshots(cfg)
+	if len(snaps) != 1 || len(snaps[0].FromRoutingInstances) != 2 {
+		t.Fatalf("FromRoutingInstances = %v, want [blue red]", snaps)
+	}
+	if snaps[0].FromRoutingInstances[0] != "blue" || snaps[0].FromRoutingInstances[1] != "red" {
+		t.Fatalf("FromRoutingInstances = %v, want [blue red]", snaps[0].FromRoutingInstances)
+	}
+	if snaps[0].FromRoutingInstance != "blue" {
+		t.Fatalf("FromRoutingInstance = %q, want blue (singular mirror)", snaps[0].FromRoutingInstance)
+	}
+}

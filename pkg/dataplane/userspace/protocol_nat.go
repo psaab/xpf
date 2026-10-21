@@ -371,7 +371,12 @@ type NAT64RuleSnapshot struct {
 	FromZone            string   `json:"from_zone,omitempty"`
 	FromZones           []string `json:"from_zones,omitempty"`
 	FromRoutingInstance string   `json:"from_routing_instance,omitempty"`
-	SourceAddresses     []string `json:"source_addresses,omitempty"`
+	// FromRoutingInstances (#16049) is the full authored RI list;
+	// empty falls back to FromRoutingInstance. A v63 helper ignores
+	// it and scopes to the singular only — the last-RI truncation —
+	// so the v64 protocol bump fences the pairing.
+	FromRoutingInstances []string `json:"from_routing_instances,omitempty"`
+	SourceAddresses      []string `json:"source_addresses,omitempty"`
 	// SourceConstrained (#15930) records that the operator authored a
 	// source restriction (`match source-address[-name]`), independent of
 	// how many prefixes survived resolution. Rust ORs it with the

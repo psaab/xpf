@@ -101,7 +101,7 @@ func TestPeerSnapshotProtocolDecision6650(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := peerSnapshotProtocolDecision(tc.clustered, tc.connected, tc.multiZone, tc.peerProto)
+			err := peerSnapshotProtocolDecision(tc.clustered, tc.connected, tc.multiZone, false, tc.peerProto)
 			if tc.refuse && err == nil {
 				t.Fatalf("expected the commit to be REFUSED but it was allowed.\nwhy: %s", tc.why)
 			}
@@ -139,7 +139,7 @@ func TestPeerSnapshotFloorIsNotTheSharedProtocolVersion6650(t *testing.T) {
 			userspace.MinProtocolMultiZoneScopedPolicy)
 	}
 	// A peer at the floor but below the current shared version must be ACCEPTED.
-	if err := peerSnapshotProtocolDecision(true, true, true,
+	if err := peerSnapshotProtocolDecision(true, true, true, false,
 		uint16(userspace.MinProtocolMultiZoneScopedPolicy)); err != nil {
 		t.Fatalf("a peer at the per-feature floor (%d) was refused while the shared "+
 			"ProtocolVersion is %d: %v — the gate is keying on the shared constant, so "+
@@ -207,5 +207,80 @@ func TestSnapshotProtocolGateRequiresClusterRuntime6650(t *testing.T) {
 	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(cand)
 	if err != nil || auth != nil {
 		t.Fatalf("snapshot authorization ran without a cluster runtime: auth=%#v err=%v", auth, err)
+	}
+}
+
+// #16049 mixed-version cell: a v64 node must NOT push a multi-RI NAT64
+// config to a connected v63 peer — the peer recompiles the config text
+// with last-RI-wins and silently truncates the scope. The peer gate
+// (option a, #6650 precedent) refuses at commit preflight and withholds
+// the queue write; a peer at v64, a disconnected peer, and a single-RI
+// config are all allowed (negative controls).
+func TestPeerSnapshotNAT64RoutingInstanceList16049(t *testing.T) {
+	nat64Cfg := func(ris []string) *config.Config {
+		cfg := &config.Config{}
+		cfg.Chassis.Cluster = &config.ClusterConfig{ConfigSync: true}
+		cfg.Security.NAT.NAT64 = []*config.NAT64RuleSet{{
+			Name: "rs1", Prefix: "64:ff9b::/96", SourcePool: "p64",
+			FromRoutingInstance: ris[0], FromRoutingInstances: ris,
+		}}
+		return cfg
+	}
+	// Decision-level cells.
+	if err := peerSnapshotProtocolDecision(true, true, false, true, 63); !errors.Is(err, ErrPeerSnapshotProtocolIncompatible) {
+		t.Fatalf("v63 peer + multi-RI NAT64 must refuse, got %v", err)
+	}
+	if err := peerSnapshotProtocolDecision(true, true, false, true, uint16(userspace.MinProtocolNAT64RoutingInstanceList)); err != nil {
+		t.Fatalf("v64 peer + multi-RI NAT64 must allow, got %v", err)
+	}
+	if err := peerSnapshotProtocolDecision(true, false, false, true, 0); err != nil {
+		t.Fatalf("disconnected peer must allow (dead-peer control), got %v", err)
+	}
+	if userspace.MinProtocolNAT64RoutingInstanceList != 64 {
+		t.Fatalf("MinProtocolNAT64RoutingInstanceList = %d, want 64 (immutable v64 fact)", userspace.MinProtocolNAT64RoutingInstanceList)
+	}
+	if !userspace.ConfigHasMultiRoutingInstanceNAT64(nat64Cfg([]string{"blue", "red"})) {
+		t.Fatal("predicate must arm on [blue red]")
+	}
+	if userspace.ConfigHasMultiRoutingInstanceNAT64(nat64Cfg([]string{"blue"})) {
+		t.Fatal("predicate must not arm on a single RI")
+	}
+	// Daemon-level: connected v63 peer refuses; v64 peer authorizes
+	// with the v64 queue floor.
+	for _, tc := range []struct {
+		name    string
+		version uint16
+		refuse  bool
+	}{
+		{"v63 peer refuses multi-RI", 63, true},
+		{"v64 peer allows multi-RI", 64, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ss := cluster.NewSessionSync(":0", ":0", nil)
+			ss.SetConnectedForTesting(true)
+			ss.SetPeerSnapshotProtocolVersionForTesting(tc.version)
+			d := &Daemon{sessionSync: ss, cluster: newClusterManager(true)}
+			auth, err := d.peerSnapshotProtocolAuthorizationForConfig(nat64Cfg([]string{"blue", "red"}))
+			if tc.refuse {
+				if !errors.Is(err, ErrPeerSnapshotProtocolIncompatible) {
+					t.Fatalf("want ErrPeerSnapshotProtocolIncompatible, got auth=%v err=%v", auth, err)
+				}
+				return
+			}
+			if err != nil || auth == nil {
+				t.Fatalf("v64 peer must authorize: auth=%v err=%v", auth, err)
+			}
+			if auth.minProtocol != uint16(userspace.MinProtocolNAT64RoutingInstanceList) {
+				t.Fatalf("auth.minProtocol = %d, want %d", auth.minProtocol, userspace.MinProtocolNAT64RoutingInstanceList)
+			}
+		})
+	}
+	// Single-RI config never arms the peer gate even against v63.
+	ss := cluster.NewSessionSync(":0", ":0", nil)
+	ss.SetConnectedForTesting(true)
+	ss.SetPeerSnapshotProtocolVersionForTesting(63)
+	d := &Daemon{sessionSync: ss, cluster: newClusterManager(true)}
+	if auth, err := d.peerSnapshotProtocolAuthorizationForConfig(nat64Cfg([]string{"blue"})); err != nil || auth != nil {
+		t.Fatalf("single-RI config must use ungated path: auth=%v err=%v", auth, err)
 	}
 }

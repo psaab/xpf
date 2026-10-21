@@ -243,10 +243,11 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			// the wire as an empty (unconstrained) list.
 			sourceAddrs = []string{natUnresolvedAddressNamePrefix + "nat64-source"}
 		}
-		// #15932: one snapshot per authored rule-set carries the whole
-		// zone union. Fold the singular FromZone into the plural wire
-		// field (deduped, order-preserved) so the dataplane unions
-		// every authored zone behind ONE (prefix, pool) allocator.
+		// #15932/#16049: one snapshot per authored rule-set carries the
+		// whole zone / routing-instance unions. Fold each singular into
+		// its plural wire field (deduped, order-preserved) so the
+		// dataplane unions every authored value behind ONE
+		// (prefix, pool) allocator.
 		fromZones := append([]string(nil), rs.FromZones...)
 		if rs.FromZone != "" {
 			seen := false
@@ -260,6 +261,19 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 				fromZones = append(fromZones, rs.FromZone)
 			}
 		}
+		fromRIs := append([]string(nil), rs.FromRoutingInstances...)
+		if rs.FromRoutingInstance != "" {
+			seen := false
+			for _, ri := range fromRIs {
+				if ri == rs.FromRoutingInstance {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				fromRIs = append(fromRIs, rs.FromRoutingInstance)
+			}
+		}
 		out = append(out, NAT64RuleSnapshot{
 			Name:                       rs.Name,
 			Prefix:                     config.NormaliseNAT64PrefixForSnapshot(rs.Prefix),
@@ -267,6 +281,7 @@ func buildNAT64SnapshotsWithFeeds(cfg *config.Config, feedOverlay map[string][]s
 			FromZone:                   rs.FromZone,
 			FromZones:                  fromZones,
 			FromRoutingInstance:        rs.FromRoutingInstance,
+			FromRoutingInstances:       fromRIs,
 			SourceAddresses:            sourceAddrs,
 			SourceConstrained:          authoredConstrained && !wildcardAuthored,
 			NoV6FragHeader:             noV6FragHeader,

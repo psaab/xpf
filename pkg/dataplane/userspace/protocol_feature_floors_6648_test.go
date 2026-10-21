@@ -60,6 +60,15 @@ func multiZoneScopeFloorCfg() *config.Config {
 	return multiZoneScopedGlobalDenyConfig()
 }
 
+func nat64RIFloorCfg16049() *config.Config {
+	cfg := &config.Config{}
+	cfg.Security.NAT.NAT64 = []*config.NAT64RuleSet{{
+		Name: "rs1", Prefix: "64:ff9b::/96", SourcePool: "p64",
+		FromRoutingInstance: "blue", FromRoutingInstances: []string{"blue", "red"},
+	}}
+	return cfg
+}
+
 // Each gate is called DIRECTLY, not through ensureRequiredSnapshotProtocolLocked:
 // at any version below ProtocolVersion the unconditional egress-zone gate at the
 // tail of the chain also fires, so an orchestrator-level assertion could not
@@ -92,6 +101,13 @@ func TestPerFeatureGatesFenceOnTheirOwnFloor6648(t *testing.T) {
 			cfg: multiZoneScopeFloorCfg(), sent: ErrScopedGlobalZoneSetProtocolIncompatible,
 			call: func(m *Manager, cfg *config.Config) error {
 				return m.ensureScopedGlobalZoneSetProtocolLocked(cfg)
+			},
+		},
+		{
+			name: "nat64-routing-instance-list", floor: MinProtocolNAT64RoutingInstanceList,
+			cfg: nat64RIFloorCfg16049(), sent: ErrNAT64RoutingInstanceListProtocolIncompatible,
+			call: func(m *Manager, cfg *config.Config) error {
+				return m.ensureNAT64RoutingInstanceListProtocolLocked(cfg)
 			},
 		},
 	} {
@@ -185,6 +201,7 @@ func TestProtocolFloorsAreImmutableLiterals6648(t *testing.T) {
 		{"policy scheduler landed in the v2 bump (f7c4b125c)", MinProtocolPolicyScheduler, 2},
 		{"persistent source NAT landed in the v3 bump (c0a047ea2)", MinProtocolPersistentSourceNAT, 3},
 		{"multi-zone scoped policy landed in the v4 bump (8119bfe27)", MinProtocolMultiZoneScopedPolicy, 4},
+		{"NAT64 multi-RI scope landed in the v64 bump (#16049)", MinProtocolNAT64RoutingInstanceList, 64},
 		{"persistent NAT lease routing scope landed in the v25 bump (#10018)", MinProtocolPersistentNatLeaseScope, 25},
 		{"persistent NAT lease permissions landed in v48 (#13945)", MinProtocolPersistentNatLeasePermissions, 48},
 		{"the secure-tunnel refusal contract completed at the v7 bump (8c011681c)", MinProtocolSecureTunnelRefusal, 7},

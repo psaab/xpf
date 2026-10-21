@@ -91,6 +91,9 @@ func requiredProtocolGateCases(t *testing.T) []gateCase {
 		{"scoped-global-zoneset", func(m *Manager) error {
 			return m.ensureScopedGlobalZoneSetProtocolLocked(multiZoneScopeFloorCfg())
 		}},
+		{"nat64-routing-instance-list", func(m *Manager) error {
+			return m.ensureNAT64RoutingInstanceListProtocolLocked(nat64RIFloorCfg16049())
+		}},
 		{"secure-tunnel", func(m *Manager) error {
 			return m.ensureSecureTunnelProtocolLocked(stSnap)
 		}},
@@ -209,11 +212,12 @@ func TestRequiredProtocolGateFixturesArm7002(t *testing.T) {
 }
 
 // TestRequiredProtocolGateSentinelsCoverEveryGate7002 pins the census's
-// population. The original #7002 list names FOUR gates; there are now SIX, and
-// the abort/disarm contract keys on this list — a gate added without an entry
+// population. The original #7002 list names FOUR gates; there are now
+// SEVEN (#16049 adds the NAT64 multi-RI gate), and the abort/disarm
+// contract keys on this list — a gate added without an entry
 // disarms the helper while the commit reports success, which is exactly #2138.
 func TestRequiredProtocolGateSentinelsCoverEveryGate7002(t *testing.T) {
-	const wantGates = 6
+	const wantGates = 7
 	if got := len(requiredProtocolGateSentinels); got != wantGates {
 		t.Fatalf("requiredProtocolGateSentinels has %d entries, want %d. A gate was "+
 			"added or removed: add its cell to TestRequiredProtocolGateDefersOnNeverObserved7002 "+

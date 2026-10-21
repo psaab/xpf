@@ -1219,8 +1219,9 @@ func (c *CLI) showNAT64(cfg *config.Config) error {
 		if rs.Prefix != "" {
 			fmt.Printf("  Prefix:      %s\n", rs.Prefix)
 		}
-		// #15932: one block per authored rule-set; render its zone
-		// union (and RI scope) so operators see the full admission set.
+		// #15932/#16049: one block per authored rule-set; render its
+		// zone / routing-instance unions so operators see the full
+		// admission set.
 		zones := rs.FromZones
 		if len(zones) == 0 && rs.FromZone != "" {
 			zones = []string{rs.FromZone}
@@ -1228,8 +1229,12 @@ func (c *CLI) showNAT64(cfg *config.Config) error {
 		if len(zones) > 0 {
 			fmt.Printf("  From zones:   %s\n", strings.Join(zones, ", "))
 		}
-		if rs.FromRoutingInstance != "" {
-			fmt.Printf("  From routing-instance: %s\n", rs.FromRoutingInstance)
+		ris := rs.FromRoutingInstances
+		if len(ris) == 0 && rs.FromRoutingInstance != "" {
+			ris = []string{rs.FromRoutingInstance}
+		}
+		if len(ris) > 0 {
+			fmt.Printf("  From routing-instances: %s\n", strings.Join(ris, ", "))
 		}
 		if rs.SourcePool != "" {
 			fmt.Printf("  Source pool:  %s\n", rs.SourcePool)
