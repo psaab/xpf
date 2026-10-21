@@ -145,3 +145,53 @@ func TestSlogHandlerOrdinaryRecordDelivered16083(t *testing.T) {
 		t.Fatal("ordinary slog record was not delivered through the queue (#16083)")
 	}
 }
+
+// TestSlogHandlerShutdownDeliversQueued16083 is the logging-level half of
+// the orderly-shutdown drain (fold Finding 2): ShutdownTimeout must
+// deliver records already accepted into the queue before it returns,
+// and a bounded shutdown against a wedged collector must count the
+// undelivered remainder rather than losing it silently.
+func TestSlogHandlerShutdownDeliversQueued16083(t *testing.T) {
+	conn := &captureSyslogEventConn11697{writes: make(chan []byte, 4)}
+	client := NewSyslogClientWithConn(conn, "tcp")
+	handler := NewSyslogSlogHandler(slog.NewTextHandler(io.Discard, nil))
+	handler.SetClients([]*SyslogClient{client})
+
+	slog.New(handler).Info("queued before shutdown")
+	handler.ShutdownTimeout(2 * time.Second)
+	select {
+	case frame := <-conn.writes:
+		if !strings.Contains(string(frame), "queued before shutdown") {
+			t.Fatalf("drained frame does not carry the record: %q", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ShutdownTimeout returned without delivering the queued record")
+	}
+}
+
+func TestSlogHandlerShutdownWedgedCountsDrops16083(t *testing.T) {
+	conn := newStalledSyslogEventConn11697()
+	client := NewSyslogClientWithConn(conn, "tcp")
+	handler := NewSyslogSlogHandler(slog.NewTextHandler(io.Discard, nil))
+	handler.SetClients([]*SyslogClient{client})
+	t.Cleanup(func() { _ = client.Close() })
+
+	if !client.SendFromEventReader(SyslogInfo, "primer") {
+		t.Fatal("primer not accepted")
+	}
+	select {
+	case <-conn.entered:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not enter the stalled connection")
+	}
+	slog.New(handler).Info("wedged behind primer")
+
+	start := time.Now()
+	handler.ShutdownTimeout(100 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("wedged ShutdownTimeout took %s, want bounded (~100ms)", elapsed)
+	}
+	if got := client.DroppedWrites(); got == 0 {
+		t.Fatal("wedged shutdown discarded the queued record without counting it")
+	}
+}

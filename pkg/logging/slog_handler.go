@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 )
 
 type eventReaderSlogContextKey struct{}
@@ -134,7 +135,9 @@ func (h *SyslogSlogHandler) Clients() []*SyslogClient {
 	return append([]*SyslogClient(nil), s.clients...)
 }
 
-// Close closes all syslog clients.
+// Close closes all syslog clients. Queued writer records are discarded
+// and counted (the reconfigure path: a client swap must not wait on the
+// old collector).
 func (h *SyslogSlogHandler) Close() {
 	s := h.loadShared()
 	if s == nil {
@@ -148,6 +151,51 @@ func (h *SyslogSlogHandler) Close() {
 	for _, c := range clients {
 		c.Close()
 	}
+}
+
+// The ShutdownTimeout deadline is a TOTAL bound across all clients, so
+// one stalled collector cannot multiply it per client; each client still
+// gets at least a minimal slice so a healthy one is not starved to zero.
+const slogShutdownClientMinSlice = 10 * time.Millisecond
+
+// ShutdownTimeout orderly-closes the handler for process exit (#16083
+// fold): each client's queued backlog is delivered bounded by the TOTAL
+// timeout (shared deadline, drained concurrently so one hung collector
+// cannot starve healthy ones), then the clients are closed. Whatever a
+// client cannot deliver in its share is discarded and counted by the
+// writer's drop accounting — never silently lost, never unbounded.
+// ShutdownTimeout is the daemon-exit path; Close remains the reconfigure
+// path. Nil-safe and idempotent (a second call finds no clients).
+func (h *SyslogSlogHandler) ShutdownTimeout(timeout time.Duration) {
+	s := h.loadShared()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	clients := s.clients
+	s.clients = nil
+	s.mu.Unlock()
+
+	if timeout <= 0 {
+		for _, c := range clients {
+			c.Close()
+		}
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		remaining := time.Until(deadline)
+		if remaining < slogShutdownClientMinSlice {
+			remaining = slogShutdownClientMinSlice
+		}
+		wg.Add(1)
+		go func(c *SyslogClient, budget time.Duration) {
+			defer wg.Done()
+			c.CloseTimeout(budget)
+		}(c, remaining)
+	}
+	wg.Wait()
 }
 
 // Enabled implements slog.Handler.

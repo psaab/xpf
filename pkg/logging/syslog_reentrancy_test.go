@@ -44,7 +44,8 @@ func withSlogDefault(t *testing.T, h slog.Handler) {
 		// a late record from that writer (e.g. a drop warning) would be
 		// forwarded by the NEXT installed handler to its clients. Closing
 		// this handler's clients retires its writer so no record crosses
-		// the boundary. Close is idempotent for tests that also close.
+		// the boundary. Tests with a plain text handler have no clients to
+		// close. Close is idempotent for tests that also close.
 		if sh, ok := h.(*SyslogSlogHandler); ok {
 			sh.Close()
 		}

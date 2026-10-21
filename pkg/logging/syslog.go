@@ -212,6 +212,10 @@ type syslogEventWrite struct {
 	message  string
 	binary   []byte
 	isBinary bool
+	// ack, when non-nil, is a flush barrier: run closes it after every
+	// record queued ahead of it has been handed to the client. It carries
+	// no payload and is never counted as a drop.
+	ack chan struct{}
 }
 
 // syslogEventWriter moves network writes off EventReader.ProcessRawEvent and
@@ -219,11 +223,15 @@ type syslogEventWrite struct {
 // Queue overflow is counted without logging on the enqueueing goroutine:
 // slog can itself forward to syslog.
 type syslogEventWriter struct {
-	client  *SyslogClient
-	queue   chan syslogEventWrite
-	stopCh  chan struct{}
-	mu      sync.Mutex
-	dropped atomic.Uint64
+	client *SyslogClient
+	queue  chan syslogEventWrite
+	stopCh chan struct{}
+	// doneCh closes when run has exited. doneOnce keeps the close exactly
+	// once even though run's drain paths return through one defer.
+	doneCh   chan struct{}
+	doneOnce sync.Once
+	mu       sync.Mutex
+	dropped  atomic.Uint64
 	// slogDropped counts slog-handler records dropped from inside run()
 	// (#16083); folded into DroppedWrites so the loss stays observable
 	// even though no warning can be emitted for it.
@@ -233,6 +241,11 @@ type syslogEventWriter struct {
 	// (#16083). A leaf lock released before slog.Warn.
 	slogWarnMu   sync.Mutex
 	slogWarnTime time.Time
+	// drainMu serializes drainAndStop: several Shutdown callers (handler
+	// Close after a timed-out Shutdown, and vice versa) must not enqueue
+	// two barriers or double-close the barrier channel.
+	drainMu sync.Mutex
+	drained bool
 }
 
 func newSyslogEventWriter(client *SyslogClient) *syslogEventWriter {
@@ -240,6 +253,7 @@ func newSyslogEventWriter(client *SyslogClient) *syslogEventWriter {
 		client: client,
 		queue:  make(chan syslogEventWrite, syslogEventQueueDepth),
 		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
 	}
 	go w.run()
 	return w
@@ -265,7 +279,8 @@ func (w *syslogEventWriter) enqueue(kind enqueueKind, item syslogEventWrite) boo
 			return false
 		default:
 		}
-		if kind == enqueueSlog && len(item.message) > syslogEventQueueMaxBytes {
+		// Barriers bypass the slog size cap: they carry no payload.
+		if kind == enqueueSlog && item.ack == nil && len(item.message) > syslogEventQueueMaxBytes {
 			w.dropped.Add(1)
 			warn = true
 			return false
@@ -274,8 +289,10 @@ func (w *syslogEventWriter) enqueue(kind enqueueKind, item syslogEventWrite) boo
 		case w.queue <- item:
 			return true
 		default:
-			w.dropped.Add(1)
-			warn = kind == enqueueSlog
+			if item.ack == nil {
+				w.dropped.Add(1)
+			}
+			warn = kind == enqueueSlog && item.ack == nil
 			return false
 		}
 	}()
@@ -307,6 +324,14 @@ func (w *syslogEventWriter) warnSlogQueueDrop() {
 		"queue_depth", syslogEventQueueDepth)
 }
 
+// stop retires the writer: queued records are discarded and counted, as
+// before (#11697). It waits (bounded by doneCh semantics — it does not
+// wait at all; the caller that needs the goroutine gone polls doneCh via
+// ShutdownDrained) — kept non-blocking because Close must interrupt a
+// Write holding s.mu without serializing behind it. Shutdown uses
+// drainAndStop instead, which delivers first; stop remains the
+// reconfigure/Close path where the client itself is being torn down.
+// Barriers still fire so a concurrent drain caller is released.
 func (w *syslogEventWriter) stop() {
 	w.mu.Lock()
 	select {
@@ -316,7 +341,11 @@ func (w *syslogEventWriter) stop() {
 	}
 	for {
 		select {
-		case <-w.queue:
+		case item := <-w.queue:
+			if item.ack != nil {
+				close(item.ack)
+				continue
+			}
 			w.dropped.Add(1)
 		default:
 			w.mu.Unlock()
@@ -325,12 +354,84 @@ func (w *syslogEventWriter) stop() {
 	}
 }
 
+// waitStopped blocks until the writer goroutine has exited. Callers use
+// it after drainAndStop's barrier when they must know the goroutine is
+// gone (daemon shutdown drain); plain stop/Close deliberately do not
+// wait, so Close can interrupt a Write without serializing behind it.
+func (w *syslogEventWriter) waitStopped() {
+	<-w.doneCh
+}
+
+// drainAndStop delivers every record queued ahead of a flush barrier,
+// then retires the writer. True means the barrier fired — the backlog
+// was written (or counted by the transport) before the timeout. False
+// means the timeout expired (or the writer was already stopped) with
+// records still queued; those are drained and counted by stop, so the
+// loss is never silent. Records enqueued concurrently with the barrier
+// may land behind it; SwapClients/daemon shutdown stops producers first.
+func (w *syslogEventWriter) drainAndStop(timeout time.Duration) bool {
+	w.drainMu.Lock()
+	defer w.drainMu.Unlock()
+	if w.drained {
+		return true
+	}
+	w.drained = true
+	ack := make(chan struct{})
+	// The barrier itself must not block: if the queue is full, insert it
+	// blocking-free by waiting for run to make room — but that is exactly
+	// the stall this timeout bounds, so offer it with the same deadline.
+	deadline := time.Now().Add(timeout)
+	enqueued := false
+	for !enqueued {
+		w.mu.Lock()
+		select {
+		case <-w.stopCh:
+			w.mu.Unlock()
+			return false
+		default:
+		}
+		select {
+		case w.queue <- syslogEventWrite{ack: ack}:
+			enqueued = true
+		default:
+		}
+		w.mu.Unlock()
+		if !enqueued {
+			if time.Now().After(deadline) {
+				w.stop()
+				return false
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	select {
+	case <-ack:
+		w.stop()
+		// The barrier fired, so run is idle in its select; stop makes it
+		// exit promptly. Wait so ShutdownDrained holds on return.
+		w.waitStopped()
+		return true
+	case <-time.After(remaining):
+		w.stop()
+		return false
+	}
+}
+
 func (w *syslogEventWriter) run() {
+	defer w.doneOnce.Do(func() { close(w.doneCh) })
 	w.client.inWriter.enter()
 	defer w.client.inWriter.exit()
 	for {
 		select {
 		case item := <-w.queue:
+			if item.ack != nil {
+				close(item.ack)
+				continue
+			}
 			if w.client.closed.Load() {
 				w.dropped.Add(1)
 				continue
@@ -343,7 +444,11 @@ func (w *syslogEventWriter) run() {
 		case <-w.stopCh:
 			for {
 				select {
-				case <-w.queue:
+				case item := <-w.queue:
+					if item.ack != nil {
+						close(item.ack)
+						continue
+					}
 					w.dropped.Add(1)
 				default:
 					return
@@ -1934,6 +2039,37 @@ func ParseFacility(name string) int {
 		return FacilityLocal6
 	default:
 		return FacilityLocal0
+	}
+}
+
+// CloseTimeout is Close with a bounded writer drain (#16083 fold): when
+// timeout > 0 and the client still has its queue writer, CloseTimeout
+// first delivers the queued backlog (bounded), then closes. On timeout
+// the remaining queue is discarded and counted. The handler's Shutdown
+// path uses it so normal process exit does not silently lose accepted
+// records; the reconfigure path keeps plain Close (old-collector records
+// must not delay a swap).
+func (s *SyslogClient) CloseTimeout(timeout time.Duration) error {
+	if timeout > 0 {
+		if writer := s.eventWriter.Load(); writer != nil {
+			writer.drainAndStop(timeout)
+		}
+	}
+	return s.Close()
+}
+
+// ShutdownDrained reports whether this client's writer goroutine has
+// exited (observability/test seam for the daemon shutdown lifecycle).
+func (s *SyslogClient) ShutdownDrained() bool {
+	writer := s.eventWriter.Load()
+	if writer == nil {
+		return true
+	}
+	select {
+	case <-writer.doneCh:
+		return true
+	default:
+		return false
 	}
 }
 
