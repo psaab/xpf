@@ -2843,6 +2843,10 @@ type compileOpts struct {
 	lenientDefaultPolicyBlock11367 bool
 	// lenientDefaultPolicyConflict11821 warns on conflicting duplicate
 	// default-policy stanzas; the post-dispatch compiler forces deny-all.
+	// It also gates the #15998 every-token census (validateInvalidDefaultPolicy15998):
+	// strict rejects any invalid default-policy token, tolerant warns and
+	// forces deny-all, so an invalid value beside a valid one cannot leave
+	// an earlier permit-all standing.
 	lenientDefaultPolicyConflict11821 bool
 	// lenientPolicyStatsSystemWide12825 warns on invalid or contradictory
 	// policy-stats values; the post-dispatch compiler disables the knob.
