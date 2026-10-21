@@ -211,9 +211,12 @@ func TestCloudflareRenumberPatchesOnlyOwnedRow(t *testing.T) {
 	b := newCFTestBackend(t, srv, fake)
 
 	const fqdn = "wan.example.net"
-	// Foreign row FIRST (so it is recs[0]) + xpf's own prior value.
+	// Foreign row FIRST (so it is recs[0]) + xpf's own prior value. The
+	// owned row is seeded with this instance's tag (#16086 fold): an
+	// untagged prior row is no longer PATCHed by value — that adoption is
+	// exactly what the fold closes.
 	foreignA := fake.seedRecord("A", fqdn, "198.51.100.20")
-	ownedA := fake.seedRecord("A", fqdn, "203.0.113.5")
+	ownedA := fake.seedRecordComment("A", fqdn, "203.0.113.5", b.instanceTag)
 
 	rec := hostRecord(t, fqdn, "203.0.113.9")
 	rec.PrevAddr = netip.MustParseAddr("203.0.113.5") // xpf's prior value
@@ -258,8 +261,8 @@ func TestCloudflareExistingNewValueRemovesStalePreviousRecord10715(t *testing.T)
 
 			const fqdn = "wan.example.net"
 			foreignID := fake.seedRecordTTL("A", fqdn, "198.51.100.20", 1800)
-			newID := fake.seedRecordTTLComment("A", fqdn, "203.0.113.9", tc.liveTTL, cfOwnedComment)
-			oldID := fake.seedRecordTTLComment("A", fqdn, "203.0.113.5", 300, cfOwnedComment)
+			newID := fake.seedRecordTTLComment("A", fqdn, "203.0.113.9", tc.liveTTL, b.instanceTag)
+			oldID := fake.seedRecordTTLComment("A", fqdn, "203.0.113.5", 300, b.instanceTag)
 			rec := hostRecordTTL(t, fqdn, "203.0.113.9", 300)
 			rec.PrevAddr = netip.MustParseAddr("203.0.113.5")
 			if err := b.UpsertLease(context.Background(), rec); err != nil {
@@ -433,8 +436,8 @@ func TestCloudflareDeleteAllOwnedRecords(t *testing.T) {
 	const owned = "203.0.113.5"
 	// Two xpf-owned (tagged) rows + one foreign value a human set on the
 	// same name + an unrelated AAAA that must never be hit.
-	ownedA := fake.seedRecordComment("A", fqdn, owned, cfOwnedComment)
-	ownedB := fake.seedRecordComment("A", fqdn, owned, cfOwnedComment)
+	ownedA := fake.seedRecordComment("A", fqdn, owned, b.instanceTag)
+	ownedB := fake.seedRecordComment("A", fqdn, owned, b.instanceTag)
 	foreignA := fake.seedRecord("A", fqdn, "198.51.100.20")
 	foreignAAAA := fake.seedRecord("AAAA", fqdn, "2001:db8::1")
 
