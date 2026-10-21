@@ -2955,6 +2955,47 @@ fn reverse_transient_hit_survives_unchanged_snat_13652() {
     );
 }
 
+/// #16215 fold (Opus blocker): a REVERSE hit must never substitute the
+/// packet's decision into the forward judgment. The reply's decision
+/// egresses the LAN side; judging the forward SNAT against that egress
+/// reads the wrong zone pair and revokes a valid translation. Reverse
+/// hits keep the stored forward decision.
+///
+/// RED-on-revert: dropping the `!metadata.is_reverse` guard substitutes
+/// the reply decision (LAN egress 99, not in the egress map's WAN row)
+/// and this valid translation revokes.
+#[test]
+fn reverse_hit_never_substitutes_reply_decision_16215() {
+    let mut case = reverse_snat_case_13652();
+    // The reply packet's re-resolved decision: LAN-side egress 99 with a
+    // locally-forwarding disposition — exactly the shape the unguarded
+    // substitution would judge the forward SNAT against.
+    case.4.resolution.disposition = ForwardingDisposition::ForwardCandidate;
+    case.4.resolution.egress_ifindex = 99;
+    case.4.resolution.tx_ifindex = 99;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.0.clone(),
+        case.2,
+        case.3.clone(),
+        case.6,
+        1_000_000,
+        case.0.protocol,
+        0x02,
+    ));
+    sessions.mark_source_nat_revalidated(&case.0, Some(false));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    assert!(
+        reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case).is_none(),
+        "a reverse hit with a valid translation must survive; the reply decision must not be substituted (#16215)"
+    );
+    assert!(
+        sessions.entry_with_origin(&case.0).is_some(),
+        "the forward row must survive its reverse hit"
+    );
+}
+
 /// #13652: a locally present reverse row without its forward companion
 /// must still run the reverse-translated tuple's sessionless source-NAT
 /// check. Missing local ownership means drop-only revocation, not permission
@@ -7466,5 +7507,142 @@ fn imported_terminal_stored_resolution_judged_by_reresolved_16109() {
     assert!(
         sessions.entry_with_origin(&key).is_some(),
         "the imported row must not be deleted at its first hit"
+    );
+}
+
+/// #16215: the OLD owner's shape. A locally-authored SNAT row is demoted
+/// by DemoteOwnerRGS (origin flips to SyncImport) and its demote
+/// re-resolution demotes the cluster-terminal FIB row to plain
+/// DiscardRoute, so the stored row is terminal. Its first post-failover
+/// hit on fw0 must NOT be judged on that stored terminal decision: the
+/// hit re-resolves (the demoted row's retransmit resolves through the
+/// same terminal FIB row, which the fabric rescue converts), and even
+/// when the packet's own decision is the terminal DiscardRoute copy,
+/// revalidation declines — the session survives on BOTH nodes, not only
+/// the activating one. A FRESH decision that genuinely withdraws the
+/// translation still revokes.
+///
+/// RED-on-revert: judging the stored terminal decision revokes here
+/// (egress-0 miss); scoping the decline to the activating node revokes
+/// the fw0 cell.
+#[test]
+fn demoted_local_snat_terminal_row_declines_on_old_owner_16215() {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, true),
+        &zones,
+        0,
+    )
+    .expect("dynamic SNAT session imports from HA wire");
+    let key = synced.key.clone();
+    let metadata = synced.metadata.clone();
+    let origin = synced.origin;
+    let source_nat_static = synced.source_nat_static;
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    // The demoted stored row: terminal DiscardRoute, egress zeroed —
+    // exactly what DemoteOwnerRGS + the HA demotion leave behind.
+    let mut terminal = synced.decision.clone();
+    terminal.resolution.disposition = ForwardingDisposition::DiscardRoute;
+    terminal.resolution.egress_ifindex = 0;
+    terminal.resolution.tx_ifindex = 0;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(
+        SyncedSessionEntry {
+            decision: terminal,
+            ..synced.clone()
+        }
+        .into_session_install(1),
+        false
+    ));
+    // First hit with the packet's own terminal decision (the retransmit
+    // resolves through the same demoted row before any rescue): decline.
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &imported_snat_forwarding(false),
+            &mut sessions,
+            &key,
+            &metadata,
+            terminal,
+            &flow,
+            origin,
+            source_nat_static,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_none(),
+        "a demoted terminal row on the old owner must decline, not revoke (#16215)"
+    );
+    assert!(
+        sessions.entry_with_origin(&key).is_some(),
+        "the demoted row must survive its first hit on the old owner"
+    );
+    // First hit judged on a FRESH forwarding decision (the rescue /
+    // re-resolution produced a real egress): judged, survives.
+    let mut fresh = terminal;
+    fresh.resolution.disposition = ForwardingDisposition::ForwardCandidate;
+    fresh.resolution.egress_ifindex = 12;
+    fresh.resolution.tx_ifindex = 12;
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &imported_snat_forwarding(false),
+            &mut sessions,
+            &key,
+            &metadata,
+            fresh,
+            &flow,
+            origin,
+            source_nat_static,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_none(),
+        "a fresh forwarding decision must judge and keep the live translation"
+    );
+    // A FRESH decision whose live configuration no longer holds the
+    // translation revokes: withdraw the pool address and re-judge under
+    // a new generation with the row carrying the fresh resolution (the
+    // RefreshOwnerRGS rewrite shape).
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    let (cur_decision, cur_metadata, _) = sessions
+        .entry_with_origin(&key)
+        .expect("row present before withdrawn rewrite");
+    let mut real = cur_decision;
+    real.resolution = fresh.resolution;
+    assert!(sessions.refresh_for_ha_transition(&key, real, cur_metadata, 1_000_000));
+    let mut withdrawn = imported_snat_forwarding(false);
+    withdrawn.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.99/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        }]);
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &withdrawn,
+            &mut sessions,
+            &key,
+            &metadata,
+            fresh,
+            &flow,
+            origin,
+            source_nat_static,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_some(),
+        "a fresh decision with a withdrawn translation must still revoke (#16215)"
     );
 }

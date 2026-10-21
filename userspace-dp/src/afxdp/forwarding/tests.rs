@@ -689,6 +689,109 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
     }
 }
 
+/// #16216: the demoted DiscardRoute must keep its cluster-terminal
+/// provenance and be rescuable by the fabric converters even when the
+/// peer-owned attribution is only available at conversion time. The
+/// pre-fix demotion zeroed `source_ifindex`, so the stranded row was
+/// indistinguishable from an operator discard and every retransmit
+/// dropped on the split node.
+///
+/// RED-on-revert: zeroing `source_ifindex` in the demotion (or dropping
+/// the DiscardRoute arm from the converters) makes the rescued cell
+/// resolve DiscardRoute; the operator control (no stamp) must stay a
+/// drop, and a fabric-ingress packet must never re-redirect.
+#[test]
+fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    for route in &mut snapshot.routes {
+        route.preference = 5;
+    }
+    for route in &mut snapshot.routes {
+        for nh in &mut route.next_hops {
+            if nh.starts_with("172.16.80.1") {
+                *nh = "172.16.80.1".to_string();
+            }
+        }
+    }
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let inactive_map = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
+    let active_map = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+
+    let raw = lookup_forwarding_resolution(&state, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ClusterTerminalHAInactive,
+        "fixture must surface the cluster terminal, got {:?}",
+        raw.disposition
+    );
+    assert!(
+        raw.source_ifindex > 0,
+        "the FIB must stamp the would-be egress, got {}",
+        raw.source_ifindex
+    );
+
+    // Locally-owned at demotion time: demotes to DiscardRoute, and the
+    // demotion must PRESERVE the provenance stamp.
+    let demoted = enforce_ha_resolution_snapshot(&state, &active_map, now_secs, raw);
+    assert_eq!(demoted.disposition, ForwardingDisposition::DiscardRoute);
+    assert_eq!(
+        demoted.source_ifindex, raw.source_ifindex,
+        "the demotion must preserve cluster-terminal provenance (#16216)"
+    );
+    assert!(discard_route_is_cluster_terminal_peer_owned(
+        &state, &inactive_map, now_secs, &demoted
+    ));
+    assert!(!discard_route_is_cluster_terminal_peer_owned(
+        &state, &active_map, now_secs, &demoted
+    ));
+
+    // Rescued at conversion time (peer-owned now): fabric redirect.
+    let rescued = redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, demoted, 24, None);
+    assert_eq!(
+        rescued.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "a peer-owned demoted cluster-terminal DiscardRoute must cross the fabric, got {:?}",
+        rescued.disposition
+    );
+    // Fabric ingress never re-redirects.
+    let fabric_ifindex = state.fabrics[0].parent_ifindex;
+    let not_rescued =
+        redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, demoted, fabric_ifindex, None);
+    assert_eq!(not_rescued.disposition, ForwardingDisposition::DiscardRoute);
+
+    // Operator discard (no provenance stamp) never rescues.
+    let mut operator = demoted;
+    operator.source_ifindex = 0;
+    let operator_out =
+        redirect_via_fabric_if_needed_at(&state, &inactive_map, now_secs, operator, 24, None);
+    assert_eq!(
+        operator_out.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "an operator discard must stay a drop"
+    );
+}
+
 /// #15742 live shape: the WAN interface itself carries the connected
 /// 172.16.80.0/24 and 2001:559:8585:80::/64 prefixes, and the probe targets
 /// (172.16.80.200, 2001:559:8585:80::200) are inside them. Go marks the

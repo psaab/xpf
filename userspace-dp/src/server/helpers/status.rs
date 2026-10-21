@@ -78,6 +78,9 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // established SESSIONS torn down by live zone policy, not dropped
     // packets, so it is exported separately from packet-drop totals.
     state.status.policy_revoked_sessions_total = state.afxdp.policy_revoked_sessions_total();
+    // #16215: stale source-NAT revocations, the StaleSourceNat sibling of
+    // the policy signal above.
+    state.status.snat_revoked_sessions_total = state.afxdp.snat_revoked_sessions_total();
     // #11503: preserve the direction-specific process-global policy denial
     // causes alongside the policy-rule counter snapshot below.
     state.status.unzoned_ingress_denied_total =

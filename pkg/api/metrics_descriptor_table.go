@@ -520,6 +520,7 @@ var collectorDescUserspaceSession = []int{
 	xpfCollectorDescFieldIndex("userspaceSessionReplicationQueueDepthMax"),
 	xpfCollectorDescFieldIndex("userspaceSessionPublishErrors"),
 	xpfCollectorDescFieldIndex("userspacePolicyRevokedSessions"),
+	xpfCollectorDescFieldIndex("userspaceSnatRevokedSessions"),
 	xpfCollectorDescFieldIndex("userspaceUnzonedIngressDenied"),
 	xpfCollectorDescFieldIndex("userspaceUnzonedEgressDenied"),
 	xpfCollectorDescFieldIndex("userspaceDnatPublishErrors"),

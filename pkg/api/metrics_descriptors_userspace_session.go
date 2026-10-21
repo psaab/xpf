@@ -383,6 +383,13 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"denied them. This counts sessions, not dropped packets (#10021).",
 		nil, nil,
 	)
+	c.userspaceSnatRevokedSessions = prometheus.NewDesc(
+		"xpf_userspace_snat_revoked_sessions_total",
+		"Cumulative established sessions revoked because the stored "+
+			"source-NAT translation was no longer valid. This counts "+
+			"sessions, not dropped packets (#16215).",
+		nil, nil,
+	)
 	c.userspaceUnzonedIngressDenied = prometheus.NewDesc(
 		"xpf_userspace_unzoned_ingress_denied_total",
 		"Cumulative transit packets denied because the ingress interface had no "+

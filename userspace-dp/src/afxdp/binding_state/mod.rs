@@ -264,6 +264,12 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// the coordinator sums it into `ProcessStatus` for the Go Prometheus
     /// surface. Counted once per revoked session, not per dropped packet.
     pub(super) policy_revoked_sessions: AtomicU64,
+    /// #16215: established sessions revoked by stale source-NAT
+    /// revalidation. The release-visible counterpart of
+    /// `DebugPollCounters::snat_revoked_sessions`; the coordinator sums
+    /// it into `ProcessStatus` for the Go Prometheus surface. Counted
+    /// once per revoked session, not per dropped packet.
+    pub(super) snat_revoked_sessions: AtomicU64,
     /// #3326: host-bound (LocalDelivery) packets dropped by the zone
     /// host-inbound admission gate (`host_inbound_admits` => false). These
     /// denies bypass the `policy_denied_packets` disposition path, so before
@@ -1075,6 +1081,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 const _: [(); 2880] = [(); std::mem::size_of::<BindingLiveState>()];
 const _: [(); 2736] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
 const _: [(); 2865] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #16215 adds one unconditional u64 snat_revoked_sessions counter before
+// both sentinels; offsets advance by 8 bytes, size unchanged.
+const _: [(); 2688] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2552] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2681] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1147,6 +1158,7 @@ impl BindingLiveState {
             session_delta_drained: AtomicU64::new(0),
             policy_denied_packets: AtomicU64::new(0),
             policy_revoked_sessions: AtomicU64::new(0),
+            snat_revoked_sessions: AtomicU64::new(0),
             host_inbound_denied_packets: AtomicU64::new(0),
             screen_drops: AtomicU64::new(0),
             // #3343: one atomic per published screen-reason drop ordinal.

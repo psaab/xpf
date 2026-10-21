@@ -4870,6 +4870,26 @@ fn process_status_policy_revoked_sessions_total_roundtrip_10021() {
         serde_json::from_value(value).expect("a status without the key must decode");
     assert_eq!(legacy.policy_revoked_sessions_total, 0);
 }
+
+// #16215: `snat_revoked_sessions_total` follows the same additive wire
+// doctrine as its #10021 policy sibling.
+#[test]
+fn process_status_snat_revoked_sessions_total_roundtrip_16215() {
+    let mut status = ProcessStatus::default();
+    status.snat_revoked_sessions_total = 4;
+    let mut value = serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["snat_revoked_sessions_total"], 4);
+    let back: ProcessStatus =
+        serde_json::from_value(value.clone()).expect("deserialize ProcessStatus");
+    assert_eq!(back.snat_revoked_sessions_total, 4);
+    value
+        .as_object_mut()
+        .expect("status serializes to an object")
+        .remove("snat_revoked_sessions_total");
+    let legacy: ProcessStatus =
+        serde_json::from_value(value).expect("a status without the key must decode");
+    assert_eq!(legacy.snat_revoked_sessions_total, 0);
+}
 #[test]
 fn process_status_s5_reinject_absent_vs_zero_and_written_not_delivered_10478() {
     let absent = serde_json::to_value(ProcessStatus::default()).expect("serialize empty status");

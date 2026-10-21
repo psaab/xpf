@@ -636,6 +636,10 @@ type xpfCollector struct {
 	// #10021: cumulative established-session revocations by live zone policy.
 	// This is a session-count signal, not a packet-drop component.
 	userspacePolicyRevokedSessions *prometheus.Desc
+	// #16215: cumulative established-session revocations by stale
+	// source-NAT revalidation. A session-count signal, not a packet-drop
+	// component.
+	userspaceSnatRevokedSessions *prometheus.Desc
 	// #11503: unzoned transit denials kept separate by ingress/egress cause.
 	userspaceUnzonedIngressDenied *prometheus.Desc
 	userspaceUnzonedEgressDenied  *prometheus.Desc
