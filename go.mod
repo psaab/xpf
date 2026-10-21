@@ -5,6 +5,7 @@ go 1.24.9
 require (
 	github.com/chzyer/readline v1.5.1
 	github.com/cilium/ebpf v0.20.0
+	github.com/flynn/noise v1.1.0
 	github.com/google/nftables v0.3.0
 	github.com/insomniacslk/dhcp v0.0.0-20251020182700-175e84fbb167
 	github.com/mdlayher/genetlink v1.3.2
@@ -25,7 +26,6 @@ require (
 )
 
 require (
-	github.com/flynn/noise v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

@@ -34,7 +34,7 @@ func synCookieCfg9173(cluster *config.ClusterConfig, rootPassword, hostName stri
 	}
 	cfg.Chassis.Cluster = cluster
 	if rootPassword != "" {
-		cfg.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.Secret(rootPassword)}
+		cfg.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.NewSecret(rootPassword)}
 	}
 	return cfg
 }
@@ -42,8 +42,8 @@ func synCookieCfg9173(cluster *config.ClusterConfig, rootPassword, hostName stri
 func keyedCluster9173(key, additional string) *config.ClusterConfig {
 	return &config.ClusterConfig{
 		ClusterID:             3,
-		ControlLinkAuthKey:    config.Secret(key),
-		ControlLinkAuthKeyAlt: config.Secret(additional),
+		ControlLinkAuthKey:    config.NewSecret(key),
+		ControlLinkAuthKeyAlt: config.NewSecret(additional),
 	}
 }
 

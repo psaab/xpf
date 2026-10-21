@@ -26,7 +26,7 @@ func certCfg15752(auth, gwCert, polCert string) *config.IPsecConfig {
 		},
 	}
 	if auth == "pre-shared-keys" {
-		cfg.IKEPolicies["pol1"].PSK = config.Secret("secret")
+		cfg.IKEPolicies["pol1"].PSK = config.NewSecret("secret")
 	}
 	return cfg
 }

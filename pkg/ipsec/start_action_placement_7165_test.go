@@ -45,7 +45,7 @@ func renderImmediateVPN(t *testing.T) string {
 			},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"ike-pol": {Name: "ike-pol", Mode: "main", Proposals: []string{"ike-prop"}, PSK: config.Secret("secret123")},
+			"ike-pol": {Name: "ike-pol", Mode: "main", Proposals: []string{"ike-prop"}, PSK: config.NewSecret("secret123")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw-a": {
@@ -65,7 +65,7 @@ func renderImmediateVPN(t *testing.T) string {
 		},
 		VPNs: map[string]*config.IPsecVPN{
 			// `immediately` requests start_action = start.
-			"vpn-a": {PSK: "fixture-secret",
+			"vpn-a": {PSK: config.NewSecret("fixture-secret"),
 				Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol",
 				BindInterface: "st0.0", EstablishTunnels: "immediately",
 			},
@@ -119,7 +119,7 @@ func TestStartActionTrapWhenEstablishTunnelsUnset14592(t *testing.T) {
 				EncryptionAlg: "aes-256-cbc", AuthAlg: "sha-256", DHGroup: 14, LifetimeSeconds: 3600},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"ike-pol": {Name: "ike-pol", Mode: "main", Proposals: []string{"ike-prop"}, PSK: config.Secret("s")},
+			"ike-pol": {Name: "ike-pol", Mode: "main", Proposals: []string{"ike-prop"}, PSK: config.NewSecret("s")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw-a": {Name: "gw-a", Address: "203.0.113.1", IKEPolicy: "ike-pol"},
@@ -132,7 +132,7 @@ func TestStartActionTrapWhenEstablishTunnelsUnset14592(t *testing.T) {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-prop"}, PFSGroup: 14},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"vpn-a": {PSK: "fixture-secret", Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol", BindInterface: "st0.0"},
+			"vpn-a": {PSK: config.NewSecret("fixture-secret"), Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol", BindInterface: "st0.0"},
 		},
 	}
 	rendered, _, err := m.renderConfig(cfg)
@@ -156,7 +156,7 @@ func TestStartActionAbsentWhenUnsetOnResponderOnly14592(t *testing.T) {
 			"dial-in": {Name: "dial-in", ResponderOnly: true, LocalAddress: "203.0.113.5", RemoteIDType: "hostname", RemoteIDValue: "dialin.example.com"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"vpn-a": {PSK: "fixture-secret", Name: "vpn-a", Gateway: "dial-in"},
+			"vpn-a": {PSK: config.NewSecret("fixture-secret"), Name: "vpn-a", Gateway: "dial-in"},
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 	}

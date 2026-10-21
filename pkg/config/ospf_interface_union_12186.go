@@ -53,33 +53,24 @@ func mergeOSPFString12186(dst *string, src string, field string, conflicts []str
 	return conflicts
 }
 
-func (u *OSPFInterfaceUnion12186) mergeMD5Key12186(key OSPFMD5Key12186, keyProv Junos9Provenance, conflicts []string) []string {
-	// Provenance is field-bound and travels as a value here because
-	// the key itself arrives by value (a synthesized legacy-view key
-	// has no source field at all). The caller resolves it from the
-	// source field before the copy.
-	srcProv := keyProv
+func (u *OSPFInterfaceUnion12186) mergeMD5Key12186(key OSPFMD5Key12186, conflicts []string) []string {
 	for i := range u.MD5Keys {
 		if u.MD5Keys[i].ID != key.ID {
 			continue
 		}
-		if u.MD5Keys[i].Key == "" {
+		if u.MD5Keys[i].Key.Reveal() == "" {
 			u.MD5Keys[i].Key = key.Key
-			u.MD5Keys[i].Key.SetJunos9Provenance(srcProv)
-			if u.AuthKeyID == key.ID && u.AuthKey == "" {
+			if u.AuthKeyID == key.ID && u.AuthKey.Reveal() == "" {
 				u.AuthKey = key.Key
-				u.AuthKey.SetJunos9Provenance(srcProv)
 			}
-		} else if key.Key != "" && u.MD5Keys[i].Key != key.Key {
+		} else if key.Key.Reveal() != "" && u.MD5Keys[i].Key != key.Key {
 			conflicts = appendOSPFConflict12186(conflicts, "authentication md5 key")
 		}
 		return conflicts
 	}
 	u.MD5Keys = append(u.MD5Keys, key)
-	u.MD5Keys[len(u.MD5Keys)-1].Key.SetJunos9Provenance(srcProv)
-	if u.AuthKeyID == key.ID && u.AuthKey == "" {
+	if u.AuthKeyID == key.ID && u.AuthKey.Reveal() == "" {
 		u.AuthKey = key.Key
-		u.AuthKey.SetJunos9Provenance(srcProv)
 	}
 	return conflicts
 }
@@ -123,10 +114,9 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 	if src.AuthType != "" && src.AuthType == u.AuthType {
 		switch src.AuthType {
 		case "simple":
-			if src.AuthKey != "" {
-				if u.AuthKey == "" {
+			if src.AuthKey.Reveal() != "" {
+				if u.AuthKey.Reveal() == "" {
 					u.AuthKey = src.AuthKey
-					u.AuthKey.SetJunos9Provenance(src.AuthKey.Provenance())
 				} else if u.AuthKey != src.AuthKey {
 					conflicts = appendOSPFConflict12186(conflicts, "authentication simple-password")
 				}
@@ -135,18 +125,13 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 			if firstAuthType == "" {
 				u.AuthKeyID = src.AuthKeyID
 				u.AuthKey = src.AuthKey
-				u.AuthKey.SetJunos9Provenance(src.AuthKey.Provenance())
 			}
 			if len(src.AuthMD5Keys) == 0 {
-				// The temporary key value has no field identity of
-				// its own; mergeMD5Key12186 reads the provenance from
-				// the AuthKey field it was just copied from. Pass the
-				// field address explicitly via the merge helper below.
 				conflicts = u.mergeMD5Key12186(
-					OSPFMD5Key12186{ID: src.AuthKeyID, Key: src.AuthKey}, src.AuthKey.Provenance(), conflicts)
+					OSPFMD5Key12186{ID: src.AuthKeyID, Key: src.AuthKey}, conflicts)
 			} else {
 				for i := range src.AuthMD5Keys {
-					conflicts = u.mergeMD5Key12186(src.AuthMD5Keys[i], src.AuthMD5Keys[i].Key.Provenance(), conflicts)
+					conflicts = u.mergeMD5Key12186(src.AuthMD5Keys[i], conflicts)
 				}
 			}
 		}
@@ -163,10 +148,9 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 	// typed fragments keep their own key handling above; if a later
 	// fragment supplies a type, that type's key handling governs and
 	// the renderer then requires a renderable typed key (#14977).
-	if u.AuthType == "" && src.AuthKey != "" {
-		if u.AuthKey == "" {
+	if u.AuthType == "" && src.AuthKey.Reveal() != "" {
+		if u.AuthKey.Reveal() == "" {
 			u.AuthKey = src.AuthKey
-			u.AuthKey.SetJunos9Provenance(src.AuthKey.Provenance())
 		} else if u.AuthKey != src.AuthKey {
 			conflicts = appendOSPFConflict12186(conflicts, "authentication-key")
 		}

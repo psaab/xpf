@@ -88,7 +88,7 @@ func TestOSPFAreaEquivalentUnionAcrossOrderings12186(t *testing.T) {
 				costFrag := &config.OSPFInterface{Name: "eth0", Cost: 10, BFDInterval: 100}
 				settingsFrag := &config.OSPFInterface{
 					Name:     "eth0",
-					AuthType: "simple", AuthKey: "union-secret-12186",
+					AuthType: "simple", AuthKey: config.NewSecret("union-secret-12186"),
 					HelloInterval: 5, DeadInterval: 20, RetransmitInt: 7,
 					HasPriority: true, // Priority 0 ("never DR") is set, not unset.
 					NetworkType: "point-to-point",
@@ -459,8 +459,8 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 		t.Run("ospfv2 "+name, func(t *testing.T) {
 			logs, restore := captureSlog12186()
 			defer restore()
-			a := &config.OSPFInterface{Name: "eth0", Cost: 10, HelloInterval: 5, AuthType: "simple", AuthKey: "first-secret-12186"}
-			b := &config.OSPFInterface{Name: "eth0", Cost: 20, HelloInterval: 9, AuthType: "simple", AuthKey: "second-secret-12186"}
+			a := &config.OSPFInterface{Name: "eth0", Cost: 10, HelloInterval: 5, AuthType: "simple", AuthKey: config.NewSecret("first-secret-12186")}
+			b := &config.OSPFInterface{Name: "eth0", Cost: 20, HelloInterval: 9, AuthType: "simple", AuthKey: config.NewSecret("second-secret-12186")}
 			want, absent := a, b
 			if swap {
 				want, absent = b, a
@@ -476,7 +476,7 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 			for _, wantLine := range []string{
 				" ip ospf cost " + strconv.Itoa(want.Cost) + "\n",
 				" ip ospf hello-interval " + strconv.Itoa(want.HelloInterval) + "\n",
-				" ip ospf authentication-key " + string(want.AuthKey) + "\n",
+				" ip ospf authentication-key " + want.AuthKey.Reveal() + "\n",
 			} {
 				if !strings.Contains(got, wantLine) {
 					t.Errorf("first-present value lost: %q:\n%s", wantLine, got)
@@ -485,7 +485,7 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 			for _, absentLine := range []string{
 				" ip ospf cost " + strconv.Itoa(absent.Cost) + "\n",
 				" ip ospf hello-interval " + strconv.Itoa(absent.HelloInterval) + "\n",
-				string(absent.AuthKey),
+				absent.AuthKey.Reveal(),
 			} {
 				if strings.Contains(got, absentLine) {
 					t.Errorf("conflicting later value leaked: %q:\n%s", absentLine, got)
@@ -528,8 +528,8 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 		t.Run("ospfv2 md5-same-id "+name, func(t *testing.T) {
 			logs, restore := captureSlog12186()
 			defer restore()
-			a := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: "md5-first-12186"}
-			b := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: "md5-second-12186"}
+			a := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: config.NewSecret("md5-first-12186")}
+			b := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 7, AuthKey: config.NewSecret("md5-second-12186")}
 			want, absent := a, b
 			if swap {
 				want, absent = b, a
@@ -542,10 +542,10 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 			if n := countInterfaceBlocks12186(got, "eth0"); n != 1 {
 				t.Fatalf("rendered %d interface blocks; want exactly one:\n%s", n, got)
 			}
-			if wantLine := " ip ospf message-digest-key 7 md5 " + string(want.AuthKey) + "\n"; !strings.Contains(got, wantLine) {
+			if wantLine := " ip ospf message-digest-key 7 md5 " + want.AuthKey.Reveal() + "\n"; !strings.Contains(got, wantLine) {
 				t.Errorf("first-present key lost: %q:\n%s", wantLine, got)
 			}
-			if strings.Contains(got, string(absent.AuthKey)) {
+			if strings.Contains(got, absent.AuthKey.Reveal()) {
 				t.Errorf("conflicting later key leaked:\n%s", got)
 			}
 			assertConflictWarned12186(t, logs.String(), "OSPF", []string{"authentication md5 key"})
@@ -558,8 +558,8 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 		t.Run("ospfv2 incompatible-auth-type "+name, func(t *testing.T) {
 			logs, restore := captureSlog12186()
 			defer restore()
-			md5 := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 11, AuthKey: "md5-auth-first-12186"}
-			simple := &config.OSPFInterface{Name: "eth0", AuthType: "simple", AuthKey: "simple-auth-second-12186"}
+			md5 := &config.OSPFInterface{Name: "eth0", AuthType: "md5", AuthKeyID: 11, AuthKey: config.NewSecret("md5-auth-first-12186")}
+			simple := &config.OSPFInterface{Name: "eth0", AuthType: "simple", AuthKey: config.NewSecret("simple-auth-second-12186")}
 			first, later := md5, simple
 			if swap {
 				first, later = simple, md5
@@ -599,8 +599,8 @@ func TestOSPFTolerantConflictRetainsFirstPresent12186(t *testing.T) {
 		logs, restore := captureSlog12186()
 		defer restore()
 		ospf := &config.OSPFConfig{Areas: []*config.OSPFArea{
-			{ID: "0", Interfaces: []*config.OSPFInterface{{Name: "eth0", AuthType: "md5", AuthKeyID: 1, AuthKey: "md5-old-12186"}}},
-			{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{{Name: "eth0", AuthType: "md5", AuthKeyID: 2, AuthKey: "md5-new-12186"}}},
+			{ID: "0", Interfaces: []*config.OSPFInterface{{Name: "eth0", AuthType: "md5", AuthKeyID: 1, AuthKey: config.NewSecret("md5-old-12186")}}},
+			{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{{Name: "eth0", AuthType: "md5", AuthKeyID: 2, AuthKey: config.NewSecret("md5-new-12186")}}},
 		}}
 		got := New().generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
 		if n := countInterfaceBlocks12186(got, "eth0"); n != 1 {

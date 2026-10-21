@@ -75,7 +75,7 @@ func writeRootKeys(t *testing.T, path, content string) {
 func rootAuthCfg(pw string, keys ...string) *config.Config {
 	cfg := &config.Config{}
 	cfg.System.RootAuthentication = &config.RootAuthConfig{
-		EncryptedPassword: config.Secret(pw),
+		EncryptedPassword: config.NewSecret(pw),
 		SSHKeys:           keys,
 	}
 	return cfg

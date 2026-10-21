@@ -94,7 +94,7 @@ func init() {
 // a well-formed prefix that decodes to zero bytes (`$9$i` / `$9$!`,
 // #15990): an empty decoded credential is never legitimate, and
 // returning ("", nil) let every presence gate that tests the ENCODED
-// form store Secret("") — BGP rendered its neighbor passwordless and
+// form store NewSecret("") — BGP rendered its neighbor passwordless and
 // IPsec rendered `secret = ""`.
 func DecodeJunos9Secret(secret string) (string, error) {
 	if !strings.HasPrefix(secret, junos9Magic) {
@@ -144,7 +144,7 @@ func decodeJunos9(secret string) (string, error) {
 		// never ran. Zero bytes is not a credential — malformed, like
 		// every other undecodable shape, so strict rejects it and the
 		// tolerant path retains it as Junos9Undecodable for the render
-		// belts to withhold (never Secret("")).
+		// belts to withhold (never NewSecret("")).
 		return "", errInvalidJunos9Secret
 	}
 	return string(out), nil
@@ -184,7 +184,8 @@ func decodeJunos9AtCompile(cfg *Config, lenient bool) ([]string, error) {
 	}
 	var warnings []string
 	decode := func(scope, field string, s *Secret) error {
-		if s == nil || *s == "" {
+		if s == nil || s.Reveal() == "" {
+
 			return nil
 		}
 		// Consume the decoder exactly once at compile. The compiled
@@ -211,7 +212,7 @@ func decodeJunos9AtCompile(cfg *Config, lenient bool) ([]string, error) {
 			}
 			return errors.New(msg)
 		}
-		*s = Secret(decoded)
+		*s = NewSecret(decoded)
 		s.SetJunos9Provenance(Junos9Decoded)
 		return nil
 	}
@@ -228,10 +229,11 @@ func decodeJunos9AtCompile(cfg *Config, lenient bool) ([]string, error) {
 			}
 			if iface.AuthMD5Keys[i].ID == iface.AuthKeyID &&
 				iface.AuthKey.Reveal() == before {
+				// Copy the md5 key's Secret wholesale: the Junos9
+				// provenance FIELD travels with the value (Decoded for
+				// a successful decode, Undecodable for a retained
+				// tolerant blob). Never stamp a literal provenance here.
 				iface.AuthKey = iface.AuthMD5Keys[i].Key
-				// The assignment copies bytes into a different field;
-				// rebind the decoded provenance the decode just wrote.
-				iface.AuthKey.SetJunos9Provenance(Junos9Decoded)
 			}
 		}
 		if iface.AuthKeyID == 0 || len(iface.AuthMD5Keys) == 0 {

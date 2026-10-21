@@ -21,8 +21,8 @@ func TestSecretMarshalJSON(t *testing.T) {
 		s    Secret
 		want string
 	}{
-		{"non-empty redacts", Secret("supersecret"), string(redactedJSON)},
-		{"empty stays empty", Secret(""), `""`},
+		{"non-empty redacts", NewSecret("supersecret"), string(redactedJSON)},
+		{"empty stays empty", NewSecret(""), `""`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,14 +44,14 @@ func TestSecretMarshalJSON(t *testing.T) {
 // interface-detected, so we exercise the method directly (no yaml encoder
 // dependency in this test): non-empty -> sentinel, empty -> "".
 func TestSecretMarshalYAML(t *testing.T) {
-	got, err := Secret("supersecret").MarshalYAML()
+	got, err := NewSecret("supersecret").MarshalYAML()
 	if err != nil {
 		t.Fatalf("MarshalYAML() error = %v", err)
 	}
 	if got != SecretRedacted {
 		t.Errorf("MarshalYAML() non-empty = %v, want %q", got, SecretRedacted)
 	}
-	got, err = Secret("").MarshalYAML()
+	got, err = NewSecret("").MarshalYAML()
 	if err != nil {
 		t.Fatalf("MarshalYAML() error = %v", err)
 	}
@@ -71,9 +71,9 @@ func TestSecretRedactsInContainers(t *testing.T) {
 		MapVals map[string]Secret
 	}
 	h := holder{
-		Field:   Secret("field-secret"),
-		Slice:   []Secret{Secret("slice-secret-a"), Secret("slice-secret-b")},
-		MapVals: map[string]Secret{"k": Secret("map-secret")},
+		Field:   NewSecret("field-secret"),
+		Slice:   []Secret{NewSecret("slice-secret-a"), NewSecret("slice-secret-b")},
+		MapVals: map[string]Secret{"k": NewSecret("map-secret")},
 	}
 	b, err := json.Marshal(h)
 	if err != nil {
@@ -97,10 +97,10 @@ func TestSecretRedactsInContainers(t *testing.T) {
 // TestSecretString covers logging hygiene: %s/%v of a Secret redacts a
 // non-empty value and renders empty as "".
 func TestSecretString(t *testing.T) {
-	if got := Secret("x").String(); got != SecretRedacted {
+	if got := NewSecret("x").String(); got != SecretRedacted {
 		t.Errorf("String() non-empty = %q, want %q", got, SecretRedacted)
 	}
-	if got := Secret("").String(); got != "" {
+	if got := NewSecret("").String(); got != "" {
 		t.Errorf("String() empty = %q, want \"\"", got)
 	}
 }
@@ -109,10 +109,10 @@ func TestSecretString(t *testing.T) {
 // real cleartext value (the half of the contract the in-memory consumers
 // depend on).
 func TestSecretReveal(t *testing.T) {
-	if got := Secret("real-value").Reveal(); got != "real-value" {
+	if got := NewSecret("real-value").Reveal(); got != "real-value" {
 		t.Errorf("Reveal() = %q, want %q", got, "real-value")
 	}
-	if got := Secret("").Reveal(); got != "" {
+	if got := NewSecret("").Reveal(); got != "" {
 		t.Errorf("Reveal() empty = %q, want \"\"", got)
 	}
 }
@@ -170,7 +170,7 @@ func TestSecretUnmarshalYAML(t *testing.T) {
 	// cleartext); feeding that YAML back in must be refused. Without
 	// UnmarshalYAML, yaml.v3 decodes the sentinel into s with no error and this
 	// assertion fails — the RED-on-revert signal.
-	yb, err := yaml.Marshal(Secret("supersecret"))
+	yb, err := yaml.Marshal(NewSecret("supersecret"))
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
@@ -186,12 +186,12 @@ func TestSecretUnmarshalYAML(t *testing.T) {
 // direct == "" present/absent checks at call sites (the named-string-type
 // property the design depends on).
 func TestSecretIsComparable(t *testing.T) {
-	m := map[Secret]int{Secret("a"): 1}
-	if m[Secret("a")] != 1 {
+	m := map[Secret]int{NewSecret("a"): 1}
+	if m[NewSecret("a")] != 1 {
 		t.Error("Secret not usable as map key")
 	}
 	var unset Secret
-	if unset != "" {
+	if unset.Reveal() != "" {
 		t.Error("zero-value Secret should compare equal to \"\"")
 	}
 }

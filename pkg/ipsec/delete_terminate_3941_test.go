@@ -97,7 +97,7 @@ func vpnCfg(names ...string) *config.IPsecConfig {
 		vpns[n] = &config.IPsecVPN{
 			LocalAddr: "10.0.1.1",
 			Gateway:   "10.0.2." + strconv.Itoa(peerOctet+1),
-			PSK:       config.Secret("secret-" + n),
+			PSK:       config.NewSecret("secret-" + n),
 		}
 	}
 	return &config.IPsecConfig{
@@ -281,7 +281,7 @@ func TestChangedVPNSecurityTerminatesAndReinitiatesLiveSA(t *testing.T) {
 	rec.listSAs = liveSA("site-a")
 	changed := vpnCfg("site-a")
 	changed.VPNs["site-a"].EstablishTunnels = "immediately"
-	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
+	changed.VPNs["site-a"].PSK = config.NewSecret("rotated-secret")
 	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
 	changed.VPNs["site-a"].RemoteID = "10.20.0.0/24"
 	if err := m.Apply(changed); err != nil {
@@ -378,7 +378,7 @@ func TestChangedVPNTerminateDebtIsRetried(t *testing.T) {
 	rec.terminateErr = map[string]error{"site-a": errTerminate}
 	changed := vpnCfg("site-a")
 	changed.VPNs["site-a"].EstablishTunnels = "immediately"
-	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
+	changed.VPNs["site-a"].PSK = config.NewSecret("rotated-secret")
 	if err := m.Apply(changed); err == nil {
 		t.Fatal("changed Apply must report a failed stale-SA termination")
 	}

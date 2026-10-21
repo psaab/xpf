@@ -43,16 +43,16 @@ func TestP3HTTPProvidersCompile(t *testing.T) {
 	}
 
 	dd := cat.Providers["duckdns"]
-	if dd == nil || dd.Backend != "duckdns" || dd.APIToken != "tok-secret-a" {
+	if dd == nil || dd.Backend != "duckdns" || dd.APIToken.Reveal() != "tok-secret-a" {
 		t.Fatalf("duckdns provider mismatch: %+v", dd)
 	}
 	cf := cat.Providers["cf"]
-	if cf == nil || cf.Backend != "cloudflare" || cf.APIToken != "cf-secret-b" || cf.Zone != "example.net" {
+	if cf == nil || cf.Backend != "cloudflare" || cf.APIToken.Reveal() != "cf-secret-b" || cf.Zone != "example.net" {
 		t.Fatalf("cf provider mismatch: %+v", cf)
 	}
 	aws := cat.Providers["aws"]
 	if aws == nil || aws.Backend != "route53" || aws.AWSAccessKeyID != "AKID" ||
-		aws.AWSSecretAccessKey != "aws-secret-c" || aws.AWSRegion != "us-west-2" || aws.HostedZoneID != "Z123ABC" {
+		aws.AWSSecretAccessKey.Reveal() != "aws-secret-c" || aws.AWSRegion != "us-west-2" || aws.HostedZoneID != "Z123ABC" {
 		t.Fatalf("aws provider mismatch: %+v", aws)
 	}
 	tmpl := cat.Providers["tmpl"]
@@ -95,7 +95,7 @@ func TestP3HTTPProviderHierarchicalCompiles(t *testing.T) {
 		t.Fatalf("CompileConfig: %v", err)
 	}
 	cf := cfg.System.Services.DynamicDNS.Providers["cf"]
-	if cf == nil || cf.Backend != "cloudflare" || cf.APIToken != "cf-secret-b" || cf.Zone != "example.net" {
+	if cf == nil || cf.Backend != "cloudflare" || cf.APIToken.Reveal() != "cf-secret-b" || cf.Zone != "example.net" {
 		t.Fatalf("hierarchical cf provider mismatch: %+v", cf)
 	}
 }

@@ -54,7 +54,7 @@ func TestChangedResponderOnlyVPNIsNotReinitiated14140(t *testing.T) {
 			mk := func(psk string) *config.IPsecConfig {
 				return eagerCfg(
 					&config.IPsecGateway{Name: "dial-in", ResponderOnly: true, RemoteIDType: "hostname", RemoteIDValue: "dialin.example.com", LocalAddress: "203.0.113.5"},
-					&config.IPsecVPN{PSK: config.Secret(psk), EstablishTunnels: mode},
+					&config.IPsecVPN{PSK: config.NewSecret(psk), EstablishTunnels: mode},
 				)
 			}
 			if err := applyChange14140(t, rec, m, mk("old-secret"), mk("rotated-secret")); err != nil {
@@ -83,7 +83,7 @@ func TestChangedNonEagerModesAreNotReinitiated14140(t *testing.T) {
 			mk := func(psk string) *config.IPsecConfig {
 				return eagerCfg(
 					&config.IPsecGateway{Name: "gw", Address: "10.0.2.1"},
-					&config.IPsecVPN{PSK: config.Secret(psk), EstablishTunnels: mode},
+					&config.IPsecVPN{PSK: config.NewSecret(psk), EstablishTunnels: mode},
 				)
 			}
 			if err := applyChange14140(t, rec, m, mk("old-secret"), mk("rotated-secret")); err != nil {
@@ -110,7 +110,7 @@ func TestChangedImmediatelyVPNIsStillReinitiated14140(t *testing.T) {
 		mk := func(psk string) *config.IPsecConfig {
 			return eagerCfg(
 				&config.IPsecGateway{Name: "gw", Address: "10.0.2.1"},
-				&config.IPsecVPN{PSK: config.Secret(psk), EstablishTunnels: "immediately"},
+				&config.IPsecVPN{PSK: config.NewSecret(psk), EstablishTunnels: "immediately"},
 			)
 		}
 		if err := applyChange14140(t, rec, m, mk("old-secret"), mk("rotated-secret")); err != nil {
@@ -126,7 +126,7 @@ func TestChangedImmediatelyVPNIsStillReinitiated14140(t *testing.T) {
 		m := newRecordingManager(t, rec)
 		mk := func(psk string) *config.IPsecConfig {
 			cfg := vpnCfg("site-a")
-			cfg.VPNs["site-a"].PSK = config.Secret(psk)
+			cfg.VPNs["site-a"].PSK = config.NewSecret(psk)
 			cfg.VPNs["site-a"].EstablishTunnels = "immediately"
 			return cfg
 		}
@@ -146,7 +146,7 @@ func TestChangedImmediatelyVPNIsStillReinitiated14140(t *testing.T) {
 		mk := func(psk string) *config.IPsecConfig {
 			return eagerCfg(
 				&config.IPsecGateway{Name: "gw", DynamicHostname: "peer.example.com", ResponderOnly: true},
-				&config.IPsecVPN{PSK: config.Secret(psk), EstablishTunnels: "immediately"},
+				&config.IPsecVPN{PSK: config.NewSecret(psk), EstablishTunnels: "immediately"},
 			)
 		}
 		if err := applyChange14140(t, rec, m, mk("old-secret"), mk("rotated-secret")); err != nil {
@@ -167,7 +167,7 @@ func TestChangedModeTransitionToNonEagerIsNotReinitiated14140(t *testing.T) {
 	mk := func(psk, mode string) *config.IPsecConfig {
 		return eagerCfg(
 			&config.IPsecGateway{Name: "gw", Address: "10.0.2.1"},
-			&config.IPsecVPN{PSK: config.Secret(psk), EstablishTunnels: mode},
+			&config.IPsecVPN{PSK: config.NewSecret(psk), EstablishTunnels: mode},
 		)
 	}
 	if err := applyChange14140(t, rec, m, mk("old-secret", "immediately"), mk("old-secret", "on-traffic")); err != nil {

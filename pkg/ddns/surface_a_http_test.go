@@ -35,7 +35,7 @@ func httpScope(fqdn, serverURL string) SurfaceAScope {
 		Source: AddressSourceInterface,
 		Provider: &config.DDNSProvider{
 			Name: "dd2", Backend: "dyndns2", Server: serverURL,
-			Username: "u", Password: config.Secret("p"),
+			Username: "u", Password: config.NewSecret("p"),
 		},
 	}
 }
@@ -163,9 +163,9 @@ func TestEngineSecretsNeverLogged(t *testing.T) {
 
 	prov := &config.DDNSProvider{
 		Name: "dd2", Backend: "dyndns2", Server: srv.URL,
-		Username: "u", Password: config.Secret(secret),
-		APIToken: config.Secret(secret), AWSSecretAccessKey: config.Secret(secret),
-		TSIGSecret: config.Secret(secret),
+		Username: "u", Password: config.NewSecret(secret),
+		APIToken: config.NewSecret(secret), AWSSecretAccessKey: config.NewSecret(secret),
+		TSIGSecret: config.NewSecret(secret),
 	}
 	// String()/slog formatting must redact every secret.
 	if s := prov.String(); strings.Contains(s, secret) {
@@ -204,7 +204,7 @@ func TestHTTPBackendErrorsNeverLeakSecret(t *testing.T) {
 		b, err := newGenericBackend(&config.DDNSProvider{
 			Name: "g", Backend: "generic",
 			URLTemplate: closedURL + "/u?h=%h&i=%i&p=%p",
-			Password:    config.Secret(secret),
+			Password:    config.NewSecret(secret),
 		}, nil)
 		if err != nil {
 			t.Fatalf("newGenericBackend: %v", err)
@@ -224,7 +224,7 @@ func TestHTTPBackendErrorsNeverLeakSecret(t *testing.T) {
 		b, err := newGenericBackend(&config.DDNSProvider{
 			Name: "g", Backend: "generic",
 			URLTemplate: "https://x/u?p=%p",
-			Password:    config.Secret("\x7f" + secret),
+			Password:    config.NewSecret("\x7f" + secret),
 		}, nil)
 		if err != nil {
 			t.Fatalf("newGenericBackend: %v", err)
@@ -241,7 +241,7 @@ func TestHTTPBackendErrorsNeverLeakSecret(t *testing.T) {
 		}))
 		defer srv.Close()
 		b, err := newCloudflareBackend(&config.DDNSProvider{
-			Name: "cf", Backend: "cloudflare", APIToken: config.Secret(secret),
+			Name: "cf", Backend: "cloudflare", APIToken: config.NewSecret(secret),
 			Zone: "example.net", Server: srv.URL,
 		}, nil)
 		if err != nil {
@@ -261,7 +261,7 @@ func TestHTTPBackendErrorsNeverLeakSecret(t *testing.T) {
 		defer srv.Close()
 		b, err := newRoute53Backend(&config.DDNSProvider{
 			Name: "r53", Backend: "route53",
-			AWSAccessKeyID: "AKID", AWSSecretAccessKey: config.Secret(secret),
+			AWSAccessKeyID: "AKID", AWSSecretAccessKey: config.NewSecret(secret),
 			AWSRegion: "us-east-1", HostedZoneID: "Z123", Server: srv.URL,
 		}, nil)
 		if err != nil {

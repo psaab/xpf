@@ -120,7 +120,7 @@ func rotatedCfg15129(mode string) *config.IPsecConfig {
 	for _, vpn := range cfg.VPNs {
 		vpn.EstablishTunnels = mode
 	}
-	cfg.VPNs["a"].PSK = config.Secret("rotated-secret-a")
+	cfg.VPNs["a"].PSK = config.NewSecret("rotated-secret-a")
 	return cfg
 }
 

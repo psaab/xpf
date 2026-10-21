@@ -38,7 +38,7 @@ func TestGenerateConfig_DynamicHostnameIdentity14590(t *testing.T) {
 					"tun1": {
 						Gateway:          "dyn-gw",
 						BindInterface:    "st0.1",
-						PSK:              "key456",
+						PSK:              config.NewSecret("key456"),
 						EstablishTunnels: mode,
 					},
 				},
@@ -91,7 +91,7 @@ func TestGenerateConfig_DynamicHostnameExplicitRemoteIDWins14590(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {Gateway: "dyn-gw", BindInterface: "st0.1", PSK: "key456"},
+			"tun1": {Gateway: "dyn-gw", BindInterface: "st0.1", PSK: config.NewSecret("key456")},
 		},
 	}
 	got := m.generateConfig(cfg)
@@ -111,7 +111,7 @@ func TestGenerateConfig_AddressGatewayStillDials14590(t *testing.T) {
 			"gw": {Name: "gw", Address: "203.0.113.1"},
 		},
 		Proposals: map[string]*config.IPsecProposal{},
-		VPNs:      map[string]*config.IPsecVPN{"tun": {Gateway: "gw", PSK: "key"}},
+		VPNs:      map[string]*config.IPsecVPN{"tun": {Gateway: "gw", PSK: config.NewSecret("key")}},
 	}
 	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
 	conn.requireSetting(t, "remote_addrs", "203.0.113.1")

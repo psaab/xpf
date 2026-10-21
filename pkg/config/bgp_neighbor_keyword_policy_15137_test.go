@@ -80,7 +80,7 @@ func assertNoKeywordFlag15137(t *testing.T, n *BGPNeighbor, policy string) {
 	if n.BFD {
 		t.Errorf("policy %q: BFD = true, want false", policy)
 	}
-	if got := string(n.AuthPassword); got != "" {
+	if got := n.AuthPassword.Reveal(); got != "" {
 		t.Errorf("policy %q: AuthPassword = %q, want empty", policy, got)
 	}
 	if n.PeerAS != 65001 {
@@ -206,7 +206,7 @@ func TestBGPNeighborKeywordPolicyControls15137(t *testing.T) {
 	if len(n.Export) != 1 || n.Export[0] != "passive" {
 		t.Errorf("fused keyword-policy control: Export = %v, want [passive]", n.Export)
 	}
-	if got := string(n.AuthPassword); got != "NEIGHBORKEY" {
+	if got := n.AuthPassword.Reveal(); got != "NEIGHBORKEY" {
 		t.Errorf("fused keyword-policy control: AuthPassword = %q, want NEIGHBORKEY", got)
 	}
 	if n.Passive {

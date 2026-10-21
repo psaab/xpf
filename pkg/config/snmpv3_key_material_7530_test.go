@@ -80,7 +80,7 @@ func TestCompleteAuthOnlyUserStillCommits7530(t *testing.T) {
 			"commit: %v", err)
 	}
 	u := cfg.System.SNMP.V3Users["ops"]
-	if u == nil || u.AuthProtocol != "sha256" || string(u.AuthPassword) == "" {
+	if u == nil || u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() == "" {
 		t.Fatalf("the control user did not compile with its credential: %+v", u)
 	}
 	if u.PrivProtocol != "" {

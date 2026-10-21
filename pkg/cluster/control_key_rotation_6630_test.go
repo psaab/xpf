@@ -38,8 +38,8 @@ func newRotNode(t *testing.T, nodeID int) *rotNode {
 // ControlLinkAuthKeyAlt plumb in group_state.go reds every step below.
 func (n *rotNode) commit(signing, additional []byte) {
 	cfg := &config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret(signing),
-		ControlLinkAuthKeyAlt: config.Secret(additional),
+		ControlLinkAuthKey:    config.NewSecret(string(signing)),
+		ControlLinkAuthKeyAlt: config.NewSecret(string(additional)),
 	}
 	n.m.UpdateConfig(cfg)
 }
@@ -305,8 +305,8 @@ func TestPSKRotationStatusNeverRendersAKey6630(t *testing.T) {
 func TestPSKRotationOverlapMustBeARealOverlap6630(t *testing.T) {
 	same := &config.Config{}
 	same.Chassis.Cluster = &config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret(rotKeyA),
-		ControlLinkAuthKeyAlt: config.Secret(rotKeyA),
+		ControlLinkAuthKey:    config.NewSecret(string(rotKeyA)),
+		ControlLinkAuthKeyAlt: config.NewSecret(string(rotKeyA)),
 	}
 	err := config.ValidateClusterAuthKeyOverlapForTest(same)
 	if err == nil {
@@ -331,8 +331,8 @@ func TestPSKRotationOverlapMustBeARealOverlap6630(t *testing.T) {
 	} {
 		padded := &config.Config{}
 		padded.Chassis.Cluster = &config.ClusterConfig{
-			ControlLinkAuthKey:    config.Secret(tc.signing),
-			ControlLinkAuthKeyAlt: config.Secret(tc.additional),
+			ControlLinkAuthKey:    config.NewSecret(tc.signing),
+			ControlLinkAuthKeyAlt: config.NewSecret(tc.additional),
 		}
 		if config.ValidateClusterAuthKeyOverlapForTest(padded) == nil {
 			t.Fatalf("%s: a key differing only in surrounding whitespace is the same key; "+
@@ -344,8 +344,8 @@ func TestPSKRotationOverlapMustBeARealOverlap6630(t *testing.T) {
 	// indistinguishable from the check rejecting everything.
 	real := &config.Config{}
 	real.Chassis.Cluster = &config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret(rotKeyB),
-		ControlLinkAuthKeyAlt: config.Secret(rotKeyA),
+		ControlLinkAuthKey:    config.NewSecret(string(rotKeyB)),
+		ControlLinkAuthKeyAlt: config.NewSecret(string(rotKeyA)),
 	}
 	if err := config.ValidateClusterAuthKeyOverlapForTest(real); err != nil {
 		t.Fatalf("a genuine two-key overlap must be accepted: %v", err)

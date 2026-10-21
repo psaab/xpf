@@ -251,7 +251,7 @@ func TestReconcileApplyBoundaryRevalidatesHash(t *testing.T) {
 		"$1$saltsalt$qjXMvbEw8oaL.CzflDtaK/",
 		"$6$a$b",
 	} {
-		err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.Secret(invalid)})
+		err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.NewSecret(invalid)})
 		if err == nil {
 			t.Errorf("reconcileUserPassword accepted invalid hash %q, want error", invalid)
 		}
@@ -265,7 +265,7 @@ func TestReconcileApplyBoundaryRevalidatesHash(t *testing.T) {
 
 	const validHash = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"
 	t.Setenv("CHPASSWD_NO_WRITE", "1")
-	if err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: validHash}); err == nil {
+	if err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.NewSecret(validHash)}); err == nil {
 		t.Fatal("reconcileUserPassword reported success when chpasswd did not update shadow")
 	}
 	if _, err := os.Stat(sentinel); err != nil {
@@ -276,7 +276,7 @@ func TestReconcileApplyBoundaryRevalidatesHash(t *testing.T) {
 	}
 
 	t.Setenv("CHPASSWD_NO_WRITE", "0")
-	if err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: validHash}); err != nil {
+	if err := d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.NewSecret(validHash)}); err != nil {
 		t.Fatalf("reconcileUserPassword rejected a valid hash after successful write: %v", err)
 	}
 	if actual, ok := currentShadowHash("op"); !ok || actual != validHash {
@@ -324,7 +324,7 @@ func TestRootAuthApplyBoundaryRevalidatesHash(t *testing.T) {
 		"$6$a$b",
 	} {
 		cfg := &config.Config{}
-		cfg.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.Secret(invalid)}
+		cfg.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.NewSecret(invalid)}
 		if err := d.applyRootAuth(cfg); err == nil {
 			t.Errorf("applyRootAuth accepted invalid root hash %q, want error", invalid)
 		}
@@ -335,7 +335,7 @@ func TestRootAuthApplyBoundaryRevalidatesHash(t *testing.T) {
 
 	const validHash = "$y$j9T$saltsaltsaltsalt$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD"
 	cfgGood := &config.Config{}
-	cfgGood.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: validHash}
+	cfgGood.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.NewSecret(validHash)}
 	if err := d.applyRootAuth(cfgGood); err != nil {
 		t.Fatalf("applyRootAuth rejected a valid yescrypt hash: %v", err)
 	}

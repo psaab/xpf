@@ -18,7 +18,7 @@ func TestGenerateConfig_Basic(t *testing.T) {
 			"site-a": {
 				LocalAddr:     "10.0.1.1",
 				Gateway:       "10.0.2.1",
-				PSK:           "supersecret",
+				PSK:           config.NewSecret("supersecret"),
 				BindInterface: "st0.0",
 			},
 		},
@@ -52,7 +52,7 @@ func TestGenerateConfig_WithProposal(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {PSK: "fixture-secret",
+			"tun1": {PSK: config.NewSecret("fixture-secret"),
 				Gateway:     "172.16.0.1",
 				IPsecPolicy: "strong",
 			},
@@ -74,7 +74,7 @@ func TestGenerateConfig_GCMNoAuth(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {PSK: "fixture-secret",
+			"tun1": {PSK: config.NewSecret("fixture-secret"),
 				Gateway:     "172.16.0.1",
 				IPsecPolicy: "gcm",
 			},
@@ -207,7 +207,7 @@ func TestResolveESPSettings_DanglingProposalSkips(t *testing.T) {
 		},
 		// Proposals deliberately omits "does-not-exist" — dangling ref.
 	}
-	vpn := &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "ipsec-pol"}
+	vpn := &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"), IPsecPolicy: "ipsec-pol"}
 
 	got, _, err := resolveESPSettings(cfg, vpn)
 	if !errors.Is(err, errESPChainUnresolved) {
@@ -234,7 +234,7 @@ func TestResolveESPSettings_DanglingProposalNoPFSkips(t *testing.T) {
 		},
 		// Proposals deliberately omits "does-not-exist" — dangling ref.
 	}
-	vpn := &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "ipsec-pol"}
+	vpn := &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"), IPsecPolicy: "ipsec-pol"}
 
 	got, _, err := resolveESPSettings(cfg, vpn)
 	if !errors.Is(err, errESPChainUnresolved) {
@@ -253,7 +253,7 @@ func TestResolveESPSettings_DanglingPolicyRefSkips(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		// Neither Policies nor Proposals defines "ipsec-pol".
 	}
-	vpn := &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "ipsec-pol"}
+	vpn := &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"), IPsecPolicy: "ipsec-pol"}
 
 	got, _, err := resolveESPSettings(cfg, vpn)
 	if !errors.Is(err, errESPChainUnresolved) {
@@ -272,13 +272,13 @@ func TestGenerateConfig_DanglingProposalSkips(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {PSK: "fixture-secret",
+			"tun1": {PSK: config.NewSecret("fixture-secret"),
 				Gateway:     "172.16.0.1",
 				IPsecPolicy: "ipsec-pol",
 				LocalID:     "10.0.1.0/24",
 				RemoteID:    "10.0.2.0/24",
 			},
-			"healthy": {PSK: "fixture-secret",
+			"healthy": {PSK: config.NewSecret("fixture-secret"),
 				Gateway:  "172.16.0.2",
 				LocalID:  "10.0.3.0/24",
 				RemoteID: "10.0.4.0/24",
@@ -334,13 +334,13 @@ func TestGenerateConfig_DanglingPolicyRefSkips(t *testing.T) {
 			"tun1": {
 				Gateway:     "172.16.0.1",
 				IPsecPolicy: policy,
-				PSK:         "tun1-secret",
+				PSK:         config.NewSecret("tun1-secret"),
 				LocalID:     "10.0.1.0/24",
 				RemoteID:    "10.0.2.0/24",
 			},
 			"healthy": {
 				Gateway:  "172.16.0.2",
-				PSK:      "healthy-secret",
+				PSK:      config.NewSecret("healthy-secret"),
 				LocalID:  "10.0.3.0/24",
 				RemoteID: "10.0.4.0/24",
 			},
@@ -533,7 +533,7 @@ func TestGenerateConfig_GatewayReference(t *testing.T) {
 			"site-a": {
 				Gateway:       "remote-gw", // reference to gateway name
 				IPsecPolicy:   "esp-aes256",
-				PSK:           "mysecret",
+				PSK:           config.NewSecret("mysecret"),
 				BindInterface: "st0.0",
 			},
 		},
@@ -579,7 +579,7 @@ func TestGenerateConfig_DirectGatewayIP(t *testing.T) {
 			"direct": {
 				Gateway:   "172.16.0.1",
 				LocalAddr: "172.16.0.2",
-				PSK:       "key123",
+				PSK:       config.NewSecret("key123"),
 			},
 		},
 	}
@@ -669,7 +669,7 @@ func TestGenerateConfig_IKEChain(t *testing.T) {
 				Name:      "ike-pol",
 				Mode:      "main",
 				Proposals: []string{"ike-p1"},
-				PSK:       "secret123",
+				PSK:       config.NewSecret("secret123"),
 			},
 		},
 		Gateways: map[string]*config.IPsecGateway{
@@ -787,7 +787,7 @@ func TestGenerateConfig_DynamicHostname(t *testing.T) {
 			"tun1": {
 				Gateway:       "dyn-gw",
 				BindInterface: "st0.1",
-				PSK:           "key456",
+				PSK:           config.NewSecret("key456"),
 			},
 		},
 	}
@@ -829,7 +829,7 @@ func TestGenerateConfig_NATTraversal_Disable(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", PSK: "key"},
+			"tun": {Gateway: "gw", PSK: config.NewSecret("key")},
 		},
 	}
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
@@ -852,7 +852,7 @@ func TestGenerateConfig_NATTraversal_Force(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", PSK: "key"},
+			"tun": {Gateway: "gw", PSK: config.NewSecret("key")},
 		},
 	}
 	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
@@ -868,7 +868,7 @@ func TestGenerateConfig_NATTraversal_Enable(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", PSK: "key"},
+			"tun": {Gateway: "gw", PSK: config.NewSecret("key")},
 		},
 	}
 	// Enable is the strongSwan default — no encap/forceencaps lines needed.
@@ -895,7 +895,7 @@ func TestGenerateConfig_NATTraversal_Default(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", PSK: "key"},
+			"tun": {Gateway: "gw", PSK: config.NewSecret("key")},
 		},
 	}
 	// #6824: `Contains(got, "encap")` also matched `forceencaps`, so this
@@ -915,7 +915,7 @@ func TestGenerateConfig_NoNATTraversal_Legacy(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", PSK: "key"},
+			"tun": {Gateway: "gw", PSK: config.NewSecret("key")},
 		},
 	}
 	parseSwanctlDoc(t, m.generateConfig(cfg)).
@@ -931,7 +931,7 @@ func TestGenerateConfig_AggressiveMode(t *testing.T) {
 				Name:      "aggr-pol",
 				Mode:      "aggressive",
 				Proposals: []string{"ike-p1"},
-				PSK:       "secret",
+				PSK:       config.NewSecret("secret"),
 			},
 		},
 		// The ike-policy -> ike-proposal chain must resolve, else
@@ -949,7 +949,7 @@ func TestGenerateConfig_AggressiveMode(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret", Gateway: "gw"},
+			"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw"},
 		},
 	}
 	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "gw")
@@ -965,7 +965,7 @@ func TestGenerateConfig_AggressiveMode_NotSet(t *testing.T) {
 				Name:      "main-pol",
 				Mode:      "main",
 				Proposals: []string{"ike-p1"},
-				PSK:       "secret",
+				PSK:       config.NewSecret("secret"),
 			},
 		},
 		// The ike-policy -> ike-proposal chain must resolve, else
@@ -982,7 +982,7 @@ func TestGenerateConfig_AggressiveMode_NotSet(t *testing.T) {
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret", Gateway: "gw"},
+			"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw"},
 		},
 	}
 	doc := parseSwanctlDoc(t, m.generateConfig(cfg))
@@ -1015,7 +1015,7 @@ func TestGenerateConfig_DFBit(t *testing.T) {
 			cfg := &config.IPsecConfig{
 				Proposals: map[string]*config.IPsecProposal{},
 				VPNs: map[string]*config.IPsecVPN{
-					"tun": {PSK: "fixture-secret", Gateway: "10.0.0.1", DFBit: tt.dfbit},
+					"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "10.0.0.1", DFBit: tt.dfbit},
 				},
 			}
 			// copy_df is a CHILD SA setting; the old needles found it anywhere.
@@ -1046,7 +1046,7 @@ func TestGenerateConfig_EstablishTunnels(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		Proposals: map[string]*config.IPsecProposal{},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret", Gateway: "10.0.0.1", BindInterface: "st0.0"},
+			"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "10.0.0.1", BindInterface: "st0.0"},
 		},
 	}
 	tests := []struct {
@@ -1094,13 +1094,13 @@ func TestGenerateConfig_IKELifetime(t *testing.T) {
 			},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"pol1": {Name: "pol1", Proposals: []string{"ike-p1"}, PSK: "secret"},
+			"pol1": {Name: "pol1", Proposals: []string{"ike-p1"}, PSK: config.NewSecret("secret")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw": {Name: "gw", Address: "203.0.113.1", IKEPolicy: "pol1"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret", Gateway: "gw"},
+			"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw"},
 		},
 	}
 	// #6824: `rekey_time` is emitted on BOTH the IKE connection and the child
@@ -1128,7 +1128,7 @@ func TestGenerateConfig_ESPLifetime(t *testing.T) {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-p2"}},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret", Gateway: "203.0.113.1", IPsecPolicy: "ipsec-pol"},
+			"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "203.0.113.1", IPsecPolicy: "ipsec-pol"},
 		},
 	}
 	// The ESP lifetime is the CHILD's rekey_time -- the mirror of the IKE
@@ -1152,7 +1152,7 @@ func TestGenerateConfig_DPDModes(t *testing.T) {
 			},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret", Gateway: "gw", EstablishTunnels: "on-traffic"},
+			"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw", EstablishTunnels: "on-traffic"},
 		},
 	}
 	// dpd_delay/dpd_timeout are IKE-level; dpd_action is on the child SA.
@@ -1245,7 +1245,7 @@ func TestGenerateConfig_JunosObfuscatedPSK(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "10.0.0.1", PSK: "$9$SpRrMLYgaZDirexdwgUDzFn9uO1RhlKW"},
+			"tun": {Gateway: "10.0.0.1", PSK: config.NewSecret("$9$SpRrMLYgaZDirexdwgUDzFn9uO1RhlKW")},
 		},
 	}
 	got, _, err := m.renderConfig(cfg)
@@ -1270,8 +1270,8 @@ func TestGenerateConfig_DecodeToEmptyPSKSkipped15990(t *testing.T) {
 		m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"bad":  {Gateway: "10.0.0.1", PSK: config.Secret(empty)},
-				"good": {Gateway: "10.0.0.2", PSK: "fixture-secret"},
+				"bad":  {Gateway: "10.0.0.1", PSK: config.NewSecret(empty)},
+				"good": {Gateway: "10.0.0.2", PSK: config.NewSecret("fixture-secret")},
 			},
 		}
 		got, rendered, err := m.renderConfig(cfg)
@@ -1293,7 +1293,7 @@ func TestGenerateConfig_DecodeToEmptyPSKSkipped15990(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "10.0.0.1", PSK: "$9$SpRrMLYgaZDirexdwgUDzFn9uO1RhlKW"},
+			"tun": {Gateway: "10.0.0.1", PSK: config.NewSecret("$9$SpRrMLYgaZDirexdwgUDzFn9uO1RhlKW")},
 		},
 	}
 	got, _, err := m.renderConfig(cfg)
@@ -1345,7 +1345,7 @@ func TestGenerateConfig_TrafficSelectors(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {PSK: "fixture-secret",
+			"tun": {PSK: config.NewSecret("fixture-secret"),
 				Gateway: "10.0.0.1",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"corp-a": {Name: "corp-a", LocalIP: "10.0.1.0/24", RemoteIP: "10.10.1.0/24"},
@@ -1390,7 +1390,7 @@ func TestEffectiveTrafficSelectors_NilVPN(t *testing.T) {
 // from LocalID/RemoteID — the behavior the broken nil-OR-empty guard used
 // to share. The #2022 fix must not regress this path.
 func TestEffectiveTrafficSelectors_NoSelectors(t *testing.T) {
-	vpn := &config.IPsecVPN{PSK: "fixture-secret", LocalID: "10.0.1.0/24", RemoteID: "10.10.1.0/24"}
+	vpn := &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"), LocalID: "10.0.1.0/24", RemoteID: "10.10.1.0/24"}
 	got := effectiveTrafficSelectors("tun", vpn)
 	if len(got) != 1 {
 		t.Fatalf("want 1 default child, got %d: %+v", len(got), got)
@@ -1426,7 +1426,7 @@ func TestPrepareConfig_ExternalInterfaceLocalAddress(t *testing.T) {
 					},
 				},
 				VPNs: map[string]*config.IPsecVPN{
-					"tun": {PSK: "fixture-secret", Gateway: "gw"},
+					"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw"},
 				},
 			},
 		},
@@ -1470,7 +1470,7 @@ func dualStackCfg(hostname string) *config.Config {
 					},
 				},
 				VPNs: map[string]*config.IPsecVPN{
-					"tun": {PSK: "fixture-secret", Gateway: "gw"},
+					"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw"},
 				},
 			},
 		},
@@ -1525,7 +1525,7 @@ func TestPrepareConfig_DynamicHostnameFamilyFallback(t *testing.T) {
 						ExternalIface:   "wan0.0",
 					},
 				},
-				VPNs: map[string]*config.IPsecVPN{"tun": {PSK: "fixture-secret", Gateway: "gw"}},
+				VPNs: map[string]*config.IPsecVPN{"tun": {PSK: config.NewSecret("fixture-secret"), Gateway: "gw"}},
 			},
 		},
 	}
@@ -1550,7 +1550,7 @@ func multiDynamicHostnameCfg(n int) *config.Config {
 			ResponderOnly:   true,
 			ExternalIface:   "wan0.0",
 		}
-		vpns[fmt.Sprintf("tun%d", i)] = &config.IPsecVPN{PSK: "fixture-secret", Gateway: name}
+		vpns[fmt.Sprintf("tun%d", i)] = &config.IPsecVPN{PSK: config.NewSecret("fixture-secret"), Gateway: name}
 	}
 	return &config.Config{
 		Interfaces: config.InterfacesConfig{
@@ -1596,7 +1596,7 @@ func TestGenerateConfig_NewlineSecretDoesNotInject(t *testing.T) {
 			"site-a": {
 				LocalAddr:     "10.0.1.1",
 				Gateway:       "10.0.2.1",
-				PSK:           "secret\ninclude /etc/evil.conf",
+				PSK:           config.NewSecret("secret\ninclude /etc/evil.conf"),
 				BindInterface: "st0.0",
 			},
 		},
@@ -1656,7 +1656,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 				"corp-gw": {Name: "corp-gw", Address: "203.0.113.7"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "corp-gw", PSK: "k"},
+				"tun": {Gateway: "corp-gw", PSK: config.NewSecret("k")},
 			},
 		}
 		got, _, err := m.renderConfig(cfg)
@@ -1680,7 +1680,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 			// usable IP / dotted hostname. Benign PSK auth so no other
 			// render error path fires (this isolates the leak path).
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "typo-gw", PSK: "k"},
+				"tun": {Gateway: "typo-gw", PSK: config.NewSecret("k")},
 			},
 		}
 		got, _, err := m.renderConfig(cfg)
@@ -1703,7 +1703,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 				"bare-gw": {Name: "bare-gw"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "bare-gw", PSK: "k"},
+				"tun": {Gateway: "bare-gw", PSK: config.NewSecret("k")},
 			},
 		}
 		got, _, err := m.renderConfig(cfg)
@@ -1721,7 +1721,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 	t.Run("dotless single-label name is skipped", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "vpnpeer", PSK: "k"},
+				"tun": {Gateway: "vpnpeer", PSK: config.NewSecret("k")},
 			},
 		}
 		got, _, err := m.renderConfig(cfg)
@@ -1736,7 +1736,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 	t.Run("inline literal IP is preserved", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "198.51.100.9", PSK: "k"},
+				"tun": {Gateway: "198.51.100.9", PSK: config.NewSecret("k")},
 			},
 		}
 		got, _, err := m.renderConfig(cfg)
@@ -1751,7 +1751,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 	t.Run("inline dotted hostname is preserved", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "peer.example.com", PSK: "k"},
+				"tun": {Gateway: "peer.example.com", PSK: config.NewSecret("k")},
 			},
 		}
 		got, _, err := m.renderConfig(cfg)
@@ -1771,7 +1771,7 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 		// render belt must skip it entirely: no connection, no secret.
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun": {Gateway: "", PSK: "k", BindInterface: "st0.0"},
+				"tun": {Gateway: "", PSK: config.NewSecret("k"), BindInterface: "st0.0"},
 			},
 		}
 		got, rendered, err := m.renderConfig(cfg)
@@ -1799,8 +1799,8 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 				"good-gw": {Name: "good-gw", Address: "192.0.2.10"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"good": {Gateway: "good-gw", PSK: "k1"},
-				"bad":  {Gateway: "missing-gw", PSK: "k2"},
+				"good": {Gateway: "good-gw", PSK: config.NewSecret("k1")},
+				"bad":  {Gateway: "missing-gw", PSK: config.NewSecret("k2")},
 			},
 		}
 		got, _, err := m.renderConfig(cfg)
@@ -1858,7 +1858,7 @@ func TestGenerateConfig_ResponderOnlyGateway(t *testing.T) {
 				VPNs: map[string]*config.IPsecVPN{
 					"dyn": {
 						Gateway:          "dial-in",
-						PSK:              "supersecret",
+						PSK:              config.NewSecret("supersecret"),
 						EstablishTunnels: establishTunnels,
 					},
 				},

@@ -25,8 +25,8 @@ func rotatingFabricServer(t *testing.T, signing, additional string) *Server {
 	t.Helper()
 	m := cluster.NewManager(0, 42)
 	m.UpdateConfig(&config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret(signing),
-		ControlLinkAuthKeyAlt: config.Secret(additional),
+		ControlLinkAuthKey:    config.NewSecret(signing),
+		ControlLinkAuthKeyAlt: config.NewSecret(additional),
 	})
 	return &Server{cluster: m}
 }

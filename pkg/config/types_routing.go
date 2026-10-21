@@ -933,13 +933,13 @@ func (tc *TunnelConfig) String() string {
 		return "<nil>"
 	}
 	priv := "<unset>"
-	if tc.WgLocalPrivkeyHex != "" {
+	if tc.WgLocalPrivkeyHex.Reveal() != "" {
 		priv = "<redacted>"
 	}
 	peers := make([]string, 0, len(tc.WgPeers))
 	for _, p := range tc.WgPeers {
 		psk := "<unset>"
-		if p.PresharedKeyHex != "" {
+		if p.PresharedKeyHex.Reveal() != "" {
 			psk = "<redacted>"
 		}
 		peers = append(peers, fmt.Sprintf(

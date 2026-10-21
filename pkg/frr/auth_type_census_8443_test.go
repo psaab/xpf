@@ -55,19 +55,19 @@ func TestNoAuthLineEndsInADanglingKeyword8443(t *testing.T) {
 				NET:        "49.0001.0100.0000.0001.00",
 				Level:      "level-2",
 				AuthType:   at,
-				AuthKey:    config.Secret(key),
-				Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: at, AuthKey: config.Secret(key)}},
+				AuthKey:    config.NewSecret(key),
+				Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: at, AuthKey: config.NewSecret(key)}},
 			}
 			rip := &config.RIPConfig{
 				AuthType:   at,
-				AuthKey:    config.Secret(key),
+				AuthKey:    config.NewSecret(key),
 				Interfaces: []string{"trust0"},
 			}
 			ospf := &config.OSPFConfig{
 				Areas: []*config.OSPFArea{{
 					ID: "0.0.0.0",
 					Interfaces: []*config.OSPFInterface{
-						{Name: "trust0", AuthType: at, AuthKey: config.Secret(key)},
+						{Name: "trust0", AuthType: at, AuthKey: config.NewSecret(key)},
 					},
 				}},
 			}
@@ -109,11 +109,11 @@ func TestRecognizedAuthTypesStillRender8443(t *testing.T) {
 		m := New()
 		isis := &config.ISISConfig{
 			NET: "49.0001.0100.0000.0001.00", Level: "level-2",
-			AuthType: tc.authType, AuthKey: "s3cret",
+			AuthType: tc.authType, AuthKey: config.NewSecret("s3cret"),
 			Interfaces: []*config.ISISInterface{{Name: "trust0"}},
 		}
 		rip := &config.RIPConfig{
-			AuthType: tc.authType, AuthKey: "s3cret", Interfaces: []string{"trust0"},
+			AuthType: tc.authType, AuthKey: config.NewSecret("s3cret"), Interfaces: []string{"trust0"},
 		}
 		got := m.generateProtocols(nil, nil, nil, rip, isis, "", 0, nil, nil)
 		for _, want := range []string{tc.wantISIS, tc.wantRIP} {
@@ -141,10 +141,10 @@ func TestUnrecognizedAuthTypeRendersPlaintextNotMD5OrSilence8443(t *testing.T) {
 	m := New()
 	isis := &config.ISISConfig{
 		NET: "49.0001.0100.0000.0001.00", Level: "level-2",
-		AuthType: "md5-typo", AuthKey: "s3cret",
+		AuthType: "md5-typo", AuthKey: config.NewSecret("s3cret"),
 		Interfaces: []*config.ISISInterface{{Name: "trust0"}},
 	}
-	rip := &config.RIPConfig{AuthType: "md5-typo", AuthKey: "s3cret", Interfaces: []string{"trust0"}}
+	rip := &config.RIPConfig{AuthType: "md5-typo", AuthKey: config.NewSecret("s3cret"), Interfaces: []string{"trust0"}}
 	got := m.generateProtocols(nil, nil, nil, rip, isis, "", 0, nil, nil)
 
 	if strings.Contains(got, "area-password md5") || strings.Contains(got, "mode md5") {
@@ -168,13 +168,13 @@ func TestUnrecognizedAuthTypeRendersPlaintextNotMD5OrSilence8443(t *testing.T) {
 func TestKeylessOSPFAuthNeverRendersUnauthenticated14397(t *testing.T) {
 	keyless := map[string]*config.OSPFConfig{
 		"md5-no-keys": {Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-			{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 1, AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: ""}}},
+			{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 1, AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: config.NewSecret("")}}},
 		}}}},
 		"md5-empty-slice": {Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
 			{Name: "ge-0/0/1.0", AuthType: "md5"},
 		}}}},
 		"simple-empty-key": {Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-			{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: ""},
+			{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: config.NewSecret("")},
 		}}}},
 	}
 	for name, ospf := range keyless {
@@ -192,19 +192,19 @@ func TestKeylessOSPFAuthNeverRendersUnauthenticated14397(t *testing.T) {
 	}{
 		"md5-keyed": {
 			ospf: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-				{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 1, AuthKey: "s3cret", AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: "s3cret"}}},
+				{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 1, AuthKey: config.NewSecret("s3cret"), AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: config.NewSecret("s3cret")}}},
 			}}}},
 			want: []string{"interface ge-0/0/1.0", " ip ospf authentication message-digest\n", " ip ospf message-digest-key 1 md5 s3cret\n", " ip ospf area 0.0.0.0\n"},
 		},
 		"md5-rollover-mix": {
 			ospf: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-				{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 2, AuthKey: "s3cret", AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: ""}, {ID: 2, Key: "s3cret"}}},
+				{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 2, AuthKey: config.NewSecret("s3cret"), AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: config.NewSecret("")}, {ID: 2, Key: config.NewSecret("s3cret")}}},
 			}}}},
 			want: []string{"interface ge-0/0/1.0", " ip ospf authentication message-digest\n", " ip ospf message-digest-key 2 md5 s3cret\n", " ip ospf area 0.0.0.0\n"},
 		},
 		"simple-keyed": {
 			ospf: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-				{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: "s3cret"},
+				{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: config.NewSecret("s3cret")},
 			}}}},
 			want: []string{"interface ge-0/0/1.0", " ip ospf authentication\n", " ip ospf authentication-key s3cret\n", " ip ospf area 0.0.0.0\n"},
 		},

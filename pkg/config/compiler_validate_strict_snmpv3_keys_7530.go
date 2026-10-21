@@ -66,7 +66,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 		if u == nil {
 			continue
 		}
-		if u.AuthProtocol != "" && string(u.AuthPassword) == "" {
+		if u.AuthProtocol != "" && u.AuthPassword.Reveal() == "" {
 			return fmt.Errorf("snmp v3 usm local-engine user %q names authentication "+
 				"protocol %q but carries no authentication-password. The agent derives "+
 				"its per-user minimum security level from the DERIVED KEY, so a user with "+
@@ -94,7 +94,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 				"and password, or remove the privacy protocol (#9155)",
 				name, u.PrivProtocol, name)
 		}
-		if u.PrivProtocol != "" && string(u.PrivPassword) == "" {
+		if u.PrivProtocol != "" && u.PrivPassword.Reveal() == "" {
 			return fmt.Errorf("snmp v3 usm local-engine user %q names privacy protocol %q "+
 				"but carries no privacy-password. With no privacy key the agent applies no "+
 				"privacy floor, so an authNoPriv request naming %q is answered with an "+

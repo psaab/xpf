@@ -103,10 +103,6 @@ func resolveOSPFIfNames(resolve func(string) string, ospf *config.OSPFConfig) *c
 			}
 			ic := *iface
 			ic.Name = name
-			ic.AuthKey.SetJunos9Provenance(iface.AuthKey.Provenance())
-			for j := range ic.AuthMD5Keys {
-				ic.AuthMD5Keys[j].Key.SetJunos9Provenance(iface.AuthMD5Keys[j].Key.Provenance())
-			}
 			ac.Interfaces = append(ac.Interfaces, &ic)
 		}
 		out.Areas = append(out.Areas, &ac)
@@ -153,7 +149,6 @@ func resolveRIPIfNames(resolve func(string) string, rip *config.RIPConfig) *conf
 		return nil
 	}
 	out := *rip
-	out.AuthKey.SetJunos9Provenance(rip.AuthKey.Provenance())
 	out.Interfaces = resolveIfNameList(resolve, rip.Interfaces, "rip")
 	out.Passive = resolveIfNameList(resolve, rip.Passive, "rip")
 	return &out
@@ -180,7 +175,6 @@ func resolveISISIfNames(resolve func(string) string, isis *config.ISISConfig) *c
 		return nil
 	}
 	out := *isis
-	out.AuthKey.SetJunos9Provenance(isis.AuthKey.Provenance())
 	out.Interfaces = make([]*config.ISISInterface, 0, len(isis.Interfaces))
 	for _, iface := range isis.Interfaces {
 		if iface == nil {
@@ -192,7 +186,6 @@ func resolveISISIfNames(resolve func(string) string, isis *config.ISISConfig) *c
 		}
 		ic := *iface
 		ic.Name = name
-		ic.AuthKey.SetJunos9Provenance(iface.AuthKey.Provenance())
 		out.Interfaces = append(out.Interfaces, &ic)
 	}
 	return &out

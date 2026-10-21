@@ -39,7 +39,7 @@ func bgpAuth14422(t *testing.T, text string) string {
 	if len(cfg.Protocols.BGP.Neighbors) != 1 {
 		t.Fatalf("neighbors: got %d, want 1 (%+v)", len(cfg.Protocols.BGP.Neighbors), cfg.Protocols.BGP.Neighbors)
 	}
-	return string(cfg.Protocols.BGP.Neighbors[0].AuthPassword)
+	return cfg.Protocols.BGP.Neighbors[0].AuthPassword.Reveal()
 }
 
 func TestDR15H7NestedPackedCredentialExcept14422(t *testing.T) {
@@ -93,7 +93,7 @@ func TestDR15H7NestedPackedOSPFExcept14422(t *testing.T) {
 				t.Fatalf("OSPF shape: %+v", cfg.Protocols.OSPF)
 			}
 			iface := cfg.Protocols.OSPF.Areas[0].Interfaces[0]
-			if got := string(iface.AuthKey); got != c.want {
+			if got := iface.AuthKey.Reveal(); got != c.want {
 				t.Errorf("AuthKey = %q, want %q (AuthType %q)", got, c.want, iface.AuthType)
 			}
 		})

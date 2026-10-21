@@ -93,13 +93,13 @@ func validateOSPFAuthKeyPresenceStrict(cfg *Config, lenient bool) ([]string, err
 								break
 							}
 						}
-					} else if iface.AuthKey == "" {
+					} else if iface.AuthKey.Reveal() == "" {
 						if err := report(scope, area.ID, iface, 0, false); err != nil {
 							return err
 						}
 					}
 				case "simple":
-					if iface.AuthKey == "" {
+					if iface.AuthKey.Reveal() == "" {
 						if err := report(scope, area.ID, iface, 0, false); err != nil {
 							return err
 						}

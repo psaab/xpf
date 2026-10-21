@@ -138,7 +138,7 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 				t.Fatalf("nested-container spelling was REJECTED: %v", err)
 			}
 			u := cfg.System.SNMP.V3Users["carol"]
-			if u == nil || string(u.AuthPassword) == "" {
+			if u == nil || u.AuthPassword.Reveal() == "" {
 				t.Fatalf("nested user compiled without auth password: %+v", u)
 			}
 		})
@@ -151,7 +151,7 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 			t.Fatalf("flat nested spelling was REJECTED: %v", err)
 		}
 		u := cfg.System.SNMP.V3Users["carol"]
-		if u == nil || u.AuthProtocol != "sha256" || u.PrivProtocol != "aes128" || string(u.PrivPassword) == "" {
+		if u == nil || u.AuthProtocol != "sha256" || u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() == "" {
 			t.Fatalf("flat nested user wrong: %+v", u)
 		}
 	})
@@ -161,7 +161,7 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 			t.Fatalf("packed auth-only spelling was REJECTED: %v", err)
 		}
 		u := cfg.System.SNMP.V3Users["carol"]
-		if u == nil || u.AuthProtocol != "sha256" || string(u.AuthPassword) == "" {
+		if u == nil || u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() == "" {
 			t.Fatalf("packed auth-only user wrong: %+v", u)
 		}
 	})
@@ -172,7 +172,7 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 			t.Fatalf("packed valid spelling was REJECTED: %v", err)
 		}
 		u := cfg.System.SNMP.V3Users["carol"]
-		if u == nil || u.AuthProtocol != "sha256" || u.PrivProtocol != "aes128" || string(u.PrivPassword) == "" {
+		if u == nil || u.AuthProtocol != "sha256" || u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() == "" {
 			t.Fatalf("packed valid user wrong: %+v", u)
 		}
 	})

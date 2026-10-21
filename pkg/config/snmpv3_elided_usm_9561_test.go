@@ -45,11 +45,11 @@ func TestElidedUSMSpellingsCompileTheUser9561(t *testing.T) {
 					t.Fatalf("%s: user u1 not compiled (users=%d); the elided spelling "+
 						"silently drops every SNMPv3 user (#9561)", path.name, len(cfg.System.SNMP.V3Users))
 				}
-				if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "xpfpass9561" ||
-					u.PrivProtocol != "aes128" || string(u.PrivPassword) != "xpfpriv9561" {
+				if u.AuthProtocol != "sha256" || u.AuthPassword.Reveal() != "xpfpass9561" ||
+					u.PrivProtocol != "aes128" || u.PrivPassword.Reveal() != "xpfpriv9561" {
 					t.Errorf("%s: user u1 compiled auth=%q/%t priv=%q/%t, want sha256 and aes128 with "+
-						"their passwords", path.name, u.AuthProtocol, u.AuthPassword != "",
-						u.PrivProtocol, u.PrivPassword != "")
+						"their passwords", path.name, u.AuthProtocol, u.AuthPassword.Reveal() != "",
+						u.PrivProtocol, u.PrivPassword.Reveal() != "")
 				}
 			}
 		})

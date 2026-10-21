@@ -22,14 +22,14 @@ import (
 func TestOSPFSimpleUnrenderableKeyOmitsInterface14977(t *testing.T) {
 	m := New()
 	ospf := &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: "bad key with spaces"},
+		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: config.NewSecret("bad key with spaces")},
 	}}}}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
 	if strings.Contains(got, "interface ge-0/0/1.0") || strings.Contains(got, "ip ospf area") {
 		t.Fatalf("unrenderable OSPF simple key activated the interface unauthenticated:\n%s", got)
 	}
 	// Control: a renderable simple key still activates with auth.
-	ospf.Areas[0].Interfaces[0].AuthKey = "s3cret"
+	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret("s3cret")
 	got = m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
 	for _, w := range []string{"interface ge-0/0/1.0\n", " ip ospf authentication\n", " ip ospf authentication-key s3cret\n", " ip ospf area 0.0.0.0\n"} {
 		if !strings.Contains(got, w) {
@@ -48,8 +48,8 @@ func TestOSPFUnrecognizedAuthTypeOmitsInterface14977(t *testing.T) {
 		authType string
 		authKey  config.Secret
 	}{
-		{"unrecognized type with key", "md-5", "s3cret"},
-		{"unrecognized type no key", "cryptographic", ""},
+		{"unrecognized type with key", "md-5", config.NewSecret("s3cret")},
+		{"unrecognized type no key", "cryptographic", config.NewSecret("")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := New()
@@ -77,13 +77,13 @@ func TestOSPFUnrecognizedAuthTypeOmitsInterface14977(t *testing.T) {
 // interface and emitted `ip rip authentication mode` with no string.
 func TestRIPUnrenderableKeyDoesNotEnroll14977(t *testing.T) {
 	m := New()
-	rip := &config.RIPConfig{AuthType: "md5", AuthKey: "bad key", Interfaces: []string{"trust0"}}
+	rip := &config.RIPConfig{AuthType: "md5", AuthKey: config.NewSecret("bad key"), Interfaces: []string{"trust0"}}
 	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 	if strings.Contains(got, "network trust0") || strings.Contains(got, "ip rip authentication") {
 		t.Fatalf("unrenderable RIP key enrolled trust0 unauthenticated:\n%s", got)
 	}
 	// Control: renderable key enrolls with mode + string.
-	rip.AuthKey = "s3cret"
+	rip.AuthKey = config.NewSecret("s3cret")
 	got = m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 	for _, w := range []string{" network trust0\n", " ip rip authentication mode md5\n", " ip rip authentication string s3cret\n"} {
 		if !strings.Contains(got, w) {
@@ -91,7 +91,7 @@ func TestRIPUnrenderableKeyDoesNotEnroll14977(t *testing.T) {
 		}
 	}
 	// Control: no auth at all still enrolls plain RIP.
-	rip.AuthType, rip.AuthKey = "", ""
+	rip.AuthType, rip.AuthKey = "", config.NewSecret("")
 	got = m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 	if !strings.Contains(got, " network trust0\n") || strings.Contains(got, "ip rip authentication") {
 		t.Errorf("plain RIP no longer enrolls cleanly:\n%s", got)
@@ -102,7 +102,7 @@ func TestRIPUnrenderableKeyDoesNotEnroll14977(t *testing.T) {
 // not silently downgrade it to a plaintext mode+string adjacency.
 func TestRIPUnrecognizedAuthTypeDoesNotEnroll14977(t *testing.T) {
 	m := New()
-	rip := &config.RIPConfig{AuthType: "bogus", AuthKey: "s3cret", Interfaces: []string{"trust0"}}
+	rip := &config.RIPConfig{AuthType: "bogus", AuthKey: config.NewSecret("s3cret"), Interfaces: []string{"trust0"}}
 	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
 	if strings.Contains(got, "network trust0") || strings.Contains(got, "ip rip authentication") {
 		t.Fatalf("unrecognized RIP auth type enrolled trust0 (silent downgrade):\n%s", got)
@@ -115,14 +115,14 @@ func TestRIPUnrecognizedAuthTypeDoesNotEnroll14977(t *testing.T) {
 // failure withholds the router stanza too.
 func TestISISUnrenderableAuthDoesNotActivate14977(t *testing.T) {
 	cases := map[string]*config.ISISConfig{
-		"global unrenderable md5": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: "bad key",
+		"global unrenderable md5": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("bad key"),
 			Interfaces: []*config.ISISInterface{{Name: "trust0"}}},
 		"global type no key": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5",
 			Interfaces: []*config.ISISInterface{{Name: "trust0"}}},
-		"global unrecognized": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "bogus", AuthKey: "s3cret",
+		"global unrecognized": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "bogus", AuthKey: config.NewSecret("s3cret"),
 			Interfaces: []*config.ISISInterface{{Name: "trust0"}}},
 		"iface unrenderable alone": {NET: "49.0001.0100.0000.0001.00", Level: "level-2",
-			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: "bad key"}}},
+			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("bad key")}}},
 		"iface type no key alone": {NET: "49.0001.0100.0000.0001.00", Level: "level-2",
 			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5"}}},
 	}
@@ -138,8 +138,8 @@ func TestISISUnrenderableAuthDoesNotActivate14977(t *testing.T) {
 		})
 	}
 	// Controls: keyed global+iface render; no-auth IS-IS still activates.
-	keyed := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: "s3cret",
-		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: "s3cret"}}}
+	keyed := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("s3cret"),
+		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("s3cret")}}}
 	got := New().generateProtocols(nil, nil, nil, nil, keyed, "", 0, nil, nil)
 	for _, w := range []string{"router isis xpf\n", " area-password md5 s3cret\n", " ip router isis xpf\n", " isis password md5 s3cret\n"} {
 		if !strings.Contains(got, w) {
@@ -160,10 +160,10 @@ func TestISISUnrenderableAuthDoesNotActivate14977(t *testing.T) {
 // IS-IS per-interface auth failure must not take down a healthy global
 // stanza: only the offending interface is withheld.
 func TestISISBadIfaceAuthKeepsHealthyGlobal14977(t *testing.T) {
-	isis := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: "s3cret",
+	isis := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("s3cret"),
 		Interfaces: []*config.ISISInterface{
-			{Name: "trust0", AuthType: "md5", AuthKey: "bad key"},
-			{Name: "trust1", AuthType: "md5", AuthKey: "s3cret"},
+			{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("bad key")},
+			{Name: "trust1", AuthType: "md5", AuthKey: config.NewSecret("s3cret")},
 		}}
 	got := New().generateProtocols(nil, nil, nil, nil, isis, "", 0, nil, nil)
 	if !strings.Contains(got, " area-password md5 s3cret\n") {
@@ -184,8 +184,8 @@ func TestISISBadIfaceAuthKeepsHealthyGlobal14977(t *testing.T) {
 func TestBGPUnrenderablePasswordExcludesNeighbor14977(t *testing.T) {
 	m := New()
 	bgp := &config.BGPConfig{LocalAS: 65000, Neighbors: []*config.BGPNeighbor{
-		{Address: "10.0.0.1", PeerAS: 65001, AuthPassword: "bad password"},
-		{Address: "10.0.0.2", PeerAS: 65002, AuthPassword: "s3cret"},
+		{Address: "10.0.0.1", PeerAS: 65001, AuthPassword: config.NewSecret("bad password")},
+		{Address: "10.0.0.2", PeerAS: 65002, AuthPassword: config.NewSecret("s3cret")},
 		{Address: "10.0.0.3", PeerAS: 65003},
 	}}
 	got := m.generateProtocols(nil, nil, bgp, nil, nil, "", 0, nil, nil)

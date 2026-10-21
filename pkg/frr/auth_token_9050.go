@@ -121,7 +121,7 @@ func authTokenOrOmit(kind string, s *config.Secret) (string, bool) {
 	if !ok {
 		secretLen := 0
 		if s != nil {
-			secretLen = len(*s)
+			secretLen = len(s.Reveal())
 		}
 		slog.Warn("frr: OMITTING a routing authentication line whose Junos $9$ secret cannot be decoded to a non-empty credential (#15990) — the adjacency will not authenticate; re-set the key",
 			"protocol", kind,

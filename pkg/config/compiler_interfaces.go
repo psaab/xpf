@@ -1187,7 +1187,7 @@ func parseTunnelWireguard(tc *TunnelConfig, wgNode *Node) {
 			}
 		case "private-key":
 			if v := nodeVal(prop); v != "" {
-				tc.WgLocalPrivkeyHex = Secret(v)
+				tc.WgLocalPrivkeyHex = NewSecret(v)
 			}
 		}
 	}
@@ -1252,7 +1252,7 @@ func parseTunnelWireguardPeer(pubkey string, peerNode *Node) WgPeerConfig {
 			}
 		case "preshared-key":
 			if v := nodeVal(prop); v != "" {
-				peer.PresharedKeyHex = Secret(v)
+				peer.PresharedKeyHex = NewSecret(v)
 			}
 		}
 	}
@@ -1623,7 +1623,7 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 			case "authentication-key":
 				if i+1 < len(keys) {
 					i++
-					vg.AuthKey = Secret(keys[i])
+					vg.AuthKey = NewSecret(keys[i])
 				}
 			case "track-interface":
 				if i+1 < len(keys) {
@@ -1754,7 +1754,7 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 			case "authentication-type":
 				vg.AuthType = nodeVal(prop)
 			case "authentication-key":
-				vg.AuthKey = Secret(nodeVal(prop))
+				vg.AuthKey = NewSecret(nodeVal(prop))
 			case "track-interface":
 				// The interface name lives in Keys[1]
 				// (NOT nodeVal — its Children[0]

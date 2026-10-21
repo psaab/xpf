@@ -179,9 +179,9 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 		write(name)
 		if u != nil {
 			write(u.AuthProtocol)
-			write(string(u.AuthPassword))
+			write(u.AuthPassword.Reveal())
 			write(u.PrivProtocol)
-			write(string(u.PrivPassword))
+			write(u.PrivPassword.Reveal())
 		}
 	}
 	return h.Sum64()

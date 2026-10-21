@@ -20,10 +20,10 @@ func TestPSKHexadecimalRender15027(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"hex-vpn":   {Gateway: "gw-a", PSK: "6162636431323334", PSKHex: true},
-			"ascii-vpn": {Gateway: "gw-b", PSK: "secret123"},
-			"bad-hex":   {Gateway: "gw-c", PSK: "zz11", PSKHex: true},
-			"odd-hex":   {Gateway: "gw-d", PSK: "616", PSKHex: true},
+			"hex-vpn":   {Gateway: "gw-a", PSK: config.NewSecret("6162636431323334"), PSKHex: true},
+			"ascii-vpn": {Gateway: "gw-b", PSK: config.NewSecret("secret123")},
+			"bad-hex":   {Gateway: "gw-c", PSK: config.NewSecret("zz11"), PSKHex: true},
+			"odd-hex":   {Gateway: "gw-d", PSK: config.NewSecret("616"), PSKHex: true},
 		},
 		IKEProposals: map[string]*config.IKEProposal{
 			"ike-psk": {
@@ -81,7 +81,7 @@ func TestPSKHexadecimalPolicyFallback15027(t *testing.T) {
 			},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"pol": {Name: "pol", Proposals: []string{"ike-psk"}, PSK: config.Secret("deadbeef01"), PSKHex: true},
+			"pol": {Name: "pol", Proposals: []string{"ike-psk"}, PSK: config.NewSecret("deadbeef01"), PSKHex: true},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw-a": {Name: "gw-a", Address: "203.0.113.1", IKEPolicy: "pol"},

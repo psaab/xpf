@@ -20,8 +20,8 @@ import (
 func missingDHConfig14588() *config.IPsecConfig {
 	return &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"bad":  {Name: "bad", Gateway: "gw-bad", IPsecPolicy: "esp-pol", PSK: "fixture-secret"},
-			"good": {Name: "good", Gateway: "gw-good", IPsecPolicy: "esp-pol", PSK: "fixture-secret"},
+			"bad":  {Name: "bad", Gateway: "gw-bad", IPsecPolicy: "esp-pol", PSK: config.NewSecret("fixture-secret")},
+			"good": {Name: "good", Gateway: "gw-good", IPsecPolicy: "esp-pol", PSK: config.NewSecret("fixture-secret")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw-bad":  {Name: "gw-bad", Address: "192.0.2.1", IKEPolicy: "ike-pol-bad"},

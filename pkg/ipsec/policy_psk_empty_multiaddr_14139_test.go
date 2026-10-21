@@ -17,7 +17,7 @@ func TestPSKEmptySecretSkipped14139(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
 			"no-secret": {Gateway: "gw-a"},
-			"healthy":   {Gateway: "gw-b", PSK: "healthy-secret"},
+			"healthy":   {Gateway: "gw-b", PSK: config.NewSecret("healthy-secret")},
 			// VPN PSK empty, IKE-policy fallback PSK present: renders.
 			"policy-psk": {Gateway: "gw-c"},
 			// Cert (pubkey) VPN legitimately has no PSK: must render.
@@ -34,7 +34,7 @@ func TestPSKEmptySecretSkipped14139(t *testing.T) {
 			},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"pol-psk":  {Name: "pol-psk", Proposals: []string{"ike-psk"}, PSK: config.Secret("policy-secret")},
+			"pol-psk":  {Name: "pol-psk", Proposals: []string{"ike-psk"}, PSK: config.NewSecret("policy-secret")},
 			"pol-cert": {Name: "pol-cert", Proposals: []string{"ike-cert"}},
 		},
 		Gateways: map[string]*config.IPsecGateway{
@@ -87,7 +87,7 @@ func TestPSKIDSelectorsMultiAddress14139(t *testing.T) {
 		m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"multi": {Gateway: "gw", PSK: "multi-secret"},
+				"multi": {Gateway: "gw", PSK: config.NewSecret("multi-secret")},
 			},
 			Gateways: map[string]*config.IPsecGateway{
 				"gw": {Name: "gw", Address: addr},

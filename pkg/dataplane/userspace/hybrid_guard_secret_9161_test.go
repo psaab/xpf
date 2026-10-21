@@ -27,9 +27,9 @@ func wgConfig9161(privkey, psk string) *config.Config {
 				Name:              "wg0",
 				Mode:              "wireguard",
 				WgListenPort:      51820,
-				WgLocalPrivkeyHex: config.Secret(privkey),
+				WgLocalPrivkeyHex: config.NewSecret(privkey),
 				WgPeers: []config.WgPeerConfig{
-					{PublicKeyHex: "aaaa", PresharedKeyHex: config.Secret(psk)},
+					{PublicKeyHex: "aaaa", PresharedKeyHex: config.NewSecret(psk)},
 				},
 			},
 		},
@@ -86,11 +86,11 @@ func TestIdenticalConfigsStillCompareEqual9161(t *testing.T) {
 func TestASecretTheHelperNeverSeesStillComparesEqual9161(t *testing.T) {
 	a := &config.Config{}
 	a.System.SNMP = &config.SNMPConfig{V3Users: map[string]*config.SNMPv3User{
-		"u": {Name: "u", AuthProtocol: "sha256", AuthPassword: config.Secret("secret-one")},
+		"u": {Name: "u", AuthProtocol: "sha256", AuthPassword: config.NewSecret("secret-one")},
 	}}
 	b := &config.Config{}
 	b.System.SNMP = &config.SNMPConfig{V3Users: map[string]*config.SNMPv3User{
-		"u": {Name: "u", AuthProtocol: "sha256", AuthPassword: config.Secret("secret-two")},
+		"u": {Name: "u", AuthProtocol: "sha256", AuthPassword: config.NewSecret("secret-two")},
 	}}
 
 	if !configsContentEqual(a, b) {
@@ -119,8 +119,8 @@ func TestPeerOrderDoesNotChangeTheDigest9161(t *testing.T) {
 			"wg0": {Tunnel: &config.TunnelConfig{
 				Name: "wg0", Mode: "wireguard",
 				WgPeers: []config.WgPeerConfig{
-					{PublicKeyHex: first, PresharedKeyHex: config.Secret("k-" + first)},
-					{PublicKeyHex: second, PresharedKeyHex: config.Secret("k-" + second)},
+					{PublicKeyHex: first, PresharedKeyHex: config.NewSecret("k-" + first)},
+					{PublicKeyHex: second, PresharedKeyHex: config.NewSecret("k-" + second)},
 				},
 			}},
 		}

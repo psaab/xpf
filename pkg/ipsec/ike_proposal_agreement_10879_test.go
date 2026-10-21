@@ -101,16 +101,16 @@ func TestResolveIKESettingsRejectsMixedConnectionSettings_10879(t *testing.T) {
 func TestRenderConfigSkipsMixedIKEAuthenticationWithoutSuppressingHealthyVPN_10879(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1":     {PSK: "fixture-secret", Name: "tun1", Gateway: "gw1", IPsecPolicy: "esp-pol"},
-			"tun-good": {PSK: "fixture-secret", Name: "tun-good", Gateway: "gw-good", IPsecPolicy: "esp-pol"},
+			"tun1":     {PSK: config.NewSecret("fixture-secret"), Name: "tun1", Gateway: "gw1", IPsecPolicy: "esp-pol"},
+			"tun-good": {PSK: config.NewSecret("fixture-secret"), Name: "tun-good", Gateway: "gw-good", IPsecPolicy: "esp-pol"},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw1":     {Name: "gw1", Address: "192.0.2.1", IKEPolicy: "ike-pol"},
 			"gw-good": {Name: "gw-good", Address: "192.0.2.2", IKEPolicy: "ike-good"},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
-			"ike-pol":  {Name: "ike-pol", Proposals: []string{"ike-psk", "ike-ecdsa"}, PSK: config.Secret("bad-shared-key")},
-			"ike-good": {Name: "ike-good", Proposals: []string{"ike-good-a", "ike-good-b"}, PSK: config.Secret("good-shared-key")},
+			"ike-pol":  {Name: "ike-pol", Proposals: []string{"ike-psk", "ike-ecdsa"}, PSK: config.NewSecret("bad-shared-key")},
+			"ike-good": {Name: "ike-good", Proposals: []string{"ike-good-a", "ike-good-b"}, PSK: config.NewSecret("good-shared-key")},
 		},
 		IKEProposals: map[string]*config.IKEProposal{
 			"ike-psk": {

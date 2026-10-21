@@ -57,7 +57,7 @@ func TestDHCPDDNSHierarchicalAndFlatSetCompileEqually(t *testing.T) {
 		UpdateServer:   "192.0.2.53",
 		TSIGKeyName:    "xpf-key",
 		TSIGAlgorithm:  "hmac-sha256",
-		TSIGSecret:     "c2VjcmV0",
+		TSIGSecret:     NewSecret("c2VjcmV0"),
 	}
 	if *df != *want {
 		t.Fatalf("flat-set DDNS mismatch:\n got %+v\nwant %+v", *df, *want)
@@ -205,7 +205,7 @@ func TestDHCPDDNSStringRedactsTSIGSecret(t *testing.T) {
 		Enabled:       true,
 		TSIGKeyName:   "k",
 		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    "TOPSECRET-base64==",
+		TSIGSecret:    NewSecret("TOPSECRET-base64=="),
 	}
 	s := d.String()
 	if strings.Contains(s, "TOPSECRET") {
@@ -215,7 +215,7 @@ func TestDHCPDDNSStringRedactsTSIGSecret(t *testing.T) {
 		t.Fatalf("String() did not redact a set secret: %q", s)
 	}
 	// An unset secret renders empty, not <redacted>.
-	d.TSIGSecret = ""
+	d.TSIGSecret = NewSecret("")
 	if strings.Contains(d.String(), "<redacted>") {
 		t.Fatalf("String() redacted an empty secret: %q", d.String())
 	}

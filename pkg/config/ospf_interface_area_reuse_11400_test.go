@@ -187,7 +187,7 @@ func TestOSPFAreaInterfaceAliasConflictLenientWarns12186(t *testing.T) {
 
 func TestOSPFAreaInterfaceUnionDefaultsAndMD5Rollover12186(t *testing.T) {
 	var union OSPFInterfaceUnion12186
-	keys := []OSPFMD5Key12186{{ID: 7, Key: Secret("rollover-seven")}}
+	keys := []OSPFMD5Key12186{{ID: 7, Key: NewSecret("rollover-seven")}}
 	first := &OSPFInterface{
 		Name: "ge-0/0/1.0", Cost: 10, Passive: true, BFD: true,
 		AuthType: "md5", AuthKeyID: 7, AuthKey: keys[0].Key, AuthMD5Keys: keys,
@@ -198,14 +198,14 @@ func TestOSPFAreaInterfaceUnionDefaultsAndMD5Rollover12186(t *testing.T) {
 	second := &OSPFInterface{
 		Name: "ge-0-0-1.0", HelloInterval: 5, NoPassive: true,
 		HasPriority: true, Priority: 0,
-		AuthType: "md5", AuthKeyID: 8, AuthKey: Secret("rollover-eight"),
-		AuthMD5Keys: []OSPFMD5Key12186{{ID: 8, Key: Secret("rollover-eight")}},
+		AuthType: "md5", AuthKeyID: 8, AuthKey: NewSecret("rollover-eight"),
+		AuthMD5Keys: []OSPFMD5Key12186{{ID: 8, Key: NewSecret("rollover-eight")}},
 	}
 	if conflicts := union.Merge(second); len(conflicts) != 0 {
 		t.Fatalf("disjoint/default fields or distinct MD5 IDs conflicted: %v", conflicts)
 	}
 	if conflicts := union.Merge(&OSPFInterface{
-		AuthType: "md5", AuthMD5Keys: []OSPFMD5Key12186{{ID: 7, Key: Secret("rollover-seven")}},
+		AuthType: "md5", AuthMD5Keys: []OSPFMD5Key12186{{ID: 7, Key: NewSecret("rollover-seven")}},
 	}); len(conflicts) != 0 || len(union.MD5Keys) != 2 {
 		t.Fatalf("repeated identical key ID should be idempotent: conflicts=%v keys=%v", conflicts, union.MD5Keys)
 	}
@@ -219,10 +219,10 @@ func TestOSPFAreaInterfaceUnionDefaultsAndMD5Rollover12186(t *testing.T) {
 		AuthMD5Keys: []OSPFMD5Key12186{{ID: 9}},
 	})
 	if conflicts := incompleteKeyUnion.Merge(&OSPFInterface{
-		AuthType: "md5", AuthKeyID: 9, AuthKey: Secret("filled-key"),
-		AuthMD5Keys: []OSPFMD5Key12186{{ID: 9, Key: Secret("filled-key")}},
+		AuthType: "md5", AuthKeyID: 9, AuthKey: NewSecret("filled-key"),
+		AuthMD5Keys: []OSPFMD5Key12186{{ID: 9, Key: NewSecret("filled-key")}},
 	}); len(conflicts) != 0 || len(incompleteKeyUnion.MD5Keys) != 1 ||
-		incompleteKeyUnion.MD5Keys[0].Key != Secret("filled-key") {
+		incompleteKeyUnion.MD5Keys[0].Key != NewSecret("filled-key") {
 		t.Fatalf("an absent same-ID key should be filled, not conflict: conflicts=%v keys=%v", conflicts, incompleteKeyUnion.MD5Keys)
 	}
 	if union.Name != first.Name || union.Cost != 10 || union.HelloInterval != 5 ||
@@ -230,8 +230,8 @@ func TestOSPFAreaInterfaceUnionDefaultsAndMD5Rollover12186(t *testing.T) {
 		union.Priority != 0 || len(union.MD5Keys) != 2 {
 		t.Fatalf("union did not preserve first-present values and combine disjoint settings: %+v", union)
 	}
-	first.AuthMD5Keys[0].Key = Secret("mutated-input")
-	if union.MD5Keys[0].Key != Secret("rollover-seven") {
+	first.AuthMD5Keys[0].Key = NewSecret("mutated-input")
+	if union.MD5Keys[0].Key != NewSecret("rollover-seven") {
 		t.Fatal("union aliases the source MD5 key slice")
 	}
 
@@ -264,7 +264,7 @@ func TestOSPFCompilerKeepsSameInterfaceMD5Rollover12186(t *testing.T) {
 		t.Fatalf("same authored interface compiled to %d model entries, want one", len(ifaces))
 	}
 	iface := ifaces[0]
-	wantKeys := map[int]Secret{7: Secret("same-interface-seven"), 8: Secret("same-interface-eight")}
+	wantKeys := map[int]Secret{7: NewSecret("same-interface-seven"), 8: NewSecret("same-interface-eight")}
 	if len(iface.AuthMD5Keys) != len(wantKeys) {
 		t.Fatalf("same-interface MD5 rollover retained %d keys, want %d: %+v", len(iface.AuthMD5Keys), len(wantKeys), iface.AuthMD5Keys)
 	}
@@ -273,7 +273,7 @@ func TestOSPFCompilerKeepsSameInterfaceMD5Rollover12186(t *testing.T) {
 			t.Fatalf("same-interface MD5 rollover key ID %d has unexpected secret", key.ID)
 		}
 	}
-	if iface.AuthKeyID != 8 || iface.AuthKey != Secret("same-interface-eight") {
+	if iface.AuthKeyID != 8 || iface.AuthKey != NewSecret("same-interface-eight") {
 		t.Fatalf("legacy MD5 fields no longer expose the last configured key: ID=%d", iface.AuthKeyID)
 	}
 }
@@ -310,23 +310,23 @@ func TestOSPFAreaInterfaceAuthTypeConflictDoesNotCrossApply12186(t *testing.T) {
 	const simpleKey = "simple-key-value"
 	var md5First OSPFInterfaceUnion12186
 	md5First.Merge(&OSPFInterface{
-		AuthType: "md5", AuthKeyID: 7, AuthKey: Secret(md5Key),
-		AuthMD5Keys: []OSPFMD5Key12186{{ID: 7, Key: Secret(md5Key)}},
+		AuthType: "md5", AuthKeyID: 7, AuthKey: NewSecret(md5Key),
+		AuthMD5Keys: []OSPFMD5Key12186{{ID: 7, Key: NewSecret(md5Key)}},
 	})
-	conflicts := md5First.Merge(&OSPFInterface{AuthType: "simple", AuthKey: Secret(simpleKey)})
+	conflicts := md5First.Merge(&OSPFInterface{AuthType: "simple", AuthKey: NewSecret(simpleKey)})
 	if len(conflicts) != 1 || conflicts[0] != "authentication-type" ||
-		len(md5First.MD5Keys) != 1 || md5First.MD5Keys[0].Key != Secret(md5Key) {
+		len(md5First.MD5Keys) != 1 || md5First.MD5Keys[0].Key != NewSecret(md5Key) {
 		t.Fatalf("MD5-first merge cross-applied incompatible simple auth: conflicts=%v state=%+v", conflicts, md5First)
 	}
 
 	var simpleFirst OSPFInterfaceUnion12186
-	simpleFirst.Merge(&OSPFInterface{AuthType: "simple", AuthKey: Secret(simpleKey)})
+	simpleFirst.Merge(&OSPFInterface{AuthType: "simple", AuthKey: NewSecret(simpleKey)})
 	conflicts = simpleFirst.Merge(&OSPFInterface{
-		AuthType: "md5", AuthKeyID: 7, AuthKey: Secret(md5Key),
-		AuthMD5Keys: []OSPFMD5Key12186{{ID: 7, Key: Secret(md5Key)}},
+		AuthType: "md5", AuthKeyID: 7, AuthKey: NewSecret(md5Key),
+		AuthMD5Keys: []OSPFMD5Key12186{{ID: 7, Key: NewSecret(md5Key)}},
 	})
 	if len(conflicts) != 1 || conflicts[0] != "authentication-type" ||
-		len(simpleFirst.MD5Keys) != 0 || simpleFirst.AuthKey != Secret(simpleKey) {
+		len(simpleFirst.MD5Keys) != 0 || simpleFirst.AuthKey != NewSecret(simpleKey) {
 		t.Fatalf("simple-first merge cross-applied incompatible MD5 auth: conflicts=%v state=%+v", conflicts, simpleFirst)
 	}
 }

@@ -188,7 +188,7 @@ func TestRestartKeepsChangedConnectionDebt10878(t *testing.T) {
 	rec.terminateErr = map[string]error{"site-a": errTerminate}
 	changed := vpnCfg("site-a")
 	changed.VPNs["site-a"].EstablishTunnels = "immediately"
-	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
+	changed.VPNs["site-a"].PSK = config.NewSecret("rotated-secret")
 	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
 	if err := m1.Apply(changed); err == nil {
 		t.Fatal("changed Apply must report a failed stale-SA termination")

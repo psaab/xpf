@@ -374,10 +374,10 @@ func TestBackendFingerprintStableAndSecretFree(t *testing.T) {
 	// no-secret contract: the fingerprint must be persistable without disclosing a
 	// secret and without depending on one).
 	secretVariants := []*config.DDNSProvider{
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", TSIGSecret: config.Secret("hunter2")},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", Password: config.Secret("hunter2")},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", APIToken: config.Secret("tok")},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", AWSSecretAccessKey: config.Secret("sk")},
+		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", TSIGSecret: config.NewSecret("hunter2")},
+		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", Password: config.NewSecret("hunter2")},
+		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", APIToken: config.NewSecret("tok")},
+		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", AWSSecretAccessKey: config.NewSecret("sk")},
 		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", Username: "u"},
 		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", TSIGKeyName: "k"},
 		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", AWSAccessKeyID: "AKIA"},
@@ -414,7 +414,7 @@ func TestSurfaceAFingerprintPersistedNoSecretOnDisk(t *testing.T) {
 	}
 	prov := &config.DDNSProvider{
 		Name: "prov", Backend: "rfc2136", UpdateServer: "ns.example.net:53",
-		TSIGKeyName: "k", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.Secret("SUPERSECRETKEY=="),
+		TSIGKeyName: "k", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.NewSecret("SUPERSECRETKEY=="),
 	}
 	sc := SurfaceAScope{
 		Key:      ScopeKey{Family: FamilyV4, Interface: "ge-0-0-2", Unit: 50, PolicyID: "prov", FQDN: "wan.example.net"},

@@ -38,7 +38,7 @@ func TestDuckDNSUpdateRequestShapeV4(t *testing.T) {
 
 	b, err := newDuckDNSBackend(&config.DDNSProvider{
 		Name: "duck", Backend: "duckdns", Server: srv.URL,
-		APIToken: config.Secret("tok-abc"),
+		APIToken: config.NewSecret("tok-abc"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("newDuckDNSBackend: %v", err)
@@ -85,7 +85,7 @@ func TestDuckDNSUpdateRequestShapeV6(t *testing.T) {
 
 	b, err := newDuckDNSBackend(&config.DDNSProvider{
 		Name: "duck", Backend: "duckdns", Server: srv.URL,
-		APIToken: config.Secret("tok-abc"),
+		APIToken: config.NewSecret("tok-abc"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("newDuckDNSBackend: %v", err)
@@ -121,7 +121,7 @@ func TestDuckDNSWithdrawClear(t *testing.T) {
 
 	b, err := newDuckDNSBackend(&config.DDNSProvider{
 		Name: "duck", Backend: "duckdns", Server: srv.URL,
-		APIToken: config.Secret("tok-abc"),
+		APIToken: config.NewSecret("tok-abc"),
 	}, nil)
 	if err != nil {
 		t.Fatalf("newDuckDNSBackend: %v", err)

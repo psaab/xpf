@@ -51,7 +51,7 @@ func TestProtocolAuthFlatRunKeepsEveryLeaf8939(t *testing.T) {
 	t.Run("protocols rip", func(t *testing.T) {
 		b := "set protocols rip "
 		ref := build(t, b+"authentication-key secret1", b+"authentication-type md5").Protocols.RIP
-		if ref == nil || ref.AuthKey == "" || ref.AuthType == "" {
+		if ref == nil || ref.AuthKey.Reveal() == "" || ref.AuthType == "" {
 			t.Fatalf("the split reference arm is incomplete (%+v) -- every comparison "+
 				"below would pass against a config that carries nothing (#8939)", ref)
 		}
@@ -67,7 +67,7 @@ func TestProtocolAuthFlatRunKeepsEveryLeaf8939(t *testing.T) {
 		b := "set protocols isis "
 		ref := build(t, b+"authentication-key secret1", b+"authentication-type md5",
 			b+"is-type level-2").Protocols.ISIS
-		if ref == nil || ref.AuthKey == "" || ref.AuthType == "" || ref.Level == "" {
+		if ref == nil || ref.AuthKey.Reveal() == "" || ref.AuthType == "" || ref.Level == "" {
 			t.Fatalf("the split reference arm is incomplete (%+v) (#8939)", ref)
 		}
 		for _, tc := range []struct{ name, cmd string }{
@@ -101,7 +101,7 @@ func TestProtocolAuthFlatRunKeepsEveryLeaf8939(t *testing.T) {
 		}
 		ref := first(build(t, b+"authentication-key secret1", b+"authentication-type md5",
 			b+"level 2"))
-		if ref.AuthKey == "" || ref.AuthType == "" || ref.Level == "" {
+		if ref.AuthKey.Reveal() == "" || ref.AuthType == "" || ref.Level == "" {
 			t.Fatalf("the split reference arm is incomplete (%+v) (#8939)", ref)
 		}
 		for _, tc := range []struct{ name, cmd string }{

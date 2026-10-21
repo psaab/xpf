@@ -358,7 +358,7 @@ system {
 	if ra == nil {
 		t.Fatal("root-authentication is nil")
 	}
-	if ra.EncryptedPassword != "$6$saltsalt$abc123def456" {
+	if ra.EncryptedPassword.Reveal() != "$6$saltsalt$abc123def456" {
 		t.Errorf("encrypted-password = %q, want %q", ra.EncryptedPassword, "$6$saltsalt$abc123def456")
 	}
 	if len(ra.SSHKeys) != 2 {
@@ -744,7 +744,7 @@ func TestSystemConfigSetSyntax(t *testing.T) {
 	if cfg.System.RootAuthentication == nil {
 		t.Fatal("root-authentication is nil")
 	}
-	if cfg.System.RootAuthentication.EncryptedPassword != "$6$abcsalt$hashhash" {
+	if cfg.System.RootAuthentication.EncryptedPassword.Reveal() != "$6$abcsalt$hashhash" {
 		t.Errorf("encrypted-password = %q", cfg.System.RootAuthentication.EncryptedPassword)
 	}
 	if len(cfg.System.RootAuthentication.SSHKeys) != 1 {
@@ -861,13 +861,13 @@ snmp {
 	if monitor.AuthProtocol != "sha" {
 		t.Errorf("monitor auth = %q, want sha", monitor.AuthProtocol)
 	}
-	if monitor.AuthPassword != "secret123" {
+	if monitor.AuthPassword.Reveal() != "secret123" {
 		t.Errorf("monitor auth password = %q, want secret123", monitor.AuthPassword)
 	}
 	if monitor.PrivProtocol != "aes128" {
 		t.Errorf("monitor priv = %q, want aes128", monitor.PrivProtocol)
 	}
-	if monitor.PrivPassword != "privpass123" {
+	if monitor.PrivPassword.Reveal() != "privpass123" {
 		t.Errorf("monitor priv password = %q, want privpass123", monitor.PrivPassword)
 	}
 	readonly := cfg.System.SNMP.V3Users["readonly"]

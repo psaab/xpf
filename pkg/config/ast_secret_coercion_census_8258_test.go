@@ -23,7 +23,7 @@ import (
 // it. `SNMPCommunity.Name` is declared `string`. It becomes a `Secret` only
 // inside `MarshalJSON`/`MarshalYAML`, by conversion:
 //
-//	return json.Marshal(alias{Name: Secret(c.Name), ...})
+//	return json.Marshal(alias{Name: NewSecret(c.Name), ...})
 //
 // So the typed route DOES redact it, exactly as if the field were declared
 // `Secret` — and the reflection census cannot see it, because at the type level
@@ -42,7 +42,7 @@ import (
 // the whole population.
 //
 // This file closes the gap by enumerating the OTHER route with `go/ast` rather
-// than a regex — a conversion `Secret(x.F)` inside a method is a syntactic
+// than a regex — a conversion `NewSecret(x.F)` inside a method is a syntactic
 // fact, so it can be extracted precisely instead of pattern-matched. Both
 // censuses feed the same map, so a leaf enrolled by either route is verified
 // the same way.

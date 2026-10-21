@@ -31,7 +31,7 @@ func TestFabricAuth15262_RestartUnderUnchangedKeyDeniesAfterGrace(t *testing.T) 
 
 	// First incarnation: key first installed now.
 	first := fabricAuth15262ManagerAt(t, path)
-	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 	firstAt := first.ControlLinkAuthKeyConfiguredAt()
 	if firstAt.IsZero() {
 		t.Fatal("first keyed apply did not publish a configuration time")
@@ -40,7 +40,7 @@ func TestFabricAuth15262_RestartUnderUnchangedKeyDeniesAfterGrace(t *testing.T) 
 	// Simulated restart: a fresh Manager (empty in-memory state) applying
 	// the same key, well after the grace measured from first keying.
 	restart := fabricAuth15262ManagerAt(t, path)
-	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 	got := restart.ControlLinkAuthKeyConfiguredAt()
 	if got.IsZero() {
 		t.Fatal("restart under unchanged key published no configuration time; the persisted first-keyed anchor was not loaded")
@@ -69,14 +69,14 @@ func TestFabricAuth15262_RestartWithinGraceKeepsRemainingGrace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fabric-auth-grace")
 
 	first := fabricAuth15262ManagerAt(t, path)
-	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 	firstAt := first.ControlLinkAuthKeyConfiguredAt()
 	if firstAt.IsZero() {
 		t.Fatal("first keyed apply did not publish a configuration time")
 	}
 
 	restart := fabricAuth15262ManagerAt(t, path)
-	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 
 	// One minute after first keying (still inside grace): allowed.
 	now := firstAt.Add(time.Minute)
@@ -101,7 +101,7 @@ func TestFabricAuth15262_NewKeyAfterRestartGetsGrace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fabric-auth-grace")
 
 	first := fabricAuth15262ManagerAt(t, path)
-	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 	firstAt := first.ControlLinkAuthKeyConfiguredAt()
 	if firstAt.IsZero() {
 		t.Fatal("first keyed apply did not publish a configuration time")
@@ -111,7 +111,7 @@ func TestFabricAuth15262_NewKeyAfterRestartGetsGrace(t *testing.T) {
 	// the persisted anchor belongs to the old key digest, so the new key
 	// gets a fresh grace.
 	restart := fabricAuth15262ManagerAt(t, path)
-	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("rotated-control-key")})
+	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("rotated-control-key")})
 	newAt := restart.ControlLinkAuthKeyConfiguredAt()
 	if newAt.IsZero() {
 		t.Fatal("new key after restart published no configuration time")
@@ -138,7 +138,7 @@ func TestFabricAuth15262_KeyFingerprintChangeInPlaceGetsGrace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fabric-auth-grace")
 
 	m := fabricAuth15262ManagerAt(t, path)
-	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 	firstAt := m.ControlLinkAuthKeyConfiguredAt()
 	if firstAt.IsZero() {
 		t.Fatal("first keyed apply did not publish a configuration time")
@@ -147,14 +147,14 @@ func TestFabricAuth15262_KeyFingerprintChangeInPlaceGetsGrace(t *testing.T) {
 	// Same process, key rotated to a different secret: this is a new
 	// first-keying for that digest and must re-anchor (operator rollout),
 	// unlike an unchanged-key re-apply which must not.
-	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("rotated-control-key")})
+	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("rotated-control-key")})
 	rotatedAt := m.ControlLinkAuthKeyConfiguredAt()
 	if rotatedAt.IsZero() || !rotatedAt.After(firstAt) {
 		t.Fatalf("in-place key rotation did not re-anchor: rotated=%v first=%v", rotatedAt, firstAt)
 	}
 
 	// Unchanged re-apply of the rotated key keeps its anchor.
-	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("rotated-control-key")})
+	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("rotated-control-key")})
 	if got := m.ControlLinkAuthKeyConfiguredAt(); !got.Equal(rotatedAt) {
 		t.Fatalf("unchanged re-apply re-anchored: got %v want %v", got, rotatedAt)
 	}
@@ -166,7 +166,7 @@ func TestFabricAuth15262_KeyFingerprintChangeInPlaceGetsGrace(t *testing.T) {
 	if got := m.ControlLinkAuthKeyConfiguredAt(); !got.IsZero() {
 		t.Fatalf("cleared key left a configuration time: %v", got)
 	}
-	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret(fabricTestKey)})
 	if got := m.ControlLinkAuthKeyConfiguredAt(); got.IsZero() || !got.After(rotatedAt) {
 		t.Fatalf("re-key after clear did not re-anchor: got %v (rotated anchor %v)", got, rotatedAt)
 	}

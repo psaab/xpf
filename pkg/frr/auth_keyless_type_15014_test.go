@@ -39,7 +39,7 @@ import (
 func TestOSPFKeyWithNoTypeDoesNotActivate15014(t *testing.T) {
 	m := New()
 	ospf := &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-		{Name: "ge-0/0/1.0", AuthKey: "s3cret"},
+		{Name: "ge-0/0/1.0", AuthKey: config.NewSecret("s3cret")},
 	}}}}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
 	if strings.Contains(got, "interface ge-0/0/1.0") || strings.Contains(got, "ip ospf area") {
@@ -58,7 +58,7 @@ func TestOSPFKeyWithNoTypeDoesNotActivate15014(t *testing.T) {
 	}
 	// Control: keyed simple still activates byte-identically.
 	keyed := &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: "s3cret"},
+		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: config.NewSecret("s3cret")},
 	}}}}
 	got = m.generateProtocols(keyed, nil, nil, nil, nil, "", 0, nil, nil)
 	for _, w := range []string{"interface ge-0/0/1.0\n", " ip ospf authentication\n", " ip ospf authentication-key s3cret\n", " ip ospf area 0.0.0.0\n"} {
@@ -73,7 +73,7 @@ func TestOSPFKeyWithNoTypeDoesNotActivate15014(t *testing.T) {
 // activation settings. The union must not launder it into plain.
 func TestOSPFKeyWithNoTypeSplitFragments15014(t *testing.T) {
 	ospf := &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-		{Name: "ge-0/0/1.0", AuthKey: "s3cret"},
+		{Name: "ge-0/0/1.0", AuthKey: config.NewSecret("s3cret")},
 		{Name: "ge-0/0/1.0", Cost: 10},
 	}}}}
 	got := New().generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
@@ -98,14 +98,14 @@ func TestOSPFKeyWithNoTypeSplitFragments15014(t *testing.T) {
 // OSPF simple with an unrenderable key renders no activation.
 func TestOSPFSimpleUnrenderableKeyNoActivation15014(t *testing.T) {
 	ospf := &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: "bad key"},
+		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: config.NewSecret("bad key")},
 	}}}}
 	got := New().generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
 	if strings.Contains(got, "interface ge-0/0/1.0") || strings.Contains(got, "ip ospf area") {
 		t.Fatalf("OSPF simple with unrenderable key activated unauthenticated:\n%s", got)
 	}
 	// Keyed control byte-identical.
-	ospf.Areas[0].Interfaces[0].AuthKey = "s3cret"
+	ospf.Areas[0].Interfaces[0].AuthKey = config.NewSecret("s3cret")
 	got = New().generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
 	for _, w := range []string{"interface ge-0/0/1.0\n", " ip ospf authentication\n", " ip ospf authentication-key s3cret\n", " ip ospf area 0.0.0.0\n"} {
 		if !strings.Contains(got, w) {
@@ -119,12 +119,12 @@ func TestOSPFSimpleUnrenderableKeyNoActivation15014(t *testing.T) {
 // withholds every enrolment.
 func TestISISUnrenderableAndKeylessNoActivation15014(t *testing.T) {
 	cases := map[string]*config.ISISConfig{
-		"area unrenderable": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: "bad key",
-			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: "s3cret"}}},
+		"area unrenderable": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("bad key"),
+			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("s3cret")}}},
 		"area keyless type": {NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5",
 			Interfaces: []*config.ISISInterface{{Name: "trust0"}}},
 		"iface unrenderable": {NET: "49.0001.0100.0000.0001.00", Level: "level-2",
-			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: "bad key"}}},
+			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("bad key")}}},
 		"iface keyless type": {NET: "49.0001.0100.0000.0001.00", Level: "level-2",
 			Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5"}}},
 	}
@@ -140,8 +140,8 @@ func TestISISUnrenderableAndKeylessNoActivation15014(t *testing.T) {
 		})
 	}
 	// Controls: keyed global+iface byte-identical; plain IS-IS activates.
-	keyed := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: "s3cret",
-		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: "s3cret"}}}
+	keyed := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("s3cret"),
+		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("s3cret")}}}
 	got := New().generateProtocols(nil, nil, nil, nil, keyed, "", 0, nil, nil)
 	for _, w := range []string{"router isis xpf\n", " area-password md5 s3cret\n", " domain-password md5 s3cret\n", " ip router isis xpf\n", " isis password md5 s3cret\n"} {
 		if !strings.Contains(got, w) {
@@ -155,10 +155,10 @@ func TestISISUnrenderableAndKeylessNoActivation15014(t *testing.T) {
 		t.Errorf("plain IS-IS control changed:\n%s", got)
 	}
 	// Per-interface failure keeps a healthy global + sibling.
-	mixed := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: "s3cret",
+	mixed := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("s3cret"),
 		Interfaces: []*config.ISISInterface{
-			{Name: "trust0", AuthType: "md5", AuthKey: "bad key"},
-			{Name: "trust1", AuthType: "md5", AuthKey: "s3cret"},
+			{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("bad key")},
+			{Name: "trust1", AuthType: "md5", AuthKey: config.NewSecret("s3cret")},
 		}}
 	got = New().generateProtocols(nil, nil, nil, nil, mixed, "", 0, nil, nil)
 	if !strings.Contains(got, " area-password md5 s3cret\n") || strings.Contains(got, "interface trust0\n") ||

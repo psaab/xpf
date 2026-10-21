@@ -100,7 +100,7 @@ const rootAuthCloseoutHash = "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5
 // credentials) has observable work in the closeout.
 func rootAuthCloseoutCfg(hash string) *config.Config {
 	cfg := &config.Config{}
-	cfg.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.Secret(hash)}
+	cfg.System.RootAuthentication = &config.RootAuthConfig{EncryptedPassword: config.NewSecret(hash)}
 	return cfg
 }
 

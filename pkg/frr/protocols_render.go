@@ -332,48 +332,9 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				renderedAreaByInterface[iface.Name] = state
 			}
 		}
-		// The render loop holds map values by copy, and field-bound
-		// provenance does not survive a struct copy. The union fields
-		// above were populated by Merge from the ORIGINAL compiled
-		// interfaces (state.settings.Merge ran on those addresses), so
-		// rebind from the still-live source fields matched by interface
-		// name and key ID/value before resolving.
-		rebindOSPFProvenance := func(state *ospfRenderV2State12186) {
-			for _, area := range ospf.Areas {
-				if area == nil || ospfAreaIdentity11400(area.ID) != state.area.key {
-					continue
-				}
-				for _, src := range area.Interfaces {
-					if src == nil || src.Name != state.settings.Name {
-						continue
-					}
-					if state.settings.AuthKey == src.AuthKey {
-						state.settings.AuthKey.SetJunos9Provenance(src.AuthKey.Provenance())
-					}
-					for i := range state.settings.MD5Keys {
-						mk := &state.settings.MD5Keys[i]
-						matched := false
-						for j := range src.AuthMD5Keys {
-							if src.AuthMD5Keys[j].ID == mk.ID && src.AuthMD5Keys[j].Key == mk.Key {
-								mk.Key.SetJunos9Provenance(src.AuthMD5Keys[j].Key.Provenance())
-								matched = true
-							}
-						}
-						if !matched && len(src.AuthMD5Keys) == 0 && src.AuthKeyID == mk.ID && src.AuthKey == mk.Key {
-							mk.Key.SetJunos9Provenance(src.AuthKey.Provenance())
-						}
-					}
-				}
-			}
-		}
 		for _, name := range interfaceOrder {
-			st := renderedAreaByInterface[name]
-			state := &st
-			rebindOSPFProvenance(state)
-			// Provenance is field-bound: keep the union value (not a
-			// copy of its embedded OSPFInterface) so credential lookups
-			// resolve against the union fields the Merge wrote.
-			iface := &state.settings.OSPFInterface
+			state := renderedAreaByInterface[name]
+			iface := state.settings.OSPFInterface
 			// #14388 (DR6-H4): decide MD5 survivability BEFORE emitting the
 			// interface header. If AuthType is md5 but no key survives
 			// (all key-ids out of 1..255, all secrets empty, or all secrets
@@ -388,7 +349,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				authEmitted := false
 				for i := range state.settings.MD5Keys {
 					key := &state.settings.MD5Keys[i]
-					if key.Key == "" {
+					if key.Key.Reveal() == "" {
 						continue
 					}
 					if key.ID < 1 || key.ID > 255 {
@@ -435,7 +396,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			// interface block is the #14388 answer.
 			var ospfSimpleTok14977 string
 			if iface.AuthType == "simple" {
-				if iface.AuthKey == "" {
+				if iface.AuthKey.Reveal() == "" {
 					slog.Warn("frr: omitting OSPF interface with simple authentication configured but no key; refusing to activate it unauthenticated (#14397)",
 						"interface", sanitizeFRRValue(iface.Name), "authentication_type", iface.AuthType)
 					continue
@@ -451,7 +412,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				slog.Warn("frr: omitting OSPF interface with an unrecognized authentication-type; refusing to activate it unauthenticated (#14977)",
 					"interface", sanitizeFRRValue(iface.Name), "authentication_type", sanitizeFRRValue(iface.AuthType))
 				continue
-			} else if iface.AuthType == "" && iface.AuthKey != "" {
+			} else if iface.AuthType == "" && iface.AuthKey.Reveal() != "" {
 				slog.Warn("frr: omitting OSPF interface with an authentication key but no authentication-type; refusing to activate it unauthenticated (#14977)",
 					"interface", sanitizeFRRValue(iface.Name))
 				continue
@@ -687,7 +648,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			// intended — that one adjacency does not come up — without
 			// the unauthenticated-session window, and every loop below
 			// inherits the exclusion so none can activate it.
-			if n.AuthPassword != "" {
+			if n.AuthPassword.Reveal() != "" {
 				if _, ok := authTokenOrOmit("bgp", &n.AuthPassword); !ok {
 					slog.Warn("frr: omitting BGP neighbor with an unrenderable authentication password; refusing to establish it unauthenticated (#14977)",
 						"neighbor", sanitizeFRRValue(n.Address))
@@ -811,7 +772,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			if n.MultihopTTL > 0 {
 				fmt.Fprintf(&b, " neighbor %s ebgp-multihop %d\n", n.Address, frrClampInt("bgp ebgp-multihop", n.MultihopTTL, 255))
 			}
-			if n.AuthPassword != "" {
+			if n.AuthPassword.Reveal() != "" {
 				if tok, ok := authTokenOrOmit("bgp", &n.AuthPassword); ok {
 					fmt.Fprintf(&b, " neighbor %s password %s\n", n.Address, tok)
 				}
@@ -1235,7 +1196,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		// indistinguishable, and flipping it would flap adjacencies
 		// that never claimed a type); keyed md5/simple/text and the
 		// neither-leaf shape are byte-unchanged.
-		ripKeylessAuth14398 := !config.AuthTypeAbsent(rip.AuthType) && rip.AuthKey == ""
+		ripKeylessAuth14398 := !config.AuthTypeAbsent(rip.AuthType) && rip.AuthKey.Reveal() == ""
 		if ripKeylessAuth14398 {
 			slog.Warn("frr: rip authentication-type is set with NO authentication-key; "+
 				"NOT enrolling any interface in RIP rather than rendering unauthenticated RIP. "+
@@ -1243,19 +1204,19 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				"authentication_type", rip.AuthType)
 		}
 		ripAuthTok14977, ripAuthTokOK14977 := "", true
-		if rip.AuthKey != "" {
+		if rip.AuthKey.Reveal() != "" {
 			ripAuthTok14977, ripAuthTokOK14977 = authTokenOrOmit("rip", &rip.AuthKey)
 		}
-		ripUnrecognized14977 := rip.AuthKey != "" && config.AuthTypeUnrecognized(rip.AuthType)
+		ripUnrecognized14977 := rip.AuthKey.Reveal() != "" && config.AuthTypeUnrecognized(rip.AuthType)
 		// #15013 (A12-01): an over-long key (>16 characters) is
 		// rejected by ripd on EVERY frr-reload, so emitting it would
 		// brick the reload forever. Fail closed exactly like the
 		// unrenderable-token arm: omit RIP enrollment entirely
 		ripResolvedKey15990, ripResolvedOK15990 := "", true
-		if rip.AuthKey != "" {
+		if rip.AuthKey.Reveal() != "" {
 			ripResolvedKey15990, ripResolvedOK15990 = resolvedAuthSecret(&rip.AuthKey)
 		}
-		ripKeyTooLong15013 := rip.AuthKey != "" && ripResolvedOK15990 && len([]rune(ripResolvedKey15990)) > config.MaxRIPAuthKeyLen
+		ripKeyTooLong15013 := rip.AuthKey.Reveal() != "" && ripResolvedOK15990 && len([]rune(ripResolvedKey15990)) > config.MaxRIPAuthKeyLen
 		if ripKeyTooLong15013 {
 			slog.Warn("frr: rip authentication-key exceeds the 16-character maximum accepted by ripd; "+
 				"NOT enrolling any interface in RIP rather than rendering a line ripd rejects on every reload (#15013)",
@@ -1286,7 +1247,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			b.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
 			b.WriteString("exit\n!\n")
 			// RIP per-interface authentication
-			if rip.AuthKey != "" {
+			if rip.AuthKey.Reveal() != "" {
 				for _, iface := range rip.Interfaces {
 					fmt.Fprintf(&b, "interface %s\n", iface)
 					// #9105: an ABSENT type is not `unrecognized`, so this warning could not
@@ -1333,10 +1294,10 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 		// no-auth-at-all shape is untouched.
 		isisGlobalAuthBad14977 := false
 		var isisGlobalTok14977 string
-		if isis.AuthKey == "" && !config.AuthTypeAbsent(isis.AuthType) {
+		if isis.AuthKey.Reveal() == "" && !config.AuthTypeAbsent(isis.AuthType) {
 			isisGlobalAuthBad14977 = true
 		}
-		if isis.AuthKey != "" {
+		if isis.AuthKey.Reveal() != "" {
 			if config.AuthTypeUnrecognized(isis.AuthType) {
 				isisGlobalAuthBad14977 = true
 			} else if tok, ok := authTokenOrOmit("isis-global", &isis.AuthKey); ok {
@@ -1352,10 +1313,10 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				continue
 			}
 			bad := false
-			if iface.AuthKey == "" && !config.AuthTypeAbsent(iface.AuthType) {
+			if iface.AuthKey.Reveal() == "" && !config.AuthTypeAbsent(iface.AuthType) {
 				bad = true
 			}
-			if iface.AuthKey != "" {
+			if iface.AuthKey.Reveal() != "" {
 				if config.AuthTypeUnrecognized(iface.AuthType) {
 					bad = true
 				} else if tok, ok := authTokenOrOmit("isis-interface", &iface.AuthKey); ok {
@@ -1425,13 +1386,13 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			// config arriving via tolerant load / peer sync now fails
 			// closed above (isisGlobalAuthBad14977) instead of only
 			// warning here. This warning is unreachable for that shape.
-			if isis.AuthKey == "" && !config.AuthTypeAbsent(isis.AuthType) {
+			if isis.AuthKey.Reveal() == "" && !config.AuthTypeAbsent(isis.AuthType) {
 				slog.Warn("frr: isis authentication-type is set with NO authentication-key; "+
 					"rendering UNAUTHENTICATED -- no area/domain password is emitted. Set "+
 					"authentication-key to authenticate (#14399)",
 					"authentication_type", isis.AuthType)
 			}
-			if isis.AuthKey != "" {
+			if isis.AuthKey.Reveal() != "" {
 				// #9105: an ABSENT type is not `unrecognized`, so this warning could not
 				// fire for it -- and it renders the key in CLEARTEXT exactly as a
 				// chosen `simple` does. Warn on both: the commit gate stops every NEW
@@ -1504,13 +1465,13 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 				// UNAUTHENTICATED (see the area/domain belt above); that
 				// shape is now omitted before this loop (#14977), so this
 				// warning is unreachable for it.
-				if iface.AuthKey == "" && !config.AuthTypeAbsent(iface.AuthType) {
+				if iface.AuthKey.Reveal() == "" && !config.AuthTypeAbsent(iface.AuthType) {
 					slog.Warn("frr: isis interface authentication-type is set with NO authentication-key; "+
 						"rendering UNAUTHENTICATED -- no interface password is emitted. Set "+
 						"authentication-key to authenticate (#14399)",
 						"interface", iface.Name, "authentication_type", iface.AuthType)
 				}
-				if iface.AuthKey != "" {
+				if iface.AuthKey.Reveal() != "" {
 					// #9105: an ABSENT type is not `unrecognized`, so this warning could not
 					// fire for it -- and it renders the key in CLEARTEXT exactly as a
 					// chosen `simple` does. Warn on both: the commit gate stops every NEW

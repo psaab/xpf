@@ -84,7 +84,7 @@ func TestStep20RestartsCommsToCompletion_6878(t *testing.T) {
 				"or a store-derived keyed check stays invisible exactly as it was " +
 				"before this test")
 		}
-		if active.Chassis.Cluster.ControlLinkAuthKey == "" {
+		if active.Chassis.Cluster.ControlLinkAuthKey.Reveal() == "" {
 			t.Fatal("fixture broken: the committed cluster config must carry an auth " +
 				"key, or Escape 1 is not covered")
 		}
@@ -126,7 +126,7 @@ func TestStep20RestartsCommsToCompletion_6878(t *testing.T) {
 		// check derived from d.store.ActiveConfig() is now observable.
 		d, starts := newDaemon(t)
 		keyed := baseTransport()
-		keyed.Chassis.Cluster.ControlLinkAuthKey = config.Secret("a-real-cluster-psk-6878")
+		keyed.Chassis.Cluster.ControlLinkAuthKey = config.NewSecret("a-real-cluster-psk-6878")
 
 		_ = d.applyTailReconciles(keyed, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 

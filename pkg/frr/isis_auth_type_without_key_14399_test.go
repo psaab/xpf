@@ -21,13 +21,13 @@ func TestISISKeyedRenderUnchanged14399(t *testing.T) {
 		isis *config.ISISConfig
 		want []string
 	}{
-		{"global md5", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.Secret("s3cret")},
+		{"global md5", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("s3cret")},
 			[]string{" area-password md5 s3cret\n", " domain-password md5 s3cret\n"}},
-		{"global simple", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "simple", AuthKey: config.Secret("s3cret")},
+		{"global simple", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "simple", AuthKey: config.NewSecret("s3cret")},
 			[]string{" area-password clear s3cret\n", " domain-password clear s3cret\n"}},
-		{"iface md5", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.Secret("s3cret")}}},
+		{"iface md5", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("s3cret")}}},
 			[]string{" isis password md5 s3cret\n"}},
-		{"iface simple", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "simple", AuthKey: config.Secret("s3cret")}}},
+		{"iface simple", &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "simple", AuthKey: config.NewSecret("s3cret")}}},
 			[]string{" isis password clear s3cret\n"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

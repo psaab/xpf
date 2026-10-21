@@ -32,7 +32,7 @@ func compileIPsecLenient10884(t *testing.T, commands []string) *config.IPsecConf
 func TestExplicitTrafficSelectorShapeBelt10884(t *testing.T) {
 	t.Run("valid sibling child loads", func(t *testing.T) {
 		cfg := &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{
-			"mixed": {PSK: "fixture-secret",
+			"mixed": {PSK: config.NewSecret("fixture-secret"),
 				Name:     "mixed",
 				Gateway:  "192.0.2.10",
 				LocalID:  "vpn.example.com",
@@ -91,7 +91,7 @@ func TestExplicitTrafficSelectorShapeBelt10884(t *testing.T) {
 
 	t.Run("selector-shaped identity fallback remains valid", func(t *testing.T) {
 		cfg := &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{
-			"fallback": {PSK: "fixture-secret",
+			"fallback": {PSK: config.NewSecret("fixture-secret"),
 				Name:    "fallback",
 				Gateway: "192.0.2.40",
 				LocalID: "10.60.0.0/24",

@@ -205,7 +205,7 @@ func TestPartialLoadChangedSurvivorKeepsNewSecret14589(t *testing.T) {
 	ch.loaded = map[string]bool{"a": true, "b": true}
 	oldHash := m.prevConnHashes["a"]
 	rotated := vpnCfg("a", "c")
-	rotated.VPNs["a"].PSK = "rotated-secret-a"
+	rotated.VPNs["a"].PSK = config.NewSecret("rotated-secret-a")
 	ch.partial = true
 	ch.loadErr = errors.New("exit status 22")
 	if err := m.Apply(rotated); err == nil {

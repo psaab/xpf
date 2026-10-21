@@ -497,7 +497,8 @@ func (p *DDNSProvider) String() string {
 		return "<nil>"
 	}
 	red := func(s Secret) string {
-		if s != "" {
+		if s.Reveal() != "" {
+
 			return SecretRedacted
 		}
 		return ""
@@ -900,7 +901,7 @@ func (c SNMPCommunity) MarshalJSON() ([]byte, error) {
 		// quarantined to deny-all and the operator needs to see why.
 		ClientListNames []string `json:",omitempty"`
 	}
-	return json.Marshal(alias{Name: Secret(c.Name), Authorization: c.Authorization, Clients: c.Clients, ClientListNames: c.ClientListNames})
+	return json.Marshal(alias{Name: NewSecret(c.Name), Authorization: c.Authorization, Clients: c.Clients, ClientListNames: c.ClientListNames})
 }
 
 // MarshalYAML mirrors MarshalJSON for the gopkg.in/yaml.v3 marshaller
@@ -912,7 +913,7 @@ func (c SNMPCommunity) MarshalYAML() (any, error) {
 		Clients       []SNMPClient `yaml:",omitempty"`
 		// #9416: kept in sync with MarshalJSON above, per this type's own rule.
 		ClientListNames []string `yaml:",omitempty"`
-	}{Name: Secret(c.Name), Authorization: c.Authorization, Clients: c.Clients, ClientListNames: c.ClientListNames}, nil
+	}{Name: NewSecret(c.Name), Authorization: c.Authorization, Clients: c.Clients, ClientListNames: c.ClientListNames}, nil
 }
 
 // SNMPCommunityDisplayName returns the token an operator-facing TEXT renderer
@@ -1902,7 +1903,7 @@ func (d *DHCPDynamicDNSConfig) String() string {
 		return "<nil>"
 	}
 	secret := ""
-	if d.TSIGSecret != "" {
+	if d.TSIGSecret.Reveal() != "" {
 		secret = "<redacted>"
 	}
 	return fmt.Sprintf("DHCPDynamicDNS{enabled=%t domain=%q ttl=%d "+

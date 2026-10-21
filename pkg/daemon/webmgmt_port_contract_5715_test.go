@@ -70,7 +70,7 @@ func webmgmtTestAuth(t *testing.T) *config.APIAuthConfig {
 		DefaultExpiresAt: expires,
 		Users: []*config.APIAuthUser{{
 			Username:  "admin",
-			Password:  config.Secret(verifier),
+			Password:  config.NewSecret(verifier),
 			Class:     "read-only",
 			ExpiresAt: expires,
 		}},

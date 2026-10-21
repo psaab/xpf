@@ -166,7 +166,7 @@ func newR53TestBackend(t *testing.T, srv *httptest.Server) *route53Backend {
 	t.Helper()
 	b, err := newRoute53Backend(&config.DDNSProvider{
 		Name: "r53", Backend: "route53",
-		AWSAccessKeyID: "AKIDEXAMPLE", AWSSecretAccessKey: config.Secret("secret-key"),
+		AWSAccessKeyID: "AKIDEXAMPLE", AWSSecretAccessKey: config.NewSecret("secret-key"),
 		AWSRegion: "us-east-1", HostedZoneID: "Z123ABC", Server: srv.URL,
 	}, nil)
 	if err != nil {
@@ -526,7 +526,7 @@ func TestRoute53MissingCredsConstructError(t *testing.T) {
 		t.Fatal("missing keys must error")
 	}
 	if _, err := newRoute53Backend(&config.DDNSProvider{Name: "r", Backend: "route53",
-		AWSAccessKeyID: "A", AWSSecretAccessKey: config.Secret("s")}, nil); err == nil {
+		AWSAccessKeyID: "A", AWSSecretAccessKey: config.NewSecret("s")}, nil); err == nil {
 		t.Fatal("missing hosted-zone-id must error")
 	}
 }

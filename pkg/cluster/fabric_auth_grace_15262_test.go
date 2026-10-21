@@ -36,7 +36,7 @@ func TestFabricGraceAnchorSurvivesRestart15262(t *testing.T) {
 	pinGraceClock15262(t, &now)
 
 	first := graceManager15262(t, path)
-	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("key-a")})
+	first.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("key-a")})
 	firstAt := first.ControlLinkAuthKeyConfiguredAt()
 	if !firstAt.Equal(now) {
 		t.Fatalf("first keying anchored at %v, want %v", firstAt, now)
@@ -49,7 +49,7 @@ func TestFabricGraceAnchorSurvivesRestart15262(t *testing.T) {
 	// persisted first-keyed time, not the restart time.
 	now = now.Add(10 * time.Minute)
 	restart := graceManager15262(t, path)
-	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("key-a")})
+	restart.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("key-a")})
 	if got := restart.ControlLinkAuthKeyConfiguredAt(); !got.Equal(firstAt) {
 		t.Fatalf("restart re-anchored the grace: got %v, want persisted %v", got, firstAt)
 	}
@@ -60,7 +60,7 @@ func TestFabricGraceAnchorSurvivesRestart15262(t *testing.T) {
 	// keying (expiry moves earlier), never extend it — fail-closed.
 	now = firstAt.Add(-time.Hour)
 	stepped := graceManager15262(t, path)
-	stepped.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("key-a")})
+	stepped.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("key-a")})
 	if got := stepped.ControlLinkAuthKeyConfiguredAt(); !got.Equal(now) {
 		t.Fatalf("future-dated stamp was honoured under a stepped-back clock: got %v, want re-anchor to %v", got, now)
 	}
@@ -72,29 +72,29 @@ func TestFabricGraceAnchorNewSetReanchors15262(t *testing.T) {
 	pinGraceClock15262(t, &now)
 
 	m := graceManager15262(t, path)
-	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("key-a")})
+	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("key-a")})
 	firstAt := m.ControlLinkAuthKeyConfiguredAt()
 
 	now = now.Add(time.Hour)
 	// Adding the rotation (additional) key changes the accepted set.
 	m.UpdateConfig(&config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret("key-a"),
-		ControlLinkAuthKeyAlt: config.Secret("key-b"),
+		ControlLinkAuthKey:    config.NewSecret("key-a"),
+		ControlLinkAuthKeyAlt: config.NewSecret("key-b"),
 	})
 	if got := m.ControlLinkAuthKeyConfiguredAt(); !got.Equal(now) {
 		t.Fatalf("adding the additional key did not re-anchor: got %v, want %v (first %v)", got, now, firstAt)
 	}
 	// Unchanged re-apply keeps it.
 	m.UpdateConfig(&config.ClusterConfig{
-		ControlLinkAuthKey:    config.Secret("key-a"),
-		ControlLinkAuthKeyAlt: config.Secret("key-b"),
+		ControlLinkAuthKey:    config.NewSecret("key-a"),
+		ControlLinkAuthKeyAlt: config.NewSecret("key-b"),
 	})
 	if got := m.ControlLinkAuthKeyConfiguredAt(); !got.Equal(now) {
 		t.Fatalf("unchanged re-apply re-anchored: got %v, want %v", got, now)
 	}
 	// Finalizing (retiring the additional key) is again a new set.
 	now = now.Add(time.Hour)
-	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("key-a")})
+	m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("key-a")})
 	if got := m.ControlLinkAuthKeyConfiguredAt(); !got.Equal(now) {
 		t.Fatalf("retiring the additional key did not re-anchor: got %v, want %v", got, now)
 	}
@@ -118,7 +118,7 @@ func TestFabricGraceAnchorCorruptStateFallsBack15262(t *testing.T) {
 			t.Fatal(err)
 		}
 		m := graceManager15262(t, path)
-		m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret("key-a")})
+		m.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.NewSecret("key-a")})
 		if got := m.ControlLinkAuthKeyConfiguredAt(); !got.Equal(now) {
 			t.Fatalf("corrupt/mismatched state %q anchored at %v, want fresh anchor %v", strings.TrimSpace(body), got, now)
 		}

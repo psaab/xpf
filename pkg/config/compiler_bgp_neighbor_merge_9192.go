@@ -341,7 +341,7 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 		case "passive":
 			neighbor.Passive = true
 		case "authentication-key":
-			neighbor.AuthPassword = Secret(nodeVal(prop))
+			neighbor.AuthPassword = NewSecret(nodeVal(prop))
 		case "route-reflector-client":
 			neighbor.RouteReflectorClient = true
 		case "default-originate":

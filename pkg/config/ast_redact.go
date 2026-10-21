@@ -31,7 +31,7 @@ import (
 // which may lose the real secret.
 //
 // #2053's Secret-typed field set is the baseline, resolved to its AST leaf
-// signatures (verified against compiler Secret(...) sites), plus the unmodeled
+// signatures (verified against compiler NewSecret(...) sites), plus the unmodeled
 // identity/access bind-password paths from #10948:
 //
 //	pre-shared-key            IKE policy / IPsec VPN PSK   (keeps ascii-text|hexadecimal qualifier)

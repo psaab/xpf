@@ -738,7 +738,7 @@ func TestRFC2136TSIGSignedAndVerified(t *testing.T) {
 		Domain:        "example.com",
 		TSIGKeyName:   keyName,
 		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    config.Secret(secret),
+		TSIGSecret:    config.NewSecret(secret),
 	}, &ptr, &conf)
 
 	if err := u.UpsertLease(context.Background(), recV4("tsig.example.com", "10.0.1.7", 300)); err != nil {
@@ -754,7 +754,7 @@ func tsigTestUpdater(t *testing.T, srv *fakeDNSServer, keyName, secret string, p
 		Domain:        "example.com",
 		TSIGKeyName:   keyName,
 		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    config.Secret(secret),
+		TSIGSecret:    config.NewSecret(secret),
 	}, ptr, conf)
 }
 
@@ -1036,7 +1036,7 @@ func TestRFC2136TSIGWrongSecretRejectedNoLeak(t *testing.T) {
 		Domain:        "example.com",
 		TSIGKeyName:   keyName,
 		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    config.Secret(clientSecret),
+		TSIGSecret:    config.NewSecret(clientSecret),
 	}, &ptr, &conf)
 
 	err := u.UpsertLease(context.Background(), recV4("bad.example.com", "10.0.1.8", 300))
@@ -1599,7 +1599,7 @@ func TestRFC2136UnsignedUpdateWarnsOncePerProvider(t *testing.T) {
 			Domain:        "example.com",
 			TSIGKeyName:   "k1",
 			TSIGAlgorithm: "hmac-sha256",
-			TSIGSecret:    config.Secret("c2VjcmV0"),
+			TSIGSecret:    config.NewSecret("c2VjcmV0"),
 		}, &ptr, &conf)
 		if u.tsigKeyName == "" {
 			t.Fatal("precondition: updater must have a TSIG key")

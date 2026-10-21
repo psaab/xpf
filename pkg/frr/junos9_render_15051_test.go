@@ -76,7 +76,7 @@ func TestJunos9MalformedBGPRefusedBeforeRender15051(t *testing.T) {
 // token passthrough renders `password $9$i` / `ip rip authentication
 // string $9$i` and enrolls both adjacencies, so the neighbor/network
 // assertions fire. Restoring decode-to-empty as ("", nil) makes strict
-// compile accept the key and store Secret(""), firing the strict
+// compile accept the key and store config.NewSecret(""), firing the strict
 // assertions.
 func TestJunos9DecodeToEmptyBGPNotRenderedPasswordless15990(t *testing.T) {
 	buildTree := func(t *testing.T, cmds []string) *config.ConfigTree {
@@ -340,9 +340,9 @@ func TestJunos9PrefixedPlaintextOSPFISIS15990(t *testing.T) {
 func TestJunos9MalformedOSPFISISWithheld15990(t *testing.T) {
 	m := New()
 	ospf := &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
-		{Name: "ge-0/0/0.0", AuthType: "md5", AuthKey: config.Secret("$9$i"), AuthKeyID: 1, AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: config.Secret("$9$i")}}},
-		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: config.Secret("$9$garbage")},
-		{Name: "ge-0/0/2.0", AuthType: "simple", AuthKey: config.Secret("s3cret")},
+		{Name: "ge-0/0/0.0", AuthType: "md5", AuthKey: config.NewSecret("$9$i"), AuthKeyID: 1, AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: config.NewSecret("$9$i")}}},
+		{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: config.NewSecret("$9$garbage")},
+		{Name: "ge-0/0/2.0", AuthType: "simple", AuthKey: config.NewSecret("s3cret")},
 	}}}}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
 	if strings.Contains(got, "ge-0/0/0.0") || strings.Contains(got, "ge-0/0/1.0") || strings.Contains(got, "$9$") {
@@ -353,8 +353,8 @@ func TestJunos9MalformedOSPFISISWithheld15990(t *testing.T) {
 	}
 
 	// Bad global IS-IS auth withholds the whole stanza (existing #14977).
-	isis := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.Secret("$9$i"),
-		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.Secret("s3cret")}}}
+	isis := &config.ISISConfig{NET: "49.0001.0100.0000.0001.00", Level: "level-2", AuthType: "md5", AuthKey: config.NewSecret("$9$i"),
+		Interfaces: []*config.ISISInterface{{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("s3cret")}}}
 	got = m.generateProtocols(nil, nil, nil, nil, isis, "", 0, nil, nil)
 	if strings.Contains(got, "router isis") || strings.Contains(got, "trust0") || strings.Contains(got, "$9$") {
 		t.Errorf("decode-to-empty global IS-IS credential activated the stanza (#15990):\n%s", got)
@@ -362,10 +362,10 @@ func TestJunos9MalformedOSPFISISWithheld15990(t *testing.T) {
 
 	// Bad interface IS-IS auth withholds only that interface when the
 	// global credential is healthy.
-	isis.AuthType, isis.AuthKey = "md5", config.Secret("s3cret")
+	isis.AuthType, isis.AuthKey = "md5", config.NewSecret("s3cret")
 	isis.Interfaces = []*config.ISISInterface{
-		{Name: "trust0", AuthType: "md5", AuthKey: config.Secret("$9$garbage")},
-		{Name: "trust1", AuthType: "md5", AuthKey: config.Secret("s3cret")},
+		{Name: "trust0", AuthType: "md5", AuthKey: config.NewSecret("$9$garbage")},
+		{Name: "trust1", AuthType: "md5", AuthKey: config.NewSecret("s3cret")},
 	}
 	got = m.generateProtocols(nil, nil, nil, nil, isis, "", 0, nil, nil)
 	if strings.Contains(got, "interface trust0\n") || strings.Contains(got, "$9$") {

@@ -200,7 +200,7 @@ func duckdnsLeakHarness(t *testing.T, policy func(*http.Request, []*http.Request
 		Name:     "duck",
 		Backend:  "duckdns",
 		Server:   "https://" + provHost + ":" + provPort + "/update",
-		APIToken: config.Secret(leakToken),
+		APIToken: config.NewSecret(leakToken),
 	}, cl)
 	if err != nil {
 		t.Fatalf("newDuckDNSBackend: %v", err)
@@ -428,7 +428,7 @@ func subdomainHarness(t *testing.T, policy func(*http.Request, []*http.Request) 
 		Name: "dd", Backend: "dyndns2",
 		Server:   "https://" + provHost + ":" + provPort + "/nic/update",
 		Username: "ddnsuser",
-		Password: config.Secret(leakBasicPassword),
+		Password: config.NewSecret(leakBasicPassword),
 	}, cl)
 	if err != nil {
 		t.Fatalf("newDyndns2Backend: %v", err)
@@ -564,7 +564,7 @@ func TestSameHostRedirectStillPublishes(t *testing.T) {
 	b, err := newDuckDNSBackend(&config.DDNSProvider{
 		Name: "duck", Backend: "duckdns",
 		Server:   "https://" + provHost + ":" + provPort + "/update",
-		APIToken: config.Secret(leakToken),
+		APIToken: config.NewSecret(leakToken),
 	}, cl)
 	if err != nil {
 		t.Fatalf("newDuckDNSBackend: %v", err)
@@ -603,7 +603,7 @@ func TestNoRedirectUpdateStillWorks(t *testing.T) {
 	b, err := newDuckDNSBackend(&config.DDNSProvider{
 		Name: "duck", Backend: "duckdns",
 		Server:   "https://" + provHost + ":" + provPort + "/update",
-		APIToken: config.Secret(leakToken),
+		APIToken: config.NewSecret(leakToken),
 	}, cl)
 	if err != nil {
 		t.Fatalf("newDuckDNSBackend: %v", err)

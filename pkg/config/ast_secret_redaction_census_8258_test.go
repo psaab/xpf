@@ -59,7 +59,7 @@ import (
 // referential type cannot loop; the type is released on the way out, so a type
 // legitimately reachable by two different routes is still visited.
 func secretFieldCensus() []string {
-	secretType := reflect.TypeOf(Secret(""))
+	secretType := reflect.TypeOf(NewSecret(""))
 	var out []string
 	onPath := map[reflect.Type]bool{}
 

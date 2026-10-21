@@ -702,7 +702,7 @@ func TestApplyConfigLockedRecordsTheLoadedIPsecGeneration9511(t *testing.T) {
 	m.SetSwanctlForTesting(successfulSwanctl9511)
 	d.ipsec = m
 	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
-		"vpn1": {PSK: "fixture-secret", Gateway: "198.51.100.1"},
+		"vpn1": {PSK: config.NewSecret("fixture-secret"), Gateway: "198.51.100.1"},
 	}
 	_ = d.applyConfigLocked(context.Background(), cfg) // other tail steps may warn; only the IPsec record is under test
 	if d.ipsecLoadedCfg.Load() != cfg {

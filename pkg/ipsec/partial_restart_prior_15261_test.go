@@ -2,6 +2,8 @@ package ipsec
 
 import (
 	"errors"
+
+	"github.com/psaab/xpf/pkg/config"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -202,7 +204,7 @@ func TestPartialLoadRestartPriorSetKeepsFingerprints15261(t *testing.T) {
 	// terminate a's stale SA (b untouched).
 	ch.listConnsErr = false
 	rotated := vpnCfg("a", "b")
-	rotated.VPNs["a"].PSK = "rotated-secret-a-15261"
+	rotated.VPNs["a"].PSK = config.NewSecret("rotated-secret-a-15261")
 	if err := m.Apply(rotated); err != nil {
 		t.Fatalf("post-restart rotation Apply: %v", err)
 	}

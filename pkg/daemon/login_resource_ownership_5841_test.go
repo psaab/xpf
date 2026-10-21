@@ -110,7 +110,7 @@ func TestReconcileUserPasswordMarkerFailureSkipsChpasswd(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
 	d := &Daemon{}
-	d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: "$6$newsalt$newhash"})
+	d.reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.NewSecret("$6$newsalt$newhash")})
 
 	// chpasswd must NOT have run: the marker-first write failed, so the mutation
 	// is skipped (fail-visible), never a mutated-but-unmarked credential.

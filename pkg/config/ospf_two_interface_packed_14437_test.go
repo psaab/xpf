@@ -61,8 +61,8 @@ func TestOSPFv2TwoInterfacesOnePackedRun14437(t *testing.T) {
 		t.Fatalf("packed two-interface run compiled %d interfaces, want 2: %+v", len(area.Interfaces), area.Interfaces)
 	}
 	if0, if1 := area.Interfaces[0], area.Interfaces[1]
-	if if0.Name != "ge-0/0/0.0" || if0.AuthType != "simple" || string(if0.AuthKey) != "SECRET" {
-		t.Errorf("IF1 = {%q auth=%q key=%q}, want {ge-0/0/0.0 simple SECRET} — empty auth activates the adjacency unauthenticated", if0.Name, if0.AuthType, string(if0.AuthKey))
+	if if0.Name != "ge-0/0/0.0" || if0.AuthType != "simple" || if0.AuthKey.Reveal() != "SECRET" {
+		t.Errorf("IF1 = {%q auth=%q key=%q}, want {ge-0/0/0.0 simple SECRET} — empty auth activates the adjacency unauthenticated", if0.Name, if0.AuthType, if0.AuthKey.Reveal())
 	}
 	if if1.Name != "ge-0/0/1.0" || if1.Cost != 10 {
 		t.Errorf("IF2 = {%q cost=%d}, want {ge-0/0/1.0 cost 10} — second interface lost", if1.Name, if1.Cost)
@@ -76,7 +76,7 @@ func TestOSPFv2TwoInterfacesOnePackedRun14437(t *testing.T) {
 	}
 	for i := range area.Interfaces {
 		got, want := area.Interfaces[i], b.Interfaces[i]
-		if got.Name != want.Name || got.AuthType != want.AuthType || string(got.AuthKey) != string(want.AuthKey) || got.Cost != want.Cost {
+		if got.Name != want.Name || got.AuthType != want.AuthType || got.AuthKey.Reveal() != want.AuthKey.Reveal() || got.Cost != want.Cost {
 			t.Errorf("interface %d packed %+v != braced %+v", i, got, want)
 		}
 	}
@@ -89,8 +89,8 @@ func TestOSPFv2TwoInterfacesPackedMD5AndThreeHeads14437(t *testing.T) {
 		t.Fatalf("packed three-interface run compiled %d interfaces, want 3", len(area.Interfaces))
 	}
 	if0 := area.Interfaces[0]
-	if if0.Name != "ge-0/0/0.0" || if0.AuthType != "md5" || if0.AuthKeyID != 7 || string(if0.AuthKey) != "SECRET" {
-		t.Errorf("IF1 = {%q auth=%q keyID=%d key=%q}, want {ge-0/0/0.0 md5 7 SECRET}", if0.Name, if0.AuthType, if0.AuthKeyID, string(if0.AuthKey))
+	if if0.Name != "ge-0/0/0.0" || if0.AuthType != "md5" || if0.AuthKeyID != 7 || if0.AuthKey.Reveal() != "SECRET" {
+		t.Errorf("IF1 = {%q auth=%q keyID=%d key=%q}, want {ge-0/0/0.0 md5 7 SECRET}", if0.Name, if0.AuthType, if0.AuthKeyID, if0.AuthKey.Reveal())
 	}
 	if area.Interfaces[1].Name != "ge-0/0/1.0" || area.Interfaces[1].Cost != 10 {
 		t.Errorf("IF2 = %+v, want ge-0/0/1.0 cost 10", area.Interfaces[1])
@@ -106,8 +106,8 @@ func TestOSPFv2TwoInterfacesFullyElided14437(t *testing.T) {
 	if len(area.Interfaces) != 2 {
 		t.Fatalf("fully-elided run compiled %d interfaces, want 2", len(area.Interfaces))
 	}
-	if area.Interfaces[0].AuthType != "simple" || string(area.Interfaces[0].AuthKey) != "SECRET" {
-		t.Errorf("IF1 auth = %q/%q, want simple/SECRET", area.Interfaces[0].AuthType, string(area.Interfaces[0].AuthKey))
+	if area.Interfaces[0].AuthType != "simple" || area.Interfaces[0].AuthKey.Reveal() != "SECRET" {
+		t.Errorf("IF1 auth = %q/%q, want simple/SECRET", area.Interfaces[0].AuthType, area.Interfaces[0].AuthKey.Reveal())
 	}
 	if area.Interfaces[1].Name != "ge-0/0/1.0" || area.Interfaces[1].Cost != 10 {
 		t.Errorf("IF2 = %+v, want ge-0/0/1.0 cost 10", area.Interfaces[1])
@@ -124,8 +124,8 @@ protocols { ospf { apply-groups G1; } }`)
 	if len(area.Interfaces) != 2 {
 		t.Fatalf("group packed run compiled %d interfaces, want 2: %+v", len(area.Interfaces), area.Interfaces)
 	}
-	if area.Interfaces[0].AuthType != "simple" || string(area.Interfaces[0].AuthKey) != "SECRET" {
-		t.Errorf("group IF1 auth = %q/%q, want simple/SECRET", area.Interfaces[0].AuthType, string(area.Interfaces[0].AuthKey))
+	if area.Interfaces[0].AuthType != "simple" || area.Interfaces[0].AuthKey.Reveal() != "SECRET" {
+		t.Errorf("group IF1 auth = %q/%q, want simple/SECRET", area.Interfaces[0].AuthType, area.Interfaces[0].AuthKey.Reveal())
 	}
 	if area.Interfaces[1].Name != "ge-0/0/1.0" || area.Interfaces[1].Cost != 10 {
 		t.Errorf("group IF2 = %+v, want ge-0/0/1.0 cost 10", area.Interfaces[1])
@@ -155,7 +155,7 @@ func TestOSPFPackedControlsUnchanged14437(t *testing.T) {
 	// Single-interface packed auth (#7653) must be unchanged by the split.
 	single := compile14437(t, `protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 authentication simple-password "SECRET"; } } }`)
 	area := ospfArea14437(t, single)
-	if len(area.Interfaces) != 1 || area.Interfaces[0].AuthType != "simple" || string(area.Interfaces[0].AuthKey) != "SECRET" {
+	if len(area.Interfaces) != 1 || area.Interfaces[0].AuthType != "simple" || area.Interfaces[0].AuthKey.Reveal() != "SECRET" {
 		t.Errorf("single packed = %+v, want one interface simple/SECRET (#7653)", area.Interfaces)
 	}
 
@@ -174,7 +174,7 @@ func TestOSPFPackedControlsUnchanged14437(t *testing.T) {
 	if len(qarea.Interfaces) != 2 {
 		t.Fatalf("quoted-name run compiled %d interfaces, want 2: %+v", len(qarea.Interfaces), qarea.Interfaces)
 	}
-	if qarea.Interfaces[0].Name != "interface" || qarea.Interfaces[0].AuthType != "simple" || string(qarea.Interfaces[0].AuthKey) != "SECRET" {
+	if qarea.Interfaces[0].Name != "interface" || qarea.Interfaces[0].AuthType != "simple" || qarea.Interfaces[0].AuthKey.Reveal() != "SECRET" {
 		t.Errorf("quoted-name IF1 = %+v, want name \"interface\" simple/SECRET", qarea.Interfaces[0])
 	}
 	if qarea.Interfaces[1].Name != "ge-0/0/1.0" || qarea.Interfaces[1].Cost != 10 {

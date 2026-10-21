@@ -36,7 +36,7 @@ func TestOSPFFRRNeverFabricatesOrEmitsInvalidMD5KeyID11794(t *testing.T) {
 			ospf := &config.OSPFConfig{Areas: []*config.OSPFArea{{
 				ID: "0.0.0.0",
 				Interfaces: []*config.OSPFInterface{{
-					Name: "eth0", AuthType: "md5", AuthKey: "key11794", AuthKeyID: tc.keyID,
+					Name: "eth0", AuthType: "md5", AuthKey: config.NewSecret("key11794"), AuthKeyID: tc.keyID,
 				}},
 			}}}
 			got := New().generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)

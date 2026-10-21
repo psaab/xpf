@@ -255,14 +255,14 @@ func TestDecodeJunos9SecretKnownAnswer15051(t *testing.T) {
 // #15990: `$9$i` / `$9$!` decode to ZERO bytes — the first char's skip
 // consumes the whole rest, so no nibble groups remain. The decoder used
 // to return ("", nil), every presence gate tests the ENCODED form, and
-// compile stored Secret(""): BGP rendered its neighbor passwordless
+// compile stored NewSecret(""): BGP rendered its neighbor passwordless
 // (skipping the #14977 belt, whose gate is `AuthPassword != ""`) and
 // IPsec rendered `secret = ""`. Decode-to-empty is now malformed.
 //
 // FAIL-ON-REVERT: restoring `return string(out), nil` for the empty
 // case makes DecodeJunos9Secret("$9$i") return ("", nil), strict
 // compile ACCEPT the BGP/OSPF/IS-IS/RIP leaves below (storing
-// Secret("")), and the strict IPsec presence gate keep accepting a
+// NewSecret("")), and the strict IPsec presence gate keep accepting a
 // `$9$i` PSK — every assertion below fires.
 func TestJunos9DecodeToEmptyRejected15990(t *testing.T) {
 	for _, empty := range []string{"$9$i", "$9$!"} {
@@ -281,7 +281,7 @@ func TestJunos9DecodeToEmptyRejected15990(t *testing.T) {
 
 	// Strict commit refuses the decode-to-empty value at every routing
 	// leaf the compile decoder walks — it must never be stored as
-	// Secret("") for a renderer to emit credential-less.
+	// NewSecret("") for a renderer to emit credential-less.
 	for _, tc := range []struct {
 		name  string
 		lines []string

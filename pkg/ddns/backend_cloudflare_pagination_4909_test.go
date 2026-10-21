@@ -86,7 +86,7 @@ func TestCloudflareListRecordsPaginates(t *testing.T) {
 	defer srv.Close()
 
 	b, err := newCloudflareBackend(&config.DDNSProvider{
-		Name: "cf", Backend: "cloudflare", APIToken: config.Secret(token),
+		Name: "cf", Backend: "cloudflare", APIToken: config.NewSecret(token),
 		Zone: zone, Server: srv.URL,
 	}, nil)
 	if err != nil {
@@ -167,7 +167,7 @@ func TestCloudflareListRecordsErrorsOnPageCap(t *testing.T) {
 	defer srv.Close()
 
 	b, err := newCloudflareBackend(&config.DDNSProvider{
-		Name: "cf", Backend: "cloudflare", APIToken: config.Secret(token),
+		Name: "cf", Backend: "cloudflare", APIToken: config.NewSecret(token),
 		Zone: zone, Server: srv.URL,
 	}, nil)
 	if err != nil {

@@ -45,11 +45,11 @@ func TestRIPKeyedRenderUnchanged14398(t *testing.T) {
 		rip  *config.RIPConfig
 		want []string
 	}{
-		{"keyed md5", &config.RIPConfig{AuthType: "md5", AuthKey: config.Secret("s3cret"), Interfaces: []string{"trust0"}},
+		{"keyed md5", &config.RIPConfig{AuthType: "md5", AuthKey: config.NewSecret("s3cret"), Interfaces: []string{"trust0"}},
 			[]string{"router rip\n", " network trust0\n", " ip rip authentication mode md5\n", " ip rip authentication string s3cret\n"}},
-		{"keyed simple", &config.RIPConfig{AuthType: "simple", AuthKey: config.Secret("s3cret"), Interfaces: []string{"trust0"}},
+		{"keyed simple", &config.RIPConfig{AuthType: "simple", AuthKey: config.NewSecret("s3cret"), Interfaces: []string{"trust0"}},
 			[]string{"router rip\n", " network trust0\n", " ip rip authentication mode text\n", " ip rip authentication string s3cret\n"}},
-		{"keyed text", &config.RIPConfig{AuthType: "text", AuthKey: config.Secret("s3cret"), Interfaces: []string{"trust0"}},
+		{"keyed text", &config.RIPConfig{AuthType: "text", AuthKey: config.NewSecret("s3cret"), Interfaces: []string{"trust0"}},
 			[]string{" ip rip authentication mode text\n", " ip rip authentication string s3cret\n"}},
 		{"neither leaf", &config.RIPConfig{Interfaces: []string{"trust0"}},
 			[]string{"router rip\n", " network trust0\n"}},

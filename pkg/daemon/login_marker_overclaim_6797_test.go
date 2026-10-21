@@ -298,7 +298,7 @@ func TestFailedChpasswdDoesNotClaimPassword_6797(t *testing.T) {
 	d.applySystemLogin(loginCfg(&config.LoginUser{
 		Name:              "ivan",
 		Class:             "operator",
-		EncryptedPassword: config.Secret("$6$salt$xpfhash"),
+		EncryptedPassword: config.NewSecret("$6$salt$xpfhash"),
 	}))
 
 	if ownedPassword(t, "ivan", 1009) {
@@ -332,7 +332,7 @@ func TestPreExistingPasswordClaimSurvivesAFailedChpasswd_6797(t *testing.T) {
 	d.applySystemLogin(loginCfg(&config.LoginUser{
 		Name:              "judy",
 		Class:             "operator",
-		EncryptedPassword: config.Secret("$6$salt$rotated"),
+		EncryptedPassword: config.NewSecret("$6$salt$rotated"),
 	}))
 
 	if !ownedPassword(t, "judy", 1010) {
@@ -390,7 +390,7 @@ func TestAccountMarkerFailureWithdrawsThePasswordClaim_6797(t *testing.T) {
 	d.applySystemLogin(loginCfg(&config.LoginUser{
 		Name:              "karl",
 		Class:             "operator",
-		EncryptedPassword: config.Secret("$6$salt$xpfhash"),
+		EncryptedPassword: config.NewSecret("$6$salt$xpfhash"),
 	}))
 
 	if ownedPassword(t, "karl", 1011) {

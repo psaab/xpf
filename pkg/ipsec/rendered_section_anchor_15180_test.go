@@ -28,12 +28,12 @@ func keywordCfg15180(keyword, aaaPSK, keywordPSK string) *config.IPsecConfig {
 			"aaa": {
 				LocalAddr: "10.0.1.1",
 				Gateway:   "10.0.2.10",
-				PSK:       config.Secret(aaaPSK),
+				PSK:       config.NewSecret(aaaPSK),
 			},
 			keyword: {
 				LocalAddr: "10.0.1.1",
 				Gateway:   "10.0.2.20",
-				PSK:       config.Secret(keywordPSK),
+				PSK:       config.NewSecret(keywordPSK),
 			},
 		},
 		Proposals: map[string]*config.IPsecProposal{},

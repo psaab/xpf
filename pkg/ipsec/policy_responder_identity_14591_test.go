@@ -23,8 +23,8 @@ func crossPSKCfg14591(rwRemoteIDType, rwRemoteIDValue string) *config.IPsecConfi
 	}
 	return &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"site-a": {Gateway: "gw-site", PSK: "site-secret"},
-			"rw":     {Gateway: "gw-rw", PSK: "rw-secret"},
+			"site-a": {Gateway: "gw-site", PSK: config.NewSecret("site-secret")},
+			"rw":     {Gateway: "gw-rw", PSK: config.NewSecret("rw-secret")},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw-site": {Name: "gw-site", Address: "203.0.113.1", LocalAddress: "198.51.100.10"},
@@ -108,7 +108,7 @@ func TestResponderOnlyPSKScoping14591(t *testing.T) {
 		// responder-only PSK VPN without a remote-identity must not load.
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"rw": {Gateway: "gw-rw", PSK: "rw-secret"},
+				"rw": {Gateway: "gw-rw", PSK: config.NewSecret("rw-secret")},
 			},
 			Gateways: map[string]*config.IPsecGateway{
 				"gw-rw": {Name: "gw-rw", ResponderOnly: true, LocalAddress: "198.51.100.10"},

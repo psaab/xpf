@@ -152,7 +152,7 @@ func TestParseLoginUserEncryptedPasswordHierarchical(t *testing.T) {
 		t.Fatalf("expected 1 user, got %+v", cfg.System.Login)
 	}
 	u := cfg.System.Login.Users[0]
-	if u.EncryptedPassword != "$6$salt$hash" {
+	if u.EncryptedPassword.Reveal() != "$6$salt$hash" {
 		t.Errorf("EncryptedPassword = %q, want %q", u.EncryptedPassword, "$6$salt$hash")
 	}
 	if len(u.SSHKeys) != 1 || u.SSHKeys[0] != "ssh-ed25519 AAAA op@host" {
@@ -191,7 +191,7 @@ func TestParseLoginUserEncryptedPasswordFlatSet(t *testing.T) {
 	if u.Name != "op" || u.Class != "operator" {
 		t.Errorf("user = %q/%q", u.Name, u.Class)
 	}
-	if u.EncryptedPassword != "$6$salt$hash" {
+	if u.EncryptedPassword.Reveal() != "$6$salt$hash" {
 		t.Errorf("flat-set EncryptedPassword = %q, want %q", u.EncryptedPassword, "$6$salt$hash")
 	}
 	if len(u.SSHKeys) != 1 || u.SSHKeys[0] != "ssh-ed25519 AAAA op@host" {
@@ -262,16 +262,16 @@ func TestLoginUserNoAuthMethodWarning(t *testing.T) {
 		wantWarn bool
 	}{
 		{"no auth at all", &LoginUser{Name: "op"}, true},
-		{"lock sentinel only", &LoginUser{Name: "op", EncryptedPassword: "!"}, true},
-		{"double-bang sentinel only", &LoginUser{Name: "op", EncryptedPassword: "!!"}, true},
-		{"star sentinel only", &LoginUser{Name: "op", EncryptedPassword: "*"}, true},
+		{"lock sentinel only", &LoginUser{Name: "op", EncryptedPassword: NewSecret("!")}, true},
+		{"double-bang sentinel only", &LoginUser{Name: "op", EncryptedPassword: NewSecret("!!")}, true},
+		{"star sentinel only", &LoginUser{Name: "op", EncryptedPassword: NewSecret("*")}, true},
 		// locked-but-restorable hash: cannot password-login until
 		// unlocked, so it is NOT a usable auth method (Codex r1 Low).
-		{"locked-restorable hash no ssh", &LoginUser{Name: "op", EncryptedPassword: "!$6$salt$hash"}, true},
-		{"double-bang restorable hash no ssh", &LoginUser{Name: "op", EncryptedPassword: "!!$6$salt$hash"}, true},
+		{"locked-restorable hash no ssh", &LoginUser{Name: "op", EncryptedPassword: NewSecret("!$6$salt$hash")}, true},
+		{"double-bang restorable hash no ssh", &LoginUser{Name: "op", EncryptedPassword: NewSecret("!!$6$salt$hash")}, true},
 		// locked-restorable hash + ssh key: ssh path is usable, no warning.
-		{"locked-restorable hash with ssh", &LoginUser{Name: "op", EncryptedPassword: "!$6$salt$hash", SSHKeys: []string{"ssh-ed25519 AAAA"}}, false},
-		{"usable password", &LoginUser{Name: "op", EncryptedPassword: "$6$salt$hash"}, false},
+		{"locked-restorable hash with ssh", &LoginUser{Name: "op", EncryptedPassword: NewSecret("!$6$salt$hash"), SSHKeys: []string{"ssh-ed25519 AAAA"}}, false},
+		{"usable password", &LoginUser{Name: "op", EncryptedPassword: NewSecret("$6$salt$hash")}, false},
 		{"ssh key only", &LoginUser{Name: "op", SSHKeys: []string{"ssh-ed25519 AAAA"}}, false},
 	}
 	for _, tc := range cases {

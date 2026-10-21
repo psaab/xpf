@@ -121,7 +121,7 @@ func TestPartialLoadRefusedExistingKeepsPriorHash15141(t *testing.T) {
 	// connection; it stays loaded under the old credentials while the
 	// partial summary reports 1 of 2 loaded.
 	gen2 := vpnCfg("a", "b")
-	gen2.VPNs["a"].PSK = config.Secret("rotated-secret-a")
+	gen2.VPNs["a"].PSK = config.NewSecret("rotated-secret-a")
 	ch.terminated = nil
 	if err := m.Apply(gen2); err == nil {
 		t.Fatal("gen2 partial load must return an error, not success")
@@ -143,7 +143,7 @@ func TestPartialLoadRefusedExistingKeepsPriorHash15141(t *testing.T) {
 	// gen3: a is now loadable with a new (valid) PSK. The gen1->gen3
 	// hash change must enter the teardown for a.
 	gen3 := vpnCfg("a", "b")
-	gen3.VPNs["a"].PSK = config.Secret("fixed-secret-a")
+	gen3.VPNs["a"].PSK = config.NewSecret("fixed-secret-a")
 	ch.terminated = nil
 	if err := m.Apply(gen3); err != nil {
 		t.Fatalf("gen3 Apply: %v", err)
@@ -172,7 +172,7 @@ func TestPartialLoadSummaryLiedRacedToFullStillPromotes15141(t *testing.T) {
 	gen1Hash := m.prevConnHashes["a"]
 
 	gen2 := vpnCfg("a", "b")
-	gen2.VPNs["a"].PSK = config.Secret("rotated-secret-a")
+	gen2.VPNs["a"].PSK = config.NewSecret("rotated-secret-a")
 	// Arm the lying partial only for gen2's load.
 	ch.liedPartial = true
 	ch.liedDone = false

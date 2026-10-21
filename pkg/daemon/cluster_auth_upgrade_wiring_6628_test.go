@@ -63,7 +63,7 @@ func TestConfigApplyReconcilesConnectionAuth6628(t *testing.T) {
 		PeerAddress:        "10.99.0.2",
 		FabricInterface:    "fab0",
 		FabricPeerAddress:  "10.99.1.2",
-		ControlLinkAuthKey: config.Secret(psk),
+		ControlLinkAuthKey: config.NewSecret(psk),
 	}
 	// Comms are "already up" on this transport, so step 20 runs its body
 	// without restarting (the auth key is excluded from the transport key —

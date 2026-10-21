@@ -57,11 +57,11 @@ func TestRedactedCloneMasksNonAdjacentMD5Key14389(t *testing.T) {
 	for _, area := range cfg.Protocols.OSPF.Areas {
 		for _, iface := range area.Interfaces {
 			if iface.AuthType == "md5" && iface.AuthKeyID == 1 &&
-				string(iface.AuthKey) == md5NonAdjacentSecret14389 {
+				iface.AuthKey.Reveal() == md5NonAdjacentSecret14389 {
 				found = true
 			}
 			for _, k := range iface.AuthMD5Keys {
-				if k.ID == 1 && string(k.Key) == md5NonAdjacentSecret14389 {
+				if k.ID == 1 && k.Key.Reveal() == md5NonAdjacentSecret14389 {
 					found = true
 				}
 			}
