@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
@@ -227,5 +228,58 @@ func TestWriteKeaConfig_PreservesKeaOwnedFile(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0o640 {
 		t.Fatalf("mode after render = %04o, want 0640", fi.Mode().Perm())
+	}
+}
+
+// TestRenderUnresolvedThenPreSeed_WarnsExactlyOnce pins the #16101 fold:
+// the absent-Kea-user warning is per-purpose. A config render with an
+// unresolved Kea user resolves SILENTLY (and populates the cached
+// lookup); a later memfile pre-seed on the SAME manager must still emit
+// its Kea-unreadable warning — exactly once across repeated pre-seeds.
+// RED-on-revert to warning-inside-the-lookup-once: the render consumes
+// the once silently and the pre-seed assertions see zero warnings.
+func TestRenderUnresolvedThenPreSeed_WarnsExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "kea-dhcp4.conf")
+	memfile := filepath.Join(dir, "kea-leases4.csv")
+
+	_, restore := installMemfileRecorder(t)
+	defer restore()
+
+	var warnings []string
+	m := New()
+	m.SetLeaseSyncSeamsForTesting(nil, "", "", memfile, "")
+	m.SetWarnForTesting(func(msg string, _ ...any) { warnings = append(warnings, msg) })
+	m.SetKeaOwnerLookupForTesting(func() (int, int, bool) { return 0, 0, false })
+
+	// 1. Render first: silent, but the config still lands locked down.
+	if _, err := m.writeKeaConfig(conf, map[string]any{"Dhcp4": map[string]any{}}); err != nil {
+		t.Fatalf("render with unresolved Kea user: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("render warned %v, want silent render (warning is pre-seed's)", warnings)
+	}
+	if fi, err := os.Stat(conf); err != nil || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("rendered config = %v err=%v, want 0640 file", fi, err)
+	}
+
+	// 2. Pre-seed on the same manager: exactly one warning, even though
+	// the lookup cache was already populated by the render.
+	now := time.Unix(1_700_000_000, 0)
+	lease := []SyncLease{{Family: 4, Address: "10.0.61.7", HWAddress: "aa:bb:cc:dd:ee:07",
+		SubnetID: 3, Remaining: 600, State: keaStateDefault}}
+	if err := m.PreSeedMemfile4(lease, now); err != nil {
+		t.Fatalf("PreSeedMemfile4: %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "_kea") {
+		t.Fatalf("warnings after render+preseed = %v, want exactly one mentioning _kea", warnings)
+	}
+
+	// 3. Repeated pre-seed: still exactly one warning total.
+	if err := m.PreSeedMemfile4(lease, now); err != nil {
+		t.Fatalf("second PreSeedMemfile4: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings after second preseed = %v, want still exactly one", warnings)
 	}
 }

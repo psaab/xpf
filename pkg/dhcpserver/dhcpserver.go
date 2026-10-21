@@ -265,6 +265,12 @@ type Manager struct {
 	keaOwnerUID    int
 	keaOwnerGID    int
 	keaOwnerOK     bool
+	// keaOwnerWarnOnce guards the absent-user warning INDEPENDENTLY of
+	// keaOwnerOnce (#16101 fold): the lookup cache may be populated
+	// silently by a config render, so the pre-seed warning must key off
+	// the resolution OUTCOME (unresolved) at pre-seed time, not off
+	// which caller happened to run the lookup first.
+	keaOwnerWarnOnce sync.Once
 }
 
 // SetLeaseSyncEnabled toggles emission of the Kea control-socket + lease_cmds
