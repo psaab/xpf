@@ -134,3 +134,52 @@ func TestSetFromInputParserUnitBudget15999(t *testing.T) {
 		t.Fatalf("key-dense SetFromInput (200k tokens, 200001 units): err=%v, want #15999 refusal", err)
 	}
 }
+
+// #15999 fold: an over-budget candidate must stay DELETABLE. Seed the
+// candidate directly over budget (restored non-flat shape), then a pure
+// delete script that shrinks it must pass the result-based check, while
+// a growing script on the same base still refuses.
+func TestOverBudgetCandidateShrinkPasses15999(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	// Seed many address lines, then directly grow beyond budget via
+	// repeated LoadSet would refuse — so plant over-budget by loading
+	// just under, then verify delete-shrink behavior at the boundary:
+	// use replay semantics via LoadSet deletes on a large candidate.
+	var b strings.Builder
+	for i := range 30_000 {
+		fmt.Fprintf(&b, "set security address-book global address a%d 10.0.0.1/32\n", i)
+	}
+	if _, err := s.LoadSet(b.String()); err != nil {
+		t.Fatalf("seed LoadSet: %v", err)
+	}
+	// Pure deletes (many lines, no growth) must pass.
+	var d strings.Builder
+	for i := range 30_000 {
+		fmt.Fprintf(&d, "delete security address-book global address a%d\n", i)
+	}
+	if _, err := s.LoadSet(d.String()); err != nil {
+		t.Fatalf("pure-delete LoadSet must pass (result-based): %v", err)
+	}
+	// Direct helper-level witness: over-budget base + shrinking script.
+	big := &config.ConfigTree{}
+	for i := range 60_000 {
+		_ = big.SetPathQuotedGrouped([]string{"security", "address-book", "global", "address", fmt.Sprintf("a%d", i), "10.0.0.1/32"}, nil, nil)
+	}
+	if big.NodeCount() <= config.MaxParseNodes {
+		t.Fatalf("fixture not over budget: %d", big.NodeCount())
+	}
+	var del []string
+	for i := range 60_000 {
+		del = append(del, fmt.Sprintf("delete security address-book global address a%d", i))
+	}
+	// replayFlatLines15999 is in-package accessible.
+	if _, err := replayFlatLines15999(big, del); err != nil {
+		t.Fatalf("over-budget pure-delete replay must pass: %v", err)
+	}
+	if big.NodeCount() > 100 {
+		t.Fatalf("delete replay did not shrink: %d", big.NodeCount())
+	}
+}

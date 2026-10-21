@@ -798,21 +798,42 @@ func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, erro
 
 // replayFlatLinesMode15999 is replayFlatLines15999 with scrub control:
 // scrub=true wraps line errors via scrubLoadLineError (flat operator
-// input); scrub=false returns the raw applyEditLine error (hierarchical
-// LoadMerge lowering, parent behavior — #12516 diagnostics survive).
+// input — raw lines can carry secrets, #14718). scrub=false returns the
+// raw applyEditLine error and is used ONLY for hierarchical LoadMerge
+// lowering, where lines are FormatSet-generated from an already-parsed
+// tree. Raw errors there can contain config PATH tokens — the authored
+// path keywords/values exactly as written in the source config (e.g.
+// #12516 refusals echo joinKeysProvGrouped(path)). That is paths-only
+// in the #14718 sense distinguished by scrubLoadLineError: the error
+// carries the line's own path, which the caller already supplied as
+// hierarchical config (not a denied class's redacted show output
+// recovered line-by-line); no separate secret VALUE beyond what the
+// author wrote in that path is synthesized. Restoring parent behavior
+// byte-identically (merge: %w) is the deliberate disposition; the flat
+// path keeps scrubbing because its lines are raw operator input.
 func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub bool) (int, error) {
 	nonEmpty := 0
+	shrinking := true
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			nonEmpty++
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		nonEmpty++
+		// delete/deactivate only shrink (or no-op) the tree; a script of
+		// ONLY shrinking verbs applied to an over-budget candidate must
+		// pass — otherwise a restored over-budget config is undeletable.
+		// Budget applies to the RESULT for those, checked post-edit below.
+		if !strings.HasPrefix(line, "delete ") && line != "delete" &&
+			!strings.HasPrefix(line, "deactivate ") && line != "deactivate" {
+			shrinking = false
 		}
 	}
-	if nonEmpty > config.MaxParseNodes {
+	if !shrinking && nonEmpty > config.MaxParseNodes {
 		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds node budget %d (#15999)", nonEmpty, config.MaxParseNodes)
 	}
 	base := working.NodeCount()
-	if base > config.MaxParseNodes {
+	if base > config.MaxParseNodes && !shrinking {
 		return 0, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
 	}
 	charged := base
@@ -825,9 +846,23 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		if !hasFlatVerb(line) {
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
-		charged += len(strings.Fields(line)) + 1
-		if charged > config.MaxParseNodes {
-			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+		isShrink := strings.HasPrefix(line, "delete ") || line == "delete" ||
+			strings.HasPrefix(line, "deactivate ") || line == "deactivate"
+		if !isShrink {
+			// Charging bounds sibling-search work for growing verbs.
+			// Shrinking verbs need no charge: their result count is
+			// checked exactly below, (1) result-based adjudication.
+			charged += len(strings.Fields(line)) + 1
+			if charged > config.MaxParseNodes {
+				// Allow if the edit so far has actually shrunk the
+				// tree below/at budget (mixed scripts on an
+				// over-budget base that net-shrink must pass).
+				if exact := working.NodeCount(); exact <= config.MaxParseNodes {
+					charged = exact + len(strings.Fields(line)) + 1
+				} else {
+					return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
+				}
+			}
 		}
 		if err := applyEditLine(working, line); err != nil {
 			if scrub {
@@ -838,18 +873,24 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		count++
 		if count%256 == 0 {
 			exact := working.NodeCount()
-			if exact > config.MaxParseNodes {
+			// Result-based: refuse only if the tree NOW exceeds the
+			// budget AND the last verb was not shrinking it. A tree
+			// still over budget mid-shrink is fine — it is heading
+			// down; the final check decides.
+			if exact > config.MaxParseNodes && !isShrink {
 				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 			}
-			// Reconcile DOWN as well as up: cumulative token charge is
-			// replay work, not final-tree units. Repeated sets/deletes
-			// that created no node must not consume the AST budget —
-			// below-budget configs pass on every verb/format.
 			charged = exact
 		}
 	}
-	if working.NodeCount() > config.MaxParseNodes {
-		return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+	if final := working.NodeCount(); final > config.MaxParseNodes {
+		// Result-based refusal: an over-budget result is accepted ONLY
+		// for a pure shrinking script that made progress (final < base),
+		// so an over-budget candidate stays deletable across repeated
+		// loads. No-progress or growing scripts refuse.
+		if !shrinking || final >= base {
+			return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
+		}
 	}
 	return count, nil
 }
