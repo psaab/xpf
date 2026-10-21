@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -987,7 +988,7 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 			return nil, nil, fmt.Errorf("%s", msg)
 		}
 		colliding[name] = struct{}{}
-		warnings = append(warnings, msg+"; the colliding name is quarantined from both filter pools on tolerant loads (#15997)")
+		warnings = append(warnings, msg)
 	}
 	for _, name := range order {
 		fams := filterFamilies[name]
@@ -1005,7 +1006,7 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 			return nil, nil, fmt.Errorf("%s", msg)
 		}
 		colliding[name] = struct{}{}
-		warnings = append(warnings, msg+"; the colliding name is quarantined from both filter pools on tolerant loads (#15997)")
+		warnings = append(warnings, msg)
 	}
 	// #4287 any+inet6 cross-check: a `family any` filter now folds into the
 	// FiltersInet6 pool as well, so a name shared with a distinct `family inet6`
@@ -1037,7 +1038,7 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 			return nil, nil, fmt.Errorf("%s", msg)
 		}
 		colliding[name] = struct{}{}
-		warnings = append(warnings, msg+"; the colliding name is quarantined from both filter pools on tolerant loads (#15997)")
+		warnings = append(warnings, msg)
 	}
 	if len(colliding) == 0 {
 		colliding = nil
@@ -1045,17 +1046,19 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 	return warnings, colliding, nil
 }
 
-// pruneIdenticalFirewallCollisions15997 drops colliding names whose every
-// definition is byte-identical: an identical-body duplicate has one
-// unambiguous meaning, so last-write-wins is harmless and the name stays
-// enforceable (#15997 decisive check). Any name with two differing bodies
-// (or a body that cannot be canonicalised) stays quarantined.
-func pruneIdenticalFirewallCollisions15997(tree *ConfigTree, colliding map[string]struct{}) map[string]struct{} {
-	if len(colliding) == 0 || tree == nil {
-		return colliding
+// effectiveFirewallInstances15997 compiles every definition of the colliding
+// names through compileFirewall itself (family-resolved: `family any`
+// dual-compiles into both pools, icmp-type echo-request resolves 128 under
+// inet6 vs 8 under any/inet) and returns, per name, the distinct effective
+// forms as (pool, filter) pairs. This is the dedupe key for the identical-
+// body exception — rendered text excludes the containing family, so two
+// text-identical bodies can be different effective filters (#16091 fold).
+func effectiveFirewallInstances15997(tree *ConfigTree, colliding map[string]struct{}) map[string]map[string]struct{} {
+	forms := map[string]map[string]struct{}{}
+	if tree == nil {
+		return forms
 	}
 	permitted := firewallFamilyPermitted9017()
-	bodies := map[string]map[string]struct{}{}
 	for _, fwNode := range tree.Children {
 		if fwNode.Name() != "firewall" {
 			continue
@@ -1069,19 +1072,75 @@ func pruneIdenticalFirewallCollisions15997(tree *ConfigTree, colliding map[strin
 					if _, want := colliding[inst.name]; !want {
 						continue
 					}
-					body := (&ConfigTree{Children: []*Node{inst.node}}).FormatSet()
-					if bodies[inst.name] == nil {
-						bodies[inst.name] = map[string]struct{}{}
+					// Synthesise a one-filter firewall root under the same
+					// family and compile it, so family-resolved values
+					// (icmp-type etc.) are baked into the compared form.
+					famNode := &Node{Keys: []string{"family", m.Af}, Children: []*Node{
+						{Keys: []string{"filter", inst.name}, Children: inst.node.Children, IsLeaf: inst.node.IsLeaf},
+					}}
+					root := &Node{Keys: []string{"firewall"}, Children: []*Node{famNode}}
+					fw := &FirewallConfig{}
+					if err := compileFirewall(root, fw); err != nil {
+						continue
 					}
-					bodies[inst.name][body] = struct{}{}
+					for pool, filters := range map[string]map[string]*FirewallFilter{"inet": fw.FiltersInet, "inet6": fw.FiltersInet6} {
+						f := filters[inst.name]
+						if f == nil {
+							continue
+						}
+						// Deep-compare via deterministic rendering of the
+						// effective struct (JSON drops unexported internals
+						// that do not affect matching; resolved values are
+						// exported).
+						data, err := json.Marshal(f)
+						if err != nil {
+							continue
+						}
+						key := pool + "|" + string(data)
+						if forms[inst.name] == nil {
+							forms[inst.name] = map[string]struct{}{}
+						}
+						forms[inst.name][key] = struct{}{}
+					}
 				}
 			}
 		}
 	}
+	return forms
+}
+
+// pruneIdenticalFirewallCollisions15997 drops colliding names whose every
+// definition has the SAME effective compiled form in the SAME pool: such a
+// duplicate has one unambiguous meaning, so last-write-wins is harmless and
+// the name stays enforceable (#15997 decisive check). The key is the
+// family-resolved compiled filter, NOT rendered text — inet6 vs any bodies
+// with identical text resolve icmp-type echo-request to 128 vs 8.
+func pruneIdenticalFirewallCollisions15997(tree *ConfigTree, colliding map[string]struct{}) map[string]struct{} {
+	if len(colliding) == 0 || tree == nil {
+		return colliding
+	}
+	forms := effectiveFirewallInstances15997(tree, colliding)
 	out := map[string]struct{}{}
 	for name := range colliding {
-		if len(bodies[name]) == 1 {
-			continue // identical-body duplicate: unaffected
+		// Identical effective duplicate iff every pool sees exactly one
+		// distinct form and at least one form was compiled. Pool keys are
+		// part of the form key, so group by pool prefix.
+		byPool := map[string]map[string]struct{}{}
+		for key := range forms[name] {
+			pool, _, _ := strings.Cut(key, "|")
+			if byPool[pool] == nil {
+				byPool[pool] = map[string]struct{}{}
+			}
+			byPool[pool][key] = struct{}{}
+		}
+		identical := len(byPool) > 0
+		for _, set := range byPool {
+			if len(set) != 1 {
+				identical = false
+			}
+		}
+		if identical {
+			continue
 		}
 		out[name] = struct{}{}
 	}

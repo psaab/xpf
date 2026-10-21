@@ -1181,6 +1181,9 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	cfg.Firewall.CollidingNames = pruneIdenticalFirewallCollisions15997(tree, firewallFilterCollisions)
 	cfg.PhysicalInterfaces = opts.physicalInterfaces
 	cfg.Warnings = append(cfg.Warnings, preWalkWarnings...)
+	for name := range cfg.Firewall.CollidingNames {
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("firewall filter %q is quarantined from both filter pools on tolerant loads (#15997)", name))
+	}
 	// #13095: stamp the pre-expansion three-view runtime zone-name union
 	// (#10248, validateZoneIDCollisionAST via opts) BEFORE any gate reads the
 	// quarantine set. zoneInterfaceMembershipConflicts,

@@ -195,6 +195,104 @@ firewall {
 	}
 }
 
+// #15997 fold (#16091): text-identical inet6 vs any bodies are NOT effectively
+// identical — icmp-type echo-request resolves 128 under inet6 vs 8 under any.
+// The dedupe key is the family-resolved compiled form, so this name stays
+// quarantined and FiltersInet6 must not silently carry type 8.
+func TestFirewallFilterInet6AnyEchoRequestNotIdentical15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet6 {
+        filter F {
+            term t {
+                from {
+                    icmp-type echo-request;
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+    family any {
+        filter F {
+            term t {
+                from {
+                    icmp-type echo-request;
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["F"]; !ok {
+		t.Fatalf("inet6/any echo-request counterexample must stay quarantined (effective forms differ 128 vs 8): %v", cfg.Firewall.CollidingNames)
+	}
+	if f, ok := cfg.Firewall.FiltersInet6["F"]; ok {
+		t.Fatalf("quarantined F must be omitted from FiltersInet6, got %+v (icmp types %v)", f, f.Terms[0].ICMPTypes)
+	}
+	if f, ok := cfg.Firewall.FiltersInet["F"]; ok {
+		t.Fatalf("quarantined F must be omitted from FiltersInet, got %+v", f)
+	}
+	// Warning must not falsely claim quarantine for a pruned identical case;
+	// here quarantine is real, so the suffix must be present.
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "\"F\"") && strings.Contains(w, "quarantined") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected quarantine warning for F, got %v", cfg.Warnings)
+	}
+}
+
+// Control: same-family identical effective duplicates stay enforceable and
+// their warning must not claim they were quarantined/omitted.
+func TestFirewallFilterIdenticalWarningTruthful15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+    family any {
+        filter blockX {
+            term t1 {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.FiltersInet["blockX"]; !ok {
+		t.Fatal("identical effective duplicate must stay in FiltersInet")
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "blockX") && strings.Contains(w, "quarantined from both filter pools") {
+			t.Fatalf("identical-body warning falsely claims quarantine: %q", w)
+		}
+	}
+}
+
 // A filter name shared between family inet and family inet6 is NOT a collision:
 // inet6 has its own dest map (FiltersInet6), so the two coexist. This legitimate
 // dual-stack case (the same filter name for the V4 and V6 path) must commit

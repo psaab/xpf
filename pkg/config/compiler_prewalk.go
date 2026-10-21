@@ -314,6 +314,9 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	if opts.firewallFilterCollisions != nil {
 		*opts.firewallFilterCollisions = fwColliding
 	}
+	// Note: the #15997 quarantine suffix is appended in compileExpanded
+	// after identical-effective pruning, so the warning never claims a
+	// name was omitted when it was kept.
 
 	// #15192 (D07-01): duplicate term name inside ONE firewall filter.
 	// compileFirewall appends one term per hierarchical stanza with no
