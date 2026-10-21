@@ -122,8 +122,14 @@ fn unit0_scoped_mirror_does_not_match_tagged_sibling_15113() {
     let mut forwarding = ForwardingState::default();
     forwarding.ingress_logical_ifindex.insert((11, 0), 11);
     forwarding.ingress_logical_ifindex.insert((11, 100), 11100);
+    forwarding
+        .ifindex_to_config_name
+        .insert(11, "ge-0/0/1.0".to_string());
+    forwarding
+        .ifindex_to_config_name
+        .insert(11100, "ge-0/0/1.1".to_string());
     forwarding.mirror_configs_scoped.insert(
-        (11, 0),
+        (11, 0, 0),
         MirrorRuntimeConfig {
             output_ifindex: 22,
             rate: 0,
@@ -161,8 +167,12 @@ fn unit0_scoped_mirror_does_not_match_tagged_sibling_15113() {
     );
     // Tagged-unit control: scoped VID 100 matches only VID 100.
     let mut tagged = ForwardingState::default();
+    tagged.ingress_logical_ifindex.insert((11, 100), 11100);
+    tagged
+        .ifindex_to_config_name
+        .insert(11100, "ge-0/0/1.1".to_string());
     tagged.mirror_configs_scoped.insert(
-        (11, 100),
+        (11, 100, 1),
         MirrorRuntimeConfig {
             output_ifindex: 22,
             rate: 0,
@@ -176,6 +186,63 @@ fn unit0_scoped_mirror_does_not_match_tagged_sibling_15113() {
         })
     );
     assert_eq!(select_mirror_config(&tagged, 11, 0, &mut counter), None);
+}
+
+#[test]
+fn tunnel_unit1_scoped_mirror_does_not_match_unit0_sibling_16063() {
+    // #16063 (SI-5): wg0.0 and wg0.1 share the wg0 netdev (ifindex 42)
+    // and both carry VID 0 — there is no VLAN tag on a tunnel inner
+    // packet to tell them apart. A mirror scoped to wg0.1 must not
+    // capture wg0.0 inner packets. The unit identity comes from the
+    // resolved logical ingress's configured name: the provider FIB (not
+    // captured in ForwardingState) sends unit-1 traffic to its
+    // connected prefix on logical 1001 and unit-0 traffic to 1000, so
+    // the state models them as distinct logical ifindexes named wg0.1 /
+    // wg0.0 arriving on the shared bind ifindex 42.
+    let mut forwarding = ForwardingState::default();
+    forwarding.ingress_logical_ifindex.insert((42, 0), 1001);
+    forwarding
+        .ifindex_to_config_name
+        .insert(1001, "wg0.1".to_string());
+    forwarding
+        .ifindex_to_config_name
+        .insert(1000, "wg0.0".to_string());
+    forwarding.mirror_configs_scoped.insert(
+        (42, 0, 1),
+        MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0,
+        },
+    );
+    let mut counter = 0;
+    // wg0.1 inner packet: its FIB egress is logical 1001 (wg0.1).
+    assert_eq!(
+        select_mirror_config(&forwarding, 42, 0, &mut counter),
+        Some(MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0
+        }),
+        "wg0.1 scoped row must mirror wg0.1 inner packets"
+    );
+    // wg0.0 inner packet arrives on the same (42, VID 0) but its
+    // logical ingress resolves to unit 0: no mirror.
+    let mut sibling = ForwardingState::default();
+    sibling.ingress_logical_ifindex.insert((42, 0), 1000);
+    sibling
+        .ifindex_to_config_name
+        .insert(1000, "wg0.0".to_string());
+    sibling.mirror_configs_scoped.insert(
+        (42, 0, 1),
+        MirrorRuntimeConfig {
+            output_ifindex: 22,
+            rate: 0,
+        },
+    );
+    assert_eq!(
+        select_mirror_config(&sibling, 42, 0, &mut counter),
+        None,
+        "wg0.1 scoped row must not mirror wg0.0 sibling inner packets"
+    );
 }
 
 #[test]
@@ -978,6 +1045,7 @@ fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
             rate: 0,
             ingress_vlan_id: 0,
             unit_scoped: false,
+            ingress_unit: 0,
         }],
         ..ConfigSnapshot::default()
     };
@@ -1035,6 +1103,7 @@ fn mirror_vlan_snapshot(ingress_frame_vid: Option<u16>) -> (ConfigSnapshot, Vec<
             rate: 0,
             ingress_vlan_id: 0,
             unit_scoped: false,
+            ingress_unit: 0,
         }],
         ..ConfigSnapshot::default()
     };

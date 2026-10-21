@@ -461,7 +461,11 @@ const (
 	// union of every authored `from zone` value. A v62 helper ignores
 	// it and scopes the prefix to the singular from_zone only — the
 	// last-zone truncation — so exact-equality versioning fences it.
-	ProtocolVersion = 63
+	// v63 -> v64 (#16063): MirrorConfigSnapshot carries ingress_unit.
+	// A v63 helper ignores it and keys a tunnel unit-scoped mirror by
+	// (ifindex, VID 0) alone, so wg0.1 mirrors every sibling tunnel unit
+	// sharing the wg0 netdev — the defect.
+	ProtocolVersion = 64
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1591,6 +1595,12 @@ type MirrorConfigSnapshot struct {
 	// keyed by the shared base ifindex mirrored every tagged sibling.
 	IngressVLANID int  `json:"ingress_vlan_id"`
 	UnitScoped    bool `json:"unit_scoped"`
+	// IngressUnit is the logical unit number of the named unit (#16063):
+	// the VID cannot distinguish tunnel units that share one netdev
+	// (wg0.0 / wg0.1 both carry VID 0 on ifindex wg0), so a unit-scoped
+	// row also carries its unit number and the Rust resolver matches
+	// only packets whose resolved logical ingress IS that unit.
+	IngressUnit int `json:"ingress_unit"`
 }
 
 type InterfaceAddressSnapshot struct {

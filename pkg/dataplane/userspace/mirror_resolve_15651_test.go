@@ -52,7 +52,7 @@ func TestBuildMirrorConfigSnapshotsResolvesUnitSpellings15651(t *testing.T) {
 	want := []MirrorConfigSnapshot{
 		{IngressIfindex: 11, OutputIfindex: 22, IngressVLANID: 0, UnitScoped: true},
 		{IngressIfindex: 13, OutputIfindex: 22, IngressVLANID: 0, UnitScoped: true},
-		{IngressIfindex: 12100, OutputIfindex: 22, IngressVLANID: 100, UnitScoped: true},
+		{IngressIfindex: 12100, OutputIfindex: 22, IngressVLANID: 100, UnitScoped: true, IngressUnit: 1},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("mirror snapshots = %+v excl=%+v, want %+v", got, excl, want)

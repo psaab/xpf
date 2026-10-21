@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Scope tunnel-unit port mirroring per logical unit: a mirror input
+    naming wg0.1 previously keyed on (ifindex, VID 0) alone, so every
+    sibling tunnel unit sharing the wg0 netdev (wg0.0 included) was
+    mirrored to the analyzer. Mirror snapshots now carry the ingress
+    unit number and the dataplane matches a unit-scoped row only for
+    packets whose resolved logical ingress is that unit (#16063).
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Render Kea DHCP configs 0640 root:_kea instead of 0644 in a 0755
     directory: the rendered kea-dhcp{4,6}.conf carries the full
     static-reservation inventory (MAC, IP, hostname), previously

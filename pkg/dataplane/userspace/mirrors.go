@@ -64,16 +64,31 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 	// ifindex alone cannot distinguish `ge-0/0/1.0` from `ge-0/0/1`.
 	type mirrorIngressScope struct {
 		vlanID     int
+		unit       int
 		unitScoped bool
 	}
 	scopeByName := make(map[string]mirrorIngressScope, len(interfaces))
 	for _, iface := range interfaces {
 		if iface.Ifindex > 0 {
+			// #16063: the unit number of the row, from the config — the
+			// snapshot row carries no unit field, and the VID is 0 for
+			// every tunnel unit sharing one netdev, so only the config
+			// unit identity distinguishes wg0.1 from wg0.0. Derived from
+			// the row's configured name; a base row has no unit suffix
+			// and stays unit 0 (unit-scoped false, so it is ignored).
+			scope := mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
+			if iface.IsUnit {
+				if split := cfg.SplitInterfaceUnitRef(iface.Name); split.HasUnit {
+					if n, _, err := config.CanonicalLogicalUnit(split.UnitTok); err == nil {
+						scope.unit = n
+					}
+				}
+			}
 			ifindexByName[iface.Name] = iface.Ifindex
-			scopeByName[iface.Name] = mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
+			scopeByName[iface.Name] = scope
 			if iface.LinuxName != "" {
 				ifindexByName[iface.LinuxName] = iface.Ifindex
-				scopeByName[iface.LinuxName] = mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
+				scopeByName[iface.LinuxName] = scope
 				// #15651: a unit row's LinuxName is the kernel device
 				// (unit 0 collapses onto the parent; a VLAN unit is
 				// `<parent>.<vid>`), so neither Name nor LinuxName ever
@@ -84,7 +99,7 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 				if iface.IsUnit {
 					if linuxUnit := config.LinuxIfName(iface.Name); linuxUnit != iface.Name && linuxUnit != iface.LinuxName {
 						ifindexByName[linuxUnit] = iface.Ifindex
-						scopeByName[linuxUnit] = mirrorIngressScope{vlanID: iface.VLANID, unitScoped: iface.IsUnit}
+						scopeByName[linuxUnit] = scope
 					}
 				}
 			}
@@ -103,6 +118,7 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 	type mirrorIngressKey struct {
 		ifindex    int
 		vlanID     int
+		unit       int
 		unitScoped bool
 	}
 	seenIngress := make(map[mirrorIngressKey]string)
@@ -179,7 +195,7 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 			if !scopeOK {
 				scope = mirrorIngressScope{}
 			}
-			key := mirrorIngressKey{ifindex: ingressIfindex, vlanID: scope.vlanID, unitScoped: scope.unitScoped}
+			key := mirrorIngressKey{ifindex: ingressIfindex, vlanID: scope.vlanID, unit: scope.unit, unitScoped: scope.unitScoped}
 			if previous, ok := seenIngress[key]; ok {
 				slog.Warn("port-mirroring: skipping duplicate ingress interface (one output per ingress interface)",
 					"name", name, "interface", input, "ifindex", ingressIfindex, "owner", previous)
@@ -197,6 +213,7 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 				Rate:           uint32(inst.InputRate),
 				IngressVLANID:  scope.vlanID,
 				UnitScoped:     scope.unitScoped,
+				IngressUnit:    scope.unit,
 			})
 		}
 	}
