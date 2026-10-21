@@ -2241,7 +2241,7 @@ firewall-filter collision (cross-family, same-family duplicate, or
 winner enforceable — a `discard` could be replaced by `accept`. Tolerant
 compilation now records the name in `Firewall.CollidingNames` and omits it
 from both filter pools, so referencing hooks dangle and the snapshot
-backstop refuses fail-closed. Identical-body duplicates are unaffected.
+backstop refuses fail-closed. Duplicates whose family-resolved effective compiled form is identical are unaffected.
 
 Only MATCH leaves count. `applicationMatchLeaves9525` and
 `applicationSettingLeaves9525` partition `valueTakingApplicationLeaves`, so a

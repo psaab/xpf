@@ -1468,7 +1468,7 @@ type FirewallConfig struct {
 	// Those names are omitted from both pools so no arbitrary last-write-wins
 	// winner (e.g. discard replaced by accept) stays enforceable; a reference
 	// to the name then dangles and the snapshot-integrity backstop refuses it
-	// fail-closed. Identical-body duplicates are not recorded. Compiler
+	// fail-closed. Duplicates with identical family-resolved effective compiled form are not recorded. Compiler
 	// metadata only, never serialized.
 	CollidingNames map[string]struct{} `json:"-"`
 }

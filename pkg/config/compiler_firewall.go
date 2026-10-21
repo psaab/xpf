@@ -858,8 +858,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 // (load / peer-sync, lenient=true): every collision is returned as a warning
 // plus the colliding-name set; compileExpanded stamps it on
 // Firewall.CollidingNames and compileFirewall omits those names from both
-// pools (#15997), so no last-write-wins winner stays enforceable. Identical-
-// body duplicates are excluded by the caller-side prune. Compilation still
+// pools (#15997), so no last-write-wins winner stays enforceable. Duplicates
+// with identical family-resolved effective compiled form are excluded by
+// the caller-side prune. Compilation still
 // succeeds so an already-persisted config BOOTS (#1960 / #3261).
 //
 // The traversal mirrors compileFirewall's family/filter walk exactly (BOTH AST

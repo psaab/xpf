@@ -1104,7 +1104,7 @@ type compileOpts struct {
 	// rejects it; the tolerant load / peer-sync paths downgrade to a warning so
 	// an already-persisted or peer-synced config an older binary silently
 	// accepted still BOOTS (#1960 no-brick), but #15997 quarantines the
-	// colliding name out of BOTH pools (identical-body duplicates excepted)
+	// colliding name out of BOTH pools (identical effective-form duplicates excepted)
 	// instead of keeping the arbitrary last-write-wins winner — warning
 	// without poisoning kept a discard-to-accept replacement enforceable.
 	// Same doctrine as lenientApplicationNameCollisions.
