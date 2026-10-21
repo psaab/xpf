@@ -570,6 +570,11 @@ func findBinary(explicit string) (string, error) {
 		if info.Mode().Perm()&0o111 == 0 {
 			return "", fmt.Errorf("userspace dataplane binary is not executable: %s (mode %s)", explicit, info.Mode())
 		}
+		// #16054: an explicit path is operator intent, so an untrusted
+		// one is a hard error (never a silent PATH fallback).
+		if reason := helperBinaryTrustReason(info); reason != "" {
+			return "", fmt.Errorf("userspace dataplane binary is not trusted: %s (%s)", explicit, reason)
+		}
 		return explicit, nil
 	}
 	candidates := []string{
@@ -587,11 +592,17 @@ func findBinary(explicit string) (string, error) {
 			return c, nil
 		}
 		if reason != "" {
+			slog.Warn("userspace: skipping dataplane helper candidate", "candidate", c, "reason", reason)
 			skipped = append(skipped, fmt.Sprintf("%s: %s", c, reason))
 		}
 	}
 	if p, err := exec.LookPath("xpf-userspace-dp"); err == nil {
-		return p, nil
+		if executable, reason := executableBinaryCandidate(p); executable {
+			return p, nil
+		} else if reason != "" {
+			slog.Warn("userspace: skipping dataplane helper candidate", "candidate", p, "reason", reason)
+			skipped = append(skipped, fmt.Sprintf("%s: %s", p, reason))
+		}
 	}
 	const notFound = "userspace dataplane helper binary not found; build make build-userspace-dp or configure system dataplane binary"
 	if len(skipped) != 0 {
@@ -600,10 +611,41 @@ func findBinary(explicit string) (string, error) {
 	return "", errors.New(notFound)
 }
 
+// helperProcessEuid is a seam so tests can simulate a root daemon
+// without running as root (#16054).
+var helperProcessEuid = os.Geteuid
+
+// helperBinaryTrustReason reports why a helper binary must not be
+// executed, or "" when it is trusted (#16054). A root daemon must only
+// execute a root-owned helper that no group/other user can replace or
+// modify; anything else found via CWD, the build tree, argv[0]'s
+// directory, or PATH could have been planted by a less-privileged user
+// and would then be trusted via its uid-0 peer credentials. A non-root
+// daemon gains no privilege by executing its own helper, so the check
+// does not apply (and the developer workflow of running a freshly
+// built, user-owned helper from the build tree keeps working).
+func helperBinaryTrustReason(info os.FileInfo) string {
+	if helperProcessEuid() != 0 {
+		return ""
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Sprintf("group/world-writable (mode %s); refusing to execute it as root", info.Mode())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "cannot verify owner; refusing to execute it as root"
+	}
+	if stat.Uid != 0 {
+		return fmt.Sprintf("owned by uid %d, not root; refusing to execute it as root", stat.Uid)
+	}
+	return ""
+}
+
 // executableBinaryCandidate mirrors exec.LookPath's executable access check
-// for implicit candidates with a path. An empty reason means the candidate
-// does not exist; the bare argv0-relative candidate can duplicate the cwd
-// candidate, so it is skipped and handled by the PATH fallback instead.
+// for implicit candidates with a path, plus the #16054 trust check for a
+// root daemon. An empty reason means the candidate does not exist; the
+// bare argv0-relative candidate can duplicate the cwd candidate, so it is
+// skipped and handled by the PATH fallback instead.
 func executableBinaryCandidate(path string) (bool, string) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -614,6 +656,9 @@ func executableBinaryCandidate(path string) (bool, string) {
 	}
 	if info.Mode().Perm()&0o111 == 0 {
 		return false, fmt.Sprintf("not executable (mode %s)", info.Mode())
+	}
+	if reason := helperBinaryTrustReason(info); reason != "" {
+		return false, reason
 	}
 	if strings.Contains(path, string(filepath.Separator)) {
 		err = unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS)
