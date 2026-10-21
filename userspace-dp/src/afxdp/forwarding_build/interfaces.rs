@@ -100,15 +100,26 @@ enum EgressZoneClaim {
 /// zones are also not, by themselves, a dispute — Go resolves each unit's
 /// effective set per unit NAME (`#3362`/`#3720`), so same-zone provenance is
 /// not required; only the effective token sets are compared.
+/// The `Agreed` payload is the CANONICAL effective-admission signature,
+/// not the raw ordered token vectors: sorted/deduped service and protocol
+/// token sets (the Rust classifier is order- and duplicate-insensitive)
+/// plus the ND-withdrawn bit. Raw non-ND `protocols_except` provenance is
+/// deliberately excluded — the consumer reads only `ndp` out of that list
+/// (`ndp_excluded`, host_inbound.rs), mirroring Go's
+/// `CanonicalHostInboundTokenSigExcept` SSOT
+/// (`pkg/config/dup_host_local_address.go`). Comparing raw ordered vectors
+/// would falsely dispute two units whose authored tokens merely differ in
+/// order, duplicates, or non-ND exclusion provenance and deny both.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum UnitHostInboundClaim {
     /// Every configured logical-unit row on the ifindex carried this
-    /// effective token triple.
-    Agreed(Vec<String>, Vec<String>, Vec<String>),
+    /// canonical effective-admission signature.
+    Agreed(std::collections::BTreeSet<String>, std::collections::BTreeSet<String>, bool),
     /// Configured logical-unit rows on one ifindex carried DIFFERENT
-    /// effective token triples.
+    /// canonical effective-admission signatures.
     Disagree,
 }
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum UnitZoneClaim {
@@ -385,6 +396,40 @@ fn unit_rows_with_empty_zone_10520(snapshot: &ConfigSnapshot) -> std::collection
     out
 }
 
+/// The canonical effective-admission signature one row votes with
+/// (#16057 fold): sorted/deduped service+protocol token SETS (matching the
+/// classifier's order/duplicate insensitivity and its trim+lowercase
+/// normalisation) plus the ND-withdrawn bit. The bit is the EFFECTIVE
+/// withdrawal, mirroring the consumer: `ndp` in `protocols_except` sets
+/// `ndp_excluded`, but a surviving positive ND admission (an explicit
+/// `ndp` protocol token, or `all`, whose expansion includes it) still
+/// admits ND — via the token in `host_inbound_admits_iface`'s unicast
+/// default arm, and via `ndp_positive`/types 133-136 in
+/// `host_inbound_admits_iface_for_destination` — so the raw except token
+/// alone is stale/alias noise there, exactly as Go's
+/// `effectiveNDPWithdrawn` rules. Every other `protocols_except` token is
+/// inert for this consumer and casts no part of the vote.
+fn unit_host_inbound_vote(
+    services: &[String],
+    protocols: &[String],
+    protocols_except: &[String],
+) -> UnitHostInboundClaim {
+    let tokens = |raw: &[String]| -> std::collections::BTreeSet<String> {
+        raw.iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect()
+    };
+    let svc = tokens(services);
+    let proto = tokens(protocols);
+    let ndp_positive = proto.contains("ndp") || proto.contains("all");
+    let ndp_withdrawn = !ndp_positive
+        && protocols_except
+            .iter()
+            .any(|t| t.trim().eq_ignore_ascii_case("ndp"));
+    UnitHostInboundClaim::Agreed(svc, proto, ndp_withdrawn)
+}
+
 /// ifindex -> [`UnitHostInboundClaim`] for every ifindex carrying at least
 /// one CONFIGURED logical-unit host-inbound override row (#16057).
 /// Computed BEFORE the walk, like [`unit_zone_claims`], so the base row's
@@ -399,10 +444,10 @@ fn unit_host_inbound_claims(snapshot: &ConfigSnapshot) -> BTreeMap<i32, UnitHost
         {
             continue;
         }
-        let vote = UnitHostInboundClaim::Agreed(
-            iface.host_inbound_system_services.clone(),
-            iface.host_inbound_protocols.clone(),
-            iface.host_inbound_protocols_except.clone(),
+        let vote = unit_host_inbound_vote(
+            &iface.host_inbound_system_services,
+            &iface.host_inbound_protocols,
+            &iface.host_inbound_protocols_except,
         );
         match out.entry(iface.ifindex) {
             std::collections::btree_map::Entry::Vacant(slot) => {
@@ -422,8 +467,9 @@ fn unit_host_inbound_claims(snapshot: &ConfigSnapshot) -> BTreeMap<i32, UnitHost
 /// by `services`/`protocols`/`protocols_except` as that ifindex's
 /// per-interface host-inbound set (#16057). Mirrors [`unit_rows_admit`]:
 /// `true` when no configured unit row sits on the ifindex, or when every
-/// one carried exactly this triple; `false` when they disagree among
-/// themselves (the triple itself is then one of the disputed sets).
+/// one carried the same canonical signature; `false` when they disagree
+/// among themselves (this row's signature is then one of the disputed
+/// sets, or a base row's differing set that must lose to the units).
 fn unit_host_inbound_claims_admit(
     claims: &BTreeMap<i32, UnitHostInboundClaim>,
     ifindex: i32,
@@ -433,10 +479,9 @@ fn unit_host_inbound_claims_admit(
 ) -> bool {
     match claims.get(&ifindex) {
         None => true,
-        Some(UnitHostInboundClaim::Agreed(s, p, e)) => {
-            s.as_slice() == services
-                && p.as_slice() == protocols
-                && e.as_slice() == protocols_except
+        Some(UnitHostInboundClaim::Agreed(..)) => {
+            claims.get(&ifindex)
+                == Some(&unit_host_inbound_vote(services, protocols, protocols_except))
         }
         Some(UnitHostInboundClaim::Disagree) => false,
     }
@@ -955,13 +1000,14 @@ pub(super) fn populate_interfaces(
         // #3362 per-interface host-inbound OVERRIDE. The control plane carries
         // the effective token set resolved for this interface.
         // #16057: a DISPUTED unit override (configured unit rows on this
-        // ifindex carrying different effective triples) is refused for every
-        // row, base included — keeping any one would hand the sibling's
-        // admission to the whole netdev. The empty fail-closed sentinel is
-        // installed after the walk. Unit rows whose triples AGREE keep the
-        // #12646 unit-wins behaviour byte-identically (one agreed triple,
-        // written by each unit row); a base row whose triple differs from
-        // the agreed unit triple still loses, exactly as #12646 pinned.
+        // ifindex carrying different canonical effective signatures) is
+        // refused for every row, base included — keeping any one would
+        // hand the sibling's admission to the whole netdev. The empty
+        // fail-closed sentinel is installed after the walk. Unit rows
+        // whose signatures AGREE keep the #12646 unit-wins behaviour
+        // byte-identically (one agreed signature, written by each unit
+        // row); a base row whose signature differs from the agreed unit
+        // signature still loses, exactly as #12646 pinned.
         if iface.host_inbound_configured
             && unit_host_inbound_claims_admit(
                 &unit_host_inbound_claim_map,
@@ -978,7 +1024,7 @@ pub(super) fn populate_interfaces(
             // win regardless of snapshot row order. Skip the base's write when
             // a configured unit row exists; retain the unit's existing
             // last-write behaviour for any additional unit aliases whose
-            // triples agree (#16057 refuses only a genuine disagreement).
+            // signatures agree (#16057 refuses only a genuine disagreement).
             empty_zone_host_inbound_sentinels.remove(&iface.ifindex);
             state.ifindex_host_inbound.insert(
                 iface.ifindex,
@@ -1291,11 +1337,12 @@ pub(super) fn populate_interfaces(
              configured logical units on the same netdev carry different effective \
              host-inbound overrides, so no unit's override is honoured and host-bound \
              services are DENIED by the per-ifindex empty host-inbound sentinel \
-             (#16057; ICMP errors/PMTUD/ND control messages remain admitted). The \
-             dataplane sees an ifindex, not a unit, so it cannot tell which unit a \
-             packet arrived on; give the units the same host-inbound override, \
-             distinct netdevs, or rely on the zone-level host-inbound set by \
-             removing the per-unit overrides.",
+             (#16057; ICMP error/PMTUD control messages remain admitted, but ND \
+             (ICMPv6 types 133-136) is denied with the sentinel, as on the #10503 \
+             contested-zone sentinel). The dataplane sees an ifindex, not a unit, \
+             so it cannot tell which unit a packet arrived on; give the units the \
+             same host-inbound override, distinct netdevs, or rely on the \
+             zone-level host-inbound set by removing the per-unit overrides.",
             ifindex
         );
     }
