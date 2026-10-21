@@ -2570,8 +2570,11 @@ func persistSelfSignedCert(dir, certPath, keyPath string, certPEM, keyPEM []byte
 // Only group/other bits are judged; owner bits are never loosened (0600
 // or stricter, e.g. 0400, is left untouched).
 //
-// The directory is repaired the same way when it exists (0700 or
-// stricter left untouched). Operator-supplied (custom) pairs NEVER take
+// The directory is asserted the same way when it exists, judged from
+// Lstat: any mode with no group/other read/write (0700, 0500, 0111,
+// 0000) is strict enough and left untouched — an execute-only directory
+// needs no owner-read to be accepted — while a loose one is tightened
+// to 0700 or refused. Operator-supplied (custom) pairs NEVER take
 // this path: their files are the operator's to permission, and chmodding
 // them indiscriminately could fight their provisioning (issue #16060).
 func assertGeneratedTLSKeyPerms(dir, keyPath string) error {
@@ -2583,22 +2586,16 @@ func assertGeneratedTLSKeyPerms(dir, keyPath string) error {
 	return tightenTLSPathPerms(keyPath, 0o600, false)
 }
 
-// tightenTLSPathPerms tightens path to at most want (owner-only) when its
-// current mode grants any access beyond want. wantDir selects the
-// directory shape check (IsDir) instead of the regular-file check.
+// tightenTLSPathPerms tightens the generated KEY to at most want when its
+// current mode grants any access beyond want. Directories take
+// tightenTLSDirPerms instead: a directory's mode can be judged from
+// Lstat alone, and an already-strict directory must not need owner-read
+// merely to be accepted.
 func tightenTLSPathPerms(path string, want os.FileMode, wantDir bool) error {
-	flags := os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 	if wantDir {
-		flags |= syscall.O_DIRECTORY
+		return tightenTLSDirPerms(path)
 	}
-	f, err := os.OpenFile(path, flags, 0)
-	if err != nil && wantDir && errors.Is(err, syscall.EACCES) {
-		// A directory without owner-read (e.g. 0111 /etc/xpf/tls) cannot
-		// be opened O_RDONLY even by its owner, though it is already
-		// stricter than 0700. A write-mode descriptor pins the same
-		// inode under O_NOFOLLOW for the fstat/fchmod below.
-		f, err = os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_DIRECTORY, 0)
-	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // absent: caller loads (fails) and mints, or reports
@@ -2625,11 +2622,7 @@ func tightenTLSPathPerms(path string, want os.FileMode, wantDir bool) error {
 	if err != nil {
 		return fmt.Errorf("stat generated management TLS path %s: %w", path, err)
 	}
-	if wantDir {
-		if !fi.IsDir() {
-			return fmt.Errorf("generated management TLS directory %s is not a directory (mode %s) — refusing to use it", path, fi.Mode())
-		}
-	} else if !fi.Mode().IsRegular() {
+	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("generated management TLS key %s is not a regular file (mode %s) — refusing to load it", path, fi.Mode())
 	}
 	if fi.Mode().Perm()&^want == 0 {
@@ -2640,5 +2633,70 @@ func tightenTLSPathPerms(path string, want os.FileMode, wantDir bool) error {
 	}
 	slog.Warn("tightened loose generated management TLS permissions on load",
 		"path", path, "from_mode", fmt.Sprintf("%04o", fi.Mode().Perm()), "to_mode", fmt.Sprintf("%04o", want))
+	return nil
+}
+
+// tightenTLSDirPerms asserts the generated TLS directory grants no
+// group/other read or write access (#16060 fold). The mode is judged
+// from Lstat (fstatat without following the final link) so an
+// already-strict directory needs no descriptor at all: an execute-only
+// 0111 directory — stricter than 0700 for the only purpose that matters
+// here, since the 0600 key inside still gates the secret — is accepted
+// and left untouched, as are 0700/0500/0000. (Opening such a directory
+// O_RDONLY fails EACCES and O_RDWR fails EISDIR on Linux, so the
+// descriptor-first shape used for the key would refuse a valid pair.)
+// Execute-only group/other traversal is accepted deliberately: knowing
+// the fixed cert.pem/key.pem names still yields nothing against a 0600
+// key. Only a directory granting group/other read (listing) or write
+// (planting) is loose; it is tightened to 0700 through an O_NOFOLLOW
+// descriptor (never chmodded by path), and a loose directory that
+// cannot be opened for repair is refused loudly. A symlinked or
+// non-directory final component is refused; absence and EACCES on the
+// Lstat itself (an untraversable parent, e.g. an unprivileged probe of
+// root-owned /etc/xpf) preserve the pre-#16060 behavior — the load
+// through such a path fails identically downstream.
+func tightenTLSDirPerms(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, syscall.EACCES) {
+			return nil
+		}
+		return fmt.Errorf("stat generated management TLS directory %s: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("generated management TLS path %s is a symlink — refusing to follow it; remove the link so the pair can be re-minted", path)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("generated management TLS directory %s is not a directory (mode %s) — refusing to use it", path, fi.Mode())
+	}
+	if fi.Mode().Perm()&0o066 == 0 {
+		return nil // no group/other read/write: strict enough, never loosen
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if _, rerr := os.Readlink(path); rerr == nil {
+			return fmt.Errorf("generated management TLS path %s is a symlink — refusing to follow it; remove the link so the pair can be re-minted", path)
+		}
+		return fmt.Errorf("open loose generated management TLS directory %s for permission repair: %w", path, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat generated management TLS directory %s: %w", path, err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("generated management TLS directory %s is not a directory (mode %s) — refusing to use it", path, st.Mode())
+	}
+	if st.Mode().Perm()&0o066 == 0 {
+		return nil // tightened (or swapped strict) since the Lstat
+	}
+	if err := tlsChmod(f, 0o700); err != nil {
+		return fmt.Errorf("tighten generated management TLS path %s to %04o: %w", path, 0o700, err)
+	}
+	slog.Warn("tightened loose generated management TLS permissions on load",
+		"path", path, "from_mode", fmt.Sprintf("%04o", st.Mode().Perm()), "to_mode", fmt.Sprintf("%04o", 0o700))
 	return nil
 }

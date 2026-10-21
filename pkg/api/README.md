@@ -1755,9 +1755,14 @@ the drop fails loudly instead of going quietly vacuous.
       a pre-existing loose pair (loosened dir/key, restored backup, operator
       chmod) is tightened descriptor-bound (`O_NOFOLLOW` + `fchmod`, so a
       symlinked key is refused, never chmodded through) or the load loudly
-      refuses; stricter modes are never loosened. Operator-supplied (custom)
-      pairs are never chmodded — only the generated path asserts. Regression
-      `tls_key_perms_16060_test.go` covers loose key/dir, stricter-untouched,
+      refuses; stricter modes are never loosened. The directory is judged
+      from `Lstat`: any mode with no group/other read/write (`0700`, `0500`,
+      execute-only `0111`, `0000`) is accepted untouched — an execute-only
+      directory cannot be opened readably on Linux yet is strict for key
+      confidentiality — while a loose one is tightened to `0700` or refused.
+      Operator-supplied (custom) pairs are never chmodded — only the
+      generated path asserts. Regression `tls_key_perms_16060_test.go` covers
+      loose key/dir, stricter-untouched, execute-only-dir load,
       chmod-failure refusal, symlinked-key refusal, absent-still-mints, and
       the custom-key negative.
     - **Re-mint STILL deferred, but no longer SILENT (#5719 C001 residual,

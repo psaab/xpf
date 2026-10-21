@@ -95,6 +95,41 @@ func TestGeneratedTLSStrictPermsUntouchedOnLoad16060(t *testing.T) {
 	}
 }
 
+// Fold witness (#16103): an execute-only generated directory (0111) is
+// stricter than 0700 for key confidentiality — it grants no group/other
+// read/write — yet it cannot be opened O_RDONLY (EACCES) or O_RDWR
+// (EISDIR) on Linux. The pair must load fine and the mode stay 0111.
+// RED on the pre-fold code: the O_RDWR fallback returns EISDIR and the
+// load fails closed. Cleanup restores traversal so TempDir removal works.
+func TestGeneratedTLSExecuteOnlyDirLoads16060(t *testing.T) {
+	dir, certPath, keyPath := mintLoose16060(t, 0o111, 0o600)
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	before, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := generateSelfSignedCertAt(dir, certPath, keyPath, "")
+	if err != nil {
+		t.Fatalf("execute-only dir must load the valid pair, got: %v", err)
+	}
+	if !usableCert(cert) {
+		t.Fatal("returned cert is not usable")
+	}
+	if got := permOf16060(t, dir); got != 0o111 {
+		t.Fatalf("dir mode after load = %04o, want 0111 (strict dir must be left untouched)", got)
+	}
+	if got := permOf16060(t, keyPath); got != 0o600 {
+		t.Fatalf("key mode after load = %04o, want 0600", got)
+	}
+	after, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("cert churned under execute-only dir — pair must load as-is")
+	}
+}
+
 func TestGeneratedTLSChmodFailureRefusesOnLoad16060(t *testing.T) {
 	dir, certPath, keyPath := mintLoose16060(t, 0o700, 0o644)
 	injected := errors.New("injected chmod failure 16060")
