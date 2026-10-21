@@ -365,3 +365,58 @@ func TestShowWholeHandlerStaleInterleave15995(t *testing.T) {
 func wholeReq15995() *pb.ShowConfigRequest {
 	return &pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE}
 }
+
+// Fold-6 strengthening (gRPC): force the stale interleave through the
+// REAL gate entry (authorizeRPCConfigRead — the exact call
+// authorizeRPCContext makes at authz.go) handing it the STALE cfg
+// while the store snapshot is already restricted, then drive the
+// HANDLER. Two facts established:
+//  1. At the gate: stale cfg does NOT admit (gate re-reads cfg+tree in
+//     the single ShowConfigSnapshot capture, store_format.go).
+//  2. At the handler: an admitted context is the only route in; since
+//     the gate refuses, construct the admitted-side control via the
+//     open class and verify handler rendering, then verify the
+//     restricted class cannot obtain an admitted context by ANY of
+//     stale/current cfg through the gate entry.
+// Production has no seam to inject a stale cfg INTO
+// authorizeRPCContext itself (cfg := s.activeConfig() is read inside
+// it immediately before the gate call, one statement, no hook) —
+// by-construction: the only cfg the gate can price with besides the
+// caller's is the single-capture scfg, which is what (1) exercises.
+func TestShowWholeStaleGateThenHandler15995(t *testing.T) {
+	s := ancestor15995Server(t)
+	s.store.ExitConfigure()
+	staleCfg := func() *config.Config {
+		tree, errs := config.NewParser(strings.Replace(ancestor15995Config,
+			`deny-configuration "^security ipsec";`, ``, 1)).Parse()
+		if len(errs) > 0 {
+			t.Fatalf("stale parse: %v", errs)
+		}
+		cfg, err := config.CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("stale compile: %v", err)
+		}
+		return cfg
+	}()
+	// (1) Gate entry with stale cfg: refused + no snapshots rendered.
+	snaps, err := s.authorizeRPCConfigRead(staleCfg, "ancestor-view", show14707Method("ShowConfig"),
+		&pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE})
+	if err == nil {
+		t.Fatalf("gate admitted stale cfg (snaps=%+v); handler would render", snaps)
+	}
+	// (2) Handler side: restricted class cannot get an admitted ctx
+	// through authorizeRPCContext; open class can and renders.
+	if _, err := s.authorizeRPCContext(ctxWithPeerUID(uidAncestor15995), show14707Method("ShowConfig"),
+		&pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE}); err == nil {
+		t.Fatal("authorizeRPCContext admitted restricted whole show")
+	}
+	octx, err := s.authorizeRPCContext(ctxWithPeerUID(uidOpen15995), show14707Method("ShowConfig"),
+		&pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE})
+	if err != nil {
+		t.Fatalf("open authorize: %v", err)
+	}
+	resp, herr := s.ShowConfig(octx, &pb.ShowConfigRequest{Target: pb.ConfigTarget_ACTIVE})
+	if herr != nil || !strings.Contains(resp.Output, "ipsec") {
+		t.Errorf("open handler render = herr=%v hasIpsec=%v", herr, herr == nil && strings.Contains(resp.Output, "ipsec"))
+	}
+}

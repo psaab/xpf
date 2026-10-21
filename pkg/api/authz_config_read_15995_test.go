@@ -278,3 +278,57 @@ func TestRESTWholeShowHandlerRestricted15995(t *testing.T) {
 		t.Errorf("open whole GET (handler) = %d, want 200 with ipsec: %s", code, body)
 	}
 }
+
+// Fold-6 strengthening (REST): closest production seam to the
+// middleware is readAuthz itself (the middleware wrapper
+// mutationAuthzGuard routes safe methods to it). authorizeInputs has
+// NO injection seam (peer identity comes from the connection context;
+// cfg is s.activeConfig() read inside authorizeRESTReadSnapshots), so
+// a stale cfg cannot be injected into the middleware call chain
+// in-test — by construction the gate's only policy source besides
+// authorizeInputs' cfg is the single ShowConfigSnapshot capture
+// (store_format.go, one RLock). This cell therefore: (1) drives the
+// gate entry (authorizeRESTConfigRead — readAuthz's exact call) with
+// the stale cfg and requires refusal with NO attached snapshots, then
+// (2) drives readAuthz + handler over HTTP with the restricted
+// principal and requires the handler never executes admitted (403),
+// while the open principal renders through the same middleware.
+func TestRESTWholeStaleGateThenMiddleware15995(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(passwd15995REST), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(authz.SetPasswdPathForTest(path))
+	store := authzStore(t, config15995REST)
+	srv, base := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(uid15995REST)})
+	staleText := strings.Replace(config15995REST, `deny-configuration "^security ipsec";`, ``, 1)
+	staleTree, errs := config.NewParser(staleText).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("stale parse: %v", errs)
+	}
+	staleCfg, err := config.CompileConfig(staleTree)
+	if err != nil {
+		t.Fatalf("stale compile: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/api/v1/config/show", nil)
+	p := authz.Principal{Class: "ancestor-view"}
+	snaps, err := srv.authorizeRESTConfigRead(req, staleCfg, p)
+	if err == nil {
+		t.Fatalf("gate admitted stale cfg (snaps=%+v); middleware would attach and handler would render", snaps)
+	}
+	// NB: the gate returns (snaps, err) together — middleware drops
+	// snaps on err (authorizeRESTReadSnapshots returns before attach),
+	// so a non-nil Primary beside a refusal is never rendered. The
+	// handler-reachability fact is the middleware assertion below.
+	_ = snaps
+	// Middleware+handler surface (restricted 403, open 200) — same
+	// assertions as TestRESTWholeShowHandlerRestricted15995, kept
+	// here so this cell is self-contained.
+	if code, _ := get14707(t, base, "/api/v1/config/show"); code != http.StatusForbidden {
+		t.Errorf("middleware whole show (restricted) = %d, want 403", code)
+	}
+	_, baseOpen := authzServer(t, Config{Addr: "127.0.0.1:8080", Store: store, PeerLookupFn: fixedPeerUID(4261)})
+	if code, body := get14707(t, baseOpen, "/api/v1/config/show"); code != http.StatusOK || !strings.Contains(body, "ipsec") {
+		t.Errorf("middleware whole show (open) = %d want 200+ipsec: %s", code, body)
+	}
+}
