@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -343,6 +344,52 @@ func TestRootAuthApplyBoundaryRevalidatesHash(t *testing.T) {
 	}
 	if actual, ok := currentShadowHash("root"); !ok || actual != validHash {
 		t.Fatalf("root shadow readback = (%q, %t), want desired hash", actual, ok)
+	}
+}
+
+// TestReconcileUserPasswordErrorAndLogNeverEchoSecret16066 is the #16066
+// decisive regression at the daemon apply boundary: a plaintext pasted into
+// encrypted-password (tolerant ingress) must appear in NEITHER the returned
+// error NOR the slog output. Pre-fix ValidateCryptHash interpolated the raw
+// value and reconcileUserPassword logged/returned it verbatim. A valid hash
+// is the control: it must still apply (covered by the boundary tests above).
+func TestReconcileUserPasswordErrorAndLogNeverEchoSecret16066(t *testing.T) {
+	dir := t.TempDir()
+	shadow := filepath.Join(dir, "shadow")
+	if err := os.WriteFile(shadow, []byte("op:*:19000:0:99999:7:::\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	passwd := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(passwd, []byte("op:x:1001:1001::/home/op:/bin/bash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldShadow, oldPasswd, oldDir := shadowPath, passwdPath, provisionedUsersDir
+	shadowPath, passwdPath = shadow, passwd
+	provisionedUsersDir = filepath.Join(dir, "provisioned-users")
+	t.Cleanup(func() { shadowPath, passwdPath, provisionedUsersDir = oldShadow, oldPasswd, oldDir })
+
+	const canary = "hunter2-plaintext"
+	buf, restore := captureSlog(t)
+	defer restore()
+	err := (&Daemon{}).reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.Secret(canary)})
+	if err == nil {
+		t.Fatal("reconcileUserPassword accepted plaintext, want error")
+	}
+	if strings.Contains(err.Error(), canary) {
+		t.Errorf("returned apply error echoed the plaintext secret: %v (#16066)", err)
+	}
+	if !strings.Contains(err.Error(), "plaintext is not allowed") {
+		t.Errorf("returned apply error lost its defect-class diagnostic: %v", err)
+	}
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("premise: the apply boundary must log the refusal, or this cell proves nothing about logs")
+	}
+	if strings.Contains(logs, canary) {
+		t.Errorf("daemon log echoed the plaintext secret: %s (#16066)", logs)
+	}
+	if !strings.Contains(logs, "refusing to apply invalid login encrypted-password") {
+		t.Errorf("daemon log lost the refusal diagnostic: %s", logs)
 	}
 }
 

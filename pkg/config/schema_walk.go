@@ -1687,12 +1687,13 @@ func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 	joined := strings.Join(redactSecretPath(path), " ")
 	if len(path) > 0 && isSecretLeaf(joined, path[len(path)-1:]) {
 		// Redact the value INSIDE the reason rather than discarding the
-		// reason. The validators echo it themselves — ValidateCryptHash says
-		// "not an encrypted password hash (got %q) — plaintext is not ..." —
-		// so they are a second leak site, but the sentence after the value is
-		// the whole diagnostic. Dropping it told the operator only that
-		// something was invalid, and TestLoginUserEncryptedPasswordSchemaGate
-		// caught that: it asserts the reason still says "plaintext".
+		// reason. Validators may echo it themselves, so they are a second
+		// leak site, but the sentence after the value is the whole
+		// diagnostic. Dropping it told the operator only that something
+		// was invalid, and TestLoginUserEncryptedPasswordSchemaGate caught
+		// that: it asserts the reason still says "plaintext". (#16066 made
+		// ValidateCryptHash itself value-free; this stays as defense in
+		// depth for every present/future secret-leaf validator.)
 		reason := "<redacted>"
 		if err != nil {
 			reason = err.Error()

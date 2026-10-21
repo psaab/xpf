@@ -74,6 +74,57 @@ func TestValidateCryptHash(t *testing.T) {
 	}
 }
 
+// TestValidateCryptHashErrorsNeverEchoValue16066 is the #16066 decisive
+// regression: every reject arm must name the defect class without rendering
+// any fragment of the submitted value. Pre-fix every arm interpolated the
+// raw value with %q, so the plaintext (and malformed-hash fragments) reached
+// daemon logs/syslog verbatim via the apply boundary. Each case carries a
+// distinctive substring of its input; none may appear in the error. Valid
+// hashes must still be accepted (covered by TestValidateCryptHash above).
+func TestValidateCryptHashErrorsNeverEchoValue16066(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    string
+		probe string // distinctive substring of in that must not leak
+		want  string // defect-class fragment the error must still carry
+	}{
+		{"plaintext", "hunter2-plaintext-16066", "hunter2-plaintext-16066", "plaintext is not allowed"},
+		{"too few fields", "$6$onlysalt16066", "onlysalt16066", "malformed crypt hash"},
+		{"unsupported id", "$99$bogus16066$x", "bogus16066", "unsupported crypt hash id"},
+		{"empty field", "$6$$hash16066", "hash16066", "empty field in crypt hash"},
+		{"invalid character", "$6$saltsalt$ab:cd16066", "cd16066", "invalid character in crypt hash"},
+		{"sha512 malformed", "$6$a$b16066$c$d", "b16066", "malformed sha512crypt hash"},
+		{"sha512 bad params", "$6$roundsX16066$saltsalt$" + strings.Repeat("a", 86), "roundsX16066", "malformed sha512crypt parameters"},
+		{"sha512 bad rounds", "$6$rounds=1000$saltsalt16066$" + strings.Repeat("a", 86), "saltsalt16066", "sha512crypt rounds must be between"},
+		{"sha512 short salt", "$6$salt123$" + strings.Repeat("a", 86), "salt123", "sha512crypt salt must be between"},
+		{"sha512 bad checksum", "$6$saltsalt16066$" + strings.Repeat("a", 85), "saltsalt16066", "sha512crypt checksum must be exactly 86 characters"},
+		{"bcrypt malformed", "$2b$12$saltsalt16066", "saltsalt16066", "malformed bcrypt hash"},
+		{"bcrypt nondigit cost", "$2b$ab$" + strings.Repeat("a", 53), "ab", "bcrypt cost must be a two-digit number"},
+		{"bcrypt low cost", "$2b$09$saltsaltsaltsaltsaltsOEpXE0KLxzyVeEtX6R7qbkVGuSGecz6W", "saltsaltsaltsaltsaltsO", "bcrypt cost must be between"},
+		{"yescrypt malformed", "$y$j9T$salt160$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD", "salt160", "malformed yescrypt hash"},
+		{"yescrypt low cost", "$y$j8T$saltsaltsalt16066$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD", "saltsaltsalt16066", "yescrypt cost must be between"},
+		{"scrypt malformed", "$7$short16066$" + strings.Repeat("a", 43), "short16066", "malformed scrypt hash"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateCryptHash(tc.in, nil)
+			if err == nil {
+				t.Fatalf("ValidateCryptHash(%q) = nil, want reject", tc.in)
+			}
+			msg := err.Error()
+			if strings.Contains(msg, tc.probe) {
+				t.Errorf("error leaked a fragment of the secret value (%q): %v (#16066)", tc.probe, err)
+			}
+			if strings.Contains(msg, tc.in) {
+				t.Errorf("error echoed the raw value verbatim: %v (#16066)", err)
+			}
+			if !strings.Contains(msg, tc.want) {
+				t.Errorf("error lost its defect-class diagnostic, want %q in: %v", tc.want, err)
+			}
+		})
+	}
+}
+
 // TestParseLoginUserEncryptedPasswordHierarchical exercises the
 // hierarchical AST shape (#1944 §7.1).
 func TestParseLoginUserEncryptedPasswordHierarchical(t *testing.T) {
