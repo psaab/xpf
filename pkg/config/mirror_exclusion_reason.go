@@ -80,3 +80,15 @@ func PortMirroringInstanceExcludedReason(inst *PortMirrorInstance) string {
 	}
 	return ""
 }
+
+// TunnelUnitSharedIfindexMirrorReason is the #16063 refusal text for a
+// port-mirroring input naming one tunnel unit whose netdev is shared
+// with sibling units at the same VID (wg0.0/wg0.1 on ifindex 42, both
+// VID 0). The packet metadata at every mirror callsite is (ifindex,
+// VID) only — tunnel decap rebinds inner packets to the tunnel's single
+// logical ifindex — so no per-packet unit identity exists; installing
+// the row would mirror every sibling unit to the analyzer. The builder
+// refuses the input (shared-ifindex refusal) and records this reason.
+func TunnelUnitSharedIfindexMirrorReason(input string) string {
+	return "input interface " + input + " shares its tunnel ifindex with sibling units; per-unit mirroring of one unit would mirror them all"
+}

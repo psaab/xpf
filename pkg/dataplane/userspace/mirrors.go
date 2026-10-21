@@ -66,8 +66,33 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 		vlanID     int
 		unit       int
 		unitScoped bool
+		// #16063: true when this unit shares its ifindex with a sibling
+		// unit at the same VID (wg0.0/wg0.1 on ifindex 42, both VID 0).
+		// The packet metadata at every mirror callsite is (ifindex, VID)
+		// only — decap rebinds to the tunnel's single logical ifindex —
+		// so no per-packet unit identity exists to distinguish them.
+		sharedTunnelUnit bool
+	}
+	// #16063: count unit rows per (ifindex, VID). More than one unit row
+	// on one key means sibling tunnel units sharing a netdev; mirroring
+	// any one of them would mirror them all, so those inputs are refused
+	// below (shared-ifindex refusal, the fix direction the issue allows).
+	type unitScopeKey struct {
+		ifindex int
+		vlanID  int
+	}
+	unitRowsByKey := make(map[unitScopeKey]int, len(interfaces))
+	for _, iface := range interfaces {
+		if iface.Ifindex > 0 && iface.IsUnit {
+			unitRowsByKey[unitScopeKey{ifindex: iface.Ifindex, vlanID: iface.VLANID}]++
+		}
 	}
 	scopeByName := make(map[string]mirrorIngressScope, len(interfaces))
+	// #16063: a row's LinuxName must not overwrite the scope recorded
+	// under another row's exact Name (wg0.0/wg0.1 both carry LinuxName
+	// wg0, the base row's Name) — otherwise a bare `wg0` input inherits
+	// the last unit's scope.
+	nameKeyed := make(map[string]bool, len(interfaces))
 	for _, iface := range interfaces {
 		if iface.Ifindex > 0 {
 			// #16063: the unit number of the row, from the config — the
@@ -83,10 +108,12 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 						scope.unit = n
 					}
 				}
+				scope.sharedTunnelUnit = unitRowsByKey[unitScopeKey{ifindex: iface.Ifindex, vlanID: iface.VLANID}] > 1
 			}
 			ifindexByName[iface.Name] = iface.Ifindex
 			scopeByName[iface.Name] = scope
-			if iface.LinuxName != "" {
+			nameKeyed[iface.Name] = true
+			if iface.LinuxName != "" && !nameKeyed[iface.LinuxName] {
 				ifindexByName[iface.LinuxName] = iface.Ifindex
 				scopeByName[iface.LinuxName] = scope
 				// #15651: a unit row's LinuxName is the kernel device
@@ -194,6 +221,20 @@ func buildMirrorConfigSnapshots(cfg *config.Config, interfaces []InterfaceSnapsh
 			}
 			if !scopeOK {
 				scope = mirrorIngressScope{}
+			}
+			if scope.unitScoped && scope.sharedTunnelUnit {
+				// #16063: sibling tunnel units share (ifindex, VID 0)
+				// and the packet carries no per-unit identity the mirror
+				// callsites can read, so installing this row would
+				// mirror every sibling. Refuse this input only.
+				slog.Warn("port-mirroring: skipping tunnel unit input sharing its ifindex with sibling units (per-unit mirroring unsupported)",
+					"name", name, "interface", input, "ifindex", ingressIfindex)
+				excluded = append(excluded, MirrorExclusion{
+					Instance: name,
+					Input:    input,
+					Reason:   config.TunnelUnitSharedIfindexMirrorReason(input),
+				})
+				continue
 			}
 			key := mirrorIngressKey{ifindex: ingressIfindex, vlanID: scope.vlanID, unit: scope.unit, unitScoped: scope.unitScoped}
 			if previous, ok := seenIngress[key]; ok {

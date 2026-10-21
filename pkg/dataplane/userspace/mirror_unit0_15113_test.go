@@ -57,10 +57,13 @@ func TestBuildMirrorConfigSnapshotsUnit0VsBarePhysical15113(t *testing.T) {
 }
 
 // #16063 (SI-5): wg0.0 and wg0.1 share the wg0 netdev (ifindex 42) and
-// both carry VLANID 0 — the VID cannot tell tunnel units apart. A
-// mirror input naming wg0.1 only must carry IngressUnit 1 so the Rust
-// resolver matches only wg0.1 inner packets; wg0.0 inner packets on
-// the same (ifindex, VID 0) must be absent from the analyzer.
+// both carry VLANID 0 — the VID cannot tell tunnel units apart, and the
+// packet metadata at every mirror callsite is (ifindex, VID) only
+// (decap rebinds to the tunnel's single logical ifindex), so no
+// per-packet unit identity exists. A mirror input naming wg0.1 only
+// must therefore be REFUSED (not installed): installing it on
+// (ifindex 42, VID 0) would mirror wg0.0 inner packets to the analyzer.
+// Production shape: base + both units all on ifindex 42.
 func TestBuildMirrorConfigSnapshotsTunnelUnitScope16063(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -82,10 +85,21 @@ func TestBuildMirrorConfigSnapshotsTunnelUnitScope16063(t *testing.T) {
 		{Name: "ge-0/0/9.0", LinuxName: "ge-0-0-9.0", Ifindex: 22},
 	}
 	got, excl := buildMirrorConfigSnapshots(cfg, interfaces)
-	want := []MirrorConfigSnapshot{
-		{IngressIfindex: 42, OutputIfindex: 22, Rate: 0, IngressVLANID: 0, UnitScoped: true, IngressUnit: 1},
+	if len(got) != 0 {
+		t.Fatalf("mirror snapshots = %+v, want none: wg0.1 on shared ifindex 42 must be refused, not keyed on (42, VID 0)", got)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("mirror snapshots = %+v excl=%+v, want wg0.1-only unit-scoped row %+v", got, excl, want)
+	if len(excl) != 1 || excl[0].Instance != "span-wg1" || excl[0].Input != "wg0.1" ||
+		excl[0].Reason != config.TunnelUnitSharedIfindexMirrorReason("wg0.1") {
+		t.Fatalf("exclusions = %+v, want one wg0.1 shared-ifindex refusal", excl)
+	}
+	// Control: mirroring the bare wg0 device (all units, operator's
+	// explicit whole-device intent) still installs unscoped.
+	cfg.ForwardingOptions.PortMirroring.Instances["span-wg1"].Input = []string{"wg0"}
+	got, excl = buildMirrorConfigSnapshots(cfg, interfaces)
+	want := []MirrorConfigSnapshot{
+		{IngressIfindex: 42, OutputIfindex: 22, Rate: 0, IngressVLANID: 0, UnitScoped: false},
+	}
+	if !reflect.DeepEqual(got, want) || len(excl) != 0 {
+		t.Fatalf("bare wg0 mirror = %+v excl=%+v, want unscoped row %+v", got, excl, want)
 	}
 }

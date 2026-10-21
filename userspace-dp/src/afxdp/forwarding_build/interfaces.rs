@@ -355,6 +355,56 @@ fn is_logical_unit_row(name: &str, is_unit: Option<bool>) -> bool {
     }
 }
 
+/// #16063: logical ifindex -> configured unit number, for unit rows
+/// whose logical identity the ingress resolution can actually produce.
+/// A unit row contributes only when no sibling unit row shares its
+/// (bind_ifindex, VID): tunnel units on one netdev (wg0.0/wg0.1, both
+/// VID 0 on the shared ifindex) are ambiguous there — the poll path's
+/// packet metadata is (ifindex, VID) only and decap rebinds to the
+/// tunnel's single logical ifindex — so they are omitted, and the Go
+/// builder refuses mirroring any one of them. VLAN units (distinct
+/// logical ifindex per VID) and a lone unit 0 are unambiguous.
+pub(super) fn ingress_unit_by_logical(
+    snapshot: &ConfigSnapshot,
+) -> FastMap<i32, i32> {
+    let mut rows_by_key: std::collections::BTreeMap<(i32, i32), i32> =
+        std::collections::BTreeMap::new();
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0 || !is_logical_unit_row(&iface.name, iface.is_unit) {
+            continue;
+        }
+        let bind_ifindex = if iface.parent_ifindex > 0 {
+            iface.parent_ifindex
+        } else {
+            iface.ifindex
+        };
+        *rows_by_key.entry((bind_ifindex, iface.vlan_id)).or_default() += 1;
+    }
+    let mut out = FastMap::default();
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0 || !is_logical_unit_row(&iface.name, iface.is_unit) {
+            continue;
+        }
+        let bind_ifindex = if iface.parent_ifindex > 0 {
+            iface.parent_ifindex
+        } else {
+            iface.ifindex
+        };
+        if rows_by_key.get(&(bind_ifindex, iface.vlan_id)).copied() != Some(1) {
+            continue;
+        }
+        let Some(unit) = iface
+            .name
+            .rsplit_once('.')
+            .and_then(|(_, unit)| unit.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        out.insert(iface.ifindex, unit);
+    }
+    out
+}
+
 /// ifindex -> [`UnitZoneClaim`] for every ifindex that carries at least one
 /// logical-unit row. An ifindex absent here carries no unit row at all, and its
 /// zone is decided exactly as it was before #7509 — that absence is what keeps

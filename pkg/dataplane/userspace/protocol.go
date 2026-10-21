@@ -474,6 +474,10 @@ const (
 	// and keys a tunnel unit-scoped mirror by (ifindex, VID 0) alone, so
 	// wg0.1 mirrors every sibling tunnel unit sharing the wg0 netdev.
 	ProtocolVersion = 66
+	// v64 -> v65 (#16063; rebased after #16117 took v64): MirrorConfigSnapshot
+	// carries ingress_unit. A v64 helper ignores it and keys a tunnel
+	// unit-scoped mirror by (ifindex, VID 0) alone, so wg0.1 mirrors every
+	// sibling tunnel unit sharing the wg0 netdev — the defect.
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
