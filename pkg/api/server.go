@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/authz"
@@ -1853,12 +1855,16 @@ const (
 // code must never mutate these. tlsHostname is the SAN-source seam (#5719):
 // tests drive the non-ASCII / IP-shaped hostname branches deterministically
 // without mutating the machine's real hostname.
+// tlsChmod is the #16060 key-permission repair seam: failure-injection
+// tests substitute it to prove a failed repair degrades loudly instead
+// of silently serving.
 var (
 	tlsMkdirAllDurable  = fsatomic.MkdirAllDurable
 	tlsRemove           = os.Remove
 	tlsSyncDir          = fsatomic.SyncDir
 	tlsWriteFileDurable = fsatomic.WriteFileDurable
 	tlsHostname         = os.Hostname
+	tlsChmod            = func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) }
 )
 
 // isDNSSANSafeHostname reports whether h is safe to place in a certificate DNS
@@ -2385,6 +2391,17 @@ func generateSelfSignedCertAtWithStatus(dir, certPath, keyPath, bindHost string)
 
 func generateSelfSignedCertAtWithStatusMulti(dir, certPath, keyPath string, bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
 	var invalidLoadedLeaf *x509.Certificate
+	// #16060 K3: assert-on-use for the GENERATED pair. Mint guarantees
+	// key 0600 / dir 0700, but a pre-existing loose pair (loosened dir or
+	// key, restored backup, operator chmod) was previously loaded and
+	// served as-is forever. Tighten-or-refuse here, before any load:
+	// a repair failure must not silently serve the loose key, and mint
+	// (which strict-removes and rewrites the pair) is not a safe
+	// fallback for a path whose shape/permissions could not be verified
+	// (e.g. a symlinked key). Custom pairs never reach this function.
+	if err := assertGeneratedTLSKeyPerms(dir, keyPath); err != nil {
+		return tls.Certificate{}, nil, err
+	}
 	// Load a usable pair as-is unless its leaf is outside its validity dates.
 	// Expiry/not-yet-valid is the one #1916 D6 durability exception: keeping
 	// serving it is never preferable to rotating the self-signed trust anchor.
@@ -2544,5 +2561,154 @@ func persistSelfSignedCert(dir, certPath, keyPath string, certPEM, keyPEM []byte
 	if err := tlsWriteFileDurable(certPath, certPEM, 0644); err != nil {
 		return err
 	}
+	return nil
+}
+
+// assertGeneratedTLSKeyPerms re-asserts the mint-time permission invariant
+// on the GENERATED management pair before it is loaded and served (#16060
+// K3). Mint writes the key 0600 under a 0700 directory, but the load path
+// previously served a pre-existing pair as-is forever: a loosened
+// directory or key (restored backup, operator chmod) was silently loaded,
+// so the mint-time invariant gave false assurance.
+//
+// The repair is tighten-only and descriptor-bound, following the
+// configstore discipline (#9897/#9898): the key is opened O_NOFOLLOW and
+// fchmod'd on the pinned descriptor, so a symlinked key is refused rather
+// than followed to chmod an arbitrary target, and a non-regular key is
+// refused outright. A missing key is a no-op — the caller's
+// LoadX509KeyPair then fails and mint proceeds. Any other failure (open,
+// stat, chmod) is returned: the caller must loudly refuse rather than
+// serve a generated key whose permissions could not be verified/repaired.
+// Only group/other bits are judged; owner bits are never loosened (0600
+// or stricter, e.g. 0400, is left untouched).
+//
+// The directory is asserted the same way when it exists, judged from
+// Lstat: any mode with no group/other read/write (0700, 0500, 0111,
+// 0000) is strict enough and left untouched — an execute-only directory
+// needs no owner-read to be accepted — while a loose one is tightened
+// to 0700 or refused. Operator-supplied (custom) pairs NEVER take
+// this path: their files are the operator's to permission, and chmodding
+// them indiscriminately could fight their provisioning (issue #16060).
+func assertGeneratedTLSKeyPerms(dir, keyPath string) error {
+	if dir != "" {
+		if err := tightenTLSPathPerms(dir, 0o700, true); err != nil {
+			return err
+		}
+	}
+	return tightenTLSPathPerms(keyPath, 0o600, false)
+}
+
+// tightenTLSPathPerms tightens the generated KEY to at most want when its
+// current mode grants any access beyond want. Directories take
+// tightenTLSDirPerms instead: a directory's mode can be judged from
+// Lstat alone, and an already-strict directory must not need owner-read
+// merely to be accepted.
+func tightenTLSPathPerms(path string, want os.FileMode, wantDir bool) error {
+	if wantDir {
+		return tightenTLSDirPerms(path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // absent: caller loads (fails) and mints, or reports
+		}
+		if errors.Is(err, syscall.EACCES) {
+			// The path exists but cannot be opened by this process at
+			// all (e.g. a root-owned 0700 /etc/xpf/tls while a test or
+			// unprivileged helper probes it). Nothing can be loaded
+			// through it either, so the caller's LoadX509KeyPair fails
+			// identically and mint's durable write surfaces the real
+			// persistence error — the pre-#16060 behavior. Refusing
+			// here would be stricter than the load itself and would
+			// break callers that probe an inaccessible production path
+			// before swapping to a writable one (SetTLSCertDirForTest).
+			return nil
+		}
+		if _, rerr := os.Readlink(path); rerr == nil {
+			return fmt.Errorf("generated management TLS path %s is a symlink — refusing to follow it; remove the link so the pair can be re-minted", path)
+		}
+		return fmt.Errorf("open generated management TLS path %s for permission check: %w", path, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat generated management TLS path %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("generated management TLS key %s is not a regular file (mode %s) — refusing to load it", path, fi.Mode())
+	}
+	if fi.Mode().Perm()&^want == 0 {
+		return nil // already owner-only (or stricter): only tighten, never loosen
+	}
+	if err := tlsChmod(f, want); err != nil {
+		return fmt.Errorf("tighten generated management TLS path %s to %04o: %w", path, want, err)
+	}
+	slog.Warn("tightened loose generated management TLS permissions on load",
+		"path", path, "from_mode", fmt.Sprintf("%04o", fi.Mode().Perm()), "to_mode", fmt.Sprintf("%04o", want))
+	return nil
+}
+
+// tightenTLSDirPerms asserts the generated TLS directory grants no
+// group/other read or write access (#16060 fold). The mode is judged
+// from Lstat (fstatat without following the final link) so an
+// already-strict directory needs no descriptor at all: an execute-only
+// 0111 directory — stricter than 0700 for the only purpose that matters
+// here, since the 0600 key inside still gates the secret — is accepted
+// and left untouched, as are 0700/0500/0000. (Opening such a directory
+// O_RDONLY fails EACCES and O_RDWR fails EISDIR on Linux, so the
+// descriptor-first shape used for the key would refuse a valid pair.)
+// Execute-only group/other traversal is accepted deliberately: knowing
+// the fixed cert.pem/key.pem names still yields nothing against a 0600
+// key. Only a directory granting group/other read (listing) or write
+// (planting) is loose; it is tightened to 0700 through an O_NOFOLLOW
+// descriptor (never chmodded by path), and a loose directory that
+// cannot be opened for repair is refused loudly. A symlinked or
+// non-directory final component is refused; absence and EACCES on the
+// Lstat itself (an untraversable parent, e.g. an unprivileged probe of
+// root-owned /etc/xpf) preserve the pre-#16060 behavior — the load
+// through such a path fails identically downstream.
+func tightenTLSDirPerms(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, syscall.EACCES) {
+			return nil
+		}
+		return fmt.Errorf("stat generated management TLS directory %s: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("generated management TLS path %s is a symlink — refusing to follow it; remove the link so the pair can be re-minted", path)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("generated management TLS directory %s is not a directory (mode %s) — refusing to use it", path, fi.Mode())
+	}
+	if fi.Mode().Perm()&0o066 == 0 {
+		return nil // no group/other read/write: strict enough, never loosen
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if _, rerr := os.Readlink(path); rerr == nil {
+			return fmt.Errorf("generated management TLS path %s is a symlink — refusing to follow it; remove the link so the pair can be re-minted", path)
+		}
+		return fmt.Errorf("open loose generated management TLS directory %s for permission repair: %w", path, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat generated management TLS directory %s: %w", path, err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("generated management TLS directory %s is not a directory (mode %s) — refusing to use it", path, st.Mode())
+	}
+	if st.Mode().Perm()&0o066 == 0 {
+		return nil // tightened (or swapped strict) since the Lstat
+	}
+	if err := tlsChmod(f, 0o700); err != nil {
+		return fmt.Errorf("tighten generated management TLS path %s to %04o: %w", path, 0o700, err)
+	}
+	slog.Warn("tightened loose generated management TLS permissions on load",
+		"path", path, "from_mode", fmt.Sprintf("%04o", st.Mode().Perm()), "to_mode", fmt.Sprintf("%04o", 0o700))
 	return nil
 }

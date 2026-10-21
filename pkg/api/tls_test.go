@@ -27,6 +27,7 @@ func resetTLSSeams(t *testing.T) {
 		tlsSyncDir = fsatomic.SyncDir
 		tlsWriteFileDurable = fsatomic.WriteFileDurable
 		tlsHostname = os.Hostname
+		tlsChmod = func(f *os.File, mode os.FileMode) error { return f.Chmod(mode) }
 	})
 }
 
