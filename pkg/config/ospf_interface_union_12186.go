@@ -63,7 +63,7 @@ func (u *OSPFInterfaceUnion12186) mergeMD5Key12186(key OSPFMD5Key12186, conflict
 			if u.AuthKeyID == key.ID && u.AuthKey.Reveal() == "" {
 				u.AuthKey = key.Key
 			}
-		} else if key.Key.Reveal() != "" && u.MD5Keys[i].Key != key.Key {
+		} else if key.Key.Reveal() != "" && u.MD5Keys[i].Key.Reveal() != key.Key.Reveal() {
 			conflicts = appendOSPFConflict12186(conflicts, "authentication md5 key")
 		}
 		return conflicts
@@ -117,7 +117,7 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 			if src.AuthKey.Reveal() != "" {
 				if u.AuthKey.Reveal() == "" {
 					u.AuthKey = src.AuthKey
-				} else if u.AuthKey != src.AuthKey {
+				} else if u.AuthKey.Reveal() != src.AuthKey.Reveal() {
 					conflicts = appendOSPFConflict12186(conflicts, "authentication simple-password")
 				}
 			}
@@ -151,7 +151,7 @@ func (u *OSPFInterfaceUnion12186) Merge(src *OSPFInterface) []string {
 	if u.AuthType == "" && src.AuthKey.Reveal() != "" {
 		if u.AuthKey.Reveal() == "" {
 			u.AuthKey = src.AuthKey
-		} else if u.AuthKey != src.AuthKey {
+		} else if u.AuthKey.Reveal() != src.AuthKey.Reveal() {
 			conflicts = appendOSPFConflict12186(conflicts, "authentication-key")
 		}
 	}

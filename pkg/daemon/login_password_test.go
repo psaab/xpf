@@ -371,7 +371,7 @@ func TestReconcileUserPasswordErrorAndLogNeverEchoSecret16066(t *testing.T) {
 	const canary = "hunter2-plaintext"
 	buf, restore := captureSlog(t)
 	defer restore()
-	err := (&Daemon{}).reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.Secret(canary)})
+	err := (&Daemon{}).reconcileUserPassword(&config.LoginUser{Name: "op", EncryptedPassword: config.NewSecret(canary)})
 	if err == nil {
 		t.Fatal("reconcileUserPassword accepted plaintext, want error")
 	}

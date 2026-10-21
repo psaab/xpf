@@ -21,7 +21,7 @@ func TestGatewaylessPSK15989(t *testing.T) {
 	gatewayless := func() *config.IPsecConfig {
 		return &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"gwless": {Gateway: "", PSK: "gwless-secret", BindInterface: "st0.0"},
+				"gwless": {Gateway: "", PSK: config.NewSecret("gwless-secret"), BindInterface: "st0.0"},
 			},
 			Gateways:  map[string]*config.IPsecGateway{},
 			Proposals: map[string]*config.IPsecProposal{},
@@ -49,8 +49,8 @@ func TestGatewaylessPSK15989(t *testing.T) {
 		cfg.Gateways["gw-site"] = &config.IPsecGateway{
 			Name: "gw-site", Address: "203.0.113.1", LocalAddress: "198.51.100.10",
 		}
-		cfg.VPNs["site-a"] = &config.IPsecVPN{Gateway: "gw-site", PSK: "site-secret"}
-		cfg.VPNs["inline"] = &config.IPsecVPN{Gateway: "192.0.2.9", PSK: "inline-secret"}
+		cfg.VPNs["site-a"] = &config.IPsecVPN{Gateway: "gw-site", PSK: config.NewSecret("site-secret")}
+		cfg.VPNs["inline"] = &config.IPsecVPN{Gateway: "192.0.2.9", PSK: config.NewSecret("inline-secret")}
 
 		text, rendered, err := m.renderConfig(cfg)
 		if err != nil {
@@ -103,8 +103,8 @@ func TestGatewaylessPSK15989(t *testing.T) {
 func collisionCfg15989(sitePSK string) *config.IPsecConfig {
 	return &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"aaa":  {Gateway: "", PSK: "gwless-secret", BindInterface: "st0.0", EstablishTunnels: "immediately"},
-			"site": {Gateway: "aaa", PSK: config.Secret(sitePSK), BindInterface: "st0.1", EstablishTunnels: "immediately"},
+			"aaa":  {Gateway: "", PSK: config.NewSecret("gwless-secret"), BindInterface: "st0.0", EstablishTunnels: "immediately"},
+			"site": {Gateway: "aaa", PSK: config.NewSecret(sitePSK), BindInterface: "st0.1", EstablishTunnels: "immediately"},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"aaa": {Name: "aaa", Address: "203.0.113.1", LocalAddress: "198.51.100.10"},

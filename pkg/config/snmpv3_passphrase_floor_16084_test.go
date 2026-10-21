@@ -82,7 +82,7 @@ func TestPassphraseFloorBoundary16084(t *testing.T) {
 	if err != nil {
 		t.Fatalf("passphrases of exactly 8 characters must commit: %v", err)
 	}
-	if u := cfg.System.SNMP.V3Users["ops"]; u == nil || string(u.AuthPassword) != "12345678" {
+	if u := cfg.System.SNMP.V3Users["ops"]; u == nil || u.AuthPassword.Reveal() != "12345678" {
 		t.Fatalf("the boundary user did not compile with its credential: %+v", u)
 	}
 }

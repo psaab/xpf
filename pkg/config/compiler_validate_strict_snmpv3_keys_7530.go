@@ -109,7 +109,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 		// passphrase is recovered after a handful of guesses. Reject at
 		// commit, naming the user and the length -- never the passphrase
 		// itself, which must not leak into an error string.
-		if pw := string(u.AuthPassword); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
+		if pw := u.AuthPassword.Reveal(); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
 			return fmt.Errorf("snmp v3 usm local-engine user %q authentication-password "+
 				"is too short: %d characters, minimum %d. The agent answers SNMPv3 "+
 				"authentication challenges online with no per-user lockout, so a short "+
@@ -117,7 +117,7 @@ func validateSNMPv3UserKeyMaterialStrict(cfg *Config) error {
 				"characters. Set a longer `authentication-password` (#16084)",
 				name, utf8.RuneCountInString(pw), snmpv3MinPassphraseRunes, snmpv3MinPassphraseRunes)
 		}
-		if pw := string(u.PrivPassword); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
+		if pw := u.PrivPassword.Reveal(); pw != "" && utf8.RuneCountInString(pw) < snmpv3MinPassphraseRunes {
 			return fmt.Errorf("snmp v3 usm local-engine user %q privacy-password "+
 				"is too short: %d characters, minimum %d. The agent answers SNMPv3 "+
 				"authentication challenges online with no per-user lockout, so a short "+

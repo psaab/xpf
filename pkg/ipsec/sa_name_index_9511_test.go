@@ -356,7 +356,7 @@ func TestActiveSANamesIKEOnlyRowPublishesTheConnectionName9511(t *testing.T) {
 func TestSANameIndexMembership15989(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"site-a": {PSK: "fixture-secret", Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+			"site-a": {PSK: config.NewSecret("fixture-secret"), Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 		},
 		Policies:  saIndexPolicies9511(),
 		Proposals: saIndexProposals9511(),
@@ -369,7 +369,7 @@ func TestSANameIndexMembership15989(t *testing.T) {
 	// gateway-less shape) indexes nothing — membership, not names.
 	skippedOnly := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"gwless": {Gateway: "", PSK: "gwless-secret", BindInterface: "st0.0"},
+			"gwless": {Gateway: "", PSK: config.NewSecret("gwless-secret"), BindInterface: "st0.0"},
 		},
 		Proposals: map[string]*config.IPsecProposal{},
 	}
