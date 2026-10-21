@@ -160,6 +160,36 @@ func TestShowConfigAncestorDeniedDescendant15995(t *testing.T) {
 	}
 }
 
+// Fold F3/C4: the handler must render the generation the gate priced.
+// After authorization, the live candidate is edited to carry a marker
+// the snapshot does not have; the rendered output must be the priced
+// (pre-edit) generation — proving price and render share one snapshot
+// (and that the gate's walk never raced the in-place candidate edit).
+func TestShowConfigRendersPricedSnapshot15995(t *testing.T) {
+	s := ancestor15995Server(t)
+	req := &pb.ShowConfigRequest{Target: pb.ConfigTarget_CANDIDATE, Path: []string{"security", "zones"}}
+	ctx, err := s.authorizeRPCContext(ctxWithPeerUID(uidAncestor15995), show14707Method("ShowConfig"), req)
+	if err != nil {
+		t.Fatalf("authorize zones candidate: %v", err)
+	}
+	// Concurrent-generation edit AFTER pricing: stage a new marker in
+	// the live candidate. A render that re-resolved the store would
+	// disclose POST-PRICE-15995; the priced snapshot must not.
+	if err := s.store.SetFromInput("security zones security-zone trust description POST-PRICE-15995"); err != nil {
+		t.Fatalf("post-price candidate edit: %v", err)
+	}
+	resp, herr := s.ShowConfig(ctx, req)
+	if herr != nil {
+		t.Fatalf("ShowConfig handler: %v", herr)
+	}
+	if strings.Contains(resp.Output, "POST-PRICE-15995") {
+		t.Errorf("handler rendered a different generation than the gate priced:\n%s", resp.Output)
+	}
+	if !strings.Contains(resp.Output, "CANDIDATE-15995") {
+		t.Errorf("priced snapshot lost its candidate content:\n%s", resp.Output)
+	}
+}
+
 func TestShowCompareRollbackAncestorDeniedDescendant15995(t *testing.T) {
 	s := ancestor15995Server(t)
 	ctx := ctxWithPeerUID(uidAncestor15995)

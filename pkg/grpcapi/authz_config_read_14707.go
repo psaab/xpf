@@ -1,11 +1,34 @@
 package grpcapi
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
+
+// configReadSnapshotsKey carries the deep-copy trees the config-read
+// gate priced, from authorizeRPCContext to the Show* handler, so the
+// handler renders the exact generation that was authorized (#15995
+// fold). Absent on ungated (superuser) calls, where the handler keeps
+// the store renderers.
+type configReadSnapshotsKey struct{}
+
+// configReadSnapshots is the snapshot set for one config-read RPC.
+// Primary is the ShowConfig target / rollback slot tree; Other is the
+// second compare arm. Nil trees render nothing, mirroring the store
+// renderers' nil-source defaults.
+type configReadSnapshots struct {
+	Primary *config.ConfigTree
+	Other   *config.ConfigTree
+	NodeID  int
+}
+
+func configReadSnapshotsFrom(ctx context.Context) (configReadSnapshots, bool) {
+	s, ok := ctx.Value(configReadSnapshotsKey{}).(configReadSnapshots)
+	return s, ok
+}
 
 // #14707: ShowConfig, ShowCompare and ShowRollback bypassed the
 // *-configuration subtree restrictions and path/format-scoped
@@ -34,14 +57,15 @@ import (
 // request for a restricted class denies rather than rendering blind.
 
 // authorizeRPCConfigRead adjudicates the three config-read RPCs against
-// the class's configuration and operational regexes.
-func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod string, req any) error {
+// the class's configuration and operational regexes, returning the
+// priced tree snapshots for the handler to render.
+func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod string, req any) (configReadSnapshots, error) {
 	if class == "" {
-		return nil
+		return configReadSnapshots{}, nil
 	}
 	service, method, ok := splitFullMethod(fullMethod)
 	if !ok || service != serviceName {
-		return nil
+		return configReadSnapshots{}, nil
 	}
 	switch method {
 	case "ShowConfig":
@@ -51,65 +75,90 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 			// restricted class that is a denial, mirroring
 			// configTargetReadPermission's unreadable-request arm.
 			if restricted, err := configReadRestricted(cfg, class); err != nil {
-				return err
+				return configReadSnapshots{}, err
 			} else if restricted {
-				return fmt.Errorf("permission denied: login class %q restricts configuration or command paths and this ShowConfig request cannot be adjudicated (#14707)", class)
+				return configReadSnapshots{}, fmt.Errorf("permission denied: login class %q restricts configuration or command paths and this ShowConfig request cannot be adjudicated (#14707)", class)
 			}
-			return nil
+			return configReadSnapshots{}, nil
 		}
 		suffix := config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat()))
 		if len(r.GetPath()) == 0 {
-			return config.AuthorizeConfigShowWhole(cfg, class, suffix)
+			return configReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class, suffix)
 		}
 		// #15995: price every rendered descendant, not just the
 		// requested path — the handler renders the whole subtree.
+		// For display inheritance the rendered subtree is the
+		// apply-groups-expanded tree, so price that expansion.
 		target := "candidate"
 		if r.GetTarget() == pb.ConfigTarget_ACTIVE {
 			target = "active"
 		}
 		var trees []*config.ConfigTree
+		nodeID := -1
 		if s.store != nil {
 			trees = s.store.ShowConfigTrees(target)
+			nodeID = s.store.NodeID()
 		}
-		return config.AuthorizeConfigShowPathRendered(cfg, class, r.GetPath(), suffix, trees...)
+		snaps := configReadSnapshots{NodeID: nodeID}
+		if len(trees) > 0 {
+			snaps.Primary = trees[0]
+		}
+		if r.GetFormat() == pb.ConfigFormat_INHERITANCE {
+			return snaps, config.AuthorizeExpandedConfigShowPathRendered(cfg, class, r.GetPath(), suffix, nodeID, trees...)
+		}
+		return snaps, config.AuthorizeConfigShowPathRendered(cfg, class, r.GetPath(), suffix, trees...)
 	case "ShowCompare":
 		r, okReq := req.(*pb.ShowCompareRequest)
 		if !okReq || r == nil {
-			return config.AuthorizeConfigShowCompare(cfg, class)
+			return configReadSnapshots{}, config.AuthorizeConfigShowCompare(cfg, class)
 		}
 		// #15995: a scoped compare discloses descendants on BOTH arms.
 		var trees []*config.ConfigTree
+		snaps := configReadSnapshots{}
 		if s.store != nil {
 			if r.GetActiveBaseline() || r.GetRollbackN() > 0 {
 				slot, other := s.store.RollbackCompareTrees(int(r.GetRollbackN()), r.GetActiveBaseline())
 				trees = []*config.ConfigTree{slot, other}
+				snaps.Primary, snaps.Other = slot, other
 			} else {
 				active, candidate := s.store.CompareTrees()
 				trees = []*config.ConfigTree{active, candidate}
+				snaps.Primary, snaps.Other = active, candidate
 			}
 		}
-		return config.AuthorizeConfigShowCompareAtPathRendered(cfg, class, r.GetPath(), trees...)
+		return snaps, config.AuthorizeConfigShowCompareAtPathRendered(cfg, class, r.GetPath(), trees...)
 	case "ShowRollback":
 		r, okReq := req.(*pb.ShowRollbackRequest)
 		if !okReq || r == nil {
 			if restricted, err := configReadRestricted(cfg, class); err != nil {
-				return err
+				return configReadSnapshots{}, err
 			} else if restricted {
-				return fmt.Errorf("permission denied: login class %q restricts configuration or command paths and this ShowRollback request cannot be adjudicated (#14707)", class)
+				return configReadSnapshots{}, fmt.Errorf("permission denied: login class %q restricts configuration or command paths and this ShowRollback request cannot be adjudicated (#14707)", class)
 			}
-			return nil
+			return configReadSnapshots{}, nil
 		}
 		// #15995: price the rollback slot's rendered descendants.
+		// Display inheritance prices the expanded slot tree.
 		var trees []*config.ConfigTree
+		nodeID := -1
 		if s.store != nil {
 			if tree := s.store.RollbackTree(int(r.GetN())); tree != nil {
 				trees = []*config.ConfigTree{tree}
 			}
+			nodeID = s.store.NodeID()
 		}
-		return config.AuthorizeConfigShowRollbackAtPathRendered(cfg, class, r.GetPath(),
+		snaps := configReadSnapshots{NodeID: nodeID}
+		if len(trees) > 0 {
+			snaps.Primary = trees[0]
+		}
+		if r.GetFormat() == pb.ConfigFormat_INHERITANCE {
+			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(cfg, class, r.GetPath(),
+				config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), nodeID, trees...)
+		}
+		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(cfg, class, r.GetPath(),
 			config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat())), trees...)
 	}
-	return nil
+	return configReadSnapshots{}, nil
 }
 
 func configReadRestricted(cfg *config.Config, class string) (bool, error) {

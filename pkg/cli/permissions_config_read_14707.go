@@ -52,10 +52,12 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 					if n, err := strconv.Atoi(rest[2]); err == nil && n >= 0 {
 						slot, other := c.store.RollbackCompareTrees(n, false)
 						trees = []*config.ConfigTree{slot, other}
+						c.setRenderSnapshots15995(slot, other)
 					}
 				} else {
 					active, candidate := c.store.CompareTrees()
 					trees = []*config.ConfigTree{active, candidate}
+					c.setCompareSnapshots15995(active, candidate)
 				}
 			}
 			return config.AuthorizeConfigShowCompareAtPathRendered(cfg, c.userClass, comparePath, trees...)
@@ -93,6 +95,9 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 	var trees []*config.ConfigTree
 	if c.store != nil {
 		trees = c.store.ShowConfigTrees("candidate")
+		if len(trees) > 0 {
+			c.setRenderSnapshots15995(nil, trees[0])
+		}
 	}
 	return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, full, displaySuffix14707(suffix), trees...)
 }
@@ -129,12 +134,18 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			if len(args) != 4 {
 				return nil // handler usage error; renders nothing
 			}
-			if n, err := strconv.Atoi(args[3]); err != nil || n < 0 {
+			n, err := strconv.Atoi(args[3])
+			if err != nil || n < 0 {
 				return nil
 			}
 			// #15657 V45-03: operational compare diffs against
 			// ACTIVE — a whole committed-tree diff, adjudicated
 			// like ShowRollback, not the candidate compare.
+			// #15995 fold: stash the priced arms for the handler.
+			if c.store != nil {
+				slot, other := c.store.RollbackCompareTrees(n, true)
+				c.setRenderSnapshots15995(slot, other)
+			}
 			return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 		}
 		n, err := strconv.Atoi(args[2])
@@ -150,16 +161,28 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			// #15657 V48-02: display formats carry an optional
 			// pre-pipe subtree path; a path render is priced as a
 			// path read, a whole render as a rollback read.
-			// #15995: price the slot's rendered descendants.
+			// #15995: price the slot's rendered descendants;
+			// display inheritance prices the expanded slot tree.
 			suffix := config.ConfigShowDisplaySuffix(displaySuffix14707("display " + displayFormatName(format)))
 			if len(rbPath) > 0 {
 				var trees []*config.ConfigTree
+				nodeID := -1
 				if c.store != nil {
 					if tree := c.store.RollbackTree(n); tree != nil {
 						trees = []*config.ConfigTree{tree}
+						c.setRenderSnapshots15995(tree, nil)
 					}
+					nodeID = c.store.NodeID()
+				}
+				if format == displayPipeInheritance {
+					return config.AuthorizeExpandedConfigShowPathRendered(cfg, c.userClass, rbPath, suffix, nodeID, trees...)
 				}
 				return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, rbPath, suffix, trees...)
+			}
+			if c.store != nil {
+				if tree := c.store.RollbackTree(n); tree != nil {
+					c.setRenderSnapshots15995(tree, nil)
+				}
 			}
 			return config.AuthorizeConfigShowRollback(cfg, c.userClass, suffix)
 		}
@@ -173,6 +196,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				if c.store != nil {
 					slot, other := c.store.RollbackCompareTrees(n, true)
 					trees = []*config.ConfigTree{slot, other}
+					c.setRenderSnapshots15995(slot, other)
 				}
 				return config.AuthorizeConfigShowRollbackAtPathRendered(cfg, c.userClass, rbPath, "", trees...)
 			}
@@ -180,6 +204,10 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 		}
 		for _, a := range rest {
 			if a == "compare" {
+				if c.store != nil {
+					slot, other := c.store.RollbackCompareTrees(n, true)
+					c.setRenderSnapshots15995(slot, other)
+				}
 				return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 			}
 		}
@@ -193,20 +221,45 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			if c.store != nil {
 				if tree := c.store.RollbackTree(n); tree != nil {
 					trees = []*config.ConfigTree{tree}
+					c.setRenderSnapshots15995(tree, nil)
 				}
 			}
 			return config.AuthorizeConfigShowPathRendered(cfg, c.userClass, rbPath, "", trees...)
 		}
+		if c.store != nil {
+			if tree := c.store.RollbackTree(n); tree != nil {
+				c.setRenderSnapshots15995(tree, nil)
+			}
+		}
 		return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
 	case "login":
-		return config.AuthorizeConfigShowSystemPath(cfg, c.userClass,
-			[]string{"system", "login"}, "show system login")
+		// #15995 fold: `show system login` prints the whole
+		// system login subtree — price its rendered descendants
+		// in the active tree, not just the `system login` root.
+		var trees []*config.ConfigTree
+		if c.store != nil {
+			trees = c.store.ShowConfigTrees("active")
+			if len(trees) > 0 {
+				c.setRenderSnapshots15995(trees[0], nil)
+			}
+		}
+		return config.AuthorizeConfigShowSystemPathRendered(cfg, c.userClass,
+			[]string{"system", "login"}, "show system login", trees...)
 	case "internet-options":
 		return config.AuthorizeConfigShowSystemPath(cfg, c.userClass,
 			[]string{"system", "internet-options"}, "show system internet-options")
 	case "root-authentication":
-		return config.AuthorizeConfigShowSystemPath(cfg, c.userClass,
-			[]string{"system", "root-authentication"}, "show system root-authentication")
+		// #15995 fold: same whole-subtree render at
+		// system root-authentication.
+		var trees []*config.ConfigTree
+		if c.store != nil {
+			trees = c.store.ShowConfigTrees("active")
+			if len(trees) > 0 {
+				c.setRenderSnapshots15995(trees[0], nil)
+			}
+		}
+		return config.AuthorizeConfigShowSystemPathRendered(cfg, c.userClass,
+			[]string{"system", "root-authentication"}, "show system root-authentication", trees...)
 	case "configuration":
 		if len(args) >= 3 && args[2] == "rescue" {
 			return config.AuthorizeConfigShowRescue(cfg, c.userClass)
@@ -263,10 +316,19 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 	// the configuration pair by passing a class whose operational
 	// verdict the caller already took: AuthorizeConfigShowPath checks
 	// both, so call the path arm via the config-only helper below.
-	// #15995: price rendered descendants of the active tree too.
+	// #15995: price rendered descendants of the active tree too;
+	// | display inheritance prices the expanded active tree.
 	var trees []*config.ConfigTree
+	nodeID := -1
 	if c.store != nil {
 		trees = c.store.ShowConfigTrees("active")
+		if len(trees) > 0 {
+			c.setRenderSnapshots15995(trees[0], nil)
+		}
+		nodeID = c.store.NodeID()
+	}
+	if displaySuffix14707(display) == "inheritance" {
+		return config.AuthorizeExpandedConfigPathOnlyRendered(cfg, c.userClass, path, nodeID, trees...)
 	}
 	return config.AuthorizeConfigPathOnlyRendered(cfg, c.userClass, path, trees...)
 }
@@ -275,4 +337,44 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 // shared gate consumes ("set"); "" stays "".
 func displaySuffix14707(display string) string {
 	return strings.TrimPrefix(display, "display ")
+}
+
+// setRenderSnapshots15995 records the priced snapshots for the handler
+// of the in-flight dispatch: slotOrActive is the primary rendered tree
+// (active for show configuration / show system, the rollback slot for
+// rollback renders), other is the second compare arm when present.
+func (c *CLI) setRenderSnapshots15995(slotOrActive, other *config.ConfigTree) {
+	if c.renderSnapshots15995 == nil {
+		c.renderSnapshots15995 = map[string]*config.ConfigTree{}
+	}
+	if slotOrActive != nil {
+		c.renderSnapshots15995["active"] = slotOrActive
+		c.renderSnapshots15995["slot"] = slotOrActive
+	}
+	if other != nil {
+		c.renderSnapshots15995["other"] = other
+	}
+}
+
+// setCompareSnapshots15995 records both candidate-compare arms.
+func (c *CLI) setCompareSnapshots15995(active, candidate *config.ConfigTree) {
+	if c.renderSnapshots15995 == nil {
+		c.renderSnapshots15995 = map[string]*config.ConfigTree{}
+	}
+	if active != nil {
+		c.renderSnapshots15995["active"] = active
+	}
+	if candidate != nil {
+		c.renderSnapshots15995["candidate"] = candidate
+	}
+}
+
+// renderSnapshot15995 returns the priced snapshot for key, or nil when
+// this dispatch was not gated with snapshots (ungated/superuser path —
+// handlers then use the store renderers as before).
+func (c *CLI) renderSnapshot15995(key string) *config.ConfigTree {
+	if c.renderSnapshots15995 == nil {
+		return nil
+	}
+	return c.renderSnapshots15995[key]
 }

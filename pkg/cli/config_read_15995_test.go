@@ -134,3 +134,131 @@ func TestCLIConfigModeShowAncestorDeniedDescendant15995(t *testing.T) {
 	}
 	store.SetEditPath(nil)
 }
+
+// Fold C2: abbreviated operational commands resolve in the handler;
+// the gate must resolve them the same way or `show conf` slips past.
+func TestCLIAbbreviatedShowConfiguration15995(t *testing.T) {
+	store := cli15995Store(t)
+	c := &CLI{store: store, userClass: "ancestor-view"}
+	for _, line := range []string{
+		"show conf security",
+		"show configur security",
+		"show conf",
+	} {
+		if err := c.dispatchOperational(line); err == nil {
+			t.Errorf("operational %q was ALLOWED (#15995 C2 abbreviation bypass)", line)
+		}
+	}
+	out := captureStdout(t, func() {
+		if err := c.dispatchOperational("show conf security zones"); err != nil {
+			t.Errorf("abbreviated allowed sibling refused: %v", err)
+		}
+	})
+	if !strings.Contains(out, "ZONE-DESC-15995") || strings.Contains(out, "ipsec") {
+		t.Errorf("abbreviated zones render wrong:\n%s", out)
+	}
+}
+
+// Fold C5: `show system login` / `show system root-authentication`
+// render whole subtrees; a denied strict descendant refuses them.
+func TestCLIShowSystemSubtreeDescendant15995(t *testing.T) {
+	text := `
+system {
+    host-name cli-15995-sys;
+    root-authentication { encrypted-password "$6$CLILEAK00$ROOTPWHASH0000000000000000000000000000000000000000000000000000000000000000000000000000"; }
+    login {
+        class login-view {
+            permissions [ view configure ];
+            deny-configuration "^system login user alice$";
+        }
+        class root-view {
+            permissions [ view configure ];
+            deny-configuration "^system root-authentication encrypted-password";
+        }
+        user alice { class login-view; }
+        user bob { class login-view; }
+    }
+}
+`
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(text); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+
+	c := &CLI{store: store, userClass: "login-view"}
+	if err := c.dispatchOperational("show system login"); err == nil {
+		t.Error("`show system login` ALLOWED though it renders denied user alice (#15995 C5)")
+	}
+	// Allowed control: bob's subtree via show configuration is not the
+	// denied alice node — the [system login user bob] path renders bob.
+	out := captureStdout(t, func() {
+		if err := c.dispatchOperational("show configuration system login user bob"); err != nil {
+			t.Errorf("allowed user bob read refused: %v", err)
+		}
+	})
+	if !strings.Contains(out, "bob") || strings.Contains(out, "alice") {
+		t.Errorf("user bob render wrong:\n%s", out)
+	}
+	c2 := &CLI{store: store, userClass: "root-view"}
+	if err := c2.dispatchOperational("show system root-authentication"); err == nil {
+		t.Error("`show system root-authentication` ALLOWED though it renders denied encrypted-password (#15995 C5)")
+	}
+}
+
+// Fold C3 (CLI): group-supplied denied descendant under
+// `display inheritance` must refuse; ordinary render is the control.
+func TestCLIInheritanceGroupDescendant15995(t *testing.T) {
+	text := `
+system {
+    host-name cli-15995-inh;
+    login {
+        class ancestor-view {
+            permissions [ view configure ];
+            deny-configuration "^security ipsec";
+        }
+        user ancuser { class ancestor-view; }
+    }
+}
+groups {
+    G {
+        security {
+            ipsec { vpn vpn1 { bind-interface st0.0; pre-shared-key ascii-text dummy15995; } }
+        }
+    }
+}
+apply-groups G;
+security {
+    zones { security-zone trust { description "ZONE-DESC-15995"; } }
+}
+`
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(text); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	c := &CLI{store: store, userClass: "ancestor-view"}
+	if err := c.dispatchOperational("show configuration security | display inheritance"); err == nil {
+		t.Error("inheritance [security] ALLOWED though expanded render carries ipsec (#15995 C3)")
+	}
+	out := captureStdout(t, func() {
+		if err := c.dispatchOperational("show configuration security zones | display inheritance"); err != nil {
+			t.Errorf("expanded zones refused: %v", err)
+		}
+	})
+	if !strings.Contains(out, "ZONE-DESC-15995") {
+		t.Errorf("expanded zones render lost content:\n%s", out)
+	}
+}

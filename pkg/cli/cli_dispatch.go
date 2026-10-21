@@ -54,10 +54,16 @@ func (c *CLI) checkConfigModePerm(line string) error {
 }
 
 func (c *CLI) dispatch(line string) error {
+	// #15995 fold: priced render snapshots live for exactly one
+	// dispatch. Clear at entry and on return so a later direct
+	// handler call never renders a previous command's snapshot.
+	// (dispatchWithPipe re-enters dispatch for its inner command;
+	// that frame prices and clears its own snapshots.)
+	c.renderSnapshots15995 = nil
+	defer func() { c.renderSnapshots15995 = nil }()
 	if cmd, pipeType, pipeArg, ok := cliterm.SplitPipe(line); ok {
 		return c.dispatchWithPipe(cmd, pipeType, pipeArg)
 	}
-
 	if c.store.InConfigMode() {
 		// #14986: never route into config mode on the global flag
 		// alone. A session that did not itself pass the gated
@@ -368,19 +374,28 @@ func (c *CLI) dispatchOperational(line string) error {
 	// whole-tree render refuses a configuration-restricted class; an
 	// explicit path is adjudicated per-path (the operational arm above
 	// already charged the path/format-scoped deny-commands).
-	if parts[0] == "show" && len(parts) >= 2 && parts[1] == "configuration" {
-		if err := c.checkShowConfigurationRead(parts[2:]); err != nil {
-			return err
-		}
-	}
-	// #14987: `show system rollback|login|root-authentication|
-	// configuration rescue` render configuration through spellings the
-	// gate above charged only on their literal command. The
-	// *-configuration pair and the anchored `^show configuration$`
-	// alternate form apply there too (parts[1] is already resolved).
-	if parts[0] == "show" && len(parts) >= 2 && parts[1] == "system" {
-		if err := c.checkShowSystemConfigRead(parts[1:]); err != nil {
-			return err
+	//
+	// #15995 fold (Codex C2): resolve the `show` subcommand exactly as
+	// handleShow resolves it (Junos prefix matching over the show
+	// tree) BEFORE dispatching to the config gates. Judging the raw
+	// second token let `show conf security` slip past
+	// checkShowConfigurationRead while the handler resolved it to
+	// `show configuration security` and rendered the denied subtree.
+	// An unresolvable/ambiguous token renders nothing (the handler
+	// errors), so it needs no adjudication here.
+	if parts[0] == "show" && len(parts) >= 2 {
+		showTree := operationalTree["show"].Children
+		if resolved, rerr := resolveCommand(parts[1], keysFromTree(showTree)); rerr == nil {
+			switch resolved {
+			case "configuration":
+				if err := c.checkShowConfigurationRead(parts[2:]); err != nil {
+					return err
+				}
+			case "system":
+				if err := c.checkShowSystemConfigRead(parts[1:]); err != nil {
+					return err
+				}
+			}
 		}
 	}
 

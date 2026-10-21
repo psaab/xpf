@@ -604,9 +604,19 @@ Three consequences an operator should know:
   the rollback slot): a strict descendant the `*-configuration`
   pair denies — or an `allow-configuration` allowlist does not
   cover — refuses the ancestor read (request an allowed subtree,
-  e.g. `security zones`, instead). The operational pair is still
-  charged once on the requested command; a descendant is not a
-  command spelling the operator typed.
+  e.g. `security zones`, instead). The price uses each rendered
+  node's complete path: a selector that truncates a multi-key node
+  (`firewall filter`, `security policies from-zone trust`) still
+  prices the instance the renderer prints. `| display inheritance`
+  prices the apply-groups-expanded tree the renderer produces, and
+  `show system login` / `show system root-authentication` price
+  their whole rendered subtrees the same way; abbreviated CLI
+  spellings (`show conf …`) are resolved before the gate, exactly
+  as the handler resolves them. Authorization and rendering share
+  one deep-copy snapshot taken under the store lock, so the priced
+  generation is the rendered generation. The operational pair is
+  still charged once on the requested command; a descendant is not
+  a command spelling the operator typed.
 
   Residual closed by #14987: on the CLI the same decision now reaches
   the `show system …` spellings that render configuration —

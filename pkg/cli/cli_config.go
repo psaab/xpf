@@ -533,9 +533,18 @@ func (c *CLI) handleConfigShow(args []string) error {
 			comparePath = append(comparePath, c.store.GetEditPath()...)
 			comparePath = append(comparePath, path...)
 			if len(pipeRest) == 1 {
-				if redact {
+				activeSnap := c.renderSnapshot15995("active")
+				candSnap := c.renderSnapshot15995("candidate")
+				switch {
+				case activeSnap != nil || candSnap != nil:
+					if redact {
+						fmt.Print(configstore.RenderCompareRedacted(activeSnap, candSnap, comparePath, candSnap != nil))
+					} else {
+						fmt.Print(configstore.RenderCompareCleartext(activeSnap, candSnap, comparePath, candSnap != nil))
+					}
+				case redact:
 					fmt.Print(c.store.ShowCompareRedactedAtPath(comparePath))
-				} else {
+				default:
 					fmt.Print(c.store.ShowCompareAtPath(comparePath))
 				}
 				return nil
@@ -548,9 +557,23 @@ func (c *CLI) handleConfigShow(args []string) error {
 					return fmt.Errorf("usage: show | compare rollback <N> (0 = active configuration)")
 				}
 				var diff string
-				if redact {
+				slotSnap := c.renderSnapshot15995("slot")
+				candSnap := c.renderSnapshot15995("candidate")
+				_ = candSnap
+				switch {
+				case slotSnap != nil:
+					// Gate stashed (slot, candidate) via
+					// setRenderSnapshots15995: slot in "slot",
+					// candidate in "other".
+					other := c.renderSnapshot15995("other")
+					if redact {
+						diff = configstore.RenderCompareRedacted(slotSnap, other, comparePath, other != nil)
+					} else {
+						diff = configstore.RenderCompareCleartext(slotSnap, other, comparePath, other != nil)
+					}
+				case redact:
 					diff, err = c.store.ShowCompareRollbackRedactedAtPath(n, comparePath)
-				} else {
+				default:
 					diff, err = c.store.ShowCompareRollbackAtPath(n, comparePath)
 				}
 				if err != nil {
@@ -581,38 +604,50 @@ func (c *CLI) handleConfigShow(args []string) error {
 		}
 	}
 
-	var output string
+	candSnap := c.renderSnapshot15995("candidate")
+	formatName := ""
 	switch format {
 	case displayPipeJSON:
-		switch {
-		case redact:
-			output = c.store.ShowCandidateJSONRedacted(displayPath)
-		case len(displayPath) > 0:
-			output = c.store.ShowCandidatePathJSON(displayPath)
-		default:
-			output = c.store.ShowCandidateJSON()
-		}
+		formatName = "json"
 	case displayPipeSet:
-		switch {
-		case redact:
-			output = c.store.ShowCandidateSetRedacted(displayPath)
-		case len(displayPath) > 0:
-			output = c.store.ShowCandidatePathSet(displayPath)
-		default:
-			output = c.store.ShowCandidateSet()
-		}
+		formatName = "set"
 	case displayPipeXML:
+		formatName = "xml"
+	}
+	var output string
+	switch format {
+	case displayPipeJSON, displayPipeSet, displayPipeXML:
 		switch {
+		case candSnap != nil && redact:
+			output = configstore.RenderShowRedacted(candSnap, displayPath, formatName)
+		case candSnap != nil:
+			output = configstore.RenderShowCleartext(candSnap, displayPath, formatName)
+		case redact && format == displayPipeJSON:
+			output = c.store.ShowCandidateJSONRedacted(displayPath)
+		case redact && format == displayPipeSet:
+			output = c.store.ShowCandidateSetRedacted(displayPath)
 		case redact:
 			output = c.store.ShowCandidateXMLRedacted(displayPath)
+		case len(displayPath) > 0 && format == displayPipeJSON:
+			output = c.store.ShowCandidatePathJSON(displayPath)
+		case len(displayPath) > 0 && format == displayPipeSet:
+			output = c.store.ShowCandidatePathSet(displayPath)
 		case len(displayPath) > 0:
 			output = c.store.ShowCandidatePathXML(displayPath)
+		case format == displayPipeJSON:
+			output = c.store.ShowCandidateJSON()
+		case format == displayPipeSet:
+			output = c.store.ShowCandidateSet()
 		default:
 			output = c.store.ShowCandidateXML()
 		}
 	case displayPipeInheritance:
 		var inhErr error
 		switch {
+		case candSnap != nil && redact:
+			output, inhErr = configstore.RenderShowInheritanceRedacted(candSnap, displayPath, c.store.NodeID())
+		case candSnap != nil:
+			output, inhErr = configstore.RenderShowInheritanceCleartext(candSnap, displayPath, c.store.NodeID())
 		case redact:
 			output, inhErr = c.store.ShowCandidateInheritanceRedacted(displayPath)
 		case len(displayPath) > 0:
@@ -627,6 +662,10 @@ func (c *CLI) handleConfigShow(args []string) error {
 	default:
 		// Show scoped to path (editPath + args), or the whole candidate.
 		switch {
+		case candSnap != nil && redact:
+			output = configstore.RenderShowRedacted(candSnap, displayPath, "text")
+		case candSnap != nil:
+			output = configstore.RenderShowCleartext(candSnap, displayPath, "text")
 		case redact:
 			output = c.store.ShowCandidateRedacted(displayPath)
 		case len(displayPath) > 0:

@@ -217,3 +217,164 @@ func TestConfigShowRenderedUnrestricted15995(t *testing.T) {
 		t.Errorf("empty class refused [security]: %v", err)
 	}
 }
+
+// Fold C1: a terminal partial multi-key selector selects a node whose
+// complete keys are longer than the request. The renderer prints the
+// complete node, so pricing must use the complete rendered path.
+func TestConfigShowPartialMultiKeySelector15995(t *testing.T) {
+	cfg := cfg15995(t, "", "^security policies from-zone trust to-zone untrust$")
+	tree, errs := NewParser(`security {
+    policies {
+        from-zone trust to-zone untrust {
+            policy p1 {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+            }
+        }
+        from-zone trust to-zone trust {
+            policy p2 {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+            }
+        }
+    }
+}`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("multi-key fixture parse: %v", errs)
+	}
+	// Premise: the truncated selector renders the complete denied node.
+	if out := tree.FormatPathRedacted([]string{"security", "policies", "from-zone", "trust"}); !strings.Contains(out, "to-zone untrust") {
+		t.Fatalf("premise broken: truncated selector does not render the complete node:\n%s", out)
+	}
+	for _, path := range [][]string{
+		{"security", "policies", "from-zone", "trust"},
+		{"security", "policies", "from-zone"},
+		{"security", "policies"},
+	} {
+		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", tree); err == nil {
+			t.Errorf("ShowConfig %v was ALLOWED though it renders the denied complete node (#15995 C1)", path)
+		}
+	}
+	// The allowed sibling context (different to-zone) still renders.
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited",
+		[]string{"security", "policies", "from-zone", "trust", "to-zone", "trust"}, "", tree); err != nil {
+		t.Errorf("allowed from-zone trust to-zone trust selector refused: %v", err)
+	}
+	// A leaf value token denied by identity: system host-name value.
+	leafCfg := cfg15995(t, "", "^system host-name SECRET-HOST-15995$")
+	leafTree, errs := NewParser(`system { host-name SECRET-HOST-15995; }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("leaf fixture parse: %v", errs)
+	}
+	if err := AuthorizeConfigShowPathRendered(leafCfg, "limited", []string{"system"}, "", leafTree); err == nil {
+		t.Error("ShowConfig [system] allowed though rendered leaf `system host-name SECRET-HOST-15995` is denied")
+	}
+}
+
+// Fold C3: display inheritance renders the apply-groups-expanded tree.
+// Pricing must expand exactly as the renderer does, or a group-supplied
+// denied descendant slips past the raw-tree walk.
+func TestConfigShowInheritanceExpandedDescendant15995(t *testing.T) {
+	cfg := cfg15995(t, "", "^security ipsec")
+	tree, errs := NewParser(`groups {
+    G {
+        security {
+            ipsec {
+                vpn vpn1 {
+                    bind-interface st0.0;
+                    pre-shared-key ascii-text dummy15995;
+                }
+            }
+        }
+    }
+}
+apply-groups G;
+security {
+    zones {
+        security-zone trust { description "ZONE-DESC-15995"; }
+    }
+}`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("inheritance fixture parse: %v", errs)
+	}
+	// Premise: raw render has no ipsec; expanded inheritance render does.
+	if out := tree.FormatPathRedacted([]string{"security"}); strings.Contains(out, "ipsec") {
+		t.Fatalf("premise broken: raw [security] render already carries ipsec:\n%s", out)
+	}
+	inh, err := tree.FormatPathInheritanceRedactedForNode([]string{"security"}, -1)
+	if err != nil {
+		t.Fatalf("inheritance render: %v", err)
+	}
+	if !strings.Contains(inh, "ipsec") {
+		t.Fatalf("premise broken: expanded inheritance render carries no ipsec:\n%s", inh)
+	}
+	// Raw price (the bug) would admit; expanded price must refuse.
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "display inheritance", tree); err != nil {
+		t.Fatalf("raw-tree price unexpectedly refused (test premise changed): %v", err)
+	}
+	if err := AuthorizeExpandedConfigShowPathRendered(cfg, "limited", []string{"security"}, "display inheritance", -1, tree); err == nil {
+		t.Error("display inheritance [security] was ALLOWED though expanded render carries denied ipsec (#15995 C3)")
+	}
+	// Allowed sibling still renders expanded.
+	if err := AuthorizeExpandedConfigShowPathRendered(cfg, "limited", []string{"security", "zones"}, "display inheritance", -1, tree); err != nil {
+		t.Errorf("expanded [security zones] must stay admitted: %v", err)
+	}
+	// System-path rendered variant (fold C5 at the shared layer).
+	sysCfg := cfg15995(t, "", "^system login user alice$")
+	sysTree, errs := NewParser(`system {
+    login {
+        user alice { class limited; }
+        user bob { class limited; }
+    }
+}`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("system fixture parse: %v", errs)
+	}
+	if err := AuthorizeConfigShowSystemPathRendered(sysCfg, "limited", []string{"system", "login"}, "show system login", sysTree); err == nil {
+		t.Error("show system login was ALLOWED though it renders denied `system login user alice` (#15995 C5)")
+	}
+	if err := AuthorizeConfigShowSystemPath(sysCfg, "limited", []string{"system", "login"}, "show system login"); err != nil {
+		t.Fatalf("premise: unrendered system path price should admit (only root priced): %v", err)
+	}
+}
+
+// Fold F1 (GLM probe-confirmed): navigatePath's terminal branch matches
+// a node by its first key alone (width 1), so a request naming only the
+// keyword (`firewall filter`, `system login user`) selects every
+// instance node. Pricing must rebuild each matched node's complete
+// path from its full Keys — the instance name the renderer prints —
+// or a deny naming one instance is silently dropped (and the allow
+// mirror over-refuses the nameless selector).
+func TestConfigShowKeywordOnlySelectorPricesInstances15995(t *testing.T) {
+	tree, errs := NewParser(`firewall {
+    filter f1 { term t1 { from { source-address 1.2.3.4/32; } then accept; } }
+    filter f2 { term t1 { then accept; } }
+}`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("F1 fixture parse: %v", errs)
+	}
+	deny := cfg15995(t, "", "^firewall filter f1")
+	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"firewall", "filter"}, "", tree); err == nil {
+		t.Error("[firewall filter] ALLOWED though it renders denied filter f1 (#15995 F1)")
+	}
+	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"firewall", "filter", "f2"}, "", tree); err != nil {
+		t.Errorf("[firewall filter f2] must stay admitted: %v", err)
+	}
+	// Allow mirror: [firewall filter] renders f2 too, which the
+	// allowlist does not cover — refuse; [.. f1] alone admits.
+	allow := cfg15995(t, "^firewall filter f1", "")
+	if err := AuthorizeConfigShowPathRendered(allow, "limited", []string{"firewall", "filter"}, "", tree); err == nil {
+		t.Error("allow ^firewall filter f1: [firewall filter] ALLOWED though it also renders uncovered f2 (#15995 F1)")
+	}
+	if err := AuthorizeConfigShowPathRendered(allow, "limited", []string{"firewall", "filter", "f1"}, "", tree); err != nil {
+		t.Errorf("allow ^firewall filter f1: [firewall filter f1] refused: %v", err)
+	}
+	sysDeny := cfg15995(t, "", "^system login user admin")
+	sysTree, errs := NewParser(`system { login { user admin { class limited; } user bob { class limited; } } }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("F1 system fixture parse: %v", errs)
+	}
+	if err := AuthorizeConfigShowPathRendered(sysDeny, "limited", []string{"system", "login", "user"}, "", sysTree); err == nil {
+		t.Error("[system login user] ALLOWED though it renders denied user admin (#15995 F1)")
+	}
+}

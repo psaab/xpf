@@ -298,9 +298,13 @@ func (s *Server) authorizeRPCContext(ctx context.Context, fullMethod string, req
 		// #14707: the config-READ pair. ShowConfig/ShowCompare/ShowRollback
 		// rendered denied subtrees because the command gate saw only the
 		// bare "show configuration" and the mutation gate ignores reads.
-		if err := s.authorizeRPCConfigRead(cfg, p.Class, fullMethod, req); err != nil {
+		// #15995 fold: stash the priced snapshots so the handler renders
+		// the authorized generation, not a re-resolved store tree.
+		snaps, err := s.authorizeRPCConfigRead(cfg, p.Class, fullMethod, req)
+		if err != nil {
 			return nil, denyRPC(fullMethod, required, p, err)
 		}
+		ctx = context.WithValue(ctx, configReadSnapshotsKey{}, snaps)
 	}
 	return context.WithValue(ctx, authorizedPrincipalKey{}, p), nil
 }

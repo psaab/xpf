@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/cmdtree"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // displayPipeFormat identifies a configuration render format selected by a
@@ -141,38 +142,53 @@ func (c *CLI) handleShow(args []string) error {
 		// the gRPC/REST usage; the cleartext siblings back the whole-tree /
 		// subtree split for the privileged path.
 		redact := c.showConfigRedacted()
-		var output string
+		// #15995 fold: render from the snapshot the gate priced, when
+		// this dispatch was gated (restricted class). Ungated classes
+		// keep the store renderers.
+		snap := c.renderSnapshot15995("active")
+		formatName := ""
 		switch format {
 		case displayPipeJSON:
-			switch {
-			case redact:
-				output = c.store.ShowActiveJSONRedacted(cfgPath)
-			case len(cfgPath) > 0:
-				output = c.store.ShowActivePathJSON(cfgPath)
-			default:
-				output = c.store.ShowActiveJSON()
-			}
+			formatName = "json"
 		case displayPipeSet:
-			switch {
-			case redact:
-				output = c.store.ShowActiveSetRedacted(cfgPath)
-			case len(cfgPath) > 0:
-				output = c.store.ShowActivePathSet(cfgPath)
-			default:
-				output = c.store.ShowActiveSet()
-			}
+			formatName = "set"
 		case displayPipeXML:
+			formatName = "xml"
+		}
+		var output string
+		switch format {
+		case displayPipeJSON, displayPipeSet, displayPipeXML:
 			switch {
+			case snap != nil && redact:
+				output = configstore.RenderShowRedacted(snap, cfgPath, formatName)
+			case snap != nil:
+				output = configstore.RenderShowCleartext(snap, cfgPath, formatName)
+			case redact && format == displayPipeJSON:
+				output = c.store.ShowActiveJSONRedacted(cfgPath)
+			case redact && format == displayPipeSet:
+				output = c.store.ShowActiveSetRedacted(cfgPath)
 			case redact:
 				output = c.store.ShowActiveXMLRedacted(cfgPath)
+			case len(cfgPath) > 0 && format == displayPipeJSON:
+				output = c.store.ShowActivePathJSON(cfgPath)
+			case len(cfgPath) > 0 && format == displayPipeSet:
+				output = c.store.ShowActivePathSet(cfgPath)
 			case len(cfgPath) > 0:
 				output = c.store.ShowActivePathXML(cfgPath)
+			case format == displayPipeJSON:
+				output = c.store.ShowActiveJSON()
+			case format == displayPipeSet:
+				output = c.store.ShowActiveSet()
 			default:
 				output = c.store.ShowActiveXML()
 			}
 		case displayPipeInheritance:
 			var inhErr error
 			switch {
+			case snap != nil && redact:
+				output, inhErr = configstore.RenderShowInheritanceRedacted(snap, cfgPath, c.store.NodeID())
+			case snap != nil:
+				output, inhErr = configstore.RenderShowInheritanceCleartext(snap, cfgPath, c.store.NodeID())
 			case redact:
 				output, inhErr = c.store.ShowActiveInheritanceRedacted(cfgPath)
 			case len(cfgPath) > 0:
@@ -186,6 +202,10 @@ func (c *CLI) handleShow(args []string) error {
 			}
 		default:
 			switch {
+			case snap != nil && redact:
+				output = configstore.RenderShowRedacted(snap, cfgPath, "text")
+			case snap != nil:
+				output = configstore.RenderShowCleartext(snap, cfgPath, "text")
 			case redact:
 				output = c.store.ShowActiveRedacted(cfgPath)
 			case len(cfgPath) > 0:
