@@ -113,26 +113,36 @@ func countNodeUnits(nodes []*Node) int {
 	return n
 }
 
-// LineOccupancy mirrors what a SetPath edit actually pays: it walks the
-// deepest existing node matching the line's path PREFIX (multi-key nodes
-// consume several path elements, exactly as navigation) and returns the
-// parser-unit cost of the nodes along that matched prefix
-// (1+len(Keys) per node). Path segments already present cost 0 net: a
-// replacement's net charge is (new nodes actually created), approximated
-// as tokCharge minus the matched-prefix node units, floored at the
-// line's trailing value tokens. No clone; O(depth + matched nodes).
-func (t *ConfigTree) LineOccupancy(path []string) (matchedUnits int, fullPath bool) {
+// LineTargetKind classifies a set path against the existing tree for
+// delta estimation (#15999): Absent (no strict prefix match), Leaf
+// (full path resolves to a leaf node), Container (full path resolves
+// to a non-leaf, or a strict prefix matches but the tail is new —
+// SetPath then ADDS nodes, incl. twin leaves under containers).
+type LineTargetKind int
+
+const (
+	LineTargetAbsent LineTargetKind = iota
+	LineTargetLeaf
+	LineTargetContainer
+)
+
+// LineOccupancy walks the deepest STRICT (full-key) prefix match,
+// returning target kind and the matched leaf's key count when Leaf.
+// O(depth + sibling scans); no clone.
+func (t *ConfigTree) LineOccupancy(path []string) (kind LineTargetKind, matchedUnits int, leafKeys int) {
 	if t == nil || len(path) == 0 {
-		return 0, false
+		return LineTargetAbsent, 0, 0
 	}
 	children := t.Children
 	pos := 0
+	var deepest *Node
 	for pos < len(path) {
 		found := false
 		for _, child := range children {
 			consumed := matchNodeKeysFull(child, path, pos)
 			if consumed > 0 {
 				matchedUnits += 1 + len(child.Keys)
+				deepest = child
 				children = child.Children
 				pos += consumed
 				found = true
@@ -143,7 +153,16 @@ func (t *ConfigTree) LineOccupancy(path []string) (matchedUnits int, fullPath bo
 			break
 		}
 	}
-	return matchedUnits, pos >= len(path)
+	if deepest == nil {
+		return LineTargetAbsent, 0, 0
+	}
+	if pos < len(path) {
+		return LineTargetContainer, matchedUnits, 0
+	}
+	if deepest.IsLeaf {
+		return LineTargetLeaf, matchedUnits, len(deepest.Keys)
+	}
+	return LineTargetContainer, matchedUnits, 0
 }
 
 // Parser implements a recursive descent parser for Junos configuration syntax.

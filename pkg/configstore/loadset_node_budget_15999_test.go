@@ -438,3 +438,75 @@ func TestContainerTwinAddRefused15999(t *testing.T) {
 	}
 	_ = before
 }
+
+// Pristine witness: a crossing refusal leaves the candidate untouched.
+func TestCrossingRefusalPristine15999(t *testing.T) {
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, config.MaxParseNodes-6)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	s2.candidate = &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+		}},
+	}}
+	before := s2.candidate.NodeCount()
+	huge := "set unknown" + strings.Repeat(" k", 100_000)
+	if _, err := s2.LoadSet(huge); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("100k-token crossing line: err=%v", err)
+	}
+	if got := s2.candidate.NodeCount(); got != before {
+		t.Fatalf("crossing refusal not pristine: %d -> %d", before, got)
+	}
+}
+
+// Annotate at exact cap (spare 0) accepted: zero-unit verb, path via
+// ParseAnnotateCommand (grouped parser would coerce verb into path).
+func TestAnnotateAtExactCapAccepted15999(t *testing.T) {
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, config.MaxParseNodes-6)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	s2.candidate = &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+		}},
+	}}
+	before := s2.candidate.NodeCount()
+	if _, err := s2.LoadSet("annotate system \"reviewer note\""); err != nil {
+		t.Fatalf("annotate at exact cap refused: %v (before=%d)", err, before)
+	}
+	if got := s2.candidate.NodeCount(); got != before {
+		t.Fatalf("annotate changed count %d -> %d", before, got)
+	}
+}
+
+// Order-independence: set FIRST, then deletes, ending below base —
+// end/result adjudication must accept (no mode flags).
+func TestSetFirstMixedRepairAccepted15999(t *testing.T) {
+	s := shrinkWitness15999(t) // over-budget base
+	base := s.candidate.NodeCount()
+	if _, err := s.LoadSet("set system host-name fw2\ndelete system host-name fw2\ndelete system services ssh"); err != nil {
+		t.Fatalf("set-first mixed repair refused: %v (base=%d)", err, base)
+	}
+	if got := s.candidate.NodeCount(); got >= base {
+		t.Fatalf("set-first repair no progress: %d -> %d", base, got)
+	}
+	// Grow-first with NO shrink anywhere on over-budget base refuses:
+	s2 := shrinkWitness15999(t)
+	if _, err := s2.LoadSet("set system domain-name example.com"); err == nil || !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("grow on over-budget: err=%v", err)
+	}
+}

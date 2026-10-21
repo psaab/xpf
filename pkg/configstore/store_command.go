@@ -831,15 +831,13 @@ func isShrinkVerb15999(line string) bool {
 }
 
 func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub bool) (int, error) {
-	// CONTRACT (#15999 adjudication): the WORK cap (line count) applies
-	// pre-replay to EVERY script. For an UNDER-budget base, the token
-	// pre-charge + delta accounting is the fast path and refuses
-	// growing crossings inline. For an OVER-budget base, ANY script
-	// (pure-shrink or mixed delete+set repair) is adjudicated on its
-	// RESULT on the clone the callers already replay onto: accept iff
-	// final <= cap OR final < base (progress); refuse iff final > cap
-	// AND final >= base. Being mixed alone never refuses — that would
-	// strand legitimate recovery of a restored over-budget config.
+	// FINAL CONTRACT (#15999): no mode flags. Every line gets only the
+	// work-bound pre-check (line count + per-line token bound).
+	// Adjudication is RESULT-based at periodic recounts and at the
+	// end: refuse iff currentExact > cap AND currentExact >= baseExact
+	// (no progress). Guards re-arm naturally as the tree shrinks —
+	// order-independent, so set-first mixed repair ending below base
+	// passes and grow-on-overbudget with no progress refuses.
 	nonEmpty := 0
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -850,9 +848,8 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 	if nonEmpty > config.MaxParseNodes {
 		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds work budget %d (#15999)", nonEmpty, config.MaxParseNodes)
 	}
-	base := working.NodeCount()
-	overBase := base > config.MaxParseNodes
-	charged := base
+	baseExact := working.NodeCount()
+	charged := baseExact // upper-bound estimate between recounts
 	count := 0
 	for i, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -862,61 +859,28 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 		if !hasFlatVerb(line) {
 			return count, fmt.Errorf("line %d: is not a set/delete/deactivate/activate/annotate command", i+1)
 		}
-		isShrink := isShrinkVerb15999(line)
-		// Verb effect table: set/edit = path units; annotate/activate
-		// = ZERO new units; delete/deactivate = negative/zero;
-		// unknown verb (verbless coerces to set in the real parser)
-		// = charge full (fail-safe). Verb via tokenizer, matching
-		// ParseSetVerbGroupedClosed's verb decision.
+		// Work-bound per line: tokCharge must UPPER-BOUND the parser
+		// units the line can create. A line's tokens split into at
+		// most len(tokens) nodes, each costing 1+len(Keys); the
+		// widest single node carries all tokens (1+len), intermediate
+		// nodes partition them, so created units <= 2*len(tokens).
+		// Charge 2*fields as the safe bound (split-edit witness:
+		// naive fields+1 under-charged 1200 vs 1502 built).
+		fields := len(strings.Fields(line))
 		verb15999 := flatVerb15999(line)
-		zeroUnit := verb15999 == "annotate" || verb15999 == "activate" || isShrink
-		if overBase && !zeroUnit {
-			// Over-budget base + growing verb: result can only be
-			// >= base unless a prior line in THIS script shrank the
-			// tree. If no shrink has happened yet (count==0 or tree
-			// still over), refuse fast without building; mixed
-			// repair that shrank first falls through to result
-			// adjudication.
-			if cur := working.NodeCount(); cur > config.MaxParseNodes && count == 0 {
-				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
-			} else if cur <= config.MaxParseNodes {
-				// Tree shrank below cap mid-script: re-enter fast path.
-			}
+		charge := 2 * fields
+		switch verb15999 {
+		case "annotate", "activate":
+			charge = 0 // zero new units
+		case "deactivate":
+			charge = 1 // can add an inactive-flag unit worst case
+		case "delete":
+			charge = 0 // negative
 		}
-		if !overBase && !zeroUnit {
-			tokCharge := len(strings.Fields(line)) + 1
-			// Oversized single line: refuse WITHOUT applying it —
-			// token count alone over cap can never fit.
-			if tokCharge-1 > config.MaxParseNodes {
-				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
-			}
-			if charged+tokCharge > config.MaxParseNodes {
-				// Delta = applyEditLine's own unit-delta on the
-				// WORKING clone at this crossing: count the tree,
-				// apply ONLY this bounded line, recount. This is
-				// the source of truth for verb+target-kind
-				// semantics (leaf replace vs container twin-add
-				// vs absent add) — no occupancy guessing. Bounded
-				// by crossing amortization (crossings cross rarely;
-				// each crossing pays O(tree), crossings are at
-				// most one per line and lines <= work cap).
-				if err := applyEditLine(working, line); err != nil {
-					if scrub {
-						return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
-					}
-					return count, err
-				}
-				afterU := working.NodeCount()
-				count++
-				charged = afterU
-				if afterU > config.MaxParseNodes && !overBase {
-					return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
-				}
-				continue
-			} else {
-				charged += tokCharge
-			}
+		if fields > config.MaxParseNodes {
+			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 		}
+		charged += charge
 		if err := applyEditLine(working, line); err != nil {
 			if scrub {
 				return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
@@ -924,19 +888,26 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			return count, err
 		}
 		count++
+		// Recount cadence: every 256 lines, plus at crossings where
+		// the estimate is within the line's subtree margin of cap
+		// (charged is an upper bound, so crossing it triggers the
+		// exact adjudication; below it no recount is needed).
+		// Adjudication ONLY at 256-line cadence and at the end:
+		// a crossing estimate triggers no refusal (a later shrink
+		// in the same script can still bring the result below
+		// base — order-independence). charged tracks the estimate
+		// for telemetry/recount timing only.
 		if count%256 == 0 {
 			exact := working.NodeCount()
-			if exact > config.MaxParseNodes && !overBase {
+			charged = exact
+			if exact > config.MaxParseNodes && exact >= baseExact {
 				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 			}
-			charged = exact
 		}
 	}
 	final := working.NodeCount()
-	if final > config.MaxParseNodes {
-		if !overBase || final >= base {
-			return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
-		}
+	if final > config.MaxParseNodes && final >= baseExact {
+		return count, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
 	}
 	return count, nil
 }
