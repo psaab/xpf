@@ -467,6 +467,14 @@ pub(super) fn populate_interfaces(
     // explicit overrides; retain its origin for the operator-facing sentence.
     let mut contested_host_inbound_sentinels: std::collections::BTreeSet<i32> =
         std::collections::BTreeSet::new();
+    // #16061: the config name claimed by logical-unit rows per ifindex, and
+    // the ifindexes where distinct unit rows claimed different names. A
+    // contested ifindex keeps NO `ifindex_to_config_name` entry at all (see
+    // the per-row write below), mirroring how #7509 refuses a contested zone
+    // rather than guessing one.
+    let mut unit_config_names: BTreeMap<i32, String> = BTreeMap::new();
+    let mut contested_config_name_ifindexes: std::collections::BTreeSet<i32> =
+        std::collections::BTreeSet::new();
 
     // #12646: Go merges physical + unit overrides into an effective per-unit
     // set, keyed by the logical unit name. A unit-0 row shares its ifindex with
@@ -504,9 +512,40 @@ pub(super) fn populate_interfaces(
             iface.linux_name.clone()
         };
         state.ifindex_to_name.insert(iface.ifindex, label);
-        state
-            .ifindex_to_config_name
-            .insert(iface.ifindex, iface.name.clone());
+        // #16061: distinct logical-unit rows can collapse onto one netdev
+        // ifindex (interface-level tunnels via `TunnelNameMap`, unit 0 on its
+        // base). A single ifindex-keyed config name cannot name two units, so
+        // keep the name only while every logical-unit row on the ifindex
+        // agrees; a later sibling with a different name withdraws it (both
+        // row orders fail closed the same way). Base rows are aliases of the
+        // device, not traffic identities, and never contest the name — the
+        // ordinary base+unit-0 pair keeps the unit's name exactly as today.
+        // An absent name reads as "" at every NAT-scope consumer, so a
+        // `from interface` / `to interface` rule scoped to either sibling
+        // simply never matches traffic on the shared ifindex instead of
+        // matching whichever sibling happened to be written last.
+        if is_logical_unit_row(&iface.name, iface.is_unit) {
+            match unit_config_names.entry(iface.ifindex) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(iface.name.clone());
+                    state
+                        .ifindex_to_config_name
+                        .insert(iface.ifindex, iface.name.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(slot) => {
+                    if slot.get() != &iface.name {
+                        contested_config_name_ifindexes.insert(iface.ifindex);
+                        state.ifindex_to_config_name.remove(&iface.ifindex);
+                    }
+                }
+            }
+        } else if !contested_config_name_ifindexes.contains(&iface.ifindex)
+            && !unit_config_names.contains_key(&iface.ifindex)
+        {
+            state
+                .ifindex_to_config_name
+                .insert(iface.ifindex, iface.name.clone());
+        }
         // #10313: a tagged logical-unit row can be the only surviving
         // snapshot row for its physical parent (the base row was unresolved
         // or skipped). Keep the parent config identity available for the
@@ -515,10 +554,19 @@ pub(super) fn populate_interfaces(
         // dotted base interface names must not be mistaken for units.
         if iface.parent_ifindex > 0 && is_logical_unit_row(&iface.name, iface.is_unit) {
             if let Some((base_name, _unit)) = iface.name.rsplit_once('.') {
-                state
-                    .ifindex_to_config_name
-                    .entry(iface.parent_ifindex)
-                    .or_insert_with(|| base_name.to_string());
+                // #16061: a unit row whose OWN ifindex is config-name
+                // contested must not publish even its base name onto the
+                // parent slot. When the unit collapses onto its parent
+                // (parent_ifindex == ifindex, e.g. wg0.0/wg0.1 on wg0), that
+                // slot IS the contested ifindex; filling it would resurrect
+                // a name the contest just withdrew — and `wg0` is a prefix
+                // sibling rules must never match through.
+                if !contested_config_name_ifindexes.contains(&iface.parent_ifindex) {
+                    state
+                        .ifindex_to_config_name
+                        .entry(iface.parent_ifindex)
+                        .or_insert_with(|| base_name.to_string());
+                }
             }
         }
         // #9821 (#12): (routing_instance, routing_domain) recorded for an
@@ -1258,6 +1306,33 @@ pub(super) fn populate_interfaces(
         }
         empty_zone_host_inbound_sentinels.insert(*ifindex);
         state.ifindex_host_inbound.entry(*ifindex).or_insert_with(|| crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
+    }
+
+    // #16061: the config-name refusal must be OBSERVABLE for the same reason
+    // the #7509 zone contest below is (#8296): without a line, a NAT rule
+    // scoped `from interface <unit>` on a shared ifindex silently stops
+    // matching with no error anywhere on the box. One line per contested
+    // ifindex per build, naming every unit that claimed it.
+    for ifindex in &contested_config_name_ifindexes {
+        let names: Vec<&str> = snapshot
+            .interfaces
+            .iter()
+            .filter(|row| {
+                row.ifindex == *ifindex && is_logical_unit_row(&row.name, row.is_unit)
+            })
+            .map(|row| row.name.as_str())
+            .collect();
+        eprintln!(
+            "xpf-userspace-dp: WARNING config-name contest on shared ifindex {}: \
+             logical units [{}] share one netdev, so the ifindex carries NO \
+             interface name (#16061). NAT rules scoped `from interface` / \
+             `to interface` to any of these units do not match traffic on this \
+             ifindex; the dataplane sees an ifindex, not a unit, so it cannot \
+             tell which unit a packet arrived on. Give the units distinct \
+             netdevs or scope the NAT rules by zone / routing-instance instead.",
+            ifindex,
+            names.join(", ")
+        );
     }
 
     // #6722: flush the Go builder's egress answer, admitting an ifindex only
@@ -2464,8 +2539,10 @@ mod routing_domain_7160_tests {
     /// last-row-wins clearing; the settled design is the guard — pair
     /// atomicity was never the invariant, membership survival is.)
     ///
-    /// `ifindex_to_config_name` intentionally still takes the last row: it
-    /// is last-wins by design for NAT scope (untouched — byte-identical).
+    /// `ifindex_to_config_name` takes the unit row's name here: the base row
+    /// is an alias, so base+unit-0 keeps the unit's name (#16061); only
+    /// distinct UNIT rows contest the name (pinned in
+    /// `config_name_16061_tests` below).
     ///
     /// FAIL-ON-REVERT: let a zero row overwrite and the domain is lost while
     /// the name flips to the trailing row.
@@ -2498,7 +2575,7 @@ mod routing_domain_7160_tests {
         assert_eq!(
             state.ifindex_to_config_name.get(&10).cloned(),
             Some("ge-0-0-5.0".to_string()),
-            "config_name stays last-wins by design (NAT scope; untouched)"
+            "the unit row's name wins over its base alias (#16061)"
         );
     }
 
@@ -2597,6 +2674,163 @@ mod routing_domain_7160_tests {
             "no claim observed, gate stays false"
         );
         assert_eq!(ingress_routing_domain(&state, 10, 0, None), 0);
+    }
+}
+
+// #16061 (SI-4-name): `ifindex_to_config_name` last-write mis-scopes
+// from-interface NAT on a shared ifindex.
+//
+// Distinct logical units can collapse onto one netdev ifindex — an
+// interface-level tunnel maps EVERY unit onto the tunnel device
+// (`TunnelNameMap`, `pkg/dataplane/userspace/interfaces.go`), and unit 0
+// collapses onto its base. The map holds ONE name per ifindex, so the old
+// unconditional insert named whichever unit row was walked LAST, and a NAT
+// rule scoped `from interface <sibling>` then matched traffic that arrived
+// on the shared device — traffic the dataplane cannot attribute to either
+// unit. The settled answer mirrors #7509's zone discipline: the ifindex
+// keeps a config name only while its logical-unit rows agree on one;
+// distinct unit names contest it and the entry is withdrawn, so scoped NAT
+// fails closed (no match) instead of matching the wrong sibling. Base rows
+// are device aliases, not traffic identities, and never contest.
+#[cfg(test)]
+mod config_name_16061_tests {
+    use super::*;
+    use crate::protocol::{ConfigSnapshot, InterfaceSnapshot, ZoneSnapshot};
+
+    fn build(snapshot: &ConfigSnapshot) -> ForwardingState {
+        let mut state = ForwardingState::default();
+        crate::afxdp::forwarding_build::zones::populate_zones(snapshot, &mut state);
+        populate_interfaces(
+            snapshot,
+            &mut state,
+            &FastMap::default(),
+            &FastMap::default(),
+        )
+        .expect("populate_interfaces");
+        state
+    }
+
+    fn unit(name: &str, ifindex: i32, zone: &str) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: name.into(),
+            linux_name: "wg0".into(),
+            ifindex,
+            zone: zone.into(),
+            is_unit: Some(true),
+            tunnel: true,
+            ..Default::default()
+        }
+    }
+
+    fn zone(name: &str, id: u16) -> ZoneSnapshot {
+        ZoneSnapshot {
+            name: name.into(),
+            id,
+            ..Default::default()
+        }
+    }
+
+    fn shared_snapshot(rows: Vec<InterfaceSnapshot>) -> ConfigSnapshot {
+        ConfigSnapshot {
+            interfaces: rows,
+            zones: vec![zone("vpn", 1), zone("lan", 2)],
+            ..Default::default()
+        }
+    }
+
+    /// Two distinct units on one ifindex contest the config name in BOTH row
+    /// orders: the ifindex carries no name, so a `from interface` rule scoped
+    /// to either sibling can never match traffic on the shared device.
+    ///
+    /// FAIL-ON-REVERT: restore the unconditional last-write insert and the
+    /// map names the last-walked sibling (`wg0.1` forward, `wg0.0` reversed).
+    #[test]
+    fn distinct_units_sharing_an_ifindex_carry_no_config_name_16061() {
+        for (label, rows) in [
+            (
+                "unit0-first",
+                vec![unit("wg0.0", 42, "vpn"), unit("wg0.1", 42, "vpn")],
+            ),
+            (
+                "unit1-first",
+                vec![unit("wg0.1", 42, "vpn"), unit("wg0.0", 42, "vpn")],
+            ),
+        ] {
+            let state = build(&shared_snapshot(rows));
+            assert_eq!(
+                state.ifindex_to_config_name.get(&42),
+                None,
+                "{label}: distinct units on one ifindex must not let either \
+                 name claim the device (#16061)"
+            );
+        }
+    }
+
+    /// The end-to-end NAT consequence through the real builder + scope
+    /// resolver: traffic resolving to the shared ifindex reports an EMPTY
+    /// ingress interface name, so a rule scoped `from interface wg0.0` (or
+    /// `wg0.1`) cannot match it — regardless of which sibling the rule names
+    /// and regardless of row order.
+    ///
+    /// FAIL-ON-REVERT: with last-write naming the scope reports the
+    /// last-walked sibling and that sibling's scoped rule matches.
+    #[test]
+    fn nat_scope_on_a_contested_ifindex_names_no_interface_16061() {
+        for rows in [
+            vec![unit("wg0.0", 42, "vpn"), unit("wg0.1", 42, "vpn")],
+            vec![unit("wg0.1", 42, "vpn"), unit("wg0.0", 42, "vpn")],
+        ] {
+            let state = build(&shared_snapshot(rows));
+            let scope =
+                crate::afxdp::forwarding::nat_scope_ctx_for_flow(&state, 42, 0, None, 24, 0);
+            assert_eq!(
+                scope.ingress_ifname, "",
+                "a contested shared ifindex must scope to no interface, so \
+                 neither sibling's `from interface` NAT rule matches (#16061)"
+            );
+        }
+    }
+
+    /// Positive controls: the shapes that legitimately share an ifindex keep
+    /// their name byte-identically.
+    ///
+    /// - base + unit 0 (the ordinary collapsed pair): the unit's name wins
+    ///   over its base alias in either order;
+    /// - duplicate rows naming the SAME unit agree, so the name stands;
+    /// - a lone base row keeps its own name (the #10313-era parent fallback
+    ///   consumers read).
+    #[test]
+    fn agreeing_and_alias_rows_keep_their_config_name_16061() {
+        let base = InterfaceSnapshot {
+            name: "wg0".into(),
+            linux_name: "wg0".into(),
+            ifindex: 42,
+            zone: "vpn".into(),
+            is_unit: Some(false),
+            tunnel: true,
+            ..Default::default()
+        };
+        for (label, rows) in [
+            ("base-first", vec![base.clone(), unit("wg0.0", 42, "vpn")]),
+            ("unit-first", vec![unit("wg0.0", 42, "vpn"), base.clone()]),
+            (
+                "same-unit-twice",
+                vec![unit("wg0.0", 42, "vpn"), unit("wg0.0", 42, "vpn")],
+            ),
+        ] {
+            let state = build(&shared_snapshot(rows));
+            assert_eq!(
+                state.ifindex_to_config_name.get(&42).map(String::as_str),
+                Some("wg0.0"),
+                "{label}: the collapsed base+unit-0 pair keeps the unit's name"
+            );
+        }
+        let state = build(&shared_snapshot(vec![base]));
+        assert_eq!(
+            state.ifindex_to_config_name.get(&42).map(String::as_str),
+            Some("wg0"),
+            "a lone base row keeps its own name"
+        );
     }
 }
 

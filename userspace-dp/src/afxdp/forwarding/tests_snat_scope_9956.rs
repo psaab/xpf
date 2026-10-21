@@ -291,3 +291,124 @@ fn fabric_punt_snat_scope_uses_peer_nat_identity_11337() {
         "#11337: RI/interface-scoped SNAT must match on a fabric-punted flow"
     );
 }
+
+/// #16061 (SI-4-name): two logical units collapsed onto ONE ifindex must not
+/// let a `from interface` SNAT rule match through the sibling's name.
+///
+/// An interface-level tunnel maps every unit onto the tunnel device, so
+/// `wg0.0` and `wg0.1` arrive as distinct unit rows sharing ifindex 42.
+/// The old builder inserted each row's name into the single
+/// `ifindex_to_config_name[42]` slot, so the LAST row walked named the
+/// device and a rule scoped `from interface wg0.1` matched traffic the
+/// dataplane can only attribute to ifindex 42 — in either row order the
+/// wrong sibling's rule could fire (or the right one silently miss).
+///
+/// The fix withdraws the name for a contested ifindex, so the scope reports
+/// "" and NEITHER sibling's interface-scoped rule matches, while a
+/// zone-scoped rule on the same traffic still does — the operator's
+/// same-device intent remains expressible, just not per-unit.
+///
+/// FAIL-ON-REVERT: restore last-write naming and the `wg0.1`-scoped rule
+/// matches in unit0-first order (and `wg0.0`'s rule in reversed order).
+#[test]
+fn snat_from_interface_never_matches_a_sibling_on_a_shared_ifindex_16061() {
+    fn shared_unit(name: &str, address: &str) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: name.to_string(),
+            zone: "lan".to_string(),
+            linux_name: "wg0".to_string(),
+            ifindex: 42,
+            parent_ifindex: 42,
+            tunnel: true,
+            is_unit: Some(true),
+            addresses: vec![addr_v4(address)],
+            ..Default::default()
+        }
+    }
+    fn snapshot(rows: Vec<InterfaceSnapshot>, from_interface: &str) -> ConfigSnapshot {
+        let mut interfaces = rows;
+        interfaces.push(InterfaceSnapshot {
+            name: "reth1.0".to_string(),
+            zone: "wan".to_string(),
+            linux_name: "ge-0-0-1".to_string(),
+            ifindex: 24,
+            hardware_addr: "02:bf:72:01:00:01".to_string(),
+            addresses: vec![addr_v4("172.16.80.8/24")],
+            ..Default::default()
+        });
+        super::super::test_fixtures::v5(ConfigSnapshot {
+            zones: vec![
+                ZoneSnapshot {
+                    name: "lan".to_string(),
+                    id: TEST_LAN_ZONE_ID,
+                    host_inbound_configured: true,
+                    host_inbound_system_services: vec!["any-service".to_string()],
+                    ..Default::default()
+                },
+                ZoneSnapshot {
+                    name: "wan".to_string(),
+                    id: TEST_WAN_ZONE_ID,
+                    host_inbound_configured: true,
+                    host_inbound_system_services: vec!["any-service".to_string()],
+                    ..Default::default()
+                },
+            ],
+            interfaces,
+            source_nat_rules: vec![SourceNATRuleSnapshot {
+                name: "snat-shared".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                from_interface: from_interface.to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                interface_mode: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+
+    let flow = unit_flow(Ipv4Addr::new(10, 0, 61, 100), 0);
+    for (label, rows) in [
+        (
+            "unit0-first",
+            vec![
+                shared_unit("wg0.0", "10.0.61.1/24"),
+                shared_unit("wg0.1", "10.0.62.1/24"),
+            ],
+        ),
+        (
+            "unit1-first",
+            vec![
+                shared_unit("wg0.1", "10.0.62.1/24"),
+                shared_unit("wg0.0", "10.0.61.1/24"),
+            ],
+        ),
+    ] {
+        for sibling in ["wg0.0", "wg0.1"] {
+            let forwarding = build_forwarding_state(&snapshot(rows.clone(), sibling));
+            // Precondition: the ifindex really is contested — no name at all,
+            // not one sibling's name.
+            assert_eq!(
+                forwarding.ifindex_to_config_name.get(&42),
+                None,
+                "{label}: shared ifindex 42 must carry no config name (#16061)"
+            );
+            assert!(
+                match_source_nat_for_flow(&forwarding, 42, 0, None, "lan", "wan", 24, &flow)
+                    .is_none(),
+                "{label}: `from interface {sibling}` must never match traffic \
+                 on the shared ifindex — the dataplane cannot tell wg0.0 from \
+                 wg0.1 on one netdev (#16061)"
+            );
+        }
+        // Control: the same traffic DOES match a zone-scoped rule (empty
+        // interface scope), so the refusal is scoped to the interface axis
+        // and is not a blanket NAT outage on the shared device.
+        let forwarding = build_forwarding_state(&snapshot(rows, ""));
+        assert!(
+            match_source_nat_for_flow(&forwarding, 42, 0, None, "lan", "wan", 24, &flow).is_some(),
+            "{label}: a zone-scoped SNAT rule must still match traffic on the \
+             shared ifindex (#16061 control)"
+        );
+    }
+}
