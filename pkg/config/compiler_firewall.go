@@ -1100,15 +1100,90 @@ func effectiveFirewallInstances15997(tree *ConfigTree, colliding map[string]stru
 	return forms
 }
 
-// firewallFilterEffectiveKey15997 is a deterministic deep key over the FULL
-// compiled filter semantics, including unexported term fields
-// (unknownChildren, nameless, routingInstanceTargetFirst/Conflict) that
-// encoding/json silently drops. Two definitions differing only there are
-// NOT identical — e.g. one carrying an unknown child (#10294 strict-reject /
-// tolerant warn) or conflicting routing-instance targets (#11814) — and
-// must stay quarantined. fmt %#v renders unexported fields and is
-// deterministic for the value types used here (slices in authored order,
-// pointers followed). FlexMatch pointers are followed by %#v.
+// effectiveTermProjection15997 lists EVERY semantic field of a compiled
+// term, including the unexported ones encoding/json drops and fmt %#v
+// mishandles (unknownChildren, nameless, routingInstanceTargetFirst /
+// routingInstanceTargetConflict). It is the canonical compared form:
+// pointers are dereferenced by value (FlexMatch), slices keep authored
+// order, no addresses appear. Any new semantic term field MUST be added
+// here — the projection test pins the field count.
+type effectiveTermProjection15997 struct {
+	Name                          string
+	UnknownChildren               []string
+	Nameless                      bool
+	SourceAddresses               []string
+	DestAddresses                 []string
+	SourcePrefixLists             []PrefixListRef
+	DestPrefixLists               []PrefixListRef
+	DSCPs                         []string
+	Protocols                     []string
+	DestinationPorts              []string
+	SourcePorts                   []string
+	SourcePortsExcept             []string
+	DestPortsExcept               []string
+	ICMPTypes                     []int
+	ICMPCodes                     []int
+	UnknownICMPTypes              []string
+	UnknownICMPCodes              []string
+	UnknownPorts                  []string
+	UnknownAddresses              []string
+	TCPFlags                      []string
+	IsFragment                    bool
+	Action                        string
+	TerminalActions               []string
+	RoutingInstanceTargetFirst    string
+	RoutingInstanceTargetConflict string
+	UnknownActions                []string
+	RejectMessageType             string
+	NextTerm                      bool
+	RoutingInstance               string
+	Log                           bool
+	Syslog                        bool
+	Count                         string
+	ForwardingClass               string
+	LossPriority                  string
+	DSCPRewrite                   string
+	Policer                       string
+	FlexMatch                     FlexMatchConfig // value copy; HasFlexMatch distinguishes nil
+	HasFlexMatch                  bool
+	UnknownFlexMatch              []string
+	FlexMatchRangeNames           []string
+	UnknownFrom                   []string
+	ValuelessFrom                 []string
+	CrossFamilyMatchSpellings     []string
+}
+
+func projectTerm15997(t *FirewallFilterTerm) effectiveTermProjection15997 {
+	var flex FlexMatchConfig
+	hasFlex := t.FlexMatch != nil
+	if hasFlex {
+		flex = *t.FlexMatch // deref: compare values, never addresses
+	}
+	return effectiveTermProjection15997{
+		Name: t.Name, UnknownChildren: t.unknownChildren, Nameless: t.nameless,
+		SourceAddresses: t.SourceAddresses, DestAddresses: t.DestAddresses,
+		SourcePrefixLists: t.SourcePrefixLists, DestPrefixLists: t.DestPrefixLists,
+		DSCPs: t.DSCPs, Protocols: t.Protocols, DestinationPorts: t.DestinationPorts,
+		SourcePorts: t.SourcePorts, SourcePortsExcept: t.SourcePortsExcept, DestPortsExcept: t.DestPortsExcept,
+		ICMPTypes: t.ICMPTypes, ICMPCodes: t.ICMPCodes,
+		UnknownICMPTypes: t.UnknownICMPTypes, UnknownICMPCodes: t.UnknownICMPCodes, UnknownPorts: t.UnknownPorts,
+		UnknownAddresses: t.UnknownAddresses, TCPFlags: t.TCPFlags, IsFragment: t.IsFragment,
+		Action: t.Action, TerminalActions: t.TerminalActions,
+		RoutingInstanceTargetFirst: t.routingInstanceTargetFirst, RoutingInstanceTargetConflict: t.routingInstanceTargetConflict,
+		UnknownActions: t.UnknownActions, RejectMessageType: t.RejectMessageType,
+		NextTerm: t.NextTerm, RoutingInstance: t.RoutingInstance,
+		Log: t.Log, Syslog: t.Syslog, Count: t.Count, ForwardingClass: t.ForwardingClass,
+		LossPriority: t.LossPriority, DSCPRewrite: t.DSCPRewrite, Policer: t.Policer,
+		FlexMatch: flex, HasFlexMatch: hasFlex, UnknownFlexMatch: t.UnknownFlexMatch, FlexMatchRangeNames: t.FlexMatchRangeNames,
+		UnknownFrom: t.UnknownFrom, ValuelessFrom: t.ValuelessFrom, CrossFamilyMatchSpellings: t.CrossFamilyMatchSpellings,
+	}
+}
+
+// firewallFilterEffectiveKey15997 is a deterministic canonical key over the
+// FULL compiled filter semantics. The projection contains no pointers, no
+// maps, and no addresses (FlexMatch is value-copied), so fmt %#v of it is
+// deterministic and address-free; identical effective duplicates — nested
+// pointers included — produce the same key at different addresses.
 func firewallFilterEffectiveKey15997(f *FirewallFilter) string {
 	if f == nil {
 		return "<nil>"
@@ -1120,8 +1195,7 @@ func firewallFilterEffectiveKey15997(f *FirewallFilter) string {
 			b.WriteString("term=nil;")
 			continue
 		}
-		// %#v on the term struct covers every field including unexported.
-		fmt.Fprintf(&b, "term=%#v;", *t)
+		fmt.Fprintf(&b, "term=%#v;", projectTerm15997(t))
 	}
 	return b.String()
 }

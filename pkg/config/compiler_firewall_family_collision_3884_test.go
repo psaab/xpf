@@ -368,6 +368,65 @@ firewall {
 	}
 }
 
+// #15997 fold 3: identical FlexMatch duplicates must be PRUNED — the nested
+// *FlexMatchConfig pointers live at different addresses, so an address-
+// printing comparator falsely quarantined them. Key must be by value.
+func TestFirewallFilterIdenticalFlexMatchPruned15997(t *testing.T) {
+	tree := parseHier(t, `
+firewall {
+    family inet {
+        filter blockX {
+            term t1 {
+                from {
+                    flexible-match-range {
+                        range r1 {
+                            match-start layer-3;
+                            byte-offset 12;
+                            bit-length 16;
+                            match-value 0x1234;
+                            match-mask 0xFFFF;
+                        }
+                    }
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+        filter blockX {
+            term t1 {
+                from {
+                    flexible-match-range {
+                        range r1 {
+                            match-start layer-3;
+                            byte-offset 12;
+                            bit-length 16;
+                            match-value 0x1234;
+                            match-mask 0xFFFF;
+                        }
+                    }
+                }
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if _, ok := cfg.Firewall.CollidingNames["blockX"]; ok {
+		t.Fatalf("identical FlexMatch duplicate falsely quarantined (pointer-address key?): %v", cfg.Firewall.CollidingNames)
+	}
+	f, ok := cfg.Firewall.FiltersInet["blockX"]
+	if !ok || len(f.Terms) != 1 || f.Terms[0].FlexMatch == nil {
+		t.Fatalf("identical FlexMatch duplicate must stay enforceable, got %+v ok=%v", f, ok)
+	}
+}
+
 // A filter name shared between family inet and family inet6 is NOT a collision:
 // inet6 has its own dest map (FiltersInet6), so the two coexist. This legitimate
 // dual-stack case (the same filter name for the V4 and V6 path) must commit
