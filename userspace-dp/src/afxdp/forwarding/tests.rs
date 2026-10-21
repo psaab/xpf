@@ -496,6 +496,236 @@ fn fabric_redirect_owner_active_reason_splits_on_ingress_16220() {
         "fabric-ingress redirect whose owner is now local must re-resolve"
     );
 }
+/// #16222: split-RG fabric-ingress revalidation must judge the cached
+/// redirect against the per-flow session resolution, not the
+/// destination-only lookup. ECMP route 203.0.113.0/24 with two WAN legs
+/// on different RGs: the destination-only hash picks one leg, a
+/// differing per-flow hash picks the other. The cached redirect's stamp
+/// owner is the LAN/ingress RG (2). Pre-fix the fabric-ingress hit
+/// evicted as FabricLocalWins; per-flow revalidation must serve it.
+#[test]
+fn fabric_ingress_redirect_per_flow_revalidation_keeps_split_rg_16222() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/2".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 30,
+        redundancy_group: 3,
+        hardware_addr: "02:bf:72:00:02:30".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "192.0.3.1/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-2".to_string(),
+        ifindex: 30,
+        family: "inet".to_string(),
+        ip: "192.0.3.2".to_string(),
+        mac: "00:11:22:33:44:77".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "192.0.2.2".to_string(),
+        mac: "00:11:22:33:44:88".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            for addr in &mut iface.addresses {
+                if addr.family == "inet" {
+                    addr.address = "192.0.2.8/24".to_string();
+                }
+            }
+        }
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![
+            "192.0.2.2@reth0.80".to_string(),
+            "192.0.3.2@ge-0/0/2".to_string(),
+        ],
+        discard: false,
+        next_table: String::new(),
+        preference: 5,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, active_ha_runtime(now_secs)),
+        (2, inactive_ha_runtime(now_secs)),
+        (3, active_ha_runtime(now_secs)),
+    ]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+    let cached_owner = 2;
+    let dst_only = lookup_forwarding_resolution_with_dynamic(
+        &state,
+        &dynamic_neighbors,
+        target,
+    )
+    .resolution;
+    assert!(
+        matches!(
+            dst_only.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        ),
+        "fixture: destination-only must produce a local candidate, got {:?}",
+        dst_only.disposition
+    );
+    let mut differing_key: Option<crate::session::SessionKey> = None;
+    for sport in 40000u16..42000 {
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: target,
+            src_port: sport,
+            dst_port: 5211,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let per_flow = lookup_forwarding_resolution_with_dynamic_for_flow(
+            &state,
+            &dynamic_neighbors,
+            target,
+            &key,
+        )
+        .resolution;
+        if per_flow.egress_ifindex != dst_only.egress_ifindex
+            && matches!(
+                per_flow.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+            )
+        {
+            differing_key = Some(key);
+            break;
+        }
+    }
+    let key = differing_key.expect(
+        "fixture must have a flow whose per-flow ECMP leg differs from destination-only",
+    );
+    // The destination-only entry point now also retains a fabric-ingress
+    // different-owner redirect (the non-supersession half of the fix).
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            cached_owner,
+            true,
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "fabric-ingress different-owner redirect must be retained"
+    );
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            cached_owner,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "per-flow fabric-ingress revalidation must keep the split-RG redirect"
+    );
+}
+
+/// #16222: even when per-flow and destination-only agree on a local
+/// candidate owned by a different RG than the cached stamp, a
+/// fabric-ingress redirect must not be evicted as different-owner
+/// FabricLocalWins — the stamp names the ingress/LAN leg, the candidate
+/// the WAN egress leg. Same-owner fabric ingress (failback) still evicts.
+#[test]
+fn fabric_ingress_different_owner_does_not_evict_16222() {
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([
+        (1, active_ha_runtime(now_secs)),
+        (2, inactive_ha_runtime(now_secs)),
+    ]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: target,
+        src_port: 52490,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    // Local candidate egresses reth0.80/RG1 (active); cached stamp owner RG2.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            2,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "fabric-ingress different-owner must not evict the split-RG redirect"
+    );
+    // Control: same-owner (RG1 stamp, RG1 now active) on fabric ingress
+    // still re-resolves locally via OwnerActiveRedirect.
+    assert_eq!(
+        cached_flow_decision_invalid_reason_for_flow(
+            &state,
+            &ha_state,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            true,
+            false,
+            Some(&key),
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::OwnerActiveRedirect),
+        "same-owner fabric ingress must still fail back to local forwarding"
+    );
+}
 
 #[test]
 fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {

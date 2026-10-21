@@ -231,13 +231,15 @@ pub(super) fn stage_flow_cache_hit(
         {
             None
         } else {
-            crate::afxdp::forwarding::cached_flow_decision_invalid_reason(
+            crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_flow(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 worker_ctx.dynamic_neighbors,
                 now_secs,
                 cached.stamp.owner_rg_id,
                 packet_fabric_ingress,
+                fabric_link_ingress,
+                Some(&flow.forward_key),
                 resolution_target_for_session(flow, cached.decision),
                 install_table_name_for_session(
                     worker_ctx.forwarding,

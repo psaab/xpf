@@ -1072,6 +1072,9 @@ struct StageSeed {
     /// `None` installs from the cached entry's key, which is every pre-#8262
     /// caller's behaviour.
     install_key: Option<crate::session::SessionKey>,
+    /// #16222: validated fabric-stamp ingress (`packet_fabric_ingress`),
+    /// distinct from the physical link identity below. Defaults false.
+    packet_fabric_ingress: bool,
     /// Physical parent-or-overlay arrival identity for the anti-loop cache
     /// guard. Defaults false for ordinary non-fabric cache fixtures.
     fabric_link_ingress: bool,
@@ -1094,6 +1097,7 @@ impl Default for StageSeed {
             flow: None,
             tx_headroom: None,
             install_key: None,
+            packet_fabric_ingress: false,
             fabric_link_ingress: false,
             cross_umem_shared: None,
             now_ns: 1_000_000,
@@ -1238,7 +1242,7 @@ fn run_stage_seeded(
         &mut owned_packet_frame,
         meta,
         &flow,
-        false,
+        seed.packet_fabric_ingress,
         None,
         seed.fabric_link_ingress,
         false,
@@ -3808,6 +3812,43 @@ fn fabric_arrival_invalidates_cached_fabric_redirect_10314() {
     assert!(
         run.scratch.scratch_forwards.is_empty(),
         "cache invalidation must not enqueue the cached fabric redirect"
+    );
+}
+/// #16222: a fabric-stamp-ingress hit on a cached FabricRedirect whose
+/// stamp owner is the LAN RG (2) must be SERVED, not evicted as
+/// different-owner FabricLocalWins. Decision-level ECMP/different-owner
+/// semantics are pinned in forwarding::tests::*_16222; this binds the
+/// stage wiring (per-flow entry point + fabric flag threading).
+#[test]
+fn fabric_stamp_ingress_serves_cached_redirect_16222() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let mut entry = cached_entry();
+    entry.descriptor.fabric_redirect = true;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
+    entry.stamp.owner_rg_id = 2;
+    entry.metadata.owner_rg_id = 2;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            packet_fabric_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    let arm = crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricLocalWins as usize;
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[arm], 0,
+        "fabric-stamp ingress must not evict as different-owner FabricLocalWins"
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "second packet on fabric ingress must be served from cache"
     );
 }
 
