@@ -62,16 +62,42 @@ func validateIPsecPSKPresenceStrict(cfg *Config) error {
 
 // ipsecVPNEffPSK mirrors the renderer's effective-PSK resolution:
 // the VPN's own key wins, then the IKE-policy key via the gateway.
+// #15990: the value is DECODED before the emptiness test — a `$9$i`
+// key is non-empty as authored but decodes to zero bytes, so an
+// encoded-form test let it pass here while the renderer stored
+// decodedPSKs[name]="" and emitted `secret = ""`. The fallback fires
+// on a DECODED-empty own key exactly as on an absent one (mirroring
+// the renderer's encoded-emptiness fallback for every constructible
+// config, where the own key that decodes empty is malformed and the
+// fallback is refused by #15990's gate below when it is malformed
+// too). A malformed-but-nonempty-decoding `$9$` value counts as
+// present here; validateIPsecPSKJunos9Strict refuses it by name.
 func ipsecVPNEffPSK(ipsec *IPsecConfig, vpn *IPsecVPN, gw *IPsecGateway) string {
-	if s := vpn.PSK.Reveal(); s != "" {
+	if s := ipsecEffPSKDecode(vpn.PSK); s != "" {
 		return s
 	}
 	if gw != nil {
 		if pol, ok := ipsec.IKEPolicies[gw.IKEPolicy]; ok && pol != nil {
-			return pol.PSK.Reveal()
+			return ipsecEffPSKDecode(pol.PSK)
 		}
 	}
 	return ""
+}
+
+// ipsecEffPSKDecode returns the decoded form of one PSK leaf for the
+// presence test above: plaintext passes through, a valid `$9$` value
+// decodes, and a malformed `$9$` value is returned as authored (non-
+// empty — presence is satisfied; well-formedness is the render belt's
+// and the malformed-PSK handling's concern, not this gate's).
+func ipsecEffPSKDecode(s Secret) string {
+	raw := s.Reveal()
+	if raw == "" {
+		return ""
+	}
+	if decoded, err := DecodeJunos9Secret(raw); err == nil {
+		return decoded
+	}
+	return raw
 }
 
 // ipsecVPNAuthNeedsPSK reports whether the VPN's effective IKE

@@ -737,6 +737,14 @@ type compileOpts struct {
 	// digits as an ASCII secret.
 	lenientIPsecPSKQualifier bool
 
+	// lenientIPsecPSKJunos9 (#15990) downgrades the malformed-`$9$`-PSK
+	// reject (validateIPsecPSKJunos9Strict) to a warning on the tolerant
+	// load / peer-sync paths, so a persisted or synced config still
+	// boots. The pkg/ipsec render belt skips a VPN whose PSK does not
+	// decode (including decode-to-empty), so no warned config renders
+	// `secret = ""`.
+	lenientIPsecPSKJunos9 bool
+
 	// lenientIPsecCertAuth (#15752) downgrades the pubkey-without-cert /
 	// unknown-identity-type reject (validateIPsecCertAuthStrict) to a
 	// warning on tolerant paths; the render belt skips the cert-less
@@ -3654,6 +3662,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecPSKPresence:                true,
 		lenientIPsecResponderIdentity:          true,
 		lenientIPsecPSKQualifier:               true,
+		lenientIPsecPSKJunos9:                  true,
 		lenientIPsecCertAuth:                   true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,

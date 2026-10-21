@@ -20,7 +20,8 @@ nothing internal.
   `runUniformGatesLogFeedRouting` and decodes every routing
   authentication leaf (BGP/OSPF/IS-IS/RIP, global + routing-instance)
   in place on the compiled Config before any gate or renderer reads
-  it; a malformed `$9$` is a strict commit error, a warning (blob
+  it; a malformed `$9$` — including one that decodes to zero bytes
+  (`$9$i`/`$9$!`, #15990) — is a strict commit error, a warning (blob
   kept) on the tolerant paths (#1960). VRRP auth is refused/dropped
   earlier by #4288/#5834 and LDP has no auth leaf, so neither is a
   decode site.

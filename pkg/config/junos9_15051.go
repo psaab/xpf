@@ -28,7 +28,8 @@ import (
 // authentication-key leaf in the typed config at all. If either gains
 // an enforced auth leaf it must be added to the walk below.
 //
-// Strict commit REFUSES a malformed `$9$` value. The tolerant
+// Strict commit REFUSES a malformed `$9$` value — including one that
+// decodes to zero bytes (`$9$i`/`$9$!`, #15990). The tolerant
 // load/peer-sync paths keep the original blob and warn (#1960): a
 // persisted config an older binary accepted must still boot, and the
 // render belts (pkg/frr authTokenOrOmit / #14977 fail-closed sites)
@@ -87,7 +88,12 @@ func init() {
 
 // DecodeJunos9Secret decodes a Junos `$9$`-obfuscated secret to its
 // plaintext. A value without the `$9$` prefix is returned unchanged.
-// A malformed `$9$` value returns errInvalidJunos9Secret.
+// A malformed `$9$` value returns errInvalidJunos9Secret — including
+// a well-formed prefix that decodes to zero bytes (`$9$i` / `$9$!`,
+// #15990): an empty decoded credential is never legitimate, and
+// returning ("", nil) let every presence gate that tests the ENCODED
+// form store Secret("") — BGP rendered its neighbor passwordless and
+// IPsec rendered `secret = ""`.
 func DecodeJunos9Secret(secret string) (string, error) {
 	if !strings.HasPrefix(secret, junos9Magic) {
 		return secret, nil
@@ -129,6 +135,15 @@ func decodeJunos9(secret string) (string, error) {
 			gaps = append(gaps, gap)
 		}
 		out = append(out, junos9GapDecode(gaps, decode))
+	}
+	if len(out) == 0 {
+		// #15990: the first char's skip consumed the whole rest
+		// (`$9$i`, `$9$!`), so zero nibble groups remain and the loop
+		// never ran. Zero bytes is not a credential — malformed, like
+		// every other undecodable shape, so strict rejects it and the
+		// tolerant path keeps the blob (and the render belts then see
+		// the undecodable blob, never Secret("")).
+		return "", errInvalidJunos9Secret
 	}
 	return string(out), nil
 }

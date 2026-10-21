@@ -1255,6 +1255,53 @@ func TestGenerateConfig_JunosObfuscatedPSK(t *testing.T) {
 	secretsOnly_6824(t, got).requireSetting(t, "secret", `"QZ1agnL21L"`)
 }
 
+// #15990: a PSK of `$9$i` / `$9$!` decodes to ZERO bytes. The renderer
+// used to store decodedPSKs[name]="" and emit `secret = ""` (which
+// stock strongSwan rejects at load, and which is never a legitimate
+// credential). The VPN must now be SKIPPED — no connection, no secret
+// — while a healthy VPN on another gateway still renders.
+//
+// FAIL-ON-REVERT: restoring the decoder's ("", nil) for decode-to-empty
+// makes normalizePSK succeed with "", so the bad VPN renders with
+// `secret = ""` and every assertion below fires.
+func TestGenerateConfig_DecodeToEmptyPSKSkipped15990(t *testing.T) {
+	for _, empty := range []string{"$9$i", "$9$!"} {
+		m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+		cfg := &config.IPsecConfig{
+			VPNs: map[string]*config.IPsecVPN{
+				"bad":  {Gateway: "10.0.0.1", PSK: config.Secret(empty)},
+				"good": {Gateway: "10.0.0.2", PSK: "fixture-secret"},
+			},
+		}
+		got, rendered, err := m.renderConfig(cfg)
+		if err != nil {
+			t.Fatalf("PSK %q: renderConfig() error = %v", empty, err)
+		}
+		doc := parseSwanctlDoc(t, got)
+		doc.hasNoSettingValuePrefixAnywhere(t, "secret", `""`)
+		if strings.Contains(got, "bad") {
+			t.Errorf("PSK %q: decode-to-empty VPN must be skipped entirely (#15990):\n%s", empty, got)
+		}
+		if len(rendered) != 1 {
+			t.Errorf("PSK %q: rendered = %v, want only the healthy VPN (#15990)", empty, rendered)
+		}
+		secretsOnly_6824(t, got).requireSetting(t, "secret", `"fixture-secret"`)
+	}
+	// Control: a valid $9$ PSK still renders its decoded secret
+	// byte-identical to the pre-fix known-answer render.
+	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+	cfg := &config.IPsecConfig{
+		VPNs: map[string]*config.IPsecVPN{
+			"tun": {Gateway: "10.0.0.1", PSK: "$9$SpRrMLYgaZDirexdwgUDzFn9uO1RhlKW"},
+		},
+	}
+	got, _, err := m.renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("control renderConfig() error = %v", err)
+	}
+	secretsOnly_6824(t, got).requireSetting(t, "secret", `"QZ1agnL21L"`)
+}
+
 func TestGenerateConfig_PubkeyAuth(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
