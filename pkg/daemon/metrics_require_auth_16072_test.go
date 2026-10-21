@@ -35,7 +35,7 @@ func TestResolveAPIBindsStampsMetricsGate16072(t *testing.T) {
 					MetricsRequireAuth: gate,
 					Users: []*config.APIAuthUser{{
 						Username:  "admin",
-						Password:  config.Secret(password),
+						Password:  config.NewSecret(password),
 						Class:     "read-only",
 						ExpiresAt: expires,
 					}},
@@ -89,7 +89,7 @@ func TestResolveAPIBindsGateSurvivesExpiredCredentials16072(t *testing.T) {
 				MetricsRequireAuth: true,
 				Users: []*config.APIAuthUser{{
 					Username:  "admin",
-					Password:  config.Secret(password),
+					Password:  config.NewSecret(password),
 					Class:     "read-only",
 					ExpiresAt: expired,
 				}},
