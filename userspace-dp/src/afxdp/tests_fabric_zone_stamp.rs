@@ -6018,6 +6018,22 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
     let mut sessions = fw0_both_halves_sessions_15958b(&split_forwarding, now_ns);
+    // Stamp the admitted pair Fresh at the poll generation the
+    // harness will use (7/9), exactly as a generation-paired
+    // production publish leaves them: the failback changes
+    // ownership/snapshot, not the policy generation, so the hit
+    // must not re-adjudicate (and revoke) the pair mid-sequence.
+    sessions.set_policy_revalidation_gen(7);
+    {
+        let keys: Vec<_> = {
+            let mut ks = Vec::new();
+            sessions.iter_with_origin(|key, _d, _m, _o| ks.push(key.clone()));
+            ks
+        };
+        for key in &keys {
+            sessions.mark_policy_revalidated(key, crate::session::PolicyRevalidationKind::LiveEgress);
+        }
+    }
     sessions.set_forwarding_revalidation_gen(7, 9);
     // Keep the pair policy-fresh at the poll generation so the
     // delivery leg is not torn down by zone-policy revalidation
@@ -6105,25 +6121,22 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     meta2.flow_src_port = 443;
     meta2.flow_dst_port = 12345;
     let (batch2, _, lan_frame) = txn_run_multi_binding_15958(
-        &mut bindings, 0, &mut sessions, &split_forwarding, &failback_ha, &frame2, meta2,
+        &mut bindings, 0, &mut sessions, &forwarding, &failback_ha, &frame2, meta2,
     );
-           // LAN delivery claim for this cell is DECISION-LEVEL ONLY:
-    // the companion holds the LAN candidate (asserted above),
-    // fabric stays frozen at the packet-1 count, and WAN stays 0.
-    // The literal LAN tx_packets counter for a WAN-ingress packet
-    // through a refreshed companion is not observable in this
-    // harness (packet 2's descriptor is recycled inside the hit's
-    // revalidation machinery before the harness enqueue stage;
-    // this cell does not assert it and passes with the re-home
-    // reverted for the same reason — the re-home is RED-pinned by
-    // the refresh-collector asserts above and the transient cell).
-    // Actual LAN TX + frame bytes for the identical candidate are
-    // pinned by the fw1 LAN-egress cells; the live gate arbitrates
-    // on-wire post-failback delivery.
-    // Session-hit accounting for packet 2 varies with the
-    // descriptor's early path; the frozen fabric/WAN counters are
-    // the observable.
-    let _ = batch2;
+    // LAN delivery (REAL, Codex9): packet 2 runs under the
+    // failback forwarding state (the republished snapshot — driving
+    // it under the stale split FIB was the harness defect that
+    // swallowed it in hit revalidation). It session-hits the
+    // re-homed companion and transmits on the LAN binding: actual
+    // tx_packets counter + LAN frame bytes asserted.
+        assert!(batch2.session_hits >= 1, "failback packet must session-hit (hits={})", batch2.session_hits);
+    assert_eq!(
+        bindings[2].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        "failback packet must transmit on the LAN binding"
+    );
+    let lan_frame = lan_frame.expect("failback packet must emit a LAN frame");
+    assert_eq!(&lan_frame[30..34], &[10, 0, 61, 102], "LAN frame dst IP must be the LAN host");
+    assert_eq!(&lan_frame[0..6], &LAN_HOST_MAC_15958, "LAN frame dst MAC must be the LAN host");
     assert_eq!(
         bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
         "fabric TX must stay at packet-1 count"
@@ -6132,7 +6145,6 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
         bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0,
         "failback hit must not use the WAN binding"
     );
-    let _ = lan_frame;
 }
 
 
