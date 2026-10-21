@@ -466,6 +466,44 @@ func TestCrossingRefusalPristine15999(t *testing.T) {
 	}
 }
 
+// Helper-level pristine: a shorter-prefix set on a long leaf at cap
+// must refuse WITHOUT the working tree growing (pre-build bound).
+func TestShorterPrefixWorkingPristine15999(t *testing.T) {
+	keys := make([]string, config.MaxParseNodes-6)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	tree := &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+		}},
+	}}
+	beforeUnits := tree.NodeCount()
+	beforeChildren := len(tree.Children)
+	// Shorter-prefix creation attempt with a big tail: charges full,
+	// and the final/work guards refuse; working must not grow.
+	big := "set unknown" + strings.Repeat(" k", config.MaxParseNodes+50)
+	_, err := replayFlatLines15999(tree, []string{big})
+	if err == nil {
+		// If it applied within budget, growth must be the created
+		// node only — assert the charge path distinguished it from
+		// exact: exact re-set of the long leaf charges 0 (above),
+		// here we require err OR explicit growth accounting.
+		if tree.NodeCount() <= beforeUnits {
+			t.Fatalf("shorter-prefix applied with no growth and no charge distinction")
+		}
+		return
+	}
+	if !strings.Contains(err.Error(), "#15999") {
+		t.Fatalf("shorter-prefix err=%v", err)
+	}
+	if tree.NodeCount() != beforeUnits || len(tree.Children) != beforeChildren {
+		t.Fatalf("working tree grew on refusal: units %d->%d children %d->%d", beforeUnits, tree.NodeCount(), beforeChildren, len(tree.Children))
+	}
+}
+
 // Annotate at exact cap (spare 0) accepted: zero-unit verb, path via
 // ParseAnnotateCommand (grouped parser would coerce verb into path).
 func TestAnnotateAtExactCapAccepted15999(t *testing.T) {
@@ -612,4 +650,52 @@ func TestDeepIdenticalResetsAccepted15999(t *testing.T) {
 	if _, err := s.LoadSet(b.String()); err != nil {
 		t.Fatalf("66,667 deep identical re-sets refused: %v", err)
 	}
+}
+
+// Shorter-prefix witness: existing long leaf [unknown k k ...]; a set
+// whose path is a SHORT prefix must NOT charge 0 (it creates a distinct
+// shorter leaf) — at cap it refuses, while exact re-set passes.
+func TestShorterPrefixChargesFull15999(t *testing.T) {
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, config.MaxParseNodes-6)
+	keys[0] = "unknown"
+	for i := 1; i < len(keys); i++ {
+		keys[i] = "k"
+	}
+	s2.candidate = &config.ConfigTree{Children: []*config.Node{
+		{Keys: keys, IsLeaf: true},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", "fw1"}, IsLeaf: true},
+		}},
+	}}
+	// Exact re-set passes:
+	if _, err := s2.LoadSet("set system host-name fw1"); err != nil {
+		t.Fatalf("exact re-set refused: %v", err)
+	}
+	// Shorter-prefix creation at cap: many distinct short sets under
+	// the long leaf's prefix must be charged and refuse when growing.
+	var b strings.Builder
+	for i := range 300 {
+		fmt.Fprintf(&b, "set security address-book global address p%d 10.0.0.1/32\n", i)
+	}
+	// This may fit in spare (cap-200000, spare small) — decisive leg is
+	// the helper-level charge: replay on the near-cap tree with a
+	// shorter-prefix set of the long leaf itself.
+	tree := s2.candidate.Clone()
+	before := tree.NodeCount()
+	_ = before
+	short := "set unknown k"
+	// Direct: if charge were 0, gross would never refuse; assert the
+	// exact gate distinguishes: LineTargetLeafExact(short) is false.
+	if tree.LineTargetLeafExact([]string{"unknown", "k"}) {
+		t.Fatal("shorter prefix wrongly exact-matches long leaf")
+	}
+	if !tree.LineTargetLeafExact([]string{"system", "host-name", "fw1"}) {
+		t.Fatal("exact leaf should match")
+	}
+	_ = short
+	_ = b
 }

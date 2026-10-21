@@ -792,6 +792,7 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 // alone crossed only after ~25k lines of sibling-search work), each line
 // is charged its token-count upper bound BEFORE its cost is paid, plus an
 // exact recount every 256 lines and at the end.
+
 func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, error) {
 	return replayFlatLinesMode15999(working, lines, true)
 }
@@ -887,8 +888,10 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			// charge = max(0, lineToks-leafToks) (small). Absent/
 			// container targets charge full (twin-add creates).
 			if perr == nil {
-				kind, _, _ := working.LineOccupancy(path)
-				if kind == config.LineTargetLeaf {
+				// Charge-0 ONLY on exact leaf equality: entire
+				// path consumed AND leaf Keys == line value keys.
+				// Shorter-prefix/divergent targets charge full.
+				if working.LineTargetLeafExact(path) {
 					// Existence keys the charge: full path resolves
 					// to an existing leaf -> creation is ZERO
 					// regardless of depth (token arithmetic over-

@@ -129,6 +129,9 @@ const (
 // LineOccupancy walks the deepest STRICT (full-key) prefix match,
 // returning target kind and the matched leaf's key count when Leaf.
 // O(depth + sibling scans); no clone.
+
+// LineOccupancy walks the deepest STRICT (full-key) prefix match and
+// classifies the target (Absent/Leaf/Container) with matched units.
 func (t *ConfigTree) LineOccupancy(path []string) (kind LineTargetKind, matchedUnits int, leafKeys int) {
 	if t == nil || len(path) == 0 {
 		return LineTargetAbsent, 0, 0
@@ -163,6 +166,48 @@ func (t *ConfigTree) LineOccupancy(path []string) (kind LineTargetKind, matchedU
 		return LineTargetLeaf, matchedUnits, len(deepest.Keys)
 	}
 	return LineTargetContainer, matchedUnits, 0
+}
+
+// LineTargetLeafExact reports whether path resolves to an existing
+// leaf consuming EXACTLY the node's full Keys with no leftover and
+// no prefix-shortfall in either direction: walk with strict full-key
+// matching; at each node require consumed == len(node.Keys) (a
+// remaining-prefix match consuming fewer than the node's keys is a
+// shorter-prefix hit, NOT exact), and at the end require pos ==
+// len(path) and the final node IsLeaf. Only then does a set replace.
+func (t *ConfigTree) LineTargetLeafExact(path []string) bool {
+	if t == nil || len(path) == 0 {
+		return false
+	}
+	children := t.Children
+	pos := 0
+	var node *Node
+	for pos < len(path) {
+		found := false
+		for _, child := range children {
+			if len(child.Keys) == 0 || pos+len(child.Keys) > len(path) {
+				continue
+			}
+			eq := true
+			for j := range child.Keys {
+				if child.Keys[j] != path[pos+j] {
+					eq = false
+					break
+				}
+			}
+			if eq {
+				node = child
+				children = child.Children
+				pos += len(child.Keys)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return node != nil && node.IsLeaf && pos == len(path)
 }
 
 // Parser implements a recursive descent parser for Junos configuration syntax.
