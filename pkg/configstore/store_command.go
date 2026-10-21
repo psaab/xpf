@@ -894,16 +894,6 @@ func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub 
 			return count, err
 		}
 		count++
-		if count%256 == 0 {
-			// Reconcile gross work upward to measured growth since
-			// base if charges under-counted (never adjudicate here).
-			if exact := working.NodeCount(); exact > baseExact {
-				if gross := exact - baseExact + cumWork; gross > cumWork {
-					// keep cumWork as charged (upper bound); no-op
-					_ = gross
-				}
-			}
-		}
 	}
 	final := working.NodeCount()
 	if final > config.MaxParseNodes && final >= baseExact {
