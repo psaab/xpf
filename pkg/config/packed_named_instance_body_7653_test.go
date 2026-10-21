@@ -105,7 +105,7 @@ func TestPackedOSPFv3InterfaceKeepsItsBody7653(t *testing.T) {
 // operator authored — a downgrade, not an outage, and therefore silent.
 func TestPackedSNMPv3UserKeepsItsCredential7653(t *testing.T) {
 	got := compilePacked7653(t, `snmp { v3 { usm { local-engine {
-    user ops authentication-sha256 authentication-password "s3cret";
+    user ops authentication-sha256 authentication-password "s3cretpass";
 } } } }`)
 	u := got.System.SNMP.V3Users["ops"]
 	if u == nil {
@@ -128,7 +128,7 @@ func TestPackedSNMPv3UserKeepsItsCredential7653(t *testing.T) {
 // disappears. Not a credential downgrade but an SNMPv3 management outage.
 func TestPackedUSMLocalEngineKeepsItsUsers7653(t *testing.T) {
 	got := compilePacked7653(t, `snmp { v3 { usm local-engine {
-    user ops { authentication-sha256 { authentication-password "s3c"; } }
+    user ops { authentication-sha256 { authentication-password "s3cretpass"; } }
 } } }`)
 	if n := len(got.System.SNMP.V3Users); n != 1 {
 		t.Fatalf("packed `usm local-engine { ... }` compiled %d v3 users, want 1. "+
@@ -156,7 +156,7 @@ func TestExpandedSpellingsAreUnchanged7653(t *testing.T) {
 	}
 
 	snmp := compilePacked7653(t, `snmp { v3 { usm { local-engine {
-    user ops { authentication-sha256 { authentication-password "s3cret"; } }
+    user ops { authentication-sha256 { authentication-password "s3cretpass"; } }
 } } } }`)
 	if u := snmp.System.SNMP.V3Users["ops"]; u == nil || u.AuthProtocol != "sha256" || string(u.AuthPassword) == "" {
 		t.Errorf("expanded SNMPv3 user regressed: %+v", u)

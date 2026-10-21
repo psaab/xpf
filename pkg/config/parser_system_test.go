@@ -826,12 +826,12 @@ snmp {
                         authentication-password "secret123";
                     }
                     privacy-aes128 {
-                        privacy-password "privpass";
+                        privacy-password "privpass123";
                     }
                 }
                 user readonly {
                     authentication-md5 {
-                        authentication-password "md5pass";
+                        authentication-password "md5pass123";
                     }
                 }
             }
@@ -867,7 +867,7 @@ snmp {
 	if monitor.PrivProtocol != "aes128" {
 		t.Errorf("monitor priv = %q, want aes128", monitor.PrivProtocol)
 	}
-	if monitor.PrivPassword != "privpass" {
+	if monitor.PrivPassword != "privpass123" {
 		t.Errorf("monitor priv password = %q, want privpass", monitor.PrivPassword)
 	}
 	readonly := cfg.System.SNMP.V3Users["readonly"]
@@ -883,7 +883,7 @@ snmp {
 }
 
 func TestSNMPv3USMFlatSet(t *testing.T) {
-	lines := []string{"set snmp v3 usm local-engine user admin authentication-sha256 authentication-password adminpass", "set snmp v3 usm local-engine user admin privacy-des privacy-password despass"}
+	lines := []string{"set snmp v3 usm local-engine user admin authentication-sha256 authentication-password adminpass", "set snmp v3 usm local-engine user admin privacy-des privacy-password despass123"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		parts, err := ParseSetCommand(line)

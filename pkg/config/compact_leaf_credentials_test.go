@@ -123,8 +123,8 @@ func TestSNMPv3CredentialCompactSpelling_6822(t *testing.T) {
 	// class, and using it here would make the cell fail for a reason other than
 	// the leaf it names.
 	compact, block := compileBothSpellings(t,
-		`snmp { v3 { usm { local-engine { user ops { authentication-sha256 authentication-password "s3cret"; privacy-aes128 privacy-password "p4ssphrase"; } } } } }`,
-		`snmp { v3 { usm { local-engine { user ops { authentication-sha256 { authentication-password "s3cret"; } privacy-aes128 { privacy-password "p4ssphrase"; } } } } } }`)
+		`snmp { v3 { usm { local-engine { user ops { authentication-sha256 authentication-password "s3cretpass"; privacy-aes128 privacy-password "p4ssphrase"; } } } } }`,
+		`snmp { v3 { usm { local-engine { user ops { authentication-sha256 { authentication-password "s3cretpass"; } privacy-aes128 { privacy-password "p4ssphrase"; } } } } } }`)
 
 	for name, cfg := range map[string]*Config{"compact": compact, "block": block} {
 		if cfg.System.SNMP == nil {
@@ -137,8 +137,8 @@ func TestSNMPv3CredentialCompactSpelling_6822(t *testing.T) {
 		if u.AuthProtocol != "sha256" {
 			t.Errorf("%s spelling: AuthProtocol = %q, want \"sha256\"", name, u.AuthProtocol)
 		}
-		if string(u.AuthPassword) != "s3cret" {
-			t.Errorf("%s spelling: AuthPassword = %q, want \"s3cret\" -- the user is "+
+		if string(u.AuthPassword) != "s3cretpass" {
+			t.Errorf("%s spelling: AuthPassword = %q, want \"s3cretpass\" -- the user is "+
 				"registered as REQUIRING SHA-256 with an empty credential",
 				name, string(u.AuthPassword))
 		}

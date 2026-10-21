@@ -55,7 +55,7 @@ func TestAuthProtocolWithoutPasswordIsRejected7530(t *testing.T) {
 // THE DEFECT, privacy half: authPriv silently degraded to authNoPriv.
 func TestPrivProtocolWithoutPasswordIsRejected7530(t *testing.T) {
 	_, err := compileSNMP7530(t,
-		`user ops { authentication-sha256 { authentication-password "s3cret"; } privacy-aes128; }`)
+		`user ops { authentication-sha256 { authentication-password "s3cretpass"; } privacy-aes128; }`)
 	if err == nil {
 		t.Fatal("a user naming privacy-aes128 with NO privacy-password committed clean. " +
 			"With no privacy key there is no privacy floor, so an authNoPriv request is " +
@@ -74,7 +74,7 @@ func TestPrivProtocolWithoutPasswordIsRejected7530(t *testing.T) {
 // satisfy both cells above and break every authNoPriv deployment.
 func TestCompleteAuthOnlyUserStillCommits7530(t *testing.T) {
 	cfg, err := compileSNMP7530(t,
-		`user ops { authentication-sha256 { authentication-password "s3cret"; } }`)
+		`user ops { authentication-sha256 { authentication-password "s3cretpass"; } }`)
 	if err != nil {
 		t.Fatalf("an auth-only user with its password is legitimate authNoPriv and must "+
 			"commit: %v", err)
@@ -92,7 +92,7 @@ func TestCompleteAuthOnlyUserStillCommits7530(t *testing.T) {
 // CONTROL 2 — a COMPLETE authPriv user must still commit.
 func TestCompleteAuthPrivUserStillCommits7530(t *testing.T) {
 	_, err := compileSNMP7530(t,
-		`user ops { authentication-sha256 { authentication-password "s3cret"; } privacy-aes128 { privacy-password "p4ssw0rd"; } }`)
+		`user ops { authentication-sha256 { authentication-password "s3cretpass"; } privacy-aes128 { privacy-password "p4ssw0rd"; } }`)
 	if err != nil {
 		t.Fatalf("a complete authPriv user must commit: %v", err)
 	}

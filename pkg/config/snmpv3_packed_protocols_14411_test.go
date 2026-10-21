@@ -48,15 +48,15 @@ func user14411(t *testing.T, cfg *Config, name string) *SNMPv3User {
 // (i) PACKED auth-first: both protocols must compile (authPriv).
 func TestPackedAuthFirstCompilesAuthPriv14411(t *testing.T) {
 	cfg, err := compile14411(t,
-		`user alice authentication-sha256 authentication-password APASS privacy-aes128 privacy-password PPASS;`)
+		`user alice authentication-sha256 authentication-password APASS12345 privacy-aes128 privacy-password PPASS12345;`)
 	if err != nil {
 		t.Fatalf("packed authPriv user was rejected: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS" {
+	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS12345" {
 		t.Fatalf("auth half wrong: auth=%q authpw set=%v", u.AuthProtocol, string(u.AuthPassword) != "")
 	}
-	if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS" {
+	if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
 		t.Fatalf("packed second (privacy) protocol was dropped: priv=%q privpw set=%v — the user compiles authNoPriv while written authPriv",
 			u.PrivProtocol, string(u.PrivPassword) != "")
 	}
@@ -69,13 +69,13 @@ func TestPackedAuthFirstCompilesAuthPriv14411(t *testing.T) {
 // the intended reading).
 func TestPackedPrivFirstCompilesAuthPriv14411(t *testing.T) {
 	cfg, err := compile14411(t,
-		`user alice privacy-aes128 privacy-password PPASS authentication-sha256 authentication-password APASS;`)
+		`user alice privacy-aes128 privacy-password PPASS12345 authentication-sha256 authentication-password APASS12345;`)
 	if err != nil {
 		t.Fatalf("packed priv-first authPriv user was rejected: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS" ||
-		u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS" {
+	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS12345" ||
+		u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
 		t.Fatalf("packed priv-first user compiled weaker/differently than written: auth=%q priv=%q", u.AuthProtocol, u.PrivProtocol)
 	}
 }
@@ -86,7 +86,7 @@ func TestPackedPrivFirstCompilesAuthPriv14411(t *testing.T) {
 // to parseSNMPv3UserKeys, so both must compile both protocols.
 func TestPackedRunOnFlatAndInstanceLines14411(t *testing.T) {
 	t.Run("flat v3 line", func(t *testing.T) {
-		p := NewParser(`snmp v3 usm local-engine user bob authentication-sha256 authentication-password APASS privacy-aes128 privacy-password PPASS;`)
+		p := NewParser(`snmp v3 usm local-engine user bob authentication-sha256 authentication-password APASS12345 privacy-aes128 privacy-password PPASS12345;`)
 		tree, perr := p.Parse()
 		if perr != nil {
 			t.Fatalf("parse: %v", perr)
@@ -96,18 +96,18 @@ func TestPackedRunOnFlatAndInstanceLines14411(t *testing.T) {
 			t.Fatalf("flat packed authPriv user was rejected: %v", err)
 		}
 		u := user14411(t, cfg, "bob")
-		if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS" {
+		if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
 			t.Fatalf("flat packed second protocol dropped: priv=%q", u.PrivProtocol)
 		}
 	})
 	t.Run("hierarchical instance line", func(t *testing.T) {
 		cfg, err := compile14411(t,
-			`user carol authentication-sha authentication-password APASS privacy-des privacy-password PPASS;`)
+			`user carol authentication-sha authentication-password APASS12345 privacy-des privacy-password PPASS12345;`)
 		if err != nil {
 			t.Fatalf("instance-line packed user was rejected: %v", err)
 		}
 		u := user14411(t, cfg, "carol")
-		if u.AuthProtocol != "sha" || u.PrivProtocol != "des" || string(u.PrivPassword) != "PPASS" {
+		if u.AuthProtocol != "sha" || u.PrivProtocol != "des" || string(u.PrivPassword) != "PPASS12345" {
 			t.Fatalf("instance-line packed user compiled weaker than written: auth=%q priv=%q", u.AuthProtocol, u.PrivProtocol)
 		}
 	})
@@ -135,7 +135,7 @@ func TestPackedPasswordValueSpellingAKeywordIsNotReparsed14411(t *testing.T) {
 // reject-only by design (#9155) — a case-variant is not a known keyword.
 func TestCaseVariantProtocolRejected14411(t *testing.T) {
 	_, err := compile14411(t,
-		`user alice { Authentication-SHA256 { authentication-password APASS; } privacy-aes128 { privacy-password PPASS; } }`)
+		`user alice { Authentication-SHA256 { authentication-password APASS12345; } privacy-aes128 { privacy-password PPASS12345; } }`)
 	if err == nil {
 		t.Fatal("case-variant Authentication-SHA256 committed clean and compiled to a weaker level than written (bare noAuthNoPriv user)")
 	}
@@ -145,7 +145,7 @@ func TestCaseVariantProtocolRejected14411(t *testing.T) {
 	// Privacy side, packed onto the user line: the case-variant token rides
 	// the user node's own Keys, which the gate must also scan case-insensitively.
 	_, err = compile14411(t,
-		`user alice authentication-sha256 authentication-password APASS Privacy-AES128 privacy-password PPASS;`)
+		`user alice authentication-sha256 authentication-password APASS12345 Privacy-AES128 privacy-password PPASS12345;`)
 	if err == nil {
 		t.Fatal("packed case-variant Privacy-AES128 committed clean")
 	}
@@ -158,7 +158,7 @@ func TestCaseVariantProtocolRejected14411(t *testing.T) {
 // must be rejected at strict commit (the gate recurses the user subtree).
 func TestWrappedProtocolKeywordRejected14411(t *testing.T) {
 	_, err := compile14411(t,
-		`user alice { authentication { authentication-sha256 { authentication-password APASS; } } }`)
+		`user alice { authentication { authentication-sha256 { authentication-password APASS12345; } } }`)
 	if err == nil {
 		t.Fatal("wrapped authentication-sha256 committed clean and compiled to a bare noAuthNoPriv user")
 	}
@@ -170,7 +170,7 @@ func TestWrappedProtocolKeywordRejected14411(t *testing.T) {
 // (iii) ANCESTOR: a protocol keyword placed under local-engine beside the
 // user (outside any user node) must be rejected at strict commit.
 func TestAncestorProtocolKeywordRejected14411(t *testing.T) {
-	p := NewParser(`snmp { v3 { usm { local-engine { authentication-sha256 { authentication-password APASS; } user alice; } } } }`)
+	p := NewParser(`snmp { v3 { usm { local-engine { authentication-sha256 { authentication-password APASS12345; } user alice; } } } }`)
 	tree, perr := p.Parse()
 	if perr != nil {
 		t.Fatalf("parse: %v", perr)
@@ -183,7 +183,7 @@ func TestAncestorProtocolKeywordRejected14411(t *testing.T) {
 		t.Errorf("rejection does not name the ancestor token: %v", err)
 	}
 	// Ancestor packed onto the local-engine line itself.
-	p2 := NewParser(`snmp { v3 { usm { local-engine privacy-aes128 privacy-password PPASS; } } }`)
+	p2 := NewParser(`snmp { v3 { usm { local-engine privacy-aes128 privacy-password PPASS12345; } } }`)
 	tree2, perr2 := p2.Parse()
 	if perr2 != nil {
 		t.Fatalf("parse: %v", perr2)
@@ -197,7 +197,7 @@ func TestAncestorProtocolKeywordRejected14411(t *testing.T) {
 // a persisted wrapped config must not silently serve a bare user while
 // `show configuration` reads authenticated (#1960-safe direction).
 func TestWrappedPlacementCompilesWrittenLevelLenient14411(t *testing.T) {
-	p := NewParser(`snmp { v3 { usm { local-engine { user alice { authentication { authentication-sha256 { authentication-password APASS; } privacy-aes128 { privacy-password PPASS; } } } } } } }`)
+	p := NewParser(`snmp { v3 { usm { local-engine { user alice { authentication { authentication-sha256 { authentication-password APASS12345; } privacy-aes128 { privacy-password PPASS12345; } } } } } } }`)
 	tree, perr := p.Parse()
 	if perr != nil {
 		t.Fatalf("parse: %v", perr)
@@ -207,8 +207,8 @@ func TestWrappedPlacementCompilesWrittenLevelLenient14411(t *testing.T) {
 		t.Fatalf("tolerant path rejected the wrapped config: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS" ||
-		u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS" {
+	if u.AuthProtocol != "sha256" || string(u.AuthPassword) != "APASS12345" ||
+		u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
 		t.Fatalf("wrapped user compiled weaker than written on the tolerant path: auth=%q priv=%q", u.AuthProtocol, u.PrivProtocol)
 	}
 }
@@ -219,7 +219,7 @@ func TestWrappedPlacementCompilesWrittenLevelLenient14411(t *testing.T) {
 // handling: a token-level scan that cannot tell a packed run from a braced
 // misplaced block rejects every flat-set authPriv user.)
 func TestFlatLinePackedRunIsNotMisplaced14411(t *testing.T) {
-	p := NewParser(`snmp v3 usm local-engine user alice authentication-sha256 authentication-password APASS privacy-aes128 privacy-password PPASS;`)
+	p := NewParser(`snmp v3 usm local-engine user alice authentication-sha256 authentication-password APASS12345 privacy-aes128 privacy-password PPASS12345;`)
 	tree, perr := p.Parse()
 	if perr != nil {
 		t.Fatalf("parse: %v", perr)
@@ -229,15 +229,15 @@ func TestFlatLinePackedRunIsNotMisplaced14411(t *testing.T) {
 		t.Fatalf("packed flat line rejected as misplaced: %v", err)
 	}
 	u := user14411(t, cfg, "alice")
-	if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS" {
+	if u.PrivProtocol != "aes128" || string(u.PrivPassword) != "PPASS12345" {
 		t.Fatalf("packed flat line compiled weaker than written: priv=%q", u.PrivProtocol)
 	}
 }
 
 func TestProtocolKeywordUnderV3OrUsmRejected14411(t *testing.T) {
 	for _, src := range []string{
-		`snmp { v3 { authentication-sha256 { authentication-password APASS; } usm { local-engine { user alice; } } } }`,
-		`snmp { v3 { usm privacy-aes128 privacy-password PPASS; } }`,
+		`snmp { v3 { authentication-sha256 { authentication-password APASS12345; } usm { local-engine { user alice; } } } }`,
+		`snmp { v3 { usm privacy-aes128 privacy-password PPASS12345; } }`,
 	} {
 		p := NewParser(src)
 		tree, perr := p.Parse()
@@ -256,7 +256,7 @@ func TestProtocolKeywordUnderV3OrUsmRejected14411(t *testing.T) {
 func TestValidSNMPv3ShapesStillCompile14411(t *testing.T) {
 	t.Run("braced authPriv", func(t *testing.T) {
 		cfg, err := compile14411(t,
-			`user alice { authentication-sha256 { authentication-password APASS; } privacy-aes128 { privacy-password PPASS; } }`)
+			`user alice { authentication-sha256 { authentication-password APASS12345; } privacy-aes128 { privacy-password PPASS12345; } }`)
 		if err != nil {
 			t.Fatalf("braced authPriv rejected: %v", err)
 		}
@@ -266,7 +266,7 @@ func TestValidSNMPv3ShapesStillCompile14411(t *testing.T) {
 		}
 	})
 	t.Run("packed auth only stays authNoPriv", func(t *testing.T) {
-		cfg, err := compile14411(t, `user alice authentication-md5 authentication-password APASS;`)
+		cfg, err := compile14411(t, `user alice authentication-md5 authentication-password APASS12345;`)
 		if err != nil {
 			t.Fatalf("packed auth-only rejected: %v", err)
 		}
@@ -299,7 +299,7 @@ func TestValidSNMPv3ShapesStillCompile14411(t *testing.T) {
 	// The tolerant path must still ACCEPT these placements with a warning
 	// (#1960 no-brick); the strict verdicts above must not brick loading.
 	t.Run("lenient still boots with warning", func(t *testing.T) {
-		p := NewParser(`snmp { v3 { usm { local-engine { user alice { Authentication-SHA256 { authentication-password APASS; } } } } } }`)
+		p := NewParser(`snmp { v3 { usm { local-engine { user alice { Authentication-SHA256 { authentication-password APASS12345; } } } } } }`)
 		tree, perr := p.Parse()
 		if perr != nil {
 			t.Fatalf("parse: %v", perr)
@@ -326,8 +326,8 @@ func TestValidSNMPv3ShapesStillCompile14411(t *testing.T) {
 // must reject (via #14401) rather than sit silently beside a bare user.
 func TestBarePasswordLeafUnderUserRejected14411(t *testing.T) {
 	for _, body := range []string{
-		`user alice { privacy-password PPASS; }`,
-		`user alice { authentication-password APASS; }`,
+		`user alice { privacy-password PPASS12345; }`,
+		`user alice { authentication-password APASS12345; }`,
 	} {
 		_, err := compile14411(t, body)
 		if err == nil {
@@ -343,7 +343,7 @@ func TestBarePasswordLeafUnderUserRejected14411(t *testing.T) {
 // compiler dispatches it via compileSystem's snmp child) must be gated
 // exactly like the top-level `snmp { … }` spelling.
 func TestSystemWrappedSNMPv3UserIsGated14411(t *testing.T) {
-	p := NewParser(`system { snmp { v3 { usm { local-engine { user alice { Authentication-SHA256 { authentication-password APASS; } } } } } } }`)
+	p := NewParser(`system { snmp { v3 { usm { local-engine { user alice { Authentication-SHA256 { authentication-password APASS12345; } } } } } } }`)
 	tree, perr := p.Parse()
 	if perr != nil {
 		t.Fatalf("parse: %v", perr)
@@ -352,7 +352,7 @@ func TestSystemWrappedSNMPv3UserIsGated14411(t *testing.T) {
 		t.Fatal("system-wrapped case-variant committed clean; the user compiled bare")
 	}
 	// Control: the valid spelling under system must still compile.
-	p2 := NewParser(`system { snmp { v3 { usm { local-engine { user alice { authentication-sha256 { authentication-password APASS; } } } } } } }`)
+	p2 := NewParser(`system { snmp { v3 { usm { local-engine { user alice { authentication-sha256 { authentication-password APASS12345; } } } } } } }`)
 	tree2, perr2 := p2.Parse()
 	if perr2 != nil {
 		t.Fatalf("parse: %v", perr2)
@@ -371,7 +371,7 @@ func TestSystemWrappedSNMPv3UserIsGated14411(t *testing.T) {
 // first-block-only gate.
 func TestSecondV3BlockIsGated14767(t *testing.T) {
 	for _, bad := range []string{"Authentication-SHA256", "authentication-sha512"} {
-		src := `snmp { v3 { usm { local-engine { user alice { authentication-sha256 { authentication-password APASS; } } } } } v3 { usm { local-engine { user bob { ` + bad + ` { authentication-password BPASS; } } } } } }`
+		src := `snmp { v3 { usm { local-engine { user alice { authentication-sha256 { authentication-password APASS12345; } } } } } v3 { usm { local-engine { user bob { ` + bad + ` { authentication-password BPASS12345; } } } } } }`
 		tree, perr := NewParser(src).Parse()
 		if perr != nil {
 			t.Fatalf("parse: %v", perr)
@@ -386,7 +386,7 @@ func TestSecondV3BlockIsGated14767(t *testing.T) {
 // node's own Keys; compileSystem synthesises the snmp node from it, and
 // the gate must see that synthesised root too.
 func TestSystemElidedSNMPIsGated14767(t *testing.T) {
-	p := NewParser(`system snmp v3 usm local-engine user alice Authentication-SHA256 authentication-password APASS;`)
+	p := NewParser(`system snmp v3 usm local-engine user alice Authentication-SHA256 authentication-password APASS12345;`)
 	tree, perr := p.Parse()
 	if perr != nil {
 		t.Fatalf("parse: %v", perr)
@@ -402,8 +402,8 @@ func TestSystemElidedSNMPIsGated14767(t *testing.T) {
 // protocol there must reject — neither may compile to a bare user.
 func TestTopLevelFlatCaseVariantAndUnknownRejected14767(t *testing.T) {
 	for _, src := range []string{
-		`snmp v3 usm local-engine user alice Authentication-SHA256 authentication-password APASS;`,
-		`snmp v3 usm local-engine user alice authentication-sha512 authentication-password APASS;`,
+		`snmp v3 usm local-engine user alice Authentication-SHA256 authentication-password APASS12345;`,
+		`snmp v3 usm local-engine user alice authentication-sha512 authentication-password APASS12345;`,
 	} {
 		p := NewParser(src)
 		tree, perr := p.Parse()

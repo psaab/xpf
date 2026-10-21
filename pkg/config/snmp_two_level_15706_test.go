@@ -93,7 +93,7 @@ func TestSNMPTrapGroupTwoLevelSecondInstance15706(t *testing.T) {
 }
 
 func TestSNMPv3UserTwoLevelSecondInstance15706(t *testing.T) {
-	cfg, err := compileHier15706(t, `snmp { v3 { usm { local-engine { user { u1 { authentication-sha { authentication-password p1pass; } } u2 { authentication-sha { authentication-password p2pass; } } } } } } }`)
+	cfg, err := compileHier15706(t, `snmp { v3 { usm { local-engine { user { u1 { authentication-sha { authentication-password p1password; } } u2 { authentication-sha { authentication-password p2password; } } } } } } }`)
 	if err != nil {
 		t.Fatalf("two-level v3 user must compile: %v", err)
 	}
@@ -102,10 +102,10 @@ func TestSNMPv3UserTwoLevelSecondInstance15706(t *testing.T) {
 	if u1 == nil || u2 == nil {
 		t.Fatalf("v3 users = %v, want both u1 and u2 (2nd instance dropped pre-fix)", cfg.System.SNMP.V3Users)
 	}
-	if u2.AuthProtocol != "sha" || string(u2.AuthPassword) != "p2pass" {
+	if u2.AuthProtocol != "sha" || string(u2.AuthPassword) != "p2password" {
 		t.Fatalf("u2 = auth %q pw set %v, want sha/p2pass", u2.AuthProtocol, string(u2.AuthPassword) != "")
 	}
-	if u1.AuthProtocol != "sha" || string(u1.AuthPassword) != "p1pass" {
+	if u1.AuthProtocol != "sha" || string(u1.AuthPassword) != "p1password" {
 		t.Fatalf("u1 = auth %q, want sha/p1pass", u1.AuthProtocol)
 	}
 }
@@ -168,7 +168,7 @@ func TestSNMPNamedFormsUnaffected15706(t *testing.T) {
 		client-list L1 { 10.0.0.0/8; }
 		community c { client-list-name L1; authorization read-only; }
 		trap-group g1 { targets 192.0.2.1; version v2; categories link; }
-		v3 { usm { local-engine { user u1 { authentication-sha { authentication-password p1pass; } } } } }
+		v3 { usm { local-engine { user u1 { authentication-sha { authentication-password p1password; } } } } }
 	}`)
 	if err != nil {
 		t.Fatalf("named forms must compile: %v", err)

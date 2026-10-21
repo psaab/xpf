@@ -80,33 +80,33 @@ func wantBareReject14401(t *testing.T, err error, user, leaf string) {
 
 func TestSNMPv3BarePasswordLeafRejected14401(t *testing.T) {
 	t.Run("flat bare authentication-password", func(t *testing.T) {
-		_, err := compile14401Flat(t, `set snmp v3 usm local-engine user alice authentication-password s3cret`)
+		_, err := compile14401Flat(t, `set snmp v3 usm local-engine user alice authentication-password s3cretpass`)
 		wantBareReject14401(t, err, "alice", "authentication-password")
 	})
 	t.Run("flat bare privacy-password beside valid auth", func(t *testing.T) {
-		_, err := compile14401Flat(t, `set snmp v3 usm local-engine user bob authentication-sha256 authentication-password s3cret privacy-password p4ss`)
+		_, err := compile14401Flat(t, `set snmp v3 usm local-engine user bob authentication-sha256 authentication-password s3cretpass privacy-password p4ssphrase`)
 		wantBareReject14401(t, err, "bob", "privacy-password")
 	})
 	t.Run("braced bare authentication-password", func(t *testing.T) {
-		_, err := compile14401Braced(t, `user alice { authentication-password "s3cret"; }`)
+		_, err := compile14401Braced(t, `user alice { authentication-password "s3cretpass"; }`)
 		wantBareReject14401(t, err, "alice", "authentication-password")
 	})
 	t.Run("braced bare privacy-password beside valid auth", func(t *testing.T) {
-		_, err := compile14401Braced(t, `user bob { authentication-sha256 { authentication-password "s3cret"; } privacy-password "p4ss"; }`)
+		_, err := compile14401Braced(t, `user bob { authentication-sha256 { authentication-password "s3cretpass"; } privacy-password "p4ssphrase"; }`)
 		wantBareReject14401(t, err, "bob", "privacy-password")
 	})
 	t.Run("packed user line bare authentication-password", func(t *testing.T) {
-		_, err := compile14401Braced(t, `user alice authentication-password s3cret;`)
+		_, err := compile14401Braced(t, `user alice authentication-password s3cretpass;`)
 		wantBareReject14401(t, err, "alice", "authentication-password")
 	})
 	t.Run("packed user line bare privacy-password after auth run", func(t *testing.T) {
-		_, err := compile14401Braced(t, `user bob authentication-sha256 authentication-password s3cret privacy-password p4ss;`)
+		_, err := compile14401Braced(t, `user bob authentication-sha256 authentication-password s3cretpass privacy-password p4ssphrase;`)
 		wantBareReject14401(t, err, "bob", "privacy-password")
 	})
 	// Group-inherited bare leaf: the gate runs on the expanded tree, so an
 	// apply-groups fragment must be caught too.
 	t.Run("group-inherited bare authentication-password", func(t *testing.T) {
-		src := `groups { g1 { snmp { v3 { usm { local-engine { user alice { authentication-password "s3cret"; } } } } } } }
+		src := `groups { g1 { snmp { v3 { usm { local-engine { user alice { authentication-password "s3cretpass"; } } } } } } }
 snmp { v3 { usm { local-engine { user alice { } } } } }
 apply-groups g1;`
 		p := NewParser(src)
@@ -125,11 +125,11 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 		name string
 		body string
 	}{
-		{"md5", `user carol { authentication-md5 { authentication-password "s3cret"; } }`},
-		{"sha", `user carol { authentication-sha { authentication-password "s3cret"; } }`},
-		{"sha256", `user carol { authentication-sha256 { authentication-password "s3cret"; } }`},
-		{"des", `user carol { authentication-sha256 { authentication-password "s3cret"; } privacy-des { privacy-password "p4ss"; } }`},
-		{"aes128", `user carol { authentication-sha256 { authentication-password "s3cret"; } privacy-aes128 { privacy-password "p4ss"; } }`},
+		{"md5", `user carol { authentication-md5 { authentication-password "s3cretpass"; } }`},
+		{"sha", `user carol { authentication-sha { authentication-password "s3cretpass"; } }`},
+		{"sha256", `user carol { authentication-sha256 { authentication-password "s3cretpass"; } }`},
+		{"des", `user carol { authentication-sha256 { authentication-password "s3cretpass"; } privacy-des { privacy-password "p4ssphrase"; } }`},
+		{"aes128", `user carol { authentication-sha256 { authentication-password "s3cretpass"; } privacy-aes128 { privacy-password "p4ssphrase"; } }`},
 	}
 	for _, tc := range nested {
 		t.Run("nested "+tc.name, func(t *testing.T) {
@@ -145,8 +145,8 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 	}
 	t.Run("flat nested containers", func(t *testing.T) {
 		cfg, err := compile14401Flat(t,
-			`set snmp v3 usm local-engine user carol authentication-sha256 authentication-password s3cret`,
-			`set snmp v3 usm local-engine user carol privacy-aes128 privacy-password p4ss`)
+			`set snmp v3 usm local-engine user carol authentication-sha256 authentication-password s3cretpass`,
+			`set snmp v3 usm local-engine user carol privacy-aes128 privacy-password p4ssphrase`)
 		if err != nil {
 			t.Fatalf("flat nested spelling was REJECTED: %v", err)
 		}
@@ -156,7 +156,7 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 		}
 	})
 	t.Run("packed auth-only run on user line stays authNoPriv", func(t *testing.T) {
-		cfg, err := compile14401Braced(t, `user carol authentication-sha256 authentication-password s3cret;`)
+		cfg, err := compile14401Braced(t, `user carol authentication-sha256 authentication-password s3cretpass;`)
 		if err != nil {
 			t.Fatalf("packed auth-only spelling was REJECTED: %v", err)
 		}
@@ -167,7 +167,7 @@ func TestSNMPv3BarePasswordControlsStillCompile14401(t *testing.T) {
 	})
 	t.Run("packed valid authPriv run via one flat line", func(t *testing.T) {
 		cfg, err := compile14401Flat(t,
-			`set snmp v3 usm local-engine user carol authentication-sha256 authentication-password s3cret privacy-aes128 privacy-password p4ss`)
+			`set snmp v3 usm local-engine user carol authentication-sha256 authentication-password s3cretpass privacy-aes128 privacy-password p4ssphrase`)
 		if err != nil {
 			t.Fatalf("packed valid spelling was REJECTED: %v", err)
 		}
@@ -213,15 +213,15 @@ func TestSNMPv3BarePasswordLenientWarns14401(t *testing.T) {
 		}
 	}
 	t.Run("braced bare auth", func(t *testing.T) {
-		cfg, err := compile14401LenientBraced(t, `user alice { authentication-password "s3cret"; }`)
+		cfg, err := compile14401LenientBraced(t, `user alice { authentication-password "s3cretpass"; }`)
 		assertWarn(t, cfg, err, "alice", "authentication-password")
 	})
 	t.Run("flat bare privacy beside auth", func(t *testing.T) {
-		cfg, err := compile14401LenientFlat(t, `set snmp v3 usm local-engine user bob authentication-sha256 authentication-password s3cret privacy-password p4ss`)
+		cfg, err := compile14401LenientFlat(t, `set snmp v3 usm local-engine user bob authentication-sha256 authentication-password s3cretpass privacy-password p4ssphrase`)
 		assertWarn(t, cfg, err, "bob", "privacy-password")
 	})
 	t.Run("lenient nested control has no bare warning", func(t *testing.T) {
-		cfg, err := compile14401LenientBraced(t, `user carol { authentication-sha256 { authentication-password "s3cret"; } privacy-aes128 { privacy-password "p4ss"; } }`)
+		cfg, err := compile14401LenientBraced(t, `user carol { authentication-sha256 { authentication-password "s3cretpass"; } privacy-aes128 { privacy-password "p4ssphrase"; } }`)
 		if err != nil {
 			t.Fatalf("lenient nested control rejected: %v", err)
 		}

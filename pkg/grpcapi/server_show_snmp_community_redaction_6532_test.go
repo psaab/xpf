@@ -156,8 +156,8 @@ func TestShowTextSNMPRenderIsDeterministic(t *testing.T) {
 		"set snmp community MMM-COMMUNITY-B authorization read-only",
 		"set snmp trap-group tg-z targets 10.0.0.3",
 		"set snmp trap-group tg-a targets 10.0.0.1",
-		"set snmp v3 usm local-engine user zeta authentication-sha256 authentication-password pw1",
-		"set snmp v3 usm local-engine user alpha authentication-md5 authentication-password pw2",
+		"set snmp v3 usm local-engine user zeta authentication-sha256 authentication-password pw1password",
+		"set snmp v3 usm local-engine user alpha authentication-md5 authentication-password pw2password",
 	}
 	if _, err := store.LoadSet(strings.Join(multi, "\n")); err != nil {
 		t.Fatalf("LoadSet(): %v", err)
