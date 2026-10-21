@@ -256,6 +256,20 @@ func authorizeConfigRenderedDescendantsWithRules(class string, rules CompiledLog
 					return err
 				}
 			}
+			// Fold 5: the terminal node itself may be a bracketed
+			// group — price each member spelling of it, and price
+			// its children under each member path (shared body
+			// renders under every member selector).
+			for _, mp := range renderedNodePaths(parentPathOf(m), m.node) {
+				if err := authorizeRenderedPath(class, rules, path, mp); err != nil {
+					return err
+				}
+				if strings.Join(mp, " ") != strings.Join(m.path, " ") {
+					if err := authorizeRenderedNode(class, rules, mp, m.node); err != nil {
+						return err
+					}
+				}
+			}
 			if err := authorizeRenderedNode(class, rules, m.path, m.node); err != nil {
 				return err
 			}
@@ -297,8 +311,74 @@ func isPathPrefix(anc, requested []string) bool {
 	return true
 }
 
+// parentPathOf returns the complete path of m's parent: the
+// second-to-last trail ancestor, or — for a top-level match — the
+// terminal path minus the node's own Keys.
+func parentPathOf(m renderedMatch) []string {
+	if len(m.ancestors) >= 2 {
+		return m.ancestors[len(m.ancestors)-2]
+	}
+	if len(m.path) >= len(m.node.Keys) {
+		return m.path[:len(m.path)-len(m.node.Keys)]
+	}
+	return nil
+}
+
+// authorizeRenderedNode prices every descendant below n (already priced
+// at prefix by the caller), recursively. The first denied descendant
+// refuses the render, naming only the path root (configAuditRoot) as
+//
+// Bracketed groups (fold 5): a node authored `keyword [ m1 m2 ]`
+// carries Keys [keyword m1 m2] with bracket provenance on the member
+// keys. The renderer prints the whole group for ANY member selector,
+// and FormatPathSet emits one line per member spelling — each member
+// is therefore a rendered path of its own (`... keyword m1`,
+// `... keyword m2`) in addition to the combined key path. An anchored
+// deny naming one member must refuse a render of its sibling member
+// (the group body is shared), so every bracketed member path is
+// priced, and children are priced under EACH member path (the body
+// renders under every member spelling).
+func authorizeRenderedNode(class string, rules CompiledLoginRegexes, prefix []string, n *Node) error {
+	for _, child := range n.Children {
+		for _, childPath := range renderedNodePaths(prefix, child) {
+			joined := strings.Join(childPath, " ")
+			if decision := rules.Evaluate(joined); !decision.Allowed {
+				return fmt.Errorf("permission denied: login class %q denies configuration under %q (%s); "+
+					"the requested subtree %q renders that descendant, so the ancestor read is refused — "+
+					"request an allowed subtree instead (#15995)",
+					class, configAuditRoot(joined), decision.Reason, configAuditRoot(strings.Join(prefix, " ")))
+			}
+			if err := authorizeRenderedNode(class, rules, childPath, child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// renderedNodePaths returns every complete path at which node n (child
+// of the node at parentPrefix) is rendered: the combined key path
+// (parentPrefix + n.Keys), plus — for a bracketed group — one path per
+// member (parentPrefix + [keyword, member]). Member detection uses
+// bracket PROVENANCE (KeyBracketed), exactly as the renderer's
+// bracketed-group handling does: unbracketed trailing keys are a
+// packed body, never member names (#9799).
+func renderedNodePaths(parentPrefix []string, n *Node) [][]string {
+	combined := append(append([]string(nil), parentPrefix...), n.Keys...)
+	out := [][]string{combined}
+	if len(n.Keys) >= 2 && n.KeyBracketed(1) {
+		for j := 1; j < len(n.Keys); j++ {
+			if !n.KeyBracketed(j) {
+				break // the bracketed group ended
+			}
+			member := append(append([]string(nil), parentPrefix...), n.Keys[0], n.Keys[j])
+			out = append(out, member)
+		}
+	}
+	return out
+}
+
 // authorizeRenderedPath prices one complete rendered path, skipping the
-// requested spelling itself (already priced by the caller).
 func authorizeRenderedPath(class string, rules CompiledLoginRegexes, requested, rendered []string) error {
 	if len(rendered) == len(requested) {
 		same := true
@@ -318,27 +398,6 @@ func authorizeRenderedPath(class string, rules CompiledLoginRegexes, requested, 
 			"the requested subtree %q renders that descendant, so the ancestor read is refused — "+
 			"request an allowed subtree instead (#15995)",
 			class, configAuditRoot(joined), decision.Reason, configAuditRoot(strings.Join(requested, " ")))
-	}
-	return nil
-}
-
-// authorizeRenderedNode prices every descendant below n (already priced
-// at prefix by the caller), recursively. The first denied descendant
-// refuses the render, naming only the path root (configAuditRoot) as
-// every sibling gate does — descendant identity tokens are operator data.
-func authorizeRenderedNode(class string, rules CompiledLoginRegexes, prefix []string, n *Node) error {
-	for _, child := range n.Children {
-		childPath := append(append([]string(nil), prefix...), child.Keys...)
-		joined := strings.Join(childPath, " ")
-		if decision := rules.Evaluate(joined); !decision.Allowed {
-			return fmt.Errorf("permission denied: login class %q denies configuration under %q (%s); "+
-				"the requested subtree %q renders that descendant, so the ancestor read is refused — "+
-				"request an allowed subtree instead (#15995)",
-				class, configAuditRoot(joined), decision.Reason, configAuditRoot(strings.Join(prefix, " ")))
-		}
-		if err := authorizeRenderedNode(class, rules, childPath, child); err != nil {
-			return err
-		}
 	}
 	return nil
 }

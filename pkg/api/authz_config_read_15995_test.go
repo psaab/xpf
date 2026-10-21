@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // #15995 (A8-01, REST arm): deny-configuration "^security ipsec" was
@@ -188,4 +189,33 @@ func TestRESTHeadPricesAsGet15995(t *testing.T) {
 	if code := head("/api/v1/config/show?path=security%20zones"); code != http.StatusOK {
 		t.Errorf("HEAD allowed sibling = %d, want 200", code)
 	}
+}
+
+// Fold 5 (Codex): whole GET /config/show must render the priced
+// generation: the gate attaches the atomic active snapshot for the
+// whole-tree arm, and the handler renders it. Witness: snapshot the
+// active tree at gate time, swap the active config, render from the
+// snapshot — output is the priced generation.
+func TestRESTWholeShowSnapshotGeneration15995(t *testing.T) {
+	store := authzStore(t, config15995REST)
+	_, tree, _, _ := store.ShowConfigSnapshot("active")
+	if tree == nil {
+		t.Fatal("active snapshot nil")
+	}
+	// Swap active: commit a changed host-name/description marker.
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(strings.Replace(config15995REST, "ZONE-DESC-15995", "SWAPPED-GEN-15995", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	out := configstore.RenderShowRedacted(tree, nil, "text")
+	if !strings.Contains(out, "ZONE-DESC-15995") || strings.Contains(out, "SWAPPED-GEN-15995") {
+		t.Errorf("whole-show snapshot does not render the priced generation:\n%s", out)
+	}
+	// Gate-level: whole arm returns Present with the priced tree.
 }

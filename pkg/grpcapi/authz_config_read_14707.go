@@ -88,7 +88,20 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		}
 		suffix := config.ConfigShowDisplaySuffix(showFormatName(r.GetFormat()))
 		if len(r.GetPath()) == 0 {
-			return configReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class, suffix)
+			// Fold 5: attach the priced generation for the handler
+			// (restricted classes are refused by ShowWhole below;
+			// admitted ones render this snapshot, not live).
+			snaps := configReadSnapshots{Present: true, NodeID: -1}
+			if s.store != nil {
+				target := "candidate"
+				if r.GetTarget() == pb.ConfigTarget_ACTIVE {
+					target = "active"
+				}
+				_, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+				snaps.NodeID = nid
+				snaps.Primary = tree
+			}
+			return snaps, config.AuthorizeConfigShowWhole(cfg, class, suffix)
 		}
 		// #15995: price every rendered descendant, not just the
 		// requested path — the handler renders the whole subtree.

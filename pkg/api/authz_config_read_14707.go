@@ -94,8 +94,25 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 			return snaps, config.AuthorizeConfigShowPathRendered(priceCfg, class, path,
 				config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
 		}
-		return restConfigReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class,
-			config.ConfigShowDisplaySuffix(restShowFormat(format)))
+		// Fold 5: whole-tree show is refused for restricted classes
+		// (AuthorizeConfigShowWhole), but an UNRESTRICTED class's
+		// request must still render the generation priced here —
+		// attach the atomic active snapshot so a commit between
+		// gate and handler cannot swap the rendered generation.
+		{
+			target := "candidate"
+			if t := strings.TrimSpace(r.URL.Query().Get("target")); t == "" || strings.EqualFold(t, "active") {
+				target = "active"
+			}
+			snaps := restConfigReadSnapshots{Present: true, NodeID: -1}
+			if s.store != nil {
+				_, tree, nid, _ := s.store.ShowConfigSnapshot(target)
+				snaps.NodeID = nid
+				snaps.Primary = tree
+			}
+			return snaps, config.AuthorizeConfigShowWhole(cfg, class,
+				config.ConfigShowDisplaySuffix(restShowFormat(format)))
+		}
 	case "GET /api/v1/config":
 		// Typed compiled-config render; whole tree, no display format.
 		return restConfigReadSnapshots{}, config.AuthorizeConfigShowWhole(cfg, class, "")

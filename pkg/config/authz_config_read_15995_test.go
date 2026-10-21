@@ -465,3 +465,40 @@ func TestConfigShowAnchoredIntermediateContext15995(t *testing.T) {
 		t.Fatal("anchored deny on intermediate context bypassed (display set)")
 	}
 }
+
+// Fold 5 (1): bracketed containers. `security-zone [ zga zgb ]` is ONE
+// node (Keys [security-zone zga zgb], bracket provenance per member);
+// the renderer prints the whole group for ANY member selector, so
+// each member is a rendered path. An anchored deny naming one member
+// must refuse renders addressed by its sibling (and vice versa for
+// the member's children, whose body is shared).
+func TestConfigShowBracketedMember15995(t *testing.T) {
+	tree, errs := NewParser(`security { zones {
+		security-zone [ zga zgb ] { tcp-rst; }
+		security-zone trust { description x; }
+	} }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("bracket fixture parse: %v", errs)
+	}
+	// Premise: sibling selector renders the whole group.
+	if out := tree.FormatPathRedacted([]string{"security", "zones", "security-zone", "zgb"}); !strings.Contains(out, "zga") {
+		t.Fatalf("premise broken: [.. zgb] does not render zga:\n%s", out)
+	}
+	deny := cfg15995(t, "", "^security zones security-zone zga$")
+	for _, p := range [][]string{
+		{"security", "zones"},
+		{"security", "zones", "security-zone", "zgb"},
+		{"security", "zones", "security-zone", "zga"},
+	} {
+		if err := AuthorizeConfigShowPathRendered(deny, "limited", p, "", tree); err == nil {
+			t.Errorf("deny zga: %v ALLOWED though it renders zga (#15995 fold5-1)", p)
+		}
+	}
+	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"security", "zones", "security-zone", "trust"}, "", tree); err != nil {
+		t.Errorf("trust sibling refused: %v", err)
+	}
+	denyChild := cfg15995(t, "", "^security zones security-zone zga tcp-rst$")
+	if err := AuthorizeConfigShowPathRendered(denyChild, "limited", []string{"security", "zones", "security-zone", "zgb"}, "", tree); err == nil {
+		t.Error("member-child deny bypassed via sibling member selector")
+	}
+}

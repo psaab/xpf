@@ -168,15 +168,15 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			// ACTIVE — a whole committed-tree diff, adjudicated
 			// like ShowRollback, not the candidate compare.
 			// #15995 fold: stash the priced arms for the handler.
+			priceCfg := cfg
 			if c.store != nil {
-				// Atomic capture for the handler; the whole-tree
-				// price below uses cfg from this same gate frame
-				// (AuthorizeConfigShowRollback consults only
-				// whether cfg's class is restricted + op pair).
-				slot, other := c.store.RollbackCompareTrees(n, true)
+				scfg, slot, other, _, _, _ := c.store.RollbackCompareSnapshot(n, true)
+				if scfg != nil {
+					priceCfg = scfg
+				}
 				c.setRenderSnapshots15995(slot, other)
 			}
-			return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
+			return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, "")
 		}
 		n, err := strconv.Atoi(args[2])
 		if err != nil || n < 0 {
@@ -214,11 +214,15 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				}
 				return config.AuthorizeConfigShowPathRendered(priceCfg, c.userClass, rbPath, suffix, trees...)
 			}
+			priceCfg := cfg
 			if c.store != nil {
-				_, tree, _, _, _ := c.store.RollbackSnapshot(n)
+				scfg, tree, _, _, _ := c.store.RollbackSnapshot(n)
+				if scfg != nil {
+					priceCfg = scfg
+				}
 				c.setRenderSnapshots15995(tree, nil)
 			}
-			return config.AuthorizeConfigShowRollback(cfg, c.userClass, suffix)
+			return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, suffix)
 		}
 		if piped {
 			if len(pipe) == 1 && pipe[0] == "compare" {
@@ -242,11 +246,15 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 		}
 		for _, a := range rest {
 			if a == "compare" {
+				priceCfg := cfg
 				if c.store != nil {
-					slot, other := c.store.RollbackCompareTrees(n, true)
+					scfg, slot, other, _, _, _ := c.store.RollbackCompareSnapshot(n, true)
+					if scfg != nil {
+						priceCfg = scfg
+					}
 					c.setRenderSnapshots15995(slot, other)
 				}
-				return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
+				return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, "")
 			}
 		}
 		// #15942 H2-04: a bare pre-pipe subtree path (`rollback 1
@@ -269,11 +277,15 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			}
 			return config.AuthorizeConfigShowPathRendered(priceCfg, c.userClass, rbPath, "", trees...)
 		}
+		priceCfg := cfg
 		if c.store != nil {
-			_, tree, _, _, _ := c.store.RollbackSnapshot(n)
+			scfg, tree, _, _, _ := c.store.RollbackSnapshot(n)
+			if scfg != nil {
+				priceCfg = scfg
+			}
 			c.setRenderSnapshots15995(tree, nil)
 		}
-		return config.AuthorizeConfigShowRollback(cfg, c.userClass, "")
+		return config.AuthorizeConfigShowRollback(priceCfg, c.userClass, "")
 	case "login":
 		// #15995 fold: `show system login` prints the whole
 		// system login subtree — price its rendered descendants
