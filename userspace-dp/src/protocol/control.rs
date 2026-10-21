@@ -298,7 +298,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v64 -> v65 (#16059): InterfaceSnapshot carries tunnel_mode; a v64
 // helper decodes "" (not-GRE) and would refuse GRE-input shapes
 // #10816 admits.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 65;
+// v65 -> v66 (#16063; after #16049 took v64 and #16059 took v65):
+// MirrorConfigSnapshot carries ingress_unit; a v65 helper keys a
+// tunnel unit-scoped mirror by (ifindex, VID 0) alone and mirrors
+// every sibling tunnel unit — the defect.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 66;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

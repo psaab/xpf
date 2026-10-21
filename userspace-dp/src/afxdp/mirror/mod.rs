@@ -71,16 +71,28 @@ pub(in crate::afxdp) fn resolve_mirror_config(
     // maps native traffic to its unit, whose scoped row is keyed by
     // the parent bind ifindex here, so check both the raw and the
     // logical bind keys at VID 0 and at the packet VID.
-    if let Some(cfg) = forwarding
-        .mirror_configs_scoped
-        .get(&(ingress_ifindex, ingress_vlan_id))
-        .or_else(|| {
-            forwarding
-                .mirror_configs_scoped
-                .get(&(logical_ifindex, ingress_vlan_id))
-        })
-    {
-        return Some(*cfg);
+    // #16063: a unit-scoped row whose (ifindex, VID) is shared by
+    // sibling tunnel units is never published by the Go builder (it
+    // refuses the input), so a scoped row here always keys a unit the
+    // packet's VID + logical resolution can identify (VLAN units, unit
+    // 0). Match the packet's unit when its logical ingress is a unit
+    // row; otherwise fall through to the bare table only.
+    let unit = forwarding
+        .ingress_unit_by_logical
+        .get(&logical_ifindex)
+        .copied();
+    if let Some(unit) = unit {
+        if let Some(cfg) = forwarding
+            .mirror_configs_scoped
+            .get(&(ingress_ifindex, ingress_vlan_id, unit))
+            .or_else(|| {
+                forwarding
+                    .mirror_configs_scoped
+                    .get(&(logical_ifindex, ingress_vlan_id, unit))
+            })
+        {
+            return Some(*cfg);
+        }
     }
     // Scoped rows live only in the scoped map, so the bare fallback
     // below cannot return one: pre-fix the unit-0 row lived in the

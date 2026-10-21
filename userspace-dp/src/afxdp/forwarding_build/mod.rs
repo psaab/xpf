@@ -625,6 +625,7 @@ fn build_fallible_forwarding_state(
         &excluded_local_v6,
     )?;
     interfaces::populate_egress(snapshot, &mut state, &iface_ctx)?;
+    state.ingress_unit_by_logical = interfaces::ingress_unit_by_logical(snapshot);
     // #6458/#13181: include each admitted member row's RG, not inherited
     // parent ingress aliases.
     interfaces::populate_zone_to_rgs(snapshot, &mut state);
@@ -949,7 +950,7 @@ fn build_fallible_forwarding_state(
             let vid = u16::try_from(mirror.ingress_vlan_id).unwrap_or(0);
             state
                 .mirror_configs_scoped
-                .insert((mirror.ingress_ifindex, vid), cfg);
+                .insert((mirror.ingress_ifindex, vid, mirror.ingress_unit), cfg);
         } else {
             state.mirror_configs.insert(mirror.ingress_ifindex, cfg);
         }

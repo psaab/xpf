@@ -601,7 +601,17 @@ pub(in crate::afxdp) struct ForwardingState {
     /// A row here matches only that VID (VID 0 covers untagged/native);
     /// it is consulted before the bare `mirror_configs` fallback so a
     /// unit-0 input never mirrors tagged siblings on the same port.
-    pub(in crate::afxdp) mirror_configs_scoped: FastMap<(i32, u16), MirrorRuntimeConfig>,
+    /// #16063: the key also carries the logical unit number — every
+    /// tunnel unit on one netdev has VID 0, so (ifindex, VID) alone
+    /// cannot tell wg0.1 from wg0.0.
+    pub(in crate::afxdp) mirror_configs_scoped: FastMap<(i32, u16, i32), MirrorRuntimeConfig>,
+    /// #16063: logical ifindex -> configured unit number, for unit rows
+    /// whose logical ifindex is distinct (VLAN units, unit 0). Built
+    /// from the snapshot's interface rows at forwarding-build time —
+    /// never from name-suffix parsing of a last-wins name map. Tunnel
+    /// units sharing one netdev have no distinct logical ifindex and
+    /// are absent here; the Go builder refuses mirroring them.
+    pub(in crate::afxdp) ingress_unit_by_logical: FastMap<i32, i32>,
     pub(in crate::afxdp) tcp_mss_all_tcp: u16,
     pub(in crate::afxdp) tcp_mss_ipsec_vpn: u16,
     pub(in crate::afxdp) tcp_mss_gre_in: u16,
