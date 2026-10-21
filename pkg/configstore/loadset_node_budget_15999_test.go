@@ -87,3 +87,36 @@ func TestFlatReplayNodeBudgetAllVerbs15999(t *testing.T) {
 		t.Fatalf("below-budget control: %v", err)
 	}
 }
+
+// #15999 fold (Claim 3): a valid config BELOW the parser-unit budget must
+// pass on flat replay even though cumulative token charge exceeds it —
+// charge reconciles to final-tree units. 25,001 distinct address lines:
+// flat token charge 8/line crosses 200k, final tree is ~100k units.
+func TestFlatReplayBelowBudgetParity15999(t *testing.T) {
+	var b strings.Builder
+	for i := range 25_001 {
+		fmt.Fprintf(&b, "set security address-book global address a%d 10.0.0.1/32\n", i)
+	}
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet(b.String()); err != nil {
+		t.Fatalf("below-budget (final-tree units) LoadSet refused: %v", err)
+	}
+	// Repeated identical sets create no nodes: 250k of them must not be
+	// refused for cumulative charge (they are still bounded by byte cap
+	// and the >budget line-count guard does not fire at exactly this
+	// count via dedupe — use LoadMerge on a smaller repeat count here).
+	s2 := newTestStore(t)
+	if err := s2.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	var rb strings.Builder
+	for range 30_000 {
+		rb.WriteString("set system host-name fw1\n")
+	}
+	if _, err := s2.LoadSet(rb.String()); err != nil {
+		t.Fatalf("repeated-set LoadSet refused by cumulative charge: %v", err)
+	}
+}

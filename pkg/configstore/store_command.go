@@ -711,8 +711,13 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 		// the deactivate verb (#2008 H1) to preserve Inactive — applying it as
 		// a plain set would silently re-activate the node.
 		setLines := strings.Split(tree.FormatSetForLoadMerge(), "\n")
-		if _, err := replayFlatLines15999(working, setLines); err != nil {
-			return fmt.Errorf("merge: %w", scrubLoadLineError(err))
+		if _, err := replayFlatLinesMode15999(working, setLines, false); err != nil {
+			// Hierarchical branch: parent behavior wrapped the RAW
+			// applyEditLine error with "merge:" (no scrub) — restoring
+			// it greens the #12516 diagnostics. The lines here are
+			// FormatSet-generated from an already-parsed tree, not
+			// raw operator input.
+			return fmt.Errorf("merge: %w", err)
 		}
 	}
 
@@ -782,12 +787,30 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 }
 
 // replayFlatLines15999 applies flat lines to working with the shared node
-// budget enforced AS YOU BUILD (#15999 fold): each line is charged its
-// token-count upper bound BEFORE its sibling-search cost is paid, plus an
-// exact recount every 256 lines and at the end, so replay aborts as soon
-// as the charged total crosses MaxParseNodes instead of after an
-// over-budget tree is fully built under s.mu.
+// budget enforced AS YOU BUILD (#15999 fold): the >budget line-count guard
+// fires BEFORE any replay (all verbs refuse in <1s — per-line charging
+// alone crossed only after ~25k lines of sibling-search work), each line
+// is charged its token-count upper bound BEFORE its cost is paid, plus an
+// exact recount every 256 lines and at the end.
 func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, error) {
+	return replayFlatLinesMode15999(working, lines, true)
+}
+
+// replayFlatLinesMode15999 is replayFlatLines15999 with scrub control:
+// scrub=true wraps line errors via scrubLoadLineError (flat operator
+// input); scrub=false returns the raw applyEditLine error (hierarchical
+// LoadMerge lowering, parent behavior — #12516 diagnostics survive).
+func replayFlatLinesMode15999(working *config.ConfigTree, lines []string, scrub bool) (int, error) {
+	nonEmpty := 0
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			nonEmpty++
+		}
+	}
+	if nonEmpty > config.MaxParseNodes {
+		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds node budget %d (#15999)", nonEmpty, config.MaxParseNodes)
+	}
 	base := working.NodeCount()
 	if base > config.MaxParseNodes {
 		return 0, fmt.Errorf("config exceeds node budget %d (#15999)", config.MaxParseNodes)
@@ -807,7 +830,10 @@ func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, erro
 			return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 		}
 		if err := applyEditLine(working, line); err != nil {
-			return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
+			if scrub {
+				return count, fmt.Errorf("line %d: %w", i+1, scrubLoadLineError(err))
+			}
+			return count, err
 		}
 		count++
 		if count%256 == 0 {
@@ -815,9 +841,11 @@ func replayFlatLines15999(working *config.ConfigTree, lines []string) (int, erro
 			if exact > config.MaxParseNodes {
 				return count, fmt.Errorf("line %d: config exceeds node budget %d (#15999)", i+1, config.MaxParseNodes)
 			}
-			if exact > charged {
-				charged = exact
-			}
+			// Reconcile DOWN as well as up: cumulative token charge is
+			// replay work, not final-tree units. Repeated sets/deletes
+			// that created no node must not consume the AST budget —
+			// below-budget configs pass on every verb/format.
+			charged = exact
 		}
 	}
 	if working.NodeCount() > config.MaxParseNodes {
@@ -899,22 +927,10 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 		return 0, fmt.Errorf("parse error: %w", err)
 	}
 	working := s.candidate.Clone()
-	// #15999: shared node budget in parser units (1+len(Keys) per node).
-	// The byte cap alone admits several times that many units via short
-	// set lines, replayed super-linearly under s.mu. A >budget line count
-	// is refused before replay as a command-count guard;
-	// replayFlatLines15999 then enforces the exact budget as it builds.
+	// #15999: shared node budget in parser units (1+len(Keys) per node),
+	// enforced inside replayFlatLines15999 (line-count guard first, then
+	// charge-as-you-build).
 	lines := strings.Split(flatContent, "\n")
-	nonEmpty := 0
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			nonEmpty++
-		}
-	}
-	if nonEmpty > config.MaxParseNodes {
-		return 0, fmt.Errorf("config too large: flat load of %d lines exceeds node budget %d (#15999)", nonEmpty, config.MaxParseNodes)
-	}
 	count, err := replayFlatLines15999(working, lines)
 	if err != nil {
 		return count, err
