@@ -317,13 +317,16 @@ func TestFRRWritePlanDecision(t *testing.T) {
 		t.Fatalf("wide+unresolved: want error, got success (floored world-readable publish, fold-2 claim 2)")
 	}
 	// Wide 0604 + resolved as process egid (already service group):
-	// grant group-read → explicit 0640-equivalent plan (0644&0640|0040
-	// = 0640 here: 0604&0640=0600, |0040=0640), no owner needed.
+	// grant group-read → explicit plan writePerm 0640 (0604&0640=0600,
+	// |0040=0640) WITH the owner pinned to (existing uid, service gid).
+	// Fold-3: asserting owner==nil here pinned the defect — a
+	// non-preserve write without WithOwner installs the temp inode's
+	// root/process group, dropping the service group for good.
 	resolveFRRGroup = func() (int, bool) { return os.Getegid(), true }
 	otherOnly := seed("otheronly.conf", 0o604)
 	plan, err = planFRRWrite(otherOnly, 0o640)
-	if err != nil || plan.preserve || plan.owner != nil || plan.writePerm != 0o640 {
-		t.Fatalf("0604 service-group plan = %+v err=%v, want explicit granted 0640 no owner", plan, err)
+	if err != nil || plan.preserve || plan.writePerm != 0o640 || plan.owner == nil || plan.owner.gid != os.Getegid() || plan.owner.uid != os.Geteuid() {
+		t.Fatalf("0604 service-group plan = %+v err=%v, want explicit granted 0640 owner (euid,egid) pinned (fold-3)", plan, err)
 	}
 	// Wide + resolved as service gid == file gid (simulate by stubbing
 	// to egid on a 0644 file): capped keeps group-read → preserve.
@@ -376,6 +379,62 @@ func TestFRRConfOtherReadOnlyKeepsServiceReader(t *testing.T) {
 	if !frrServiceReadable(fi, gid) {
 		st := fi.Sys().(*syscall.Stat_t)
 		t.Fatalf("service lost read after 0604 apply: mode %04o uid=%d gid=%d serviceGID=%d", fi.Mode().Perm(), st.Uid, st.Gid, gid)
+	}
+}
+
+// TestFRRConfOtherReadAlreadyServiceGroup is the fold-3 e2e cell: the
+// SAME grant arm, but the seed already carries the service gid (!=
+// process egid — a supplementary group, so the pre-write gid differs
+// from the temp inode's group). The file must land 0640 with gid STILL
+// the service gid: pre-fix the grant arm returned preserve=false,
+// owner=nil, so fsatomic installed the temp's process group and the
+// service reader was dropped permanently (as root: root:root 0640).
+// Asserting final gid (not just readability via owner/other) is what
+// discriminates this arm from the migrate arm above. As root the seed
+// is chgrp'd to a foreign service gid; non-root uses a supplementary
+// group (chgrp to a member group is permitted).
+func TestFRRConfOtherReadAlreadyServiceGroup(t *testing.T) {
+	gid := foldServiceGID(t) // supplementary, != egid
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "frr.conf")
+	if err := os.WriteFile(conf, []byte("hostname r1\n"), 0o604); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(conf, 0o604); err != nil {
+		t.Fatal(err)
+	}
+	// Seed gid = service gid (grant arm), NOT the process egid.
+	if err := os.Chown(conf, os.Geteuid(), gid); err != nil {
+		t.Fatalf("seed chgrp to service gid: %v", err)
+	}
+	fi0, _ := os.Stat(conf)
+	st0 := fi0.Sys().(*syscall.Stat_t)
+	if int(st0.Gid) != gid || int(st0.Gid) == os.Getegid() {
+		t.Fatalf("bad seed: gid=%d want service gid %d (!= egid %d)", st0.Gid, gid, os.Getegid())
+	}
+	restore := resolveFRRGroup
+	resolveFRRGroup = func() (int, bool) { return gid, true }
+	t.Cleanup(func() { resolveFRRGroup = restore })
+	m := &Manager{frrConf: conf}
+	if err := m.writeManagedSection("router bgp 65000\n neighbor 192.0.2.1 password new-secret\n"); err != nil {
+		t.Fatalf("writeManagedSection 0604 service-group: %v", err)
+	}
+	fi, err := os.Stat(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("0604 service-group apply mode = %04o, want 0640 (grant)", fi.Mode().Perm())
+	}
+	if int(st.Gid) != gid {
+		t.Fatalf("0604 service-group apply gid = %d, want pinned service gid %d (fold-3: unpinned explicit write installs temp group %d)", st.Gid, gid, os.Getegid())
+	}
+	if int(st.Uid) != os.Geteuid() {
+		t.Fatalf("0604 service-group apply uid = %d, want preserved %d", st.Uid, os.Geteuid())
+	}
+	if !frrServiceReadable(fi, gid) {
+		t.Fatalf("service lost read after 0604 service-group apply: mode %04o gid=%d", fi.Mode().Perm(), st.Gid)
 	}
 }
 

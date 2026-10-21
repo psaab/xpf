@@ -1538,9 +1538,12 @@ func (p frrWritePlan) options() []fsatomic.Option {
 //     capped mode keeps group-read: pure preserve (cap via fsatomic).
 //   - Existing, wider, group resolved, otherwise (gid must migrate,
 //     and/or capped mode lacks group-read — e.g. 0604, whose only
-//     service access was other-read): explicit plan — gid migrates to
-//     the service gid (uid preserved) and group-read is GRANTED if
-//     the capped mode lacks it. Granting 0040 is the one deliberate
+//     service access was other-read): explicit plan — gid is PINNED to
+//     the service gid (uid preserved; pinning even when the file
+//     already carries that gid, because without preserve fsatomic
+//     would install the temp inode's root/process group instead —
+//     fold-3) and group-read is GRANTED if the capped mode lacks it.
+//     Granting 0040 is the one deliberate
 //     exception to strict bitwise preservation: without it the capped
 //     file drops the service reader (fold-2 claim 3); the result is
 //     still subset of perm (0640 has the group-read bit), never wider
@@ -1587,13 +1590,19 @@ func planFRRWrite(path string, perm os.FileMode) (frrWritePlan, error) {
 		return frrWritePlan{}, fmt.Errorf("frr.conf %s: cannot determine existing ownership (no Stat_t); refusing to tighten mode %04o past %04o without a proven service group (#16046)", path, existing, perm)
 	}
 	if groupOK && int(st.Gid) == frrGID {
-		// Already the service group: no chown needed, installability
-		// irrelevant. Preserve, granting group-read if the cap lost it.
+		// Already the service group. If the capped mode keeps
+		// group-read, pure preserve suffices (no chown). If not
+		// (0604-class: service read via other only), group-read is
+		// granted via an explicit plan — which MUST also pin the
+		// owner to (existing uid, service gid): a non-preserve write
+		// without WithOwner installs the temp inode's group
+		// (root/process), silently dropping the service group the
+		// grant was meant for (fold-3).
 		capped := existing & perm
 		if capped&0o040 != 0 {
 			return frrWritePlan{writePerm: perm, preserve: true}, nil
 		}
-		return frrWritePlan{writePerm: capped | 0o040}, nil
+		return frrWritePlan{writePerm: capped | 0o040, owner: &frrWriteOwner{uid: int(st.Uid), gid: frrGID}}, nil
 	}
 	if !groupOK || !installable {
 		// Cannot name (or cannot install) the service group: tightening
