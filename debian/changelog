@@ -7,10 +7,13 @@ xpf (0.0.0) unstable; urgency=medium
     its sibling's management admission (for example ssh) purely by
     snapshot row order. The override is now refused for the whole ifindex
     and an empty fail-closed sentinel is installed with a build warning,
-    mirroring the contested-zone backstop; ICMP error/PMTUD/ND control
-    traffic is unaffected. Units whose overrides agree, a single
-    configured unit, and units on distinct ifindexes are unchanged
-    (#16057).
+    mirroring the contested-zone backstop; ICMP error/PMTUD control
+    traffic remains admitted, but ND (ICMPv6 types 133-136) is denied
+    with the sentinel, as on the contested-zone sentinel. Overrides are
+    compared as effective sets, so token order, duplicates, or non-ND
+    exclusion provenance alone never trigger the refusal. Units whose
+    overrides agree as sets, a single configured unit, and units on
+    distinct ifindexes are unchanged (#16057).
 
 xpf (0.0.0) unstable; urgency=medium
 
