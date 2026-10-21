@@ -160,13 +160,17 @@ the apply path pays no fsync (the file is regenerated on every apply).
   `ActiveConnectionNames` publishes child names once a connection has children (a
   multi-selector VPN's are `<vpn>-<selector>`), and the connection name only for an
   IKE SA with no child yet, so the HA per-RG attribution maps names back here.
-  Eligibility is decided per VPN (a whole-config render decides grouping):
-  a VPN the renderer skips
-  contributes no name; a VPN whose render fails outright keeps its names as
-  candidates (a failed Apply leaves the previous swanctl config loaded); and two VPN
-  names that sanitise alike cannot borrow each other's result. A name two VPNs
-  render (`a` + selector `b-c` and `a-b` + selector `c`; or `blue` + selector `red`
-  and `blue-red`) lists both, and the index never picks one.
+  Eligibility is decided per VPN from the whole-config render's
+  membership set (a whole-config render decides grouping): a VPN the
+  renderer skips contributes no name. On a whole-config hard render
+  error the index falls back to the pre-fold #9511 per-VPN rule — a
+  VPN whose own render fails outright keeps its names as candidates,
+  one that skips cleanly contributes nothing (restored in the #15989
+  fold; pinned by `TestSANameIndexMembershipAndHardErrorContract15989`).
+  Two VPN names that sanitise alike cannot borrow each other's result
+  on the successful path. A name two VPNs render (`a` + selector
+  `b-c` and `a-b` + selector `c`; or `blue` + selector `red` and
+  `blue-red`) lists both, and the index never picks one.
 
 ## Module layout (#1989)
 

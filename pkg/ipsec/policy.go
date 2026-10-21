@@ -1037,11 +1037,21 @@ type SANameIndex map[string][]string
 //     for it (effectiveTrafficSelectors + sanitizeSwanctlValue, the
 //     render's own expansion) are indexed.
 //
-// Building renders every VPN and repeats the render's skip warnings, so
-// build once per config, not per name. ipsecCfg is only read. The active
-// config is indexed without PrepareConfig because that can block on DNS;
-// the config-only render projection retains external-interface
-// candidates whose local bind is resolved only at apply time.
+// A whole-config HARD render error falls back to the pre-fold #9511
+// keep-names rule, restored cheaply in the fold: BuildSANameIndex
+// re-renders per VPN, and a VPN whose OWN render fails outright keeps
+// its names as candidates (an extra candidate only makes attribution
+// stricter — it may skip an initiate, never cause one — so a failed
+// Apply leaving the previous config loaded can still attribute; see
+// BuildSANameIndex). A VPN whose render SUCCEEDS membership-clean
+// contributes nothing, and the successful whole-config membership
+// path never borrows names, so the #15989 collision stays closed.
+//
+// Building renders the config once on the healthy path, so build once
+// per config, not per name. ipsecCfg is only read. The active config
+// is indexed without PrepareConfig because that can block on DNS; the
+// config-only render projection retains external-interface candidates
+// whose local bind is resolved only at apply time.
 func BuildSANameIndex(ipsecCfg *config.IPsecConfig) SANameIndex {
 	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
 		return nil
@@ -1050,8 +1060,36 @@ func BuildSANameIndex(ipsecCfg *config.IPsecConfig) SANameIndex {
 	// property — a per-VPN render cannot know its connection is shared.
 	// Membership is per-VPN (#15989 fold): a skipped VPN must not borrow
 	// a sibling's rendered connection that happens to share its name.
-	_, _, members, _ := (&Manager{}).renderConfigMembersForConfigOnly(ipsecCfg)
+	_, _, members, renderErr := (&Manager{}).renderConfigMembersForConfigOnly(ipsecCfg)
 	idx := make(SANameIndex)
+	if renderErr != nil {
+		// #9511 keep-names on hard error (restored in the #15989 fold):
+		// the whole render failed, so there is no membership to trust.
+		// Re-render per VPN as the pre-fold index did: a VPN that SKIPS
+		// cleanly (empty per-VPN render) contributes nothing; a VPN
+		// whose own render FAILS outright keeps its names as candidates.
+		// Keeping them can only add candidates, and a caller that
+		// requires every candidate (HA attribution) can only become
+		// stricter: it may skip an initiate, never cause one. The
+		// daemon indexes the config strongSwan has LOADED, whose whole
+		// render succeeded, so this arm arises only before the first
+		// load in a process, when it falls back to the promoted config.
+		for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
+			vpn := ipsecCfg.VPNs[name]
+			one := *ipsecCfg
+			one.VPNs = map[string]*config.IPsecVPN{name: vpn}
+			if _, r, err := (&Manager{}).renderConfigForConfigOnly(&one); err == nil && len(r) == 0 {
+				continue // renders cleanly to nothing: skipped, no names
+			}
+			_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
+			conn := gatewayKeyFor(ipsecCfg, name, vpn, gw)
+			idx.add(conn, name)
+			for _, child := range effectiveTrafficSelectors(name, vpn) {
+				idx.add(sanitizeSwanctlValue(child.Name), name)
+			}
+		}
+		return idx
+	}
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
 		if !members[name] {
 			continue

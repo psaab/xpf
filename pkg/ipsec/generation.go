@@ -118,10 +118,13 @@ func (m *Manager) LoadedGeneration() (string, error) {
 // ErrGenerationUnvalidatable. The config-only projection mirrors render skips except that
 // an unresolved external-interface address remains a candidate: production may resolve it
 // from the live kernel, and if configuration alone cannot determine that address the
-// generation is unvalidatable. A hard render error is returned. This deliberately differs
-// from BuildSANameIndex, which keeps a render-error VPN's names because for attribution
-// an extra candidate only makes ownership stricter; here the question is equality with
-// what charon holds.
+// generation is unvalidatable. A hard render error is returned. This
+// deliberately differs from BuildSANameIndex, which answers attribution
+// (which VPNs could own a name) rather than equality with what charon
+// holds: on a hard render error the index falls back to the #9511
+// per-VPN keep-names rule instead of failing, because for attribution
+// an extra candidate only makes ownership stricter; here the question
+// is equality with what charon holds, so the error propagates.
 func ExpectedLoadedConns(cfg *config.Config) (LoadedConns, error) {
 	if cfg == nil {
 		return LoadedConns{}, nil
