@@ -160,13 +160,22 @@ the apply path pays no fsync (the file is regenerated on every apply).
   `ActiveConnectionNames` publishes child names once a connection has children (a
   multi-selector VPN's are `<vpn>-<selector>`), and the connection name only for an
   IKE SA with no child yet, so the HA per-RG attribution maps names back here.
-  Eligibility is decided per VPN (a whole-config render decides grouping):
-  a VPN the renderer skips
-  contributes no name; a VPN whose render fails outright keeps its names as
-  candidates (a failed Apply leaves the previous swanctl config loaded); and two VPN
-  names that sanitise alike cannot borrow each other's result. A name two VPNs
-  render (`a` + selector `b-c` and `a-b` + selector `c`; or `blue` + selector `red`
-  and `blue-red`) lists both, and the index never picks one.
+  Eligibility is decided per VPN from the whole-config render's
+  membership set (a whole-config render decides grouping): a VPN the
+  renderer skips contributes no name (pinned by
+  `TestSANameIndexMembership15989`). On a whole-config hard render
+  error the index falls back to the pre-fold #9511 per-VPN rule — a
+  VPN whose own render fails outright keeps its names as candidates,
+  one that skips cleanly contributes nothing (restored in the #15989
+  fold). That fallback is untested defensive code: every resolver
+  error today is skip-class, so no reachable config triggers it; it
+  guards the render's documented future hard-error class, and the
+  reachable behavior (successful-render membership) is identical
+  with or without it.
+  Two VPN names that sanitise alike cannot borrow each other's result
+  on the successful path. A name two VPNs render (`a` + selector
+  `b-c` and `a-b` + selector `c`; or `blue` + selector `red` and
+  `blue-red`) lists both, and the index never picks one.
 
 ## Module layout (#1989)
 
@@ -913,8 +922,13 @@ all files stay in `package ipsec`, so the public API is unchanged.
   #15193 local-owner `%any` never replaces the peer selector.)
   Configure `remote-identity` on the gateway (or use
   `dynamic hostname <fqdn>`); the peer presenting that identity with
-  this VPN's key is then the only one the secret matches. A
-  cert/EAP VPN has no PSK,
+  this VPN's key is then the only one the secret matches. Since #15989
+  (H-4) the same rule covers a gateway-less PSK VPN (no `ike gateway`
+  leaf): it renders with no `remote_addrs` and no peer selector, so it
+  would likewise carry a lone `%any` selector — commit rejects it and
+  the render belt skips it. Inline endpoints (a usable IP/hostname in
+  the gateway leaf, no gateway object) are unaffected: the peer
+  address scopes their secret. A cert/EAP VPN has no PSK,
   so it emits no secret block and is unaffected. The selector values reuse
   the `sanitizeSwanctlValue`/`escapeSwanctlQuoted` quoting (#1798/#2126).
   Two #14139 (D5-06) refinements: a comma-separated multi-address gateway

@@ -342,3 +342,38 @@ func TestActiveSANamesIKEOnlyRowPublishesTheConnectionName9511(t *testing.T) {
 		}
 	}
 }
+
+// #15989 fold: on the SUCCESSFUL whole-config render, SA-index
+// eligibility is the per-VPN membership set — a healthy VPN is
+// indexed, and a skipped gateway-less VPN contributes nothing, even
+// under a name a healthy sibling renders (the borrowing arm is pinned
+// by TestGatewaylessNameCollision15989). The whole-config hard-error
+// fallback in BuildSANameIndex (pre-fold #9511 per-VPN keep-names) is
+// deliberately NOT pinned here: no reachable config triggers the
+// render's abort arm today (every resolver error is skip-class), so
+// it is untested defensive code for the documented future hard-error
+// class, and the reachable behavior is identical without it.
+func TestSANameIndexMembership15989(t *testing.T) {
+	cfg := &config.IPsecConfig{
+		VPNs: map[string]*config.IPsecVPN{
+			"site-a": {PSK: "fixture-secret", Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+		},
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
+	}
+	// Successful-render membership: the healthy VPN is indexed.
+	if got := BuildSANameIndex(cfg).VPNs("site-a"); len(got) != 1 || got[0] != "site-a" {
+		t.Fatalf("healthy config must index site-a, got %v", got)
+	}
+	// Successful-render membership: a skipped-only config (the #15989
+	// gateway-less shape) indexes nothing — membership, not names.
+	skippedOnly := &config.IPsecConfig{
+		VPNs: map[string]*config.IPsecVPN{
+			"gwless": {Gateway: "", PSK: "gwless-secret", BindInterface: "st0.0"},
+		},
+		Proposals: map[string]*config.IPsecProposal{},
+	}
+	if got := BuildSANameIndex(skippedOnly); len(got) != 0 {
+		t.Fatalf("skipped-only config must yield an empty index, got %v", got)
+	}
+}

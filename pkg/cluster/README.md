@@ -3245,11 +3245,13 @@ standby can re-initiate the primary's tunnels on takeover:
   `ipsecSAsToReinitiate` now attributes through `ipsec.BuildSANameIndex`, cached per
   attribution config (`cachedIPsecSANameIndex`) so a takeover wave does not re-render
   every VPN once per RG. The index maps each name to the VPNs whose render produces
-  it. It decides eligibility by rendering each VPN on its own: skipped VPNs
-  contribute nothing, a VPN whose render fails outright keeps its names as
-  candidates, and it expands selectors with the renderer's own code rather than by
-  parsing the name. `ipsecConnRedundancyGroups` walks every candidate VPN to its
-  reth.
+  it. It decides eligibility per VPN from the whole-config render's membership
+  set: skipped VPNs contribute nothing; on a whole-config hard render error it
+  falls back to the pre-fold per-VPN rule, keeping a failed VPN's names as
+  candidates and dropping cleanly-skipped ones (restored in the #15989 fold);
+  and it expands selectors with the renderer's own code rather than parsing
+  the name.
+  `ipsecConnRedundancyGroups` walks every candidate VPN to its reth.
 
   The wire is deliberately unchanged. The same name is what `InitiateConnection`
   hands to `swanctl --initiate --child`, and publishing the VPN name instead would
