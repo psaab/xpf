@@ -558,6 +558,10 @@ func tuneSocketBuffers() {
 	}
 }
 
+// findBinary returns the absolute path of the exact file it validated,
+// so the file exec.Command runs is the file that was stat-checked —
+// never a bare name the exec layer would re-resolve through PATH or
+// the process CWD at Start time (#16054).
 func findBinary(explicit string) (string, error) {
 	if explicit != "" {
 		info, err := os.Stat(explicit)
@@ -575,7 +579,11 @@ func findBinary(explicit string) (string, error) {
 		if reason := helperBinaryTrustReason(info); reason != "" {
 			return "", fmt.Errorf("userspace dataplane binary is not trusted: %s (%s)", explicit, reason)
 		}
-		return explicit, nil
+		abs, err := filepath.Abs(explicit)
+		if err != nil {
+			return "", fmt.Errorf("userspace dataplane binary path is not resolvable: %s: %w", explicit, err)
+		}
+		return abs, nil
 	}
 	candidates := []string{
 		"./xpf-userspace-dp",
@@ -589,7 +597,13 @@ func findBinary(explicit string) (string, error) {
 		}
 		executable, reason := executableBinaryCandidate(c)
 		if executable {
-			return c, nil
+			abs, err := filepath.Abs(c)
+			if err != nil {
+				slog.Warn("userspace: skipping dataplane helper candidate", "candidate", c, "reason", err)
+				skipped = append(skipped, fmt.Sprintf("%s: %s", c, err))
+				continue
+			}
+			return abs, nil
 		}
 		if reason != "" {
 			slog.Warn("userspace: skipping dataplane helper candidate", "candidate", c, "reason", reason)
@@ -598,7 +612,13 @@ func findBinary(explicit string) (string, error) {
 	}
 	if p, err := exec.LookPath("xpf-userspace-dp"); err == nil {
 		if executable, reason := executableBinaryCandidate(p); executable {
-			return p, nil
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				slog.Warn("userspace: skipping dataplane helper candidate", "candidate", p, "reason", err)
+				skipped = append(skipped, fmt.Sprintf("%s: %s", p, err))
+			} else {
+				return abs, nil
+			}
 		} else if reason != "" {
 			slog.Warn("userspace: skipping dataplane helper candidate", "candidate", p, "reason", reason)
 			skipped = append(skipped, fmt.Sprintf("%s: %s", p, reason))
@@ -614,6 +634,17 @@ func findBinary(explicit string) (string, error) {
 // helperProcessEuid is a seam so tests can simulate a root daemon
 // without running as root (#16054).
 var helperProcessEuid = os.Geteuid
+
+// helperFileOwnerUID is a seam so tests can present a fixture as
+// root-owned without running as root (#16054); production reads the
+// real owner from the file's stat.
+var helperFileOwnerUID = func(info os.FileInfo) (uint32, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
+}
 
 // helperBinaryTrustReason reports why a helper binary must not be
 // executed, or "" when it is trusted (#16054). A root daemon must only
@@ -631,12 +662,12 @@ func helperBinaryTrustReason(info os.FileInfo) string {
 	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Sprintf("group/world-writable (mode %s); refusing to execute it as root", info.Mode())
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
+	uid, ok := helperFileOwnerUID(info)
 	if !ok {
 		return "cannot verify owner; refusing to execute it as root"
 	}
-	if stat.Uid != 0 {
-		return fmt.Sprintf("owned by uid %d, not root; refusing to execute it as root", stat.Uid)
+	if uid != 0 {
+		return fmt.Sprintf("owned by uid %d, not root; refusing to execute it as root", uid)
 	}
 	return ""
 }

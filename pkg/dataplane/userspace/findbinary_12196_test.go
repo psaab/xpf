@@ -113,9 +113,9 @@ func TestFindBinaryPrefersExecutableCwdOverPath12196(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findBinary(\"\") = error %v, want ./%s", err, findBinaryName12196)
 	}
-	want := "./" + findBinaryName12196
+	want := cwdHelper
 	if got != want {
-		t.Fatalf("findBinary(\"\") = %q, want cwd candidate %q (PATH helper %q)", got, want, pathHelper)
+		t.Fatalf("findBinary(\"\") = %q, want validated absolute cwd candidate %q (PATH helper %q)", got, want, pathHelper)
 	}
 }
 

@@ -19,17 +19,27 @@ import (
 // as root, with a loud log for skipped implicit candidates.
 //
 // These cells are intentionally NOT parallel: they chdir, rewrite PATH,
-// and swap the process-euid seam, all process-global. They use the seam
-// so they exercise the root arm regardless of the test runner's euid;
-// when the runner really is uid 1000, every fixture file below is
-// genuinely user-owned, so the ownership arm is real kernel data, not
-// mocked stat output.
+// and swap the process-euid and file-owner seams, all process-global.
+// The euid seam exercises the root arm regardless of the runner's euid;
+// ownership is real kernel data except in the writability cell, where
+// the owner seam presents the fixture as root-owned so only the
+// &0o022 arm can refuse (a non-root runner cannot chown to root).
 
 func asRoot16054(t *testing.T) {
 	t.Helper()
 	old := helperProcessEuid
 	helperProcessEuid = func() int { return 0 }
 	t.Cleanup(func() { helperProcessEuid = old })
+}
+
+// asRootOwned16054 presents every fixture file as root-owned via the
+// owner seam, isolating the writability arm from the ownership arm:
+// with ownership neutralized, only the &0o022 check can refuse.
+func asRootOwned16054(t *testing.T) {
+	t.Helper()
+	old := helperFileOwnerUID
+	helperFileOwnerUID = func(os.FileInfo) (uint32, bool) { return 0, true }
+	t.Cleanup(func() { helperFileOwnerUID = old })
 }
 
 func writeHelper16054(t *testing.T, dir, mode string) string {
@@ -97,11 +107,14 @@ func TestFindBinaryRefusesUserOwnedPathHelperAsRoot16054(t *testing.T) {
 	}
 }
 
-// Group/world-writable must be refused even apart from ownership
-// (a non-root runner owns its fixtures, so under a simulated root
-// daemon both arms fire; the reason must name writability or owner).
+// Decisive writability cell: the fixture is presented as root-owned
+// (owner seam) and chmodded 0777, so the ownership arm cannot fire —
+// refusal can only come from the group/world-writable (&0o022) check,
+// and the reason must name it specifically. Deleting the &0o022 check
+// turns this cell RED (the root-owned writable helper is then accepted).
 func TestFindBinaryRefusesWritableCwdHelperAsRoot16054(t *testing.T) {
 	asRoot16054(t)
+	asRootOwned16054(t)
 	cwd := t.TempDir()
 	writeHelper16054(t, cwd, "writable")
 	t.Chdir(cwd)
@@ -109,10 +122,10 @@ func TestFindBinaryRefusesWritableCwdHelperAsRoot16054(t *testing.T) {
 
 	_, err := findBinary("")
 	if err == nil {
-		t.Fatal("findBinary(\"\") accepted group/world-writable CWD helper as root")
+		t.Fatal("findBinary(\"\") accepted root-owned but group/world-writable CWD helper as root")
 	}
-	if !strings.Contains(err.Error(), "writable") && !strings.Contains(err.Error(), "not root") {
-		t.Fatalf("findBinary error %q must explain the trust refusal", err)
+	if !strings.Contains(err.Error(), "group/world-writable") {
+		t.Fatalf("findBinary error %q must specifically name group/world-writable, not the ownership arm", err)
 	}
 }
 
@@ -150,8 +163,57 @@ func TestFindBinaryNonRootKeepsCwdPreference16054(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findBinary(\"\") = %v, want CWD helper for non-root/dev workflow", err)
 	}
-	if want := "./xpf-userspace-dp"; got != want {
-		t.Fatalf("findBinary(\"\") = %q, want cwd candidate %q", got, want)
+	if want := filepath.Join(cwd, "xpf-userspace-dp"); got != want {
+		t.Fatalf("findBinary(\"\") = %q, want validated absolute cwd candidate %q", got, want)
+	}
+}
+
+// Bare-name witness (#16054 fold): a configured bare name stats the
+// CWD file, but a bare return value would be re-resolved by
+// exec.Command through PATH at Start time — validated file != executed
+// file. findBinary must return the validated absolute path, so with a
+// CWD plant and a different PATH helper the executed file is the CWD
+// file that was actually checked (non-root arm, where the plant is
+// admissible at all).
+func TestFindBinaryBareNameReturnsValidatedAbsolute16054(t *testing.T) {
+	cwd := t.TempDir()
+	cwdHelper := writeHelper16054(t, cwd, "")
+	bin := t.TempDir()
+	pathHelper := writeHelper16054(t, bin, "")
+	t.Chdir(cwd)
+	t.Setenv("PATH", bin)
+
+	got, err := findBinary("xpf-userspace-dp")
+	if err != nil {
+		t.Fatalf("findBinary(bare) = %v, want validated CWD helper", err)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("findBinary(bare) = %q, want absolute path (bare name would be re-resolved through PATH %q)", got, pathHelper)
+	}
+	if got != cwdHelper {
+		t.Fatalf("findBinary(bare) = %q, want validated CWD file %q, not PATH file %q", got, cwdHelper, pathHelper)
+	}
+}
+
+// Bare-name witness, root arm: the CWD plant is user-owned, so under a
+// simulated root daemon the bare name must be refused for the file it
+// actually stats — it must never fall through to executing the PATH
+// namesake instead.
+func TestFindBinaryBareNamePlantRefusedAsRoot16054(t *testing.T) {
+	asRoot16054(t)
+	cwd := t.TempDir()
+	planted := writeHelper16054(t, cwd, "")
+	bin := t.TempDir()
+	writeHelper16054(t, bin, "")
+	t.Chdir(cwd)
+	t.Setenv("PATH", bin)
+
+	got, err := findBinary("xpf-userspace-dp")
+	if err == nil {
+		t.Fatalf("findBinary(bare) = %q as root, want refusal of planted %q (never the PATH namesake)", got, planted)
+	}
+	if !strings.Contains(err.Error(), "not trusted") {
+		t.Fatalf("findBinary(bare) error %q must say the CWD file it stat'ed is not trusted", err)
 	}
 }
 
