@@ -3,8 +3,8 @@ package config
 // #6706 review r11 F4: bind the NODE-AWARE `LoginDroppedByPacking` assignment.
 //
 // The flag is assigned at two places in compiler.go: once in the generic
-// `compileConfigWithOpts` (CompileConfig / CompileConfigLenient) and once in
-// `compileConfigForNodeWithOpts` (CompileConfigForNode /
+// `compileTree` (CompileConfig / CompileConfigLenient) and once in
+// `compileTree node branch` (CompileConfigForNode /
 // CompileConfigForNodeLenient). Every pre-existing true-flag assertion reaches
 // the GENERIC one; the node-aware assignment had no test that could fire.
 //

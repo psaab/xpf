@@ -86,7 +86,7 @@ func compileSecurity8875(t *testing.T, text string) (*Config, string) {
 	}
 	// The strict path must accept it too.
 	tree2, _ := NewParser(text).Parse()
-	if _, serr := compileConfigWithOpts(tree2, compileOpts{}); serr != nil {
+	if _, serr := compileTree(tree2, compileOpts{}, nil); serr != nil {
 		t.Errorf("strict compile REJECTED %q: %v", text, serr)
 	}
 	// Compare CONTENTS, not counts: a digest of the compiled security section

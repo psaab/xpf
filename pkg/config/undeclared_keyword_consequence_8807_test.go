@@ -57,7 +57,7 @@ func signature8807(t *testing.T, text string) (js string, warnings int, strictOK
 	if len(perrs) > 0 {
 		t.Fatalf("fixture does not parse: %v", perrs)
 	}
-	cfg, err := compileConfigWithOpts(tree, lenientCompileOpts())
+	cfg, err := compileTree(tree, lenientCompileOpts(), nil)
 	if err != nil || cfg == nil {
 		t.Fatalf("fixture does not compile leniently: %v", err)
 	}
@@ -65,7 +65,7 @@ func signature8807(t *testing.T, text string) (js string, warnings int, strictOK
 	cfg.Warnings = nil
 	b, _ := json.Marshal(cfg)
 	strictTree, _ := NewParser(text).Parse()
-	_, serr := compileConfigWithOpts(strictTree, compileOpts{})
+	_, serr := compileTree(strictTree, compileOpts{}, nil)
 	return string(b), warnings, serr == nil
 }
 

@@ -123,7 +123,7 @@ policies { from-zone trust to-zone untrust {
 		if len(perrs) > 0 {
 			t.Fatalf("fixture must parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tree, lenientCompileOpts())
+		cfg, err := compileTree(tree, lenientCompileOpts(), nil)
 		if err != nil || cfg == nil {
 			t.Fatalf("the LENIENT path must accept a duplicate block — that is what it is for: %v", err)
 		}
@@ -178,7 +178,7 @@ policies { from-zone trust to-zone untrust {
 		if len(perrs) > 0 {
 			t.Fatalf("fixture must parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tree, lenientCompileOpts())
+		cfg, err := compileTree(tree, lenientCompileOpts(), nil)
 		if err != nil || cfg == nil {
 			t.Fatalf("lenient compile: %v", err)
 		}
@@ -202,7 +202,7 @@ policies { from-zone trust to-zone untrust {
 		} {
 			applySet(t, tree2, c)
 		}
-		cfg2, err := compileConfigWithOpts(tree2, lenientCompileOpts())
+		cfg2, err := compileTree(tree2, lenientCompileOpts(), nil)
 		if err != nil || cfg2 == nil {
 			t.Fatalf("flat set must compile: %v", err)
 		}

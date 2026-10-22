@@ -73,13 +73,13 @@ func TestSkippedOnRefusalStillNeedsTheLenientAnswer8752(t *testing.T) {
 		}
 		// The strict path must refuse every malformed fixture; the lenient
 		// path's acceptance and omission behaviour is measured below.
-		if _, err := compileConfigWithOpts(tree, compileOpts{}); err == nil {
+		if _, err := compileTree(tree, compileOpts{}, nil); err == nil {
 			t.Errorf("%s: the STRICT path accepted the malformed input, so the skip entry's stated "+
 				"reason (\"REFUSED at commit\") is no longer true and the entry needs "+
 				"re-deriving on both paths", c.name)
 		}
 
-		cfg, err := compileConfigWithOpts(tree, lenientCompileOpts())
+		cfg, err := compileTree(tree, lenientCompileOpts(), nil)
 		gotAccept := err == nil && cfg != nil
 		if gotAccept != c.lenientAccept {
 			t.Errorf("%s: LENIENT accept = %v, want %v. That is the path Store.Load and "+

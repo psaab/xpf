@@ -123,7 +123,7 @@ func TestElidedBraceLeavesPayloadsAlone8850(t *testing.T) {
 		}
 		opts := lenientCompileOpts()
 		opts.skipCompactNormalize = skipPass
-		cfg, err := compileConfigWithOpts(tree, opts)
+		cfg, err := compileTree(tree, opts, nil)
 		if err != nil {
 			t.Fatalf("compile (skipPass=%v): %v", skipPass, err)
 		}

@@ -125,7 +125,7 @@ func TestDuplicateBlocksAcceptedStrictly9023(t *testing.T) {
 	for _, c := range dupBlockCases9023() {
 		t.Run(c.name, func(t *testing.T) {
 			tree, _ := NewParser(c.twoBlk).Parse()
-			if _, err := compileConfigWithOpts(tree, compileOpts{}); err != nil {
+			if _, err := compileTree(tree, compileOpts{}, nil); err != nil {
 				t.Errorf("the strict path rejected the two-block spelling: %v\n"+
 					"After merging, the surviving block carries what the operator wrote, so a "+
 					"gate firing here is reporting a symptom of the duplication", err)

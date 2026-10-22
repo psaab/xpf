@@ -98,7 +98,7 @@ func TestFabricStampAdvisoryDoesNotFollowAuthKeyOption10105(t *testing.T) {
 	// that only relaxes the unrelated cluster-auth gate must still receive the
 	// deployment warning.
 	cfg := compileFabricStamp10105(t, fabricStampCluster10105, func(tree *ConfigTree) (*Config, error) {
-		return compileConfigWithOpts(tree, compileOpts{lenientClusterAuthKey: true})
+		return compileTree(tree, compileOpts{lenientClusterAuthKey: true}, nil)
 	})
 	if !hasFabricStamp10105Warning(cfg) {
 		t.Fatalf("relaxing only the auth-key gate must not suppress the #10105 advisory; warnings=%v", cfg.Warnings)

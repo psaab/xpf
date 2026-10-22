@@ -794,8 +794,8 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 
 	// #5631 (codex-review-181 M23) numeric interface-unit alias gate MOVED to
-	// the PRE-expansion gate block of compileConfigForNodeWithOpts /
-	// compileConfigWithOpts in #5878 and PROMOTED to a both-node-effective
+	// the PRE-expansion gate block of compileTree node branch /
+	// compileTree in #5878 and PROMOTED to a both-node-effective
 	// union so a peer-only `groups node1`/`${node}` alias that collides only in
 	// the STANDBY node's effective view is rejected at either node's commit
 	// (see validateInterfaceUnitAliasCollisionsAST in
@@ -877,8 +877,8 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 
 	// The #6662 packed-login-body gate and the #6701 built-in-class-shadow gate
 	// used to run here, on the ALREADY-EXPANDED single-node view. They now run
-	// PRE-EXPANSION as both-node unions from compileConfigWithOpts /
-	// compileConfigForNodeWithOpts (see compiler_system_login_gates.go), because
+	// PRE-EXPANSION as both-node unions from compileTree /
+	// compileTree node branch (see compiler_system_login_gates.go), because
 	// the single-node view let a `groups node1` + `apply-groups "${node}"` body
 	// bypass both gates entirely on the committing node and reach the peer
 	// through the tolerant sync path (#6706 review blocker).

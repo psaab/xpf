@@ -1044,7 +1044,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	}
 	// #2008 H1: strip `inactive:` subtrees BEFORE group expansion so the
 	// schema/check path agrees with the compile path (strip -> expand ->
-	// validate; see compileConfigWithOpts in compiler.go). ExpandGroups
+	// validate; see compileTree in compiler.go). ExpandGroups
 	// (ast_groups.go) collects every `apply-groups` node by name WITHOUT
 	// checking Inactive, so without this an `inactive: apply-groups foo`
 	// would still expand group foo (false-validating inherited content the
@@ -1059,7 +1059,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	// whichever spelling it was authored (#8921).
 	// #8921: normalize brace-elided statements BEFORE expansion and AFTER
 	// stripping inactive nodes -- the order the compile path uses
-	// (compileConfigWithOpts: strip -> normalize -> expand). ExpandGroups merges a group body into inline config by the
+	// (compileTree: strip -> normalize -> expand). ExpandGroups merges a group body into inline config by the
 	// statement's SHAPE, so a group spelling `neighbor 192.0.2.1 hold-time 2;`
 	// packed failed to meet an inline `neighbor 192.0.2.1 { hold-time 30; }`,
 	// was appended beside it instead of being overridden, and was then

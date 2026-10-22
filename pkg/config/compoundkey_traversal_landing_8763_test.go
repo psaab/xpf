@@ -50,7 +50,7 @@ func compileFor8763(t *testing.T, text string, skipNormalize bool) (js, verdict 
 	if len(perrs) > 0 {
 		return "", "PARSE-ERR"
 	}
-	cfg, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: skipNormalize})
+	cfg, err := compileTree(tree, compileOpts{skipCompactNormalize: skipNormalize}, nil)
 	if err != nil {
 		return "", "REJECTED"
 	}

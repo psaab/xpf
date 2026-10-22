@@ -136,7 +136,7 @@ func diagnosticMergeName9023(name string) string {
 // CompileConfig converts a parsed ConfigTree AST into a typed Config struct.
 // It clones the tree before expansion so the original tree is not mutated.
 func CompileConfig(tree *ConfigTree) (*Config, error) {
-	return compileConfigWithOpts(tree, compileOpts{})
+	return compileTree(tree, compileOpts{}, nil)
 }
 
 // CompileConfigLenient is CompileConfig with the tolerant-path
@@ -151,7 +151,7 @@ func CompileConfig(tree *ConfigTree) (*Config, error) {
 // (The former #1733 equal-flow worker-cap downgrade was retired in
 // #1830 (e) — the dataplane no longer caps equal-flow at 32 workers.)
 func CompileConfigLenient(tree *ConfigTree) (*Config, error) {
-	return compileConfigWithOpts(tree, lenientCompileOpts())
+	return compileTree(tree, lenientCompileOpts(), nil)
 }
 
 // validateWebManagementAuthStrict hard-rejects a `system services
@@ -388,7 +388,19 @@ func validateAPIAuthCredentialsStrict(cfg *Config) error {
 	return nil
 }
 
-func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) {
+// compileTree is the single compile orchestrator behind the four public
+// entry points (#16167, formerly the twin
+// orchestrators). nodeID is the node-scope selector:
+// nil compiles the generic union-of-groups verdict (no node identity
+// stamped, ${node} expanded through the #15031 node0-fallback pass);
+// a non-nil pointer compiles that node's scoped view (its ${node} group
+// expanded, NodeID stamped for the #4329 derivations). Both branches
+// must go through this one body so every pre-expansion gate and
+// transform runs identically on both compile paths — a step present on
+// only one of them makes cluster peers compile the same config
+// differently (#8662/#8752). Never re-add a second orchestrator or a
+// boolean node-scope flag: presence is carried by the pointer alone.
+func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, error) {
 	// #2008 H1: prune `inactive:`-marked subtrees BEFORE every other
 	// pre-expansion gate, group expansion, and compilation. Doing it first
 	// means the tunnel-id collision gate ignores inactive tunnel
@@ -399,6 +411,10 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// single deep copy (no double-clone on the has-inactive path); the result
 	// never aliases the caller's tree, so the caller retains groups/apply-groups
 	// nodes for `show configuration` and ExpandGroups below mutates only our copy.
+	// The strip is centralized in this shared entry so BOTH cluster nodes
+	// compile the identical active set from the same persisted
+	// (Inactive-flag-carrying, JSON-synced) tree — a deactivated stanza is
+	// dead on both nodes, with no split-brain firewall posture.
 	tree = tree.cloneForExpansion()
 	// #15037: capture the any-node physical-interface set NOW, before
 	// ExpandGroups below removes the groups stanza the peer node's
@@ -510,7 +526,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// instances; lenient warns and compileRoutingInstances quarantines the later
 	// instance.
 	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
-		tree, nil, opts.lenientRoutingInstanceTableIDCollision)
+		tree, nodeID, opts.lenientRoutingInstanceTableIDCollision)
 	if riTableIDErr != nil {
 		return nil, riTableIDErr
 	}
@@ -518,7 +534,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// as the table-id gate above. Strict only: the lenient paths skip it and
 	// compileRoutingInstances quarantines the instance with one warning.
 	if !opts.lenientReservedRoutingInstanceName {
-		if err := validateReservedRoutingInstanceNamesAST(tree, nil); err != nil {
+		if err := validateReservedRoutingInstanceNamesAST(tree, nodeID); err != nil {
 			return nil, err
 		}
 	}
@@ -527,7 +543,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// create that device. Tolerant paths skip this gate and quarantine only
 	// invalid VRF-based names in compileRoutingInstances.
 	if !opts.lenientRoutingInstanceKernelName {
-		if err := validateRoutingInstanceKernelNameAST(tree, nil); err != nil {
+		if err := validateRoutingInstanceKernelNameAST(tree, nodeID); err != nil {
 			return nil, err
 		}
 	}
@@ -686,20 +702,35 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// (plus `| display inheritance`, which re-derives them on its own clone)
 	// branches on them — plain Format/validators never see them.
 	//
-	// #15031: expand exactly once for the generic compile. A plain pass
-	// that fails midway on an undefined "${node}" group has already
-	// partially merged the tree, so retrying with node=node0 vars on
-	// that same tree drops the earlier groups' provenance and can
-	// accept a default-policy conflict the fresh node0 compile rejects.
-	fellBack, expandErr := tree.ExpandGroupsNodeFallback15031(true)
-	if expandErr != nil {
-		return nil, fmt.Errorf("apply-groups: %w", expandErr)
+	// nodeID selects the expansion flavor: nil runs the generic #15031
+	// node0-fallback pass (expanding exactly once — a plain pass that
+	// fails midway on an undefined "${node}" group has already partially
+	// merged the tree, so retrying with node=node0 vars on that same tree
+	// drops the earlier groups' provenance and can accept a
+	// default-policy conflict the fresh node0 compile rejects); &id runs
+	// the node-scoped pass with vars {"node": "node<id>"}.
+	usedNodeFallback := false
+	var vars map[string]string
+	if nodeID == nil {
+		fellBack, expandErr := tree.ExpandGroupsNodeFallback15031(true)
+		if expandErr != nil {
+			return nil, fmt.Errorf("apply-groups: %w", expandErr)
+		}
+		usedNodeFallback = fellBack
+	} else {
+		vars = map[string]string{"node": fmt.Sprintf("node%d", *nodeID)}
+		if err := tree.ExpandGroupsWithVarsTagged(vars); err != nil {
+			return nil, fmt.Errorf("apply-groups: %w", err)
+		}
 	}
-	usedNodeFallback := fellBack
 	dupMergeWarnings = resolveDuplicateBlockMergeWarnings9023(tree, registeredMerges, dupMergeWarnings)
 
 	if expandedPolicySourceTree != nil {
-		if _, err := expandedPolicySourceTree.ExpandGroupsNodeFallback15031(true); err != nil {
+		if nodeID == nil {
+			if _, err := expandedPolicySourceTree.ExpandGroupsNodeFallback15031(true); err != nil {
+				return nil, fmt.Errorf("apply-groups: %w", err)
+			}
+		} else if err := expandedPolicySourceTree.ExpandGroupsWithVarsTagged(vars); err != nil {
 			return nil, fmt.Errorf("apply-groups: %w", err)
 		}
 		expandedConflicts := collectDirectTerminalActionConflictsFromExpandedTree(
@@ -708,6 +739,15 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 			directActionConflicts, expandedConflicts)
 	}
 
+	if nodeID != nil {
+		// #4329: thread the runtime cluster node identity into compileExpanded so
+		// it can stamp ClusterConfig.NodeID for a leaf-less flat vSRX config
+		// BEFORE any NodeID-dependent derivation runs (reth member resolution AND
+		// the compile-time fabric-member / FabricInterface auto-detect). See the
+		// stamp block in compileExpanded for the full rationale and guards.
+		opts.nodeAware = true
+		opts.stampNodeID = *nodeID
+	}
 	cfg, err := compileExpanded(tree, opts)
 	if err != nil {
 		return nil, err
@@ -765,7 +805,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 // resolves to group "node0"). This supports a single shared config for both
 // nodes in a chassis cluster.
 func CompileConfigForNode(tree *ConfigTree, nodeID int) (*Config, error) {
-	return compileConfigForNodeWithOpts(tree, nodeID, compileOpts{})
+	return compileTree(tree, compileOpts{}, &nodeID)
 }
 
 // CompileConfigForNodeLenient is CompileConfigForNode with the
@@ -788,343 +828,7 @@ func CompileConfigForNode(tree *ConfigTree, nodeID int) (*Config, error) {
 // must inspect, and a compile error there is swallowed by its
 // `err != nil -> return nil` arm.
 func CompileConfigForNodeLenient(tree *ConfigTree, nodeID int) (*Config, error) {
-	return compileConfigForNodeWithOpts(tree, nodeID, lenientCompileOpts())
-}
-
-func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts) (*Config, error) {
-	// #2008 H1: prune `inactive:` subtrees first — see compileConfigWithOpts.
-	// Centralizing the strip in this shared node-aware entry guarantees BOTH
-	// cluster nodes compile the identical active set from the same persisted
-	// (Inactive-flag-carrying, JSON-synced) tree, so a deactivated stanza is
-	// dead on both nodes — no split-brain firewall posture. cloneForExpansion
-	// returns a fresh, freely-mutable pruned tree in a single deep copy (never
-	// aliases the caller's tree) so ExpandGroupsWithVars below mutates only our copy.
-	tree = tree.cloneForExpansion()
-	// #15037: capture the any-node physical-interface set NOW, before
-	// ExpandGroupsWithVars below removes the groups stanza the peer
-	// node's interface declarations live in.
-	opts.physicalInterfaces = physicalInterfacesInTree(tree)
-	if _, err := HashAPIAuthSecrets(tree); err != nil {
-		return nil, err
-	}
-
-	// #8662: normalize brace-elided ("compact") statements into their braced
-	// shape BEFORE group expansion and every validator, so nothing downstream
-	// has to know the two spellings exist. Applied at BOTH compile entry
-	// points — this one and the node-aware sibling — because a normalization
-	// present on only one of them would make a cluster peer compile the same
-	// config differently from the node that authored it, which is the class of
-	// asymmetry #8597 K51 was. Scoped to the security-relevant subset for now;
-	// see compact_normalize_8662.go.
-	if !opts.skipCompactNormalize {
-		normalizeCompactStanzas(tree)
-	}
-	normalizeImplicitInetFilters9899(tree)
-	// #8752: fold a repeated named-instance statement into the first
-	// occurrence, on the TOLERANT path only. The strict path keeps rejecting
-	// (#3473) so the operator is still told to rename; the tolerant path cannot
-	// reject — it exists to boot a config already on disk — and its only other
-	// option is to split the statements into two policies, which is what it does
-	// today and which loses the second statement's content. Runs at BOTH compile
-	// entry points for the reason the comment above gives: a transform present on
-	// only one makes a peer compile the same config differently from the node
-	// that authored it.
-	//
-	// It also WARNS rather than merging silently. The #3473 gate's lenient arm
-	// exists to tell the operator their on-disk config has a duplicate; merging
-	// removes the duplicate and would therefore remove the diagnostic with it,
-	// swallowing exactly the information the gate was added to surface.
-	var dupMergeWarnings []string
-	// Issues 9023/#12043: registered duplicate containers merge on BOTH paths. The
-	// routing-instances dynamic-name fold (#11459) runs before typed compilation
-	// so strict and tolerant paths produce one deterministic record per name;
-	// the policy fold below remains tolerant-only because strict commits reject
-	// duplicate policy names.
-	registeredMerges := mergeDuplicateBlocks9023(tree)
-	// Keep the pre-fold tree for group conflict provenance. The main tolerant
-	// fold remains pre-expansion; the clone preserves source boundaries while
-	// the effective group-expanded policies are inspected below.
-	var expandedPolicySourceTree *ConfigTree
-	var foldWidened []foldWidenedPolicy9571
-	var directActionConflicts []directTerminalActionConflict11063
-	if opts.lenientDuplicatePolicyNames {
-		if treeHasGroupApplications11063(tree) {
-			expandedPolicySourceTree = tree.Clone()
-			if hasGroupScopedDuplicateBlockMerge9023(registeredMerges) {
-				stripDuplicateBlockMergeMarkers9023(expandedPolicySourceTree)
-			}
-		}
-		var merged []string
-		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
-		for _, what := range merged {
-			// The wording deliberately carries "duplicate policy name" and
-			// "#3473": that is the existing contract for this diagnostic, and
-			// the #3473 cell matches on it. Merging must not silently retire a
-			// warning by rephrasing it.
-			dupMergeWarnings = append(dupMergeWarnings,
-				"duplicate policy name in `"+what+"` — the repeated statements were merged "+
-					"into the first occurrence on the tolerant path so the configuration "+
-					"loads as authored; a strict commit rejects the duplicate instead "+
-					"(#3473/#8752)")
-		}
-		for _, w := range foldWidened {
-			if w.semantic {
-				dupMergeWarnings = append(dupMergeWarnings, foldSemanticWarning14968(w))
-			} else {
-				dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
-			}
-		}
-	}
-
-	// #1873 R-B: union-of-groups tunnel id collision gate — see
-	// compileConfigWithOpts. Pre-expansion on purpose; read-only, safe on the copy.
-	tunnelIDWarnings, tunnelIDErr := validateTunnelEndpointIDCollisionAST(
-		tree, opts.sanitizeFreeTextControlChars)
-	if tunnelIDErr != nil {
-		return nil, tunnelIDErr
-	}
-
-	// #3075: stable-zone-id collision gate — see compileConfigWithOpts.
-	// Pre-expansion union across all groups so the verdict is identical on both
-	// cluster nodes; read-only, safe on the soon-to-be-expanded copy. The
-	// returned runtime name set is the same on both nodes (#12247).
-	zoneIDWarnings, zoneQuarantineNames, zoneIDErr := validateZoneIDCollisionAST(
-		tree, opts.lenientZoneIDCollision)
-	if zoneIDErr != nil {
-		return nil, zoneIDErr
-	}
-	// #13095: thread the runtime zone-name union into compileExpanded so it
-	// stamps cfg.ZoneQuarantineNames BEFORE the zone gates read the
-	// quarantine set (see the stamp site in compileExpanded).
-	opts.zoneQuarantineNames = zoneQuarantineNames
-
-	// #3855: stable routing-instance table-id collision gate — see
-	// compileConfigWithOpts. Union of the names each compile path's group
-	// expansion lands (#9657), so the verdict is identical on both cluster nodes;
-	// read-only, safe on the copy.
-	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
-		tree, &nodeID, opts.lenientRoutingInstanceTableIDCollision)
-	if riTableIDErr != nil {
-		return nil, riTableIDErr
-	}
-	// #9622: reserved routing-instance name gate — same three-view name union
-	// as the table-id gate above. Strict only: the lenient paths skip it and
-	// compileRoutingInstances quarantines the instance with one warning.
-	if !opts.lenientReservedRoutingInstanceName {
-		if err := validateReservedRoutingInstanceNamesAST(tree, &nodeID); err != nil {
-			return nil, err
-		}
-	}
-	// #11391: same expanded instance-type-aware gate as the generic compiler,
-	// including group-supplied types and names from both cluster-node expansions.
-	if !opts.lenientRoutingInstanceKernelName {
-		if err := validateRoutingInstanceKernelNameAST(tree, &nodeID); err != nil {
-			return nil, err
-		}
-	}
-
-	// #5180: duplicate hierarchical named-block gate — see compileConfigWithOpts.
-	// Pre-expansion, top-level stanzas only; strict rejects, lenient warns. Also
-	// rejects a quoted-empty group/interface/screen-ids-option name (#6455).
-	dupBlockWarnings, dupBlockErr := validateDuplicateNamedBlockAST(
-		tree, opts.lenientDuplicateNamedBlock)
-	if dupBlockErr != nil {
-		return nil, dupBlockErr
-	}
-
-	// #14448: duplicate api-auth class/expires gate — see
-	// compileConfigWithOpts / validateAPIAuthDuplicateScalarAST.
-	apiAuthDupWarnings, apiAuthDupErr := validateAPIAuthDuplicateScalarAST(
-		tree, opts.lenientAPIAuthDuplicateScalar)
-	if apiAuthDupErr != nil {
-		return nil, apiAuthDupErr
-	}
-
-	// #5649 (C181-M18): duplicate NAT rule-name gate — see compileConfigWithOpts
-	// / validateDuplicateNATRuleNamesAST. Pre-expansion, top-level `security`
-	// stanzas only; strict rejects, lenient warns. Also rejects a quoted-empty
-	// rule name (#6455).
-	dupNATRuleWarnings, dupNATRuleErr := validateDuplicateNATRuleNamesAST(
-		tree, opts.lenientDuplicateNATRuleName)
-	if dupNATRuleErr != nil {
-		return nil, dupNATRuleErr
-	}
-
-	// #6454 (C181-M18 sibling): duplicate NAT rule-SET-name gate — see
-	// compileConfigWithOpts / validateDuplicateNATRuleSetNamesAST. Pre-expansion,
-	// top-level `security` stanzas only, keyed by (natType, rule-set); strict
-	// rejects, lenient warns. Also rejects a quoted-empty rule-set name (#6455).
-	dupNATRuleSetWarnings, dupNATRuleSetErr := validateDuplicateNATRuleSetNamesAST(
-		tree, opts.lenientDuplicateNATRuleSetName)
-	if dupNATRuleSetErr != nil {
-		return nil, dupNATRuleSetErr
-	}
-
-	// #6455 Finding 1: the POST-expansion half of the duplicate-name gate
-	// family. The three gates above scan only top-level stanzas, so a duplicate
-	// authored ENTIRELY inside an applied group body — appended wholesale by
-	// apply-groups, never coalesced — reaches the compiled config with both
-	// instances alive while the byte-identical inline duplicate is rejected.
-	// This re-runs the SAME three scanners on a group-EXPANDED clone, once per
-	// cluster node (node0 AND node1) like the #5878/#5879/#6178 union gates, so
-	// the fragment-coalescing false-reject that killed a per-group-body scan
-	// cannot occur (the fragments are one node by then) and a peer-only `groups
-	// node1` duplicate is caught. Findings the pre-expansion gates already
-	// warned about are dropped so an inline duplicate reports once. See
-	// dup_names_expanded_6455.go.
-	dupExpandedWarnings, dupExpandedErr := validateDuplicateNamesExpandedAST(
-		tree, opts.lenientDuplicateNamesExpanded,
-		concatWarnings(dupBlockWarnings, dupNATRuleWarnings, dupNATRuleSetWarnings))
-	if dupExpandedErr != nil {
-		return nil, dupExpandedErr
-	}
-
-	// #5878: numeric interface-unit alias gate (#5631) as a BOTH-NODE-effective
-	// union — see compileConfigWithOpts. Pre-expansion on purpose: the union
-	// across View 1 (groups) + Views 2/3 (node0/node1 expansions) is identical
-	// on both nodes, so a `groups node1`/`${node}` alias that collides only in
-	// the peer's effective view is rejected here even when THIS commit compiles
-	// s.nodeID alone (the #5878 divergent-commit defect). Strict rejects on the
-	// operator commit / commit-check path; lenient warns on load / peer-sync.
-	unitAliasWarnings, unitAliasErr := validateInterfaceUnitAliasCollisionsAST(
-		tree, opts.lenientInterfaceUnitAliasCollisions)
-	if unitAliasErr != nil {
-		return nil, unitAliasErr
-	}
-
-	// #5879: canonical per-physical-interface QinQ / stacked-VLAN honesty
-	// gate — see compileConfigWithOpts / compiler_interfaces_qinq.go. Runs
-	// PRE-expansion: it expands the candidate once per cluster node itself
-	// (node0 AND node1) so a peer-only-group or `vlan-tags`-spelled inner tag
-	// is rejected here even when THIS commit compiles nodeID alone. Strict
-	// rejects; lenient warns (#1960).
-	qinqWarnings, qinqErr := validateQinQVLANStackAST(tree, opts.lenientQinQVLANStack)
-	if qinqErr != nil {
-		return nil, qinqErr
-	}
-
-	// #6178: input-vlan-map / output-vlan-map (per-unit VLAN rewrite) honesty
-	// gate — see compileConfigWithOpts / compiler_interfaces_vlanmap.go. Runs
-	// PRE-expansion per cluster node (node0 AND node1) so a peer-only-group
-	// vlan-map is rejected here even when THIS commit compiles nodeID alone.
-	// Strict rejects; lenient warns (#1960).
-	vlanMapWarnings, vlanMapErr := validateVLANMapAST(tree, opts.lenientVLANMap)
-	if vlanMapErr != nil {
-		return nil, vlanMapErr
-	}
-
-	// #14574: vlan-id without tagging gate — see compileConfigWithOpts /
-	// compiler_interfaces_vlan_tagging.go. PRE-expansion per cluster node.
-	// Strict rejects; lenient warns (#1960).
-	vlanIDTaggingWarnings, vlanIDTaggingErr := validateVlanIDTaggingAST(tree, opts.lenientVlanIDTagging)
-	if vlanIDTaggingErr != nil {
-		return nil, vlanIDTaggingErr
-	}
-
-	// #6662 / #6701 (#6706 review blocker): the `system login` packed-body and
-	// built-in-class-shadow gates, as BOTH-NODE-effective unions. This is the
-	// site the blocker turned on: with the gates running post-expansion on the
-	// single local view, `groups node1 { system login ... }` + `apply-groups
-	// "${node}"` committed green on node 0 (the body was already stripped) and
-	// arrived at node 1 through Store.SyncApply, which is lenient and only
-	// warns — so the shadowing/packed body was live on the peer with no strict
-	// check anywhere. Evaluating BOTH node views here makes the verdict
-	// HA-symmetric: whichever node commits rejects it. Same doctrine as
-	// #5878/#5879/#6178 above, and the same argument
-	// compiler_peer_effective_snat.go (#5876) makes for source NAT.
-	loginPackedWarnings, loginPackedErr := validateLoginPackedStatementsAST(
-		tree, opts.lenientLoginPackedStatements)
-	if loginPackedErr != nil {
-		return nil, loginPackedErr
-	}
-	loginShadowWarnings, loginShadowErr := validateLoginClassShadowsBuiltinAST(
-		tree, opts.lenientLoginClassShadowsBuiltin)
-	if loginShadowErr != nil {
-		return nil, loginShadowErr
-	}
-	// #11358/#12238: evaluate both effective node views before this node-specific
-	// expansion, so a peer-only repeated boundary, or weekday statements that a
-	// peer-only group supplies separately, cannot bypass strict commit
-	// validation. Group fragments merged into one weekday statement are
-	// diagnosed as one statement (#12643).
-	schedulerWindowWarnings11358, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
-		tree, opts.lenientSchedulerWindowPairs11358)
-	if schedulerWindowErr11358 != nil {
-		return nil, schedulerWindowErr11358
-	}
-
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	// TAGGED, as in compileConfigWithOpts (#9854 coalescing provenance).
-	if err := tree.ExpandGroupsWithVarsTagged(vars); err != nil {
-		return nil, fmt.Errorf("apply-groups: %w", err)
-	}
-
-	if expandedPolicySourceTree != nil {
-		if err := expandedPolicySourceTree.ExpandGroupsWithVarsTagged(vars); err != nil {
-			return nil, fmt.Errorf("apply-groups: %w", err)
-		}
-		expandedConflicts := collectDirectTerminalActionConflictsFromExpandedTree(
-			expandedPolicySourceTree)
-		directActionConflicts = mergeDirectConflicts11063(
-			directActionConflicts, expandedConflicts)
-	}
-	dupMergeWarnings = resolveDuplicateBlockMergeWarnings9023(tree, registeredMerges, dupMergeWarnings)
-
-	// #4329: thread the runtime cluster node identity into compileExpanded so
-	// it can stamp ClusterConfig.NodeID for a leaf-less flat vSRX config
-	// BEFORE any NodeID-dependent derivation runs (reth member resolution AND
-	// the compile-time fabric-member / FabricInterface auto-detect). See the
-	// stamp block in compileExpanded for the full rationale and guards.
-	opts.nodeAware = true
-	opts.stampNodeID = nodeID
-
-	cfg, err := compileExpanded(tree, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	// Mark source-action conflicts and widening folds after compilation, when
-	// the LenientContentDropped flag lives on the compiled policy.
-	markDirectTerminalActionConflicts11063(cfg, directActionConflicts)
-	markFoldWidenedPolicies9571(cfg, foldWidened)
-	cfg.Warnings = append(cfg.Warnings, tunnelIDWarnings...)
-	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
-	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
-	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
-	cfg.Warnings = append(cfg.Warnings, dupBlockWarnings...)
-	cfg.Warnings = append(cfg.Warnings, apiAuthDupWarnings...)
-	cfg.Warnings = append(cfg.Warnings, dupNATRuleWarnings...)
-	cfg.Warnings = append(cfg.Warnings, dupNATRuleSetWarnings...)
-	cfg.Warnings = append(cfg.Warnings, dupExpandedWarnings...)
-	cfg.Warnings = append(cfg.Warnings, unitAliasWarnings...)
-	cfg.Warnings = append(cfg.Warnings, qinqWarnings...)
-	cfg.Warnings = append(cfg.Warnings, vlanMapWarnings...)
-	cfg.Warnings = append(cfg.Warnings, vlanIDTaggingWarnings...)
-	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
-	cfg.Warnings = append(cfg.Warnings, schedulerWindowWarnings11358...)
-	appendClusterNTPAdvisoryLocked(cfg, opts)
-	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
-	appendDPDThresholdIKEv2AdvisoryLocked(cfg, opts)
-	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)
-	appendWgUnitFilterShadowAdvisory16059Locked(cfg, opts)
-	if !opts.suppressFabricStampAdvisory {
-		cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
-	}
-	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
-	appendUserspaceMgmtZoneAdvisoryLocked(cfg, opts)
-	appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
-	cfg.Warnings = append(cfg.Warnings, loginShadowWarnings...)
-	if opts.lenientLoginClassShadowsBuiltin {
-		cfg.Warnings = append(cfg.Warnings, neutraliseShadowedLoginAssignments14387(cfg)...)
-	}
-	// #6706: record that a `system login` path was authored packed, so the
-	// daemon can tell "RBAC never configured" from "RBAC configured and dropped"
-	// — both of which arrive here as System.Login == nil. Set from the BROADER
-	// detector, not from len(loginPackedWarnings): the reporting gate is silent
-	// for the short prefixes, and those are precisely the ones whose packed and
-	// nested spellings disagree about whether the CLI denies or permits.
-	cfg.System.LoginDroppedByPacking = loginPathPackedAnywhere(tree)
-	return cfg, nil
+	return compileTree(tree, lenientCompileOpts(), &nodeID)
 }
 
 // compileExpanded compiles an already-expanded (groups resolved) ConfigTree

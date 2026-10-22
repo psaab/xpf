@@ -1,13 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Fix master pkg/config build (#16245): drop the pre-#16162
-    two-argument `cfg *Config` signature from
-    ValidateDNSProxyDefaultDomain left by the #16162/#16163 semantic
-    merge collision (body never read cfg) and update the #16163
-    census test's remaining two-argument LeafValidator,
-    PositionalKeyValidator, ValidateDNSDomain and SchemaValidate
-    call sites to the retired-cfg forms. No validation acceptance
-    logic changed.
+  * Collapse the twin compile orchestrators into one compileTree(tree,
+    opts, nodeID *int): nil keeps the generic union-of-groups verdict
+    (no stamped identity, ${node} via the #15031 node0-fallback pass),
+    &id compiles the node-scoped view (its ${node} group, NodeID
+    stamped for #4329). The four public CompileConfig[Lenient] /
+    CompileConfigForNode[Lenient] wrappers keep their signatures as
+    one-line delegations, every pre-expansion gate now lives in exactly
+    one body, and each branch keeps its exact historical warning
+    emission sequence (node: fabric advisories hoisted above the
+    unzoned/mgmt-zone/Rx-MTU trio; generic: trio first) so compiled
+    output and warning order are unchanged (#16167).
 
 xpf (0.0.0) unstable; urgency=medium
 
@@ -1010,3 +1013,4 @@ xpf (0.0.0) unstable; urgency=medium
     explicit next hops to their route's routing instance, and scope/recheck
     transit martians on neighbor replay and final transmit (#11074).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
+

@@ -25,8 +25,8 @@ import (
 // and it is decidable per site WITHOUT a compiled fixture and without asking
 // whether the value is observable in the typed config -- the question that
 // leaves 91 of these cells unruled by the #2419 census. The reason is where the
-// fold runs: both compile entries (compileConfigWithOpts and
-// compileConfigForNodeWithOpts) prune inactive nodes and then normalize before
+// fold runs: both compile entries (compileTree and
+// compileTree node branch) prune inactive nodes and then normalize before
 // anything else reads the tree, and SchemaValidateWithDefinitions normalizes
 // before its walk. An identical tree therefore compiles and validates
 // identically whether or not the value is observable in the typed config.

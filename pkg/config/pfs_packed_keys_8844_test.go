@@ -46,7 +46,7 @@ func TestPFSPackedKeys8844(t *testing.T) {
 		if masked {
 			// Reproduce pre-#8844 exactly: the pair unadmitted. Paired with
 			// skipCompactNormalize, because the pass ALSO runs inside
-			// compileConfigWithOpts and would otherwise re-fold with the real
+			// compileTree and would otherwise re-fold with the real
 			// scope -- a pre-normalised tree is not a baseline on its own.
 			normalizeCompactStanzasWithScope(tree, func(kw, head string) bool {
 				if kw == "perfect-forward-secrecy" && head == "keys" {
@@ -59,7 +59,7 @@ func TestPFSPackedKeys8844(t *testing.T) {
 		}
 		lo := lenientCompileOpts()
 		lo.skipCompactNormalize = true
-		cfg, err := compileConfigWithOpts(tree, lo)
+		cfg, err := compileTree(tree, lo, nil)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}

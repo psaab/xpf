@@ -31,7 +31,7 @@ system {
 // TestMasterPasswordViaApplyGroupsEncrypts is the #5231 regression guard.
 //
 // A master-password declared inside a group and pulled in via apply-groups is
-// ACTIVE at runtime — compileConfigWithOpts expands apply-groups before
+// ACTIVE at runtime — compileTree expands apply-groups before
 // compileSystem reads master-password, so the effective config sets
 // sys.MasterPassword. But maybeEncryptTreeJSON runs on the UNEXPANDED persisted
 // candidate tree, so a resolver that scans only top-level `system` stanzas

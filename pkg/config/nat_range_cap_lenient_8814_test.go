@@ -252,7 +252,7 @@ func TestFlatSetSpellingHitsTheSameRangeCap8814(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, lerr := compileConfigWithOpts(flat(t, tc.line), lenientCompileOpts())
+			cfg, lerr := compileTree(flat(t, tc.line), lenientCompileOpts(), nil)
 			if lerr != nil {
 				t.Fatalf("CompileConfigLenient FAILED on the flat spelling: %v (#8814)", lerr)
 			}
@@ -268,7 +268,7 @@ func TestFlatSetSpellingHitsTheSameRangeCap8814(t *testing.T) {
 					"reach the same record-and-gate path as the hierarchical one, or the strict gate "+
 					"guards only configs that arrive from a file", got, tc.wantRecord)
 			}
-			_, serr := compileConfigWithOpts(flat(t, tc.line), compileOpts{})
+			_, serr := compileTree(flat(t, tc.line), compileOpts{}, nil)
 			if tc.wantStrict {
 				if serr == nil {
 					t.Error("flat set: strict CompileConfig ACCEPTED an oversized range — an operator can " +
@@ -295,7 +295,7 @@ func TestFlatSetSpellingHitsTheSameRangeCap8814(t *testing.T) {
 	}
 	// proxy-arp, the second caller, in the same spelling.
 	line := "set security nat proxy-arp interface ge-0-0-0 address 10.0.0.1/32 to 10.0.1.1/32"
-	cfg, lerr := compileConfigWithOpts(flat(t, line), lenientCompileOpts())
+	cfg, lerr := compileTree(flat(t, line), lenientCompileOpts(), nil)
 	if lerr != nil {
 		t.Fatalf("flat set proxy-arp: CompileConfigLenient FAILED: %v", lerr)
 	}
@@ -308,7 +308,7 @@ func TestFlatSetSpellingHitsTheSameRangeCap8814(t *testing.T) {
 	if recorded != 1 {
 		t.Errorf("flat set proxy-arp: %d recorded oversized range(s), want 1", recorded)
 	}
-	if _, serr := compileConfigWithOpts(flat(t, line), compileOpts{}); serr == nil {
+	if _, serr := compileTree(flat(t, line), compileOpts{}, nil); serr == nil {
 		t.Error("flat set proxy-arp: strict CompileConfig accepted an oversized range (#8814)")
 	} else if !strings.Contains(serr.Error(), proxyARPCapPhrase8822) {
 		// #8822: the proxy-arp leg had the same `err != nil` proxy.

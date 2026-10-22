@@ -107,7 +107,7 @@ func TestSchedulerNameFoldRestoresTheScheduleOntoTheOperatorsPolicy8690(t *testi
 		if len(perrs) > 0 {
 			t.Fatalf("fixture must parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tree, lenientCompileOpts())
+		cfg, err := compileTree(tree, lenientCompileOpts(), nil)
 		if err != nil || cfg == nil {
 			t.Fatalf("the LENIENT path must accept this — that is the whole point of it: %v", err)
 		}

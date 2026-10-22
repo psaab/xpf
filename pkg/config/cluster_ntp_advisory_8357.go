@@ -19,8 +19,8 @@ const clusterNTPAdvisory = "chassis cluster is configured but `system ntp server
 // appendClusterNTPAdvisoryLocked adds the #8357 advisory when a chassis cluster
 // is configured with no NTP server.
 //
-// SHARED by both compile entries (`compileConfigWithOpts` and
-// `compileConfigForNodeWithOpts`) rather than written out at each: the two
+// SHARED by both compile entries (`compileTree` and
+// `compileTree node branch`) rather than written out at each: the two
 // entries already carry near-identical warning blocks, and a condition
 // duplicated across them is one that drifts. One helper means a change to what
 // counts as "no time source" cannot apply to only one of the paths.

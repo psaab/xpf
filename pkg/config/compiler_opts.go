@@ -3550,7 +3550,7 @@ type compileOpts struct {
 	// identity (from /etc/xpf/node-id, or `-node-id` on `xpfd
 	// check-config`) into compileExpanded so it can be stamped onto the
 	// compiled ClusterConfig.NodeID BEFORE any NodeID-dependent derivation
-	// runs. Only the node-aware entry (compileConfigForNodeWithOpts) sets
+	// runs. Only the node-aware entry (compileTree node branch) sets
 	// nodeAware; the standalone CompileConfig path leaves it false so
 	// single-node compiles are unchanged. See the stamp in compileExpanded
 	// for the full rationale and guards.
