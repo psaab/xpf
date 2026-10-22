@@ -124,12 +124,8 @@ distinction).
 - `CompileConfig(tree) (*Config, error)` — `compiler.go`. AST-to-typed-
   struct walker. Clones the tree, expands `apply-groups` (with
   `${node}` fallback for cluster mode), then dispatches over AST
-  nodes via a switch statement to fill the typed `Config`. Eleven
-  `compiler*.go` files in this package, ~7.6K LOC total
-  (`compiler.go` + `compiler_interfaces.go`, `compiler_routing.go`,
-  `compiler_security.go`, `compiler_services.go`, `compiler_system.go`,
-  `compiler_firewall.go`, `compiler_nat.go`, `compiler_ipsec.go`,
-  `compiler_protocols.go`, `compiler_class_of_service.go`).
+  nodes via a switch statement to fill the typed `Config`. 237
+  `compiler*.go` files in this package, ~105.7K LOC total.
   Note: this is the **AST → typed Go struct** stage; the BPF-map
   compilation (zones, policies, NAT IDs, etc.) happens later in
   `pkg/dataplane.Manager.Compile`.
@@ -257,8 +253,8 @@ distinction).
   `inactive: apply-groups foo` suppresses the inherited config, inactive
   nodes inside a `groups {}` body are pruned, the pre-expansion tunnel-id
   collision gate ignores inactive tunnel definitions, and a deactivated leaf
-  with a deliberately-invalid value commits clean (Junos parks WIP). The
-  ~15 compiler files and the schema gate never observe an inactive node, so
+  with a deliberately-invalid value commits clean (Junos parks WIP).
+  The 237 compiler files and the schema gate never observe an inactive node, so
   none of them changed. All five display serializers (text, inheritance, set,
   JSON, XML) plus the `show | compare` diff re-emit the marker from the flag via
   the shared `inactivePrefix` / `xmlInactiveAttr` helpers; XML keeps values such
@@ -1319,7 +1315,7 @@ scope SILENTLY DISCARDED and applied GLOBALLY (translated sessions leaked across
 the routing boundary — a security/isolation failure); #3095 made that an interim
 commit reject (`validateNATRuleSetScopeAST`). #3096 implements the full path:
 
-- **Capture.** `parseNATMatchScopes` / `collectNATScopes` (`compiler_nat.go`,
+- **Capture.** `parseNATMatchScopes` / `collectNATScopes` (`compiler_nat_helpers.go`,
   generalizing the old `parseZoneList`) read `zone`, `interface`, AND
   `routing-instance` from both AST shapes (inline + child-leaf, bracket lists
   collapsed). The from/to scope lists Cartesian-expand into one
