@@ -42,11 +42,14 @@ locating any symbol below is now a matter of opening the named file.
   gate of its own. The heartbeat retry loop runs on a bare `go` and is not in
   that WaitGroup.
 - `HeartbeatPacket`, `MarshalHeartbeat`,
-  `UnmarshalHeartbeat`, the #4107 control-channel auth
+  `UnmarshalHeartbeat`, the #4107 control-channel auth wire codec
   (`MarshalHeartbeatAuth`, `marshalHeartbeatAuthEpoch`,
-  `heartbeatAuthTrailer`, `verifyHeartbeatMAC`, `heartbeatAuthReplay`,
+  `heartbeatAuthTrailer`, `verifyHeartbeatMAC`) —
+  `heartbeat_wire.go` (split in-package from `heartbeat.go`, #16169;
+  golden byte vectors in `heartbeat_wire_golden_test.go`).
+  `heartbeatAuthReplay`,
   `heartbeatAuthState.admitAuthed`, `heartbeatAuthDecision`,
-  `Manager.heartbeatNonce`), sender/receiver goroutine types —
+  `Manager.heartbeatNonce`, sender/receiver goroutine types —
   `heartbeat.go`. See "Control-channel authentication" below.
 - The #6169 across-reboot boot epoch — wire section constants, the
   key-derived marker (`heartbeatEpochMarker`), the verified-frame reader
