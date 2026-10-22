@@ -375,6 +375,10 @@ pub(super) fn apply(
                         _ => "worker spawn failed",
                     };
                     response.error = crate::snapshot_post_teardown_refusal(verb, stage);
+                    // #16133: additive code beside the legacy prefix; the
+                    // prose stays so old Go readers classify identically.
+                    response.error_code = crate::ERROR_CODE_SNAPSHOT_POST_TEARDOWN.to_string();
+                    response.error_retry_class = crate::ERROR_RETRY_CLASS_RETRY_DEBT.to_string();
                     eprintln!(
                         "CTRL_REQ: same-plan apply_snapshot rejected (post-teardown worker bring-up failure): {stage} — dataplane down, NOT persisting"
                     );
@@ -619,6 +623,9 @@ pub(super) fn apply(
                     _ => "worker spawn failed",
                 };
                 response.error = crate::snapshot_post_teardown_refusal(verb, stage);
+                // #16133: see the same-plan leg above.
+                response.error_code = crate::ERROR_CODE_SNAPSHOT_POST_TEARDOWN.to_string();
+                response.error_retry_class = crate::ERROR_RETRY_CLASS_RETRY_DEBT.to_string();
                 eprintln!(
                     "CTRL_REQ: apply_snapshot rejected (post-teardown worker bring-up failure): {stage} — dataplane down, NOT persisting"
                 );

@@ -3066,7 +3066,8 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
 #[test]
 fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
     use crate::{
-        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX,
+        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, ERROR_CODE_SNAPSHOT_POST_TEARDOWN,
+        ERROR_RETRY_CLASS_RETRY_DEBT, SNAPSHOT_POST_TEARDOWN_PREFIX,
     };
 
     // Prior snapshot deferred workers -> previous_defer_workers=true makes
@@ -3153,6 +3154,16 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
             && response.error.contains("worker spawn failed"),
         "post-teardown refusal must carry the machine-readable kind and diagnostic: {}",
         response.error
+    );
+    // #16133: the additive structured fields ride beside the prose prefix;
+    // old Go readers ignore them and classify on the prefix alone.
+    assert_eq!(
+        response.error_code, ERROR_CODE_SNAPSHOT_POST_TEARDOWN,
+        "post-teardown refusal must carry the #16133 error_code beside the prefix"
+    );
+    assert_eq!(
+        response.error_retry_class, ERROR_RETRY_CLASS_RETRY_DEBT,
+        "post-teardown refusal must carry the #16133 retry_debt class"
     );
 
     // (b) persist_state was NOT set -> the state file was never written.
@@ -3246,7 +3257,8 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
 #[test]
 fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
     use crate::{
-        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX,
+        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, ERROR_CODE_SNAPSHOT_POST_TEARDOWN,
+        ERROR_RETRY_CLASS_RETRY_DEBT, SNAPSHOT_POST_TEARDOWN_PREFIX,
     };
 
     // Prior snapshot: one binding interface (ge-0/0/1, ifindex 11). NOT
@@ -3339,6 +3351,9 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         "post-teardown refusal must carry the machine-readable kind and diagnostic: {}",
         response.error
     );
+    // #16133: full-apply leg stamps the same additive code as the same-plan leg.
+    assert_eq!(response.error_code, ERROR_CODE_SNAPSHOT_POST_TEARDOWN);
+    assert_eq!(response.error_retry_class, ERROR_RETRY_CLASS_RETRY_DEBT);
 
     // (b) persist_state was NOT set -> the state file was never written.
     assert!(
