@@ -184,4 +184,77 @@ func TestCompleteRPCParity16160(t *testing.T) {
 			t.Errorf("committed RPC missing predefined apps: %v", appResp.Candidates)
 		}
 	}
+
+	// Present-but-nil cell (#3494/#5886 shape), committed only: inject
+	// nil zone / interface / unit / zone-pair / policy slots into the
+	// ACTIVE config AFTER Commit + ExitConfigure. ExitConfigure is
+	// load-bearing: in config mode completionConfig() would draw the
+	// CANDIDATE compile (a fresh object without the injections — the
+	// 5886 config-mode bypass), so the RPC would complete from a
+	// different snapshot than the one mutated and ProvideValues over
+	// the active config would disagree for the wrong reason. Out of
+	// config mode, completionConfig returns (ActiveConfig, false):
+	// the exact object mutated here, catalogueSuppressed=false, so
+	// RPC-live must equal ProvideValues(active, hint, path, false)
+	// with every nil slot skipped — no panic, no nil name offered.
+	// The internal gRPC nil tests only assert no-panic and discard
+	// outputs; this cell asserts the outputs.
+	store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err != nil {
+		t.Fatalf("configstore.New (nil cell): %v", err)
+	}
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(parityRPCBody16160); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.Commit()
+	if err != nil {
+		t.Fatalf("Commit (nil cell): %v", err)
+	}
+	store.ExitConfigure()
+	if store.InConfigMode() {
+		t.Fatal("nil cell: still in config mode after ExitConfigure (candidate bypass not excluded)")
+	}
+	if active == nil || store.ActiveConfig() != active {
+		t.Fatal("nil cell: ActiveConfig is not the committed object")
+	}
+	active.Security.Zones["nilzone"] = nil
+	active.Interfaces.Interfaces["ge-0/0/9"] = nil
+	if iface := active.Interfaces.Interfaces["ge-0/0/0"]; iface != nil {
+		iface.Units[9] = nil
+	} else {
+		t.Fatal("nil cell: fixture missing ge-0/0/0")
+	}
+	active.Security.Policies = append([]*config.ZonePairPolicies{nil}, active.Security.Policies...)
+	for _, zpp := range active.Security.Policies {
+		if zpp != nil {
+			zpp.Policies = append([]*config.Policy{nil}, zpp.Policies...)
+		}
+	}
+	srv := grpcapi.NewServer("", grpcapi.Config{Store: store})
+	ctx := rpcParityCtx16160()
+	for _, cell := range rpcCells16160() {
+		resp, err := srv.Complete(ctx, &pb.CompleteRequest{Line: cell.line, Pos: int32(len(cell.line)), ConfigMode: true})
+		if err != nil {
+			t.Fatalf("nil cell %s: Complete: %v", cell.name, err)
+		}
+		got := liveFromRPC16160(resp)
+		want := canonicalRPC16160(config.ProvideValues(active, cell.hint, cell.path, false))
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("nil cell %s: RPC live %v != ProvideValues(active) %v (all RPC %v)", cell.name, got, want, resp.Candidates)
+		}
+		if len(got) == 0 {
+			t.Errorf("nil cell %s: no live values via RPC (parity would be vacuous)", cell.name)
+		}
+		for _, cand := range resp.Candidates {
+			if cand == "nilzone" || cand == "ge-0/0/9" {
+				t.Errorf("nil cell %s: RPC offered nil slot %q: %v", cell.name, cand, resp.Candidates)
+			}
+			if cell.name == "unit" && cand == "9" {
+				t.Errorf("nil cell unit: RPC offered nil unit 9: %v", resp.Candidates)
+			}
+		}
+	}
 }
