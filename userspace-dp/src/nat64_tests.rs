@@ -2153,7 +2153,7 @@ fn build_nat64_frame_into_reuses_caller_buffer_13267() {
 // a future edit reintroduces a per-checksum buffer.
 #[test]
 fn pseudo_header_checksum_helpers_have_no_per_packet_vec() {
-    let src = include_str!("nat64.rs");
+    let src = include_str!("nat64/checksum.rs");
     for fn_name in ["fn checksum16_ipv4_pseudo", "fn checksum16_ipv6_pseudo"] {
         let start = src.find(fn_name).unwrap_or_else(|| panic!("{fn_name} must exist"));
         // The body ends at the function's column-0 closing brace `\n}`. Each
