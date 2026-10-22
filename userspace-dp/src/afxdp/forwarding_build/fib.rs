@@ -24,12 +24,218 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_LEAK_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
-fn leak_identity_matches_v4(a: &LeakRuleV4, b: &LeakRuleV4) -> bool {
-    a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+// #16130: diff-verified twin pairs only. The normalized per-pair diffs
+// published in the PR show these bodies are verbatim after folding the
+// family tokens (address/prefix/next-hop types, table field, parse fn);
+// they are genericized below over the `FibFamily` trait, which is
+// private to this module. Pairs whose diff is NOT empty stay as two
+// explicit bodies and are listed at `recursive_static_target_v4` — no
+// v6-only branch is folded in here.
+/// Family operations for the diff-verified FIB twin pairs (#16130).
+/// Private to this module: a new family cannot be added outside
+/// this file, so every generic body keeps exactly the two monomorphized
+trait FibFamily: Copy {
+    type Addr: Copy + Ord + std::str::FromStr;
+    type Leak;
+    type NextHop;
+
+    fn parse_next_hop(spec: &str) -> (Option<Self::Addr>, Option<String>);
+    fn leak_identity_matches(a: &Self::Leak, b: &Self::Leak) -> bool;
+    fn leak_incarnation(leak: &Self::Leak) -> u64;
+    fn leak_incarnation_mut(leak: &mut Self::Leak) -> &mut u64;
+    fn resolve_target<'a>(
+        next_hop: Option<Self::Addr>,
+        interface: Option<&str>,
+        allow_forwarding_instance_default_interface: bool,
+        names: &BTreeMap<String, i32>,
+        linux_names: &BTreeMap<String, i32>,
+        state: &ForwardingState,
+        table: &str,
+        recursive_routes: &RecursiveGatewayRoutes<'a>,
+        excluded_route: &RouteSnapshot,
+    ) -> Vec<(Option<Self::Addr>, i32, u16, u32)>;
+    fn make_next_hop(
+        next_hop: Option<Self::Addr>,
+        ifindex: i32,
+        logical_interface_id: u64,
+        tunnel_endpoint_id: u16,
+        weight: u32,
+    ) -> Self::NextHop;
 }
 
-fn leak_identity_matches_v6(a: &LeakRuleV6, b: &LeakRuleV6) -> bool {
-    a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+#[derive(Clone, Copy)]
+struct V4Family;
+#[derive(Clone, Copy)]
+struct V6Family;
+
+impl FibFamily for V4Family {
+    type Addr = Ipv4Addr;
+    type Leak = LeakRuleV4;
+    type NextHop = RouteNextHopV4;
+
+    fn parse_next_hop(spec: &str) -> (Option<Self::Addr>, Option<String>) {
+        parse_route_next_hop_generic(spec)
+    }
+    fn leak_identity_matches(a: &Self::Leak, b: &Self::Leak) -> bool {
+        a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+    }
+    fn leak_incarnation(leak: &Self::Leak) -> u64 {
+        leak.incarnation
+    }
+    fn leak_incarnation_mut(leak: &mut Self::Leak) -> &mut u64 {
+        &mut leak.incarnation
+    }
+    fn resolve_target<'a>(
+        next_hop: Option<Self::Addr>,
+        interface: Option<&str>,
+        allow_forwarding_instance_default_interface: bool,
+        names: &BTreeMap<String, i32>,
+        linux_names: &BTreeMap<String, i32>,
+        state: &ForwardingState,
+        table: &str,
+        recursive_routes: &RecursiveGatewayRoutes<'a>,
+        excluded_route: &RouteSnapshot,
+    ) -> Vec<(Option<Self::Addr>, i32, u16, u32)> {
+        resolve_next_hop_target_v4(
+            next_hop,
+            interface,
+            allow_forwarding_instance_default_interface,
+            names,
+            linux_names,
+            state,
+            table,
+            recursive_routes,
+            excluded_route,
+        )
+    }
+    fn make_next_hop(
+        next_hop: Option<Self::Addr>,
+        ifindex: i32,
+        logical_interface_id: u64,
+        tunnel_endpoint_id: u16,
+        weight: u32,
+    ) -> Self::NextHop {
+        RouteNextHopV4 {
+            next_hop,
+            ifindex,
+            logical_interface_id,
+            tunnel_endpoint_id,
+            weight,
+        }
+    }
+}
+
+impl FibFamily for V6Family {
+    type Addr = Ipv6Addr;
+    type Leak = LeakRuleV6;
+    type NextHop = RouteNextHopV6;
+
+    fn parse_next_hop(spec: &str) -> (Option<Self::Addr>, Option<String>) {
+        parse_route_next_hop_generic(spec)
+    }
+    fn leak_identity_matches(a: &Self::Leak, b: &Self::Leak) -> bool {
+        a.prefix == b.prefix && a.next_table == b.next_table && a.rule_priority == b.rule_priority
+    }
+    fn leak_incarnation(leak: &Self::Leak) -> u64 {
+        leak.incarnation
+    }
+    fn leak_incarnation_mut(leak: &mut Self::Leak) -> &mut u64 {
+        &mut leak.incarnation
+    }
+    fn resolve_target<'a>(
+        next_hop: Option<Self::Addr>,
+        interface: Option<&str>,
+        allow_forwarding_instance_default_interface: bool,
+        names: &BTreeMap<String, i32>,
+        linux_names: &BTreeMap<String, i32>,
+        state: &ForwardingState,
+        table: &str,
+        recursive_routes: &RecursiveGatewayRoutes<'a>,
+        excluded_route: &RouteSnapshot,
+    ) -> Vec<(Option<Self::Addr>, i32, u16, u32)> {
+        resolve_next_hop_target_v6(
+            next_hop,
+            interface,
+            allow_forwarding_instance_default_interface,
+            names,
+            linux_names,
+            state,
+            table,
+            recursive_routes,
+            excluded_route,
+        )
+    }
+    fn make_next_hop(
+        next_hop: Option<Self::Addr>,
+        ifindex: i32,
+        logical_interface_id: u64,
+        tunnel_endpoint_id: u16,
+        weight: u32,
+    ) -> Self::NextHop {
+        RouteNextHopV6 {
+            next_hop,
+            ifindex,
+            logical_interface_id,
+            tunnel_endpoint_id,
+            weight,
+        }
+    }
+}
+
+fn merge_recursive_targets<A: Copy + Ord>(
+    targets: Vec<(A, i32, u16, u32)>,
+) -> Vec<(A, i32, u16, u32)> {
+    let mut merged = BTreeMap::new();
+    for (gateway, ifindex, endpoint, weight) in targets {
+        let total = merged.entry((gateway, ifindex, endpoint)).or_insert(0u32);
+        *total = total.saturating_add(weight);
+    }
+    merged
+        .into_iter()
+        .map(|((gateway, ifindex, endpoint), weight)| (gateway, ifindex, endpoint, weight))
+        .collect()
+}
+
+fn parse_route_next_hop_generic<A: std::str::FromStr>(spec: &str) -> (Option<A>, Option<String>) {
+    let (ip_part, if_part) = if let Some((lhs, rhs)) = spec.split_once('@') {
+        (lhs, rhs)
+    } else {
+        (spec, "")
+    };
+    let ip = if ip_part.is_empty() {
+        None
+    } else {
+        ip_part.parse::<A>().ok()
+    };
+    let iface = if if_part.is_empty() {
+        None
+    } else {
+        Some(if_part.to_string())
+    };
+    (ip, iface)
+}
+
+/// #9951: retain a leak's incarnation across a config rebuild when the exact
+/// rule remains. A rule absent from the previous state receives a fresh
+/// process-local incarnation, so remove -> re-add cannot resurrect sessions
+/// that still carry the removed rule's stamp.
+fn assign_leak_incarnations_for<F: FibFamily>(
+    leaks_by_table: &mut FastMap<String, Vec<F::Leak>>,
+    previous: Option<&FastMap<String, Vec<F::Leak>>>,
+) {
+    for (table, leaks) in leaks_by_table {
+        let old = previous.and_then(|prev| prev.get(table));
+        for leak in leaks {
+            let retained = old.and_then(|rules| {
+                rules
+                    .iter()
+                    .find(|candidate| F::leak_identity_matches(candidate, leak))
+                    .map(|candidate| F::leak_incarnation(candidate))
+            });
+            *F::leak_incarnation_mut(leak) =
+                retained.unwrap_or_else(|| NEXT_LEAK_INCARNATION.fetch_add(1, Ordering::Relaxed));
+        }
+    }
 }
 
 /// #9951: retain a leak's incarnation across a config rebuild when the exact
@@ -40,32 +246,14 @@ pub(super) fn assign_leak_incarnations(
     state: &mut ForwardingState,
     previous: Option<&ForwardingState>,
 ) {
-    for (table, leaks) in &mut state.leak_rules_v4 {
-        let old = previous.and_then(|prev| prev.leak_rules_v4.get(table));
-        for leak in leaks {
-            leak.incarnation = old
-                .and_then(|rules| {
-                    rules
-                        .iter()
-                        .find(|candidate| leak_identity_matches_v4(candidate, leak))
-                })
-                .map(|candidate| candidate.incarnation)
-                .unwrap_or_else(|| NEXT_LEAK_INCARNATION.fetch_add(1, Ordering::Relaxed));
-        }
-    }
-    for (table, leaks) in &mut state.leak_rules_v6 {
-        let old = previous.and_then(|prev| prev.leak_rules_v6.get(table));
-        for leak in leaks {
-            leak.incarnation = old
-                .and_then(|rules| {
-                    rules
-                        .iter()
-                        .find(|candidate| leak_identity_matches_v6(candidate, leak))
-                })
-                .map(|candidate| candidate.incarnation)
-                .unwrap_or_else(|| NEXT_LEAK_INCARNATION.fetch_add(1, Ordering::Relaxed));
-        }
-    }
+    assign_leak_incarnations_for::<V4Family>(
+        &mut state.leak_rules_v4,
+        previous.map(|prev| &prev.leak_rules_v4),
+    );
+    assign_leak_incarnations_for::<V6Family>(
+        &mut state.leak_rules_v6,
+        previous.map(|prev| &prev.leak_rules_v6),
+    );
 }
 
 /// #9951: build the per-incarnation liveness index once per forwarding
@@ -264,6 +452,14 @@ fn route_member_weight(route: &RouteSnapshot, index: usize) -> u32 {
 type RecursiveTargetV4 = (Ipv4Addr, i32, u16, u32);
 type RecursiveTargetV6 = (Ipv6Addr, i32, u16, u32);
 
+// #16130 NOT genericized: `recursive_static_target_v4`/`_v6` are not
+// diff-verified twins. The v6 body carries the unicast-link-local
+// recursion refusal and the `blocks_walk_up` terminal marker (returning
+// `vec![(ip, 0, 0, 1)]`) with no v4 counterpart; folding either into a
+// generic would hide a routing-semantics difference. Both bodies stay
+// explicit, sharing only the diff-verified helpers above
+// (`merge_recursive_targets`, `parse_route_next_hop_generic` via the
+// family parse fns, and the generic gateway wrapper below).
 fn recursive_static_target_v4<'a>(
     state: &ForwardingState,
     routes: &RecursiveGatewayRoutes<'a>,
@@ -395,15 +591,7 @@ fn recursive_static_target_v4<'a>(
 }
 
 fn merge_recursive_targets_v4(targets: Vec<RecursiveTargetV4>) -> Vec<RecursiveTargetV4> {
-    let mut merged = BTreeMap::new();
-    for (gateway, ifindex, endpoint, weight) in targets {
-        let total = merged.entry((gateway, ifindex, endpoint)).or_insert(0u32);
-        *total = total.saturating_add(weight);
-    }
-    merged
-        .into_iter()
-        .map(|((gateway, ifindex, endpoint), weight)| (gateway, ifindex, endpoint, weight))
-        .collect()
+    merge_recursive_targets(targets)
 }
 
 fn recursive_static_target_v6<'a>(
@@ -553,15 +741,27 @@ fn recursive_static_target_v6<'a>(
 }
 
 fn merge_recursive_targets_v6(targets: Vec<RecursiveTargetV6>) -> Vec<RecursiveTargetV6> {
-    let mut merged = BTreeMap::new();
-    for (gateway, ifindex, endpoint, weight) in targets {
-        let total = merged.entry((gateway, ifindex, endpoint)).or_insert(0u32);
-        *total = total.saturating_add(weight);
-    }
-    merged
-        .into_iter()
-        .map(|((gateway, ifindex, endpoint), weight)| (gateway, ifindex, endpoint, weight))
-        .collect()
+    merge_recursive_targets(targets)
+}
+
+fn recursive_gateway_target_generic<'a, A: Copy, F>(
+    ip: A,
+    excluded_route: &'a RouteSnapshot,
+    resolve: F,
+) -> Vec<(A, i32, u16, u32)>
+where
+    F: FnOnce(
+        A,
+        &mut [Option<&'a RouteSnapshot>; MAX_RECURSIVE_STATIC_DEPTH],
+        &mut [Option<A>; MAX_RECURSIVE_STATIC_DEPTH],
+        &mut usize,
+    ) -> Vec<(A, i32, u16, u32)>,
+{
+    let mut work = MAX_RECURSIVE_STATIC_WORK;
+    let mut visited = [None; MAX_RECURSIVE_STATIC_DEPTH];
+    let mut excluded_routes = [None; MAX_RECURSIVE_STATIC_DEPTH];
+    excluded_routes[0] = Some(excluded_route);
+    resolve(ip, &mut excluded_routes, &mut visited, &mut work)
 }
 
 fn recursive_gateway_target_v4<'a>(
@@ -573,22 +773,20 @@ fn recursive_gateway_target_v4<'a>(
     linux_names: &BTreeMap<String, i32>,
     excluded_route: &'a RouteSnapshot,
 ) -> Vec<RecursiveTargetV4> {
-    let mut work = MAX_RECURSIVE_STATIC_WORK;
-    let mut visited = [None; MAX_RECURSIVE_STATIC_DEPTH];
-    let mut excluded_routes = [None; MAX_RECURSIVE_STATIC_DEPTH];
-    excluded_routes[0] = Some(excluded_route);
-    recursive_static_target_v4(
-        state,
-        routes,
-        ip,
-        table,
-        names,
-        linux_names,
-        &mut excluded_routes,
-        &mut visited,
-        0,
-        &mut work,
-    )
+    recursive_gateway_target_generic(ip, excluded_route, |ip, excluded_routes, visited, work| {
+        recursive_static_target_v4(
+            state,
+            routes,
+            ip,
+            table,
+            names,
+            linux_names,
+            excluded_routes,
+            visited,
+            0,
+            work,
+        )
+    })
 }
 
 fn recursive_gateway_target_v6<'a>(
@@ -600,22 +798,20 @@ fn recursive_gateway_target_v6<'a>(
     linux_names: &BTreeMap<String, i32>,
     excluded_route: &'a RouteSnapshot,
 ) -> Vec<RecursiveTargetV6> {
-    let mut work = MAX_RECURSIVE_STATIC_WORK;
-    let mut visited = [None; MAX_RECURSIVE_STATIC_DEPTH];
-    let mut excluded_routes = [None; MAX_RECURSIVE_STATIC_DEPTH];
-    excluded_routes[0] = Some(excluded_route);
-    recursive_static_target_v6(
-        state,
-        routes,
-        ip,
-        table,
-        names,
-        linux_names,
-        &mut excluded_routes,
-        &mut visited,
-        0,
-        &mut work,
-    )
+    recursive_gateway_target_generic(ip, excluded_route, |ip, excluded_routes, visited, work| {
+        recursive_static_target_v6(
+            state,
+            routes,
+            ip,
+            table,
+            names,
+            linux_names,
+            excluded_routes,
+            visited,
+            0,
+            work,
+        )
+    })
 }
 
 pub(super) fn populate_routes(
@@ -975,14 +1171,14 @@ pub(super) fn populate_fabrics(
 /// same-table static routes; the terminal gateway and egress ifindex are baked
 /// into the member because lookup consumes `nh.next_hop` and `nh.ifindex`.
 /// Candidates whose interface fails to resolve are retained with ifindex 0.
-fn resolve_route_next_hops_v4_with_routes(
+fn resolve_route_next_hops_with_routes<F: FibFamily>(
     route: &RouteSnapshot,
     names: &BTreeMap<String, i32>,
     linux_names: &BTreeMap<String, i32>,
     state: &ForwardingState,
     table: &str,
     recursive_routes: &RecursiveGatewayRoutes<'_>,
-) -> Vec<RouteNextHopV4> {
+) -> Vec<F::NextHop> {
     if route.discard || !route.next_table.is_empty() {
         return Vec::new();
     }
@@ -992,8 +1188,8 @@ fn resolve_route_next_hops_v4_with_routes(
         .enumerate()
         .flat_map(|(index, nh)| {
             let weight = route_member_weight(route, index);
-            let (parsed_next_hop, interface) = parse_route_next_hop(nh.as_str());
-            let targets = resolve_next_hop_target_v4(
+            let (parsed_next_hop, interface) = F::parse_next_hop(nh.as_str());
+            let targets = F::resolve_target(
                 parsed_next_hop,
                 interface.as_deref(),
                 parsed_next_hop.is_some() || nh.starts_with('@'),
@@ -1017,19 +1213,35 @@ fn resolve_route_next_hops_v4_with_routes(
                         })
                         .or(interface.as_deref())
                         .unwrap_or("");
-                    RouteNextHopV4 {
+                    F::make_next_hop(
                         next_hop,
                         ifindex,
-                        logical_interface_id: crate::afxdp::types::ecmp_logical_interface_id(
-                            logical_interface,
-                        ),
+                        crate::afxdp::types::ecmp_logical_interface_id(logical_interface),
                         tunnel_endpoint_id,
-                        weight: weight.saturating_mul(recursive_weight),
-                    }
+                        weight.saturating_mul(recursive_weight),
+                    )
                 },
             )
         })
         .collect()
+}
+
+fn resolve_route_next_hops_v4_with_routes(
+    route: &RouteSnapshot,
+    names: &BTreeMap<String, i32>,
+    linux_names: &BTreeMap<String, i32>,
+    state: &ForwardingState,
+    table: &str,
+    recursive_routes: &RecursiveGatewayRoutes<'_>,
+) -> Vec<RouteNextHopV4> {
+    resolve_route_next_hops_with_routes::<V4Family>(
+        route,
+        names,
+        linux_names,
+        state,
+        table,
+        recursive_routes,
+    )
 }
 
 /// #2389: resolve every authored IPv6 next-hop to one or more terminal members.
@@ -1041,53 +1253,14 @@ fn resolve_route_next_hops_v6_with_routes(
     table: &str,
     recursive_routes: &RecursiveGatewayRoutes<'_>,
 ) -> Vec<RouteNextHopV6> {
-    if route.discard || !route.next_table.is_empty() {
-        return Vec::new();
-    }
-    route
-        .next_hops
-        .iter()
-        .enumerate()
-        .flat_map(|(index, nh)| {
-            let weight = route_member_weight(route, index);
-            let (parsed_next_hop, interface) = parse_route_next_hop_v6(nh.as_str());
-            let targets = resolve_next_hop_target_v6(
-                parsed_next_hop,
-                interface.as_deref(),
-                parsed_next_hop.is_some() || nh.starts_with('@'),
-                names,
-                linux_names,
-                state,
-                table,
-                recursive_routes,
-                route,
-            );
-            targets.into_iter().map(
-                move |(next_hop, ifindex, tunnel_endpoint_id, recursive_weight)| {
-                    let logical_interface = interface
-                        .as_deref()
-                        .filter(|name| names.contains_key(*name))
-                        .or_else(|| {
-                            state
-                                .ifindex_to_config_name
-                                .get(&ifindex)
-                                .map(String::as_str)
-                        })
-                        .or(interface.as_deref())
-                        .unwrap_or("");
-                    RouteNextHopV6 {
-                        next_hop,
-                        ifindex,
-                        logical_interface_id: crate::afxdp::types::ecmp_logical_interface_id(
-                            logical_interface,
-                        ),
-                        tunnel_endpoint_id,
-                        weight: weight.saturating_mul(recursive_weight),
-                    }
-                },
-            )
-        })
-        .collect()
+    resolve_route_next_hops_with_routes::<V6Family>(
+        route,
+        names,
+        linux_names,
+        state,
+        table,
+        recursive_routes,
+    )
 }
 
 fn route_table_instance(table: &str) -> Option<&str> {
@@ -1127,6 +1300,9 @@ fn explicit_ifindex_in_route_table(
     .then_some(ifindex)
 }
 
+// #16130 NOT genericized: `resolve_next_hop_target_v6` carries the
+// #12398 B1 link-local early return with no v4 counterpart. Both bodies
+// stay explicit and are reached only through `FibFamily::resolve_target`.
 fn resolve_next_hop_target_v4(
     next_hop: Option<Ipv4Addr>,
     interface: Option<&str>,
@@ -1249,41 +1425,11 @@ fn resolve_next_hop_target_v6(
 /// called. Without that guard, a valid IPv6 gateway on an IPv4 route would
 /// silently produce `(None, None)` and the route would become NoRoute.
 fn parse_route_next_hop(spec: &str) -> (Option<Ipv4Addr>, Option<String>) {
-    let (ip_part, if_part) = if let Some((lhs, rhs)) = spec.split_once('@') {
-        (lhs, rhs)
-    } else {
-        (spec, "")
-    };
-    let ip = if ip_part.is_empty() {
-        None
-    } else {
-        ip_part.parse::<Ipv4Addr>().ok()
-    };
-    let iface = if if_part.is_empty() {
-        None
-    } else {
-        Some(if_part.to_string())
-    };
-    (ip, iface)
+    parse_route_next_hop_generic(spec)
 }
 
 fn parse_route_next_hop_v6(spec: &str) -> (Option<Ipv6Addr>, Option<String>) {
-    let (ip_part, if_part) = if let Some((lhs, rhs)) = spec.split_once('@') {
-        (lhs, rhs)
-    } else {
-        (spec, "")
-    };
-    let ip = if ip_part.is_empty() {
-        None
-    } else {
-        ip_part.parse::<Ipv6Addr>().ok()
-    };
-    let iface = if if_part.is_empty() {
-        None
-    } else {
-        Some(if_part.to_string())
-    };
-    (ip, iface)
+    parse_route_next_hop_generic(spec)
 }
 
 fn resolve_ifindex(
@@ -1297,6 +1443,9 @@ fn resolve_ifindex(
         .or_else(|| linux_names.get(name).copied())
 }
 
+// #16130 NOT genericized: `infer_connected_route_target_v6` carries the
+// #11322 link-local candidate-collapse branch with no v4 counterpart.
+// Both bodies stay explicit.
 fn infer_connected_route_target_v4(
     state: &ForwardingState,
     ip: Ipv4Addr,
@@ -1364,6 +1513,159 @@ fn infer_connected_route_target_v6(
         .find(|entry| entry.table == table && entry.prefix.contains(ip))
         .map(|entry| (entry.ifindex, entry.tunnel_endpoint_id))
 }
+#[cfg(test)]
+mod fib_genericize_16130_tests {
+    use super::*;
+
+    // Decisive parity for the genericized merge: duplicate terminals sum
+    // saturating, distinct keys stay separate and sorted by key.
+    // FAIL-ON-REVERT: reverting `merge_recursive_targets` to per-family
+    // bodies that (say) overwrite instead of saturating-add, or dropping
+    // the sort, reds this in both families via the one generic body.
+    #[test]
+    fn merge_recursive_targets_sums_saturating_and_sorts_16130() {
+        let gw = Ipv4Addr::new(192, 0, 2, 1);
+        let merged = merge_recursive_targets(vec![
+            (gw, 7, 0u16, u32::MAX),
+            (gw, 7, 0u16, 5),
+            (gw, 3, 0u16, 2),
+            (Ipv4Addr::new(192, 0, 2, 2), 7, 0u16, 1),
+        ]);
+        assert_eq!(
+            merged,
+            vec![
+                (gw, 3, 0, 2),
+                (gw, 7, 0, u32::MAX),
+                (Ipv4Addr::new(192, 0, 2, 2), 7, 0, 1),
+            ]
+        );
+        let gw6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let merged6 = merge_recursive_targets(vec![(gw6, 7, 0u16, 3), (gw6, 7, 0u16, 4)]);
+        assert_eq!(merged6, vec![(gw6, 7, 0, 7)]);
+    }
+
+    #[test]
+    fn parse_route_next_hop_generic_matches_family_shapes_16130() {
+        assert_eq!(
+            parse_route_next_hop_generic::<Ipv4Addr>("192.0.2.1@ge-0-0-0"),
+            (Some(Ipv4Addr::new(192, 0, 2, 1)), Some("ge-0-0-0".into()))
+        );
+        assert_eq!(
+            parse_route_next_hop_generic::<Ipv4Addr>("@ge-0-0-0"),
+            (None, Some("ge-0-0-0".into()))
+        );
+        assert_eq!(
+            parse_route_next_hop_generic::<Ipv6Addr>("2001:db8::1"),
+            (Some("2001:db8::1".parse::<Ipv6Addr>().unwrap()), None)
+        );
+        // Cross-family literal fails closed to (None, None), as before.
+        assert_eq!(
+            parse_route_next_hop_generic::<Ipv4Addr>("2001:db8::1"),
+            (None, None)
+        );
+        assert_eq!(parse_route_next_hop_generic::<Ipv6Addr>(""), (None, None));
+    }
+
+    // The v6-only branches must NOT be folded into the generic: a v6
+    // link-local gateway stays ifindex-0 unresolved, and the v4
+    // counterparts resolve through their own explicit bodies.
+    #[test]
+    fn v6_link_local_branches_stay_explicit_16130() {
+        let state = ForwardingState::default();
+        let snapshot = ConfigSnapshot::default();
+        let routes = RecursiveGatewayRoutes::from_snapshot(&snapshot);
+        let route = RouteSnapshot::default();
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
+        assert_eq!(
+            resolve_next_hop_target_v6(
+                Some(ll),
+                None,
+                false,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &state,
+                "inet6.0",
+                &routes,
+                &route,
+            ),
+            vec![(Some(ll), 0, 0, 1)],
+            "v6 link-local must not recurse globally (#12398 B1)"
+        );
+        // v6 link-local recursion entry refuses immediately.
+        let mut work = MAX_RECURSIVE_STATIC_WORK;
+        let mut excluded = [None; MAX_RECURSIVE_STATIC_DEPTH];
+        assert!(recursive_static_target_v6(
+            &state,
+            &routes,
+            ll,
+            "inet6.0",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &mut excluded,
+            &mut [None; MAX_RECURSIVE_STATIC_DEPTH],
+            0,
+            &mut work,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn leak_incarnation_retained_only_on_exact_identity_16130() {
+        let mut state = ForwardingState::default();
+        let mut prev = ForwardingState::default();
+        let leak = |prefix: &str, table: &str, prio: u32, inc: u64| LeakRuleV4 {
+            prefix: PrefixV4::from_net(prefix.parse().unwrap()),
+            next_table: table.into(),
+            rule_priority: prio,
+            incarnation: inc,
+        };
+        prev.leak_rules_v4.insert(
+            "inet.0".into(),
+            vec![leak("10.0.0.0/8", "tenant.inet.0", 100, 4242)],
+        );
+        state.leak_rules_v4.insert(
+            "inet.0".into(),
+            vec![
+                leak("10.0.0.0/8", "tenant.inet.0", 100, 0),
+                leak("10.0.0.0/8", "tenant.inet.0", 200, 0),
+            ],
+        );
+        assign_leak_incarnations(&mut state, Some(&prev));
+        let leaks = &state.leak_rules_v4["inet.0"];
+        assert_eq!(leaks[0].incarnation, 4242, "exact identity retains");
+        assert_ne!(leaks[1].incarnation, 4242, "different priority is fresh");
+        assert_ne!(leaks[1].incarnation, 0);
+    }
+
+    #[test]
+    fn leak_incarnation_retained_only_on_exact_identity_v6_16130() {
+        let mut state = ForwardingState::default();
+        let mut prev = ForwardingState::default();
+        let leak = |prefix: &str, table: &str, prio: u32, inc: u64| LeakRuleV6 {
+            prefix: PrefixV6::from_net(prefix.parse().unwrap()),
+            next_table: table.into(),
+            rule_priority: prio,
+            incarnation: inc,
+        };
+        prev.leak_rules_v6.insert(
+            "inet6.0".into(),
+            vec![leak("2001:db8::/32", "tenant.inet6.0", 100, 4242)],
+        );
+        state.leak_rules_v6.insert(
+            "inet6.0".into(),
+            vec![
+                leak("2001:db8::/32", "tenant.inet6.0", 100, 0),
+                leak("2001:db8::/32", "tenant.inet6.0", 200, 0),
+            ],
+        );
+        assign_leak_incarnations(&mut state, Some(&prev));
+        let leaks = &state.leak_rules_v6["inet6.0"];
+        assert_eq!(leaks[0].incarnation, 4242, "exact identity retains");
+        assert_ne!(leaks[1].incarnation, 4242, "different priority is fresh");
+        assert_ne!(leaks[1].incarnation, 0);
+    }
+}
+
 #[cfg(test)]
 mod recursive_cycle_guard_12398_tests {
     use super::*;
