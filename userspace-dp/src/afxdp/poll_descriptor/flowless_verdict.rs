@@ -75,7 +75,15 @@ pub(super) fn flowless_local_delivery_verdict(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     extra: crate::filter::TermMatchExtra<'_>,
+    // #15951 fold: `flow` is the WIRE flow (retained for the deny record's
+    // 5-tuple); `policy_flow` is the POST-translation flow the caller built
+    // from `flowless_nat.rewrite_dst` (`post_nat_l3_flow`), or the same flow
+    // when no address-only DNAT/NPTv6 applied. The host-inbound/lo0 gates and
+    // the junos-host evaluation judge `policy_flow`; the emitted record keeps
+    // `flow` as its tuple and carries `nat` in its `nat_dst_*` fields.
     flow: &SessionFlow,
+    policy_flow: &SessionFlow,
+    nat: crate::nat::NatDecision,
     meta: UserspaceDpMeta,
     logical_ingress_ifindex: i32,
     from_zone_id: u16,
@@ -104,13 +112,16 @@ pub(super) fn flowless_local_delivery_verdict(
     // (l4_present = false) so a port-bearing admit / lo0 term cannot match a
     // fragment; the ICMP first-L4-byte is 0 (absent), so the #3171 ICMP/ND
     // global accept does not falsely exempt a fragment whose type we cannot read.
+    // #15951 fold: the service gate judges the POST-translation destination
+    // (`policy_flow.dst_ip`, #9529 parity with the flow-backed arms), while the
+    // lo0 filter stays on the WIRE flow (Junos filters are pre-NAT).
     match host_inbound_gated_lo0_action(
         forwarding,
         logical_ingress_ifindex,
         from_zone_id,
-        flow.dst_ip,
+        policy_flow.dst_ip,
         0,
-        matches!(flow.dst_ip, IpAddr::V6(_)),
+        matches!(policy_flow.dst_ip, IpAddr::V6(_)),
         0,
         extra,
         flow,
@@ -160,11 +171,11 @@ pub(super) fn flowless_local_delivery_verdict(
     // metadata to carry — only a deny/reject drives the flowless filter drop.
     if let Some(result) = junos_host_policy_eval(
         forwarding,
-        flow,
-        // #9529: the flowless arm applies no destination translation (a
-        // translated flow's later fragments follow fragment association,
-        // not this arm), so its wire destination IS its post-translation one.
-        (flow.dst_ip, flow.forward_key.dst_port),
+        policy_flow,
+        // #9529/#15951 fold: judged post-translation — `policy_flow` already
+        // carries the DNAT/NPTv6-rewritten destination (ports stay 0, as
+        // flowless address-only translation rewrites no port).
+        (policy_flow.dst_ip, policy_flow.forward_key.dst_port),
         from_zone_id,
         packet_len,
         false,
@@ -180,12 +191,12 @@ pub(super) fn flowless_local_delivery_verdict(
             emit_junos_host_deny_l4(
                 forwarding,
                 event_stream,
+                // Wire flow: the record's 5-tuple is the received tuple; `nat`
+                // carries the translated destination it was judged on.
                 flow,
                 meta,
-                flow.forward_key.dst_port,
-                // #9529: the flowless arm applies no destination translation,
-                // so there is no translated tuple to report.
-                &crate::nat::NatDecision::default(),
+                policy_flow.forward_key.dst_port,
+                &nat,
                 from_zone_id,
                 result.policy_id,
                 result.action,

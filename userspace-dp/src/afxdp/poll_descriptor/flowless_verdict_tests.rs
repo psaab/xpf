@@ -228,12 +228,32 @@ mod flowless_local_delivery_tests {
         meta: UserspaceDpMeta,
         from_zone_id: u16,
     ) -> FlowlessLocalVerdict {
+        verdict_nat(
+            fw,
+            flow,
+            flow,
+            crate::nat::NatDecision::default(),
+            meta,
+            from_zone_id,
+        )
+    }
+
+    fn verdict_nat(
+        fw: &ForwardingState,
+        wire_flow: &SessionFlow,
+        policy_flow: &SessionFlow,
+        nat: crate::nat::NatDecision,
+        meta: UserspaceDpMeta,
+        from_zone_id: u16,
+    ) -> FlowlessLocalVerdict {
         let mut counters = BatchCounters::default();
         flowless_local_delivery_verdict(
             fw,
             None,
             flowless_extra(),
-            flow,
+            wire_flow,
+            policy_flow,
+            nat,
             meta,
             meta.ingress_ifindex as i32,
             from_zone_id,
@@ -285,6 +305,8 @@ mod flowless_local_delivery_tests {
             Some(&handle),
             flowless_extra(),
             &flow,
+            &flow,
+            crate::nat::NatDecision::default(),
             flowless_meta(PROTO_TCP),
             INGRESS_IF,
             ZONE,
@@ -522,6 +544,8 @@ mod flowless_local_delivery_tests {
                 Some(&handle),
                 flowless_extra(),
                 &flow,
+                &flow,
+                crate::nat::NatDecision::default(),
                 meta,
                 meta.ingress_ifindex as i32,
                 TEST_TRUST_ZONE_ID,
@@ -547,6 +571,98 @@ mod flowless_local_delivery_tests {
             event.application_id, 0,
             "flowless traffic has no L4 service port"
         );
+        // No translation in this fixture: nat_dst stays empty.
+        assert_eq!(event.nat_dst_ip, None);
+        assert_eq!(event.nat_dst_port, 0);
+    }
+
+    // #15951 fold: an address-only DNAT to a local address (VIP -> local) is
+    // judged post-translation on the flowless arm too. The junos-host deny
+    // naming ONLY the translated local address must match, and the deny record
+    // must retain the WIRE destination in dst_ip while carrying the translated
+    // address in nat_dst_ip. Passing a default NatDecision (or judging the
+    // wire flow) turns both assertions RED.
+    #[test]
+    fn flowless_dnat_junos_host_deny_carries_translated_tuple_15951() {
+        use crate::test_zone_ids::TEST_TRUST_ZONE_ID;
+        let wire_dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let local_dst = IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1));
+        let mut fw = fw_with_host_inbound(TEST_TRUST_ZONE_ID, &["any-service"], &[]);
+        let zone_name_to_id: rustc_hash::FxHashMap<String, u16> =
+            [("trust".to_string(), TEST_TRUST_ZONE_ID)]
+                .into_iter()
+                .collect();
+        fw.policy = crate::policy::parse_policy_state(
+            "permit",
+            &[crate::PolicyRuleSnapshot {
+                name: "host-deny-local-only".into(),
+                from_zone: "trust".into(),
+                to_zone: crate::policy::JUNOS_HOST_ZONE_NAME.into(),
+                source_addresses: vec!["any".into()],
+                // Matches ONLY the translated (local) destination.
+                destination_addresses: vec!["10.0.99.1/32".into()],
+                applications: vec!["any".into()],
+                application_terms: Vec::new(),
+                action: "deny".into(),
+                ..Default::default()
+            }],
+            &zone_name_to_id,
+        );
+        let (handle, rx) = crate::event_stream::test_worker_handle(
+            8,
+            crate::event_stream::DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+            },
+        );
+        // Wire flow: dst is the VIP; policy flow: dst rewritten to local.
+        let mut wire = flowless_flow(PROTO_TCP);
+        wire.dst_ip = wire_dst;
+        wire.forward_key.dst_ip = wire_dst;
+        let mut policy_flow = wire.clone();
+        policy_flow.dst_ip = local_dst;
+        policy_flow.forward_key.dst_ip = local_dst;
+        let nat = crate::nat::NatDecision {
+            rewrite_dst: Some(local_dst),
+            ..Default::default()
+        };
+        let meta = flowless_meta(PROTO_TCP);
+        let mut counters = BatchCounters::default();
+        assert_eq!(
+            flowless_local_delivery_verdict(
+                &fw,
+                Some(&handle),
+                flowless_extra(),
+                &wire,
+                &policy_flow,
+                nat,
+                meta,
+                meta.ingress_ifindex as i32,
+                TEST_TRUST_ZONE_ID,
+                Some(TEST_TRUST_ZONE_ID),
+                64,
+                1_000,
+                &mut counters,
+            ),
+            FlowlessLocalVerdict::Filtered,
+            "deny naming only the translated local address must match post-translation"
+        );
+        assert_eq!(counters.policy_denied_packets, 1);
+        let event = rx
+            .try_recv()
+            .expect("flowless DNAT junos-host deny emits a policy event")
+            .decode_dataplane_event()
+            .expect("flowless DNAT deny payload");
+        assert_eq!(
+            event.dst_ip, wire_dst,
+            "record retains the wire destination"
+        );
+        assert_eq!(
+            event.nat_dst_ip,
+            Some(local_dst),
+            "record carries the translated destination it was judged on"
+        );
+        assert_eq!(event.nat_dst_port, 0, "address-only DNAT rewrites no port");
     }
 
     // (c) #3600 review Note 2: a host-bound flowless packet whose dst is the
@@ -656,7 +772,10 @@ mod flowless_local_delivery_tests {
             Some("red.inet.0"),
         )
         .expect("owner-table destination resolves");
-        assert_eq!(owner.resolution.disposition, ForwardingDisposition::LocalDelivery);
+        assert_eq!(
+            owner.resolution.disposition,
+            ForwardingDisposition::LocalDelivery
+        );
         assert_eq!(owner.resolution.local_ifindex, 12);
 
         // A packet resolving in inet.0 must fall through to inet.0's FIB.

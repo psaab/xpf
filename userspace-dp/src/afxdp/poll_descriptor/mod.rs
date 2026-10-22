@@ -9537,7 +9537,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding,
                             worker_ctx.event_stream,
                             crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta),
+                            // #15951 fold: wire flow for the deny record's tuple,
+                            // post-translation flow + decision for judging/NAT.
+                            l3_ctx.as_ref().unwrap_or(l3_flow),
                             l3_flow,
+                            flowless_nat,
                             meta,
                             // #3609: the host-inbound override map is keyed by
                             // the LOGICAL unit ifindex; pass the resolved value,
