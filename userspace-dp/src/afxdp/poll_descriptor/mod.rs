@@ -4198,27 +4198,42 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // session ever installed on the new owner. When
                         // the fabric LINK carried the packet (physical
                         // fabric ifindex, not merely a zone stamp) and it
-                        // is not a SYN, adopt an ESTABLISHED synced
-                        // session for the exact NAT'd wire tuple: resolve
-                        // through the ordinary session-hit path, which
-                        // materializes the worker row from the synced
-                        // entry and re-resolves to a local WAN
-                        // ForwardCandidate. Only a ForwardCandidate
-                        // outcome is adopted — terminal-local, never
-                        // re-redirected; anything else falls through to
-                        // the ordinary miss discard, and a SYN keeps the
-                        // existing punt/seed behavior exactly.
+                        // is not a SYN, adopt an ESTABLISHED session for
+                        // the exact NAT'd wire tuple: resolve through the
+                        // ordinary session-hit path, which materializes
+                        // the worker row from the synced entry and
+                        // re-resolves to a local WAN ForwardCandidate.
+                        // Only a ForwardCandidate outcome is adopted —
+                        // terminal-local, never re-redirected; anything
+                        // else falls through to the ordinary miss
+                        // discard, and a SYN keeps the existing
+                        // punt/seed behavior exactly.
+                        //
+                        // #16217 (FZDiag16): the shared synced maps alone
+                        // miss the heavy split tuples — on this node they
+                        // hold only SyncImport replicas imported from the
+                        // old owner, stuck at w=2 because every evidence
+                        // collector excludes peer-synced rows. This
+                        // node's OWN worker table may hold the completing
+                        // pair as a local serving row (WorkerLocalImport/
+                        // SharedPromote, Established). The gate therefore
+                        // ALSO consults the local table (canonical key
+                        // derived via the forward-wire alias / reverse-NAT
+                        // probe): a local non-reverse serving row that is
+                        // Established qualifies; pending/closing/
+                        // reverse-only never adopt (fail-closed).
                         let adopted = if fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
-                        {
-                            crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+                            && crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+                                sessions,
                                 worker_ctx.shared_sessions,
                                 worker_ctx.shared_forward_wire_sessions,
                                 &worker_ctx.shared_owner_rg_indexes,
                                 &flow.forward_key,
+                                now_ns,
                             )
-                            .and_then(|_| {
-                                resolve_flow_session_decision_with_conntrack_and_payload(
+                        {
+                            resolve_flow_session_decision_with_conntrack_and_payload(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
                                     conntrack_v4_fd,
@@ -4246,7 +4261,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_id,
                                     None,
                                 )
-                            })
                             .filter(|resolved| {
                                 matches!(
                                     resolved.decision.resolution.disposition,

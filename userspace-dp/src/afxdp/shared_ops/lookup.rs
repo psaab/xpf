@@ -69,6 +69,48 @@ pub(in crate::afxdp) fn lookup_shared_established_for_wire(
     )
     .filter(is_established)
 }
+/// #16217 (FZDiag16 local-evidence arm): fabric-ingress adoption gate
+/// with the worker-local serving table as a second evidence source.
+/// The shared maps alone miss the heavy split tuples: on the new owner
+/// the shared rows are `SyncImport` replicas imported from the old
+/// owner, stuck at HandshakePending (w=2) because every evidence
+/// collector excludes peer-synced rows — yet THIS node's worker tables
+/// hold the completing pair as local serving rows
+/// (`WorkerLocalImport`/`SharedPromote`, wire Established) served on
+/// the fabric peer. So: shared Established qualifies as before; else a
+/// local non-reverse serving row for the canonical key behind
+/// `wire_key` that is fully Established (pending/closing/reverse-only
+/// never adopt — `SessionTable::local_established_for_wire_at` fails
+/// closed, incl. wire-alias ambiguity and idle expiry) also qualifies.
+/// The returned entry is only the gate's boolean-with-provenance: the
+/// caller re-resolves through the ordinary session-hit path, which
+/// materializes/re-resolves the row and must still yield a local
+/// `ForwardCandidate`. For the local arm there is no shared entry to
+/// return, so the local canonical key is carried on a cloned local-row
+/// snapshot is NOT fabricated — instead this returns `None` entry-wise
+/// and the caller uses `local_established_for_wire_at` directly. This
+/// wrapper exists so the poll gate has ONE fail-closed predicate:
+/// `true` iff either evidence source proves Established.
+pub(in crate::afxdp) fn fabric_adoption_established_for_wire(
+    sessions: &crate::session::SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    wire_key: &SessionKey,
+    now_ns: u64,
+) -> bool {
+    if lookup_shared_established_for_wire(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        wire_key,
+    )
+    .is_some()
+    {
+        return true;
+    }
+    sessions.local_established_for_wire_at(wire_key, now_ns).is_some()
+}
 /// #16217: INPUT evidence for the ct-slice collector and the export
 /// stamp — reverse service observed for the canonical key anywhere
 /// in the shared maps. Fail-closed: only an ACTUAL reverse packet

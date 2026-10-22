@@ -233,6 +233,7 @@ streams. The remaining blackhole stays downstream of / at the
 adoption instant for those tuples. Cluster restored: clean master
 `2c8575b70e`, helper `2f2f5cbf…b04` both nodes (hash-proved),
 RG0/1/2 node0 primary, target OK, P4 verification 13.6 Gbit/s.
+
 A second identical run was executed for the twice-on-loss
 requirement; its table is recorded with the PR comment.
 Live Run 4 (same build `99.16217.25.dirty` / helper `41a057f2…0d92`,
@@ -244,3 +245,37 @@ nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
 verification 11.3 Gbit/s. (The run-4 restore leg initially left fw0
 on the fix build after a rolling-upgrade rejoin timeout; fw0 was
 then redeployed clean and re-verified homogeneous.)
+
+## Local-table evidence arm (FZDiag16)
+
+FZDiag16 on head `e0f0b9ff80` proved the export stamp never fires for
+the heavy split tuples: on fw0 the forward half is a peer-synced
+`SyncImport` row stuck in pure Opening (the completing SYN-ACK/ACK is
+fabric-served on fw1), and every evidence collector excludes
+peer-synced origins, so no Established export ever crosses. At the
+failover instant fw1 holds local `WorkerLocalImport`/`SharedPromote`
+rows Established (wire=4) for those tuples, but the adoption gate
+(`lookup_shared_established_for_wire`) read only the shared maps —
+whose fw1 rows are the fw0 imports stuck at w=2.
+
+Fix: the fabric-ingress session-miss gate
+(`poll_descriptor/mod.rs`, `fabric_link_ingress && !SYN`) now uses
+`fabric_adoption_established_for_wire` (`shared_ops/lookup.rs`):
+shared Established qualifies as before; ELSE the worker-local table
+is consulted via `SessionTable::local_established_for_wire_at`
+(`session/lookup.rs`), which derives the canonical key from the wire
+key (forward-wire alias match — ambiguity fails closed — or a direct
+probe of the wire key) and qualifies only a non-reverse, non-closing,
+non-peer-synced local row that is Established with `handshake_pending`
+cleared and not idle-crossed. Pending/closing/reverse-only and
+peer-synced local rows never adopt. On a qualifying gate the packet
+still re-resolves through the existing
+`resolve_flow_session_decision_with_conntrack_and_payload` path and
+only a `ForwardCandidate` outcome is adopted (fail-closed otherwise).
+
+Tests: `fabric_gate_adopts_on_local_established_when_shared_pending_16217`
+— shared maps w=2 only: local Established (WorkerLocalImport and
+SharedPromote) adopts and derives the canonical key; empty table,
+local Opening, peer-synced Established, and reverse-only Established
+all decline. FAIL-ON-REVERT: dropping the local arm turns the
+Established-local assertions false.

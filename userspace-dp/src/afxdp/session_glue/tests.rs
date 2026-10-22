@@ -4188,6 +4188,166 @@ fn fabric_ingress_adopts_established_synced_wire_session_16217() {
     );
 }
 
+/// #16217 (FZDiag16): the fabric-adoption gate must ALSO adopt when the
+/// shared maps hold only w=2 (HandshakePending) SyncImport replicas —
+/// the heavy split shape — but THIS worker's local table holds a
+/// non-reverse serving row (WorkerLocalImport/SharedPromote) for the
+/// canonical key that is Established. Declines when the local row is
+/// pending, reverse-only, peer-synced, or closing.
+///
+/// FAIL-ON-REVERT: drop the local arm of
+/// `fabric_adoption_established_for_wire` and the Established-local
+/// assertions below go false (shared w=2 alone never qualifies).
+#[test]
+fn fabric_gate_adopts_on_local_established_when_shared_pending_16217() {
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let pending_wire = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+    let now = 1_000_000u64;
+    // Shared maps: ONLY a w=2 forward SyncImport replica (the fw0-import
+    // shape) — the pre-existing shared gate must decline on it alone.
+    let shared_entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: SessionMetadata { forward_ingress_vlan_id: None,
+    nat_scope_ifindex: None, ..test_metadata() },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x18,
+    generation: 0,
+    session_id: 7777,
+    tcp_close_class: 0, tcp_handshake_state: pending_wire, rev_packets: 0u64, pptp_call_ids: 0,
+    source_nat_static: None, };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &shared_entry,
+    );
+    assert!(
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+        )
+        .is_none(),
+        "premise: shared w=2 alone must not adopt"
+    );
+    let gate = |sessions: &SessionTable| {
+        crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+            sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+            now,
+        )
+    };
+    // Empty local table: declines.
+    assert!(!gate(&SessionTable::new()), "no local row -> no adoption");
+    // Local serving row Established (WorkerLocalImport, midstream ACK
+    // install = established, not pending): adopts despite shared w=2,
+    // and derives the canonical key from the wire key.
+    for origin in [SessionOrigin::WorkerLocalImport, SessionOrigin::SharedPromote] {
+        let mut sessions = SessionTable::new();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision.clone(),
+            test_metadata(),
+            origin,
+            now,
+            PROTO_TCP,
+            0x18,
+        ));
+        assert_eq!(
+            sessions.handshake_state_wire_for(&key),
+            crate::session::TcpHandshakeState::Established.to_wire(),
+            "premise: local {origin:?} row must read Established"
+        );
+        assert_eq!(
+            sessions.local_established_for_wire_at(&translated_key, now),
+            Some(key.clone()),
+            "canonical key must derive from the wire key ({origin:?})"
+        );
+        assert!(gate(&sessions), "local Established {origin:?} must adopt");
+    }
+    // Local row pending (SYN install = Opening): declines.
+    {
+        let mut sessions = SessionTable::new();
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision.clone(),
+            test_metadata(),
+            SessionOrigin::WorkerLocalImport,
+            now,
+            PROTO_TCP,
+            0x02,
+        ));
+        assert!(!gate(&sessions), "local pending/Opening row must not adopt");
+    }
+    // Local row peer-synced Established (SyncImport import): declines —
+    // a replica's flags are not serving evidence.
+    {
+        let mut sessions = SessionTable::new();
+        assert!(sessions.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: key.clone(),
+                decision: decision.clone(),
+                metadata: test_metadata(),
+                origin: SessionOrigin::SyncImport,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0x18,
+                session_id: 7777,
+                tcp_close_class: 0,
+                tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+                source_nat_static: None,
+            },
+            false,
+        ));
+        assert_eq!(
+            sessions.handshake_state_wire_for(&key),
+            crate::session::TcpHandshakeState::Established.to_wire(),
+            "premise: peer-synced row reads Established on the wire"
+        );
+        assert!(!gate(&sessions), "peer-synced local row must not adopt");
+    }
+    // Reverse-only local row Established: declines.
+    {
+        let mut sessions = SessionTable::new();
+        let mut rev_meta = test_metadata();
+        rev_meta.is_reverse = true;
+        let rev_key = crate::session::reverse_session_key(&key, decision.nat);
+        assert!(sessions.install_with_protocol_with_origin(
+            rev_key,
+            decision.clone(),
+            rev_meta,
+            SessionOrigin::WorkerLocalImport,
+            now,
+            PROTO_TCP,
+            0x18,
+        ));
+        assert!(!gate(&sessions), "reverse-only local row must not adopt");
+    }
+}
+
 #[test]
 fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_fabric_ingress() {
     let mut sessions = SessionTable::new();
