@@ -147,9 +147,17 @@ func TestPeerCapabilitiesPayloadIsLengthGated6650(t *testing.T) {
 		t.Fatalf("a longer payload must still decode its leading u16: got %d", got)
 	}
 
-	src := readClusterSource(t, "sync_conn_read.go")
+	// #16168: the case body now lives in the extracted delegate
+	// handlePeerCapabilities (sync_failover_recv.go); the assertion
+	// follows it there at the same strength — the guard and the store
+	// must both be present in the delegate body.
+	src := readClusterSource(t, "sync_failover_recv.go")
+	if !sourceContainsFlat(src, "func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) {") {
+		t.Error("handlePeerCapabilities is missing from sync_failover_recv.go — " +
+			"the syncMsgPeerCapabilities arm no longer delegates to it")
+	}
 	if !sourceContainsFlat(src, "if len(payload) < 2 {") {
-		t.Error("the syncMsgPeerCapabilities arm has no length gate — a 1-byte frame " +
+		t.Error("the handlePeerCapabilities delegate has no length gate — a 1-byte frame " +
 			"would slice out of range or decode garbage into the peer capability")
 	}
 	// Either spelling stores the decoded version; Swap additionally reports
@@ -157,7 +165,7 @@ func TestPeerCapabilitiesPayloadIsLengthGated6650(t *testing.T) {
 	// callback so steady-state re-advertisements do not re-fire it (#10511).
 	if !sourceContainsFlat(src, "s.peerSnapshotProtocol.Store(uint32(peerProto))") &&
 		!sourceContainsFlat(src, "s.peerSnapshotProtocol.Swap(uint32(peerProto))") {
-		t.Error("the syncMsgPeerCapabilities arm does not store the decoded version")
+		t.Error("the handlePeerCapabilities delegate does not store the decoded version")
 	}
 }
 
