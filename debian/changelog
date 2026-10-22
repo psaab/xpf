@@ -1,5 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Introduce by-value policy and session query structs in userspace-dp
+    (#16129): PolicyQuery carries the counted / L3-aware /
+    unresolved-egress / without-counting evaluation modes and
+    SessionQuery carries a 3-variant Defer enum replacing the
+    (defer_close, defer_all) bool pair. The thin evaluate_policy_* and
+    lookup_with_origin_* wrappers remain the permanent public
+    constructors and delegate to the query executors, so existing
+    callers cannot diverge; wrapper-vs-hand-built-query equivalence
+    tests pin the field mapping.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Type FirewallFilterTerm.Action/TerminalActions as the
     string-underlying FilterAction enum {Unset,Accept,Reject,Discard}
     (#16140); NextTerm stays bool so the co-authored terminal +

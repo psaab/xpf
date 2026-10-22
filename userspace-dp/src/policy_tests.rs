@@ -10878,3 +10878,151 @@ fn test_books_arc_survives_policy_state_clone_15091() {
         "cloned PolicyState must share the books Arc (O(1) publish)"
     );
 }
+
+
+// #16129: wrapper ≡ query equivalence, independently constructed. For each row
+// the query is built by hand (struct literal, NOT via the wrapper it is compared
+// against and NOT via the PolicyQuery::* constructor the wrapper delegates to),
+// so a wrong field mapping in either the wrapper or the constructor (e.g.
+// l4_present, egress_resolved, hit_count, packet_len) makes the row RED.
+// Each case runs on a FRESH state because counted rows bump hit counters.
+#[test]
+fn policy_wrapper_query_equivalence_16129() {
+    fn permit_state() -> PolicyState {
+        parse_policy_state(
+            "deny",
+            &[PolicyRuleSnapshot {
+                policy_id: 4242,
+                name: "allow-web".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..Default::default()
+            }],
+            &test_zone_name_to_id(),
+        )
+    }
+    let src: IpAddr = "10.0.61.100".parse().expect("src");
+    let dst: IpAddr = "172.16.80.200".parse().expect("dst");
+    let now = 1_234_567_890u64;
+
+    // Row 1: counted / icmp_at (L4 present, resolved egress).
+    {
+        let via_wrapper = evaluate_policy_result_with_icmp_at(
+            &permit_state(), TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 12345, 443,
+            None, 64, now,
+        );
+        let query = PolicyQuery {
+            from_id: TEST_LAN_ZONE_ID, to_id: TEST_WAN_ZONE_ID, src_ip: src, dst_ip: dst,
+            protocol: PROTO_TCP, src_port: 12345, dst_port: 443, packet_icmp: None,
+            packet_len: 64, l4_present: true, hit_count: PolicyHitCount::Count,
+            egress_resolved: true, now_ns: now,
+        };
+        let via_query = evaluate_policy_query(&permit_state(), &query);
+        assert_eq!(via_wrapper, via_query, "counted_at wrapper != hand-built query");
+        assert_eq!(via_query.action, PolicyAction::Permit);
+    }
+
+    // Row 2: l3_aware with l4_present = false (flowless fragment).
+    {
+        let via_wrapper = evaluate_policy_result_l3_aware_at(
+            &permit_state(), TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 0, 0, None,
+            64, false, now,
+        );
+        let query = PolicyQuery {
+            from_id: TEST_LAN_ZONE_ID, to_id: TEST_WAN_ZONE_ID, src_ip: src, dst_ip: dst,
+            protocol: PROTO_TCP, src_port: 0, dst_port: 0, packet_icmp: None, packet_len: 64,
+            l4_present: false, hit_count: PolicyHitCount::Count, egress_resolved: true,
+            now_ns: now,
+        };
+        let via_query = evaluate_policy_query(&permit_state(), &query);
+        assert_eq!(via_wrapper, via_query, "l3_aware_at wrapper != hand-built query");
+    }
+
+    // Row 3: unresolved egress to zone 0 must KEEP the default-policy verdict
+    // (egress_resolved = false), unlike a resolved zone-0 egress. This row is
+    // discriminating: flipping egress_resolved changes the action.
+    {
+        let via_wrapper = evaluate_policy_result_l3_aware_unresolved_egress_at(
+            &permit_state(), TEST_LAN_ZONE_ID, 0, src, dst, PROTO_TCP, 12345, 443, None, 64,
+            true, now,
+        );
+        let query = PolicyQuery {
+            from_id: TEST_LAN_ZONE_ID, to_id: 0, src_ip: src, dst_ip: dst, protocol: PROTO_TCP,
+            src_port: 12345, dst_port: 443, packet_icmp: None, packet_len: 64, l4_present: true,
+            hit_count: PolicyHitCount::Count, egress_resolved: false, now_ns: now,
+        };
+        let via_query = evaluate_policy_query(&permit_state(), &query);
+        assert_eq!(via_wrapper, via_query, "unresolved-egress wrapper != hand-built query");
+        // Negative control: the SAME tuple with egress_resolved = true denies,
+        // proving this row actually exercises the egress_resolved field.
+        let resolved = PolicyQuery { egress_resolved: true, ..query };
+        assert_ne!(
+            evaluate_policy_query(&permit_state(), &resolved),
+            via_query,
+            "egress_resolved must be load-bearing in the unresolved-egress row"
+        );
+    }
+
+    // Row 4: without_counting (hit_count = Never, packet_len forced to 0).
+    {
+        let via_wrapper = evaluate_policy_result_without_counting_at(
+            &permit_state(), TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 12345,
+            443, None, now,
+        );
+        let query = PolicyQuery {
+            from_id: TEST_LAN_ZONE_ID, to_id: TEST_WAN_ZONE_ID, src_ip: src, dst_ip: dst,
+            protocol: PROTO_TCP, src_port: 12345, dst_port: 443, packet_icmp: None,
+            packet_len: 0, l4_present: true, hit_count: PolicyHitCount::Never,
+            egress_resolved: true, now_ns: now,
+        };
+        let via_query = evaluate_policy_query(&permit_state(), &query);
+        assert_eq!(via_wrapper, via_query, "without_counting wrapper != hand-built query");
+    }
+}
+
+// #16129: the named constructors must produce exactly the hand-built queries
+// above — this pins the constructor field mapping independently of the
+// wrappers (which delegate to the constructors, so wrapper-vs-constructor
+// alone would be tautological).
+#[test]
+fn policy_query_constructors_match_hand_built_16129() {
+    let src: IpAddr = "10.0.61.100".parse().expect("src");
+    let dst: IpAddr = "172.16.80.200".parse().expect("dst");
+    assert_eq!(
+        PolicyQuery::counted_at(1, 2, src, dst, PROTO_TCP, 12345, 443, Some((8, 0)), 64, 99),
+        PolicyQuery {
+            from_id: 1, to_id: 2, src_ip: src, dst_ip: dst, protocol: PROTO_TCP,
+            src_port: 12345, dst_port: 443, packet_icmp: Some((8, 0)), packet_len: 64,
+            l4_present: true, hit_count: PolicyHitCount::Count, egress_resolved: true,
+            now_ns: 99,
+        }
+    );
+    assert_eq!(
+        PolicyQuery::l3_aware_at(1, 2, src, dst, PROTO_TCP, 0, 0, None, 64, false, 99),
+        PolicyQuery {
+            from_id: 1, to_id: 2, src_ip: src, dst_ip: dst, protocol: PROTO_TCP, src_port: 0,
+            dst_port: 0, packet_icmp: None, packet_len: 64, l4_present: false,
+            hit_count: PolicyHitCount::Count, egress_resolved: true, now_ns: 99,
+        }
+    );
+    assert_eq!(
+        PolicyQuery::l3_aware_unresolved_egress_at(1, 0, src, dst, PROTO_TCP, 1, 2, None, 64, true, 99),
+        PolicyQuery {
+            from_id: 1, to_id: 0, src_ip: src, dst_ip: dst, protocol: PROTO_TCP, src_port: 1,
+            dst_port: 2, packet_icmp: None, packet_len: 64, l4_present: true,
+            hit_count: PolicyHitCount::Count, egress_resolved: false, now_ns: 99,
+        }
+    );
+    assert_eq!(
+        PolicyQuery::without_counting_at(1, 2, src, dst, PROTO_TCP, 1, 2, None, 99),
+        PolicyQuery {
+            from_id: 1, to_id: 2, src_ip: src, dst_ip: dst, protocol: PROTO_TCP, src_port: 1,
+            dst_port: 2, packet_icmp: None, packet_len: 0, l4_present: true,
+            hit_count: PolicyHitCount::Never, egress_resolved: true, now_ns: 99,
+        }
+    );
+}

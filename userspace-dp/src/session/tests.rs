@@ -12454,3 +12454,91 @@ fn reverse_translated_alias_flow_cache_probes_resolve_13640() {
         "only the intentional pre-install miss may count (#13640)"
     );
 }
+
+
+// #16129: session wrapper ≡ query equivalence + Defer enum semantics. Each
+// row uses a FRESH table because lookups mutate hit state. Queries are built
+// by hand (struct literal, not via the SessionQuery::* constructor the
+// wrapper delegates to), and each row asserts the OBSERVABLE side effect
+// (closing flag / last_seen refresh), not just the returned lookup — so a
+// wrong Defer mapping in either the wrapper or the constructor goes RED.
+#[test]
+fn session_wrapper_query_equivalence_16129() {
+    use super::lookup::{Defer, SessionQuery};
+
+    // Defer accessors: the three live modes, exhaustively.
+    assert!(!Defer::None.close() && !Defer::None.all());
+    assert!(Defer::Close.close() && !Defer::Close.all());
+    assert!(Defer::All.close() && Defer::All.all());
+
+    // Named constructors must equal the hand-built queries below.
+    let key = key_v4();
+    assert_eq!(
+        SessionQuery::new(&key, 10, TCP_FIN, 7),
+        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::None, payload_len: 7 }
+    );
+    assert_eq!(
+        SessionQuery::deferring_close(&key, 10, TCP_FIN),
+        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::Close, payload_len: 0 }
+    );
+    assert_eq!(
+        SessionQuery::deferring_authority(&key, 10, TCP_FIN, 7),
+        SessionQuery { key: &key, now_ns: 10, tcp_flags: TCP_FIN, defer: Defer::All, payload_len: 7 }
+    );
+
+    let now = 1_000_000_000u64;
+
+    // Row 1: ordinary (Defer::None) FIN lookup CLOSES the entry.
+    {
+        let mut via_wrapper = SessionTable::new();
+        assert!(via_wrapper.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
+        let hit_w = via_wrapper.lookup_with_origin_with_payload(&key, now + 1_000_000, TCP_FIN, 0);
+        let closed_w = via_wrapper.entry_by_key(&key).expect("entry").closing;
+
+        let mut via_query = SessionTable::new();
+        assert!(via_query.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
+        let q = SessionQuery { key: &key, now_ns: now + 1_000_000, tcp_flags: TCP_FIN, defer: Defer::None, payload_len: 0 };
+        let hit_q = match via_query.lookup_with_origin_query(&q) {
+            SessionExpiryProbe::Live(hit) => Some(hit),
+            SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
+        };
+        let closed_q = via_query.entry_by_key(&key).expect("entry").closing;
+        assert_eq!(hit_w, hit_q, "ordinary wrapper != hand-built query (result)");
+        assert!(closed_w && closed_q, "ordinary FIN lookup must close the entry");
+    }
+
+    // Row 2: deferring-close (Defer::Close) FIN lookup must NOT close, while
+    // still returning the hit. Negative control vs Row 1 proves `defer` is
+    // load-bearing.
+    {
+        let mut via_wrapper = SessionTable::new();
+        assert!(via_wrapper.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
+        let hit_w = via_wrapper.lookup_with_origin_deferring_close_expiry(&key, now + 1_000_000, TCP_FIN);
+        let closed_w = via_wrapper.entry_by_key(&key).expect("entry").closing;
+
+        let mut via_query = SessionTable::new();
+        assert!(via_query.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
+        let q = SessionQuery { key: &key, now_ns: now + 1_000_000, tcp_flags: TCP_FIN, defer: Defer::Close, payload_len: 0 };
+        let hit_q = via_query.lookup_with_origin_query(&q);
+        let closed_q = via_query.entry_by_key(&key).expect("entry").closing;
+        assert_eq!(hit_w, hit_q, "deferring-close wrapper != hand-built query (result)");
+        assert!(!closed_w && !closed_q, "deferring-close FIN lookup must not close the entry");
+    }
+
+    // Row 3: deferring-authority (Defer::All) must not even refresh last_seen.
+    {
+        let mut via_wrapper = SessionTable::new();
+        assert!(via_wrapper.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
+        let hit_w = via_wrapper.lookup_with_origin_deferring_authority_with_payload(&key, now + 5_000_000, 0x10, 0);
+        let seen_w = via_wrapper.entry_by_key(&key).expect("entry").last_seen_ns;
+
+        let mut via_query = SessionTable::new();
+        assert!(via_query.install_with_protocol(key.clone(), decision(), metadata(), now, PROTO_TCP, 0x10));
+        let q = SessionQuery { key: &key, now_ns: now + 5_000_000, tcp_flags: 0x10, defer: Defer::All, payload_len: 0 };
+        let hit_q = via_query.lookup_with_origin_query(&q);
+        let seen_q = via_query.entry_by_key(&key).expect("entry").last_seen_ns;
+        assert_eq!(hit_w, hit_q, "deferring-authority wrapper != hand-built query (result)");
+        assert_eq!(seen_w, now, "deferring-authority wrapper must not refresh last_seen");
+        assert_eq!(seen_q, now, "deferring-authority query must not refresh last_seen");
+    }
+}
