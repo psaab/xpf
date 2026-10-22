@@ -33,10 +33,7 @@ func IsUnknownSecurityPoliciesChildSchemaError12217(err error) bool {
 }
 
 func securityPoliciesSchema12217() *schemaNode {
-	if schemaSecurity == nil {
-		return nil
-	}
-	return schemaSecurity.children["policies"]
+	return refSecurityPolicies.resolve()
 }
 
 // Known non-enforcement statements are exempted by content, not keyword. Leaf

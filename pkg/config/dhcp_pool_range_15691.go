@@ -147,9 +147,8 @@ func applyDHCPAddressRange15691(pool *DHCPPool, pp *Node) {
 // walked. Returns nil when the schema does not resolve (expansion is then
 // a no-op, matching expandRunChildren9235's nil contract).
 func dhcpPoolSchema15691(isV6 bool) *schemaNode {
-	server := "dhcp-local-server"
 	if isV6 {
-		server = "dhcpv6-local-server"
+		return refDHCPPoolV6.resolve()
 	}
-	return resolveSchemaPath9235("system", "services", server, "group", "pool")
+	return refDHCPPoolV4.resolve()
 }

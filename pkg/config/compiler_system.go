@@ -362,7 +362,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			// #15709: peers compile like servers but to NTPPeers, rendered
 			// as chrony `peer` directives. Packed tails (`ntp peer X
 			// prefer;`) ride Keys, expanded via ntpSourceValues.
-			ntpChildren15709 := hoistAndSplitRun8939(packedBodyChildren(child, schemaForPath("system", "ntp")), schemaForPath("system", "ntp"))
+			ntpChildren15709 := hoistAndSplitRun8939(packedBodyChildren(child, refSystemNTP.resolve()), refSystemNTP.resolve())
 			for _, peerChild := range ntpChildren15709 {
 				if peerChild.Name() != "peer" {
 					continue
@@ -902,7 +902,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					sys.InternetOptions.NoIPv6RejectZeroHopLimit = true
 				}
 			}
-			for _, c := range packedBodyChildren(child, schemaForPath("system", "internet-options")) {
+			for _, c := range packedBodyChildren(child, refSystemInternetOptions.resolve()) {
 				if c.Name() == "no-ipv6-reject-zero-hop-limit" {
 					sys.InternetOptions.NoIPv6RejectZeroHopLimit = true
 				}
@@ -1038,7 +1038,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				// advisory made the loss observable. Hoisted against the
 				// destination schema WITHOUT its facility wildcard; see
 				// syslogDestinationHoistSchema9414.
-				hostSchema := schemaForPath("system", "syslog", "host")
+				hostSchema := refSyslogHost.resolve()
 				for _, prop := range hoistAndSplitRun8939(
 					packedBodyChildren(slInst.node, hostSchema), syslogDestinationHoistSchema9414("host")) {
 					// #4303 S-1: switch on the KNOWN host sub-statements
@@ -1123,7 +1123,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				// #9414 / #8939: read every statement of a flat-set chain.
 				// #15708: packedBodyChildren expands compact `file f fac sev;`.
 				for _, prop := range hoistAndSplitRun8939(
-					packedBodyChildren(fileInst.node, schemaForPath("system", "syslog", "file")),
+					packedBodyChildren(fileInst.node, refSyslogFile.resolve()),
 					syslogDestinationHoistSchema9414("file")) {
 					switch prop.Name() {
 					case "archive":
@@ -1171,7 +1171,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				}
 				user := rec.user
 				for _, prop := range hoistAndSplitRun8939(
-					packedBodyChildren(userInst.node, schemaForPath("system", "syslog", "user")),
+					packedBodyChildren(userInst.node, refSyslogUser.resolve()),
 					syslogDestinationHoistSchema9414("user")) {
 					switch prop.Name() {
 					case "match", "match-strings", "structured-data",
@@ -1191,7 +1191,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			// #15709: top-level syslog statements. Expand packed/chained
 			// shapes, inherit source-address, record inert globals.
 			{
-				syslogTop := hoistAndSplitRun8939(packedBodyChildren(child, schemaForPath("system", "syslog")), schemaForPath("system", "syslog"))
+				syslogTop := hoistAndSplitRun8939(packedBodyChildren(child, refSyslog.resolve()), refSyslog.resolve())
 				inert := map[string]bool{}
 				for _, kw := range sys.Syslog.TopLevelInert {
 					inert[kw] = true
@@ -1208,7 +1208,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						}
 					case "console":
 						inert["console"] = true
-						for _, prop := range hoistAndSplitRun8939(packedBodyChildren(top, schemaForPath("system", "syslog", "console")), syslogDestinationHoistSchema9414("host")) {
+						for _, prop := range hoistAndSplitRun8939(packedBodyChildren(top, refSyslogConsole.resolve()), syslogDestinationHoistSchema9414("host")) {
 							switch prop.Name() {
 							case "match", "match-strings", "structured-data", "explicit-priority", "allow-duplicates":
 								skipped.note("console", prop.Name())
@@ -1275,7 +1275,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			continue
 		}
 		serviceChildren = append(serviceChildren,
-			packedBodyChildren(child, schemaForPath("system", "services"))...)
+			packedBodyChildren(child, refSystemServices.resolve())...)
 	}
 	// #15716: also unpack a header-packed `system services ssh
 	// root-login <val>` even when braced `services` children exist, so
@@ -1285,7 +1285,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 		for _, services := range packedBodyChildren(node, systemSchema9792()) {
 			if services.Name() == "services" {
 				serviceChildren = append(serviceChildren,
-					packedBodyChildren(services, schemaForPath("system", "services"))...)
+					packedBodyChildren(services, refSystemServices.resolve())...)
 			}
 		}
 		if v, ok := headerPackedRootLogin15716(node.Keys); ok {
@@ -1331,7 +1331,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			sshNode = &Node{Keys: []string{"ssh"}}
 			for _, child := range sshNodes {
 				sshNode.Children = append(sshNode.Children,
-					packedBodyChildren(child, schemaForPath("system", "services", "ssh"))...)
+					packedBodyChildren(child, refSystemServicesSSH.resolve())...)
 			}
 		}
 		if sshNode != nil {
@@ -1469,7 +1469,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			}
 			if httpsNode := wmNode.FindChild("https"); httpsNode != nil {
 				sys.Services.WebManagement.HTTPS = true
-				httpsSchema := schemaForPath("system", "services", "web-management", "https")
+				httpsSchema := refWebMgmtHTTPS.resolve()
 				for _, prop := range expandFlatRun(packedBodyChildren(httpsNode, httpsSchema), httpsSchema) {
 					switch prop.Name() {
 					case "system-generated-certificate":
@@ -2733,27 +2733,9 @@ func sshKeyValues(node *Node) []string {
 // setSchema, so the run expansion is driven by the same declaration SetPath
 // walked. Mirrors loginClassSchema8939 below.
 func loginUserSchema9391() *schemaNode {
-	sys := resolveSchemaChild(setSchema, "system")
-	login := resolveSchemaChild(sys, "login")
-	usr := resolveSchemaChild(login, "user")
-	if usr == nil {
-		return nil
-	}
-	if usr.wildcard != nil {
-		return usr.wildcard
-	}
-	return usr
+	return refLoginUserInstance.resolve()
 }
 
 func loginClassSchema8939() *schemaNode {
-	sys := resolveSchemaChild(setSchema, "system")
-	login := resolveSchemaChild(sys, "login")
-	cls := resolveSchemaChild(login, "class")
-	if cls == nil {
-		return nil
-	}
-	if cls.wildcard != nil {
-		return cls.wildcard
-	}
-	return cls
+	return refLoginClassInstance.resolve()
 }

@@ -19,13 +19,5 @@ package config
 // bgpMultipathSchema8939 resolves the `protocols bgp multipath` container so
 // expandFlatRun knows which tokens are siblings rather than values.
 func bgpMultipathSchema8939() *schemaNode {
-	protos := resolveSchemaChild(setSchema, "protocols")
-	if protos == nil {
-		return nil
-	}
-	bgp := resolveSchemaChild(protos, "bgp")
-	if bgp == nil {
-		return nil
-	}
-	return resolveSchemaChild(bgp, "multipath")
+	return refBGPMultipath.resolve()
 }

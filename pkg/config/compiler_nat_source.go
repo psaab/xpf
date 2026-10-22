@@ -1080,7 +1080,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 		// `raise-threshold 80 clear-threshold 55` chain leaves clear nested under
 		// raise and the compiler silently falls back to its raise-only default.
 		alarmChildren := alarmNode.Children
-		if alarmSchema := schemaForPath("security", "nat", "source", "pool-utilization-alarm"); alarmSchema != nil {
+		if alarmSchema := refNATSourcePoolUtilAlarm.resolve(); alarmSchema != nil {
 			alarmChildren = expandFlatRun(alarmChildren, alarmSchema)
 		}
 		alarm := &PoolUtilizationAlarmConfig{}
@@ -1163,7 +1163,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			// packedBodyChildren also returns the real `then` child, and
 			// feeding it to the match loop would record `then` as an
 			// unknown match leaf (#9877).
-			ruleNode := packedBody(ruleInst.node, schemaForPath("security", "nat", "source", "rule-set", "rule"))
+			ruleNode := packedBody(ruleInst.node, refNATSourceRule.resolve())
 
 			// #3850: iterate EVERY `match {}` block, not just the first — a
 			// duplicate block (a `load merge`/`load override` that splits its

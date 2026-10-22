@@ -515,7 +515,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			// packedBody returns the original node when there is no tail
 			// (braced twin and bare `unit 0 point-to-point;` unchanged).
 			unitNode := packedBody(unitInst.node,
-				schemaForPath("interfaces", "x", "unit"))
+				refInterfaceUnit.resolve())
 			if unitNode == nil {
 				unitNode = unitInst.node
 			}
@@ -824,7 +824,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						// #9620 H9.
 						for _, rawDHCPNode := range afNode.FindChildren("dhcp") {
 							if dhcpNode := packedBody(rawDHCPNode,
-								schemaForPath("interfaces", "x", "unit", "family", "inet", "dhcp")); dhcpNode != nil {
+								refInterfaceUnitFamilyInetDHCP.resolve()); dhcpNode != nil {
 								unit.DHCP = true
 								if len(dhcpNode.Children) > 0 {
 									opts := unit.DHCPOptions
@@ -984,7 +984,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						// dhcpv6-client node's Keys.
 						for _, rawDCNode := range afNode.FindChildren("dhcpv6-client") {
 							if dcNode := packedBody(rawDCNode,
-								schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client")); dcNode != nil {
+								refInterfaceUnitFamilyInet6DHCPv6.resolve()); dcNode != nil {
 								unit.DHCPv6 = true
 								dc := unit.DHCPv6Client
 								if dc == nil {
@@ -1011,7 +1011,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 										}
 									case "prefix-delegating":
 										pdNode := packedBody(prop,
-											schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client", "prefix-delegating"))
+											refInterfaceUnitFamilyInet6DHCPv6PD.resolve())
 										if plNode := pdNode.FindChild("preferred-prefix-length"); plNode != nil {
 											if v := nodeVal(plNode); v != "" {
 												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcpv6-client prefix-delegating preferred-prefix-length", v); ok {
@@ -1039,7 +1039,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 										}
 									case "update-router-advertisement":
 										uraNode := packedBody(prop,
-											schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client", "update-router-advertisement"))
+											refInterfaceUnitFamilyInet6DHCPv6RA.resolve())
 										if ifNode := uraNode.FindChild("interface"); ifNode != nil {
 											dc.UpdateRAInterface = nodeVal(ifNode)
 										}

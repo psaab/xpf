@@ -474,4 +474,15 @@ func init() {
 	}
 	registerSchemaKeywords(setSchema)
 	registerSchemaKeywords(groupWild)
+	// #16147 (R3, step 3 LAST): fail loud at startup on any static
+	// SchemaRef whose path no longer resolves, naming every dead ref
+	// at once. This runs after the groups-wildcard wiring above and
+	// after package var-init; no SchemaRef addresses a groups subtree,
+	// so none can capture the wildcard before it is wired here. The
+	// non-panicking audit (TestSchemaRefsResolve) is the first
+	// deliverable and enumerates the same list without aborting; this
+	// panic can only fire on a genuinely new bad ref introduced in
+	// code, never on operator configuration (#1960 no-brick unchanged:
+	// config-driven schemaForPath keeps its tolerant nil return).
+	validateSchemaRefs()
 }

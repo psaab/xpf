@@ -120,7 +120,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 		pool := &NATPool{Name: inst.name}
 		var addressStatements []string
 
-		for _, prop := range expandFlatRun(inst.node.Children, schemaForPath("security", "nat", "destination", "pool")) {
+		for _, prop := range expandFlatRun(inst.node.Children, refNATDestPool.resolve()) {
 			switch prop.Name() {
 			case "address":
 				// DNAT pool address grammar (Junos):
@@ -214,7 +214,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			// twin of compileNATSource — see there. Without this the packed
 			// match vanished: no destination key, so the snapshot builder
 			// published no entry and an `off` exemption was silently deleted.
-			ruleNode := packedBody(ruleInst.node, schemaForPath("security", "nat", "destination", "rule-set", "rule"))
+			ruleNode := packedBody(ruleInst.node, refNATDestRule.resolve())
 
 			// #3850: iterate EVERY `match {}` block, not just the first — a
 			// duplicate block (a `load merge`/`load override` that splits its

@@ -391,7 +391,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			fw.ThreeColorPolicers[tcpInst.name] = tcp
 		}
 
-		singleRateSchema := resolveSchemaPath9235("firewall", "three-color-policer", "single-rate")
+		singleRateSchema := refThreeColorSingleRate.resolve()
 		singleRates := tcpInst.node.FindChildren("single-rate")
 		if len(singleRates) > 0 {
 			tcp.SingleRateConfigured = true
@@ -423,7 +423,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			}
 		}
 
-		twoRateSchema := resolveSchemaPath9235("firewall", "three-color-policer", "two-rate")
+		twoRateSchema := refThreeColorTwoRate.resolve()
 		twoRates := tcpInst.node.FindChildren("two-rate")
 		if len(twoRates) > 0 {
 			tcp.TwoRateConfigured = true
@@ -1529,8 +1529,8 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 						termSchema := schemaForPath("firewall", "family", af, "filter", "term")
 						fromSchema := schemaForPath("firewall", "family", af, "filter", "term", "from")
 						if termSchema == nil || fromSchema == nil {
-							termSchema = schemaForPath("firewall", "family", "inet", "filter", "term")
-							fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
+							termSchema = refFirewallFamilyInetFilterTerm.resolve()
+							fromSchema = refFirewallFamilyInetFilterTermFrom.resolve()
 						}
 						// Per-direction prefix-list coverage, accumulated across
 						// every `from` block of the term (#4426). Index 0 = source,
@@ -2067,7 +2067,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 	fromSchema := schemaForPath("firewall", "family", family, "filter", "term", "from")
 	if fromSchema == nil {
 		// Family-independent fallback for family-less / unknown AST shapes.
-		fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
+		fromSchema = refFirewallFamilyInetFilterTermFrom.resolve()
 	}
 	for _, unknown := range packedUnknownFromLeaves(node, fromSchema) {
 		// The packed scanner emits each opaque leaf once; retaining the
@@ -2198,7 +2198,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 			// Packed tails: if child.Keys carries a tail beyond the keyword,
 			// packedBody with the flex schema can synthesize range/field
 			// nodes; otherwise the tail itself is unread.
-			flexSchema := resolveSchemaPath9235("firewall", "family", "inet", "filter", "term", "from", "flexible-match-range")
+			flexSchema := refFirewallFlexMatch.resolve()
 			flexBody := child
 			if len(child.Keys) > 1 {
 				if exp := packedBody(child, flexSchema); exp != child {
@@ -2260,7 +2260,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 					// Distinct later ranges remain fail-closed, but their
 					// bodies must still be recorded if malformed (#14347):
 					// fall through to body inspection without merging.
-					rangeSchema0 := resolveSchemaPath9235("firewall", "family", "inet", "filter", "term", "from", "flexible-match-range", "range")
+					rangeSchema0 := refFirewallFlexMatchRange.resolve()
 					body0 := expandResolvingRuns9792(packedBody(rangeInst.node, rangeSchema0).Children, rangeSchema0)
 					if len(body0) == 0 && len(packedBody(rangeInst.node, rangeSchema0).Children) == 0 {
 						// Empty later range: still malformed, but cardinality
@@ -2277,7 +2277,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 				if fm == nil {
 					fm = &FlexMatchConfig{MatchStart: "layer-3"}
 				}
-				rangeSchema := resolveSchemaPath9235("firewall", "family", "inet", "filter", "term", "from", "flexible-match-range", "range")
+				rangeSchema := refFirewallFlexMatchRange.resolve()
 				expanded := expandResolvingRuns9792(packedBody(rangeInst.node, rangeSchema).Children, rangeSchema)
 				if len(expanded) == 0 {
 					term.UnknownFlexMatch = append(term.UnknownFlexMatch, "range "+rangeInst.name)
@@ -2979,31 +2979,5 @@ func thenActionExtras8971(child *Node) []string {
 
 // filterThenSchema8971 resolves the firewall filter term `then` container.
 func filterThenSchema8971() *schemaNode {
-	fw := resolveSchemaChild(setSchema, "firewall")
-	if fw == nil {
-		return nil
-	}
-	fam := resolveSchemaChild(fw, "family")
-	if fam == nil {
-		return nil
-	}
-	inet := resolveSchemaChild(fam, "inet")
-	if inet == nil {
-		return nil
-	}
-	filt := resolveSchemaChild(inet, "filter")
-	if filt == nil {
-		return nil
-	}
-	if filt.wildcard != nil {
-		filt = filt.wildcard
-	}
-	tm := resolveSchemaChild(filt, "term")
-	if tm == nil {
-		return nil
-	}
-	if tm.wildcard != nil {
-		tm = tm.wildcard
-	}
-	return resolveSchemaChild(tm, "then")
+	return refFilterThen.resolve()
 }

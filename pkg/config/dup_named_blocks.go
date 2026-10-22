@@ -203,7 +203,7 @@ func validateDuplicateNamedBlockAST(tree *ConfigTree, lenient bool) ([]string, e
 	// body expansion too: `ids-option s1 icmp ... icmp ...;` has no authored
 	// family children, but packedBody synthesizes the same siblings
 	// compileScreen will consume.
-	idsSchema := schemaForPath("security", "screen", "ids-option")
+	idsSchema := refScreenIdsOption.resolve()
 	for _, child := range tree.Children {
 		if child.Name() != "security" {
 			continue

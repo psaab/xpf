@@ -62,7 +62,7 @@ func unpackSystemRootLogin15716(sysNode *Node) []string {
 		if child == nil || child.Name() != "services" {
 			continue
 		}
-		for _, svcChild := range packedBodyChildren(child, schemaForPath("system", "services")) {
+		for _, svcChild := range packedBodyChildren(child, refSystemServices.resolve()) {
 			out = append(out, unpackServicesChildRootLogin15716(svcChild)...)
 		}
 	}
@@ -71,7 +71,7 @@ func unpackSystemRootLogin15716(sysNode *Node) []string {
 
 func unpackServicesRootLogin15716(svc *Node) []string {
 	var out []string
-	for _, c := range packedBodyChildren(svc, schemaForPath("system", "services")) {
+	for _, c := range packedBodyChildren(svc, refSystemServices.resolve()) {
 		out = append(out, unpackServicesChildRootLogin15716(c)...)
 	}
 	return out

@@ -249,7 +249,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 		// the profile compiled DISABLED while the profile itself survived and
 		// bound to a zone normally, so the operator got no protection from a
 		// check they configured and nothing said so.
-		idsSchema := schemaForPath("security", "screen", "ids-option")
+		idsSchema := refScreenIdsOption.resolve()
 		body := screenPackedBody(inst.node, idsSchema)
 
 		// #9421: #6683 normalised the ids-option node's packed tail and

@@ -1028,7 +1028,5 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 // flowTCPSessionSchema8939 resolves the `security flow tcp-session` leaf set so
 // expandFlatRun can tell one of its leaves from a value token.
 func flowTCPSessionSchema8939() *schemaNode {
-	sec := resolveSchemaChild(setSchema, "security")
-	flow := resolveSchemaChild(sec, "flow")
-	return resolveSchemaChild(flow, "tcp-session")
+	return refFlowTCPSession.resolve()
 }

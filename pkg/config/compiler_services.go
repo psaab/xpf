@@ -3195,12 +3195,5 @@ func dhcpGroupInterfaceValues(prop *Node) []string {
 // exactly the grammar the walker validates (#6821). It reads setSchema rather
 // than restating the shape, so the two cannot drift.
 func dhcpLocalServerSchemaNode() *schemaNode {
-	n := setSchema
-	for _, k := range []string{"system", "services", "dhcp-local-server"} {
-		if n == nil {
-			return nil
-		}
-		n = n.children[k]
-	}
-	return n
+	return refDHCPServer.resolve()
 }

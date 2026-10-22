@@ -1181,16 +1181,7 @@ func gatewayLeafSchema8939(parent *Node) *schemaNode {
 // `unmeasured` rather than as a loser. It was found by compiling the container
 // by hand.
 func ipsecVPNLeafSchema8939() *schemaNode {
-	sec := resolveSchemaChild(setSchema, "security")
-	ipsec := resolveSchemaChild(sec, "ipsec")
-	vpn := resolveSchemaChild(ipsec, "vpn")
-	if vpn == nil {
-		return nil
-	}
-	if vpn.wildcard != nil {
-		return vpn.wildcard
-	}
-	return vpn
+	return refIPsecVPNInstance.resolve()
 }
 
 // ipsecTrafficSelectorSchema8939 resolves `security ipsec vpn <name>
@@ -1199,14 +1190,7 @@ func ipsecVPNLeafSchema8939() *schemaNode {
 // the same segmentation -- fixing only the compiler would leave the packed
 // spelling rejected at commit, so the fix would never be reachable.
 func ipsecTrafficSelectorSchema8939() *schemaNode {
-	ts := resolveSchemaChild(ipsecVPNLeafSchema8939(), "traffic-selector")
-	if ts == nil {
-		return nil
-	}
-	if ts.wildcard != nil {
-		return ts.wildcard
-	}
-	return ts
+	return refIPsecTrafficSelector.resolve()
 }
 
 // securityNamedLeafSchema8939 resolves `security <branch> <kind> <name>` for

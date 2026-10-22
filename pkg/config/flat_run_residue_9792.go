@@ -24,15 +24,15 @@ package config
 // resolves the interface body and `wireguard` then resolves to nil.
 
 func synFloodSchema9792() *schemaNode {
-	return resolveSchemaPath9235("security", "screen", "ids-option", "tcp", "syn-flood")
+	return refScreenSynFlood.resolve()
 }
 
 func limitSessionSchema9792() *schemaNode {
-	return resolveSchemaPath9235("security", "screen", "ids-option", "limit-session")
+	return refScreenLimitSession.resolve()
 }
 
 func securityZoneSchema9792() *schemaNode {
-	return resolveSchemaPath9235("security", "zones", "security-zone")
+	return refSecurityZone.resolve()
 }
 
 // policySchema9792 resolves the policy body at either position compilePolicy
@@ -45,23 +45,23 @@ func policySchema9792(global bool) *schemaNode {
 }
 
 func nat64RuleSetSchema9792() *schemaNode {
-	return resolveSchemaPath9235("security", "nat", "nat64", "rule-set")
+	return refNAT64RuleSet.resolve()
 }
 
 func feedServerSchema9792() *schemaNode {
-	return resolveSchemaPath9235("security", "dynamic-address", "feed-server")
+	return refDynamicAddressFeedServer.resolve()
 }
 
 func packetFilterSchema9792() *schemaNode {
-	return resolveSchemaPath9235("security", "flow", "traceoptions", "packet-filter")
+	return refFlowTraceoptionsPacketFilter.resolve()
 }
 
 func bridgeDomainSchema9792() *schemaNode {
-	return resolveSchemaPath9235("bridge-domains", "xpfname")
+	return refBridgeDomainInstance.resolve()
 }
 
 func cosInterfaceSchema9792() *schemaNode {
-	return resolveSchemaPath9235("class-of-service", "interfaces")
+	return refCoSInterfaces.resolve()
 }
 
 // samplingFlowServerSchema9792 resolves the collector body. compileSamplingFamily
@@ -69,41 +69,41 @@ func cosInterfaceSchema9792() *schemaNode {
 // (TestFlatRunResidueSchemasResolve9792 checks both), so one resolver drives the
 // expansion for either.
 func samplingFlowServerSchema9792() *schemaNode {
-	return resolveSchemaPath9235("forwarding-options", "sampling", "instance", "family", "inet", "output", "flow-server")
+	return refSamplingFlowServer.resolve()
 }
 
 func interfaceSchema9792() *schemaNode {
-	return resolveSchemaPath9235("interfaces", "xpfname")
+	return refInterfaceInstance.resolve()
 }
 
 func gigetherOptionsSchema9792() *schemaNode {
-	return resolveSchemaPath9235("interfaces", "xpfname", "gigether-options")
+	return refGigetherOptions.resolve()
 }
 
 func aggregatedEtherOptionsSchema9792() *schemaNode {
-	return resolveSchemaPath9235("interfaces", "xpfname", "aggregated-ether-options")
+	return refAggregatedEtherOptions.resolve()
 }
 
 func redundantEtherOptionsSchema9792() *schemaNode {
-	return resolveSchemaPath9235("interfaces", "xpfname", "redundant-ether-options")
+	return refRedundantEtherOptions.resolve()
 }
 
 func tunnelWireguardSchema9792() *schemaNode {
-	return resolveSchemaPath9235("interfaces", "xpfname", "tunnel", "wireguard")
+	return refTunnelWireguard.resolve()
 }
 
 func tunnelWireguardPeerSchema9792() *schemaNode {
-	return resolveSchemaPath9235("interfaces", "xpfname", "tunnel", "wireguard", "peer")
+	return refTunnelWireguardPeer.resolve()
 }
 
 // bgpNeighborSchema9792 resolves the neighbor body the #9192 merge reads for
 // both the default instance and a routing instance (same declaration).
 func bgpNeighborSchema9792() *schemaNode {
-	return resolveSchemaPath9235("protocols", "bgp", "group", "neighbor")
+	return refBGPNeighbor.resolve()
 }
 
 func routingInstanceSchema9792() *schemaNode {
-	return resolveSchemaPath9235("routing-instances", "xpfname")
+	return refRoutingInstanceInstance.resolve()
 }
 
 // preferredRouteSchema9792 resolves the `route <cidr>` body of an ip-monitoring
@@ -116,11 +116,11 @@ func preferredRouteSchema9792(inInstance bool) *schemaNode {
 }
 
 func systemSchema9792() *schemaNode {
-	return resolveSchemaPath9235("system")
+	return refSystem.resolve()
 }
 
 func ntpServerSchema9792() *schemaNode {
-	return resolveSchemaPath9235("system", "ntp", "server")
+	return refNTPServer.resolve()
 }
 
 // expandResolvingRuns9792 expands a child only when it is unambiguously a

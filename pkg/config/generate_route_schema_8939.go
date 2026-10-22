@@ -13,20 +13,5 @@ package config
 // contributor set unconstrained rather than empty — it generates on
 // contributions the operator meant to exclude.
 func generateRouteSchema8939() *schemaNode {
-	ro := resolveSchemaChild(setSchema, "routing-options")
-	if ro == nil {
-		return nil
-	}
-	gen := resolveSchemaChild(ro, "generate")
-	if gen == nil {
-		return nil
-	}
-	rt := resolveSchemaChild(gen, "route")
-	if rt == nil {
-		return nil
-	}
-	if rt.wildcard != nil {
-		return rt.wildcard
-	}
-	return rt
+	return refGenerateRoute.resolve()
 }

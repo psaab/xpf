@@ -27,20 +27,13 @@ package config
 //	rip  split   -> ip rip authentication mode md5
 //	rip  packed  -> ip rip authentication mode text
 func ripLeafSchema8939() *schemaNode {
-	return resolveSchemaChild(resolveSchemaChild(setSchema, "protocols"), "rip")
+	return refRIP.resolve()
 }
 
 func isisLeafSchema8939() *schemaNode {
-	return resolveSchemaChild(resolveSchemaChild(setSchema, "protocols"), "isis")
+	return refISIS.resolve()
 }
 
 func isisInterfaceSchema8939() *schemaNode {
-	ifc := resolveSchemaChild(isisLeafSchema8939(), "interface")
-	if ifc == nil {
-		return nil
-	}
-	if ifc.wildcard != nil {
-		return ifc.wildcard
-	}
-	return ifc
+	return refISISInterface.resolve()
 }

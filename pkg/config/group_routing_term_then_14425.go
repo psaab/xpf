@@ -43,21 +43,15 @@ func isRoutingTermThenAction14425(ancestorPath [][]string, n *Node) bool {
 }
 
 func routingPolicyStatementSchema14425() *schemaNode {
-	return resolveSchemaChild(schemaPolicyOptions, "policy-statement")
+	return refPolicyStatement.resolve()
 }
 
 func routingTermSchema14425() *schemaNode {
-	if ps := routingPolicyStatementSchema14425(); ps != nil {
-		return resolveSchemaChild(ps, "term")
-	}
-	return nil
+	return refPolicyTermChain.resolve()
 }
 
 func routingTermThenSchema14425() *schemaNode {
-	if term := routingTermSchema14425(); term != nil {
-		return resolveSchemaChild(term, "then")
-	}
-	return nil
+	return refPolicyTermThen.resolve()
 }
 
 // routingThenNodeAction14425 returns the terminal action carried by a
