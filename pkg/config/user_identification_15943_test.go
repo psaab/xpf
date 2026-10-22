@@ -42,3 +42,34 @@ func TestUserIdentificationPasswordRedacted15943(t *testing.T) {
 		}
 	}
 }
+
+func TestServicesUserIdentificationFlatWarns15943(t *testing.T) {
+	tree, errs := NewParser("services user-identification authentication-source local-authentication-table auth1;").Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	for _, compile := range []struct {
+		name string
+		fn   func(*ConfigTree) (*Config, error)
+	}{{"strict", CompileConfig}, {"lenient", CompileConfigLenient}} {
+		cfg, err := compile.fn(tree)
+		if err != nil {
+			t.Fatalf("%s compile: %v", compile.name, err)
+		}
+		joined := strings.Join(cfg.Warnings, "\n")
+		if !strings.Contains(joined, "services user-identification authentication-source") || !strings.Contains(joined, "accepted-only") {
+			t.Errorf("%s flat services user-identification produced no accepted-only warning: %v", compile.name, cfg.Warnings)
+		}
+	}
+	bare, errs := NewParser("security user-identification;").Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse bare: %v", errs)
+	}
+	cfg, err := CompileConfig(bare)
+	if err != nil {
+		t.Fatalf("bare security compile: %v", err)
+	}
+	if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "security user-identification") {
+		t.Errorf("bare security user-identification did not warn: %v", cfg.Warnings)
+	}
+}

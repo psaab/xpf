@@ -127,7 +127,12 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// already-persisted or peer-synced config still boots — #1960 no-brick).
 	// Runs on the fully-compiled *Config so the typed term list (with
 	// UnknownFlexMatch populated by compileFilterFrom) is available.
-	if err := validateFilterFlexMatchStrict(cfg); err != nil {
+	if opts.lenientFlexMatchValueMissing {
+		if msg := flexMatchValueMissingWarning(cfg); msg != "" {
+			cfg.Warnings = append(cfg.Warnings, msg)
+		}
+	}
+	if err := validateFilterFlexMatchStrictOpts(cfg, opts.lenientFlexMatchValueMissing); err != nil {
 		if opts.lenientFlexMatch {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("firewall filter flexible-match-range (downgraded to warning on tolerant path): %v", err))

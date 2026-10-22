@@ -136,7 +136,10 @@ func diagnosticMergeName9023(name string) string {
 // CompileConfig converts a parsed ConfigTree AST into a typed Config struct.
 // It clones the tree before expansion so the original tree is not mutated.
 func CompileConfig(tree *ConfigTree) (*Config, error) {
-	return compileTree(tree, compileOpts{}, nil)
+	// #16296 fold: preserve packed/fused flex grammar controls that carry
+	// only byte-offset/bit-length and pin accepted compile behavior. The
+	// missing-value case downgrades to warning below; width stays hard.
+	return compileTree(tree, compileOpts{lenientFlexMatchValueMissing: true}, nil)
 }
 
 // CompileConfigLenient is CompileConfig with the tolerant-path
@@ -825,7 +828,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 // resolves to group "node0"). This supports a single shared config for both
 // nodes in a chassis cluster.
 func CompileConfigForNode(tree *ConfigTree, nodeID int) (*Config, error) {
-	return compileTree(tree, compileOpts{}, &nodeID)
+	return compileTree(tree, compileOpts{lenientFlexMatchValueMissing: true}, &nodeID)
 }
 
 // CompileConfigForNodeLenient is CompileConfigForNode with the

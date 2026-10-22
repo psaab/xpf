@@ -23,30 +23,27 @@ func flexTerm15943(t *testing.T, cmds ...string) (*Config, error) {
 }
 
 func TestFlexMatchMissingValueRejected_15943(t *testing.T) {
-	_, err := flexTerm15943(t,
+	// #16296 adjudication: packed/fused positive controls pin that a
+	// value-less range must remain compilable. Strict CompileConfig therefore
+	// accepts it with a loud warning, and every builder must treat it as
+	// invalid rather than inventing a live value-0 match.
+	cfg, err := flexTerm15943(t,
 		"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 bit-length 8",
 		"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 byte-offset 12",
 		"set firewall family inet filter f1 term missing-val then discard",
 	)
-	if err == nil {
-		t.Fatal("value-less flexible-match-range compiled clean — it would live-match value 0 with a full mask (#15943)")
+	if err != nil {
+		t.Fatalf("accepted packed/fused missing-value controls must keep compiling: %v", err)
 	}
-	if !strings.Contains(err.Error(), "15943") {
-		t.Errorf("reject does not cite #15943: %v", err)
-	}
-	// Lenient must also not invent the match: the compiled term (if any)
-	// must be FlexMatchValid==false so builders poison it.
-	cfg, lerr := CompileConfigLenient(buildTree(t, []string{
-		"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 bit-length 8",
-		"set firewall family inet filter f1 term missing-val from flexible-match-range range r1 byte-offset 12",
-		"set firewall family inet filter f1 term missing-val then discard",
-	}))
-	if lerr != nil {
-		t.Fatalf("lenient compile must not hard-fail: %v", lerr)
+	if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "no match-value") {
+		t.Errorf("missing-value accepted without warning: %v", cfg.Warnings)
 	}
 	term := firstInetTerm(t, cfg, "f1")
 	if FlexMatchValid(term.FlexMatch) {
-		t.Errorf("lenient value-less term is FlexMatchValid — builders would emit a live 0x0 match: %+v", term.FlexMatch)
+		t.Errorf("value-less term is FlexMatchValid — builders would emit a live 0x0 match: %+v", term.FlexMatch)
+	}
+	if !term.FlexMatch.ValueMissing {
+		t.Errorf("compiler did not record the missing value: %+v", term.FlexMatch)
 	}
 }
 
@@ -97,6 +94,21 @@ func TestFlexMatchOutOfWidthRejected_15943(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("out-of-width match-value (0x40 in 4 bits) compiled clean — it would be silently truncated (#15943)")
+	}
+	// Mask carrying bits outside the field is likewise unrepresentable:
+	// builders would truncate it to the load width and enforce a different
+	// mask than authored (Opus fold on #16296).
+	_, err = flexTerm15943(t,
+		"set firewall family inet filter f1 term wide-mask from flexible-match-range range r1 bit-length 4",
+		"set firewall family inet filter f1 term wide-mask from flexible-match-range range r1 range 0x4/0x1F",
+		"set firewall family inet filter f1 term wide-mask then discard",
+	)
+	if err == nil {
+		t.Fatal("out-of-width match-mask (0x1F in 4 bits) compiled clean — it would be silently truncated (#15943)")
+	}
+	// Hand-built contract used by snapshot/lo0 builder tests.
+	if FlexMatchValid(&FlexMatchConfig{BitLength: 4, Value: 1, Mask: 0xff, ValueSet: true, MaskSet: true}) {
+		t.Fatal("FlexMatchValid accepted a 0xff mask in a 4-bit field")
 	}
 	// Control: an in-width value commits clean.
 	cfg, err := flexTerm15943(t,

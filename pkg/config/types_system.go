@@ -1818,6 +1818,11 @@ type FlexMatchConfig struct {
 	// every snapshot/lo0 builder consult.
 	ValueSet bool
 	MaskSet  bool
+	// ValueMissing marks a range where no match-value/range token arrived.
+	// Compiler producers in this package set it when FlexMatch was materialized
+	// without a value; tests that intentionally exercise an incomplete
+	// FlexMatch use it to avoid treating zero as an authored address pattern.
+	ValueMissing bool
 }
 
 // FlexMatchValid reports whether fm's value/mask fit within its bit-length
@@ -1833,7 +1838,7 @@ func FlexMatchValid(fm *FlexMatchConfig) bool {
 	if fm == nil {
 		return true
 	}
-	if !fm.ValueSet {
+	if fm.ValueMissing || !fm.ValueSet {
 		return false
 	}
 	if fm.BitLength == 0 || fm.BitLength >= 32 {
@@ -1841,9 +1846,13 @@ func FlexMatchValid(fm *FlexMatchConfig) bool {
 	}
 	limit := uint32(1) << fm.BitLength
 	if fm.MaskSet {
-		// An explicit mask defines which value bits matter: both builders
-		// pre-mask (Value & Mask), so value bits outside the mask are
-		// inert by design. What must fit is the EFFECTIVE value.
+		// An explicit mask wider than the field is unrepresentable:
+		// the snapshot/lo0 builders truncate it to the load width, so
+		// the wire mask differs from the authored predicate. Reject
+		// (strict) / fail closed (tolerant) instead.
+		if fm.Mask >= limit {
+			return false
+		}
 		if fm.Value&fm.Mask >= limit {
 			return false
 		}

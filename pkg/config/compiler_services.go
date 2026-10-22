@@ -1123,7 +1123,20 @@ func compileServices(node *Node, svc *ServicesConfig, warnings *[]string) error 
 		svc.ApplicationIdentification = true
 	}
 	if warnings != nil {
-		*warnings = append(*warnings, servicesAcceptedOnlyWarnings(node)...)
+		*warnings = append(*warnings, userIdentificationWarnings("services", node)...)
+		old := servicesAcceptedOnlyWarnings(node)
+		for _, w := range old {
+			dup := false
+			for _, existing := range *warnings {
+				if existing == w {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				*warnings = append(*warnings, w)
+			}
+		}
 	}
 	return nil
 }
@@ -1207,94 +1220,6 @@ func servicesAcceptedOnlyWarnings(node *Node) []string {
 	for _, child := range node.Children {
 		if child.Name() == "ssl" {
 			warnings = append(warnings, servicesSSLProxyWarnings(child, seenSSLProxyProfiles)...)
-		}
-	}
-	return warnings
-}
-
-// userIdentificationWarnings returns the accepted-only warnings for a
-// `user-identification` stanza (or its direct sub-stanzas) under the given
-// root ("services" or "security"). It is the shared walker for both
-// spellings (#15943, H15-01): the `security` spelling was previously
-// rejected by the closed-world schema while the compiler accepted it with
-// no warning at all, and the packed-root shape could suppress the warning
-// entirely. The walker scans the node's children AND packed Keys, so
-// braced, flat-set, and packed forms all warn identically.
-func userIdentificationWarnings(root string, node *Node) []string {
-	if node == nil {
-		return nil
-	}
-	// Collect the identity stanza: either node IS user-identification, or
-	// it is the root carrying one as a child / packed key.
-	var uiNodes []*Node
-	if node.Name() == "user-identification" {
-		uiNodes = append(uiNodes, node)
-	}
-	for _, child := range node.Children {
-		if child.Name() == "user-identification" {
-			uiNodes = append(uiNodes, child)
-		}
-	}
-	// Packed root: `security user-identification ...` retained in Keys.
-	if len(node.Keys) > 1 {
-		for i, k := range node.Keys {
-			if k == "user-identification" && i+1 < len(node.Keys) {
-				// Synthesize a view: the next key is the sub-stanza name.
-				uiNodes = append(uiNodes, &Node{Keys: []string{"user-identification", node.Keys[i+1]}})
-				break
-			}
-		}
-	}
-	var warnings []string
-	direct := func(name string) {
-		switch name {
-		case "active-directory-access", "identity-management", "local-authentication-table", "authentication-source", "device-information":
-			warnings = append(warnings, fmt.Sprintf(
-				"%s %s configured but accepted-only — xpf does not implement identity-based policy mapping, so this stanza has no runtime effect (#10947)",
-				root, name))
-		}
-	}
-	if len(uiNodes) == 0 {
-		// Direct sub-stanzas under the root (no user-identification wrapper).
-		for _, child := range node.Children {
-			direct(child.Name())
-		}
-		if len(node.Keys) > 1 {
-			direct(node.Keys[1])
-		}
-		return warnings
-	}
-	for _, ui := range uiNodes {
-		var stanzas []string
-		add := func(name string) {
-			switch name {
-			case "active-directory-access", "identity-management", "local-authentication-table", "authentication-source", "device-information":
-				for _, e := range stanzas {
-					if e == name {
-						return
-					}
-				}
-				stanzas = append(stanzas, name)
-			}
-		}
-		if len(ui.Keys) > 1 {
-			add(ui.Keys[1])
-		}
-		for _, c := range ui.Children {
-			add(c.Name())
-			// Packed child keys may carry the sub-stanza as Keys[1].
-			if len(c.Keys) > 1 {
-				add(c.Keys[1])
-			}
-		}
-		if len(stanzas) == 0 {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s user-identification configured but accepted-only — xpf does not implement identity-based policy mapping, so the stanza has no runtime effect (#10947)", root))
-		}
-		for _, s := range stanzas {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s user-identification %s configured but accepted-only — xpf does not implement user-identification and this stanza has no runtime effect (#10947)",
-				root, s))
 		}
 	}
 	return warnings

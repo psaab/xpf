@@ -2368,6 +2368,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 						}
 					}
 				}
+				fm.ValueMissing = !fm.ValueSet
 				term.FlexMatch = fm
 				// Continue counting distinct names: multiple ranges retain
 				// the existing strict refusal and tolerant fail-closed marker.

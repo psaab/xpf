@@ -210,9 +210,13 @@ func TestFilterSnapshotFlexMatchCeilByteLength(t *testing.T) {
 					ByteOffset: 0,
 					BitLength:  tc.bits,
 					Value:      0x1,
-					Mask:       0xFFFFFFFF,
-					ValueSet:   true,
-					MaskSet:    true,
+					// A field-fitting mask: a wider authored mask is now
+					// unrepresentable (strict rejects, tolerant poisons),
+					// and this test names builder length geometry, not mask
+					// admission.
+					Mask:     uint32(1)<<tc.bits - 1,
+					ValueSet: true,
+					MaskSet:  true,
 				},
 			}}},
 		}

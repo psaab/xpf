@@ -2,8 +2,11 @@ package dataplane
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #15943 (H11-01): a failure at or after Phase 2 must return the partial
@@ -21,70 +24,90 @@ import (
 // the abort (bound by TestCompileUserspaceShimWiresHostDivergence8285's
 // ordering plus the CompileConfig-level contract here).
 
-// failingAfterZonesDP presents as the real pass and fails SetAddressBookEntry,
-// which compileAddressBook (Phase 3, the first phase after compileZones)
-// calls. compileZones itself cannot complete in a unit test (it would touch
-// the real host), and recordingDP's SetZoneConfig tripwire already proves
-// the pre-pass runs before it; here the zones phase is allowed to be ENTERED
-// and the failure is staged in the phase immediately after it, which is the
-// earliest post-Phase-2 failure reachable without netlink.
-type failingAfterZonesDP struct {
-	recordingDP
+// postPhase2DP completes Phase 2 and fails first in Phase 3. Its zone path
+// is deliberately interface-free: programZoneMaps succeeds without calling
+// SetZoneConfig (a hook that is per-zone only when a zone exists), and the
+// caller stubs host interface enumeration to empty. CompileConfig's Phase 3
+// calls ClearAddressBookV4 before any address entries, which is the first
+// staged failure. zonesComplete is therefore an ordering counter: Clear*
+// must be reached exactly once and only after compileZones returns.
+type postPhase2DP struct {
+	discardingDataPlane
+	zonesComplete bool
+	clearV4Calls  int
 }
 
-func (f *failingAfterZonesDP) SetAddressBookEntry(cidr string, addressID uint32) error {
-	return errors.New("failingAfterZonesDP: staged Phase-3 failure (#15943)")
+func (d *postPhase2DP) xpfValidationPass() bool { return false }
+
+func (d *postPhase2DP) DeleteStaleIfaceZone(map[IfaceZoneKey]bool) {}
+func (d *postPhase2DP) DeleteStaleVlanIface(map[uint32]bool)       {}
+func (d *postPhase2DP) ClearAddressBookV4() error {
+	d.clearV4Calls++
+	if !d.zonesComplete {
+		return errors.New("ClearAddressBookV4 reached before compileZones completed")
+	}
+	return errors.New("postPhase2DP: staged Phase-3 failure (#15943)")
 }
 
 func TestCompileConfigReturnsPartialResultAfterPhase2_15943(t *testing.T) {
-	// Control first: the pre-pass failure path must still return nil, because
-	// nothing has mutated and there is nothing to account for.
+	// Neutralize host interface enumeration for the compile below. This
+	// follows the established interfaceLister test seam and ensures Phase 2
+	// cannot observe or mutate any host link.
+	oldLister := interfaceLister
+	interfaceLister = func() ([]net.Interface, error) { return nil, nil }
+	t.Cleanup(func() { interfaceLister = oldLister })
+
+	// A zone-less config has no zone interfaces to program, so compileZones
+	// completes its real body (including stripUnmanagedInterfaces against
+	// the empty seam) and advances to Phase 3. This is materially different
+	// from recordingDP: no SetZoneConfig tripwire fires inside Phase 2.
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{}
+	// DeleteStale* are compileZones' final dataplane calls, so they mark
+	// Phase-2 completion before Phase 3 begins.
+	dp2 := &postPhase2CompletingDP{}
+	result, err := CompileConfig(dp2, cfg, false)
+	if err == nil {
+		t.Fatal("expected the staged Phase-3 failure")
+	}
+	if !strings.Contains(err.Error(), "compile address book") || !strings.Contains(err.Error(), "staged Phase-3 failure") {
+		t.Fatalf("failure did not occur in Phase 3 after Phase 2: %v", err)
+	}
+	if dp2.clearV4Calls != 1 {
+		t.Fatalf("Phase 3 ClearAddressBookV4 calls = %d, want 1", dp2.clearV4Calls)
+	}
+	if result == nil {
+		t.Fatalf("post-Phase-2 failure returned a nil result (err=%v) — CompileUserspaceShim would drop divergence accounting (#15943)", err)
+	}
+	if result.ZoneIDs == nil {
+		t.Fatal("partial result is not CompileConfig's result (ZoneIDs not initialized)")
+	}
+
+	// Keep the nil-result control for a pre-mutation failure: it must stay
+	// nil, because inheriting/accounting for a config that never reached
+	// Phase 2 would falsely report divergence.
 	dpPre := &recordingDP{}
 	resultPre, errPre := CompileConfig(dpPre, failLaterPhaseConfig(), false)
 	if errPre == nil {
 		t.Fatal("control: expected the unresolvable application to fail the pre-pass")
 	}
 	if resultPre != nil {
-		t.Fatalf("control: pre-mutation failure returned a result (%v), want nil — "+
-			"accounting must only fire when Phase 2 may have mutated the host", resultPre)
+		t.Fatalf("pre-mutation failure returned a result, want nil: %v", resultPre)
 	}
 	assertNoHostMutation(t, dpPre)
-
-	// Post-Phase-2 failure: address-book (Phase 3) fails after compileZones
-	// was entered (the SetZoneConfig tripwire proves entry). The compile must
-	// surface BOTH the Phase-3 error and a non-nil partial result carrying
-	// the zone/screen IDs assigned before the failure.
-	dp := &failingAfterZonesDP{}
-	cfg := failLaterPhaseConfig()
-	cfg.Security.Policies[0].Policies[0].Match.Applications = []string{"any"} // pre-pass clean
-	result, err := CompileConfig(dp, cfg, false)
-	if err == nil {
-		t.Fatal("expected the staged Phase-3 failure")
-	}
-	// The tripwire error is also in the chain (compileZones halted on it
-	// before any interface work); what matters is that a result came back.
-	if result == nil {
-		t.Fatalf("post-Phase-2 failure returned a nil result (err=%v) — "+
-			"CompileUserspaceShim would drop the host divergence silently (#15943)", err)
-	}
-	if len(result.ZoneIDs) == 0 {
-		t.Errorf("partial result carries no ZoneIDs — it is not the compile's own result")
-	}
-	if !errors.Is(err, errStopBeforeHostReconcile) && !strings.Contains(err.Error(), "failingAfterZonesDP") {
-		t.Fatalf("failed for an unexpected reason, so the partial-result contract is unbound: %v", err)
-	}
 }
 
-// TestCompileConfigNATPhaseFailureReturnsResult_15943 pins the NAT family
-// specifically: the five #15002-era shapes (missing SNAT/DNAT pool, DNAT
-// network-prefix pool, mixed-family static NAT, NAT64 prefix/pool) hard-error
-// in Phases 6/6.5/6.6 on the real pass. The pre-pass catches the ones it runs
-// identically, so those return nil pre-mutation (asserted by the existing
-// #4960 cells); this cell pins that IF a NAT-phase failure is ever reached
-// post-Phase-2, the result contract holds there too — it drives compileNAT
-// directly against the real-pass shim after seeding a result the way
-// CompileConfig does, so a future `return nil` regression inside a NAT phase
-// wrapper reds here even though the pre-pass currently masks it end-to-end.
+type postPhase2CompletingDP struct {
+	postPhase2DP
+}
+
+func (d *postPhase2CompletingDP) DeleteStaleIfaceZone(map[IfaceZoneKey]bool) {
+	d.zonesComplete = true
+}
+func (d *postPhase2CompletingDP) DeleteStaleVlanIface(map[uint32]bool) {
+	d.zonesComplete = true
+}
+
 func TestCompileConfigNATPhaseFailureReturnsResult_15943(t *testing.T) {
 	cfg := failLaterNATPhaseConfig()
 	result := newValidationResult()

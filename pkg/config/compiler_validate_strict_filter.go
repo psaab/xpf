@@ -1149,6 +1149,10 @@ func validateFilterMatchValuesStrict(cfg *Config) error {
 // terms in config order). On the tolerant load / peer-sync path the caller
 // downgrades the returned error to a warning (#1960 no-brick).
 func validateFilterFlexMatchStrict(cfg *Config) error {
+	return validateFilterFlexMatchStrictOpts(cfg, false)
+}
+
+func validateFilterFlexMatchStrictOpts(cfg *Config, allowValueMissing bool) error {
 	if cfg == nil {
 		return nil
 	}
@@ -1190,12 +1194,17 @@ func validateFilterFlexMatchStrict(cfg *Config) error {
 				// silently truncate; reject at commit instead. The
 				// tolerant path fails the term closed via FlexMatchValid
 				// in the snapshot/lo0 builders.
-				if term.FlexMatch != nil && len(term.UnknownFlexMatch) == 0 && !FlexMatchValid(term.FlexMatch) {
+				// Open (tolerant buddy) compile shares this helper through
+				// uniform gates but the caller downgrades this specific
+				// missing-value error to a warning when its option allows:
+				// see validateFilterFlexMatchValueMissingWarning; bad width
+				// remains hard on both paths.
+				if term.FlexMatch != nil && len(term.UnknownFlexMatch) == 0 && !FlexMatchValid(term.FlexMatch) && !(allowValueMissing && term.FlexMatch.ValueMissing) {
 					return fmt.Errorf(
 						"firewall family %s filter %q term %q: flexible-match-range "+
-							"must specify a match-value that fits within bit-length; "+
+							"must specify a match-value and explicit match-mask that fit within bit-length; "+
 							"a range with no match-value would match value 0 and an "+
-							"out-of-width value would be silently truncated (#15943)",
+							"an out-of-width value or explicit mask would be silently truncated (#15943)",
 						family, name, term.Name)
 				}
 				if len(term.UnknownFlexMatch) == 0 {
@@ -2425,4 +2434,35 @@ func validateFirewallPolicerThenConflictStrict(cfg *Config) error {
 		}
 	}
 	return check("three-color-policer", tcps)
+}
+
+// flexMatchValueMissingWarning returns an operator-visible warning for a
+// value-less flexible-match-range admitted on the tolerant compile path.
+// It names the first such term deterministically; builders poison the term.
+func flexMatchValueMissingWarning(cfg *Config) string {
+	if cfg == nil {
+		return ""
+	}
+	for _, family := range []struct {
+		name    string
+		filters map[string]*FirewallFilter
+	}{{"inet", cfg.Firewall.FiltersInet}, {"inet6", cfg.Firewall.FiltersInet6}} {
+		names := make([]string, 0, len(family.filters))
+		for name := range family.filters {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			f := family.filters[name]
+			if f == nil {
+				continue
+			}
+			for _, term := range f.Terms {
+				if term != nil && term.FlexMatch != nil && term.FlexMatch.ValueMissing {
+					return fmt.Sprintf("firewall family %s filter %q term %q: flexible-match-range has no match-value; accepted on this compile path but its term fails closed in the dataplane until a match-value is configured (#15943)", family.name, name, term.Name)
+				}
+			}
+		}
+	}
+	return ""
 }
