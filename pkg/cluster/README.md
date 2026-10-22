@@ -3999,7 +3999,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   failover-ACK cap (`failoverAckTimeout`, `sync.go`) further bounds this: if the
   owner's actuation barrier delays the applied-ack past 20s the requester times
   out and sends NO commit — the exact stranded case the lease-expiry restore
-  handles — so a large `failoverActuateTimeout` cannot delay a real commit past
+  handles — so a large actuation registry timeout cannot delay a real commit past
   the lease. reqID is threaded
   into `OnRemoteFailover`/`OnRemoteFailoverBatch`/`OnRemoteFailoverCommit`/
   `OnRemoteFailoverCommitBatch` (`sync.go`) to arm/clear it.
