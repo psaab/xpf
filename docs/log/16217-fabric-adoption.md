@@ -126,3 +126,47 @@ streams' workers/tables within the handshake window (the ct-slice
 is gated on the 10 s conntrack-refresh cycle). Cluster restored:
 clean master `2c8575b70e`, helper `2f2f5cbf…b04` both nodes,
 RG0/1/2 node0 primary, target OK, P4 verification 14.1 Gbit/s.
+
+## Wire-cadence residual (FZFixWire4)
+
+Residual after Run 1: node-wide evidence works but ct-slice assembly
+is gated on the 10 s `CT_REFRESH_WINDOW_NS` cycle — heavy split
+streams' wire stayed `w=2` pre-failover.
+
+Fix: at the moment `cache_hit_handshake_progress` detects completion
+for a tuple (the flow-cache hit path in `stage_flow_cache_hit`, right
+after `emit_probe_hit_state_update` publishes the HA stage-advance
+Update via the emit carve-out), immediately advance the shared
+canonical slot (`restamp_shared_handshake_established`, already
+present) AND the forward-wire alias slot
+(`restamp_shared_forward_wire_established`) to Established — same
+packet path, bounded work, existing shared-map locks only, no
+ct-slice wait. The ct-slice remains the backstop for completions
+that never take a cache hit. No probes added.
+
+Tests: `split_cache_hit_completion_collects_without_ct_slice_16217`
+— split-shape completion via the cache-hit path (`probe_hit` on
+promoted pairs) lands Established on both halves, queues the HA
+Update, and the collector collects the tuple with zero shared
+evidence (no ct-slice run); the replica half completes from node
+evidence on its next served hit and emits the stage-advance Update.
+`cargo test 16217` 5/5, `16223` 15/15, `session::` 496 passed with
+4 failures (`icmp_error_budget_9901` x2 — flaky under parallel load,
+pass in isolation; `tcp_seq_15753`,
+`session_decision_typed_snat_layout_11064` — pre-existing on base).
+
+Live Run 2 (build `99.16217.24.dirty`, deb sha256 `dc7bb96e…f0`,
+helper sha256 `a8d35d77…8d` homogeneous `/proc/<pid>/exe` both
+nodes before traffic; evidence `/var/worktrees/fzadopt2/cell24/`):
+aged 30 s RG1 failover P4, all-node0, FO at 30 s — **FAIL, 25 SUM
+zero intervals** (31 s→end), `snat_revoked=0` both nodes. Pre-FO
+9.7–10.7 Gbit/s, no pre-FO zeros. Narrowing vs Run 1: at d28 fw1's
+Backup rows for the two heaviest streams (37910/37926) now read
+`Timeout: 1800` — the wire advanced pre-FO, so the adoption gate
+no longer reads `w=2` for those tuples. The remaining blackhole is
+downstream of adoption: post-FO the adopted rows exist (Timeout
+1800, both nodes) but forward WAN traffic stays zero — the
+post-takeover forward/reply path for fabric-era sessions, the same
+residual FZFixHandshake2 named. Cluster restored: clean master
+`2c8575b70e`, helper `2f2f5cbf…b04` both nodes, RG0/1/2 node0
+primary, target OK, P4 verification 9.6 Gbit/s.

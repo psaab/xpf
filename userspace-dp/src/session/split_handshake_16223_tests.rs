@@ -656,6 +656,136 @@ fn split_two_workers_neither_alone_sufficient_16217() {
     assert!(!c_neg.iter().any(|(k, _)| k == &forward));
 }
 
+/// #16217 wire-cadence shape: a split pair completes via the cache-hit
+/// path (`cache_hit_handshake_progress`) on the serving table while
+/// the peer's shared wire still reads HandshakePending — the ct-slice
+/// (10 s cadence) has not run. The completion itself must be visible
+/// to the collector WITHOUT any ct-slice run: the local table already
+/// reads Established for both halves, and the collector's aggregated
+/// evidence (shared reverse replica) must collect the tuple for the
+/// shared canonical + forward-wire alias advance. Control: without
+/// the cache-hit completion the pending pair collects nothing.
+#[test]
+fn split_cache_hit_completion_collects_without_ct_slice_16217() {
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+
+    // Control: pending synced pair, no completion yet.
+    let mut control = SessionTable::new();
+    for (key, is_rev, id) in [(&forward, false, 95u64), (&reverse, true, 95u64)] {
+        let mut meta = metadata();
+        meta.is_reverse = is_rev;
+        if is_rev {
+            meta.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+            meta.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+        }
+        assert!(control.upsert_synced_with_origin(
+            SessionInstall {
+                key: key.clone(),
+                decision: decision(),
+                metadata: meta,
+                origin: SessionOrigin::SharedPromote,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: id,
+                tcp_close_class: 0,
+                tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+                source_nat_static: None,
+            },
+            false,
+        ));
+    }
+    let mut ctrl_out: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    control.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut ctrl_out);
+    // A pending pair with only a reverse replica present DOES carry
+    // rev_packets_any via the local half; use zero-evidence collector
+    // semantics: the pair is not Established locally, so (a) fails and
+    // without shared aggregation nothing collects. Assert the local
+    // halves are not yet Established (the wire-advance premise).
+    assert!(
+        !control.entry_by_key(&forward).expect("ctrl fwd").established
+            || control.entry_by_key(&forward).expect("ctrl fwd").handshake_pending,
+        "premise: control pair still pending"
+    );
+
+    // Split serving table: promoted pair, completing ACK + data served
+    // ONLY via cache hits (probe_hit) — the #16223 completion path.
+    let mut serving = SessionTable::new();
+    let serving_reverse = install_forward_reverse_pair(&mut serving, &forward, now, TCP_SYN);
+    assert_eq!(serving_reverse, reverse);
+    assert!(serving.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    assert!(serving.probe_hit(&forward, now + 2 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    assert!(serving.probe_hit(&reverse, now + 3 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    for key in [&forward, &reverse] {
+        let e = serving.entry_by_key(key).expect("serving half");
+        assert!(e.established && !e.handshake_pending, "premise: cache-hit completion landed");
+    }
+    // The HA stage-advance Update must be queued (emit carve-out).
+    serving.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = serving
+        .drain_deltas(64)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert!(!updates.is_empty(), "#16217: cache-hit completion must queue an HA Update");
+    assert!(
+        updates.iter().any(|d| d.tcp_handshake_state == TcpHandshakeState::Established.to_wire()),
+        "#16217: an Update must carry the Established stage"
+    );
+
+    // Collector on the serving table WITHOUT ct-slice: local (a) alone
+    // collects (Established row present), proving the wire can advance
+    // on the same packet path.
+    let mut out: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    serving.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut out);
+    assert!(out.iter().any(|(k, _)| k == &forward), "#16217: completed pair must collect without ct-slice");
+
+    // Replica table (peer worker): pending, completes from node
+    // evidence on its next served hit — again no ct-slice involved.
+    let mut replica = SessionTable::new();
+    for (key, is_rev) in [(&forward, false), (&reverse, true)] {
+        let mut meta = metadata();
+        meta.is_reverse = is_rev;
+        if is_rev {
+            meta.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+            meta.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+        }
+        assert!(replica.upsert_synced_with_origin(
+            SessionInstall {
+                key: key.clone(),
+                decision: decision(),
+                metadata: meta,
+                origin: SessionOrigin::SyncImport,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 96,
+                tcp_close_class: 0,
+                tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+                source_nat_static: None,
+            },
+            false,
+        ));
+    }
+    let _ = replica.drain_deltas(64);
+    replica.note_node_served_handshake(&forward, TcpHandshakeState::Established.to_wire(), 3);
+    assert!(replica.probe_hit(&forward, now + 6 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    for key in [&forward, &reverse] {
+        let e = replica.entry_by_key(key).expect("replica half");
+        assert!(e.established && !e.handshake_pending, "#16217: replica must complete via cache-hit path");
+    }
+    replica.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = replica
+        .drain_deltas(64)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1, "#16217: replica completion must emit the stage-advance Update");
+    assert_eq!(updates[0].tcp_handshake_state, TcpHandshakeState::Established.to_wire());
+}
+
 /// #16217 split shape (FZFixWire): the serving pair is Established on
 fn split_serving_established_replica_pending_completes_and_announces_16217() {
     let forward = key_v4();

@@ -759,6 +759,18 @@ pub(super) fn stage_flow_cache_hit(
                 &flow.forward_key,
                 cached_decision.nat,
             );
+            // #16217 (wire-cadence residual): the ct-slice restamp only
+            // runs on the 10 s conntrack-refresh cadence, so a heavy
+            // split stream's shared wire stayed HandshakePending (w=2)
+            // at failover. Advance the forward-wire KEY ALIAS slot here
+            // too - same packet path, same bounded work - so the
+            // fabric-ingress adoption gate sees Established under the
+            // NAT'd tuple without waiting for the ct-slice backstop.
+            crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+                worker_ctx.shared_sessions,
+                worker_ctx.shared_forward_wire_sessions,
+                &[(flow.forward_key.clone(), cached_decision.nat)],
+            );
         }
         // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,
         // but a filter-pinned queue must not be reclassified. The separate
