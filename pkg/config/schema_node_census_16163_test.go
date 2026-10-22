@@ -367,7 +367,7 @@ func enumExampleErr16163(n *schemaNode, ex string) (err error) {
 		}
 	}()
 	if n.validator != nil {
-		return n.validator(ex, nil)
+		return n.validator(ex)
 	}
 	if n.treeValidator != nil {
 		return n.treeValidator(ex, &schemaRefs{})
@@ -390,11 +390,11 @@ func enumExampleInCompletion16163(n *schemaNode, ex string) bool {
 // invent others. Without this, a predicate bug that reports nothing would
 // pass the census above on any tree.
 func TestSchemaNodeCensusSeededViolations16163(t *testing.T) {
-	accept := func(string, *Config) error { return nil }
+	accept := func(string) error { return nil }
 	acceptTree := func(string, *schemaRefs) error { return nil }
 	acceptTail := func([]string, [][]string) error { return nil }
 	acceptNode := func(*Node, *schemaNode) error { return nil }
-	acceptPos := func(int, string, *Config) error { return nil }
+	acceptPos := func(int, string) error { return nil }
 
 	cases := []struct {
 		name string
@@ -524,16 +524,16 @@ func TestSchemaNodeCensusSeededViolations16163(t *testing.T) {
 // named exception, not a domain.
 func TestDNSProxyDefaultDomainWildcard16163(t *testing.T) {
 	for _, ok := range []string{"*", "example.net", "corp.example.net."} {
-		if err := ValidateDNSProxyDefaultDomain(ok, nil); err != nil {
+		if err := ValidateDNSProxyDefaultDomain(ok); err != nil {
 			t.Errorf("ValidateDNSProxyDefaultDomain(%q) = %v, want nil", ok, err)
 		}
 	}
 	for _, bad := range []string{"bad_domain", "-bad.net", "exa mple.net", "**"} {
-		if err := ValidateDNSProxyDefaultDomain(bad, nil); err == nil {
+		if err := ValidateDNSProxyDefaultDomain(bad); err == nil {
 			t.Errorf("ValidateDNSProxyDefaultDomain(%q) = nil, want rejection", bad)
 		}
 	}
-	if err := ValidateDNSDomain("*", nil); err == nil {
+	if err := ValidateDNSDomain("*"); err == nil {
 		t.Error("ValidateDNSDomain(\"*\") = nil, want rejection (wildcard is dns-proxy-only)")
 	}
 	// Strict commit path: the documented wildcard spelling must survive
@@ -547,7 +547,7 @@ func TestDNSProxyDefaultDomainWildcard16163(t *testing.T) {
 	if err := tree.SetPath(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate must accept dns-proxy default-domain *: %v", err)
 	}
 	badTree := &ConfigTree{}
@@ -558,7 +558,7 @@ func TestDNSProxyDefaultDomainWildcard16163(t *testing.T) {
 	if err := badTree.SetPath(badPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := SchemaValidate(badTree, nil); err == nil {
+	if err := SchemaValidate(badTree); err == nil {
 		t.Fatal("SchemaValidate must reject dns-proxy default-domain bad_domain")
 	}
 }
