@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Complete the Go-Rust userspace wire fixture coverage (#16132): the
+    protocol_wire_v1.json golden now carries populated specimens for every
+    field a default specimen cannot show (skip-on-default keys and nested
+    types behind empty containers), plus a Rust source-census gate and a
+    Go tag-census gate that agree the fixture exercises every serializable
+    DTO field with explicit, justified allowlists for one-sided fields.
+    Missing-fixture now fails instead of skipping, deserialize-only secret
+    fields are asserted absent, and no manifest or codegen is added: that
+    remains gated on a demonstrated drift escaping both gates. Test-only;
+    no production or dataplane behaviour changes.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Extract the factory-reset wipe into pkg/factoryreset and move the
     Complete RPC out of server_cluster.go: the shared zeroize wipe
     (PerformZeroizeWipe and its pending/ungated/log-inventory variants,

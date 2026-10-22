@@ -2841,6 +2841,706 @@ fn wire_invariant_default_specimens() {
         "zone_traffic_counter_status".into(),
         dump(&ZoneTrafficCounterStatus::default()),
     );
+    // #16132: populated specimens for fields a `::default()` specimen cannot
+    // show. Every field below is `skip_serializing_if` on its default value
+    // (or a nested type reachable only through an empty container / `None`),
+    // so the default specimens above omit its wire spelling entirely and a
+    // serde rename would have shipped green. Synthetic sentinel values only;
+    // never a real key, version, or host value. The four deserialize-only
+    // secrets (`syn_cookie_master_key`, `syn_cookie_key_ring`,
+    // `wg_local_privkey_hex`, `wg_preshared_key_hex`) are deliberately NOT
+    // populated: they are `skip_serializing` unconditionally, so no
+    // serialization specimen can ever carry them — see
+    // `wire_fixture_completeness_16132`.
+    let stamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("sentinel timestamp");
+    let populated_policy_match = SessionPolicyMatch {
+        addr_family: 2,
+        routing_domain: 7,
+        tuple: SessionPolicyTuple {
+            addr_family: 2,
+            protocol: 6,
+            src_ip: "10.0.0.1".into(),
+            dst_ip: "10.0.0.2".into(),
+            src_port: 40001,
+            dst_port: 443,
+            tunnel_discriminator: 9,
+            routing_domain: 7,
+        },
+        reverse_key: Some(SessionPolicyTuple {
+            addr_family: 2,
+            protocol: 6,
+            src_ip: "10.0.0.2".into(),
+            dst_ip: "10.0.0.1".into(),
+            src_port: 443,
+            dst_port: 40001,
+            tunnel_discriminator: 9,
+            routing_domain: 7,
+        }),
+        policy_id: 11,
+        created_secs: 12,
+        created_ns: 13,
+        expected_rt_flow_session_id: 14,
+        expected_companion_rt_flow_session_id: 15,
+        ingress_zone_id: 16,
+        egress_zone_id: 17,
+        dnat: true,
+        nat_dst_ip: "10.0.0.3".into(),
+        nat_dst_port: 8443,
+    };
+    let populated_fib_route = FibRouteWire {
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "203.0.113.0/24".into(),
+        kind: "unicast".into(),
+        next_hops: vec![FibNextHopWire {
+            next_hop: "192.0.2.1".into(),
+            ifindex: 3,
+            interface: "ge-0/0/0.0".into(),
+            tunnel_endpoint_id: 4,
+            weight: 5,
+        }],
+        discard: false,
+        reject: false,
+        cluster_terminal: true,
+        next_table: "inet.1".into(),
+        rule_priority: 6,
+        preference: 7,
+        mtu: 1500,
+    };
+    let populated_pmech_inventory = IpsecPMechInventorySnapshot {
+        policy_identity: "pmech16132".into(),
+        generation: 8,
+        fib_generation: 9,
+        complete: true,
+        main_routes: vec![IpsecMainRouteSnapshot {
+            domain: 10,
+            table: 11,
+            family: "inet".into(),
+            destination: "203.0.113.0/24".into(),
+            protocol: 12,
+            disposition: 13,
+            next_hops: vec![IpsecMainRouteNextHopSnapshot {
+                ifindex: 14,
+                weight: 15,
+            }],
+        }],
+        tunnel_rows: vec![IpsecPMechTunnelRowSnapshot {
+            stn: "st0.1".into(),
+            if_id: 16,
+            logical_ifindex: 17,
+            explicit_selectors: vec![IpsecTrafficSelectorSnapshot {
+                name: "ts16132".into(),
+                local_ts: "10.0.0.0/8".into(),
+                remote_ts: "192.168.0.0/16".into(),
+                source: "16132".into(),
+            }],
+            effective_prefixes: vec!["10.0.0.0/8".into()],
+            ingress_prefixes: vec!["10.1.0.0/16".into()],
+            destination_prefixes: vec!["192.168.0.0/16".into()],
+            inventory_generation: 18,
+            fib_generation: 19,
+            source_kind: "16132".into(),
+            selector_provenance: "16132".into(),
+            inventory_complete: true,
+            inventory_valid: true,
+            inventory_reason: "16132".into(),
+        }],
+    };
+    let populated_idle_lease = IdleLeaseWire {
+        pool_name: "p16132".into(),
+        protocol: 6,
+        src_ip: "10.0.61.102".into(),
+        src_port: 40000,
+        routing_scope: Some(7),
+        egress_scope: Some(11),
+        remote_ip: "8.8.8.8".into(),
+        remote_port: 443,
+        permit_any_remote: true,
+        permitted_remotes: vec![PermittedRemoteWire {
+            ip: "8.8.8.8".into(),
+            port: 443,
+        }],
+        translated_ip: "172.16.80.7".into(),
+        translated_port: 51400,
+        address_only: true,
+        deterministic: true,
+        deterministic_mode: 2,
+        deterministic_block_size: 32,
+        deterministic_blocks_per_ip: 2,
+        deterministic_host_prefix_len: 32,
+        deterministic_host_base: "2001:db8::".into(),
+        deterministic_host_count: 2,
+        remaining_ns: 123,
+        timeout_ns: 300_000_000_000,
+    };
+    let populated_s5_status = S5ReinjectStatus {
+        run_id: "16132-run".into(),
+        provenance: vec![S5ReinjectProvenance {
+            request_id: 1,
+            permit_epoch: 2,
+            queue_epoch: 3,
+            queue_number: 4,
+            family: 5,
+            hook: 6,
+            owned_ifindex: 7,
+            owner: "16132-owner".into(),
+            stn: "st0.1".into(),
+            outcome: "16132-outcome".into(),
+            bytes_written: 8,
+            frame_digest: vec![9],
+            reason: 10,
+        }],
+        ..Default::default()
+    };
+    let populated_wg_peer = WgPeerStatus {
+        peer_pubkey_hex: "16132-pub".into(),
+        peer_endpoint: "192.0.2.1:51820".into(),
+        session_confirmed: true,
+    };
+    let populated_tunnel_wg_peer = TunnelWgPeerSnapshot {
+        wg_peer_pubkey_hex: "16132-pub".into(),
+        wg_allowed_ips: vec!["10.0.0.0/8".into()],
+        wg_endpoint: "192.0.2.1:51820".into(),
+        wg_keepalive_secs: 25,
+        wg_preshared_key_hex: String::new(),
+    };
+    s.insert(
+        "address_book_snapshot".into(),
+        dump(&AddressBookSnapshot {
+            id: 1,
+            name: "book16132".into(),
+            prefixes_v4: vec!["10.0.0.0/8".into()],
+            prefixes_v6: vec!["2001:db8::/32".into()],
+        }),
+    );
+    s.insert(
+        "binding_status_populated".into(),
+        dump(&BindingStatus {
+            last_heartbeat: Some(stamp),
+            last_change: Some(stamp),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "config_snapshot_populated".into(),
+        dump(&ConfigSnapshot {
+            permit_epoch: 16132,
+            queue_epochs: vec![QueueEpochSnapshot { queue: 3, epoch: 4 }],
+            ipsec_tunnel_snapshot_generation: 5,
+            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
+                stn: "st0.1".into(),
+                if_id: 6,
+                logical_ifindex: 7,
+            }],
+            pmech_inventory: Some(populated_pmech_inventory.clone()),
+            bindless_selector_fence_enabled: true,
+            bindless_selector_rows: vec![IpsecBindlessSelectorSnapshot {
+                local_ts: "10.0.0.0/8".into(),
+                remote_ts: "192.168.0.0/16".into(),
+            }],
+            zone_set_validated: true,
+            route_table_identities: vec![RouteTableIdentitySnapshot {
+                name: "inet.0".into(),
+                domain: 20,
+                table: 21,
+            }],
+            forwarding_tables: vec!["inet.0".into()],
+            wg_steered_listen_ports: vec![51820],
+            no_ipv6_reject_zero_hop_limit: true,
+            clear_policies: true,
+            cold_path_sample_mask: Some(22),
+            content_digest: "16132-digest".into(),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "control_request_populated".into(),
+        dump(&ControlRequest {
+            idle_leases: vec![populated_idle_lease.clone()],
+            session_policy_list: Some(SessionPolicyListRequest {
+                policy_ids: vec![11],
+                mode: "16132".into(),
+                before_secs: Some(23),
+                families: vec![2],
+                classes: vec!["16132".into()],
+                continuation: "16132-cont".into(),
+            }),
+            session_counter_query: Some(SessionCounterQueryRequest {
+                src_ip: "10.0.0.1".into(),
+                dst_ip: "10.0.0.2".into(),
+                src_port: 40001,
+                dst_port: 443,
+                protocol: 6,
+            }),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "control_response_populated".into(),
+        dump(&ControlResponse {
+            ok: true,
+            error: "16132-error".into(),
+            session_counters: vec![SessionCounterRowWire {
+                worker_id: 1,
+                answered: true,
+                found: true,
+                replica: true,
+                fwd_packets: 2,
+                fwd_bytes: 3,
+                rev_packets: 4,
+                rev_bytes: 5,
+            }],
+            status: Some(ProcessStatus::default()),
+            session_policy_matches: vec![populated_policy_match.clone()],
+            session_policy_per_worker_errors: vec!["16132-per-worker".into()],
+            session_deltas: vec![SessionDeltaInfo::default()],
+            idle_leases: vec![populated_idle_lease.clone()],
+            display_leases: vec![DisplayLeaseWire {
+                pool_name: "p16132".into(),
+                ..Default::default()
+            }],
+            policy_delete_errors: vec!["16132-delete".into()],
+            fib_routes: vec![populated_fib_route.clone()],
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "cos_interface_status_populated".into(),
+        dump(&CoSInterfaceStatus {
+            owner_worker_id: Some(3),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "cos_queue_status_populated".into(),
+        dump(&CoSQueueStatus {
+            owner_worker_id: Some(3),
+            equal_flow_fail_open_reason: "16132-reason".into(),
+            equal_flow_target_policy: "16132-policy".into(),
+            lease_v8_worker_requested_bytes: vec![4],
+            lease_v8_worker_granted_bytes: vec![5],
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "cos_scheduler_snapshot_populated".into(),
+        dump(&CoSSchedulerSnapshot {
+            equal_flow_target_policy: "16132-policy".into(),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "fib_next_hop_wire".into(),
+        dump(&populated_fib_route.next_hops[0]),
+    );
+    s.insert("fib_route_wire".into(), dump(&populated_fib_route));
+    s.insert(
+        "firewall_term_snapshot_populated".into(),
+        dump(&FirewallTermSnapshot {
+            flex_match: Some(FlexMatchSnapshot {
+                offset: 1,
+                length: 2,
+                value: 3,
+                mask: 4,
+                match_start: "layer-4".into(),
+            }),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "flex_match_snapshot".into(),
+        dump(&FlexMatchSnapshot {
+            offset: 1,
+            length: 2,
+            value: 3,
+            mask: 4,
+            match_start: "layer-4".into(),
+        }),
+    );
+    s.insert(
+        "flow_worker_status_populated".into(),
+        dump(&FlowWorkerStatus {
+            cos_queue_id: Some(5),
+            dscp_rewrite: Some(6),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "ha_group_status_populated".into(),
+        dump(&HAGroupStatus {
+            lease_state: "16132-state".into(),
+            lease_until: 7,
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "interface_snapshot_populated".into(),
+        dump(&InterfaceSnapshot {
+            secure_tunnel: true,
+            link_up: Some(true),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "ipsec_bindless_selector_snapshot".into(),
+        dump(&IpsecBindlessSelectorSnapshot {
+            local_ts: "10.0.0.0/8".into(),
+            remote_ts: "192.168.0.0/16".into(),
+        }),
+    );
+    s.insert(
+        "ipsec_main_route_next_hop_snapshot".into(),
+        dump(&IpsecMainRouteNextHopSnapshot {
+            ifindex: 14,
+            weight: 15,
+        }),
+    );
+    s.insert(
+        "ipsec_main_route_snapshot".into(),
+        dump(&IpsecMainRouteSnapshot {
+            domain: 10,
+            table: 11,
+            family: "inet".into(),
+            destination: "203.0.113.0/24".into(),
+            protocol: 12,
+            disposition: 13,
+            next_hops: vec![IpsecMainRouteNextHopSnapshot {
+                ifindex: 14,
+                weight: 15,
+            }],
+        }),
+    );
+    s.insert(
+        "ipsec_pmech_inventory_snapshot".into(),
+        dump(&populated_pmech_inventory),
+    );
+    s.insert(
+        "ipsec_pmech_tunnel_row_snapshot".into(),
+        dump(&IpsecPMechTunnelRowSnapshot {
+            stn: "st0.1".into(),
+            if_id: 16,
+            logical_ifindex: 17,
+            explicit_selectors: vec![IpsecTrafficSelectorSnapshot {
+                name: "ts16132".into(),
+                local_ts: "10.0.0.0/8".into(),
+                remote_ts: "192.168.0.0/16".into(),
+                source: "16132".into(),
+            }],
+            effective_prefixes: vec!["10.0.0.0/8".into()],
+            ingress_prefixes: vec!["10.1.0.0/16".into()],
+            destination_prefixes: vec!["192.168.0.0/16".into()],
+            inventory_generation: 18,
+            fib_generation: 19,
+            source_kind: "16132".into(),
+            selector_provenance: "16132".into(),
+            inventory_complete: true,
+            inventory_valid: true,
+            inventory_reason: "16132".into(),
+        }),
+    );
+    s.insert(
+        "ipsec_traffic_selector_snapshot".into(),
+        dump(&IpsecTrafficSelectorSnapshot {
+            name: "ts16132".into(),
+            local_ts: "10.0.0.0/8".into(),
+            remote_ts: "192.168.0.0/16".into(),
+            source: "16132".into(),
+        }),
+    );
+    s.insert(
+        "ipsec_tunnel_row_snapshot".into(),
+        dump(&IpsecTunnelRowSnapshot {
+            stn: "st0.1".into(),
+            if_id: 6,
+            logical_ifindex: 7,
+        }),
+    );
+    s.insert(
+        "nat_app_term_wire".into(),
+        dump(&NatAppTermWire {
+            protocol: 6,
+            ports: vec![NatPortRangeWire {
+                low: 1024,
+                high: 2048,
+            }],
+            src_ports: vec![NatPortRangeWire {
+                low: 3072,
+                high: 4096,
+            }],
+            icmp_type: Some(8),
+            icmp_code: Some(0),
+        }),
+    );
+    s.insert(
+        "nat_port_range_wire".into(),
+        dump(&NatPortRangeWire {
+            low: 1024,
+            high: 2048,
+        }),
+    );
+    s.insert(
+        "permitted_remote_wire".into(),
+        dump(&PermittedRemoteWire {
+            ip: "8.8.8.8".into(),
+            port: 443,
+        }),
+    );
+    s.insert(
+        "policy_application_snapshot_populated".into(),
+        dump(&PolicyApplicationSnapshot {
+            icmp_type: Some(8),
+            icmp_code: Some(0),
+            inactivity_timeout: Some(30),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "policy_rename_ancestry".into(),
+        dump(&PolicyRenameAncestry {
+            source_rule_id: "16132-src".into(),
+            destination_rule_id: "16132-dst".into(),
+            source_from_zone: "trust".into(),
+            source_to_zone: "untrust".into(),
+            destination_from_zone: "trust".into(),
+            destination_to_zone: "untrust".into(),
+            source_from_zone_id: 1,
+            source_to_zone_id: 2,
+            destination_from_zone_id: 3,
+            destination_to_zone_id: 4,
+            source_from_zone_any: true,
+            source_to_zone_any: true,
+            destination_from_zone_any: true,
+            destination_to_zone_any: true,
+        }),
+    );
+    s.insert(
+        "policy_session_rebind".into(),
+        dump(&PolicySessionRebind {
+            family: "inet".into(),
+            src_ip: "10.0.0.1".into(),
+            dst_ip: "10.0.0.2".into(),
+            src_port: 40001,
+            dst_port: 443,
+            protocol: 6,
+            routing_domain: 7,
+            policy_id: 8,
+            rule_id: "16132-rule".into(),
+            ingress_zone: 9,
+            egress_zone: 10,
+            tunnel_discriminator: 11,
+        }),
+    );
+    s.insert(
+        "process_status_populated".into(),
+        dump(&ProcessStatus {
+            linked_libelf_version: "16132-elf".into(),
+            linked_zlib_version: "16132-zlib".into(),
+            linked_zstd_version: "16132-zstd".into(),
+            last_snapshot_at: Some(stamp),
+            neighbor_replace_applied: Some(true),
+            unzoned_ingress_denied_total: 107,
+            unzoned_egress_denied_total: 211,
+            dynamic_neighbor_keys: vec!["16132-key".into()],
+            wg_tunnels: vec![WgTunnelStatus {
+                tunnel: "st0.1".into(),
+                peers: vec![populated_wg_peer.clone()],
+                ..Default::default()
+            }],
+            per_binding: vec![BindingCountersSnapshot::default()],
+            zone_counter_layout_version: 1,
+            zone_counter_slotted_zone_ids: vec![7],
+            zone_counter_overflow_active: true,
+            zone_traffic_counters: vec![ZoneTrafficCounterStatus::default()],
+            flood_counter_layout_version: 1,
+            flood_counter_slotted_zone_ids: vec![7],
+            flood_counter_overflow_active: true,
+            zone_flood_counters: vec![ZoneFloodCounterStatus::default()],
+            last_resolution: Some(PacketResolution::default()),
+            s5_reinject: Some(populated_s5_status.clone()),
+            learned_route_import_capped: Some(true),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "queue_epoch_snapshot".into(),
+        dump(&QueueEpochSnapshot { queue: 3, epoch: 4 }),
+    );
+    s.insert(
+        "queue_status_populated".into(),
+        dump(&QueueStatus {
+            last_change: Some(stamp),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "route_snapshot_populated".into(),
+        dump(&RouteSnapshot {
+            mtu: 1500,
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "route_table_identity_snapshot".into(),
+        dump(&RouteTableIdentitySnapshot {
+            name: "inet.0".into(),
+            domain: 20,
+            table: 21,
+        }),
+    );
+    s.insert(
+        "s5_reinject_provenance".into(),
+        dump(&S5ReinjectProvenance {
+            request_id: 1,
+            permit_epoch: 2,
+            queue_epoch: 3,
+            queue_number: 4,
+            family: 5,
+            hook: 6,
+            owned_ifindex: 7,
+            owner: "16132-owner".into(),
+            stn: "st0.1".into(),
+            outcome: "16132-outcome".into(),
+            bytes_written: 8,
+            frame_digest: vec![9],
+            reason: 10,
+        }),
+    );
+    s.insert("s5_reinject_status".into(), dump(&populated_s5_status));
+    s.insert(
+        "screen_profile_snapshot_populated".into(),
+        dump(&ScreenProfileSnapshot {
+            alarm_without_drop: true,
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "session_counter_query_request".into(),
+        dump(&SessionCounterQueryRequest {
+            src_ip: "10.0.0.1".into(),
+            dst_ip: "10.0.0.2".into(),
+            src_port: 40001,
+            dst_port: 443,
+            protocol: 6,
+        }),
+    );
+    s.insert(
+        "session_counter_row_wire".into(),
+        dump(&SessionCounterRowWire {
+            worker_id: 1,
+            answered: true,
+            found: true,
+            replica: true,
+            fwd_packets: 2,
+            fwd_bytes: 3,
+            rev_packets: 4,
+            rev_bytes: 5,
+        }),
+    );
+    s.insert(
+        "session_policy_list_request".into(),
+        dump(&SessionPolicyListRequest {
+            policy_ids: vec![11],
+            mode: "16132".into(),
+            before_secs: Some(23),
+            families: vec![2],
+            classes: vec!["16132".into()],
+            continuation: "16132-cont".into(),
+        }),
+    );
+    s.insert("session_policy_match".into(), dump(&populated_policy_match));
+    s.insert(
+        "session_policy_tuple".into(),
+        dump(&SessionPolicyTuple {
+            addr_family: 2,
+            protocol: 6,
+            src_ip: "10.0.0.1".into(),
+            dst_ip: "10.0.0.2".into(),
+            src_port: 40001,
+            dst_port: 443,
+            tunnel_discriminator: 9,
+            routing_domain: 7,
+        }),
+    );
+    s.insert(
+        "session_sync_request_populated".into(),
+        dump(&SessionSyncRequest {
+            policy_matches: Some(vec![populated_policy_match.clone()]),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "three_color_policer_status_populated".into(),
+        dump(&ThreeColorPolicerStatus {
+            family: "inet".into(),
+            filter_name: "16132-filter".into(),
+            term_name: "16132-term".into(),
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "tunnel_endpoint_snapshot_populated".into(),
+        dump(&TunnelEndpointSnapshot {
+            link_up: Some(true),
+            wg_peers: vec![populated_tunnel_wg_peer.clone()],
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "tunnel_wg_peer_snapshot".into(),
+        dump(&populated_tunnel_wg_peer),
+    );
+    s.insert("wg_peer_status".into(), dump(&populated_wg_peer));
+    s.insert(
+        "wg_tunnel_status".into(),
+        dump(&WgTunnelStatus {
+            tunnel: "st0.1".into(),
+            peers: vec![populated_wg_peer.clone()],
+            ..Default::default()
+        }),
+    );
+    s.insert(
+        "ipsec_pmech_inventory_snapshot".into(),
+        dump(&populated_pmech_inventory),
+    );
+    s.insert(
+        "syn_cookie_key_ring_snapshot".into(),
+        dump(&SynCookieKeyRingSnapshot {
+            period_secs: 64,
+            bases: vec![SynCookieKeyBaseSnapshot {
+                base: "16132-base".to_string().into(),
+                accept_only: true,
+            }],
+        }),
+    );
+    s.insert(
+        "syn_cookie_key_base_snapshot".into(),
+        dump(&SynCookieKeyBaseSnapshot {
+            base: "16132-base".to_string().into(),
+            accept_only: true,
+        }),
+    );
+    s.insert(
+        "worker_runtime_status_populated".into(),
+        dump(&WorkerRuntimeStatus {
+            session_volume_high_water: 1,
+            cold_path_layout_version: 2,
+            cold_path_active_slot_ids: vec![3],
+            cold_path_active_zone_from: vec![4],
+            cold_path_active_zone_to: vec![5],
+            cold_path_active_samples: vec![6],
+            cold_path_active_sum_ns: vec![7],
+            cold_path_active_buckets: vec![vec![8]],
+            cold_path_active_builder_collision: vec![true],
+            cold_path_overflow_active: true,
+            cold_path_sample_phase: 9,
+            cold_path_wrapper_underflow_count: 10,
+            cold_path_ns_per_tsc_q32: 11,
+            cold_path_wrapper_ns_baseline: 12,
+            cold_path_clock_source: "16132-clock".into(),
+            cold_path_snapshot_failed: 13,
+            ..Default::default()
+        }),
+    );
     let specimens = Value::Object(s);
 
     let actual =
@@ -4263,4 +4963,556 @@ fn process_status_roundtrips_typed_nat_parse_errors_13283() {
     assert_eq!(decoded.source_nat_parse_errors, 17);
     assert_eq!(decoded.destination_nat_parse_errors, 19);
     assert_eq!(decoded.static_nat_parse_errors, 23);
+}
+
+// #16132: fixture-completeness gate. The golden above proves the fixture
+// matches today's serialization; this gate proves the fixture EXERCISES
+// every serializable field, by censusing the Rust source independently of
+// the specimens:
+//
+//   - every `pub` field of every struct in `src/protocol/*.rs` must have
+//     its wire key present in at least one fixture specimen of that type
+//     (default specimens pin always-emitted keys; the `*_populated`
+//     specimens added for #16132 pin the `skip_serializing_if` keys);
+//   - a field with unconditional `skip_serializing` (the four
+//     deserialize-only secrets) must NEVER appear in the fixture;
+//   - zero-field guards: the census must find a substantial number of
+//     structs/fields and the fixture a substantial number of specimens,
+//     so an empty census cannot greenwash the gate.
+//
+// A rename escapes this gate only together with a fixture regeneration,
+// and that regenerated fixture then fails the Go agreement cell
+// (`TestWireFixtureCompleteness16132`), whose Go tag census is independent
+// of this source census. A width change (e.g. u16->u32) that keeps the key
+// changes no key set; it is caught when the populated specimen value no
+// longer fits the narrower Go field on decode, and by review of the
+// regenerated fixture diff. No manifest is built: per the issue, that is
+// gated on a demonstrated drift escaping BOTH gates above.
+#[test]
+fn wire_fixture_completeness_16132() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // --- Independent directional source census -------------------------
+    // Parse `pub struct` bodies in src/protocol/*.rs (excluding this test
+    // file), modelling serde's EFFECTIVE names in each direction, not just
+    // a shared `rename = "..."`:
+    //   rename = "x"                              -> ser=x, de=x
+    //   rename(serialize="x", deserialize="y")    -> ser=x, de=y (either
+    //                                                side may be absent,
+    //                                                falling back to the
+    //                                                shared/field name)
+    //   container rename_all / rename_all(ser,de) -> case rule applied to
+    //                                                every field without an
+    //                                                explicit rename
+    //   alias = "a" (field or deserialize-alias)  -> extra ACCEPTED de name;
+    //                                                never an emitted ser name
+    // `skip_serializing` is direction-specific too: skip_serializing /
+    // skip_serializing_if remove the ser name; skip_deserializing removes
+    // the de name; `skip` removes both; unconditional `skip_serializing`
+    // marks a deserialize-only secret (checked absent from the fixture).
+    // Container attributes are read from the attribute block immediately
+    // preceding each struct; flatten/transparent/custom (de)serialize_with
+    // on a field, if ever added, PANICS here rather than being modelled
+    // wrong — extend the census deliberately instead of greening past it.
+    fn quoted_values(attrs: &str, key: &str) -> Vec<String> {
+        // All `key = "..."` occurrences (rename appears at most once per
+        // direction in valid serde; aliases may repeat).
+        let mut out = Vec::new();
+        let needle = format!("{key} = \"");
+        let mut rest = attrs;
+        while let Some(pos) = rest.find(&needle) {
+            let tail = &rest[pos + needle.len()..];
+            // Reject keys that are a suffix of a longer key (e.g. the
+            // `rename` inside `rename_all` has ` = "` never following it
+            // as `rename = "`, so this is exact for our attribute shapes;
+            // also require a non-identifier boundary before the key).
+            let boundary_ok = pos == 0
+                || !rest[..pos]
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if boundary_ok {
+                if let Some(end) = tail.find('"') {
+                    out.push(tail[..end].to_string());
+                }
+            }
+            rest = &rest[pos + needle.len()..];
+        }
+        out
+    }
+    fn first_quoted(attrs: &str, key: &str) -> Option<String> {
+        quoted_values(attrs, key).into_iter().next()
+    }
+    fn directional_names(
+        attrs: &str,
+        key: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        // (shared, serialize, deserialize) for `key`, where a plain
+        // `key = "x"` is shared and `key(serialize=.., deserialize=..)`
+        // carries the two directional forms.
+        let mut shared = first_quoted(attrs, key);
+        let mut ser = None;
+        let mut de = None;
+        if let Some(pos) = attrs.find(&format!("{key}(")) {
+            // Scan only inside this parenthesised group.
+            let group_start = pos + key.len() + 1;
+            let mut depth = 0usize;
+            let mut group_end = attrs.len();
+            for (off, ch) in attrs[group_start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        if depth == 0 {
+                            group_end = group_start + off;
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            let group = &attrs[group_start..group_end];
+            ser = first_quoted(group, "serialize");
+            de = first_quoted(group, "deserialize");
+            if shared.is_none() {
+                // `rename("x", serialize=..)` positional-shared form is
+                // not valid serde for fields; nothing to recover here.
+                shared = None;
+            }
+        }
+        let _ = &shared;
+        (shared, ser, de)
+    }
+    fn apply_rename_all(rule: &str, field: &str) -> String {
+        // Mirror serde_derive's RenameRule::apply_to_field exactly.
+        match rule {
+            "lowercase" | "snake_case" => field.to_string(),
+            "UPPERCASE" | "SCREAMING_SNAKE_CASE" => field.to_ascii_uppercase(),
+            "PascalCase" => {
+                let mut out = String::new();
+                let mut cap = true;
+                for ch in field.chars() {
+                    if ch == '_' {
+                        cap = true;
+                    } else if cap {
+                        out.push(ch.to_ascii_uppercase());
+                        cap = false;
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                out
+            }
+            "camelCase" => {
+                let pascal = apply_rename_all("PascalCase", field);
+                let mut chars = pascal.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
+                    None => pascal,
+                }
+            }
+            "kebab-case" => field.replace('_', "-"),
+            "SCREAMING-KEBAB-CASE" => field.to_ascii_uppercase().replace('_', "-"),
+            other => panic!(
+                "wire census: unknown rename_all rule {other:?} — extend apply_rename_all deliberately"
+            ),
+        }
+    }
+    struct CensusField {
+        ser: Option<String>,
+        de: Option<String>,
+        aliases: Vec<String>,
+        secret: bool,
+    }
+    let proto_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("protocol");
+    let mut census: BTreeMap<String, Vec<CensusField>> = BTreeMap::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&proto_dir)
+        .expect("read protocol dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+        .filter(|e| e.file_name() != "tests.rs")
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    assert!(!entries.is_empty(), "census found no protocol sources");
+    for entry in entries {
+        let text = std::fs::read_to_string(entry.path()).expect("read protocol source");
+        let bytes = text.as_bytes();
+        let mut i = 0usize;
+        while i < text.len() {
+            let Some(pos) = text[i..].find("struct ") else {
+                break;
+            };
+            let start = i + pos;
+            let after = &text[start + 7..];
+            let name_end = after
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            let name = &after[..name_end];
+            let Some(brace_rel) = text[start..].find('{') else {
+                i = start + 7;
+                continue;
+            };
+            let brace = start + brace_rel;
+            if text[start..brace].contains('(') || text[start..brace].contains(';') {
+                i = brace + 1;
+                continue;
+            }
+            let mut depth = 0usize;
+            let mut j = brace;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            let body = text[brace + 1..j].to_string();
+            // Container attributes: the `#[...]` block(s) directly before
+            // `struct` (skipping doc comments / derives in between are all
+            // inside those brackets, so take text from the last `#[`
+            // run start). We scan backwards over consecutive `#[...]`.
+            let pre = &text[..start];
+            let container_attrs = {
+                let mut end = pre.len();
+                loop {
+                    let trimmed = pre[..end].trim_end();
+                    if !trimmed.ends_with(']') {
+                        break;
+                    }
+                    // Find the matching `#[` for this trailing `]`.
+                    let mut d = 0usize;
+                    let mut k = trimmed.len();
+                    let mut open = None;
+                    while k > 0 {
+                        k -= 1;
+                        match trimmed.as_bytes()[k] {
+                            b']' => d += 1,
+                            b'[' => {
+                                d -= 1;
+                                if d == 0 {
+                                    open = Some(k);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let Some(open) = open else { break };
+                    if open == 0 || trimmed.as_bytes()[open - 1] != b'#' {
+                        break;
+                    }
+                    end = open - 1;
+                }
+                pre[end..].to_string()
+            };
+            if container_attrs.contains("transparent") {
+                // serde(transparent) newtypes have no field-name wire of
+                // their own; their inner value is the wire. Nothing to
+                // census (SynCookieMasterKeyHex rides a plain String).
+                i = j + 1;
+                continue;
+            }
+            assert!(
+                !container_attrs.contains("flatten"),
+                "wire census: container flatten on {name} is not modelled — extend the census deliberately"
+            );
+            let (ca_shared, ca_ser_rule, ca_de_rule) = {
+                let (shared, ser, de) = directional_names(&container_attrs, "rename_all");
+                (shared, ser, de)
+            };
+            let mut fields: Vec<CensusField> = Vec::new();
+            let mut pending_attrs = String::new();
+            let mut rest = body.as_str();
+            loop {
+                let Some(pub_pos) = rest.find("pub") else {
+                    break;
+                };
+                pending_attrs.push_str(&rest[..pub_pos]);
+                let after_pub_full = &rest[pub_pos + 3..];
+                let after_pub = after_pub_full
+                    .strip_prefix("(crate)")
+                    .unwrap_or(after_pub_full);
+                let Some(colon) = after_pub.find(':') else {
+                    break;
+                };
+                let field_name = after_pub[..colon].trim();
+                let valid = !field_name.is_empty()
+                    && field_name.chars().all(|c| c.is_alphanumeric() || c == '_');
+                if valid {
+                    // Custom (de)serializers change the VALUE shape,
+                    // not the field NAME, so name census stays sound
+                    // for them (e.g. null_tolerant_vec on
+                    // NAT64RuleSnapshot.pool_addresses and in
+                    // security.rs). Flatten is different — it splices
+                    // another struct's names in — and custom containers
+                    // likewise; fail loudly rather than model either
+                    // wrong. `with =` is allowed only in its known
+                    // null-tolerant/present-ring value forms.
+                    assert!(
+                        !pending_attrs.contains("flatten"),
+                        "wire census: field {name}.{field_name} uses flatten — extend the census deliberately instead of modelling it wrong"
+                    );
+                    if pending_attrs.contains("serialize_with")
+                        || pending_attrs.contains("deserialize_with")
+                        || pending_attrs.contains("with =")
+                    {
+                        assert!(
+                            pending_attrs.contains("null_tolerant_vec")
+                                || pending_attrs.contains("deserialize_present_key_ring"),
+                            "wire census: field {name}.{field_name} uses an unmodelled custom (de)serializer — extend the census deliberately"
+                        );
+                    }
+                    let (shared, ser_d, de_d) = directional_names(&pending_attrs, "rename");
+                    let rule_ser = ca_ser_rule.clone().or(ca_shared.clone());
+                    let rule_de = ca_de_rule.clone().or(ca_shared.clone());
+                    let base_ser = rule_ser.as_deref().map(|r| apply_rename_all(r, field_name));
+                    let base_de = rule_de.as_deref().map(|r| apply_rename_all(r, field_name));
+                    let ser_name = ser_d
+                        .clone()
+                        .or(shared.clone())
+                        .or(base_ser)
+                        .unwrap_or_else(|| field_name.to_string());
+                    let de_name = de_d
+                        .clone()
+                        .or(shared.clone())
+                        .or(base_de)
+                        .unwrap_or_else(|| field_name.to_string());
+                    let mut aliases = quoted_values(&pending_attrs, "alias");
+                    aliases.sort();
+                    aliases.dedup();
+                    let skip_both = pending_attrs.contains("skip = true")
+                        || pending_attrs.contains("skip,")
+                        || pending_attrs.contains("skip)");
+                    let skip_ser = skip_both
+                        || (pending_attrs.contains("skip_serializing")
+                            && !pending_attrs.contains("skip_deserializing"));
+                    let skip_de = skip_both || pending_attrs.contains("skip_deserializing");
+                    // Unconditional (not *_if) skip_serializing is the
+                    // deserialize-only-secret marker.
+                    let secret = pending_attrs.contains("skip_serializing")
+                        && !pending_attrs.contains("skip_serializing_if")
+                        && !pending_attrs.contains("skip_deserializing");
+                    fields.push(CensusField {
+                        ser: if skip_ser { None } else { Some(ser_name) },
+                        de: if skip_de { None } else { Some(de_name) },
+                        aliases,
+                        secret,
+                    });
+                }
+                pending_attrs.clear();
+                rest = &after_pub[colon + 1..];
+            }
+            if !fields.is_empty() {
+                census.insert(name.to_string(), fields);
+            }
+            i = j + 1;
+        }
+    }
+    let total_fields: usize = census.values().map(|v| v.len()).sum();
+    // --- Fixture specimens, grouped by Rust type ------------------------
+    let fixture_path = proto_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+        .join("fixtures")
+        .join("protocol_wire_v1.json");
+    let fixture_raw = std::fs::read_to_string(&fixture_path).unwrap_or_else(|e| {
+        panic!(
+            "wire fixture missing at {}: {e} (no skip-on-missing)",
+            fixture_path.display()
+        )
+    });
+    let fixture: serde_json::Value = serde_json::from_str(&fixture_raw).expect("fixture parses");
+    let specimens = fixture.as_object().expect("fixture is an object");
+    assert!(
+        specimens.len() >= 100,
+        "fixture has only {} specimens — gate would be vacuous",
+        specimens.len()
+    );
+
+    fn snake_case(name: &str) -> String {
+        // Conventional snake_case: CoS -> cos, NAT64 -> nat64,
+        // DSCP -> dscp (an acronym run is one word, not d_s_c_p).
+        // Explicit acronym spellings used by the fixture keys; the
+        // generic rule below cannot recover `CoS`->`cos` or
+        // `DSCP`->`dscp` boundaries on its own.
+        let expanded = name
+            .replace("CoS", "Cos")
+            .replace("DSCP", "Dscp")
+            .replace("IEEE", "Ieee")
+            .replace("INet", "Inet")
+            .replace("NAT64", "Nat64")
+            .replace("HA", "Ha")
+            .replace("NAT", "Nat")
+            .replace("PMech", "Pmech");
+        let chars: Vec<char> = expanded.chars().collect();
+        let mut out = String::new();
+        for (idx, ch) in chars.iter().enumerate() {
+            if ch.is_uppercase() {
+                if idx > 0 {
+                    out.push('_');
+                }
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push(*ch);
+            }
+        }
+        out
+    }
+    // Specimen keys for a type: its snake_case name, the cos_/nat_
+    // prefixed spellings, and any `*_populated` / suffixed variants.
+    let mut keys_by_type: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for type_name in census.keys() {
+        let snake = snake_case(type_name);
+        let mut keys = BTreeSet::new();
+        for key in specimens.keys() {
+            let base = key
+                .strip_suffix("_populated")
+                .or_else(|| key.strip_suffix("_weighted"))
+                .or_else(|| key.strip_suffix("_linked_lib_versions"))
+                .or_else(|| key.strip_suffix("_unzoned_policy_denials"))
+                .unwrap_or(key);
+            if base == snake || *key == snake {
+                keys.insert(key.clone());
+            }
+        }
+        keys_by_type.insert(type_name.clone(), keys);
+    }
+
+    // Collect every key appearing anywhere in the fixture (for secrets).
+    fn collect_keys(v: &serde_json::Value, out: &mut BTreeSet<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, child) in m {
+                    out.insert(k.clone());
+                    collect_keys(child, out);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for child in a {
+                    collect_keys(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut all_keys = BTreeSet::new();
+    collect_keys(&fixture, &mut all_keys);
+    for secret in [
+        "syn_cookie_master_key",
+        "syn_cookie_key_ring",
+        "wg_local_privkey_hex",
+        "wg_preshared_key_hex",
+    ] {
+        assert!(
+            !all_keys.contains(secret),
+            "secret wire key {secret} present in fixture — deserialize-only field leaked"
+        );
+    }
+
+    // Directional deserialize names that intentionally differ from the
+    // serialize name, with the Go spelling they must keep accepting.
+    // Currently empty: no protocol field uses a directional rename. Any
+    // future one must be recorded here AND mirrored in the Go gate, or
+    // this census fails — that is what closes the review witness where
+    // rename(deserialize="peer_endpoint_typo") greened both fixture gates
+    // while silently breaking Go->Rust decode of `peer_endpoint`.
+    const DIRECTIONAL_DE_EXCEPTIONS: &[(&str, &str, &str)] = &[];
+    // Accepted deserialize aliases (never emitted). Currently the single
+    // legacy spelling in snapshot.rs; a new alias must be recorded here.
+    const KNOWN_DE_ALIASES: &[(&str, &str)] = &[("InterfaceSnapshot", "cos_shaping_rate_bps")];
+
+    // Every struct must have a specimen, and every non-secret field's
+    // serialize wire key must appear in at least one specimen OF THAT TYPE.
+    let mut failures: Vec<String> = Vec::new();
+    for (type_name, fields) in &census {
+        let keys = &keys_by_type[type_name];
+        if keys.is_empty() {
+            failures.push(format!("{type_name}: no fixture specimen"));
+            continue;
+        }
+        let mut present = BTreeSet::new();
+        for key in keys {
+            if let Some(obj) = specimens[key].as_object() {
+                for k in obj.keys() {
+                    present.insert(k.clone());
+                }
+            }
+        }
+        for field in fields {
+            if field.secret {
+                if let Some(wire) = &field.ser {
+                    if present.contains(wire) {
+                        failures.push(format!(
+                            "{type_name}.{wire}: deserialize-only secret present in specimen"
+                        ));
+                    }
+                }
+                // A secret's deserialize name is real wire (Go->Rust):
+                // it is censused on the Go side, not in this fixture.
+                continue;
+            }
+            // Serialize direction: the specimen is serialized output, so
+            // the SERIALIZE name must be exercised by it. A directional
+            // rename(serialize=..) drift changes this name and reds here
+            // (and in the golden) even though decode stays green.
+            if let Some(wire) = &field.ser {
+                if !present.contains(wire) {
+                    failures.push(format!(
+                        "{type_name}.{wire}: serialize wire key absent from all specimens of this type"
+                    ));
+                }
+            }
+            // Deserialize direction: serde accepts the deserialize name
+            // (plus any alias). That name is NOT required in serialized
+            // specimens — requiring it would false-red every legitimate
+            // directional rename — so it is recorded for the Go-side
+            // census comparison in the test comment contract below: the
+            // Go gate's tag census is the live decode oracle, and a
+            // deserialize-only rename (the review witness:
+            // rename(deserialize="peer_endpoint_typo")) leaves the
+            // fixture byte-identical while Rust stops accepting the Go
+            // spelling. It is caught here by construction check: a field
+            // whose deserialize name differs from its serialize name
+            // must be listed in DIRECTIONAL_DE_EXCEPTIONS with its Go
+            // spelling, otherwise this gate fails — see below.
+            if let (Some(ser), Some(de)) = (&field.ser, &field.de) {
+                if ser != de
+                    && !DIRECTIONAL_DE_EXCEPTIONS
+                        .iter()
+                        .any(|(ty, s, d)| *ty == type_name && s == ser && d == de)
+                {
+                    failures.push(format!(
+                        "{type_name}: directional rename serialize={ser:?} deserialize={de:?} is not in DIRECTIONAL_DE_EXCEPTIONS — a deserialize-only drift would leave the fixture green while breaking Go->Rust decode; if intentional, record the Go spelling there and in the Go gate"
+                    ));
+                }
+            }
+            for alias in &field.aliases {
+                if !KNOWN_DE_ALIASES
+                    .iter()
+                    .any(|(ty, a)| *ty == type_name && a == alias)
+                {
+                    failures.push(format!(
+                        "{type_name}: deserialize alias {alias:?} is not in KNOWN_DE_ALIASES — aliases widen decode without appearing in any specimen; record intentional ones there"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "wire fixture completeness failures ({}):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
