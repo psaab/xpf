@@ -432,7 +432,7 @@ assert_helper_value 321 ha_sync_stats_value "${STATISTICS_RENDERED}" 'Session cr
 assert_helper_value 321 ha_sync_stats_value "${STATISTICS_RENDERED}" 'Session create' received
 assert_helper_value 0 ha_status_summary_value "${STATISTICS_RENDERED}" 'Session delta pending'
 assert_helper_value 5 ha_status_summary_value "${STATISTICS_RENDERED}" 'Session delta drained'
-assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${STATISTICS_RENDERED}" "${STATISTICS_RENDERED}"
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${STATISTICS_RENDERED}" "${STATISTICS_RENDERED}" 321 321
 assert_helper_value 18 ha_status_summary_value "${STATISTICS_RENDERED}" 'Session misses'
 assert_helper_value 9000 ha_interface_packets_value "${INTERFACES_RENDERED}" 'ge-[0-9]+-0-1' rx
 assert_helper_value 2600 ha_interface_packets_value "${INTERFACES_RENDERED}" 'ge-[0-9]+-0-2' tx
@@ -461,7 +461,7 @@ assert_helper_value 19 ha_status_summary_value "${SYNC_TARGET}" 'Session delta d
 assert_helper_status 2 ha_status_summary_value "${SYNC_TARGET}" 'Missing label'
 assert_helper_value 5 ha_sync_stats_value "${SYNC_SOURCE}" 'Session create' sent
 assert_helper_value 5 ha_sync_stats_value "${SYNC_TARGET}" 'Session create' received
-assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}"
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 5 5
 
 SYNC_REVERSE_SOURCE="${TMP_DIR}/sync-reverse-source.txt"
 SYNC_REVERSE_TARGET="${TMP_DIR}/sync-reverse-target.txt"
@@ -479,7 +479,7 @@ Session create 7 7
 Session delta pending: 0
 Session delta drained: 0
 EOF
-assert_helper_status 0 ha_session_sync_idle_sample fw1 fw0 "${SYNC_REVERSE_SOURCE}" "${SYNC_REVERSE_TARGET}"
+assert_helper_status 0 ha_session_sync_idle_sample fw1 fw0 "${SYNC_REVERSE_SOURCE}" "${SYNC_REVERSE_TARGET}" 7 7
 SYNC_NOT_IDLE="${TMP_DIR}/sync-not-idle.txt"
 cat >"${SYNC_NOT_IDLE}" <<'EOF'
 Services Synchronized:
@@ -488,7 +488,7 @@ Session create 4 5
 Session delta pending: 1
 Session delta drained: 0
 EOF
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_NOT_IDLE}"
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_NOT_IDLE}" 5 5
 SYNC_MISSING_DRAINED="${TMP_DIR}/sync-missing-drained.txt"
 cat >"${SYNC_MISSING_DRAINED}" <<'EOF'
 Services Synchronized:
@@ -496,7 +496,77 @@ Session create 5 5
 
 Session delta pending: 0
 EOF
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}"
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" 5 5
+
+# #16289: offset baselines. The tcp-cluster failure was source sent=15 vs
+# target received=174 (delta 159 from a previous counting epoch) with
+# pending=0: absolute equality can never hold, yet sync is caught up.
+# Baseline-relative idle must judge the pair idle when nothing sent since
+# the baseline is unreceived, and never idle while sends go unreceived.
+SYNC_OFFSET_SOURCE="${TMP_DIR}/sync-offset-source.txt"
+SYNC_OFFSET_TARGET="${TMP_DIR}/sync-offset-target.txt"
+cat >"${SYNC_OFFSET_SOURCE}" <<'EOF'
+Services Synchronized:
+Session create 15 0
+
+Session delta pending: 0
+Session delta drained: 12
+EOF
+cat >"${SYNC_OFFSET_TARGET}" <<'EOF'
+Services Synchronized:
+Session create 0 174
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+# First sample only establishes the baseline: never idle by itself.
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" '' ''
+# Static offset pair (the cell3.log evidence shape) is idle vs baseline.
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174
+# Lockstep advance since baseline (15->74, 174->233) stays idle.
+SYNC_OFFSET_SOURCE_LATE="${TMP_DIR}/sync-offset-source-late.txt"
+SYNC_OFFSET_TARGET_LATE="${TMP_DIR}/sync-offset-target-late.txt"
+cat >"${SYNC_OFFSET_SOURCE_LATE}" <<'EOF'
+Services Synchronized:
+Session create 74 0
+
+Session delta pending: 0
+Session delta drained: 12
+EOF
+cat >"${SYNC_OFFSET_TARGET_LATE}" <<'EOF'
+Services Synchronized:
+Session create 0 233
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE_LATE}" "${SYNC_OFFSET_TARGET_LATE}" 15 174
+# Received stalls while sent grows since baseline: not idle.
+SYNC_OFFSET_TARGET_STALLED="${TMP_DIR}/sync-offset-target-stalled.txt"
+cat >"${SYNC_OFFSET_TARGET_STALLED}" <<'EOF'
+Services Synchronized:
+Session create 0 174
+
+Session delta pending: 0
+Session delta drained: 19
+EOF
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE_LATE}" "${SYNC_OFFSET_TARGET_STALLED}" 15 174
+# Offset pair with pending nonzero: not idle even with equal deltas.
+SYNC_OFFSET_TARGET_PENDING="${TMP_DIR}/sync-offset-target-pending.txt"
+cat >"${SYNC_OFFSET_TARGET_PENDING}" <<'EOF'
+Services Synchronized:
+Session create 0 174
+
+Session delta pending: 3
+Session delta drained: 19
+EOF
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET_PENDING}" 15 174
+# Counter rewind since baseline (daemon restart): not idle, re-baseline.
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 15 174
+# Malformed / half-empty baselines are VOID, and the old 4-arg shape is gone.
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" malformed 174
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 ''
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}"
 
 assert_helper_value 5 ha_nondecreasing_delta 10 15
 assert_helper_status 2 ha_nondecreasing_delta 15 10

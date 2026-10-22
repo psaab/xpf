@@ -403,6 +403,7 @@ wait_for_session_sync_idle() {
 	source_node="$(node_name "$SOURCE_NODE")"
 	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
+	local baseline_sent="" baseline_received=""
 	while (( tries > 0 )); do
 		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
 		capture_sync_snapshot "$TARGET_VM" "${label}-target"
@@ -410,7 +411,7 @@ wait_for_session_sync_idle() {
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
 		local sample_status sample_diagnostic
-		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" 2>&1)"; then
+		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" 2>&1)"; then
 			sample_status=0
 		else
 			sample_status=$?
@@ -432,6 +433,10 @@ wait_for_session_sync_idle() {
 			fi
 		else
 			stable=0
+			# #16289: (re-)baseline on every non-idle sample (first
+			# sample, lag, or counter rewind after a restart).
+			baseline_sent="$source_sent"
+			baseline_received="$target_recv"
 		fi
 		prev_source_sent="$source_sent"
 		prev_target_recv="$target_recv"
