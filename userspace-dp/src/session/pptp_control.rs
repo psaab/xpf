@@ -39,6 +39,7 @@
 
 use std::net::IpAddr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A TCP/1723 segment copied off the hot path, waiting to be parsed (#7699).
 ///
@@ -80,6 +81,20 @@ pub(crate) const PENDING_CONTROL_CAPACITY: usize = 64;
 /// data forwards unassociated.
 pub(crate) const CONTROL_DRAIN_INTERVAL_NS: u64 = 1_000_000_000;
 
+/// #16240: lock-free last-drain mirror. Each `take_*` first loads the
+/// matching atomic; inside the interval it returns without touching the
+/// inbox mutex (4 acquisitions/worker/tick -> one atomic load each). The
+/// in-lock timestamp stays authoritative: the mirror is only ever written
+/// while holding the lock, at the same instant the guarded timestamp is
+/// set (take_*) or hypothetically cleared (mark_*_sent), so a stale
+/// mirror can only cause a spurious lock acquisition, never a skipped
+/// due drain. If a future change clears/resets a guarded timestamp
+/// under the lock, it MUST store the same value to the mirror there.
+fn gate_closed(mirror: &AtomicU64, now_ns: u64) -> bool {
+    let last = mirror.load(Ordering::Relaxed);
+    last != 0 && now_ns.saturating_sub(last) < CONTROL_DRAIN_INTERVAL_NS
+}
+
 /// The hand-off from the data path to the periodic control-channel work.
 ///
 /// Shared across the workers of a dataplane, like `dynamic_neighbors`, and
@@ -88,9 +103,45 @@ pub(crate) const CONTROL_DRAIN_INTERVAL_NS: u64 = 1_000_000_000;
 /// ONE drain enough — whichever worker drains installs the association in its
 /// own table and broadcasts it to the rest, so a per-worker inbox would only
 /// buy N duplicate parses of the same segment.
-#[derive(Default)]
 pub(crate) struct PptpControlInbox {
     inner: Mutex<InboxInner>,
+    last_drain_atomic: AtomicU64,
+    last_forget_retry_atomic: AtomicU64,
+    last_call_forget_retry_atomic: AtomicU64,
+    last_call_install_retry_atomic: AtomicU64,
+    /// Test-only proof that the lock-free pre-check short-circuits (#16240).
+    #[cfg(test)]
+    lock_acquisitions: AtomicU64,
+}
+
+impl Default for PptpControlInbox {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            last_drain_atomic: AtomicU64::new(0),
+            last_forget_retry_atomic: AtomicU64::new(0),
+            last_call_forget_retry_atomic: AtomicU64::new(0),
+            last_call_install_retry_atomic: AtomicU64::new(0),
+            #[cfg(test)]
+            lock_acquisitions: AtomicU64::new(0),
+        }
+    }
+}
+
+impl PptpControlInbox {
+    #[cfg(test)]
+    fn lock_acquisition_count(&self) -> u64 {
+        self.lock_acquisitions.load(Ordering::Relaxed)
+    }
+
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, InboxInner> {
+        #[cfg(test)]
+        self.lock_acquisitions.fetch_add(1, Ordering::Relaxed);
+        match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -194,16 +245,17 @@ impl PptpControlInbox {
     }
 
     pub(crate) fn take_pending_in_domain(&self, now_ns: u64, current_epoch: u64) -> Vec<(u32, PendingControlSegment)> {
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        if gate_closed(&self.last_drain_atomic, now_ns) {
+            return Vec::new();
+        }
+        let mut inner = self.lock_inner();
         if inner.last_drain_ns != 0
             && now_ns.saturating_sub(inner.last_drain_ns) < CONTROL_DRAIN_INTERVAL_NS
         {
             return Vec::new();
         }
         inner.last_drain_ns = now_ns;
+        self.last_drain_atomic.store(now_ns, Ordering::Relaxed);
         // When the draining view is enabled, only entries stamped with
         // that view's exact epoch are eligible: strictly older entries
         // predate a disable/re-enable, and newer entries were captured
@@ -441,32 +493,34 @@ impl PptpControlInbox {
     /// Take a snapshot of due close retries. Queue locks are acquired only
     /// after this inbox lock has been released.
     pub(crate) fn take_channel_forget_retries(&self, now_ns: u64) -> Vec<PendingChannelForget> {
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        if gate_closed(&self.last_forget_retry_atomic, now_ns) {
+            return Vec::new();
+        }
+        let mut inner = self.lock_inner();
         if inner.last_forget_retry_ns != 0
             && now_ns.saturating_sub(inner.last_forget_retry_ns) < CONTROL_DRAIN_INTERVAL_NS
         {
             return Vec::new();
         }
         inner.last_forget_retry_ns = now_ns;
+        self.last_forget_retry_atomic.store(now_ns, Ordering::Relaxed);
         inner.pending_forgets.clone()
     }
 
     /// Take due CDN retries without holding the inbox lock while workers are
     /// queued.
     pub(crate) fn take_call_forget_retries(&self, now_ns: u64) -> Vec<PendingCallForget> {
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        if gate_closed(&self.last_call_forget_retry_atomic, now_ns) {
+            return Vec::new();
+        }
+        let mut inner = self.lock_inner();
         if inner.last_call_forget_retry_ns != 0
             && now_ns.saturating_sub(inner.last_call_forget_retry_ns) < CONTROL_DRAIN_INTERVAL_NS
         {
             return Vec::new();
         }
         inner.last_call_forget_retry_ns = now_ns;
+        self.last_call_forget_retry_atomic.store(now_ns, Ordering::Relaxed);
         inner.pending_call_forgets.clone()
     }
 
@@ -474,16 +528,17 @@ impl PptpControlInbox {
     /// are queued.
     pub(crate) fn take_call_install_retries(&self, now_ns: u64) -> Vec<PendingCallInstall> { self.take_call_install_retries_at(now_ns, 0) }
     pub(crate) fn take_call_install_retries_at(&self, now_ns: u64, current_epoch: u64) -> Vec<PendingCallInstall> {
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        if gate_closed(&self.last_call_install_retry_atomic, now_ns) {
+            return Vec::new();
+        }
+        let mut inner = self.lock_inner();
         if inner.last_call_install_retry_ns != 0
             && now_ns.saturating_sub(inner.last_call_install_retry_ns) < CONTROL_DRAIN_INTERVAL_NS
         {
             return Vec::new();
         }
         inner.last_call_install_retry_ns = now_ns;
+        self.last_call_install_retry_atomic.store(now_ns, Ordering::Relaxed);
         inner
             .pending_call_installs
             .iter()
@@ -1252,5 +1307,78 @@ mod tests_generation_regression {
         // Old candidate-epoch entries (5) under recovery (6) still drop.
         assert!(inbox.push(seg(5, 2, 2)));
         assert_eq!(inbox.take_pending_in_domain(2_000_000_000, 6).len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod lockfree_gate_tests_16240 {
+    use super::*;
+    use crate::session::pptp::{ControlChannelId, PptpCall, PptpCallDisconnect};
+
+    fn seg(b: u8) -> PendingControlSegment {
+        PendingControlSegment { epoch: 0, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: PPTP_CONTROL_PORT, dst_port: 49152, captured_ns: 0, payload: vec![b; 8] }
+    }
+
+    fn channel() -> ControlChannelId {
+        ControlChannelId::new("198.51.100.7".parse().unwrap(), 49152, "203.0.113.9".parse().unwrap(), 1723)
+    }
+
+    /// #16240: inside the 1s interval all four take_* return empty WITHOUT
+    /// acquiring the inbox mutex; at/after the interval they drain exactly
+    /// as before. RED ON REVERT: remove any take_*'s atomic pre-check and
+    /// that take_* increments the lock counter on the gated call; remove
+    /// the in-lock gate/mirror store and the boundary assertions fail.
+    #[test]
+    fn gated_take_star_do_not_lock_and_drain_at_interval_16240() {
+        const Q: usize = 7;
+        const T0: u64 = 1_000_000_000;
+        let inbox = PptpControlInbox::default();
+        let control = channel();
+        let call = PptpCall::new("198.51.100.7".parse().unwrap(), 0x1111, "203.0.113.9".parse().unwrap(), 0x2222);
+        assert!(inbox.push(seg(1)));
+        inbox.record_channel_forget(control, 10, vec![Q]);
+        inbox.record_call_forget(PptpCallDisconnect { allocator: "198.51.100.7".parse().unwrap(), call_id: 0x1111, control, disconnected_ns: 10 }, vec![Q]);
+        inbox.record_call_install(call, control, 10, vec![Q]);
+        // First (due) drains: each take_* locks once and hands work out.
+        assert_eq!(inbox.take_pending_in_domain(T0, 0).len(), 1);
+        assert_eq!(inbox.take_channel_forget_retries(T0).len(), 1);
+        assert_eq!(inbox.take_call_forget_retries(T0).len(), 1);
+        assert_eq!(inbox.take_call_install_retries_at(T0, 0).len(), 1);
+        assert!(inbox.push(seg(2)));
+        let locks_after_due = inbox.lock_acquisition_count();
+        // Inside the interval: gated, empty, and NO new lock acquisition.
+        let gated_at = T0 + CONTROL_DRAIN_INTERVAL_NS - 1;
+        assert!(inbox.take_pending_in_domain(gated_at, 0).is_empty());
+        assert!(inbox.take_channel_forget_retries(gated_at).is_empty());
+        assert!(inbox.take_call_forget_retries(gated_at).is_empty());
+        assert!(inbox.take_call_install_retries_at(gated_at, 0).is_empty());
+        assert_eq!(inbox.lock_acquisition_count(), locks_after_due, "a gated take_* acquired the inbox mutex — the #16240 lock-free pre-check is missing or bypassed for that take_*");
+        // At the interval boundary the in-lock gate is authoritative and
+        // the drain timing is unchanged.
+        let due_at = T0 + CONTROL_DRAIN_INTERVAL_NS;
+        assert_eq!(inbox.take_pending_in_domain(due_at, 0).len(), 1, "segment buffered during the gated window must drain at the interval boundary");
+        assert_eq!(inbox.take_channel_forget_retries(due_at).len(), 1);
+        assert_eq!(inbox.take_call_forget_retries(due_at).len(), 1);
+        assert_eq!(inbox.take_call_install_retries_at(due_at, 0).len(), 1);
+        assert!(inbox.lock_acquisition_count() > locks_after_due, "due drains must still take the lock (in-lock gate authoritative)");
+    }
+
+    /// #16240: mark_*_sent acks must not disturb the gate — after a due
+    /// retry drain, gated calls stay lock-free until the next interval,
+    /// and an acked retry is not redelivered at the next due drain.
+    #[test]
+    fn mark_sent_keeps_gate_until_next_interval_16240() {
+        const Q: usize = 9;
+        const T0: u64 = 1_000_000_000;
+        let inbox = PptpControlInbox::default();
+        let control = channel();
+        let call = PptpCall::new("198.51.100.7".parse().unwrap(), 0x1111, "203.0.113.9".parse().unwrap(), 0x2222);
+        inbox.record_call_install(call, control, 10, vec![Q]);
+        assert_eq!(inbox.take_call_install_retries_at(T0, 0).len(), 1);
+        inbox.mark_call_install_sent(call, control, 10, Q);
+        let locks = inbox.lock_acquisition_count();
+        assert!(inbox.take_call_install_retries_at(T0 + 1, 0).is_empty());
+        assert_eq!(inbox.lock_acquisition_count(), locks, "gated install retry after mark_*_sent acquired the mutex");
+        assert!(inbox.take_call_install_retries_at(T0 + CONTROL_DRAIN_INTERVAL_NS, 0).is_empty(), "acked install retry must not be redelivered at the next due drain");
     }
 }
