@@ -295,12 +295,55 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 	return true
 }
 
+// republishConnectedRG synchronously rebuilds connected prefixes
+// from the provider's current verdict and bumps the FIB generation
+// (#16270, option a). It runs the same routes-only publisher the
+// async path uses, inline, so an activation sequence can order it
+// BEFORE the RG reports forwarding-active: once SetRGActive lands,
+// the helper FIB already holds the /24 transit row and no arriving
+// retransmit can reach the pref-200 cluster-terminal and demote to
+// DiscardRoute. Returns true when the FIB moved (published or a
+// pending bump landed). The caller owns applySem.
+func (d *Daemon) republishConnectedRG(reason string) bool {
+	if d == nil || d.store == nil || d.isResetting() {
+		return false
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return false
+	}
+	pub, ok := d.dataplane().(routeOverlayPublisher)
+	if !ok {
+		return false
+	}
+	schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
+	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
+	if err != nil {
+		slog.Warn("HA connected-route republish failed; next ownership edge or commit retries",
+			"reason", reason, "err", err)
+		return false
+	}
+	if !published && !d.pendingFIBBump {
+		return true
+	}
+	if _, err := pub.BumpFIBGeneration(); err != nil {
+		d.pendingFIBBump = true
+		slog.Warn("HA connected-route FIB bump unconfirmed; route listener retry remains armed",
+			"reason", reason, "err", err)
+		return false
+	}
+	d.pendingFIBBump = false
+	return true
+}
+
 // scheduleConnectedRGRepublish refreshes helper routes after an RG
-// ownership edge (#15742). A nonblocking goroutine takes applySem, then the
-// existing routes-only publisher rebuilds connected prefixes from the
+// ownership edge (#15742). A nonblocking goroutine takes applySem, then
+// the existing routes-only publisher rebuilds connected prefixes from the
 // provider's current verdict and duplicate-skips if ownership did not move
 // the effective route set. It deliberately mirrors scheduleFRRHAReconcile:
-// event handlers do not perform control-socket I/O inline.
+// event handlers do not perform control-socket I/O inline. The
+// activation path additionally runs republishConnectedRG synchronously
+// (#16270) so forwarding-active is never reported ahead of the FIB.
 func (d *Daemon) scheduleConnectedRGRepublish(reason string) {
 	if d == nil || d.store == nil || d.isResetting() {
 		return
@@ -311,35 +354,25 @@ func (d *Daemon) scheduleConnectedRGRepublish(reason string) {
 			return
 		}
 		defer d.applySem.Release(1)
-		if d.isResetting() {
-			return
-		}
-		cfg := d.store.ActiveConfig()
-		if cfg == nil {
-			return
-		}
-		pub, ok := d.dataplane().(routeOverlayPublisher)
-		if !ok {
-			return
-		}
-		schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
-		published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
-		if err != nil {
-			slog.Warn("HA connected-route republish failed; next ownership edge or commit retries",
-				"reason", reason, "err", err)
-			return
-		}
-		if !published && !d.pendingFIBBump {
-			return
-		}
-		if _, err := pub.BumpFIBGeneration(); err != nil {
-			d.pendingFIBBump = true
-			slog.Warn("HA connected-route FIB bump unconfirmed; route listener retry remains armed",
-				"reason", reason, "err", err)
-			return
-		}
-		d.pendingFIBBump = false
+		d.republishConnectedRG(reason)
 	}()
+}
+
+// republishConnectedRGSync runs the connected-RG republish inline
+// under applySem (#16270). Called from the cluster-primary
+// activation sequence before SetRGActive so the helper FIB holds
+// the connected row before the RG reports forwarding-active.
+func (d *Daemon) republishConnectedRGSync(ctx context.Context, reason string) {
+	if d == nil || d.store == nil || d.isResetting() {
+		return
+	}
+	if err := d.applySem.Acquire(ctx, 1); err != nil {
+		slog.Warn("HA connected-route sync republish skipped; apply semaphore unavailable",
+			"reason", reason, "err", err)
+		return
+	}
+	defer d.applySem.Release(1)
+	d.republishConnectedRG(reason)
 }
 
 // RouteListenerMarks and RouteListenerRepublishes surface the #7437 pair for

@@ -1052,6 +1052,71 @@ fn lookup_forwarding_resolution_v4_inner(
         }
         Some(ResolvedRouteV4::Static { route, selected }) => {
             if route.discard || route.reject {
+                // #16270 (option b): a connected prefix covering `ip`
+                // in this table is more specific than any forwarding
+                // row this terminal shadows, so the republishing-owed
+                // connected row — not the terminal — is the correct
+                // route. This fires for ANY destination inside a
+                // locally present connected prefix, including when
+                // the terminal at the same LPM is a pref-5
+                // forwarding row whose member the HA gate would
+                // demote: the connected row must still win so its
+                // egress RG attribution is the connected row's, not
+                // the demoted forwarding row's. When the table also
+                // holds a cluster-terminal and the connected prefix's
+                // egress RG is locally forwarding-active — checked
+                // at enforce/HA time via the stamp this resolution
+                // already carries — the terminal defers.
+                // `select_v4_route` reaches here only when no
+                // connected route already won the LPM, so the
+                // connected scan below covers the case where the
+                // terminal is longer than the covering connected
+                // prefix (the exact live shape: pref-200 cluster
+                // /0 terminal selected after the connected /24 was
+                // suppressed peer-owned and not yet republished).
+                // In that window the connected prefix exists only in
+                // `connected_v4_by_ifindex` (peer-owned suppression
+                // removed it from `connected_v4` transit); prefer it
+                // only when the table holds a cluster-terminal —
+                // otherwise the operator discard/reject terminal
+                // keeps its exact pre-fix semantics.
+                if !route.cluster_terminal
+                    && table_has_cluster_terminal_v4(state, table)
+                {
+                    if let Some(ifindex) = state
+                        .connected_v4
+                        .iter()
+                        .find(|entry| entry.table == table && entry.prefix.contains(ip))
+                        .map(|entry| entry.ifindex)
+                    {
+                        let neighbor = lookup_neighbor_entry(
+                            state,
+                            dynamic_neighbors,
+                            ifindex,
+                            IpAddr::V4(ip),
+                        );
+                        let mut resolution = ForwardingResolution {
+                            disposition: if neighbor.is_some() {
+                                ForwardingDisposition::ForwardCandidate
+                            } else {
+                                ForwardingDisposition::MissingNeighbor
+                            },
+                            local_ifindex: 0,
+                            egress_ifindex: ifindex,
+                            tx_ifindex: ifindex,
+                            tunnel_endpoint_id: 0,
+                            next_hop: Some(IpAddr::V4(ip)),
+                            neighbor_mac: neighbor.map(|entry| entry.mac),
+                            src_mac: None,
+                            tx_vlan_id: 0,
+                            source_ifindex: 0,
+                            route_mtu: 0,
+                            transport_route_mtu: 0,
+                        };
+                        populate_egress_resolution(state, ifindex, &mut resolution);
+                        return selected_route_lookup_result(state, table, resolution);
+                    }
+                }
                 let mut resolution = ForwardingResolution {
                     disposition: if route.cluster_terminal {
                         ForwardingDisposition::ClusterTerminalHAInactive
@@ -1356,6 +1421,47 @@ fn lookup_forwarding_resolution_v6_inner(
         }
         Some(ResolvedRouteV6::Static { route, selected }) => {
             if route.discard || route.reject {
+                // #16270 (option b): v6 twin of the v4 connected-win
+                // above — a covering connected prefix in this table
+                // beats a non-cluster terminal when the table also
+                // holds a cluster-terminal (republication owed).
+                if !route.cluster_terminal
+                    && table_has_cluster_terminal_v6(state, table)
+                {
+                    if let Some(ifindex) = state
+                        .connected_v6
+                        .iter()
+                        .find(|entry| entry.table == table && entry.prefix.contains(ip))
+                        .map(|entry| entry.ifindex)
+                    {
+                        let neighbor = lookup_neighbor_entry(
+                            state,
+                            dynamic_neighbors,
+                            ifindex,
+                            IpAddr::V6(ip),
+                        );
+                        let mut resolution = ForwardingResolution {
+                            disposition: if neighbor.is_some() {
+                                ForwardingDisposition::ForwardCandidate
+                            } else {
+                                ForwardingDisposition::MissingNeighbor
+                            },
+                            local_ifindex: 0,
+                            egress_ifindex: ifindex,
+                            tx_ifindex: ifindex,
+                            tunnel_endpoint_id: 0,
+                            next_hop: Some(IpAddr::V6(ip)),
+                            neighbor_mac: neighbor.map(|entry| entry.mac),
+                            src_mac: None,
+                            tx_vlan_id: 0,
+                            source_ifindex: 0,
+                            route_mtu: 0,
+                            transport_route_mtu: 0,
+                        };
+                        populate_egress_resolution(state, ifindex, &mut resolution);
+                        return selected_route_lookup_result(state, table, resolution);
+                    }
+                }
                 let mut resolution = ForwardingResolution {
                     disposition: if route.cluster_terminal {
                         ForwardingDisposition::ClusterTerminalHAInactive
@@ -1921,6 +2027,26 @@ fn select_v4_route<'a>(
                 tunnel_endpoint_id: conn.tunnel_endpoint_id,
             })
         })
+}
+
+/// #16270: with the connected-RG republication still owed (the post-
+/// activation FIB lacks the /24 transit row), does `table` hold a
+/// cluster-terminal? After a synchronous-with-activation republish
+/// this is never true; the slow-path lookup consults it when the
+/// republish is delayed so the terminal defers to HAInactive.
+fn table_has_cluster_terminal_v4(state: &ForwardingState, table: &str) -> bool {
+    state
+        .routes_v4
+        .get(table)
+        .is_some_and(|routes| routes.iter().any(|r| r.cluster_terminal))
+}
+
+/// #16270: v6 twin of `table_has_cluster_terminal_v4`.
+fn table_has_cluster_terminal_v6(state: &ForwardingState, table: &str) -> bool {
+    state
+        .routes_v6
+        .get(table)
+        .is_some_and(|routes| routes.iter().any(|r| r.cluster_terminal))
 }
 
 fn select_v6_route<'a>(
