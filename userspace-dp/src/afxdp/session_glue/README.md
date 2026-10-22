@@ -366,3 +366,16 @@ reserved port on every alias-owned transient purge → standby source-NAT /
 NAT64 pool exhaustion under sustained HA churn. Distinct from #5178 (a
 reservation released into a recycle queue the deterministic allocator
 never drains) — here there was simply no release call at all.
+
+## Extended shared-session bundle (#16185)
+
+`SharedSessionRefs` (in `promote.rs`) is the one bundle for shared-map
+wiring. #16185 extended it — deliberately not a parallel
+`SharedSessionCtx` — with `peer_worker_commands`,
+`worker_commands_by_id` (normalised to `&WorkerCommandQueues`),
+`ConntrackFds { v4, v6 }` and `Tick { ns, secs }`, and collapsed the
+`resolve_*` (26→17), `delete_terminal_*` (17→9) and purge signatures
+onto it. `session_map` stays separate (per-binding steering handle,
+not shared wiring); `WorkerContext` keeps the broader poll context;
+no `CommandTick` and no flow-cache stage context were introduced.
+Wiring cells: `shared_session_refs_16185_tests.rs`.

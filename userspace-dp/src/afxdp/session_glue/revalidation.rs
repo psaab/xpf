@@ -46,20 +46,10 @@ lo0_filter_changed: bool,) -> usize {
 
 pub(in crate::afxdp) fn purge_sessions_for_input_dscp_filter_revalidation(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
-conntrack_v4_fd: c_int,
-conntrack_v6_fd: c_int,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-// #8114 item 4: forwarded to `delete_terminal_filtered_session` so a
-// `DeleteSynced` a full sibling queue refuses is attributed and repaired.
-worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+shared: SharedSessionRefs<'_>,
 forwarding: &ForwardingState,
 purge_v4: bool,
 purge_v6: bool,
-now_ns: u64,
 // #6211 F2: THIS worker's id — the purge tears down sessions that may be
 // peer-synced, whose reservation every worker holds.
 worker_id: u32,) -> usize {
@@ -85,20 +75,12 @@ worker_id: u32,) -> usize {
         delete_terminal_filtered_session(
             sessions,
             session_map,
-            conntrack_v4_fd,
-            conntrack_v6_fd,
-            shared_sessions,
-            shared_nat_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            peer_worker_commands,
-            worker_commands_by_id,
+            shared,
             forwarding,
             &key,
             decision,
             &metadata,
             origin,
-            now_ns,
             worker_id,
         );
     }
@@ -146,17 +128,9 @@ new_forwarding: &ForwardingState,) -> FastSet<u16> {
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn purge_sessions_with_removed_zone_ids(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
-conntrack_v4_fd: c_int,
-conntrack_v6_fd: c_int,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+shared: SharedSessionRefs<'_>,
 forwarding: &ForwardingState,
 removed_zone_ids: &FastSet<u16>,
-now_ns: u64,
 worker_id: u32,) -> usize {
     if removed_zone_ids.is_empty() {
         return 0;
@@ -179,20 +153,12 @@ worker_id: u32,) -> usize {
         delete_terminal_filtered_session(
             sessions,
             session_map,
-            conntrack_v4_fd,
-            conntrack_v6_fd,
-            shared_sessions,
-            shared_nat_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            peer_worker_commands,
-            worker_commands_by_id,
+            shared,
             forwarding,
             &key,
             decision,
             &metadata,
             origin,
-            now_ns,
             worker_id,
         );
     }
@@ -328,17 +294,9 @@ new_policy: &crate::policy::PolicyState,) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn purge_sessions_bound_to_deleted_first_policy(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
-conntrack_v4_fd: c_int,
-conntrack_v6_fd: c_int,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+shared: SharedSessionRefs<'_>,
 forwarding: &ForwardingState,
 rule_id: &str,
-now_ns: u64,
 worker_id: u32,) -> usize {
     let mut bound = Vec::new();
     sessions.iter_with_origin(|key, decision, metadata, origin| {
@@ -358,20 +316,12 @@ worker_id: u32,) -> usize {
         delete_terminal_filtered_session(
             sessions,
             session_map,
-            conntrack_v4_fd,
-            conntrack_v6_fd,
-            shared_sessions,
-            shared_nat_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            peer_worker_commands,
-            worker_commands_by_id,
+            shared,
             forwarding,
             &key,
             decision,
             &metadata,
             origin,
-            now_ns,
             worker_id,
         );
     }
@@ -452,23 +402,12 @@ pub(crate) fn publish_worker_session_map_entry(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn delete_terminal_filtered_session(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
-conntrack_v4_fd: c_int,
-conntrack_v6_fd: c_int,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-// #8114 item 4: the same queues keyed by worker id, forwarded to
-// `delete_terminal_half` so a `DeleteSynced` a full sibling queue refuses
-// can be attributed and repaired.
-worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+shared: SharedSessionRefs<'_>,
 forwarding: &ForwardingState,
 key: &SessionKey,
 decision: SessionDecision,
 metadata: &SessionMetadata,
 origin: SessionOrigin,
-now_ns: u64,
 // #6211 F2: THIS worker's id, threaded from `WorkerLaunchPlan::worker_id`
 // in the worker loop. A peer-synced reservation is held by every worker, so
 // a release must drop THIS worker's bit rather than free the port outright.
@@ -511,20 +450,12 @@ worker_id: u32,) {
         worker_id,
         sessions,
         session_map,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        peer_worker_commands,
-        worker_commands_by_id,
+        shared,
         forwarding,
         key,
         decision,
         metadata,
         origin,
-        now_ns,
     );
 
     if let Some((companion_decision, companion_metadata, companion_origin)) = companion {
@@ -532,20 +463,12 @@ worker_id: u32,) {
             worker_id,
             sessions,
             session_map,
-            conntrack_v4_fd,
-            conntrack_v6_fd,
-            shared_sessions,
-            shared_nat_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            peer_worker_commands,
-            worker_commands_by_id,
+            shared,
             forwarding,
             &companion_key,
             companion_decision,
             &companion_metadata,
             companion_origin,
-            now_ns,
         );
     }
 }
@@ -563,24 +486,12 @@ fn delete_terminal_half(
     worker_id: u32,
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
-    conntrack_v4_fd: c_int,
-    conntrack_v6_fd: c_int,
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    // #8114 item 4: the same queues keyed by worker id, so a `DeleteSynced` a
-    // full sibling queue REFUSES can be attributed and that sibling's NAT
-    // holder bit released on its behalf. See
-    // `replicate_session_delete_repairing`.
-    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    shared: SharedSessionRefs<'_>,
     forwarding: &ForwardingState,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
-    now_ns: u64,
 ) {
     release_source_nat_allocation_for_worker(
         &forwarding.iface_nat_allocators,
@@ -588,7 +499,7 @@ fn delete_terminal_half(
         key,
         decision.nat,
         metadata.is_reverse,
-        now_ns,
+        shared.tick.ns,
         worker_id,
     );
     crate::nat64::release_nat64_allocation_for_worker(
@@ -596,7 +507,7 @@ fn delete_terminal_half(
         key,
         decision.nat,
         metadata.is_reverse,
-        now_ns,
+        shared.tick.ns,
         worker_id,
     );
     let close_snapshot = sessions.close_snapshot_for(key).unwrap_or_default();
@@ -608,8 +519,8 @@ fn delete_terminal_half(
             decision,
             metadata,
             origin,
-            conntrack_v4_fd,
-            conntrack_v6_fd,
+            shared.conntrack.v4,
+            shared.conntrack.v6,
             closed_id,
         );
     if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
@@ -620,10 +531,10 @@ fn delete_terminal_half(
     }
     sessions.delete(key);
     remove_shared_session(
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
+        shared.sessions,
+        shared.nat_sessions,
+        shared.forward_wire_sessions,
+        shared.owner_rg_indexes,
         key,
     );
     // #9560 round 3: shared authority for this key is gone, so the coordinator's claim
@@ -632,13 +543,13 @@ fn delete_terminal_half(
     // here is one no worker teardown can ever release.
     release_coordinator_session_rows(session_map, key);
     replicate_session_delete_repairing(
-        peer_worker_commands,
-        worker_commands_by_id,
+        shared.peer_worker_commands,
+        shared.worker_commands_by_id,
         forwarding,
         key,
         decision.nat,
         metadata.is_reverse,
-        now_ns,
+        shared.tick.ns,
     );
     sessions.emit_close_delta_with_snapshot(
         key.clone(),

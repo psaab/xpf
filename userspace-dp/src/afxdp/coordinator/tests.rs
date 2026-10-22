@@ -11616,20 +11616,22 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
         nat_sessions: &coordinator.sessions.nat,
         forward_wire_sessions: &coordinator.sessions.forward_wire,
         owner_rg_indexes: &coordinator.sessions.owner_rg_indexes,
-    };
+            peer_worker_commands: &[],
+        worker_commands_by_id: empty_worker_commands_by_id(),
+        conntrack: ConntrackFds { v4: -1, v6: -1 },
+        tick: Tick { ns: 2_000_000, secs: 0 },
+};
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<crate::afxdp::WorkerCommand>>>> = Vec::new();
     let promoted_metadata = crate::afxdp::session_glue::maybe_promote_synced_session(
         &mut local_sessions,
         SteeringMap::unshared_for_test(-1),
         shared,
-        &peer_worker_commands,
         &coordinator.forwarding,
         &key,
         imported.decision,
         imported.metadata.clone(),
         imported.origin,
         false,
-        2_000_000,
         imported.protocol,
         0x10,
         crate::afxdp::session_glue::SessionHitVerdict::Owner,

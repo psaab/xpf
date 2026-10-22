@@ -1,5 +1,28 @@
 use super::*;
 
+/// #16185: the conntrack map fd pair that travels with the shared
+/// session maps. `v4`/`v6` are distinct named fields so a transposed
+/// pair is a compile-visible field error, not a silent same-type
+/// (`c_int`) argument swap. `-1` means unavailable (no-op), matching
+/// the pre-bundle scalar convention.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct ConntrackFds {
+    pub v4: c_int,
+    pub v6: c_int,
+}
+
+/// #16185: one packet's two clocks. `ns` (monotonic nanoseconds) and
+/// `secs` (seconds for HA leases) travel together at every
+/// resolve/teardown site; bundling them removes the same-typed `u64`
+/// neighbour swap hazard. `Tick` carries only these two: the HA
+/// startup-grace deadline stays a separate named argument because it
+/// is a deadline, not a clock reading.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct Tick {
+    pub ns: u64,
+    pub secs: u64,
+}
+
 /// Shared-session backing references that travel together at every
 /// site that touches synced sessions. Grouping them collapses the
 /// 16-param `maybe_promote_synced_session` and 10-param
@@ -8,21 +31,78 @@ use super::*;
 /// as a leading param; the actual `fn` declarations on
 /// `origin/master` carry 16 and 10 typed args respectively.)
 ///
-/// `Copy` because the struct is 4 `&`-references (= 32 bytes on
-/// x86-64) with no destructor. Passing it by value at the 3 call
-/// sites in `resolve_flow_session_decision` should compile to the
-/// same register/stack use vs. passing the 4 references
-/// individually. Note: `cargo-asm 0.1.16` panics parsing this
-/// codebase's symbols, so a programmatic before/after asm diff was
-/// not produced. The zero-cost claim rests on the structural
-/// argument (Copy + pointer-sized fields + no Drop) and is
-/// empirically gated by the smoke-plus-test-failover pass in the PR.
+/// #16185 extends this existing bundle - deliberately NOT a parallel
+/// `SharedSessionCtx` - with the groupings that travel with the
+/// shared maps at the resolve/teardown call sites: the peer/command
+/// queues, `conntrack` ([`ConntrackFds`]) and `tick` ([`Tick`]).
+/// `session_map` stays a separate argument: it is the caller's
+/// per-binding steering handle, not shared-map wiring, and
+/// `WorkerContext` keeps owning the broader poll context.
+/// `worker_commands_by_id` is normalised to `&WorkerCommandQueues`
+/// here (the type `resolve_*`/`promote.rs` already used); the
+/// `delete_terminal_*` twins previously took the bare
+/// `&BTreeMap<...>` deref target, so this also closes the validator
+/// open check on the two queue-map types with one answer.
+///
+/// `Copy` because the struct is 6 `&`-references plus two small
+/// `Copy` value groupings (conntrack fd pair + tick) with no
+/// destructor. Passing it by value should compile to the same
+/// register/stack use vs. passing the fields individually. Note:
+/// `cargo-asm 0.1.16` panics parsing this codebase's symbols, so a
+/// programmatic before/after asm diff was not produced. The
+/// zero-cost claim rests on the structural argument (Copy +
+/// pointer-sized fields + no Drop) and is empirically gated by the
+/// iperf witness in the PR.
 #[derive(Clone, Copy)]
 pub(in crate::afxdp) struct SharedSessionRefs<'a> {
     pub sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub owner_rg_indexes: &'a SharedSessionOwnerRgIndexes,
+    pub peer_worker_commands: &'a [Arc<Mutex<VecDeque<WorkerCommand>>>],
+    pub worker_commands_by_id: &'a WorkerCommandQueues,
+    pub conntrack: ConntrackFds,
+    pub tick: Tick,
+}
+
+impl<'a> SharedSessionRefs<'a> {
+    /// The no-conntrack, no-clock bundle for callers that only carry
+    /// the shared maps (the old `-1, -1` scalar convention):
+    /// conntrack fds `-1` (unavailable) and a zero tick. Production
+    /// poll sites construct the full struct literally so every field
+    /// is visible at the call site.
+    pub(in crate::afxdp) fn detached(
+        sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        owner_rg_indexes: &'a SharedSessionOwnerRgIndexes,
+        peer_worker_commands: &'a [Arc<Mutex<VecDeque<WorkerCommand>>>],
+        worker_commands_by_id: &'a WorkerCommandQueues,
+    ) -> Self {
+        Self {
+            sessions,
+            nat_sessions,
+            forward_wire_sessions,
+            owner_rg_indexes,
+            peer_worker_commands,
+            worker_commands_by_id,
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick::default(),
+        }
+    }
+
+    /// This bundle with different conntrack fds and tick (the
+    /// `_with_conntrack` entry points receive the fds/clock from
+    /// their caller and graft them onto the shared-map bundle).
+    pub(in crate::afxdp) fn with_conntrack_tick(
+        mut self,
+        conntrack: ConntrackFds,
+        tick: Tick,
+    ) -> Self {
+        self.conntrack = conntrack;
+        self.tick = tick;
+        self
+    }
 }
 
 /// Predicate: is `key` the forward (NAT-translated) side of a
@@ -78,18 +158,13 @@ pub(in crate::afxdp) enum SessionHitVerdict {
 fn promote_synced_session_with_conntrack(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
-    conntrack_v4_fd: c_int,
-    conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: SessionMetadata,
     origin: SessionOrigin,
     fabric_ingress: bool,
-    now_ns: u64,
     protocol: u8,
     tcp_flags: u8,
 ) -> SessionMetadata {
@@ -113,7 +188,7 @@ fn promote_synced_session_with_conntrack(
         decision,
         metadata: promoted.clone(),
         origin: SessionOrigin::SharedPromote,
-        now_ns,
+        now_ns: shared.tick.ns,
         protocol,
         tcp_flags,
     }) {
@@ -134,8 +209,8 @@ fn promote_synced_session_with_conntrack(
         // Clear only the origin bit in the conntrack mirror; counters,
         // timestamps, NAT state, and creation time remain untouched.
         crate::afxdp::bpf_map::update_session_cluster_synced_origin(
-            conntrack_v4_fd,
-            conntrack_v6_fd,
+            shared.conntrack.v4,
+            shared.conntrack.v6,
             key,
             false,
         );
@@ -182,7 +257,7 @@ fn promote_synced_session_with_conntrack(
             shared.owner_rg_indexes,
             &promoted_entry,
         );
-        replicate_session_upsert(peer_worker_commands, worker_commands_by_id, &promoted_entry);
+        replicate_session_upsert(shared.peer_worker_commands, shared.worker_commands_by_id, &promoted_entry);
     }
     promoted
 }
@@ -191,14 +266,12 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     forwarding: &ForwardingState,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: SessionMetadata,
     origin: SessionOrigin,
     fabric_ingress: bool,
-    now_ns: u64,
     protocol: u8,
     tcp_flags: u8,
     verdict: SessionHitVerdict,
@@ -206,21 +279,19 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
     if verdict != SessionHitVerdict::Owner {
         return metadata;
     }
+    // No-conntrack leg: force `-1, -1` so a caller that grafted real
+    // fds onto the bundle cannot leak them into this entry point.
+    let shared = shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, shared.tick);
     promote_synced_session_with_conntrack(
         sessions,
         session_map,
-        -1,
-        -1,
         shared,
-        peer_worker_commands,
-        empty_worker_commands_by_id(),
         forwarding,
         key,
         decision,
         metadata,
         origin,
         fabric_ingress,
-        now_ns,
         protocol,
         tcp_flags,
     )
@@ -231,13 +302,8 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
 pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
-    conntrack_v4_fd: c_int,
-    conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
-    now_ns: u64,
     tcp_flags: u8,
     worker_id: u32,
     verdict: SessionHitVerdict,
@@ -250,13 +316,8 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     apply_deferred_synced_purge(
         sessions,
         session_map,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
         shared,
-        peer_worker_commands,
-        worker_commands_by_id,
         forwarding,
-        now_ns,
         worker_id,
         verdict,
         resolved,
@@ -266,7 +327,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     super::apply_deferred_shared_materialization(
         sessions,
         forwarding,
-        now_ns,
+        shared.tick.ns,
         tcp_flags,
         verdict,
         resolved,
@@ -275,21 +336,22 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     let Some(promotion) = resolved.deferred_synced_promotion.take() else {
         return;
     };
+    // The deferred promotion carries its own install tick; graft it
+    // so the promote leg stamps the install time, not the purge's.
+    let shared = shared.with_conntrack_tick(
+        shared.conntrack,
+        Tick { ns: promotion.now_ns, secs: shared.tick.secs },
+    );
     resolved.metadata = promote_synced_session_with_conntrack(
         sessions,
         session_map,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
         shared,
-        peer_worker_commands,
-        worker_commands_by_id,
         forwarding,
         &promotion.key,
         promotion.decision,
         promotion.metadata,
         promotion.origin,
         promotion.fabric_ingress,
-        promotion.now_ns,
         promotion.protocol,
         promotion.tcp_flags,
     );
@@ -334,18 +396,13 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
 pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
-    conntrack_v4_fd: c_int,
-    conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    worker_commands_by_id: &WorkerCommandQueues,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
     shared_identity: Option<(u64, u64)>,
     forwarding: &ForwardingState,
-    now_ns: u64,
     // #6211 F2: THIS worker's id. This purge tears down a PEER-SYNCED forward
     // session, whose reservation every worker holds, so it must drop only this
     // worker's bit.
@@ -375,8 +432,8 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
             decision,
             metadata,
             origin,
-            conntrack_v4_fd,
-            conntrack_v6_fd,
+            shared.conntrack.v4,
+            shared.conntrack.v6,
             session_id,
         );
     if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
@@ -389,13 +446,13 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     evicted_keys.push(key.clone());
     if let (SharedRemoval::Removed(_), Some((session_id, _))) = (removed, shared_identity) {
         replicate_session_delete_conditional(
-            peer_worker_commands,
-            worker_commands_by_id,
+            shared.peer_worker_commands,
+            shared.worker_commands_by_id,
             forwarding,
             key,
             decision.nat,
             metadata.is_reverse,
-            now_ns,
+            shared.tick.ns,
             session_id,
             None,
             0,
@@ -411,7 +468,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
         key,
         decision.nat,
         metadata.is_reverse,
-        now_ns,
+        shared.tick.ns,
         worker_id,
     );
     crate::nat64::release_nat64_allocation_for_worker(
@@ -419,7 +476,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
         key,
         decision.nat,
         metadata.is_reverse,
-        now_ns,
+        shared.tick.ns,
         worker_id,
     );
     true
@@ -436,25 +493,19 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
     metadata: &SessionMetadata,
     origin: SessionOrigin,
     forwarding: &ForwardingState,
-    now_ns: u64,
     worker_id: u32,
 ) {
     let mut evicted_keys = Vec::new();
     purge_translated_synced_hit_with_context(
         sessions,
         session_map,
-        -1,
-        -1,
         shared,
-        &[],
-        empty_worker_commands_by_id(),
         key,
         decision,
         metadata,
         origin,
         None,
         forwarding,
-        now_ns,
         worker_id,
         &mut evicted_keys,
     );
@@ -462,13 +513,8 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
 fn apply_deferred_synced_purge(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
-    conntrack_v4_fd: c_int,
-    conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
-    now_ns: u64,
     worker_id: u32,
     verdict: SessionHitVerdict,
     resolved: &mut ResolvedFlowSessionDecision,
@@ -483,18 +529,13 @@ fn apply_deferred_synced_purge(
     purge_translated_synced_hit_with_context(
         sessions,
         session_map,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
         shared,
-        peer_worker_commands,
-        worker_commands_by_id,
         &purge.key,
         purge.decision,
         &purge.metadata,
         purge.origin,
         purge.shared_identity,
         forwarding,
-        now_ns,
         worker_id,
         evicted_keys,
     );

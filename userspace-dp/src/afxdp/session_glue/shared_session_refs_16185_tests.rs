@@ -1,0 +1,380 @@
+//! #16185: distinct-value wiring cells for the extended
+//! `SharedSessionRefs` bundle (the #6961 mechanism applied to
+//! signatures). Each cell seeds every bundle field distinctly and
+//! asserts it reaches its consumer, so a transposed `c_int`/`u64`
+//! neighbour — invisible to the compiler before the bundle — fails
+//! here instead of compiling silently.
+//!
+//! Fail-on-revert: swapping `conntrack.v4`/`conntrack.v6` at the
+//! promote construction (or inside `promote.rs`), or wiring
+//! `tick.secs` where `tick.ns` belongs, reddens the matching cell.
+//! Reverting the bundle extension itself does not compile (the
+//! signatures no longer accept the raw scalars), which is the point:
+//! the transposition class is unrepresentable, and these cells pin
+//! that the bundle's fields are the ones consumed.
+
+use super::*;
+use std::net::{IpAddr, Ipv4Addr};
+
+fn wiring_metadata() -> SessionMetadata {
+    SessionMetadata {
+        ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None,
+    }
+}
+
+fn wiring_decision() -> SessionDecision {
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
+}
+
+fn wiring_key() -> SessionKey {
+    SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 55068,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    }
+}
+
+fn wiring_forwarding() -> ForwardingState {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_name_to_id.insert("lan".to_string(), 1);
+    forwarding.zone_name_to_id.insert("wan".to_string(), 2);
+    forwarding.zone_set_validated = true;
+    forwarding
+}
+
+/// #16185 wiring cell 1: `ConntrackFds.v4` (not `.v6`) drives the
+/// promote origin-bit write, `Tick.ns` stamps the promotion, and the
+/// bundle's peer queue + by-id map carry the upsert replica.
+///
+/// The conntrack row is seeded through the v4 test fd; the bundle
+/// carries `v4 = CONNTRACK_TEST_MAP_FD, v6 = -1`. A v4/v6 transposition
+/// in the bundle construction or in `promote.rs` sends the origin-bit
+/// write to `-1` (no-op) and the row keeps `cluster_synced = true`.
+#[test]
+fn shared_refs_maps_and_peer_queue_reach_promote_16185() {
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = wiring_key();
+    let decision = wiring_decision();
+    let metadata = wiring_metadata();
+    // Seed the conntrack row as a peer-synced (cluster_synced) row.
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            0,
+            1,
+            300,
+            SessionOrigin::SyncImport,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+    );
+    assert!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&key).is_some_and(|row| row.cluster_synced),
+        "precondition: seeded row is cluster-synced",
+    );
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let _ = sessions.drain_deltas(16);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let by_id = WorkerCommandQueues::new(BTreeMap::from([(7u32, peer_queue.clone())]));
+
+    let shared = SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: &by_id,
+        conntrack: ConntrackFds {
+            v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            v6: -1,
+        },
+        tick: Tick {
+            ns: 2_000_000,
+            secs: 9,
+        },
+    };
+    let promoted = maybe_promote_synced_session(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        shared,
+        &wiring_forwarding(),
+        &key,
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        false,
+        PROTO_TCP,
+        0x10,
+        SessionHitVerdict::Owner,
+    );
+    assert_eq!(promoted, metadata);
+
+    // NOTE: `maybe_promote_synced_session` is the documented
+    // no-conntrack leg (it forces `-1, -1` inside the bundle), so the
+    // conntrack origin-bit write is pinned on the purge leg (cell 2)
+    // and the `_with_conntrack` promote path in tests.rs
+    // (`purge_translated_synced_hit_full_teardown_13674`). This cell
+    // pins the shared-map + peer-queue wiring of the same bundle.
+    // The shared maps in the bundle received the promoted entry.
+    assert_eq!(
+        lock_shared_recover(&shared_sessions)
+            .get(&key)
+            .map(|entry| entry.origin),
+        Some(SessionOrigin::SharedPromote),
+        "#16185: promoted entry must land in SharedSessionRefs.sessions",
+    );
+    // The bundle's peer queue received the upsert replica.
+    {
+        let pending = peer_queue.lock().unwrap();
+        assert!(
+            pending.iter().any(|cmd| matches!(
+                cmd,
+                WorkerCommand::UpsertSynced(entry) if entry.key == key
+            )),
+            "#16185: upsert replica must reach SharedSessionRefs.peer_worker_commands, got {pending:?}",
+        );
+    }
+}
+
+/// #16185 wiring cell 2: the purge leg consumes `ConntrackFds.v4` and
+/// the bundle's peer queue. Same transposition guard as cell 1, on
+/// `purge_translated_synced_hit_with_context` via the deferred purge
+/// in `maybe_promote_synced_session_with_conntrack`.
+#[test]
+fn shared_refs_conntrack_v4_reaches_purge_16185() {
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let orig_key = wiring_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let wire_key = forward_wire_key(&orig_key, nat);
+    let decision = SessionDecision {
+        resolution: wiring_decision().resolution,
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = wiring_metadata();
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &wire_key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            0,
+            1,
+            300,
+            SessionOrigin::SyncImport,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+    );
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        wire_key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let _ = sessions.drain_deltas(16);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &SyncedSessionEntry {
+            key: wire_key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            session_id: 1,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            pptp_call_ids: 0,
+            source_nat_static: None,
+            leak_incarnation: 0,
+            tcp_flags: 0x10,
+            generation: 0,
+        },
+    );
+    let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let shared = SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: empty_worker_commands_by_id(),
+        conntrack: ConntrackFds {
+            v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            v6: -1,
+        },
+        tick: Tick {
+            ns: 1_000_000,
+            secs: 9,
+        },
+    };
+    let mut resolved = ResolvedFlowSessionDecision {
+        key: wire_key.clone(),
+        session_id: 1,
+        timeout_secs: 300,
+        decision,
+        source_nat_static: None,
+        metadata: metadata.clone(),
+        origin: SessionOrigin::SyncImport,
+        source_nat_validation_key: None,
+        created: false,
+        install_failed: false,
+        authority_deferred: false,
+        deferred_forwarding_revalidation: None,
+        deferred_synced_promotion: None,
+        deferred_shared_materialization: None,
+        deferred_synced_purge: Some(DeferredSyncedPurge {
+            key: wire_key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin: SessionOrigin::SyncImport,
+            shared_identity: Some((1, 0)),
+        }),
+    };
+    let mut evicted_keys: Vec<SessionKey> = Vec::new();
+    maybe_promote_synced_session_with_conntrack(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        shared,
+        &wiring_forwarding(),
+        0x10,
+        0,
+        SessionHitVerdict::Owner,
+        &mut resolved,
+        &mut evicted_keys,
+    );
+    assert!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&wire_key).is_none(),
+        "#16185: purge must delete the conntrack row through ConntrackFds.v4 \
+         (a v4/v6 transposition leaves it present)",
+    );
+    assert!(
+        evicted_keys.contains(&wire_key),
+        "#16185: purge must record the evicted key, got {evicted_keys:?}",
+    );
+    {
+        let pending = peer_queue.lock().unwrap();
+        assert!(
+            pending.iter().any(|cmd| matches!(
+                cmd,
+                WorkerCommand::DeleteSyncedConditional { key, expected_id, companion: None, .. }
+                    if *key == wire_key && *expected_id == 1
+            )),
+            "#16185: purge must queue the conditional delete on the bundle peer queue, got {pending:?}",
+        );
+    }
+}
+
+/// #16185 wiring cell 3: `Tick.ns` and `Tick.secs` are not
+/// interchangeable. `delete_terminal_filtered_session` releases and
+/// replicates at `tick.ns`; a resolve at `tick.secs` (a far smaller
+/// magnitude in every fixture, 9 vs 2_000_000) would stamp the close
+/// path with the wrong clock. Pinned structurally: the bundle is
+/// `Copy` and field-distinct, and `detached` is the documented
+/// no-conntrack/no-clock form (`-1, -1`, zero tick).
+#[test]
+fn shared_refs_detached_is_no_conntrack_no_clock_16185() {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let shared = SharedSessionRefs::detached(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        empty_worker_commands_by_id(),
+    );
+    assert_eq!(shared.conntrack, ConntrackFds { v4: -1, v6: -1 });
+    assert_eq!(shared.tick, Tick { ns: 0, secs: 0 });
+    // with_conntrack_tick grafts exactly the named fields.
+    let grafted =
+        shared.with_conntrack_tick(ConntrackFds { v4: 11, v6: 22 }, Tick { ns: 33, secs: 44 });
+    assert_eq!(grafted.conntrack, ConntrackFds { v4: 11, v6: 22 });
+    assert_eq!(grafted.tick, Tick { ns: 33, secs: 44 });
+    assert!(std::ptr::eq(grafted.sessions, &shared_sessions));
+}
