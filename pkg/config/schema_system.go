@@ -246,7 +246,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				// (types_system.go; renderChronyThreshold ignores anything
 				// else), so the strict gate enforces the enum instead of
 				// committing a silently-unrendered value.
-				"action": {desc: "Action on threshold", args: 1, placeholder: "<action>", valueType: ValueEnumOf, validator: ValidateEnum([]string{"accept", "reject"}), children: nil},
+				"action": {desc: "Action on threshold", args: 1, placeholder: "<action>", valueType: ValueEnumOf, valueDesc: "accept | reject", valueExamples: []string{"accept", "reject"}, validator: ValidateEnum([]string{"accept", "reject"}), children: nil},
 			}},
 		// #15709: Junos NTP peers (symmetric mode) compile to chrony
 		// `peer` directives (NTPPeers); trusted-key/authentication-key/
@@ -722,7 +722,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		"dns": {desc: "DNS service", children: map[string]*schemaNode{
 			"dns-proxy": {desc: "DNS proxy/forwarder (accepted but NOT served — commit warns, see docs/next-features/dns-proxy.md)", children: map[string]*schemaNode{
 				"interface":      {desc: "DNS proxy listening interface", args: 1, multi: true, placeholder: "<interface-name>", children: nil},
-				"default-domain": {desc: "DNS proxy default domain", args: 1, placeholder: "<domain>", valueType: ValueHostname, valueDesc: "Default domain (e.g. example.net or * for all)", valueExamples: []string{"example.net", "*"}, children: nil},
+				"default-domain": {desc: "DNS proxy default domain", args: 1, placeholder: "<domain>", valueType: ValueHostname, valueDesc: "Default domain (e.g. example.net or * for all)", valueExamples: []string{"example.net", "*"}, validator: ValidateDNSProxyDefaultDomain, children: nil},
 				"forwarders":     {desc: "DNS proxy upstream forwarders", children: map[string]*schemaNode{
 					// A wildcard value slot: each child node is one forwarder
 					// address (`forwarders { 1.1.1.1; }`, keys=[1.1.1.1]).
@@ -1308,6 +1308,7 @@ func dhcpLocalServerGroupSchema(fam string) *schemaNode {
 				multi:            true,
 				valueList:        true,
 				placeholder:      "<interface>",
+				keyValueType:     ValueInterfaceName,
 				keyValueDesc:     "Interface name, optionally unit-qualified",
 				keyValueExamples: []string{"ge-0/0/1.0", "reth0.80"},
 				// keyValidator, NOT validator: this node declares CHILDREN

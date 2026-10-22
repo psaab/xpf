@@ -356,6 +356,7 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 							valueType:     ValueString,
 							valueDesc:     "Logical interface unit (e.g. reth0.0)",
 							valueExamples: []string{"reth0.0"},
+							validator:     ValidateInterfaceName,
 							children:      nil,
 						},
 						"secondary-ip-address": {
@@ -364,6 +365,7 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 							valueType:     ValueIPAddress,
 							valueDesc:     "IPv4 address held by the secondary node",
 							valueExamples: []string{"10.0.0.3"},
+							validator:     ValidateIPAddress,
 							children:      nil,
 						},
 					}}},

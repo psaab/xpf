@@ -1,0 +1,36 @@
+# #16163 Phase A schemaNode invariant census — initial violation allow-list.
+#
+# Format: <rule> | <path> | <reason>
+# One line per (rule, unique-node) violation found by
+# TestSchemaNodeInvariantCensus16163 on the initial tree. The test asserts
+# set-equality in both directions: a new violation reds, and a fixed
+# violation whose line remains reds. Monotonicity is anchored to the
+# frozen baseline in schema_node_census_16163_test.go
+# (schemaNodeBaseline16163, these same 10 keys at first landing): this
+# file must stay a SUBSET of that baseline, so a fixed line can never
+# be swapped for a new violation. This list may ONLY shrink — never
+# add a line to silence a new defect without fixing the node; each line
+# needs a reason a reviewer can audit. Paths use <*> for a wildcard
+# identity and name the FIRST reachable path of the shared node pointer.
+#
+# Initial census (origin/master 2c8575b70e): 1882 unique schemaNodes.
+# After the same-PR fixes (typed validators wired on the three
+# valueType-without-validator leaves, keyValueType added to the DHCP
+# group interface key slot, enum examples added to fail-mode and ntp
+# threshold action), 10 violations remain on 10 unique nodes:
+#   4x valueType+keySlot, 5x scalar-not-honoured, 1x valueMetadata-without-valueType.
+# The enum census (R9) stands clean after those fixes: every ValueEnumOf
+# leaf carrying examples has them validator-accepted and present in
+# completion; refuse-only enum stubs (OSPF unmodeled leaves, plain-text
+# password, login *-regexps) deliberately carry no examples and are not
+# violations.
+scalar-not-honoured | groups <*> security zones security-zone advanced-connection-tracking mode | scalar tag inert on a typed (ValueEnumOf) leaf: isScalarValueLeaf excludes typed leaves because validateTypedLeaf already owns trailing-token rejection; removing scalar here needs a per-site audit that the typed path rejects the same trailing shapes the author expected (#16163 burn-down)
+scalar-not-honoured | groups <*> security zones security-zone advanced-connection-tracking timeout | scalar tag inert on a typed (ValueInteger) leaf: same typed-leaf ownership as mode above; audit before removing the tag (#16163 burn-down)
+scalar-not-honoured | groups <*> security zones security-zone white-list | scalar tag inert on a multi leaf: isScalarValueLeaf excludes multi leaves because a multi leaf absorbs its value tail by design; audit whether white-list trailing tokens are values or garbage before removing (#16163 burn-down)
+scalar-not-honoured | groups <*> system host-name | scalar tag inert on a typed (ValueHostname) leaf: validateTypedLeaf owns arity for typed leaves; audit host-name trailing-token behaviour before removing the tag (#16163 burn-down)
+scalar-not-honoured | groups <*> system services dhcp-local-server dhcp-socket-type | scalar tag inert on a typed (ValueEnumOf) leaf: validateTypedLeaf owns arity; audit before removing the tag (#16163 burn-down)
+valueType+keySlot | groups <*> system syslog console <*> | deliberate dual slot (#6844/#2008): the wildcard keyword IS the syslog facility (validated by keyValidator) and the value IS the severity (validated by the ValueEnumOf validator); both slots are live and neither flips the other — not a key-slot container
+valueType+keySlot | groups <*> system syslog file <*> | deliberate dual slot (#6844/#2008): same facility/severity wildcard leaf as console, built per-destination by syslogFacilitySeverityLeaf
+valueType+keySlot | groups <*> system syslog host <*> | deliberate dual slot (#6844/#2008): same facility/severity wildcard leaf as console, built per-destination by syslogFacilitySeverityLeaf
+valueType+keySlot | groups <*> system syslog user <*> | deliberate dual slot (#6844/#2008): same facility/severity wildcard leaf as console, built per-destination by syslogFacilitySeverityLeaf
+valueMetadata-without-valueType | groups <*> policy-options policy-statement term from protocol | valueExamples (bgp, ospf) are deliberately completion/probe-only: the leaf stays untyped (ValueAny, no validator) because `from protocol` acceptance is owned by the compiler-side validateRoutingPolicyProtocolsStrict (#7121) against FRRRoutingProtocolKeyword, and the #2419 probe synthesizes from these examples; typing it here would duplicate that domain in the schema walk — burn-down must first decide single ownership (#16163)
