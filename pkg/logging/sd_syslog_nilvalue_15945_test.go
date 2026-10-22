@@ -210,3 +210,69 @@ func TestSDSyslogScreenDropEventModeWire15945(t *testing.T) {
 		t.Fatalf("event-mode screen line app=%q msgid=%q sd=%q: %q", app, msgid, sd, line)
 	}
 }
+
+// Malformed structured input must not pass through into the
+// STRUCTURED-DATA slot. splitRTFlowStructured historically trusted
+// prefix + "[junos@" and emitted the rest verbatim, so an
+// unterminated quote, a missing closing bracket, or an unescaped
+// "]" inside a value produced a line a strict RFC 5424 parser
+// misparses exactly like the two-dash defect above. The envelope
+// must instead fall back to NILVALUE SD with the full body as MSG.
+func TestSDSyslogMalformedSDFallsBackToNilvalue15945(t *testing.T) {
+	cases := []struct {
+		name       string
+		structured string
+		wantApp    string
+	}{
+		{"screen_unterminated_quote", `RT_IDS - RT_SCREEN_DROP [junos@2636.1.1.1.2.40 attack-name="SYN flood]`, "xpf"},
+		{"screen_missing_closing_bracket", `RT_IDS - RT_SCREEN_DROP [junos@2636.1.1.1.2.40 attack-name="SYN flood" action="drop"`, "xpf"},
+		{"screen_unescaped_bracket_in_value", `RT_IDS - RT_SCREEN_DROP [junos@2636.1.1.1.2.40 attack-name="SYN]flood" action="drop"]`, "xpf"},
+		{"screen_unquoted_param_value", `RT_IDS - RT_SCREEN_DROP [junos@2636.1.1.1.2.40 attack-name=synflood action="drop"]`, "xpf"},
+		{"screen_param_without_equals", `RT_IDS - RT_SCREEN_DROP [junos@2636.1.1.1.2.40 attack-name "SYN flood"]`, "xpf"},
+		{"screen_dangling_escape", `RT_IDS - RT_SCREEN_DROP [junos@2636.1.1.1.2.40 attack-name="SYN flood\`, "xpf"},
+		{"screen_trailing_garbage_after_element", `RT_IDS - RT_SCREEN_DROP [junos@2636.1.1.1.2.40 attack-name="SYN flood"] forged-tail`, "xpf"},
+		{"session_unterminated_quote", `RT_FLOW - RT_FLOW_SESSION_CREATE [junos@2636.1.1.1.2.129 source-address="10.0.1.5]`, "RT_FLOW"},
+		{"session_missing_closing_bracket", `RT_FLOW - RT_FLOW_SESSION_CREATE [junos@2636.1.1.1.2.129 source-address="10.0.1.5"`, "RT_FLOW"},
+		{"session_bare_token_in_element", `RT_FLOW - RT_FLOW_SESSION_CREATE [junos@2636.1.1.1.2.129 source-address="10.0.1.5" bare]`, "RT_FLOW"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := formatSDSyslogLine(14, ts15945, host15945, tc.structured, tc.structured)
+			app, msgid, sd, msg := rfc5424Fields15945(t, line)
+			if app != tc.wantApp {
+				t.Fatalf("app=%q want %q (NILVALUE fallback): %q", app, tc.wantApp, line)
+			}
+			if msgid != "-" || sd != "-" {
+				t.Fatalf("msgid=%q sd=%q, want NILVALUE -/- for malformed SD: %q", msgid, sd, line)
+			}
+			if !strings.Contains(msg, tc.structured) {
+				t.Fatalf("body did not survive verbatim as MSG:\n got msg: %q\nfull line: %q", msg, line)
+			}
+			if strings.Contains(sd, "[junos@") {
+				t.Fatalf("malformed SD element reached the wire: %q", line)
+			}
+		})
+	}
+}
+
+// Control: a well-formed screen element (including an escaped quote
+// and bracket inside a value, as escapeSDParamValue produces) still
+// decomposes into the RT_IDS SD arm — validation must not reject the
+// records the fix itself emits.
+func TestSDSyslogWellFormedScreenStillStructured15945(t *testing.T) {
+	rec := baseRecord9321("SCREEN_DROP")
+	rec.ScreenCheck = `SYN "flood"]test`
+	rec.Action = "deny"
+	line := sdLine15945(rec)
+	app, msgid, sd, msg := rfc5424Fields15945(t, line)
+	if app != "RT_IDS" || msgid != "RT_SCREEN_DROP" {
+		t.Fatalf("well-formed screen header app=%q msgid=%q: %q", app, msgid, line)
+	}
+	if !strings.HasPrefix(sd, "[junos@2636.1.1.1.2.40 ") || msg != "" {
+		t.Fatalf("well-formed screen SD=%q msg=%q: %q", sd, msg, line)
+	}
+	el := parseSDElement9321(t, sd)
+	if got := paramValue9321(t, el, "attack-name"); got != rec.ScreenCheck {
+		t.Fatalf("attack-name=%q want %q", got, rec.ScreenCheck)
+	}
+}
