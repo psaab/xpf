@@ -585,25 +585,6 @@ fn count_matched_non_routing_terms_family<F: AddrFamily>(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
-fn count_matched_non_routing_terms_v4(
-    filter: &Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
-    protocol: u8,
-    src_port: u16,
-    dst_port: u16,
-    dscp: u8,
-    extra: TermMatchExtra<'_>,
-    packet_bytes: u64,
-    terminal: &FilterTerm,
-) {
-    count_matched_non_routing_terms_family::<V4Family>(
-        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, terminal,
-    )
-}
-
-#[inline]
 fn evaluate_filter_ref_non_routing_counted_v6(
     filter: &Filter,
     src_ip: Ipv6Addr,
@@ -620,26 +601,6 @@ fn evaluate_filter_ref_non_routing_counted_v6(
     evaluate_filter_ref_non_routing_counted_family::<V6Family>(
         filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes,
         count_policy, policer_now_ns,
-    )
-}
-
-/// #2620: v6 counterpart of `count_matched_non_routing_terms_v4`.
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn count_matched_non_routing_terms_v6(
-    filter: &Filter,
-    src_ip: Ipv6Addr,
-    dst_ip: Ipv6Addr,
-    protocol: u8,
-    src_port: u16,
-    dst_port: u16,
-    dscp: u8,
-    extra: TermMatchExtra<'_>,
-    packet_bytes: u64,
-    terminal: &FilterTerm,
-) {
-    count_matched_non_routing_terms_family::<V6Family>(
-        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, terminal,
     )
 }
 

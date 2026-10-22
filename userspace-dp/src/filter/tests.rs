@@ -12856,9 +12856,14 @@ fn three_color_forwarding_class_meters_without_dropping_9882() {
 // address membership is the shared `crate::prefix::nets_match` with `except`
 // EXPLICIT (filter passes its flag; source NAT passes `false`). These tests
 // run the SAME term shape through both families and assert identical
-// verdicts on the empty / except / port-exception cells, through EVERY
-// collapsed walker flavour (counted, cached TX-selection, cached input
-// counters, TX-selection counted) — not only `evaluate_filter`. The NAT
+// verdicts on the empty / except / port-exception cells. Four of the eight
+// collapsed generic walk bodies are exercised directly: the full counted
+// walk (Cells 1-5, via `evaluate_filter`), TX-selection counted, cached
+// TX-selection, and cached input-counter capture (the second test below,
+// empty cells only). NOT directly exercised here: routing-instance
+// evaluation, non-routing evaluation / terminal-deny replay, and cached
+// input-policer capture — those bodies are covered by their pre-existing
+// tests, not by these cells. The NAT
 // explicit-`false` arm and the cross-family empty-except cell are pinned in
 // `nat_shared_nets_match_explicit_false_16128` (nat/tests_source.rs) and
 // Cell 5 below respectively. FAIL-ON-REVERT: (a) make the shared empty guard
@@ -13032,13 +13037,15 @@ fn family_differential_empty_except_port_except_16128() {
         assert_eq!(action, FilterAction::Accept, "{family}: unresolved port-except must fail closed (fall through to implicit Accept)");
     }
 
-    // Cell 5: cross-family empty-except. A v4-only `except` scope evaluated
+    // Cell 5: cross-family empty-except (helper-level property, NOT a
+    // supported configuration). A v4-only `except` scope evaluated
     // for a v6 packet: the v6 vec is empty while `source_except` (shared
     // across families) is true, so "not in {}" matches ALL — the v6 packet
     // is discarded. The snapshot compiler rejects a wrong-family-ONLY scope
     // (#14446), so fabricate the term directly (the #8630 precedent): clone
-    // a compiled term and override its address fields. This exercises the
-    // REAL `term_matches_family::<V6Family>` against the empty v6 vec.
+    // a compiled term and override its address fields. This pins the
+    // `term_matches_family::<V6Family>` empty-vec answer only; it is not
+    // evidence that wrong-family-only terms are admissible configuration.
     {
         let state = build(
             "inet",

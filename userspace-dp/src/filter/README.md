@@ -49,8 +49,10 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   each evaluator flavour is ONE family-generic term-walk
   (`term_matches_family` / `evaluate_*_family` behind thin v4/v6 wrappers,
   monomorphised; `term_matches_family` and `crate::prefix::nets_match` are
-  `#[inline(always)]`, the generic walk bodies and their wrappers are
-  `#[inline]`) and address membership is
+  `#[inline(always)]`, most generic walk bodies and wrappers are
+  `#[inline]` — except the cached TX-selection walk
+  (`evaluate_filter_ref_tx_selection_cached_family` and its v4/v6
+  wrappers), which carries no inline attribute) and address membership is
   the shared `crate::prefix::nets_match` with `except` EXPLICIT: filter
   passes its per-direction flag, source NAT passes `false` (its
   constrained-but-empty set stays fail-closed, #2398; the filter's
