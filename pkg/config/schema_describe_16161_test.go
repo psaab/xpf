@@ -76,6 +76,39 @@ func TestDescribeSetPathPrefixAndMisses16161(t *testing.T) {
 	}
 }
 
+// Review fold (#16161): at a level that has BOTH child keywords and
+// a wildcard slot, an ambiguous candidate prefix must describe
+// NOTHING — not the wildcard's text. `system syslog host <host>`
+// carries match/match-strings children plus the facility wildcard
+// ("Syslog facility (value is the severity threshold)"); the old
+// code returned that wildcard text for `ma`, contradicting the
+// documented "any ambiguity yields (\"\", false)". Exact keywords
+// keep their own text, a unique prefix still expands, and a
+// non-keyword instance name still borrows the wildcard's.
+func TestDescribeSetPathAmbiguousPrefixAtWildcardLevel16161(t *testing.T) {
+	host := []string{"system", "syslog", "host", "10.0.0.1"}
+	if got, ok := DescribeSetPath(host, "ma"); ok || got != "" {
+		t.Errorf("DescribeSetPath(%v, \"ma\") = (%q, %v), want (\"\", false): ambiguous prefix of match/match-strings must not borrow the wildcard description",
+			host, got, ok)
+	}
+	if got, ok := DescribeSetPath(host, "mat"); ok || got != "" {
+		t.Errorf("DescribeSetPath(%v, \"mat\") = (%q, %v), want (\"\", false)",
+			host, got, ok)
+	}
+	if got, ok := DescribeSetPath(host, "match"); !ok || got != "Regular-expression message filter" {
+		t.Errorf("DescribeSetPath(%v, \"match\") = (%q, %v), want the match description",
+			host, got, ok)
+	}
+	if got, ok := DescribeSetPath(host, "match-"); !ok || got != "Message string filter" {
+		t.Errorf("DescribeSetPath(%v, \"match-\") = (%q, %v), want the match-strings description (unique prefix)",
+			host, got, ok)
+	}
+	if got, ok := DescribeSetPath(host, "kern"); !ok || got != "Syslog facility (value is the severity threshold)" {
+		t.Errorf("DescribeSetPath(%v, \"kern\") = (%q, %v), want the facility wildcard description for an instance name",
+			host, got, ok)
+	}
+}
+
 // Identity (args) tokens are consumed as values, so a description
 // lookup past a named instance still lands on the right children.
 func TestDescribeSetPathConsumesArgs16161(t *testing.T) {

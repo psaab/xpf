@@ -33,7 +33,10 @@ func DescribeSetPath(tokens []string, name string) (string, bool) {
 			return "", false // at a leaf; tokens remain unconsumed
 		}
 		keyword := tokens[i]
-		child, _ := resolveSchemaKeyword(schema, keyword)
+		child, _, ambiguous := resolveSchemaKeyword(schema, keyword)
+		if ambiguous {
+			return "", false // ambiguous prefix: never guess (#16161)
+		}
 		if child == nil {
 			// A wildcard slot consumes the token as a name value.
 			child = schema.wildcard
@@ -52,7 +55,7 @@ func DescribeSetPath(tokens []string, name string) (string, bool) {
 			return "", false
 		}
 		if child.compoundKey && i < len(tokens) {
-			if sub, _ := resolveSchemaKeyword(child, tokens[i]); sub != nil {
+			if sub, _, ambiguous := resolveSchemaKeyword(child, tokens[i]); !ambiguous && sub != nil {
 				child = sub
 				i++
 			}
@@ -65,43 +68,61 @@ func DescribeSetPath(tokens []string, name string) (string, bool) {
 	if schema == nil || name == "" {
 		return "", false
 	}
-	if child, _ := resolveSchemaKeyword(schema, name); child != nil && child.desc != "" {
+	if child, _, ambiguous := resolveSchemaKeyword(schema, name); ambiguous {
+		return "", false // ambiguous candidate prefix: never guess (#16161)
+	} else if child != nil && child.desc != "" {
 		return child.desc, true
 	}
-	// A wildcard name slot describes a candidate instance name.
+	// A wildcard name slot describes a candidate instance name —
+	// only for a name that matches no child keyword at all. An
+	// ambiguous prefix (handled above) or an exact known keyword
+	// that simply lacks a description must not borrow the
+	// wildcard's: `ma` under a level with match/match-strings
+	// children describes nothing, not the wildcard's text.
 	if schema.wildcard != nil && schema.wildcard.desc != "" {
-		// Only when name is not a known child keyword that simply
-		// lacks a description: known keywords handled above return
-		// their own desc; an undescribed known keyword must not
-		// borrow the wildcard's.
-		if _, known := schema.children[name]; !known {
+		if _, known := schema.children[name]; !known && !isKeywordPrefix(schema, name) {
 			return schema.wildcard.desc, true
 		}
 	}
 	return "", false
 }
 
+// isKeywordPrefix reports whether name is a strict prefix of any
+// child keyword of schema (an abbreviation attempt, unique or
+// ambiguous), as opposed to a would-be instance name for the
+// wildcard slot.
+func isKeywordPrefix(schema *schemaNode, name string) bool {
+	for k := range schema.children {
+		if strings.HasPrefix(k, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveSchemaKeyword resolves keyword against schema's children:
 // an exact match wins, otherwise a unique prefix match expands.
-// It returns (nil, "") when there is no match or the prefix is
-// ambiguous. Wildcards are NOT consulted here; callers decide.
-func resolveSchemaKeyword(schema *schemaNode, keyword string) (*schemaNode, string) {
+// It returns (nil, "", false) when there is no match or the prefix
+// is ambiguous — the ambiguity is reported explicitly so callers
+// can tell "no such keyword" (a wildcard slot may still claim the
+// token) from "ambiguous prefix" (must describe nothing, per the
+// DescribeSetPath contract) (#16161 review fold).
+// Wildcards are NOT consulted here; callers decide.
+func resolveSchemaKeyword(schema *schemaNode, keyword string) (node *schemaNode, resolved string, ambiguous bool) {
 	if schema == nil || schema.children == nil {
-		return nil, ""
+		return nil, "", false
 	}
 	if s, ok := schema.children[keyword]; ok {
-		return s, keyword
+		return s, keyword, false
 	}
-	var match *schemaNode
-	resolved := ""
 	for k, s := range schema.children {
 		if strings.HasPrefix(k, keyword) {
-			if match != nil {
-				return nil, "" // ambiguous prefix
+			if node != nil {
+				return nil, "", true // ambiguous prefix
 			}
-			match = s
+			node = s
 			resolved = k
 		}
 	}
-	return match, resolved
+	return node, resolved, false
 }
