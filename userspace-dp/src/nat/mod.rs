@@ -6,7 +6,8 @@
 // allocator + persistent lease state machine, destination NAT
 // table, static 1:1 NAT, and pool status aggregation. The split
 // localizes the allocator's rollback/release/expiration invariants
-// to `allocator.rs`, keeps DNAT and static NAT tables in their own
+// to `allocator/` (mod.rs facade + deterministic.rs + occupancy.rs,
+// #16135), keeps DNAT and static NAT tables in their own
 // files, and aggregates pool status alongside the cross-cutting
 // type at the module root.
 //
