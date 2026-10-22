@@ -157,6 +157,9 @@ mod shared_umem;
 #[cfg(test)]
 #[path = "test_fixtures.rs"]
 mod test_fixtures;
+#[cfg(test)]
+#[path = "testfx.rs"]
+mod testfx;
 #[path = "tunnel.rs"]
 mod tunnel;
 #[path = "tx/mod.rs"]

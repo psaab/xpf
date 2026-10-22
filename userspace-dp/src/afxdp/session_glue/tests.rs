@@ -6,6 +6,11 @@
 // session_glue/mod.rs.
 
 use super::*;
+use crate::afxdp::testfx::{
+    test_forwarding_state, test_forwarding_state_split_rgs,
+    test_forwarding_state_split_rgs_with_tunnel, test_forwarding_state_with_fabric,
+    test_forwarding_state_with_local_destination, test_key, test_metadata, test_resolution,
+};
 use crate::afxdp::worker_queue::WORKER_COMMAND_DRAIN_BUDGET;
 use crate::session::{ForwardingGenerationStamp, PolicyRevalidationKind, PolicyRevalidationTarget};
 
@@ -45,43 +50,10 @@ fn inactive_ha_runtime(watchdog_timestamp: u64) -> HAGroupRuntime {
     }
 }
 
-fn test_resolution() -> ForwardingResolution {
-    ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }
-}
-
-fn test_metadata() -> SessionMetadata {
-    SessionMetadata { ingress_zone: 1,
-    egress_zone: 2,
-    ingress_zone_check: 0,
-    egress_zone_check: 0,
-    ingress_ifindex: 0,
-    ingress_vlan_id: 0,
-    forward_ingress_vlan_id: None,
-    owner_rg_id: 1,
-    fabric_ingress: false,
-    is_reverse: false,
-    nat64_reverse: None,
-    log_session_init: false,
-    log_session_close: false,
-    policy_id: 0,
-    inactivity_timeout_ns: None,
-    policy_counter_idx: 0,
-    policy_counter: None,
-    nat_scope_ifindex: None }
-}
+// #16137: `test_resolution` / `test_metadata` now live once in
+// `crate::afxdp::testfx` (imported above); the copies formerly here were
+// byte-identical (`test_resolution`) resp. the canonical original
+// (`test_metadata`).
 
 fn test_decision() -> SessionDecision {
     SessionDecision {
@@ -124,49 +96,8 @@ fn empty_filter(name: &str, family: &str) -> Arc<Filter> {
     })
 }
 
-fn test_forwarding_state() -> ForwardingState {
-    let mut forwarding = ForwardingState::default();
-    forwarding.connected_v4.push(ConnectedRouteV4 {
-        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(10, 0, 61, 0), 24).unwrap()),
-        host: Ipv4Addr::new(10, 0, 61, 0),
-        ifindex: 6,
-        tunnel_endpoint_id: 0,
-        table: "inet.0".to_string(),
-    });
-    forwarding.neighbors.insert(
-        (6, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-        NeighborEntry {
-            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
-        },
-    );
-    forwarding.egress.insert(
-        6,
-        EgressInterface {
-            bind_ifindex: 6,
-            vlan_id: 0,
-            mtu: 1500,
-            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01],
-            zone_id: TEST_LAN_ZONE_ID,
-            redundancy_group: 1,
-            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
-            primary_v6: None,
-        },
-    );
-    forwarding.egress.insert(
-        12,
-        EgressInterface {
-            bind_ifindex: 11,
-            vlan_id: 80,
-            mtu: 1500,
-            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
-            zone_id: TEST_WAN_ZONE_ID,
-            redundancy_group: 1,
-            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
-            primary_v6: None,
-        },
-    );
-    forwarding
-}
+// #16137: `test_forwarding_state` now lives once in `crate::afxdp::testfx`
+// (imported above); the copy formerly here is the canonical original.
 
 fn add_live_test_key_route(forwarding: &mut ForwardingState) {
     forwarding.connected_v4.push(ConnectedRouteV4 {
@@ -187,16 +118,8 @@ fn add_live_test_key_neighbor(neighbors: &ShardedNeighborMap) {
     );
 }
 
-fn test_forwarding_state_with_local_destination(ip: Ipv4Addr) -> ForwardingState {
-    let mut forwarding = test_forwarding_state();
-    forwarding.local_v4.insert(ip);
-    forwarding
-        .local_tables_v4
-        .entry(ip)
-        .or_default()
-        .insert("inet.0".to_string());
-    forwarding
-}
+// #16137: `test_forwarding_state_with_local_destination` now lives once in
+// `crate::afxdp::testfx` (imported above).
 
 #[test]
 fn session_key_has_lo0_filter_matches_packet_family() {
@@ -450,64 +373,11 @@ fn test_local_delivery_decision() -> SessionDecision {
     }
 }
 
-fn test_forwarding_state_with_fabric() -> ForwardingState {
-    let mut forwarding = test_forwarding_state();
-    forwarding
-        .zone_name_to_id
-        .insert("lan".to_string(), TEST_LAN_ZONE_ID);
-    forwarding
-        .zone_name_to_id
-        .insert("sfmix".to_string(), TEST_SFMIX_ZONE_ID);
-    forwarding
-        .zone_name_to_id
-        .insert("wan".to_string(), TEST_WAN_ZONE_ID);
-    forwarding.fabrics.push(FabricLink {
-        parent_ifindex: 21,
-        overlay_ifindex: 101,
-        peer_addr: IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2)),
-        peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
-        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
-        up: true,
-    });
-    forwarding
-}
-
-fn test_forwarding_state_split_rgs() -> ForwardingState {
-    let mut forwarding = test_forwarding_state_with_fabric();
-    forwarding.egress.insert(
-        6,
-        EgressInterface {
-            bind_ifindex: 6,
-            vlan_id: 0,
-            mtu: 1500,
-            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01],
-            zone_id: TEST_LAN_ZONE_ID,
-            redundancy_group: 2,
-            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
-            primary_v6: None,
-        },
-    );
-    forwarding
-}
-
-fn test_forwarding_state_split_rgs_with_tunnel() -> ForwardingState {
-    let mut forwarding = test_forwarding_state_split_rgs();
-    forwarding.tunnel_endpoint_by_ifindex.insert(586, 1);
-    forwarding
-}
-
-fn test_key() -> SessionKey {
-    SessionKey {
-        addr_family: libc::AF_INET as u8,
-        protocol: PROTO_TCP,
-        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
-        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        src_port: 55068,
-        dst_port: 5201,
-        discriminator: Default::default(),
-        routing_domain: 0,
-    }
-}
+// #16137: `test_forwarding_state_with_fabric`,
+// `test_forwarding_state_split_rgs`,
+// `test_forwarding_state_split_rgs_with_tunnel`, and `test_key` now live
+// once in `crate::afxdp::testfx` (imported above); the copies formerly
+// here were the canonical originals.
 
 #[test]
 fn maybe_promote_synced_session_sets_fabric_ingress_on_fabric_hit() {
