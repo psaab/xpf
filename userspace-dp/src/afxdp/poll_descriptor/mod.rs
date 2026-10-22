@@ -786,17 +786,16 @@ use policy_revalidation::{
 // up; the explicit hint matches other hot-path extractions in
 // this repo).
 //
-// `area` raw-pointer contract (#1826, applies to every
-// `unsafe { &*area }` reborrow in this function): the caller
-// (worker/lifecycle.rs `process_binding_rx`) casts `area` from a
-// `&MmapArea` borrowed out of `binding.umem`'s `Rc<WorkerUmemInner>`
-// allocation. The pointee outlives this call — nothing on the poll
-// path drops or replaces `binding.umem`, and the only
-// `&mut Umem` escape hatch (`WorkerUmem::umem_mut`, a `RefCell` borrow
-// — #15730) runs solely at bind time, never while a worker is polling
-// — so each shared reborrow is valid and cannot alias a mutable borrow.
-// The raw pointer only decouples the immutable
-// UMEM-area borrow from the `&mut BindingWorker` borrow.
+// `area` handle contract (#16184, supersedes the #1826 raw-pointer
+// contract): the caller (worker/lifecycle.rs `poll_binding`) mints
+// an owned `UmemAreaHandle` — an `Rc<WorkerUmemInner>` clone — from
+// `binding.umem` BEFORE handing `binding` out as `&mut`, so every
+// `area.area()` reborrow in this function is backed by an owned
+// clone, not a threaded raw pointer. The pointee outlives this
+// call for as long as the handle lives; the only `&mut Umem`
+// escape hatch (`WorkerUmem::umem_mut`, a `RefCell` borrow —
+// #15730) runs solely at bind time, never while a worker is
+// polling, so each shared reborrow cannot alias a mutable borrow.
 #[inline]
 fn dns_reply_qr_set(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {
     if meta.protocol != PROTO_UDP {
@@ -960,7 +959,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     binding_index: usize,
     left: &mut [BindingWorker],
     right: &mut [BindingWorker],
-    area: *const MmapArea,
+    area: &UmemAreaHandle,
     available: u32,
     injected_packet: Option<(Vec<u8>, UserspaceDpMeta)>,
     sessions: &mut SessionTable,
@@ -1026,7 +1025,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         // SAFETY: `addr` came from this binding's free-TX frame pool, so the
         // offset belongs to this binding's UMEM and no other owner can access
         // it until the injected packet reaches the origin-aware recycle arm.
-        let Some(dst) = (unsafe { (&*area).slice_mut_unchecked(addr as usize, frame.len()) })
+        let Some(dst) = (unsafe { area.area().slice_mut_unchecked(addr as usize, frame.len()) })
         else {
             binding.tx_pipeline.free_tx_frames.push_back(addr);
             crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
@@ -1086,9 +1085,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
             record_rx_descriptor_telemetry(desc, area, telemetry, worker_ctx);
         }
         let mut recycle_now = true;
-        // SAFETY: per the `area` contract in this function's header
-        // comment — pointee outlives the call, never aliased mutably.
-        if let Some(meta) = injected_meta.or_else(|| try_parse_metadata(unsafe { &*area }, desc)) {
+        if let Some(meta) = injected_meta.or_else(|| try_parse_metadata(area.area(), desc)) {
             telemetry.counters.metadata_packets += 1;
             let disposition = classify_metadata(meta, validation);
             if disposition == PacketDisposition::Valid {
@@ -1108,7 +1105,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     replay_scratch_frame = owned;
                     replay_scratch_frame.as_slice()
                 } else if let Some(slice) =
-                    unsafe { &*area }.slice(desc.addr as usize, desc.len as usize)
+                    area.area().slice(desc.addr as usize, desc.len as usize)
                 {
                     slice
                 } else {
@@ -1457,9 +1454,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // the live UMEM Ethernet frame, so the source MAC is the
                 // outer host's and not the GRE tunnel egress).
                 let mut flow = stage_parse_flow_and_learn(
-                    // SAFETY: per the `area` contract in this
-                    // function's header comment.
-                    unsafe { &*area },
+                    area.area(),
                     desc,
                     packet_frame,
                     meta,
@@ -9072,9 +9067,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.ha_state,
                                 now_secs,
                                 resolve_forwarding(
-                                    // SAFETY: per the `area` contract in this
-                                    // function's header comment.
-                                    unsafe { &*area },
+                                    area.area(),
                                     desc,
                                     meta,
                                     worker_ctx.forwarding,
@@ -12956,7 +12949,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
 pub(super) fn poll_binding_process_descriptor(
     binding: &mut BindingWorker,
     binding_index: usize,
-    area: *const MmapArea,
+    area: &UmemAreaHandle,
     available: u32,
     sessions: &mut SessionTable,
     screen: &mut ScreenState,

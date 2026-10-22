@@ -1134,12 +1134,12 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         dbg: &mut dbg,
         counters: &mut batch,
     };
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,

@@ -373,7 +373,7 @@ fn drive_packets(
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
     let mut dbg = DebugPollCounters::default();
-    let area_ptr = binding.umem.area() as *const MmapArea;
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
 
     let mut telemetry = TelemetryContext {
         dbg: &mut dbg,
@@ -382,7 +382,7 @@ fn drive_packets(
     poll_binding_process_descriptor(
         &mut binding,
         0,
-        area_ptr,
+        &area_handle,
         1,
         &mut sessions,
         &mut screen,
@@ -418,7 +418,7 @@ fn drive_packets(
         poll_binding_process_descriptor(
             &mut binding,
             0,
-            area_ptr,
+            &area_handle,
             1,
             &mut sessions,
             &mut screen,

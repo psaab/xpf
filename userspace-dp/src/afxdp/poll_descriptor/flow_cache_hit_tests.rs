@@ -969,7 +969,7 @@ struct StageRun {
 /// Drive the LIVE call site once.
 ///
 /// #6304 fidelity: production slices `raw_frame` straight out of the UMEM
-/// (`poll_descriptor/mod.rs`: `unsafe { &*area }.slice(desc.addr, desc.len)`),
+/// (`poll_descriptor/mod.rs`: `area.area().slice(desc.addr, desc.len)`),
 /// so `packet_frame` ALIASES the bytes `apply_rewrite_descriptor` then mutates
 /// in place (TTL decrement + checksum delta). Handing a heap copy in here
 /// instead would decouple the mirror clone from the rewrite and make "the
@@ -1134,7 +1134,12 @@ fn run_stage_seeded(
         len: frame.len() as u32,
         options: 0,
     };
+    // #16184: mint the owned handle up front; `raw_frame` borrows
+    // from it (the same aliasing the production handle guarantees),
+    // so no raw pointer is needed to stage the fixture.
+    let area = UmemAreaHandle::from_mmap_area_for_test(area);
     let raw_frame = area
+        .area()
         .slice(frame_offset as usize, frame.len())
         .expect("raw frame must ALIAS the UMEM, as it does in production");
 
@@ -1226,7 +1231,7 @@ fn run_stage_seeded(
         BINDING_INDEX,
         &ingress_umem,
         desc,
-        &area as *const MmapArea,
+        &area,
         raw_frame,
         &mut owned_packet_frame,
         meta,
@@ -1257,7 +1262,7 @@ fn run_stage_seeded(
         .tx_pipeline
         .pending_tx_prepared
         .front()
-        .and_then(|prepared| area.slice(prepared.offset as usize, prepared.len as usize))
+        .and_then(|prepared| area.area().slice(prepared.offset as usize, prepared.len as usize))
         .map(<[u8]>::to_vec);
     let tx_frame = if seed.cross_umem_shared.is_some() {
         target_tx_frame
@@ -1265,7 +1270,7 @@ fn run_stage_seeded(
         tx_pipeline_state
             .pending_tx_prepared
             .front()
-            .and_then(|prepared| area.slice(prepared.offset as usize, prepared.len as usize))
+            .and_then(|prepared| area.area().slice(prepared.offset as usize, prepared.len as usize))
             .map(<[u8]>::to_vec)
     };
     // #6304: read the hit entry's accumulated byte count back out. The
