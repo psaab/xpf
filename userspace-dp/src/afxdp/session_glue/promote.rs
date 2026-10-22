@@ -1,10 +1,14 @@
 use super::*;
 
 /// #16185: the conntrack map fd pair that travels with the shared
-/// session maps. `v4`/`v6` are distinct named fields so a transposed
-/// pair is a compile-visible field error, not a silent same-type
-/// (`c_int`) argument swap. `-1` means unavailable (no-op), matching
-/// the pre-bundle scalar convention.
+/// session maps. `v4`/`v6` are named fields at one construction site
+/// (instead of two bare `c_int` arguments at every call), so the
+/// pair is built once and reviewed once. Named fields do not make
+/// a same-typed transposition uncompilable (`v4: <v6 fd>` still
+/// type-checks); the wiring cells in
+/// `shared_session_refs_16185_tests.rs` are what pin each fd to its
+/// consumer. `-1` means unavailable (no-op), matching the
+/// pre-bundle scalar convention.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct ConntrackFds {
     pub v4: c_int,

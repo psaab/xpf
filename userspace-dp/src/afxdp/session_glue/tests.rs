@@ -10302,7 +10302,7 @@ fn sync_import_legitimate_promotion_remains_enabled_10613() {
                     peer_worker_commands: &[],
             worker_commands_by_id: empty_worker_commands_by_id(),
             conntrack: ConntrackFds { v4: -1, v6: -1 },
-            tick: Tick::default(),
+            tick: Tick { ns: 2_000_000, secs: 0 },
 },
         &test_forwarding_state_with_fabric(),
         &key,
@@ -13464,7 +13464,7 @@ fn local_hit_purge_removes_shared_and_replicates_14666() {
         forward_wire_sessions: &shared_forward_wire_sessions,
         owner_rg_indexes: &shared_owner_rg_indexes,
             peer_worker_commands: &peer_worker_commands,
-        worker_commands_by_id: empty_worker_commands_by_id(),
+        worker_commands_by_id: by_id_ref,
         conntrack: ConntrackFds { v4: -1, v6: -1 },
         tick: Tick::default(),
 };
@@ -13596,7 +13596,7 @@ fn local_hit_purge_preserves_replacement_shared_entry_14666() {
         forward_wire_sessions: &shared_forward_wire_sessions,
         owner_rg_indexes: &shared_owner_rg_indexes,
             peer_worker_commands: &peer_worker_commands,
-        worker_commands_by_id: empty_worker_commands_by_id(),
+        worker_commands_by_id: &by_id,
         conntrack: ConntrackFds { v4: -1, v6: -1 },
         tick: Tick::default(),
 };
@@ -20001,7 +20001,7 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
             peer_worker_commands: &[],
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick { ns: 1_000_000, secs: 0 },
 };
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
@@ -21741,7 +21741,7 @@ fn worker_list_excludes_promoted_unbound_row_from_positional_matching_12072() {
             peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds { v4: -1, v6: -1 },
-        tick: Tick::default(),
+        tick: Tick { ns: monotonic_nanos(), secs: 0 },
 };
     let promoted_metadata = maybe_promote_synced_session(
         &mut sessions,

@@ -1,17 +1,23 @@
 //! #16185: distinct-value wiring cells for the extended
 //! `SharedSessionRefs` bundle (the #6961 mechanism applied to
-//! signatures). Each cell seeds every bundle field distinctly and
-//! asserts it reaches its consumer, so a transposed `c_int`/`u64`
-//! neighbour — invisible to the compiler before the bundle — fails
-//! here instead of compiling silently.
+//! signatures). The bundle removes the repeated bare-scalar
+//! threading (two `c_int` fds and two `u64` clocks at every call
+//! site, each a same-typed neighbour the compiler could not
+//! distinguish), but named fields alone do not make a transposition
+//! uncompilable: `v4: <the v6 fd>` still type-checks. What these
+//! cells pin is narrower and honest: the bundle's named fields are
+//! the values each consumer actually reads.
 //!
-//! Fail-on-revert: swapping `conntrack.v4`/`conntrack.v6` at the
-//! promote construction (or inside `promote.rs`), or wiring
-//! `tick.secs` where `tick.ns` belongs, reddens the matching cell.
-//! Reverting the bundle extension itself does not compile (the
-//! signatures no longer accept the raw scalars), which is the point:
-//! the transposition class is unrepresentable, and these cells pin
-//! that the bundle's fields are the ones consumed.
+//! Coverage by field: cell 1 pins the shared sessions map and the
+//! peer queue on the plain promote leg (which is the no-conntrack
+//! wrapper, so it says nothing about fds); cell 4 pins
+//! `ConntrackFds.v4` and the deferred-promotion `Tick.ns` graft on
+//! the `_with_conntrack` promotion leg (origin-bit write); cell 2
+//! pins `ConntrackFds.v4` + peer queue on the purge leg; cell 3 pins
+//! only the `detached`/`with_conntrack_tick` constructor values.
+//! No cell observes a `Tick.secs` consumer: the resolve path's
+//! seconds reading is exercised by the existing HA resolution
+//! tests through their own bundles, not asserted here.
 
 use super::*;
 use std::net::{IpAddr, Ipv4Addr};
@@ -82,14 +88,13 @@ fn wiring_forwarding() -> ForwardingState {
     forwarding
 }
 
-/// #16185 wiring cell 1: `ConntrackFds.v4` (not `.v6`) drives the
-/// promote origin-bit write, `Tick.ns` stamps the promotion, and the
-/// bundle's peer queue + by-id map carry the upsert replica.
+/// #16185 wiring cell 1: the plain promote leg publishes into the
+/// bundle's shared sessions map and replicates on its peer queue.
 ///
-/// The conntrack row is seeded through the v4 test fd; the bundle
-/// carries `v4 = CONNTRACK_TEST_MAP_FD, v6 = -1`. A v4/v6 transposition
-/// in the bundle construction or in `promote.rs` sends the origin-bit
-/// write to `-1` (no-op) and the row keeps `cluster_synced = true`.
+/// This entry point is the documented no-conntrack wrapper (it
+/// forces the fds to `-1,-1` inside), so this cell makes no fd or
+/// timestamp claim; the conntrack origin-bit write is pinned by
+/// cell 4 on the `_with_conntrack` leg.
 #[test]
 fn shared_refs_maps_and_peer_queue_reach_promote_16185() {
     crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
@@ -170,12 +175,6 @@ fn shared_refs_maps_and_peer_queue_reach_promote_16185() {
     );
     assert_eq!(promoted, metadata);
 
-    // NOTE: `maybe_promote_synced_session` is the documented
-    // no-conntrack leg (it forces `-1, -1` inside the bundle), so the
-    // conntrack origin-bit write is pinned on the purge leg (cell 2)
-    // and the `_with_conntrack` promote path in tests.rs
-    // (`purge_translated_synced_hit_full_teardown_13674`). This cell
-    // pins the shared-map + peer-queue wiring of the same bundle.
     // The shared maps in the bundle received the promoted entry.
     assert_eq!(
         lock_shared_recover(&shared_sessions)
@@ -347,13 +346,11 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
     }
 }
 
-/// #16185 wiring cell 3: `Tick.ns` and `Tick.secs` are not
-/// interchangeable. `delete_terminal_filtered_session` releases and
-/// replicates at `tick.ns`; a resolve at `tick.secs` (a far smaller
-/// magnitude in every fixture, 9 vs 2_000_000) would stamp the close
-/// path with the wrong clock. Pinned structurally: the bundle is
-/// `Copy` and field-distinct, and `detached` is the documented
-/// no-conntrack/no-clock form (`-1, -1`, zero tick).
+/// #16185 wiring cell 3: constructor values only. `detached` is
+/// the documented no-conntrack/no-clock form (`-1, -1`, zero tick)
+/// and `with_conntrack_tick` grafts exactly the named fields. This
+/// cell calls no timestamp or fd consumer; consumers are pinned by
+/// cells 2 and 4.
 #[test]
 fn shared_refs_detached_is_no_conntrack_no_clock_16185() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -377,4 +374,129 @@ fn shared_refs_detached_is_no_conntrack_no_clock_16185() {
     assert_eq!(grafted.conntrack, ConntrackFds { v4: 11, v6: 22 });
     assert_eq!(grafted.tick, Tick { ns: 33, secs: 44 });
     assert!(std::ptr::eq(grafted.sessions, &shared_sessions));
+}
+
+/// #16185 wiring cell 4: the deferred-promotion leg of
+/// `maybe_promote_synced_session_with_conntrack` consumes
+/// `ConntrackFds.v4` for the origin-bit write and grafts the
+/// deferred promotion's own `now_ns` (not the bundle tick).
+///
+/// The conntrack row is seeded cluster-synced through the v4 test
+/// fd; the bundle carries `v4 = CONNTRACK_TEST_MAP_FD, v6 = -1`
+/// and a deliberately different bundle tick (`ns: 5`). The
+/// deferred promotion carries `now_ns: 2_000_000`. After the call
+/// the row's `cluster_synced` must be false: a v4/v6 transposition
+/// at this construction (or inside `promote.rs`) sends the write
+/// to `-1` and leaves it set.
+#[test]
+fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = wiring_key();
+    let decision = wiring_decision();
+    let metadata = wiring_metadata();
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            0,
+            1,
+            300,
+            SessionOrigin::SyncImport,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+    );
+    assert!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&key)
+            .is_some_and(|row| row.cluster_synced),
+        "precondition: seeded row is cluster-synced",
+    );
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let _ = sessions.drain_deltas(16);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let shared = SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: empty_worker_commands_by_id(),
+        conntrack: ConntrackFds {
+            v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            v6: -1,
+        },
+        tick: Tick { ns: 5, secs: 9 },
+    };
+    let mut resolved = ResolvedFlowSessionDecision {
+        key: key.clone(),
+        session_id: 1,
+        timeout_secs: 300,
+        decision,
+        source_nat_static: None,
+        metadata: metadata.clone(),
+        origin: SessionOrigin::SyncImport,
+        source_nat_validation_key: None,
+        created: false,
+        install_failed: false,
+        authority_deferred: false,
+        deferred_forwarding_revalidation: None,
+        deferred_synced_promotion: Some(DeferredSyncedPromotion {
+            key: key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin: SessionOrigin::SyncImport,
+            fabric_ingress: false,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            now_ns: 2_000_000,
+        }),
+        deferred_shared_materialization: None,
+        deferred_synced_purge: None,
+    };
+    let mut evicted_keys: Vec<SessionKey> = Vec::new();
+    maybe_promote_synced_session_with_conntrack(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        shared,
+        &wiring_forwarding(),
+        0x10,
+        0,
+        SessionHitVerdict::Owner,
+        &mut resolved,
+        &mut evicted_keys,
+    );
+    let row = crate::afxdp::bpf_map::conntrack_row_for_test(&key)
+        .expect("conntrack row still present after deferred promotion");
+    assert!(
+        !row.cluster_synced,
+        "#16185: deferred promotion must clear the synced origin bit through \
+         ConntrackFds.v4 (a v4/v6 transposition leaves it set)",
+    );
+    assert_eq!(
+        lock_shared_recover(&shared_sessions)
+            .get(&key)
+            .map(|entry| entry.origin),
+        Some(SessionOrigin::SharedPromote),
+        "#16185: deferred promotion must publish SharedPromote into the bundle sessions map",
+    );
 }
