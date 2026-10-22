@@ -13,6 +13,40 @@ import (
 // Behaviour must match the pre-dedup twins (#9118) in file size, counters,
 // and errors.
 
+// Healthy writes must allocate nothing in ensureOpenLocked. The first
+// dedup built a capturing callback and a []any log-attrs slice on every
+// call (0 -> 3 allocs/write vs parent); the helper now takes only cheap
+// scalars and constructs the open/log record inside the reopen branch.
+func TestEnsureOpenHealthyZeroAllocs16181(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	lw, err := NewLocalLogWriter(LocalLogConfig{Path: path})
+	if err != nil {
+		t.Fatalf("NewLocalLogWriter: %v", err)
+	}
+	defer lw.Close()
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if got := testing.AllocsPerRun(100, func() {
+		if !lw.ensureOpenLocked() {
+			t.Fatal("healthy writer reported unusable")
+		}
+	}); got != 0 {
+		t.Errorf("healthy LocalLogWriter.ensureOpenLocked allocs/run = %v, want 0", got)
+	}
+
+	dir := t.TempDir()
+	tw := newTraceWriter16181(t, dir)
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+	if got := testing.AllocsPerRun(100, func() {
+		if !tw.ensureOpenLocked() {
+			t.Fatal("healthy trace writer reported unusable")
+		}
+	}); got != 0 {
+		t.Errorf("healthy TraceWriter.ensureOpenLocked allocs/run = %v, want 0", got)
+	}
+}
+
 // --- LocalLogWriter (openHardenedAuditLog on a raw path) ---
 
 func TestLocalWriterDedupFileReplacedResyncs16181(t *testing.T) {

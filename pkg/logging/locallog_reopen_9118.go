@@ -52,26 +52,25 @@ type wedgeState9118 struct {
 	recovered   atomic.Uint64
 }
 
-// reopenHelperArgs carries the writer-specific inputs to the shared reopen
-// helper (#16181). The open function and the recovery log record differ per
-// writer kind; everything else about the wedge recovery is identical.
-type reopenHelperArgs struct {
-	// open reopens the writer's file. Called only when a reopen is due.
-	open func() (*os.File, error)
-	// logMsg and logAttrs are the writer-specific recovery WARN fields.
-	logMsg   string
-	logAttrs []any
-}
-
 // ensureOpenForWriter is the single implementation behind both writers'
 // ensureOpenLocked methods (#16181, dedup of #9118). It attempts to recover
 // a wedged writer and reports whether the handle is usable afterwards.
 //
+// Only cheap scalars and field references cross into the helper: logPath is
+// the writer's path as logged (lw.path / tw.path), openArg is the argument
+// for the writer-specific open (lw.path for openHardenedAuditLog, tw.name
+// for openTraceFile), and trace selects between those two open paths and
+// the recovery log message. The open call and the recovery log attributes
+// are constructed only inside the reopen branch below, so the healthy
+// path (file != nil, taken on every ordinary write) performs no callback
+// or slice construction and allocates nothing -- verified by an
+// AllocsPerRun probe in locallog_reopen_dedup_16181_test.go.
+//
 // file and written are pointer parameters because the two writer structs
 // store them in distinct field sets that cannot share a base type without
 // restructuring both writers; passing them explicitly keeps this helper
-// free of writer-specific knowledge beyond the supplied open fn and log
-// fields. wedge is shared because both writers already embed wedgeState9118.
+// free of writer-specific knowledge beyond the supplied scalars. wedge is
+// shared because both writers already embed wedgeState9118.
 //
 // The caller must hold the owning writer's mutex.
 //
@@ -79,7 +78,7 @@ type reopenHelperArgs struct {
 // deliberately, or when the last attempt was too recent -- so a caller can
 // use the result directly as "may I write?" and the existing drop-and-count
 // arm stays exactly where it was for the cases that genuinely cannot write.
-func ensureOpenForWriter(wedge *wedgeState9118, file **os.File, written *int64, args reopenHelperArgs) bool {
+func ensureOpenForWriter(wedge *wedgeState9118, file **os.File, written *int64, dropped, failed *atomic.Uint64, logPath, openArg string, trace bool) bool {
 	if *file != nil {
 		return true
 	}
@@ -92,7 +91,17 @@ func ensureOpenForWriter(wedge *wedgeState9118, file **os.File, written *int64, 
 	}
 	wedge.lastAttempt = now
 
-	f, err := args.open()
+	// Reopen branch only (slow path): select the writer-specific open and,
+	// on success, build the recovery log record. Keeping both out of the
+	// wrappers above the healthy check is what keeps a healthy write at
+	// zero allocations.
+	var f *os.File
+	var err error
+	if trace {
+		f, err = openTraceFile(openArg)
+	} else {
+		f, err = openHardenedAuditLog(openArg, os.O_APPEND)
+	}
 	if err != nil {
 		// Deliberately NOT counted as a failed rotation: no rotation was
 		// attempted. It is counted by the caller's existing drop path, which is
@@ -110,10 +119,15 @@ func ensureOpenForWriter(wedge *wedgeState9118, file **os.File, written *int64, 
 		*written = 0
 	}
 	wedge.recovered.Add(1)
-	attrs := make([]any, 0, len(args.logAttrs)+1)
-	attrs = append(attrs, args.logAttrs...)
-	attrs = append(attrs, "recoveries", wedge.recovered.Load())
-	slog.Warn(args.logMsg, attrs...)
+	logMsg := "local security-log writer recovered after a failed rotation reopen (#9118)"
+	if trace {
+		logMsg = "flow-trace writer recovered after a failed rotation reopen (#9118)"
+	}
+	slog.Warn(logMsg,
+		"path", logPath,
+		"dropped_writes", dropped.Load(),
+		"failed_rotations", failed.Load(),
+		"recoveries", wedge.recovered.Load())
 	return true
 }
 
@@ -123,17 +137,10 @@ func ensureOpenForWriter(wedge *wedgeState9118, file **os.File, written *int64, 
 // Thin wrapper over ensureOpenForWriter (#16181): the local writer opens a
 // raw path via openHardenedAuditLog, which is deliberately NOT unified with
 // the trace writer's open path (openTraceFile resolves under the trace dir
-// and takes a sanitised basename).
+// and takes a sanitised basename). Only cheap scalars are passed, so a
+// healthy write allocates nothing.
 func (lw *LocalLogWriter) ensureOpenLocked() bool {
-	return ensureOpenForWriter(&lw.wedge, &lw.file, &lw.written, reopenHelperArgs{
-		open:   func() (*os.File, error) { return openHardenedAuditLog(lw.path, os.O_APPEND) },
-		logMsg: "local security-log writer recovered after a failed rotation reopen (#9118)",
-		logAttrs: []any{
-			"path", lw.path,
-			"dropped_writes", lw.droppedWrites.Load(),
-			"failed_rotations", lw.failedRotations.Load(),
-		},
-	})
+	return ensureOpenForWriter(&lw.wedge, &lw.file, &lw.written, &lw.droppedWrites, &lw.failedRotations, lw.path, lw.path, false)
 }
 
 // RecoveredWrites reports how many times a wedged writer was reopened (#9118).
@@ -146,17 +153,10 @@ func (lw *LocalLogWriter) RecoveredWrites() uint64 { return lw.wedge.recovered.L
 // (#16181). It exists as a separate method only because the trace writer
 // opens a different path: openTraceFile resolves under traceLogDir and
 // sanitises the basename, which openHardenedAuditLog on a raw path would
-// not. The recovery logic itself is the shared helper above.
+// not. The recovery logic itself is the shared helper above, and only
+// cheap scalars are passed so a healthy write allocates nothing.
 func (tw *TraceWriter) ensureOpenLocked() bool {
-	return ensureOpenForWriter(&tw.wedge, &tw.file, &tw.written, reopenHelperArgs{
-		open:   func() (*os.File, error) { return openTraceFile(tw.name) },
-		logMsg: "flow-trace writer recovered after a failed rotation reopen (#9118)",
-		logAttrs: []any{
-			"path", tw.path,
-			"dropped_writes", tw.droppedWrites.Load(),
-			"failed_rotations", tw.failedRotations.Load(),
-		},
-	})
+	return ensureOpenForWriter(&tw.wedge, &tw.file, &tw.written, &tw.droppedWrites, &tw.failedRotations, tw.path, tw.name, true)
 }
 
 // RecoveredWrites reports how many times a wedged trace writer was reopened.
