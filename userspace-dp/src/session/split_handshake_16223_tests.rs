@@ -428,6 +428,7 @@ fn syn_ack_first_replica_completes_from_node_evidence_16223() {
         handshake_wire: TcpHandshakeState::Established.to_wire(),
         rev_packets: serving_entry.counters.rev_packets,
         shared_established: true,
+        ..NodeServedEvidence::default()
     };
     let forwards = |_: i32| true;
     let epoch = |_: i32| 0u32;
@@ -519,5 +520,291 @@ fn node_evidence_without_served_reverse_does_not_complete_16223() {
     let _ = table.expire_stale_entries(now + 60 * SEC);
     assert!(table.entry_by_key(&forward).is_none(), "unserved pair must reap");
     assert!(table.entry_by_key(&reverse).is_none(), "unserved pair must reap");
+}
+
+/// #16217 split shape, NEITHER table alone sufficient (FZFixWire3):
+/// worker A's serving forward row is Established but served ZERO
+/// reverse packets (the strict slice's `rev_packets>0` conjunct
+/// fails); worker B's row for the same tuple is a pending replica
+/// that observed reverse traffic but never promoted (its
+/// `established` conjunct fails). Only NODE-WIDE assembly — A
+/// Established OR B reverse counters, aggregated over the shared
+/// maps by `shared_completion_evidence` at the ct-slice — collects
+/// the tuple. Neither table's evidence alone may collect it.
+#[test]
+fn split_two_workers_neither_alone_sufficient_16217() {
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+
+    // Worker A: serving pair promoted (SYN-ACK observed) and the
+    // forward ACK completes it locally — Established, but the reverse
+    // half was never hit again, so local reverse counters stay 0.
+    let mut a = SessionTable::new();
+    let a_rev = install_forward_reverse_pair(&mut a, &forward, now, TCP_SYN);
+    assert_eq!(a_rev, reverse);
+    assert!(a.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    assert!(a.probe_hit(&forward, now + 2 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    {
+        let e = a.entry_by_key(&forward).expect("A forward");
+        assert!(e.established && !e.handshake_pending, "premise A: Established");
+        assert_eq!(e.counters.rev_packets, 0, "premise A: zero local reverse");
+    }
+    // A's slice alone collects via (a): any worker's local row Established.
+    let mut a_node: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    a.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut a_node);
+    assert!(
+        a_node.iter().any(|(k, _)| k == &forward),
+        "#16217(a): local Established row collects without shared evidence"
+    );
+    // Strict slice on A alone must NOT collect it.
+    let mut strict: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    a.established_forward_slice(0, usize::MAX, &mut strict);
+    assert!(
+        !strict.iter().any(|(k, _)| k == &forward),
+        "premise: strict slice alone insufficient (rev_packets==0)"
+    );
+
+    // Worker B: pending replica that observed reverse service only.
+    let mut b = SessionTable::new();
+    let mut rev_meta = metadata();
+    rev_meta.is_reverse = true;
+    rev_meta.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    rev_meta.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    assert!(b.upsert_synced_with_origin(
+        SessionInstall {
+            key: reverse.clone(),
+            decision: decision(),
+            metadata: rev_meta,
+            origin: SessionOrigin::SyncImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 93,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    // B's slice alone (no shared evidence) must NOT collect.
+    let mut b_alone: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    b.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut b_alone);
+    assert!(
+        !b_alone.iter().any(|(k, _)| k == &forward),
+        "premise: worker B alone insufficient"
+    );
+
+    // Node-wide: a pending FORWARD row on a third table, fed ONLY the
+    // aggregated evidence (A established via stamps + B reverse
+    // counters via shared-map replica), must collect — neither source
+    // alone is in this table.
+    let mut c = SessionTable::new();
+    assert!(c.upsert_synced_with_origin(
+        SessionInstall {
+            key: forward.clone(),
+            decision: decision(),
+            metadata: metadata(),
+            // Serving origin so the collector considers it.
+            origin: SessionOrigin::SharedPromote,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 94,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    {
+        let e = c.entry_by_key(&forward).expect("C forward");
+        assert!(!e.established || e.handshake_pending, "premise C: not locally complete");
+    }
+    // Alone: no shared evidence → not collected.
+    let mut c_alone: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    c.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut c_alone);
+    assert!(
+        !c_alone.iter().any(|(k, _)| k == &forward),
+        "premise: collector table alone insufficient (no cross-table view)"
+    );
+    // Aggregated: reverse service observed node-wide (B) → collected.
+    let agg = |_: &SessionKey| NodeServedEvidence {
+        rev_packets_any: 7,
+        ..NodeServedEvidence::default()
+    };
+    let mut c_agg: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    c.node_served_forward_slice(0, usize::MAX, &agg, &mut c_agg);
+    assert!(
+        c_agg.iter().any(|(k, _)| k == &forward),
+        "#16217(b): node-wide reverse evidence must collect the split tuple"
+    );
+    // Aggregated (c): #16223 served-completion stamp alone → collected.
+    let agg_c = |_: &SessionKey| NodeServedEvidence {
+        served_completed: true,
+        ..NodeServedEvidence::default()
+    };
+    let mut c_agg2: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    c.node_served_forward_slice(0, usize::MAX, &agg_c, &mut c_agg2);
+    assert!(
+        c_agg2.iter().any(|(k, _)| k == &forward),
+        "#16217(c): served-completion evidence must collect the split tuple"
+    );
+    // Negative: zero aggregated evidence → still not collected.
+    let mut c_neg: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    c.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut c_neg);
+    assert!(!c_neg.iter().any(|(k, _)| k == &forward));
+}
+
+/// #16217 split shape (FZFixWire): the serving pair is Established on
+fn split_serving_established_replica_pending_completes_and_announces_16217() {
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+
+    // Serving table (sibling worker): promoted pair, genuinely served.
+    let mut serving = SessionTable::new();
+    let serving_reverse = install_forward_reverse_pair(&mut serving, &forward, now, TCP_SYN);
+    assert_eq!(serving_reverse, reverse);
+    assert!(serving.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    assert!(serving.probe_hit(&forward, now + 2 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    assert!(serving.probe_hit(&reverse, now + 3 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    let serving_entry = serving.entry_by_key(&forward).expect("serving forward");
+    assert!(serving_entry.established && !serving_entry.handshake_pending);
+    assert!(serving_entry.counters.rev_packets > 0);
+    // Leg 1: the node-served slice collects the serving pair.
+    let mut out: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+    serving.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut out);
+    assert!(
+        out.iter().any(|(k, _)| k == &forward),
+        "#16217: node-served slice must collect the sibling serving pair, got {out:?}"
+    );
+
+    // Replica table: peer-synced HandshakePending pair, never served
+    // locally (the completing ACK was consumed on the sibling).
+    let mut replica = SessionTable::new();
+    assert!(replica.upsert_synced_with_origin(
+        SessionInstall {
+            key: forward.clone(),
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::SyncImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 91,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    assert!(replica.upsert_synced_with_origin(
+        SessionInstall {
+            key: reverse.clone(),
+            decision: decision(),
+            metadata: reverse_metadata,
+            origin: SessionOrigin::SyncImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 91,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    let _ = replica.drain_deltas(64);
+    // Node evidence arrives (shared wire Established + serving rev).
+    replica.note_node_served_handshake(
+        &forward,
+        TcpHandshakeState::Established.to_wire(),
+        serving_entry.counters.rev_packets,
+    );
+    // A served hit on the replica completes it via node evidence.
+    assert!(replica.probe_hit(&forward, now + 6 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    for key in [&forward, &reverse] {
+        let entry = replica.entry_by_key(key).expect("replica half");
+        assert!(
+            entry.established && !entry.handshake_pending,
+            "#16217: replica half must complete from node evidence"
+        );
+    }
+    replica.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = replica
+        .drain_deltas(64)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1, "#16217: stage advancement must emit exactly one Update, got {updates:?}");
+    assert_eq!(updates[0].key, forward);
+    assert_eq!(
+        updates[0].tcp_handshake_state,
+        TcpHandshakeState::Established.to_wire(),
+        "#16217: Update must carry the Established stage"
+    );
+    assert_eq!(updates[0].tcp_close_class, 0, "#16217: close class unchanged");
+}
+
+/// #16217 guard: a peer-synced row whose CLOSE class transitions
+/// (server RST) must stay silent — the carve-out is stage-only.
+#[test]
+fn peer_synced_close_transition_stays_silent_16217() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: forward.clone(),
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::SyncImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 92,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: reverse.clone(),
+            decision: decision(),
+            metadata: reverse_metadata,
+            origin: SessionOrigin::SyncImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 92,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::Established.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    let _ = table.drain_deltas(64);
+    assert!(table.lookup(&reverse, now + SEC, crate::tcp_flags::TCP_RST | TCP_ACK).is_some());
+    let updates: Vec<_> = table
+        .drain_deltas(64)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert!(
+        updates.is_empty(),
+        "#16217: peer-synced close transition must stay silent, got {updates:?}"
+    );
 }
 

@@ -1588,6 +1588,7 @@ pub(crate) fn worker_loop(
             &mut wg_uncovered_batch,
             worker_id,
             &shared_sessions,
+            &shared_forward_wire_sessions,
             &mut established_shared_cursor,
         );
         // #7201: a command backlog IS work. `apply_worker_commands` drains at

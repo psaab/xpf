@@ -38,6 +38,7 @@ pub(super) fn run_ct_slice(
     wg_uncovered_batch: &mut crate::afxdp::wg_uncovered_forward::WgUncoveredInjectedBatch,
     worker_id: u32,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     established_cursor: &mut usize,
 ) {
     const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000;
@@ -97,8 +98,38 @@ pub(super) fn run_ct_slice(
         let mut established: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
         *established_cursor =
             sessions.established_forward_slice(*established_cursor, usize::MAX, &mut established);
+        // #16217/#16223: assemble completion evidence NODE-WIDE (the
+        // shared maps are visible here): (a) any worker's local row
+        // Established, (b) reverse traffic for the canonical key in
+        // the shared synced/replica maps, or (c) #16223
+        // cache_hit_handshake_progress completion — folded via the
+        // counter stamps in `node_served_evidence`. Shared
+        // Established is OUTPUT only (the restamp below), never an
+        // input, so there is no chicken-and-egg.
+        let shared_evidence = |key: &SessionKey| {
+            crate::afxdp::shared_ops::shared_completion_evidence(
+                shared_sessions,
+                shared_forward_wire_sessions,
+                key,
+            )
+        };
+        let mut node_served: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+        sessions.node_served_forward_slice(0, usize::MAX, &shared_evidence, &mut node_served);
+        for pair in node_served {
+            if !established.contains(&pair) {
+                established.push(pair);
+            }
+        }
         crate::afxdp::shared_ops::restamp_shared_handshakes_established(
             shared_sessions,
+            &established,
+        );
+        // #16217: advance the forward-wire KEY ALIAS slot beside the
+        // canonical restamp so a completed fabric pair reads
+        // Established under the NAT'd tuple too.
+        crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+            shared_sessions,
+            shared_forward_wire_sessions,
             &established,
         );
     }
