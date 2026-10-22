@@ -6,8 +6,10 @@ use super::*;
 /// pair is built once and reviewed once. Named fields do not make
 /// a same-typed transposition uncompilable (`v4: <v6 fd>` still
 /// type-checks); the wiring cells in
-/// `shared_session_refs_16185_tests.rs` are what pin each fd to its
-/// consumer. `-1` means unavailable (no-op), matching the
+/// `shared_session_refs_16185_tests.rs` pin the IPv4 fd to its
+/// consumers (the IPv6 fd has no wiring cell; both cells drive
+/// IPv4 keys through the v4 test fd). `-1` means unavailable
+/// (no-op), matching the
 /// pre-bundle scalar convention.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct ConntrackFds {

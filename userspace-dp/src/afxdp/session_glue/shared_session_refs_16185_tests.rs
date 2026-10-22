@@ -499,4 +499,14 @@ fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
         Some(SessionOrigin::SharedPromote),
         "#16185: deferred promotion must publish SharedPromote into the bundle sessions map",
     );
+    // The promotion must be stamped with the deferred promotion's own
+    // now_ns (2_000_000), not the bundle tick (ns: 5): promote grafts
+    // promotion.now_ns into shared.tick.ns, which SessionUpdate
+    // writes as last_seen_ns. Reading 5 here would mean the graft
+    // consumed the bundle clock instead.
+    assert_eq!(
+        sessions.last_seen_ns(&key),
+        Some(2_000_000),
+        "#16185: deferred promotion must stamp last_seen_ns from promotion.now_ns, not the bundle tick",
+    );
 }
