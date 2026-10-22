@@ -1,5 +1,20 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Extract the shared SNMP v1/v2c community admission gate:
+    communityGate in pkg/snmp/agent.go now holds the single fail-closed
+    head (BER community decode, getCommunity lookup, clients
+    source-allowlist enforcement with the no-secret known_community
+    denial logs) that handleV1Packet and handleV2cPacket previously
+    duplicated, so an admission change can no longer land on one
+    version only. The v1/v2c handlers and their per-varbind PDU
+    behaviour are not merged, v3 (USM) does not pass through the
+    gate, and agent.go is not split. New differential tests cover
+    accepted/wrong community, allowlist allowed/denied, malformed
+    community, and secret-free denial logs on both wire versions,
+    plus a v3-unaffected control (#16180).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Share the completion value provider and hint-roots table across the
     local CLI and the gRPC Complete RPC: pkg/config gains
     ProvideValues(cfg, hint, path, catalogueSuppressed) and HintRoots

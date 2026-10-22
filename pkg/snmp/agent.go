@@ -1088,42 +1088,75 @@ func (a *Agent) handlePacketFrom(data []byte, srcIP net.IP) []byte {
 	}
 }
 
+// communityGate is the shared fail-closed community admission check for the
+// SNMP v1 and v2c packet handlers (#16180). It decodes the BER community
+// string, resolves it via getCommunity, and enforces the community's
+// `clients` source-IP allowlist (#4289). On success it returns the raw
+// community bytes (needed to build the response), the resolved community
+// (needed to gate SET authorization), and the remaining bytes after the
+// community field. On any admission failure it returns nil, nil, nil —
+// callers MUST drop the packet (return nil) without serving it.
+//
+// SECURITY: the community string is the v1/v2c shared secret and is NEVER
+// logged (#4302). Denial logs record only the request source and a
+// known_community boolean that distinguishes an unknown-community drop
+// (false) from a source-denied KNOWN community (true, #4289), so a denial
+// can be correlated without exposing the secret. A nil srcIP disables the
+// source check (see SNMPCommunity.AllowsSource).
+//
+// Only the v1/v2c handlers call this gate. SNMPv3 MUST NOT pass through it
+// — v3 has no community and is authenticated by USM in handleV3Packet. The
+// per-version PDU/response semantics stay in the callers (#5049): this
+// helper dedups exactly the identical admission head and nothing else.
+// Hot-path: one BER decode + map lookup + prefix check per packet, as
+// before; the extraction adds no allocation beyond the pre-existing decode.
+func (a *Agent) communityGate(rest []byte, srcIP net.IP) (community []byte, comm *config.SNMPCommunity, pduRest []byte) {
+	// Decode community string.
+	community, pduRest, err := berDecodeOctetString(rest)
+	if err != nil {
+		slog.Debug("SNMP: failed to decode community")
+		return nil, nil, nil
+	}
+
+	// Verify community string and resolve its authorization level.
+	comm = a.getCommunity(string(community))
+	if comm == nil {
+		// SECURITY (#4302): do NOT log the community string — it is the
+		// v1/v2c shared secret (SNMPCommunity.Name, redacted everywhere
+		// else). Log only the source; known_community=false marks the
+		// unknown-community drop, symmetric with the source-denied
+		// known_community=true log below (#4289).
+		slog.Debug("SNMP: invalid community", "src", srcIP, "known_community", false)
+		return nil, nil, nil
+	}
+
+	// #4289: enforce the community `clients` source-IP restriction. A
+	// community scoped to specific prefixes must be answered ONLY from
+	// those sources; a query from a non-permitted source is silently
+	// dropped (no response, as with an unknown community). A community
+	// without `clients` is allow-all.
+	if !comm.AllowsSource(srcIP) {
+		// SECURITY: do NOT log the community string — it is the v1/v2c
+		// shared secret (SNMPCommunity.Name, redacted everywhere else).
+		// Log only the source; known_community=true distinguishes this
+		// source-denied KNOWN community from the unknown-community drop
+		// above (which also logs no secret value here) so a
+		// source-restriction denial can be correlated without exposing
+		// the secret (#4289).
+		slog.Debug("SNMP: source not permitted for community",
+			"src", srcIP, "known_community", true)
+		return nil, nil, nil
+	}
+
+	return community, comm, pduRest
+}
+
 // handleV2cPacket processes an SNMP v2c message (version already decoded).
 // srcIP is the request source (nil disables the source check); it enforces the
 // community `clients` source-IP allowlist (#4289).
 func (a *Agent) handleV2cPacket(rest []byte, srcIP net.IP) []byte {
-	// Decode community string.
-	community, rest, err := berDecodeOctetString(rest)
-	if err != nil {
-		slog.Debug("SNMP: failed to decode community")
-		return nil
-	}
-
-	// Verify community string and resolve its authorization level.
-	comm := a.getCommunity(string(community))
+	community, comm, rest := a.communityGate(rest, srcIP)
 	if comm == nil {
-		// SECURITY (#4302): do NOT log the community string — it is the v2c
-		// shared secret (SNMPCommunity.Name, redacted everywhere else). Log
-		// only the source; known_community=false marks the unknown-community
-		// drop, symmetric with the source-denied known_community=true log
-		// below (#4289).
-		slog.Debug("SNMP: invalid community", "src", srcIP, "known_community", false)
-		return nil
-	}
-
-	// #4289: enforce the community `clients` source-IP restriction. A community
-	// scoped to specific prefixes must be answered ONLY from those sources; a
-	// query from a non-permitted source is silently dropped (no response, as
-	// with an unknown community). A community without `clients` is allow-all.
-	if !comm.AllowsSource(srcIP) {
-		// SECURITY: do NOT log the community string — it is the v2c shared
-		// secret (SNMPCommunity.Name, redacted everywhere else). Log only the
-		// source; known_community=true distinguishes this source-denied KNOWN
-		// community from the unknown-community drop above (which also logs no
-		// secret value here) so a source-restriction denial can be correlated
-		// without exposing the secret (#4289).
-		slog.Debug("SNMP: source not permitted for community",
-			"src", srcIP, "known_community", true)
 		return nil
 	}
 
@@ -1161,27 +1194,8 @@ func (a *Agent) handleV2cPacket(rest []byte, srcIP net.IP) []byte {
 // version" drop, so the agent emitted v1 traps but silently dropped every v1
 // GET/GETNEXT poll — a legacy v1 manager saw the device as down.
 func (a *Agent) handleV1Packet(rest []byte, srcIP net.IP) []byte {
-	// Decode community string (same frame as v2c).
-	community, rest, err := berDecodeOctetString(rest)
-	if err != nil {
-		slog.Debug("SNMP: failed to decode community")
-		return nil
-	}
-
-	// Verify community string and resolve its authorization level.
-	comm := a.getCommunity(string(community))
+	community, comm, rest := a.communityGate(rest, srcIP)
 	if comm == nil {
-		// SECURITY (#4302): never log the community string (the v1 shared
-		// secret); log only the source, symmetric with the v2c path (#4289).
-		slog.Debug("SNMP: invalid community", "src", srcIP, "known_community", false)
-		return nil
-	}
-
-	// #4289: enforce the community `clients` source-IP restriction, identical to
-	// the v2c path — a scoped community answers ONLY permitted sources.
-	if !comm.AllowsSource(srcIP) {
-		slog.Debug("SNMP: source not permitted for community",
-			"src", srcIP, "known_community", true)
 		return nil
 	}
 
