@@ -14210,6 +14210,7 @@ fn arm_standby_hold_clock_5152(table: &mut SessionTable, now_ns: u64) {
         epoch_of: &epoch,
         ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+    node_served: &|_| crate::session::NodeServedEvidence::default(),
     };
     let expired = table.expire_stale_entries_ha(now_ns, Some(&ctx));
     assert!(expired.is_empty(), "arming HOLD pass must hold, not reap");

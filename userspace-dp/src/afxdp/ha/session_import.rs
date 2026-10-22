@@ -1314,6 +1314,9 @@ impl crate::afxdp::ha::SessionDomain {
                 }
             }
         }
+        // #16223: the shared publish itself preserves the monotonic
+        // handshake stage at its choke point (`publish_shared_session`),
+        // so no import-side twin is needed here.
         publish_shared_session(
             &self.sessions.synced,
             &self.sessions.nat,

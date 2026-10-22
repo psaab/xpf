@@ -738,6 +738,35 @@ pub(in crate::afxdp) fn publish_shared_session(
         // #2402: recover poison so a peer-sync / promote publish is never
         // silently dropped because a worker panicked under this lock.
         let mut sessions = lock_shared_publish(shared_sessions);
+        // #16223: monotonic handshake stage at the single publish
+        // choke point — a republication of the same incarnation
+        // (install-time publish, HA resend, barrier replay) must not
+        // regress a stage this node already advanced (the ct-slice
+        // maintenance restamps Established once a worker's pair
+        // completes). A different session_id is a new incarnation
+        // and takes the incoming stage as-is.
+        let mut entry_owned;
+        let entry = if let Some(previous) = sessions.get(&entry.key) {
+            let same = entry.session_id == 0
+                || previous.session_id == 0
+                || entry.session_id == previous.session_id;
+            let rank = |wire: u8| match crate::session::TcpHandshakeState::from_wire(wire) {
+                Some(crate::session::TcpHandshakeState::Opening) => 1,
+                Some(crate::session::TcpHandshakeState::HandshakePending) => 2,
+                Some(crate::session::TcpHandshakeState::SynAckFirstPending) => 3,
+                Some(crate::session::TcpHandshakeState::Established) => 4,
+                None => 4,
+            };
+            if same && rank(entry.tcp_handshake_state) < rank(previous.tcp_handshake_state) {
+                entry_owned = entry.clone();
+                entry_owned.tcp_handshake_state = previous.tcp_handshake_state;
+                &entry_owned
+            } else {
+                entry
+            }
+        } else {
+            entry
+        };
         let previous_owner_rg = sessions
             .insert(entry.key.clone(), entry.clone())
             .map(|existing| existing.metadata.owner_rg_id);
@@ -1492,5 +1521,139 @@ fn remove_owner_rg_index_entry_locked(
         if keys.is_empty() {
             index.remove(&owner_rg_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod handshake_monotonic_16223_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn key(src_port: u16) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            src_port,
+            dst_port: 5211,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        }
+    }
+
+    fn entry(key: &SessionKey, wire: u8, session_id: u64, reverse: bool) -> SyncedSessionEntry {
+        let mut metadata = crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: reverse,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        };
+        metadata.is_reverse = reverse;
+        SyncedSessionEntry {
+            key: key.clone(),
+            decision: crate::session::SessionDecision {
+                resolution: crate::afxdp::ForwardingResolution {
+                    disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    source_ifindex: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: crate::nat::NatDecision {
+                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                    ..crate::nat::NatDecision::default()
+                },
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata,
+            source_nat_static: None,
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol: crate::ip_proto::PROTO_TCP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id,
+            tcp_close_class: 0,
+            tcp_handshake_state: wire,
+            pptp_call_ids: 0,
+        }
+    }
+
+    fn maps() -> (
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        SharedSessionOwnerRgIndexes,
+    ) {
+        (
+            Arc::new(Mutex::new(FastMap::default())),
+            Arc::new(Mutex::new(FastMap::default())),
+            Arc::new(Mutex::new(FastMap::default())),
+            SharedSessionOwnerRgIndexes::default(),
+        )
+    }
+
+    fn nat_decision() -> crate::nat::NatDecision {
+        crate::nat::NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            ..crate::nat::NatDecision::default()
+        }
+    }
+
+    fn wire(
+        shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        key: &SessionKey,
+    ) -> u8 {
+        lock_shared_recover(shared)
+            .get(key)
+            .map(|e| e.tcp_handshake_state)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn publish_never_regresses_handshake_stage_16223() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43001);
+        let reverse = crate::session::reverse_session_key(&forward, nat_decision());
+        let opening = crate::session::TcpHandshakeState::Opening.to_wire();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        // Install-time publishes: forward Opening, reverse pending.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, opening, 77, false));
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, 3, 77, true));
+        // Serving maintenance advances both stored rows.
+        restamp_shared_handshakes_established(&shared, &[(forward.clone(), nat_decision())]);
+        assert_eq!(wire(&shared, &forward), established, "forward advanced");
+        assert_eq!(wire(&shared, &reverse), established, "derived reverse advanced");
+        // A stale Opening republication (same incarnation) must not regress.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, opening, 77, false));
+        assert_eq!(wire(&shared, &forward), established, "#16223: republication regressed forward");
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&reverse, opening, 77, true));
+        assert_eq!(wire(&shared, &reverse), established, "#16223: republication regressed reverse");
+        // A new incarnation takes the incoming stage as-is.
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, opening, 78, false));
+        assert_eq!(wire(&shared, &forward), opening, "new incarnation must not inherit stage");
     }
 }

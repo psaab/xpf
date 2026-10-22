@@ -121,6 +121,7 @@ fn gc_as_forwarder(table: &mut SessionTable, now: u64) -> Vec<ExpiredSession> {
         epoch_of: &epoch,
         ceiling_mult: 4,
         ceiling_abs_ns: u64::MAX,
+    node_served: &|_| NodeServedEvidence::default(),
     };
     table.last_gc_ns = 0;
     table.expire_stale_entries_ha(now, Some(&ctx))

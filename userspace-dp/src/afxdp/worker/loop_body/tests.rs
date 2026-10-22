@@ -210,6 +210,89 @@ mod flow_cache_invalidation_tests {
         }
     }
 
+    fn expired_replica(key: SessionKey, session_id: u64) -> ExpiredSession {
+        ExpiredSession {
+            origin: SessionOrigin::WorkerLocalImport,
+            session_id,
+            ..expired(key, None)
+        }
+    }
+
+    fn serving_shared_entry(key: &SessionKey, session_id: u64) -> SyncedSessionEntry {
+        SyncedSessionEntry {
+            key: key.clone(),
+            decision: reap_decision(None),
+            metadata: reap_metadata(),
+            source_nat_static: None,
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id,
+            tcp_close_class: 0,
+            tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+            pptp_call_ids: 0,
+        }
+    }
+
+    // #16223 B4: a WorkerLocalImport replica's expiry must NOT evict
+    // the serving pair's flow-cache descriptor (nor run its map/NAT
+    // teardown) while the shared map still holds the promoted serving
+    // entry under the same session_id. Control: with no serving entry,
+    // the same replica expiry DOES evict (full teardown preserved).
+    #[test]
+    fn replica_expiry_does_not_evict_serving_cache_16223() {
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let key = reap_key(41001);
+
+        // Fenced case: serving entry present in the shared map.
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        insert_cache_entry(&mut binding, &key, None);
+        assert!(cache_hits(&mut binding, &key, &rg_epochs));
+        let shared = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut map = FastMap::default();
+            map.insert(key.clone(), serving_shared_entry(&key, 4242));
+            map
+        }));
+        reap_expired_sessions(
+            std::slice::from_mut(&mut binding),
+            &[expired_replica(key.clone(), 4242)],
+            &forwarding,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            1_000_000_000,
+            0,
+            &shared,
+        );
+        assert!(
+            cache_hits(&mut binding, &key, &rg_epochs),
+            "#16223 B4: replica expiry must not evict the serving descriptor"
+        );
+
+        // Control: no serving entry -> replica expiry tears down fully.
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        insert_cache_entry(&mut binding, &key, None);
+        assert!(cache_hits(&mut binding, &key, &rg_epochs));
+        reap_expired_sessions(
+            std::slice::from_mut(&mut binding),
+            &[expired_replica(key.clone(), 4242)],
+            &forwarding,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            1_000_000_000,
+            0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
+        );
+        assert!(
+            !cache_hits(&mut binding, &key, &rg_epochs),
+            "#16223 B4 control: unserved replica expiry must still evict"
+        );
+    }
+
     // #3776 H1: a packet that resumes on a reaped flow's 5-tuple must MISS the
     // cache. Without the GC-path `invalidate_slot` the descriptor survives the
     // reap and the resumed packet is forwarded with no live session — the
@@ -236,6 +319,7 @@ mod flow_cache_invalidation_tests {
             -1,
             1_000_000_000,
             0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );
 
         assert!(
@@ -271,6 +355,7 @@ mod flow_cache_invalidation_tests {
             -1,
             1_000_000_000,
             0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );
 
         assert!(
@@ -304,6 +389,7 @@ mod flow_cache_invalidation_tests {
             -1,
             1_000_000_000,
             0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );
 
         assert!(
@@ -467,6 +553,7 @@ mod flow_cache_invalidation_tests {
             -1,
             1_000_000_000,
             0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );
 
         assert!(
@@ -556,6 +643,7 @@ mod flow_cache_invalidation_tests {
                 CONNTRACK_TEST_MAP_FD,
                 1_000_000_000,
                 0,
+                &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
             );
             assert_eq!(deferred.len(), 1, "GateBusy must retain the delete");
             assert_eq!(
@@ -1146,6 +1234,7 @@ mod gc_reap_source_nat_release_tests_6901 {
             -1,
             1_000_000_000,
             0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );
 
         assert_eq!(
@@ -1196,6 +1285,7 @@ mod gc_reap_source_nat_release_tests_6901 {
             -1,
             1_000_000_000,
             0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );
 
         assert_eq!(
@@ -1328,6 +1418,7 @@ mod gc_reap_nat64_release_tests_7740 {
             -1,
             1_000_000_000,
             0,
+            &std::sync::Arc::new(std::sync::Mutex::new(FastMap::default())),
         );
     }
 

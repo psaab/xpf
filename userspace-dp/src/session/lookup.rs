@@ -890,8 +890,39 @@ impl SessionTable {
         let state_transition = !defer_all
             && (propagate.close || propagate.established || propagate.handshake_completed);
         if state_transition {
+            // Only a COMPLETED handshake stamps node proof; a mere
+            // promotion (SYN-ACK seen, still pending) is the #6752
+            // half-open shape and must stamp nothing.
+            let stamp_proof = if propagate.handshake_completed {
+                let fwd_key = if self
+                    .entry_by_key(&actual_key)
+                    .is_some_and(|e| e.metadata.is_reverse)
+                {
+                    reverse_session_key(&actual_key, propagate.nat)
+                } else {
+                    actual_key.clone()
+                };
+                let rev = self
+                    .entry_by_key(&fwd_key)
+                    .map(|fwd| fwd.counters.rev_packets)
+                    .unwrap_or(0);
+                Some((fwd_key, rev.max(1)))
+            } else {
+                None
+            };
             self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
             self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
+            // #16223: a serving completion/promotion here is the
+            // node-level proof sibling replicas key on — stamp it so
+            // replica tables on other workers (and this table's GC)
+            // complete/retain instead of reaping at 20 s.
+            if let Some((fwd_key, rev)) = stamp_proof {
+                self.note_node_served_handshake(
+                    &fwd_key,
+                    TcpHandshakeState::Established.to_wire(),
+                    rev,
+                );
+            }
         }
         // #16223: companion-aware completion when this hit carried
         // progress evidence but the classic arms did not fire (the
@@ -936,6 +967,23 @@ impl SessionTable {
                         handshake_state_before,
                     );
                     self.push_to_wheel(&matched_key, now_ns);
+                    let fwd_key2 = if self
+                        .entry_by_key(&matched_key)
+                        .is_some_and(|e| e.metadata.is_reverse)
+                    {
+                        reverse_session_key(&matched_key, nat)
+                    } else {
+                        matched_key.clone()
+                    };
+                    let rev2 = self
+                        .entry_by_key(&fwd_key2)
+                        .map(|fwd| fwd.counters.rev_packets)
+                        .unwrap_or(0);
+                    self.note_node_served_handshake(
+                        &fwd_key2,
+                        TcpHandshakeState::Established.to_wire(),
+                        rev2.max(1),
+                    );
                 }
             }
         }
@@ -1843,6 +1891,42 @@ impl SessionTable {
         })
     }
 
+    /// #16223: collect this table's completed forward pairs for the
+    /// periodic shared-wire maintenance: canonical forward keys whose
+    /// entry is fully established (pending cleared, not closing) with
+    /// at least one admitted reverse packet. The caller drives a
+    /// full-table walk per maintenance slice (budget `usize::MAX`)
+    /// and threads the returned cursor (always 0 on completion).
+    /// Serving state only — replica rows in this table are
+    /// reported too when they themselves completed, which is correct:
+    /// their completion is equally node-level proof.
+    pub(crate) fn established_forward_slice(
+        &self,
+        cursor: usize,
+        budget: usize,
+        out: &mut Vec<(SessionKey, crate::nat::NatDecision)>,
+    ) -> usize {
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        if cap == 0 || budget == 0 {
+            return 0;
+        }
+        let start = if cursor >= cap { 0 } else { cursor };
+        let end = start.saturating_add(budget).min(cap);
+        for idx in start..end {
+            if let Some(record) = self.entries.get(idx) {
+                let entry = &record.entry;
+                if !entry.metadata.is_reverse
+                    && entry.established
+                    && !entry.handshake_pending
+                    && !entry.closing
+                    && entry.counters.rev_packets > 0
+                {
+                    out.push((record.key.clone(), entry.decision.nat));
+                }
+            }
+        }
+        if end >= cap { 0 } else { end }
+    }
     /// #5152: test-only read of an entry's `first_held_ns` — the standby
     /// bounded-leak HOLD clock (§6.4). Lets the session_glue activation-scan
     /// test assert the clock is PRESERVED for a session that re-resolves to

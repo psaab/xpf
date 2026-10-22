@@ -37,6 +37,8 @@ pub(super) fn run_ct_slice(
     >,
     wg_uncovered_batch: &mut crate::afxdp::wg_uncovered_forward::WgUncoveredInjectedBatch,
     worker_id: u32,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    established_cursor: &mut usize,
 ) {
     const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000;
     const CT_SLICE_INTERVAL_NS: u64 = 100_000_000;
@@ -81,6 +83,24 @@ pub(super) fn run_ct_slice(
         // slice".
         *session_volume_high_water =
             (*session_volume_high_water).max(ct_outcome.max_session_volume);
+        // #16223: on the same cadence, advance the shared synced
+        // entries for this worker's completed pairs to the
+        // Established wire. The expiry retention and replica
+        // completion on sibling workers consult that wire as
+        // node-level proof; without this maintenance it only ever
+        // carried the install-time Opening/Pending state, so replicas
+        // reaped at 20 s despite a promoted serving pair. Full-table
+        // walk each slice: per-worker tables are small next to the
+        // 2048-slot conntrack budget above, and a completed pair must
+        // advance within one GC interval of its completion, not after
+        // a multi-second cursor rotation.
+        let mut established: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
+        *established_cursor =
+            sessions.established_forward_slice(*established_cursor, usize::MAX, &mut established);
+        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            shared_sessions,
+            &established,
+        );
     }
     // Check if fabric links were updated by the coordinator (e.g. after
     // RG failover when peer MAC was resolved). If so, rebuild the

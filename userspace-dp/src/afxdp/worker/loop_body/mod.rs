@@ -522,6 +522,8 @@ pub(crate) fn worker_loop(
     let mut ct_cycle_start_ns: u64 = 0;
     // Persistent slab-index cursor: 0 means "between cycles / at the top".
     let mut ct_refresh_cursor: usize = 0;
+    // #16223: cursor for the shared-wire Established maintenance walk.
+    let mut established_shared_cursor: usize = 0;
     // #869: worker-runtime telemetry.  Local counters, published to
     // `runtime_atomics` on the ~1s cadence below.
     use crate::afxdp::worker_runtime::{
@@ -1585,6 +1587,8 @@ pub(crate) fn worker_loop(
             &wg_uncovered_queues,
             &mut wg_uncovered_batch,
             worker_id,
+            &shared_sessions,
+            &mut established_shared_cursor,
         );
         // #7201: a command backlog IS work. `apply_worker_commands` drains at
         // most `WORKER_COMMAND_DRAIN_BUDGET` per pass so the AF_XDP rings get
