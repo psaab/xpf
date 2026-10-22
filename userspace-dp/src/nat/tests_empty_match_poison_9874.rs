@@ -3,7 +3,7 @@
 //
 // The Go #8430 gate rejects such a rule at strict commit but downgrades to a
 // warning on lenient load / peer-sync, and the snapshot carried NO marker — so
-// the rule installed with `source_constrained = false` and `nets_match_v4`
+// the rule installed with `source_constrained = false` and the shared `crate::prefix::nets_match` (#16128; then `nets_match_v4`)
 // returned true for every flow in scope (source/mod.rs:1287,1527-1528). The
 // typed rule now carries `LenientMatchDropped`, the snapshot carries
 // `lenient_match_dropped`, and the source-NAT table fails such a rule CLOSED:

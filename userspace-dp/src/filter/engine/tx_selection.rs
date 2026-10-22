@@ -15,7 +15,9 @@
 
 use super::super::*;
 use super::eval::filter_log_match;
-use super::matching::{term_matches_v4, term_matches_v6};
+use super::matching::{
+    AddrFamily, V4Family, V6Family, term_matches_family,
+};
 use super::policer::apply_term_three_color_policer;
 
 #[inline]
@@ -230,10 +232,10 @@ fn evaluate_filter_ref_tx_selection_runtime_inner<'a>(
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
+fn evaluate_filter_ref_tx_selection_counted_family<'a, F: AddrFamily>(
     filter: &'a Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
@@ -250,9 +252,10 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
     // its action+modifiers and returns. The policer meter is a side effect that
     // must run for a fall-through term too, so it is invoked on every match.
     // #15189: the term slice starts at `from_term` (0 on full walks).
+    // #16128: one family-generic body behind the v4/v6 wrappers.
     let mut acc = TxSelectionFilterResult::default();
     for term in &filter.terms[from_term.min(filter.terms.len())..] {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
             continue;
@@ -274,6 +277,28 @@ fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
         }
     }
     acc
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn evaluate_filter_ref_tx_selection_counted_v4<'a>(
+    filter: &'a Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+    packet_bytes: u64,
+    now_ns: Option<u64>,
+    count_terms: bool,
+    from_term: usize,
+) -> TxSelectionFilterResult<'a> {
+    evaluate_filter_ref_tx_selection_counted_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
+        count_terms, from_term,
+    )
 }
 
 /// #2544: merge a matched term's TX-selection modifiers into the running result.
@@ -336,27 +361,10 @@ fn evaluate_filter_ref_tx_selection_counted_v6<'a>(
     count_terms: bool,
     from_term: usize,
 ) -> TxSelectionFilterResult<'a> {
-    // #2544: see evaluate_filter_ref_tx_selection_counted_v4.
-    let mut acc = TxSelectionFilterResult::default();
-    for term in &filter.terms[from_term.min(filter.terms.len())..] {
-        if !term_matches_v6(
-            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
-        ) {
-            continue;
-        }
-        // #4085: skip the counter on the ingress tx-selection leg (count_terms
-        // == false) — the input-filter action-eval already recorded it once.
-        if count_terms && term.has_count {
-            record_filter_counter(&term.counter, packet_bytes);
-        }
-        // #14659: see v4 — merge the PBR term's modifiers before terminating.
-        merge_matched_tx_modifiers(&mut acc, filter, term, now_ns, packet_bytes);
-        if !term.continue_term {
-            acc.action = term.action;
-            return acc;
-        }
-    }
-    acc
+    evaluate_filter_ref_tx_selection_counted_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
+        count_terms, from_term,
+    )
 }
 
 /// #14120/#14659: counter-suppressed, policer-metered TX-selection walk for

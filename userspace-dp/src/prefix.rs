@@ -74,6 +74,59 @@ impl PrefixV6 {
     }
 }
 
+/// #16128: family-generic prefix membership for the filter term-walk and the
+/// source-NAT rule match. One generic `nets_match` (below) serves both callers
+/// only because `except` stays EXPLICIT at every call site: filter passes its
+/// per-direction `*_except` flag, NAT passes `false`. The two empty-set
+/// answers are therefore preserved, not merged — see `nets_match`.
+pub(crate) trait AddrPrefix {
+    type Addr: Copy;
+    fn contains(&self, ip: Self::Addr) -> bool;
+}
+
+impl AddrPrefix for PrefixV4 {
+    type Addr = Ipv4Addr;
+    #[inline(always)]
+    fn contains(&self, ip: Ipv4Addr) -> bool {
+        PrefixV4::contains(self, ip)
+    }
+}
+
+impl AddrPrefix for PrefixV6 {
+    type Addr = Ipv6Addr;
+    #[inline(always)]
+    fn contains(&self, ip: Ipv6Addr) -> bool {
+        PrefixV6::contains(self, ip)
+    }
+}
+
+/// #16128: shared prefix-set membership with EXPLICIT `except`.
+///
+/// - `constrained == false`: match any address; `except` is irrelevant (no
+///   scope to invert).
+/// - `constrained == true` but `nets` empty: return `except`. Filter relies
+///   on both arms (#2400/#2506): positive empty = match NOTHING (fail closed),
+///   `except` empty = match ALL (Junos "not in {}", incl. the cross-family
+///   case where the other family's vec is empty). Source NAT passes
+///   `except == false` unconditionally, so its empty set stays fail-closed
+///   (#2398) — never merged into the filter's match-all arm.
+/// - otherwise: membership XOR `except`.
+#[inline(always)]
+pub(crate) fn nets_match<P: AddrPrefix>(
+    constrained: bool,
+    except: bool,
+    nets: &[P],
+    ip: P::Addr,
+) -> bool {
+    if !constrained {
+        return true;
+    }
+    if nets.is_empty() {
+        return except;
+    }
+    nets.iter().any(|net| net.contains(ip)) ^ except
+}
+
 const fn mask_v4(prefix_len: u8) -> u32 {
     if prefix_len == 0 {
         0

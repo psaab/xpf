@@ -296,7 +296,7 @@ pub(crate) struct FilterTerm {
     // `destination-port-except <name>` can never invert an empty set into
     // match-ALL (that was the pre-#3205 fail-OPEN hole that accepted the very
     // port it was meant to exclude). This intentionally DIFFERS from the ADDRESS
-    // empty-except path (`nets_match_v4`/`nets_match_v6`, which returns `except`
+    // empty-except path (`crate::prefix::nets_match`, which returns `except`
     // → match-ALL): a port scope has no prefix-list indirection, so
     // `constrained && Any` can ONLY mean every token was unparseable — never a
     // legitimately empty scope — whereas an empty address prefix-list scope IS

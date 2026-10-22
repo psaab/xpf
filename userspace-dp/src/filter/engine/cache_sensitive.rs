@@ -17,7 +17,9 @@
 
 use super::super::*;
 use super::eval::filter_log_match;
-use super::matching::{term_matches_v4, term_matches_v6};
+use super::matching::{
+    AddrFamily, V4Family, V6Family, term_matches_family,
+};
 
 mod rotation;
 
@@ -49,10 +51,10 @@ pub(crate) fn evaluate_filter_ref_tx_selection_cached(
     }
 }
 
-fn evaluate_filter_ref_tx_selection_cached_v4(
+fn evaluate_filter_ref_tx_selection_cached_family<F: AddrFamily>(
     filter: &Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
@@ -61,9 +63,10 @@ fn evaluate_filter_ref_tx_selection_cached_v4(
 ) -> CachedTxSelectionFilterResult {
     // #2544: accumulate modifiers across fall-through terms; return on the first
     // terminating matched term. See merge_matched_cached_modifiers.
+    // #16128: one family-generic body behind the v4/v6 wrappers.
     let mut acc = CachedTxSelectionFilterResult::default();
     for term in &filter.terms {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term,
             src_ip,
             dst_ip,
@@ -85,6 +88,21 @@ fn evaluate_filter_ref_tx_selection_cached_v4(
         }
     }
     acc
+}
+
+fn evaluate_filter_ref_tx_selection_cached_v4(
+    filter: &Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    ports_unknown: bool,
+) -> CachedTxSelectionFilterResult {
+    evaluate_filter_ref_tx_selection_cached_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, ports_unknown,
+    )
 }
 
 /// #2544: merge a matched term's modifiers into the cached TX-selection result.
@@ -133,31 +151,9 @@ fn evaluate_filter_ref_tx_selection_cached_v6(
     dscp: u8,
     ports_unknown: bool,
 ) -> CachedTxSelectionFilterResult {
-    // #2544: see evaluate_filter_ref_tx_selection_cached_v4.
-    let mut acc = CachedTxSelectionFilterResult::default();
-    for term in &filter.terms {
-        if !term_matches_v6(
-            term,
-            src_ip,
-            dst_ip,
-            protocol,
-            src_port,
-            dst_port,
-            dscp,
-            TermMatchExtra {
-                ports_unknown,
-                ..Default::default()
-            },
-        ) {
-            continue;
-        }
-        merge_matched_cached_modifiers(&mut acc, filter, term);
-        if !term.continue_term {
-            acc.action = term.action;
-            return acc;
-        }
-    }
-    acc
+    evaluate_filter_ref_tx_selection_cached_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, ports_unknown,
+    )
 }
 
 /// #3777: capture the interface INPUT filter `then count` term handles matched
@@ -219,18 +215,19 @@ pub(crate) fn evaluate_interface_input_filter_counters_cached(
 }
 
 #[inline]
-fn capture_input_filter_counters_v4(
+fn capture_input_filter_counters_family<F: AddrFamily>(
     filter: &Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
     dscp: u8,
 ) -> CachedFilterCounters {
+    // #16128: one family-generic body behind the v4/v6 wrappers.
     let mut counters = CachedFilterCounters::default();
     for term in &filter.terms {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term,
             src_ip,
             dst_ip,
@@ -256,6 +253,21 @@ fn capture_input_filter_counters_v4(
         }
     }
     counters
+}
+
+#[inline]
+fn capture_input_filter_counters_v4(
+    filter: &Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+) -> CachedFilterCounters {
+    capture_input_filter_counters_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp,
+    )
 }
 /// #14120/#14659: capture the interface INPUT filter's matched three-color
 /// policer handles for a host-bound (LocalDelivery) flow, mirroring the counter
@@ -303,19 +315,20 @@ pub(crate) fn evaluate_interface_input_filter_policers_cached(
 }
 
 #[inline]
-fn capture_input_filter_policers_v4(
+fn capture_input_filter_policers_family<F: AddrFamily>(
     filter: &Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
     dscp: u8,
     extra: TermMatchExtra<'_>,
 ) -> CachedThreeColorPolicers {
+    // #16128: one family-generic body behind the v4/v6 wrappers.
     let mut policers = CachedThreeColorPolicers::default();
     for term in &filter.terms {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
             continue;
@@ -335,6 +348,22 @@ fn capture_input_filter_policers_v4(
 }
 
 #[inline]
+fn capture_input_filter_policers_v4(
+    filter: &Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+) -> CachedThreeColorPolicers {
+    capture_input_filter_policers_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
+    )
+}
+
+#[inline]
 fn capture_input_filter_policers_v6(
     filter: &Filter,
     src_ip: Ipv6Addr,
@@ -345,25 +374,9 @@ fn capture_input_filter_policers_v6(
     dscp: u8,
     extra: TermMatchExtra<'_>,
 ) -> CachedThreeColorPolicers {
-    let mut policers = CachedThreeColorPolicers::default();
-    for term in &filter.terms {
-        if !term_matches_v6(
-            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
-        ) {
-            continue;
-        }
-        // #14659: see v4 — include the PBR term's policer before stopping.
-        policers.extend(CachedThreeColorPolicers::from_option(
-            term.three_color_policer.clone(),
-        ));
-        if !term.routing_instance.is_empty() {
-            return policers;
-        }
-        if !term.continue_term {
-            return policers;
-        }
-    }
-    policers
+    capture_input_filter_policers_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
+    )
 }
 
 /// #7992: the cache-replay evaluator for a caller that has NO PORTS AT ALL.
@@ -413,30 +426,7 @@ fn capture_input_filter_counters_v6(
     dst_port: u16,
     dscp: u8,
 ) -> CachedFilterCounters {
-    let mut counters = CachedFilterCounters::default();
-    for term in &filter.terms {
-        if !term_matches_v6(
-            term,
-            src_ip,
-            dst_ip,
-            protocol,
-            src_port,
-            dst_port,
-            dscp,
-            TermMatchExtra::default(),
-        ) {
-            continue;
-        }
-        if term.has_count {
-            counters.push(term.counter.clone());
-        }
-        // #14121: see the v4 capture walk.
-        if !term.routing_instance.is_empty() {
-            return counters;
-        }
-        if !term.continue_term {
-            return counters;
-        }
-    }
-    counters
+    capture_input_filter_counters_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp,
+    )
 }

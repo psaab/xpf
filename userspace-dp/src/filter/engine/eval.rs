@@ -38,7 +38,9 @@
 // one.
 
 use super::super::*;
-use super::matching::{term_matches, term_matches_v4, term_matches_v6};
+use super::matching::{
+    AddrFamily, V4Family, V6Family, term_matches, term_matches_family,
+};
 // #5857: the lo0 host-bound filter meters its three-color policer on the same
 // runtime the interface TX-selection leg uses (`merge_matched_tx_modifiers`).
 use super::policer::apply_term_three_color_policer;
@@ -145,10 +147,11 @@ pub(super) fn evaluate_filter_ref_counted(
 }
 
 #[inline]
-fn evaluate_filter_ref_counted_v4(
+#[allow(clippy::too_many_arguments)]
+fn evaluate_filter_ref_counted_family<F: AddrFamily>(
     filter: &Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
@@ -161,9 +164,10 @@ fn evaluate_filter_ref_counted_v4(
     // fall-through term (continue_term) applies its modifiers and continues; a
     // matched terminating term applies its action+modifiers and returns. If no
     // term terminates, the accumulated modifiers ride the default Accept.
+    // #16128: one family-generic body behind the v4/v6 wrappers.
     let mut acc = FilterResult::default();
     for term in &filter.terms {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
             continue;
@@ -180,6 +184,24 @@ fn evaluate_filter_ref_counted_v4(
     }
     normalize_log_match_action(&mut acc);
     acc
+}
+
+#[inline]
+fn evaluate_filter_ref_counted_v4(
+    filter: &Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+    packet_bytes: u64,
+    now_ns: Option<u64>,
+) -> FilterResult {
+    evaluate_filter_ref_counted_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
+    )
 }
 
 /// #2616: the RT_FLOW log action must report the verdict the packet actually
@@ -276,27 +298,9 @@ fn evaluate_filter_ref_counted_v6(
     packet_bytes: u64,
     now_ns: Option<u64>,
 ) -> FilterResult {
-    // #2544: see evaluate_filter_ref_counted_v4 — accumulate fall-through
-    // modifiers; return on the first terminating matched term.
-    let mut acc = FilterResult::default();
-    for term in &filter.terms {
-        if !term_matches_v6(
-            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
-        ) {
-            continue;
-        }
-        if term.has_count {
-            record_filter_counter(&term.counter, packet_bytes);
-        }
-        merge_matched_modifiers(&mut acc, filter, term, now_ns, packet_bytes);
-        if !term.continue_term {
-            acc.action = term.action;
-            normalize_log_match_action(&mut acc);
-            return acc;
-        }
-    }
-    normalize_log_match_action(&mut acc);
-    acc
+    evaluate_filter_ref_counted_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, now_ns,
+    )
 }
 
 /// #2620: counter ownership policy for the non-routing input-filter evaluator.
@@ -441,10 +445,11 @@ fn evaluate_filter_ref_non_routing_counted(
 }
 
 #[inline]
-fn evaluate_filter_ref_non_routing_counted_v4(
+#[allow(clippy::too_many_arguments)]
+fn evaluate_filter_ref_non_routing_counted_family<F: AddrFamily>(
     filter: &Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
@@ -467,10 +472,11 @@ fn evaluate_filter_ref_non_routing_counted_v4(
     // `discard`/`reject` (the exit on which the poll path `continue`s and the
     // routing evaluator never runs), so those fall-through counters are recorded
     // exactly once and never drop to zero.
+    // #16128: one family-generic body behind the v4/v6 wrappers.
     let (always_count, replay_on_terminal_deny) = count_policy.counting();
     let mut acc = FilterResult::default();
     for (term_idx, term) in filter.terms.iter().enumerate() {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
             continue;
@@ -500,7 +506,7 @@ fn evaluate_filter_ref_non_routing_counted_v4(
         if !term.continue_term {
             acc.action = term.action;
             if replay_on_terminal_deny && term.action != FilterAction::Accept {
-                count_matched_non_routing_terms_v4(
+                count_matched_non_routing_terms_family::<F>(
                     filter,
                     src_ip,
                     dst_ip,
@@ -521,15 +527,8 @@ fn evaluate_filter_ref_non_routing_counted_v4(
     acc
 }
 
-/// #2620: replay the matched-term walk under `OnlyTerminalNonAccept` once the
-/// caller has resolved that the verdict is a terminal `discard`/`reject`,
-/// recording each matched `then count` term up to AND INCLUDING `terminal`
-/// exactly once. The routing evaluator never runs on this exit, so this
-/// evaluator is the sole counter. Walk order is identical to the main loop so
-/// the recorded set matches.
 #[inline]
-#[allow(clippy::too_many_arguments)]
-fn count_matched_non_routing_terms_v4(
+fn evaluate_filter_ref_non_routing_counted_v4(
     filter: &Filter,
     src_ip: Ipv4Addr,
     dst_ip: Ipv4Addr,
@@ -539,10 +538,37 @@ fn count_matched_non_routing_terms_v4(
     dscp: u8,
     extra: TermMatchExtra<'_>,
     packet_bytes: u64,
+    count_policy: NonRoutingCountPolicy,
+    policer_now_ns: Option<u64>,
+) -> FilterResult {
+    evaluate_filter_ref_non_routing_counted_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes,
+        count_policy, policer_now_ns,
+    )
+}
+
+/// #2620: replay the matched-term walk under `OnlyTerminalNonAccept` once the
+/// caller has resolved that the verdict is a terminal `discard`/`reject`,
+/// recording each matched `then count` term up to AND INCLUDING `terminal`
+/// exactly once. The routing evaluator never runs on this exit, so this
+/// evaluator is the sole counter. Walk order is identical to the main loop so
+/// the recorded set matches.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn count_matched_non_routing_terms_family<F: AddrFamily>(
+    filter: &Filter,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+    packet_bytes: u64,
     terminal: &FilterTerm,
 ) {
     for term in &filter.terms {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
             continue;
@@ -559,6 +585,25 @@ fn count_matched_non_routing_terms_v4(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
+fn count_matched_non_routing_terms_v4(
+    filter: &Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+    packet_bytes: u64,
+    terminal: &FilterTerm,
+) {
+    count_matched_non_routing_terms_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, terminal,
+    )
+}
+
+#[inline]
 fn evaluate_filter_ref_non_routing_counted_v6(
     filter: &Filter,
     src_ip: Ipv6Addr,
@@ -572,52 +617,10 @@ fn evaluate_filter_ref_non_routing_counted_v6(
     count_policy: NonRoutingCountPolicy,
     policer_now_ns: Option<u64>,
 ) -> FilterResult {
-    // #2544/#2620: see evaluate_filter_ref_non_routing_counted_v4.
-    let (always_count, replay_on_terminal_deny) = count_policy.counting();
-    let mut acc = FilterResult::default();
-    for (term_idx, term) in filter.terms.iter().enumerate() {
-        if !term_matches_v6(
-            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
-        ) {
-            continue;
-        }
-        if !term.routing_instance.is_empty() {
-            // #14659: see v4 — preserve accumulated fall-through modifiers.
-            // #15189: see v4 — record the defer index for the remainder.
-            acc.deferred_at_routing_term = Some(term_idx);
-            normalize_log_match_action(&mut acc);
-            return acc;
-        }
-        if always_count && term.has_count {
-            record_filter_counter(&term.counter, packet_bytes);
-        }
-        // #5857/#14120: meter inline only when the caller owns the meter
-        // (`policer_now_ns = Some`, host-bound / Stage-11 paths with no
-        // TX-selection leg); transit passes `None` and meters in that leg.
-        merge_matched_modifiers(&mut acc, filter, term, policer_now_ns, packet_bytes);
-        acc.routing_instance = None;
-        if !term.continue_term {
-            acc.action = term.action;
-            if replay_on_terminal_deny && term.action != FilterAction::Accept {
-                count_matched_non_routing_terms_v6(
-                    filter,
-                    src_ip,
-                    dst_ip,
-                    protocol,
-                    src_port,
-                    dst_port,
-                    dscp,
-                    extra,
-                    packet_bytes,
-                    term,
-                );
-            }
-            normalize_log_match_action(&mut acc);
-            return acc;
-        }
-    }
-    normalize_log_match_action(&mut acc);
-    acc
+    evaluate_filter_ref_non_routing_counted_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes,
+        count_policy, policer_now_ns,
+    )
 }
 
 /// #2620: v6 counterpart of `count_matched_non_routing_terms_v4`.
@@ -635,19 +638,9 @@ fn count_matched_non_routing_terms_v6(
     packet_bytes: u64,
     terminal: &FilterTerm,
 ) {
-    for term in &filter.terms {
-        if !term_matches_v6(
-            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
-        ) {
-            continue;
-        }
-        if term.has_count {
-            record_filter_counter(&term.counter, packet_bytes);
-        }
-        if std::ptr::eq(term, terminal) {
-            return;
-        }
-    }
+    count_matched_non_routing_terms_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, terminal,
+    )
 }
 
 #[inline]
@@ -660,10 +653,10 @@ pub(super) fn filter_log_match(filter: &Filter, term: &FilterTerm) -> Option<Fil
 }
 
 #[inline]
-fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
+fn evaluate_filter_ref_routing_instance_counted_family<'a, F: AddrFamily>(
     filter: &'a Filter,
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: F::Addr,
+    dst_ip: F::Addr,
     protocol: u8,
     src_port: u16,
     dst_port: u16,
@@ -678,7 +671,7 @@ fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
 ) -> Option<FilterRoutingInstanceResult<'a>> {
     let mut acc_log: Option<FilterLogMatch> = None;
     for term in &filter.terms {
-        if !term_matches_v4(
+        if !term_matches_family::<F>(
             term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
         ) {
             continue;
@@ -695,6 +688,7 @@ fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
         // #2619: capture a fall-through `then log` term's log_match before we
         // continue past it — the PBR path previously dropped these. Latest
         // matched logging term wins, mirroring the full evaluator.
+        // #16128: one family-generic body behind the v4/v6 wrappers.
         if term.continue_term {
             if let Some(lm) = filter_log_match(filter, term) {
                 acc_log = Some(lm);
@@ -727,6 +721,24 @@ fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
 }
 
 #[inline]
+fn evaluate_filter_ref_routing_instance_counted_v4<'a>(
+    filter: &'a Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+    packet_bytes: u64,
+    count: bool,
+) -> Option<FilterRoutingInstanceResult<'a>> {
+    evaluate_filter_ref_routing_instance_counted_family::<V4Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, count,
+    )
+}
+
+#[inline]
 fn evaluate_filter_ref_routing_instance_counted_v6<'a>(
     filter: &'a Filter,
     src_ip: Ipv6Addr,
@@ -737,49 +749,11 @@ fn evaluate_filter_ref_routing_instance_counted_v6<'a>(
     dscp: u8,
     extra: TermMatchExtra<'_>,
     packet_bytes: u64,
-    // #8114 item 1: `false` suppresses the `then count` records so the
-    // side-effect-free STATIC verdict for a route-lookup-affecting filter can
-    // reuse this walk. `record_filter_counter` bumps the PACKET count even with
-    // `packet_bytes = 0`, so passing zero bytes is not a substitute.
     count: bool,
 ) -> Option<FilterRoutingInstanceResult<'a>> {
-    let mut acc_log: Option<FilterLogMatch> = None;
-    for term in &filter.terms {
-        if !term_matches_v6(
-            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
-        ) {
-            continue;
-        }
-        if count && term.has_count {
-            record_filter_counter(&term.counter, packet_bytes);
-        }
-        // #2544: see the v4 variant — a matched fall-through term keeps scanning.
-        // #2619: capture its log_match before continuing (latest wins).
-        if term.continue_term {
-            if let Some(lm) = filter_log_match(filter, term) {
-                acc_log = Some(lm);
-            }
-            continue;
-        }
-        let routing_instance =
-            (!term.routing_instance.is_empty()).then_some(&*term.routing_instance)?;
-        if let Some(lm) = filter_log_match(filter, term) {
-            acc_log = Some(lm);
-        }
-        // #2616: stamp the routing-instance term's verdict onto the log_match.
-        if let Some(lm) = acc_log.as_mut() {
-            lm.action = term.action;
-        }
-        return Some(FilterRoutingInstanceResult {
-            routing_instance,
-            log: term.log,
-            action: term.action,
-            filter_id: filter.id,
-            term_id: term.id,
-            log_match: acc_log,
-        });
-    }
-    None
+    evaluate_filter_ref_routing_instance_counted_family::<V6Family>(
+        filter, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra, packet_bytes, count,
+    )
 }
 
 /// Evaluate the lo0 (host-bound) filter for a given address family.
