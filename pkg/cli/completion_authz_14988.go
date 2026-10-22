@@ -161,22 +161,7 @@ func (c *CLI) filterOperationalCandidates(a *completionAuthz, words []string, ca
 
 // --- *-configuration gate ----------------------------------------------
 
-// hintRoots14988 maps a ValueHint to the config subtree(s) its live
-// values are read from (#14708, same map as the gRPC gate).
-var hintRoots14988 = map[config.ValueHint][]string{
-	config.ValueHintZoneName:      {"security zones"},
-	config.ValueHintAddressName:   {"security address-book"},
-	config.ValueHintAppName:       {"applications"},
-	config.ValueHintAppSetName:    {"applications"},
-	config.ValueHintPoolName:      {"security nat"},
-	config.ValueHintInterfaceName: {"interfaces"},
-	config.ValueHintScreenProfile: {"security screen"},
-	config.ValueHintStreamName:    {"security log"},
-	config.ValueHintPolicyAddress: {"security address-book"},
-	config.ValueHintPolicyApp:     {"applications"},
-	config.ValueHintPolicyName:    {"security policies"},
-	config.ValueHintUnitNumber:    {"interfaces"},
-}
+// Hint roots are the shared config.HintRoots table (#16160, #14708).
 
 // effectiveConfigPath returns the config path a *-configuration rule must
 // judge for a cursor typed under `groups <name> …` (#15942 H1-02): the
@@ -229,7 +214,7 @@ func (a completionAuthz) providerHintAllowed(hint config.ValueHint, path []strin
 	if hint == config.ValueHintNone {
 		return true
 	}
-	roots, ok := hintRoots14988[hint]
+	roots, ok := config.HintRoots[hint]
 	if !ok {
 		return false
 	}
