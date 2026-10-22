@@ -49,6 +49,14 @@ pub(crate) struct XskSocketOpaque {
     _opaque: [u8; 0],
 }
 
+// SAFETY: plain-old-data ring headers (integers plus raw pointers
+// into the mmap'd UMEM / libxdp-owned ring storage). Moving the
+// header to the worker thread that owns the ring is sound only
+// under that queue's single-writer discipline, which travels with
+// it. The pointers ARE dereferenced from Rust, not only through
+// the bridge: `RingRx::needs_wakeup` reads `*flags` directly, and
+// the bridge consumes the producer/consumer pointers. Both are
+// sound only while the owning queue exclusively drives the ring.
 unsafe impl Send for XskRingProd {}
 unsafe impl Send for XskRingCons {}
 
@@ -409,8 +417,10 @@ pub struct Umem {
     umem_area: NonNull<[u8]>,
 }
 
-// Umem is not actually thread-safe (single-writer rings), but the
-// previous xdpilone code used it as Send-able. We preserve that.
+// SAFETY: `Umem` is not actually thread-safe (single-writer rings), but
+// the previous xdpilone code used it as Send-able. We preserve that:
+// the value is moved once to the worker that owns its queues, and the
+// fill/completion rings are only driven from that owner thereafter.
 unsafe impl Send for Umem {}
 
 impl Umem {
@@ -706,6 +716,15 @@ pub struct DeviceQueue {
     fd: c_int,
 }
 
+// SAFETY: owns the libxdp socket handle (`DeviceQueue::drop` calls
+// `bridge_xsk_socket_delete`) — but NOT always its fill/completion
+// rings. `DeviceQueueRings::Owned` (shared-secondary) owns the
+// per-socket ring boxes; `BorrowedUmem` (private, shared owner)
+// holds non-owning pointers to the rings `Umem` owns, so the
+// `Umem` must outlive this queue and drop after it. The `fd` is a
+// non-owning copy (also carried by `User`/`RingRx`/`RingTx`); no
+// close happens through it here. Moved once to the owning worker,
+// which exclusively drives socket and rings thereafter.
 unsafe impl Send for DeviceQueue {}
 
 impl DeviceQueue {
@@ -855,6 +874,11 @@ pub struct RingRx {
     fd: c_int,
 }
 
+// SAFETY: owns a boxed consumer-ring header. The `fd` is a
+// non-owning copy of the socket fd (also carried by `User` and
+// `DeviceQueue`, whose drop deletes the socket); nothing closes
+// it here. Moved once to the owning worker, which is the sole
+// consumer of the ring thereafter.
 unsafe impl Send for RingRx {}
 
 impl RingRx {
@@ -938,6 +962,11 @@ pub struct RingTx {
     fd: c_int,
 }
 
+// SAFETY: owns a boxed producer-ring header. The `fd` is a
+// non-owning copy of the socket fd (also carried by `User` and
+// `DeviceQueue`, whose drop deletes the socket); nothing closes
+// it here. Moved once to the owning worker, which is the sole
+// producer of the ring thereafter.
 unsafe impl Send for RingTx {}
 
 impl RingTx {

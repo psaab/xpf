@@ -665,3 +665,104 @@ Cargo compares mtimes only, so a library replaced by a file with an older mtime 
 The version checks are pure functions in `build_support/libversions.rs`. `build.rs` includes that file with `#[path]`, and `src/main.rs` includes it again under `cfg(test)`. `src/build_libversions_tests.rs` tests each check on both sides of its boundary, and checks that the versions this build recorded pass them.
 
 `XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD` keeps libxdp from loading its own XDP program. `csrc/xsk_bridge.c` sets it, with `xdp_flags = 0`, in `bridge_fill_socket_config`, which both socket-create functions use to fill their config; the Rust side passes neither flag. The create functions reach libxdp through two static function pointers that default to `xsk_socket__create` and `xsk_socket__create_shared`. A test-only seam, `bridge_xsk_capture_socket_create_for_test`, points them at capture functions (`1`) or back at libxdp's (`0`). A capture records the `libxdp_flags` of the config it receives, which `bridge_xsk_captured_libxdp_flags` returns, and returns `-EINVAL` without reading any other argument or creating a socket. `socket_create_passes_inhibit_prog_load_to_libxdp_9726` calls `bridge_xsk_socket_create_private` and `bridge_xsk_socket_create_shared` under capture with null pointers. It asserts that each returned `-EINVAL` and passed flags that are non-zero and equal to the header's value, so a create function that passes 0, another flag, or a config its fill did not set fails it. Production never calls the seam. A `_Static_assert` also pins the header's value.
+
+## Production `unsafe` surface (#16187)
+
+The audit surface for `unsafe` in this binary is the per-directory
+ratchet in `src/protocol/unsafe_ratchet_16187.rs` (test-only; it reads
+the source tree at `cargo test` time). There is deliberately **no**
+crate-root `deny(unsafe_code)` and `src/xsk_ffi.rs` is deliberately
+**not** split — both were proposed and unanimously rejected in the
+R10 review (see the ratchet file's header for the reasoning).
+
+Published baseline — the filing measurement, reproduced exactly:
+whole-word `unsafe` hits in files under `src/` whose path contains
+no `test` substring (raw text, comments and strings included):
+
+| Count | File |
+|------:|------|
+| 71 | `xsk_ffi.rs` |
+| 43 | `afxdp/bpf_map/mod.rs` |
+| 39 | `afxdp/neighbor.rs` |
+| 25 | `afxdp/coordinator/wg_control/sock.rs` |
+| 22 | `slowpath.rs` |
+| 12 | `afxdp/bind.rs` |
+| 12 | `afxdp/bpf_map/metrics.rs` |
+| 12 | `afxdp/forwarding/ipsec_sa.rs` |
+| 10 | `afxdp/mpsc_inbox.rs` |
+| 9 | `afxdp/neighbor_resolver.rs` |
+| 9 | `afxdp/tunnel.rs` |
+| 8 | `afxdp/umem/mmap.rs` |
+| 7 | `afxdp/poll_descriptor/rx_telemetry.rs` |
+| 6 | `afxdp/poll_descriptor/mod.rs` |
+| 6 | `afxdp/tx/rings.rs` |
+| 5 | `afxdp/frame/checksum.rs` |
+| 5 | `afxdp/tx/dispatch/mod.rs` |
+| 4 | `afxdp/bpf_map/ha.rs` |
+| 4 | `afxdp/bpf_map/pin.rs` |
+| 4 | `afxdp/checksum.rs` |
+| 4 | `afxdp/cold_path_hist.rs` |
+| 4 | `afxdp/binding_state/tx_inbox.rs` |
+| 4 | `afxdp/cos/queue_service/drain.rs` |
+| 4 | `afxdp/worker/lifecycle.rs` |
+| 3 | `afxdp/coordinator/wg_control/mod.rs` |
+| 3 | `afxdp/frame/mod.rs` |
+| 3 | `afxdp/poll_descriptor/flow_cache_hit.rs` |
+| 3 | `afxdp/worker/mod.rs` |
+| 2 | `afxdp/bpf_map/publish_conntrack.rs` |
+| 2 | `afxdp/coordinator/wg_control/kernel_path.rs` |
+| 2 | `afxdp/tx/drain/mod.rs` |
+| 2 | `afxdp/types/cos.rs` |
+| 2 | `afxdp/umem/mod.rs` |
+| 2 | `afxdp/wg/engine.rs` |
+| 2 | `afxdp/worker_runtime.rs` |
+| 2 | `event_stream/clock.rs` |
+| 2 | `hot_hash_seed.rs` |
+| 2 | `io_uring_write.rs` |
+| 2 | `server/helpers/planning.rs` |
+| 2 | `server/lifecycle.rs` |
+| 2 | `state_writer.rs` |
+| 1 | `afxdp/cos/ecn.rs` |
+| 1 | `afxdp/cos/redirect_pool.rs` |
+| 1 | `afxdp/frame/build/mod.rs` |
+| 1 | `afxdp/frame/headers.rs` |
+| 1 | `afxdp/frame/inspect.rs` |
+| 1 | `afxdp/frame/rewrite/mod.rs` |
+| 1 | `afxdp/mirror/fast_path.rs` |
+| 1 | `afxdp/tx/cos_classify.rs` |
+| 1 | `afxdp/tx/tcp_segmentation.rs` |
+| 1 | `afxdp/tx/transmit/mod.rs` |
+| 1 | `afxdp/tx/transmit/rewrite.rs` |
+| 1 | `afxdp/types/runtime_view.rs` (prose only, see note) |
+| 1 | `afxdp/wg/counters.rs` |
+| 1 | `afxdp/wg/scratch.rs` (prose only, see note) |
+| 1 | `afxdp/worker/loop_body/debug_report.rs` |
+| 1 | `afxdp/worker/loop_body/mod.rs` |
+| 1 | `afxdp/worker/loop_body/reconcile.rs` (prose only, see note) |
+| 1 | `drop_order_probe.rs` (prose only, test-only module, see note) |
+| 1 | `nat/source/mod.rs` (prose only, see note) |
+| 1 | `policy.rs` (prose only, see note) |
+| 1 | `protocol/control.rs` (prose only, see note) |
+| 1 | `server/handlers/snapshot.rs` (prose only, see note) |
+| 1 | `server/reinject_9506.rs` |
+
+**390 hits in 64 files** under that rule (the column sums to it).
+
+The ratchet itself counts a stricter thing — whole-word `unsafe`
+in **code only** (comments/strings blanked, inline `#[cfg(test)]`
+bodies blanked, `#[cfg(test)]`-only files excluded via the #12270
+declaration graph, `test_alloc.rs` excluded by name as a test-only
+crate-root module): **367 hits in 55 production files across 25
+directories** at `ba55ef764a`, held per directory in
+`UNSAFE_CEILING_PER_DIR`. The gap between the two measurements is
+prose mentions (e.g. `policy.rs`, `state_writer.rs` — comment-only,
+zero code hits), inline test-module unsafe (e.g. 7 of
+`afxdp/neighbor.rs`'s 39), and test-only files the filename rule
+cannot see. Both numbers are published so neither can be silently
+substituted for the other; the ceiling table is the enforced one.
+
+To change the surface: remove unsafe and tighten the ceiling in
+the same commit, or add unsafe only with a raised ceiling in the
+same diff — that diff is the review. A first unsafe in a
+zero-ceiling directory (`forwarding_build/`, `session/`, `filter/`,
+…) reds by name. Test files are not policed by this ratchet.
