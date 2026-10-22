@@ -1,0 +1,57 @@
+{
+  "Dhcp6": {
+    "interfaces-config": {
+      "interfaces": [
+        "ge-0-0-0",
+        "ge-0-0-1"
+      ]
+    },
+    "lease-database": {
+      "name": "/var/lib/kea/kea-leases6.csv",
+      "type": "memfile"
+    },
+    "subnet6": [
+      {
+        "id": 2001307565,
+        "subnet": "2001:db8:1::/64",
+        "pools": [
+          {
+            "pool": "2001:db8:1::10 - 2001:db8:1::20"
+          }
+        ],
+        "interface": "ge-0-0-0"
+      },
+      {
+        "id": 2304805888,
+        "subnet": "2001:db8:2::/64",
+        "pools": [
+          {
+            "pool": "2001:db8:2::10 - 2001:db8:2::20"
+          }
+        ],
+        "interface": "ge-0-0-1",
+        "option-data": [
+          {
+            "name": "dns-servers",
+            "data": "2001:db8::1"
+          },
+          {
+            "name": "domain-search",
+            "data": "example.com"
+          }
+        ],
+        "valid-lifetime": 7200,
+        "reservations": [
+          {
+            "hw-address": "aa:bb:cc:dd:ee:01",
+            "ip-addresses": [
+              "2001:db8:2::50"
+            ],
+            "hostname": "host-b"
+          }
+        ]
+      }
+    ],
+    "valid-lifetime": 86400
+  }
+}

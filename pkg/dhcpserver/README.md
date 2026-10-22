@@ -199,13 +199,18 @@ Both detail renderers (`pkg/cli` `showDHCPServer` and `pkg/grpcapi`
 v4 `domain-name` + `static-binding`, v6 `dns-server` + `domain-name` +
 `lease-time` + `static-binding` (binding hostnames via
 `termsafe.SanitizeForDisplay`), and the Kea subnet-id beside each subnet.
-The id comes from `SubnetIDAssignments15694`, which replays the
-generators' stable walk (sorted groups/pools, subnet-less/interface-less/
-duplicate-prefix skips, then `resolveSubnetID`) so the displayed id is the
-id in the rendered Kea config and correlates with the lease table's
-`Subnet` column. Guard:
+The id comes from `SubnetIDAssignments15694`, which shares the
+generators' one walk (`walkKeaSubnets`, #16175 — sorted groups/pools,
+subnet-less/interface-less/duplicate-prefix skips, then
+`resolveSubnetID`) so the displayed id is the id in the rendered Kea
+config and correlates with the lease table's `Subnet` column. The v6
+multi-interface / narrowed-group render refusal lives only in the v6
+generator's visit step, so the assignments walk deliberately does not
+reproduce it. Guard:
 `TestSubnetIDAssignmentsMatchKeaRender_15694` asserts the map equals the
-rendered conf, and the two `*_15694` renderer tests assert the fields,
+rendered conf, `TestKeaWalkerGolden{4,6}_16175` pin both families'
+golden JSON, `TestKeaWalkerV6RefusalAsymmetry16175` pins the refusal
+asymmetry, and the two `*_15694` renderer tests assert the fields,
 order, and ids on both surfaces.
 
 ## Stable subnet IDs — #2668 / #5041 / #5203
