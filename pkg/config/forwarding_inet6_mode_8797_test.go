@@ -28,7 +28,7 @@ func TestInet6ForwardingModeReachesTheCompiledConfig8797(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: false})
+		cfg, err := compileTree(tree, compileOpts{skipCompactNormalize: false}, nil)
 		if err != nil {
 			return "", err
 		}
@@ -44,7 +44,7 @@ func TestInet6ForwardingModeReachesTheCompiledConfig8797(t *testing.T) {
 			}
 			tree.SetPath(path)
 		}
-		cfg, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: false})
+		cfg, err := compileTree(tree, compileOpts{skipCompactNormalize: false}, nil)
 		if err != nil {
 			return "", err
 		}

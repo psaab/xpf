@@ -526,7 +526,7 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			"accepts. Braced is accepted either way.",
 		// #9656 (M40): the zone-statement gate refuses a childless `security-zone`
 		// statement whose keys after the zone name are dropped. HAND-MEASURED with
-		// type-VALID values through compileConfigWithOpts, skipCompactNormalize
+		// type-VALID values through compileTree, skipCompactNormalize
 		// off and on:
 		//
 		//	BRACED passDisabled=true   <nil>      <- the config is legitimate
@@ -622,7 +622,7 @@ func compactElidedCompilesEmpty(t *testing.T, siteKey string, parent []string, c
 	// only difference from the census's own measurement is the normalizer.
 	opts := lenientCompileOpts()
 	opts.skipCompactNormalize = true
-	got, err := compileConfigWithOpts(tree, opts)
+	got, err := compileTree(tree, opts, nil)
 	if err != nil || got == nil {
 		return true
 	}
@@ -753,7 +753,7 @@ func compileStrict8690(t *testing.T, text string, skipNormalize bool) error {
 	if len(perrs) > 0 {
 		return fmt.Errorf("parse: %v", perrs)
 	}
-	_, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: skipNormalize})
+	_, err := compileTree(tree, compileOpts{skipCompactNormalize: skipNormalize}, nil)
 	return err
 }
 
@@ -765,7 +765,7 @@ func compileSeam8690(t *testing.T, text string, skipNormalize bool) *Config {
 	if len(perrs) > 0 {
 		return nil
 	}
-	cfg, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: skipNormalize})
+	cfg, err := compileTree(tree, compileOpts{skipCompactNormalize: skipNormalize}, nil)
 	if err != nil || cfg == nil {
 		return nil
 	}
@@ -775,7 +775,7 @@ func compileSeam8690(t *testing.T, text string, skipNormalize bool) *Config {
 
 // #8690 requirement: the pass must run at BOTH compile entry points.
 //
-// It is wired at both (compiler.go, compileConfigWithOpts and the node-aware
+// It is wired at both (compiler.go, compileTree and the node-aware
 // sibling behind CompileConfigForNode), and until this cell existed that
 // wiring was untested: deleting the call from the node-aware path reds NOTHING
 // in the whole pkg/config suite. That path is the cluster one — Store.SyncApply
@@ -873,7 +873,7 @@ func TestElidedSSHRootLoginReachesTheDaemon8690(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	off, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: true})
+	off, err := compileTree(tree, compileOpts{skipCompactNormalize: true}, nil)
 	if err != nil || off == nil {
 		t.Fatalf("un-normalized compile failed: %v", err)
 	}
@@ -1281,7 +1281,7 @@ func TestArm2CannotSeeATrailingTokenGate8690(t *testing.T) {
 		if len(perrs) > 0 {
 			return nil // a parse failure is not the gate we are probing
 		}
-		_, err := compileConfigWithOpts(tree, compileOpts{})
+		_, err := compileTree(tree, compileOpts{}, nil)
 		return err
 	}
 
@@ -1433,7 +1433,7 @@ func TestTheGateCountsTheSurvivingCriterion8690(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		_, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: skipPass})
+		_, err := compileTree(tree, compileOpts{skipCompactNormalize: skipPass}, nil)
 		if err == nil {
 			return ""
 		}

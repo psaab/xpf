@@ -1445,7 +1445,7 @@ func TestLoginPathPackedDoesNotOverReach_6706(t *testing.T) {
 // re-attributed. Asserting only "no longer says INERT" would pass if the whole
 // stanza had started committing green.
 //
-// The STRICT path cannot bind the skip on its own: compileConfigWithOpts runs
+// The STRICT path cannot bind the skip on its own: compileTree runs
 // the packed gate before the shadow gate and returns on its first error, so
 // with the skip reverted strict still surfaces the packed message and a
 // strict-only assertion stays green. The observable difference is on the

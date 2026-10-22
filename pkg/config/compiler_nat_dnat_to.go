@@ -33,7 +33,7 @@ import "fmt"
 // reject + the already-persisted lenient-load path. Detection is scoped to
 // `security nat destination rule-set` so the source-NAT `to` clause (a real
 // feature) is never touched. The walk runs on the group-expanded,
-// inactive-pruned tree (compileConfigWithOpts / compileConfigForNodeWithOpts
+// inactive-pruned tree (compileTree / compileTree node branch
 // strip inactive subtrees and expand groups before compileExpanded), so an
 // apply-groups-inherited `to` is caught and an `inactive:` rule-set is
 // ignored for free.

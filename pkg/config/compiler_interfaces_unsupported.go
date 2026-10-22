@@ -76,8 +76,8 @@ import (
 // (validateVRRPTrackInterfaceAST, validateTCPMSSRanges,
 // validateNodesControlChars, validateTunnelEndpointIDCollisionAST) is an
 // AST pre-walk in compileExpanded for the same reason. The walk runs on
-// the group-expanded, inactive-pruned tree (compileConfigWithOpts /
-// compileConfigForNodeWithOpts strip inactive subtrees and expand groups
+// the group-expanded, inactive-pruned tree (compileTree /
+// compileTree node branch strip inactive subtrees and expand groups
 // before compileExpanded), so an apply-groups-inherited stanza is caught
 // and an `inactive:` stanza is ignored (#2008 H1 doctrine) for free.
 

@@ -14,7 +14,7 @@ func TestSecurityZoneCompactLeafWithBracedBodyAndUnbracketedHeaderTokens(t *test
 		if len(perrs) > 0 {
 			t.Fatalf("parse %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			// Reject is acceptable fail-closed
 			t.Logf("strict rejected (acceptable): %v", err)
@@ -42,7 +42,7 @@ func TestSecurityZoneCompactLeafWithBracedBodyAndUnbracketedHeaderTokens(t *test
 		if len(perrs) > 0 {
 			t.Fatalf("parse %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Logf("strict rejected (acceptable): %v", err)
 			return
@@ -58,7 +58,7 @@ func TestSecurityZoneCompactLeafWithBracedBodyAndUnbracketedHeaderTokens(t *test
 		if len(perrs) > 0 {
 			t.Fatalf("parse %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Logf("strict rejected (acceptable): %v", err)
 			return
@@ -73,7 +73,7 @@ func TestSecurityZoneCompactLeafWithBracedBodyAndUnbracketedHeaderTokens(t *test
 		if len(perrs) > 0 {
 			t.Fatalf("parse %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("bracketed control rejected: %v", err)
 		}
@@ -87,7 +87,7 @@ func TestSecurityZoneCompactLeafWithBracedBodyAndUnbracketedHeaderTokens(t *test
 		if len(perrs) > 0 {
 			t.Fatalf("parse %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("bare group rejected: %v", err)
 		}

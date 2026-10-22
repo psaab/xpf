@@ -62,7 +62,7 @@ package config
 // THE CLONE IS ONE OF TWO GUARDS ON THE SAME PROPERTY, AND THE FIRST VERSION OF
 // THIS COMMENT CLAIMED IT WAS THE ONLY ONE. It said expanding in place "would
 // rewrite the operator's authored spelling as a side effect of compiling it".
-// Measured, it would not — on its own. `compileConfigWithOpts` (compiler.go)
+// Measured, it would not — on its own. `compileTree` (compiler.go)
 // opens with `tree = tree.cloneForExpansion()`, a deep copy taken before any
 // reader runs, so the tree the renderers and `show | display set` read is already
 // out of reach. Removing EITHER guard survives the suite; removing BOTH reds

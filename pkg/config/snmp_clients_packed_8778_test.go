@@ -67,7 +67,7 @@ func TestPackedCommunityStillEnforcesClients8778(t *testing.T) {
 				t.Fatalf("SetPath(%q): %v", line, err)
 			}
 		}
-		cfg, err := compileConfigWithOpts(tree, compileOpts{})
+		cfg, err := compileTree(tree, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}
@@ -80,7 +80,7 @@ func TestPackedCommunityStillEnforcesClients8778(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}
@@ -104,7 +104,7 @@ func TestPackedCommunityStillEnforcesClients8778(t *testing.T) {
 				t.Fatalf("SetPath(%q): %v", line, err)
 			}
 		}
-		cfg, err := compileConfigWithOpts(tree, compileOpts{})
+		cfg, err := compileTree(tree, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}
@@ -120,7 +120,7 @@ func TestPackedCommunityStillEnforcesClients8778(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}
@@ -145,7 +145,7 @@ func TestPackedCommunityStillEnforcesClients8778(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}

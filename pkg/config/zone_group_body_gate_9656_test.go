@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// prewalkTree9656 prepares a tree the way compileConfigWithOpts hands it to
+// prewalkTree9656 prepares a tree the way compileTree hands it to
 // runPreWalkGates: compact stanzas normalized, groups expanded.
 func prewalkTree9656(t *testing.T, text string) *ConfigTree {
 	t.Helper()

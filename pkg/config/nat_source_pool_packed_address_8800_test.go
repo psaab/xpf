@@ -44,7 +44,7 @@ func TestSourceNATPoolPackedAddress8800(t *testing.T) {
 	// pair masked out and sets skipCompactNormalize, which reproduces
 	// pre-#8800 behaviour exactly. Compiling a pre-normalised tree WITHOUT
 	// that opt would not be a baseline: the pass runs inside
-	// compileConfigWithOpts and would simply re-fold with the real scope.
+	// compileTree and would simply re-fold with the real scope.
 	compile := func(t *testing.T, txt string, masked bool) (addrs []string, strictRejects bool) {
 		t.Helper()
 		norm := func() *ConfigTree {
@@ -66,7 +66,7 @@ func TestSourceNATPoolPackedAddress8800(t *testing.T) {
 		}
 		lo := lenientCompileOpts()
 		lo.skipCompactNormalize = true
-		cfg, err := compileConfigWithOpts(norm(), lo)
+		cfg, err := compileTree(norm(), lo, nil)
 		if err != nil {
 			t.Fatalf("lenient compile of %q: %v", txt, err)
 		}
@@ -75,7 +75,7 @@ func TestSourceNATPoolPackedAddress8800(t *testing.T) {
 				addrs = p.Addresses
 			}
 		}
-		_, serr := compileConfigWithOpts(norm(), compileOpts{skipCompactNormalize: true})
+		_, serr := compileTree(norm(), compileOpts{skipCompactNormalize: true}, nil)
 		return addrs, serr != nil
 	}
 
@@ -184,7 +184,7 @@ func TestDestinationNATPoolPackedAddress8800(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, lenientCompileOpts())
+		cfg, err := compileTree(tr, lenientCompileOpts(), nil)
 		if err != nil {
 			t.Fatalf("lenient compile: %v", err)
 		}
@@ -196,7 +196,7 @@ func TestDestinationNATPoolPackedAddress8800(t *testing.T) {
 			}
 		}
 		tr2, _ := NewParser(txt).Parse()
-		_, serr := compileConfigWithOpts(tr2, compileOpts{})
+		_, serr := compileTree(tr2, compileOpts{}, nil)
 		return addr, port, serr != nil
 	}
 	for _, tc := range []struct{ name, packed, braced string }{

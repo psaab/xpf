@@ -38,7 +38,7 @@ func TestIPMonitoringElisionDoesNotSuppressValidation8928(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("fixture does not parse (%q): %v", text, perrs[0])
 		}
-		_, err := compileConfigWithOpts(tree, compileOpts{})
+		_, err := compileTree(tree, compileOpts{}, nil)
 		return err
 	}
 

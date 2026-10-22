@@ -407,11 +407,11 @@ func TestFlatRunResidueSchemasResolve9235(t *testing.T) {
 //
 //	mutation                                              verdict
 //	expandRun9235 writes in place (clone removed)         SURVIVED
-//	compileConfigWithOpts discards cloneForExpansion      SURVIVED
+//	compileTree discards cloneForExpansion      SURVIVED
 //	BOTH of the above                                     KILLED — the two
 //	                                                      expandRun9235 subtests
 //
-// So `compileConfigWithOpts`'s opening `tree = tree.cloneForExpansion()` (a deep
+// So `compileTree`'s opening `tree = tree.cloneForExpansion()` (a deep
 // copy, before any reader runs) and the clone inside `expandRun9235` cover each
 // other exactly, and no single-clause mutation can expose either. That is the
 // #8690 mutation-insensitivity shape: a property reached by two paths is
@@ -466,7 +466,7 @@ func TestFlatRunResidueCompileDoesNotTouchTheAuthoredTree9235(t *testing.T) {
 			}
 			if after := tree.FormatSet(); after != before {
 				t.Errorf("#9235: compiling REWROTE the authored tree:\nbefore %q\nafter  %q\n"+
-					"`compileConfigWithOpts` must keep its `tree = tree.cloneForExpansion()` "+
+					"`compileTree` must keep its `tree = tree.cloneForExpansion()` "+
 					"deep copy. `show configuration` is the operator's record of what they "+
 					"typed, and the renderers read the same object the compiler was handed.",
 					before, after)

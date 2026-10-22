@@ -242,7 +242,7 @@ func absFlat8763(t *testing.T, prereq, stmtSuffix string) *ConfigTree {
 }
 
 func compileTree8763(tree *ConfigTree, skipNormalize bool) (*Config, error) {
-	return compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: skipNormalize})
+	return compileTree(tree, compileOpts{skipCompactNormalize: skipNormalize}, nil)
 }
 
 func TestSecurityMatchLeavesLandTheAuthoredValue8763(t *testing.T) {

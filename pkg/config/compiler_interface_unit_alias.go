@@ -62,8 +62,8 @@ import (
 //
 // This gate is now the BOTH-NODE UNION, modeled EXACTLY on
 // validateTunnelEndpointIDCollisionAST (tunnelid.go), and runs in the
-// PRE-expansion gate block of compileConfigForNodeWithOpts /
-// compileConfigWithOpts (beside the tunnel/zone/table-id gates):
+// PRE-expansion gate block of compileTree node branch /
+// compileTree (beside the tunnel/zone/table-id gates):
 //
 //	View 1 — the PRE-expansion presence union across every top-level
 //	  "interfaces" root AND every "groups" block, grouping raw unit spellings

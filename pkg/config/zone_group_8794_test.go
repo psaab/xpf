@@ -34,7 +34,7 @@ func TestBracketedZoneGroupCreatesEveryZone8794(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("%s: fixture must parse: %v", label, perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("%s: strict compile: %v", label, err)
 		}
@@ -75,7 +75,7 @@ func TestBracketedZoneGroupCreatesEveryZone8794(t *testing.T) {
 	//
 	// TESTED AGAINST THE DISCRIMINATOR DIRECTLY, not through a compile. The
 	// first version of this subtest fed `security-zone trust screen edge;`
-	// through compileConfigWithOpts and asserted no `screen`/`edge` zone
+	// through compileTree and asserted no `screen`/`edge` zone
 	// appeared — and it was VACUOUS: the #8690 normalizer admits
 	// ("security-zone","screen") and pre-splits that tail into
 	// `Keys=[security-zone trust] children=1` before compileZones ever runs, so
@@ -116,7 +116,7 @@ func TestBracketedZoneGroupDoesNotFanOutApplyMacro12828(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("fixture must parse: %v", perrs)
 	}
-	cfg, err := compileConfigWithOpts(tr, compileOpts{})
+	cfg, err := compileTree(tr, compileOpts{}, nil)
 	if err != nil {
 		t.Fatalf("strict compile: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestBracketedZoneGroupDoesNotFanOutApplyMacro12828(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("fixture must parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		cfg, err := compileTree(tr, compileOpts{}, nil)
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}
@@ -182,7 +182,7 @@ func TestEveryZoneEnumerationSeesTheGroup8794(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("fixture must parse: %v", perrs)
 	}
-	cfg, err := compileConfigWithOpts(tr, compileOpts{})
+	cfg, err := compileTree(tr, compileOpts{}, nil)
 	if err != nil {
 		t.Fatalf("strict compile: %v", err)
 	}

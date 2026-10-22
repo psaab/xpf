@@ -138,7 +138,7 @@ func routingInstanceTypeFlagsAST(tree *ConfigTree, compiledNode *int) map[string
 	emitGenericExpandedRoutingInstancesAST(tree, nil, types)
 	emitNodeExpandedRoutingInstancesAST(tree, 0, nil, types)
 	emitNodeExpandedRoutingInstancesAST(tree, 1, nil, types)
-	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
+	// compileTree node branch accepts any integer node ID, negative ones
 	// included, and expands that node's own groups (`node%d`). A generic compile
 	// passes nil.
 	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
@@ -157,7 +157,7 @@ func routingInstanceTypeFlagsASTByView(tree *ConfigTree, compiledNode *int) []ma
 		emitNodeExpandedRoutingInstancesAST(tree, nodeID, nil, types)
 		views = append(views, types)
 	}
-	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
+	// compileTree node branch accepts any integer node ID, negative ones
 	// included, and expands that node's own groups (`node%d`).
 	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
 		types := make(map[string]routingInstanceASTTypeFlags)
@@ -374,10 +374,10 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 //
 //   - Every top-level "routing-instances" root, across all roots (#5691).
 //   - The names after the generic compile's own group expansion
-//     (compileConfigWithOpts: no node variables, and on an undefined "${node}"
+//     (compileTree: no node variables, and on an undefined "${node}"
 //     group a retry with node0 on the same, already-expanded tree).
 //   - The names after each cluster node's expansion (node0, node1), as
-//     compileConfigForNodeWithOpts expands them, plus the requested node's own
+//     compileTree node branch expands them, plus the requested node's own
 //     expansion when a node compile passes any other ID, negative ones
 //     included (compiledNode is nil for the generic compile).
 //
@@ -399,7 +399,7 @@ func routingInstanceNameUnionAST(tree *ConfigTree, compiledNode *int) map[string
 	emitGenericExpandedRoutingInstancesAST(tree, names, nil)
 	emitNodeExpandedRoutingInstancesAST(tree, 0, names, nil)
 	emitNodeExpandedRoutingInstancesAST(tree, 1, names, nil)
-	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
+	// compileTree node branch accepts any integer node ID, negative ones
 	// included, and expands that node's own groups (`node%d`), so a node compile
 	// for any other ID counts its own view too. A generic compile passes nil.
 	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
@@ -409,7 +409,7 @@ func routingInstanceNameUnionAST(tree *ConfigTree, compiledNode *int) map[string
 }
 
 // emitGenericExpandedRoutingInstancesAST collects the routing instances the
-// generic compile lands, expanding a clone exactly as compileConfigWithOpts
+// generic compile lands, expanding a clone exactly as compileTree
 // does (#15031: one atomic ${node} -> node0 fallback expansion, never a
 // retry on a partially merged clone). Any failure contributes nothing (#9657).
 func emitGenericExpandedRoutingInstancesAST(tree *ConfigTree, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {

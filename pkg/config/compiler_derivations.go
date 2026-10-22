@@ -71,7 +71,7 @@ func resolveDerivedConfig(cfg *Config, opts compileOpts) {
 	//
 	// Guards (all load-bearing):
 	//   - opts.nodeAware && stampNodeID >= 0: only the node-aware entry
-	//     (compileConfigForNodeWithOpts) sets these. The standalone
+	//     (compileTree node branch) sets these. The standalone
 	//     CompileConfig path leaves nodeAware false, so single-node compiles
 	//     are unchanged; a negative node-id (defensive) never stamps.
 	//   - Cluster != nil: never fabricate a cluster stanza. A config-less HA

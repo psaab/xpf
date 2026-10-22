@@ -378,14 +378,14 @@ func TestFilterFromPackedSeenWithoutNormalizer9875(t *testing.T) {
 		t.Helper()
 		return fwTree9875(t, `term T { from protocol; then { discard; } }`)
 	}
-	if _, err := compileConfigWithOpts(mk(t), compileOpts{skipCompactNormalize: true}); err == nil {
+	if _, err := compileTree(mk(t), compileOpts{skipCompactNormalize: true}, nil); err == nil {
 		t.Fatal("strict must reject from-packed valueless `protocol` even with the normalizer skipped")
 	} else if !strings.Contains(err.Error(), "#8480") {
 		t.Fatalf("strict error must stay the #8480 gate, got: %v", err)
 	}
 	lo := lenientCompileOpts()
 	lo.skipCompactNormalize = true
-	cfg, err := compileConfigWithOpts(mk(t), lo)
+	cfg, err := compileTree(mk(t), lo, nil)
 	if err != nil {
 		t.Fatalf("lenient must warn, not fail: %v", err)
 	}

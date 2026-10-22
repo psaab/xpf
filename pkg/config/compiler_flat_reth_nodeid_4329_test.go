@@ -243,7 +243,7 @@ func TestFlatFabricGroupsFormUnaffected_4329(t *testing.T) {
 
 // TestFlatRethStandaloneCompileUnchanged_4329 pins that the standalone
 // (non-cluster) compile path is untouched: CompileConfig (nodeID == -1)
-// routes through compileConfigWithOpts, never the node-aware stamp, so a
+// routes through compileTree, never the node-aware stamp, so a
 // leaf-less config keeps NodeIDSet==false and its zero-default NodeID.
 func TestFlatRethStandaloneCompileUnchanged_4329(t *testing.T) {
 	tree := buildTree(t, flatRethClusterConfig())

@@ -1097,7 +1097,7 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 		if len(perrs) > 0 {
 			return "<parse err>"
 		}
-		cfg, err := compileConfigWithOpts(tr, lenientCompileOpts())
+		cfg, err := compileTree(tr, lenientCompileOpts(), nil)
 		if err != nil || cfg == nil {
 			return fmt.Sprintf("<err %v>", err)
 		}
