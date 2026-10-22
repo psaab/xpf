@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/optopic"
 )
 
 // #9059: ShowText is on the fabric allowlist as a METHOD, and it multiplexes
@@ -44,11 +45,21 @@ import (
 // config TEXT through config sync, so configuration is not the marginal
 // disclosure. `route-all`, `security-log`, `commit-history`, the `nat-*-detail`
 // topics and the `test-policy:` policy simulator are.
-var fabricAllowedShowTextTopics = map[string]bool{
-	// The only topic either peer-proxy call site sends
-	// (server_show_forwarding.go:123, pkg/cli/cli_show_chassis.go:153).
-	"chassis-forwarding": true,
-}
+//
+// #16136: the fabric admission bit now lives WITH the topic in the optopic
+// registry (Entry.FabricAllowed), so a topic is priced, commanded, and
+// fabric-classified in one edit. fabricAllowedShowTextTopics is the derived
+// view the allowlist tests and gate read; it is built from the registry,
+// never hand-edited.
+var fabricAllowedShowTextTopics = func() map[string]bool {
+	out := make(map[string]bool)
+	for _, e := range optopic.ShowTextEntries() {
+		if e.FabricAllowed {
+			out[e.Key] = true
+		}
+	}
+	return out
+}()
 
 // isFabricSafeShowText reports whether a ShowText request asks for a topic the
 // local node actually proxies to a peer.

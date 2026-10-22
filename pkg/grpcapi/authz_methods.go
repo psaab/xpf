@@ -1,11 +1,11 @@
 package grpcapi
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/optopic"
 )
 
 // authz_methods.go is the method -> required-permission table the #5278
@@ -183,97 +183,68 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	"SystemAction": config.PermMaint,
 }
 
-// systemActionPermissions prices each SystemAction verb the way the CLI prices
-// the command that sends it.
+// systemActionPermissions is now a view onto the optopic registry
+// (#16136): exact SystemAction verbs with their price, derived from
+// optopic.SystemActionEntries. Retained as a named map because the
+// completeness tests and the REST/CLI parity readers address it by that
+// name; it is built once from the registry, never hand-edited. Add or
+// reprice a verb in pkg/optopic, not here.
 //
-// SystemAction is one RPC multiplexing three very different permission tiers,
-// and folding it up to its destructive floor — which is what pkg/api's REST
-// gate must do, because that middleware deliberately never decodes a request
-// body — would take `clear arp`, `clear system config-lock`, `request protocols
-// bgp clear` and `request dhcp renew` away from the `operator` class that holds
-// them today. A unary gRPC interceptor is handed the DECODED request, so the
-// verb is available without buffering anything the caller controls.
+// SystemAction is one RPC multiplexing three very different permission
+// tiers, and folding it up to its destructive floor — which is what
+// pkg/api's REST gate must do, because that middleware deliberately never
+// decodes a request body — would take `clear arp`, `clear system
+// config-lock`, `request protocols bgp clear` and `request dhcp renew`
+// away from the `operator` class that holds them today. A unary gRPC
+// interceptor is handed the DECODED request, so the verb is available
+// without buffering anything the caller controls.
 //
-// The key set is pinned to the handler's own switch by
-// TestEverySystemActionVerbHasAPermission_5278, which reads the case labels out
-// of server_diag_system_action.go rather than from a list typed here.
-var systemActionPermissions = map[string]config.LoginClassPermission{
-	// Destructive maintenance. `operator` deliberately lacks PermMaint on
-	// Junos and here (#4108 F21).
-	"reboot":             config.PermMaint,
-	"halt":               config.PermMaint,
-	"power-off":          config.PermMaint,
-	"zeroize":            config.PermMaint,
-	"in-service-upgrade": config.PermMaint, // drains this node to secondary (#4859)
+// The key set is pinned to the handler's own switch by the census in
+// authz_registry_census_16136_test.go, which reads the case labels out of
+// server_diag_system_action.go rather than from a list typed here or in
+// the registry.
+var systemActionPermissions = func() map[string]config.LoginClassPermission {
+	out := make(map[string]config.LoginClassPermission)
+	for _, e := range optopic.SystemActionEntries() {
+		if !e.IsPrefix() {
+			out[e.Key] = e.Permission
+		}
+	}
+	return out
+}()
 
-	// The `clear ...` family: `clear system config-lock`, `clear arp`,
-	// `clear interfaces statistics`, `clear ipv6 neighbors`, and the counter
-	// clears — all reached from cmd/cli/clear.go, i.e. parts[0] == "clear".
-	"clear-config-lock":           config.PermClear,
-	"clear-arp":                   config.PermClear,
-	"clear-interfaces-statistics": config.PermClear,
-	"clear-ipv6-neighbors":        config.PermClear,
-	"clear-policy-counters":       config.PermClear,
-	"clear-firewall-counters":     config.PermClear,
-	"clear-nat-counters":          config.PermClear,
-	"clear-persistent-nat":        config.PermClear,
-
-	// The `request ...` family that is not maintenance: these are sent from
-	// cmd/cli/request.go (`request protocols ospf|bgp clear`, `request security
-	// ipsec sa clear`, `request dhcp renew`, `request system dynamic-dns
-	// update|check`), i.e. parts[0] == "request" without a maintenance verb.
-	"ospf-clear":         config.PermControl,
-	"bgp-clear":          config.PermControl,
-	"ipsec-sa-clear":     config.PermControl,
-	"dhcp-renew":         config.PermControl,
-	"dynamic-dns-update": config.PermControl,
-	// Confirming a refused feed shrink is a configuration decision, not a
-	// routine control request.
-	"dynamic-address-shrink-ack": config.PermConfig,
-	"dynamic-dns-check":          config.PermControl,
-	// #8597 K47: `request system configuration rescue save|delete`. Explicit
-	// rather than left to the PermMaint default, because pkg/cli charges
-	// PermControl — an absent entry would make the remote surface STRICTER
-	// than the console, which is the same parity defect in the other
-	// direction.
-	"rescue-save":   config.PermControl,
-	"rescue-delete": config.PermControl,
-	// #15239: `xpfd upgrade kernel rejoin` — the orchestrator node rejoin
-	// (ResetAllFailover + kernel-hold release). Maintenance-tier like the
-	// other destructive cluster lifecycle verbs; explicit rather than
-	// left to the PermMaint default so the price is auditable.
-	"cluster-rejoin": config.PermMaint,
-}
-
-// systemActionPermission prices one SystemAction verb.
+// systemActionPermission prices one SystemAction verb (#16136: prices
+// live in pkg/optopic; this is the grpcapi lookup over them).
 //
-// An action absent from the table costs PermMaint. That covers the PREFIX-form
-// verbs the handler's default branch parses — `cluster-failover*` (#5810) and
-// the `userspace-*` dataplane control forms — and any verb added in future.
+// An action absent from the registry costs PermMaint. That covers the
+// PREFIX-form verbs the handler's default branch parses —
+// `cluster-failover*` (#5810) and the `userspace-*` dataplane control
+// forms (all registered as PermMaint prefix families in optopic) — and
+// any verb added in future.
 //
-// For cluster-failover that is exactly right: `request chassis cluster failover`
-// is PermMaint in the CLI too. For the `userspace-*` forms it OVER-restricts by
-// one tier in one direction, and the trade is stated rather than hidden: the
-// CLI charges PermMaint for the destructive halves (`disarm`, `unregister`,
-// `inject-packet`) and PermControl for the restorative ones (`arm`,
-// `register`), so an `operator` loses the ability to RE-ARM a binding over
-// gRPC. Recovering that one tier would mean re-implementing three argument
-// parsers (ParseForwardingCommand / ParseQueueCommand / ParseBindingCommand)
-// inside the authorization gate, where a parse that disagreed with the
-// handler's would be a bypass rather than a cosmetic bug. Over-restricting a
-// deep dataplane-diagnostic verb to super-user is the cheaper error.
+// For cluster-failover that is exactly right: `request chassis cluster
+// failover` is PermMaint in the CLI too. For the `userspace-*` forms it
+// OVER-restricts by one tier in one direction, and the trade is stated
+// rather than hidden: the CLI charges PermMaint for the destructive
+// halves (`disarm`, `unregister`, `inject-packet`) and PermControl for
+// the restorative ones (`arm`, `register`), so an `operator` loses the
+// ability to RE-ARM a binding over gRPC. Recovering that one tier would
+// mean re-implementing three argument parsers (ParseForwardingCommand /
+// ParseQueueCommand / ParseBindingCommand) inside the authorization
+// gate, where a parse that disagreed with the handler's would be a
+// bypass rather than a cosmetic bug. Over-restricting a deep
+// dataplane-diagnostic verb to super-user is the cheaper error.
 func systemActionPermission(action string) config.LoginClassPermission {
 	// #14709: the D11 attestation arm re-arms the proof-of-life authority
 	// and its handler requires root or the configured super-user class.
 	// It is a PREFIX verb (`userspace-attest:arm:<run>:<epoch>:<marker>`),
-	// so it has no exact table key; without this arm it would fall to the
-	// PermMaint default and a maintenance-only class would reach a handler
-	// that must deny it — price it PermAll to match the handler.
-	if strings.HasPrefix(action, "userspace-attest:arm:") {
-		return config.PermAll
+	// so it has no exact registry key; price it PermAll to match the
+	// handler (optopic.AttestArmPermission).
+	if strings.HasPrefix(action, optopic.AttestArmPrefix) {
+		return optopic.AttestArmPermission
 	}
-	if p, ok := systemActionPermissions[action]; ok {
-		return p
+	if e, ok := optopic.LookupSystemAction(action); ok {
+		return e.Permission
 	}
 	return config.PermMaint
 }
@@ -361,223 +332,89 @@ const getNATRuleStatsMethodName = "GetNATRuleStats"
 // TestEveryShowTextTopicHasAPermission_5278, which enumerates the topic
 // literals out of the dispatcher in server_show.go.
 
-// showTextElevatedTopics prices the topics that cost MORE than the `show`
-// family's view tier. A key ending in ':' is a PREFIX rule (the topic is a
-// delimiter-packed parameter string); any other key is an exact topic.
-var showTextElevatedTopics = map[string]config.LoginClassPermission{
-	// #8597 K47: a `request` verb, not a `show` one. pkg/cli charges the
-	// `request` family's PermControl for `request security policies check`
-	// (it is not in requestSubcommandIsMaintenance's destructive set), so
-	// pricing it at the view tier here would make the remote surface LOOSER
-	// than the console.
-	"policies-check": config.PermControl,
-
-	"test-policy:":  config.PermControl,
-	"test-routing:": config.PermControl,
-	"test-zone:":    config.PermControl,
-}
-
-// showTextViewTopics is every OTHER topic the ShowText dispatcher serves — all
-// of them reached from a `show ...` command. It is a hand-written list that is
-// machine-checked against production source in both directions
-// (TestEveryShowTextTopicHasAPermission_5278 parses server_show.go), which is
-// what makes it a coverage claim rather than an assertion of good intent. Keys
-// ending in ':' are prefix rules, exactly as above.
+// showTextElevatedTopics / showTextViewTopics are views onto the optopic
+// registry (#16136), retained under their historical names because the
+// completeness and tier tests address them. They are derived once from
+// pkg/optopic — add or reprice a topic THERE, never here. A key ending in
+// ':' is a PREFIX rule (the topic is a delimiter-packed parameter string);
+// any other key is an exact topic.
 //
-// #6496: "bootstrap-import" sits here at PermView, matching the coarse model
+// ShowText topics are priced by the command that emits them: the `test`
+// family and `policies-check` (a `request` verb served over ShowText) cost
+// PermControl; every `show` topic costs PermView. See pkg/optopic for the
+// per-entry provenance.
+//
+// #6496: "bootstrap-import" sits at PermView, matching the coarse model
 // the rest of `show` uses (PermView gates every show command) and matching
 // "login" below, which renders login configuration at the same level. Its
 // error detail is withheld from /health because that endpoint is
 // UNAUTHENTICATED (#5031) — a different distinction from privilege level;
 // every caller reaching here has authenticated.
-var showTextViewTopics = map[string]bool{
-	"address-book":                      true,
-	"alarms":                            true,
-	"alg":                               true,
-	"application-identification-status": true,
-	"applications":                      true,
-	"backup-router":                     true,
-	"bfd-peers":                         true,
-	"bootstrap-import":                  true,
-	"buffers":                           true,
-	"buffers-detail":                    true,
-	"chassis":                           true,
-	"chassis-cluster":                   true,
-	"chassis-cluster-control-plane-statistics": true,
-	"chassis-cluster-data-plane-fairness":      true,
-	"chassis-cluster-data-plane-flows":         true,
-	"chassis-cluster-data-plane-interfaces":    true,
-	"chassis-cluster-data-plane-statistics":    true,
-	"chassis-cluster-fabric-statistics":        true,
-	"chassis-cluster-fence-status":             true,
-	"chassis-cluster-information":              true,
-	"chassis-cluster-interfaces":               true,
-	"chassis-cluster-ip-monitoring-status":     true,
-	"chassis-cluster-statistics":               true,
-	"chassis-cluster-status":                   true,
-	"chassis-device-map":                       true,
-	"chassis-device-map-candidates":            true,
-	"chassis-environment":                      true,
-	"chassis-forwarding":                       true,
-	"chassis-hardware":                         true,
-	"class-of-service":                         true,
-	"class-of-service:":                        true,
-	"commit-history":                           true,
-	"core-dumps":                               true,
-	"cos-classifier":                           true,
-	"cos-classifier:":                          true,
-	"cos-forwarding-class":                     true,
-	"cos-rewrite-rule":                         true,
-	"cos-rewrite-rule:":                        true,
-	"cos-scheduler-map":                        true,
-	"cos-scheduler-map:":                       true,
-	"dhcp-relay":                               true,
-	"dhcp-server":                              true,
-	"dhcp-server-detail":                       true,
-	"dhcp-server-dynamic-dns":                  true,
-	"dhcp-server-dynamic-dns-detail":           true,
-	"dynamic-address":                          true,
-	"event-options":                            true,
-	"firewall":                                 true,
-	"firewall-effective":                       true,
-	"firewall-effective-filter:":               true,
-	"firewall-effective:":                      true,
-	"firewall-filter:":                         true,
-	"flow-monitoring":                          true,
-	"flow-monitoring-statistics":               true,
-	"flow-statistics":                          true,
-	"flow-timeouts":                            true,
-	"flow-traceoptions":                        true,
-	"forwarding-options":                       true,
-	"forwarding-options-port-mirroring":        true,
-	"ike":                                      true,
-	"interfaces-detail":                        true,
-	"interfaces-extensive":                     true,
-	"interfaces-queue":                         true,
-	"interfaces-queue:":                        true,
-	"interfaces-statistics":                    true,
-	"internet-options":                         true,
-	"ipsec-statistics":                         true,
-	"ipv6-router-advertisement":                true,
-	"kernel-upgrade":                           true,
-	"lldp":                                     true,
-	"lldp-neighbors":                           true,
-	"log":                                      true,
-	"log:":                                     true,
-	"license":                                  true,
-	"login":                                    true,
-	"monitor-security-flow":                    true,
-	"nat-dest-rule-detail":                     true,
-	"nat-nptv6":                                true,
-	"nat-source-rule-detail":                   true,
-	"nat-static":                               true,
-	"nat-static-rule":                          true,
-	"nat-static-rule-detail":                   true,
-	"nat64":                                    true,
-	"ntp":                                      true,
-	"persistent-nat":                           true,
-	"persistent-nat-detail":                    true,
-	"policies-detail":                          true,
-	"policies-hit-count":                       true,
-	"policy-options":                           true,
-	"root-authentication":                      true,
-	"route-all":                                true,
-	"route-fib":                                true,
-	"route-detail":                             true,
-	"route-instance":                           true,
-	"route-map":                                true,
-	"route-prefix:":                            true,
-	"route-protocol:":                          true,
-	"route-summary":                            true,
-	"route-table:":                             true,
-	"route-terse":                              true,
-	"routing-instances":                        true,
-	"routing-instances-detail":                 true,
-	"routing-options":                          true,
-	"rpm":                                      true,
-	"schedulers":                               true,
-	"screen":                                   true,
-	"screen-ids-option-detail:":                true,
-	"screen-ids-option:":                       true,
-	"screen-statistics-all":                    true,
-	"screen-statistics:":                       true,
-	"security-alarms":                          true,
-	"security-alarms-detail":                   true,
-	"security-log":                             true,
-	"services-dynamic-dns":                     true,
-	"services-dynamic-dns-detail":              true,
-	"services-ip-monitoring-status":            true,
-	"sessions-top:bytes":                       true,
-	"sessions-top:packets":                     true,
-	"snmp":                                     true,
-	"snmp-v3":                                  true,
-	"storage":                                  true,
-	"system-services":                          true,
-	"system-syslog":                            true,
-	"task":                                     true,
-	"tunnels":                                  true,
-	"version":                                  true,
-	"vlans":                                    true,
-	"wireguard":                                true,
-	"wireguard-detail":                         true,
-	"wireguard-public-key":                     true,
-	"zones-detail":                             true,
-}
+var (
+	showTextElevatedTopics = func() map[string]config.LoginClassPermission {
+		out := make(map[string]config.LoginClassPermission)
+		for _, e := range optopic.ShowTextEntries() {
+			if e.Permission != config.PermView {
+				out[e.Key] = e.Permission
+			}
+		}
+		return out
+	}()
+	showTextViewTopics = func() map[string]bool {
+		out := make(map[string]bool)
+		for _, e := range optopic.ShowTextEntries() {
+			if e.Permission == config.PermView {
+				out[e.Key] = true
+			}
+		}
+		return out
+	}()
+)
 
-// showTextPrefixRule is one prefix-keyed topic rule, pre-resolved at init so
-// the lookup is deterministic: rules are sorted longest-key-first, so an
-// unambiguous longest match wins rather than whichever key map iteration
-// reached first. TestShowTextPrefixRulesAreUnambiguous_5278 additionally
-// asserts no rule is a prefix of another, so the ordering never has to
-// arbitrate a genuine overlap.
+// showTextPrefix mirrors the registry's prefix rules for the ambiguity
+// census (TestShowTextPrefixRulesAreUnambiguous_5278): pre-resolved from
+// pkg/optopic, longest-key-first. The registry itself panics at init on a
+// shadowed prefix, so this list can never contain a genuine overlap.
+var showTextPrefix = func() []showTextPrefixRule {
+	entries := optopic.ShowTextEntries()
+	out := make([]showTextPrefixRule, 0, len(entries))
+	for _, e := range entries {
+		if e.IsPrefix() {
+			out = append(out, showTextPrefixRule{prefix: e.Key, perm: e.Permission})
+		}
+	}
+	// Registry order is lexical; lookups go through optopic (which sorts
+	// longest-first). Sort here too so any reader iterating this list
+	// sees the resolution order.
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if len(out[j].prefix) > len(out[i].prefix) ||
+				(len(out[j].prefix) == len(out[i].prefix) && out[j].prefix < out[i].prefix) {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}()
+
+// showTextPrefixRule is one prefix-keyed topic rule from the registry.
 type showTextPrefixRule struct {
 	prefix string
 	perm   config.LoginClassPermission
 }
 
-var (
-	showTextExact  = map[string]config.LoginClassPermission{}
-	showTextPrefix []showTextPrefixRule
-)
-
-func init() {
-	add := func(key string, perm config.LoginClassPermission) {
-		if strings.HasSuffix(key, ":") {
-			showTextPrefix = append(showTextPrefix, showTextPrefixRule{key, perm})
-			return
-		}
-		showTextExact[key] = perm
-	}
-	for k, p := range showTextElevatedTopics {
-		add(k, p)
-	}
-	for k := range showTextViewTopics {
-		add(k, config.PermView)
-	}
-	sort.Slice(showTextPrefix, func(i, j int) bool {
-		if len(showTextPrefix[i].prefix) != len(showTextPrefix[j].prefix) {
-			return len(showTextPrefix[i].prefix) > len(showTextPrefix[j].prefix)
-		}
-		return showTextPrefix[i].prefix < showTextPrefix[j].prefix
-	})
-}
-
-// showTextTopicPermission prices one ShowText topic.
+// showTextTopicPermission prices one ShowText topic (#16136: the price
+// lives in pkg/optopic; this is the grpcapi lookup over it).
 //
-// An UNKNOWN topic costs unmappedMethodPermission — the strictest tier, not the
-// view floor — for the same reason an unmapped METHOD does: a topic nobody
-// priced is a topic nobody classified, and the dispatcher's own answer for it
-// is InvalidArgument anyway, so the strict default costs a super-user-only
-// error message rather than access. ok=false reports the miss so the caller can
-// log it.
+// An UNKNOWN topic costs unmappedMethodPermission — the strictest tier, not
+// the view floor — for the same reason an unmapped METHOD does: a topic
+// nobody priced is a topic nobody classified, and the dispatcher's own
+// answer for it is InvalidArgument anyway, so the strict default costs a
+// super-user-only error message rather than access. ok=false reports the
+// miss so the caller can log it.
 func showTextTopicPermission(topic string) (config.LoginClassPermission, bool) {
-	if p, ok := showTextExact[topic]; ok {
-		return p, true
-	}
-	for _, r := range showTextPrefix {
-		if strings.HasPrefix(topic, r.prefix) {
-			return r.perm, true
-		}
+	if e, ok := optopic.LookupShowText(topic); ok {
+		return e.Permission, true
 	}
 	return unmappedMethodPermission, false
 }

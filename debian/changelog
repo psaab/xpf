@@ -60,6 +60,20 @@ xpf (0.0.0) unstable; urgency=medium
     (junosSyslogSeverities in pkg/config/schema_system.go) is unchanged.
     Perf: config/query-time string parsing only, no dataplane hot path;
     the lenient parsers replace a switch with one map lookup.
+  * Split the ShowText topic and SystemAction verb metadata (authz price,
+    canonical command, fabric admission) into a new metadata-only registry
+    package, pkg/optopic (#16136). Typed *Server handlers stay in
+    pkg/grpcapi; the registry holds no handler values and depends only on
+    pkg/config's permission enum. The grpcapi price tables, cmdtree's
+    topic<->command table, authz's verb->command table, and the fabric
+    topic allowlist are now derived from the one registry. A new census
+    (authz_registry_census_16136_test.go) retains an independent source
+    scrape of the handler dispatch and asserts registry == scrape over the
+    full topic/verb census, separately for exact/prefix keys, pricing,
+    commands, prefix-priced families, and fabric admission. The previously
+    unpriced dispatched topic `applications:` is registered at PermView.
+    No dispatch change and no new-topic freeze: operator output is
+    byte-identical.
 
 xpf (0.0.0) unstable; urgency=medium
 

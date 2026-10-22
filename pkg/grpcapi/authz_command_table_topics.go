@@ -103,13 +103,14 @@ import (
 // showTextTopicCommand maps a ShowText topic to the canonical operational
 // command that emits it.
 //
-// THE TABLE ITSELF MOVED TO pkg/cmdtree (#8058, showtext_topic.go) and this is
-// a view onto it. It used to be transcribed here independently of the remote
-// `cli` binary's command -> topic switches, and nothing made the two agree; a
-// topic re-attributed on one side left this one pricing an authz decision
-// against a command string no operator could type. Both surfaces now read the
-// cmdtree table, so that divergence is unrepresentable rather than a bug to be
-// caught by a mirrored test. Add or rename a topic THERE.
+// THE TABLE ITSELF LIVES IN pkg/optopic (#16136, the topic registry) and
+// this is a view onto it via pkg/cmdtree. It used to be transcribed here
+// independently of the remote `cli` binary's command -> topic switches, and
+// nothing made the two agree; a topic re-attributed on one side left this
+// one pricing an authz decision against a command string no operator could
+// type. Both surfaces now read the one registry, so that divergence is
+// unrepresentable rather than a bug to be caught by a mirrored test. Add or
+// rename a topic in pkg/optopic.
 //
 // Everything this file's checks assert about the table is unchanged and still
 // asserted HERE, because they are properties of the SERVER's dispatcher rather
@@ -118,15 +119,16 @@ import (
 // TestEveryShowTextTopicHasACanonicalCommand7172.
 //
 // A key ending in ':' is the PREFIX form of a parameter-packed topic and is
-// spelled exactly as showTextViewTopics / showTextElevatedTopics spell it, so
+// spelled exactly as the optopic registry spells it, so
 // whatever rule 5b uses to price a topic finds a command for the same key.
 var showTextTopicCommand = cmdtree.ShowTextTopicCommands()
 
 // systemActionVerbCommand is the SHARED table, aliased rather than copied.
 //
 // #9952 moved it to pkg/authz because the REST surface dispatches the same
-// verbs and must charge them the same commands. The alias keeps every reader in
-// this package — and, more importantly, the completeness guard that pins this
-// key set against the handler's own `switch req.Action` — working unchanged,
-// while there is exactly ONE table for both surfaces to disagree with.
+// verbs and must charge them the same commands; #16136 derives that table
+// from pkg/optopic. The alias keeps every reader in this package — and,
+// more importantly, the completeness guard that pins this key set against
+// the handler's own `switch req.Action` — working unchanged, while there
+// is exactly ONE registry for both surfaces to disagree with.
 var systemActionVerbCommand = authz.SystemActionVerbCommand
