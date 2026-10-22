@@ -150,6 +150,41 @@ func TestResolveTCPAddrBoundedForms16178(t *testing.T) {
 			t.Fatalf("got %v, want [fe80::1%%eth0]:514", got)
 		}
 	})
+	t.Run("ipv6 literal with multi-percent zone", func(t *testing.T) {
+		// Go splits the zone at the FIRST '%': [fe80::1%eth%0]:0 is the
+		// literal fe80::1 with zone "eth%0" (verified against
+		// net.ResolveTCPAddr), NOT hostname fe80::1%eth with zone 0.
+		// A last-'%' split mis-parses it as a hostname and consults the
+		// resolver — install a seam that fails if ever consulted.
+		origLookup := lookupSyslogIPAddr
+		lookupSyslogIPAddr = func(_ context.Context, host string) ([]net.IPAddr, error) {
+			return nil, fmt.Errorf("lookup seam consulted for literal host %q", host)
+		}
+		t.Cleanup(func() { lookupSyslogIPAddr = origLookup })
+		got, err := resolveTCPAddrBounded(ctx, "tcp", "[fe80::1%eth%0]:0")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if !got.IP.Equal(net.ParseIP("fe80::1")) || got.Port != 0 || got.Zone != "eth%0" {
+			t.Fatalf("got %v, want [fe80::1%%eth%%0]:0", got)
+		}
+	})
+	t.Run("udp resolver multi-percent zone", func(t *testing.T) {
+		// Same first-'%' invariant for the #14613 sibling sharing this
+		// split: [fe80::1%eth%0]:0 must stay a literal, never a lookup.
+		origLookup := lookupSyslogIPAddr
+		lookupSyslogIPAddr = func(_ context.Context, host string) ([]net.IPAddr, error) {
+			return nil, fmt.Errorf("lookup seam consulted for literal host %q", host)
+		}
+		t.Cleanup(func() { lookupSyslogIPAddr = origLookup })
+		got, err := resolveUDPAddrBounded(ctx, "udp", "[fe80::1%eth%0]:0")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if !got.IP.Equal(net.ParseIP("fe80::1")) || got.Port != 0 || got.Zone != "eth%0" {
+			t.Fatalf("got %v, want [fe80::1%%eth%%0]:0", got)
+		}
+	})
 	t.Run("ipv6 literal", func(t *testing.T) {
 		got, err := resolveTCPAddrBounded(ctx, "tcp6", "[2001:db8::1]:514")
 		if err != nil {

@@ -931,7 +931,10 @@ func resolveUDPAddrBounded(ctx context.Context, network, address string) (*net.U
 		return &net.UDPAddr{Port: pn}, nil
 	}
 	name, zone := host, ""
-	if i := strings.LastIndex(host, "%"); i >= 0 {
+	// Go splits the zone at the FIRST '%': the zone itself may contain
+	// further '%' (e.g. fe80::1%eth%0 -> zone "eth%0"). Splitting at the
+	// last '%' would mis-parse such literals as hostnames (#16224).
+	if i := strings.Index(host, "%"); i >= 0 {
 		name, zone = host[:i], host[i+1:]
 	}
 	if ip := net.ParseIP(name); ip != nil {
@@ -980,7 +983,9 @@ func resolveTCPAddrBounded(ctx context.Context, network, address string) (*net.T
 		return &net.TCPAddr{Port: pn}, nil
 	}
 	name, zone := host, ""
-	if i := strings.LastIndex(host, "%"); i >= 0 {
+	// As resolveUDPAddrBounded: Go splits the zone at the FIRST '%'
+	// (zone may contain further '%', e.g. fe80::1%eth%0).
+	if i := strings.Index(host, "%"); i >= 0 {
 		name, zone = host[:i], host[i+1:]
 	}
 	if ip := net.ParseIP(name); ip != nil {
