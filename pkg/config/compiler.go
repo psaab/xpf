@@ -781,9 +781,20 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	appendWgUnitFilterShadowAdvisory16059Locked(cfg, opts)
 	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
 	appendUserspaceMgmtZoneAdvisoryLocked(cfg, opts)
-	appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
-	if !opts.suppressFabricStampAdvisory {
-		cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
+	// Warning ORDER is operator-visible and differed between the former
+	// twins (#16167 review fold): the generic body appends the Rx-MTU
+	// advisory BEFORE the #10105 fabric advisories, the node body
+	// appended it AFTER. Preserve each branch's historical order.
+	if nodeID == nil {
+		appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
+		if !opts.suppressFabricStampAdvisory {
+			cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
+		}
+	} else {
+		if !opts.suppressFabricStampAdvisory {
+			cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
+		}
+		appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
 	}
 	cfg.Warnings = append(cfg.Warnings, loginShadowWarnings...)
 	if opts.lenientLoginClassShadowsBuiltin {
