@@ -915,9 +915,15 @@ func secretIndices(fp []string) []int {
 			// rendered in cleartext to PermView on every AST-display surface.
 			// `user-identification` covers the wrapped spelling at any depth;
 			// the three stanza names cover the direct-under-services spelling
-			// the compiler also accepts.
+			// the compiler also accepts. #15943 (H15-01): the Junos
+			// sub-stanzas `authentication-source` and `device-information`
+			// are likewise identity contexts in their own right — a bind
+			// `password` directly under `services authentication-source` /
+			// `device-information` (or the `security` spellings below)
+			// matched no scope and rendered in cleartext.
 			if containsAnyOf(fp[:i], "api-auth", "dynamic-dns", "archive-sites", "user-identification", "access",
-				"active-directory-access", "identity-management", "local-authentication-table") {
+				"active-directory-access", "identity-management", "local-authentication-table",
+				"authentication-source", "device-information") {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
 				}
