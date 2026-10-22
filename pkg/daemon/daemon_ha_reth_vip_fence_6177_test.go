@@ -82,8 +82,7 @@ func newRethFenceDaemon(t *testing.T, ha *actuationHA, barrier vipReleaseBarrier
 		cluster:                    cm,
 		vrrpMgr:                    vrrp.NewManager(),
 		rgStates:                   make(map[int]*rgStateMachine),
-		failoverActuateWait:        make(map[failoverActuationKey]*failoverActuation),
-		failoverActuateTimeout:     2 * time.Second,
+		failoverActuations:         failoverActuationRegistry{timeout: 2 * time.Second},
 		rethVIPReleaseTimeout:      time.Second,
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 	}
@@ -196,7 +195,7 @@ func TestRethDemotionFenceFailsWhenVIPReleaseStalls_6177(t *testing.T) {
 		t.Fatalf("fence verdict = %q, want it to name the un-released virtual addresses", err)
 	}
 	// The verdict must come from the VIP sub-wait, not from the outer
-	// failoverActuateTimeout — the latter is 2s here and would delay the peer.
+	// registry timeout — the latter is 2s here and would delay the peer.
 	if strings.Contains(err.Error(), "timed out waiting for local fence actuation") {
 		t.Fatalf("fence verdict = %q, want the VIP release timeout not the outer barrier timeout", err)
 	}

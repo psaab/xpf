@@ -619,7 +619,7 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// upstream 20s failover-ACK cap (failoverAckTimeout, sync.go) bounds
 	// the actuation-barrier contribution: if the owner takes longer than
 	// 20s to ack, the requester times out and sends NO commit, so a large
-	// failoverActuateTimeout cannot delay a real commit past this lease.
+	// registry timeout cannot delay a real commit past this lease.
 	d.cluster.SetRemoteTransferOutLeaseDuration(2*d.localFailoverCommitTimeout + 20*time.Second)
 	d.cluster.SetTransferReadinessFunc(d.userspaceTransferReadiness)
 	// #9569: the untargeted failover and ForceSecondary refuse a peer that did

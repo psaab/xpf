@@ -3316,12 +3316,12 @@ The fix gates the applied-ack on a fence-completion barrier:
    on a clean release, `signalFailoverActuationFailed` when `removeVIPs` failed
    (a stale VIP is still answering ARP, so it is not a two-owner-safe
    resignation) or when the release does not report within
-   `rethVIPReleaseTimeout` (500 ms default — far below the 3 s
-   `failoverActuateTimeout` so the verdict NAMES the un-released addresses, and
+   `rethVIPReleaseTimeout` (500 ms default — far below the actuation
+   registry's 3 s timeout so the verdict NAMES the un-released addresses, and
    far below the initiator's 20 s ack timeout so the ack is a decision, not a
    hang). Already-BACKUP and no-instance RGs resolve promptly rather than
    stalling, so a clean failover is not downgraded to a hold.
-6. The wait is bounded by `failoverActuateTimeout` (3s default). A demotion that
+6. The wait is bounded by the actuation registry timeout (3s default). A demotion that
    never actuates (superseded reset, event-channel drop) downgrades the ack to
    `failoverAckFailed` so the peer **holds** rather than promoting into the
    two-owner window — safety over latency in the race. On the normal path the

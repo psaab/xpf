@@ -100,8 +100,7 @@ func newActuationDaemon(t *testing.T, ha *actuationHA) *Daemon {
 		cluster:                    cm,
 		vrrpMgr:                    vrrp.NewManager(),
 		rgStates:                   make(map[int]*rgStateMachine),
-		failoverActuateWait:        make(map[failoverActuationKey]*failoverActuation),
-		failoverActuateTimeout:     2 * time.Second,
+		failoverActuations:         failoverActuationRegistry{timeout: 2 * time.Second},
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 	}
 	d.setDataplane(&actuationDP{ha: ha})
@@ -268,7 +267,7 @@ func TestFailoverActuation_UnarmedRGIsNoop(t *testing.T) {
 	// panic, block, or disturb anything — that is the whole assertion.
 	demoteRG1(t, d)
 
-	if n := len(d.failoverActuateWait); n != 0 {
+	if n := d.failoverActuations.armedCount(); n != 0 {
 		t.Fatalf("resolving an unarmed RG created %d barrier(s); it must be a no-op", n)
 	}
 }

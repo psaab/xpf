@@ -100,8 +100,7 @@ func recoveredSecondaryDaemon12171(t *testing.T) *Daemon {
 		blackholeRoutes:            make(map[int][]netlink.Route),
 		store:                      s,
 		opts:                       Options{NoDataplane: true},
-		failoverActuateWait:        make(map[failoverActuationKey]*failoverActuation),
-		failoverActuateTimeout:     2 * time.Second,
+		failoverActuations:         failoverActuationRegistry{timeout: 2 * time.Second},
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 	}
 	if d.store.ClusterReadOnly() {

@@ -72,9 +72,8 @@ func newBarrier8000Daemon(t *testing.T, rgIDs ...int) *Daemon {
 		}
 	}
 	return &Daemon{
-		cluster:                cm,
-		failoverActuateWait:    make(map[failoverActuationKey]*failoverActuation),
-		failoverActuateTimeout: barrier8000Timeout,
+		cluster:            cm,
+		failoverActuations: failoverActuationRegistry{timeout: barrier8000Timeout},
 	}
 }
 

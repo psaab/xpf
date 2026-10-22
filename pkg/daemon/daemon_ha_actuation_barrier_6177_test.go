@@ -22,8 +22,7 @@ import (
 // newBarrierDaemon builds the minimum Daemon the barrier API needs.
 func newBarrierDaemon(timeout time.Duration) *Daemon {
 	return &Daemon{
-		failoverActuateWait:    make(map[failoverActuationKey]*failoverActuation),
-		failoverActuateTimeout: timeout,
+		failoverActuations: failoverActuationRegistry{timeout: timeout},
 	}
 }
 
@@ -31,9 +30,7 @@ func newBarrierDaemon(timeout time.Duration) *Daemon {
 // released by exactly one wait or disarm, so a test that finishes with a
 // non-zero count has leaked a channel no one will ever close or read.
 func armedBarriers(d *Daemon) int {
-	d.failoverActuateMu.Lock()
-	defer d.failoverActuateMu.Unlock()
-	return len(d.failoverActuateWait)
+	return d.failoverActuations.armedCount()
 }
 
 // errFenceRejected stands in for the dataplane refusing the demotion write —
@@ -90,7 +87,7 @@ func TestFailoverActuationBarrier_TimeoutReportsFailureAndDropsBarrier(t *testin
 // wait found nothing, returned nil, and the node acked APPLIED for a demotion
 // it had not performed: the two-owner window #5640 exists to prevent.
 //
-// Fail-on-revert: key failoverActuateWait by rgID alone (or drop reqID from the
+// Fail-on-revert: key the registry wait map by rgID alone (or drop reqID from the
 // key), and the newer request's barrier is deleted by the older one's expiry —
 // the wait below returns nil and this reds on a clean assertion.
 func TestFailoverActuationBarrier_ExpiredRequestKeepsNewerRequestArmed(t *testing.T) {
@@ -135,7 +132,7 @@ func TestFailoverActuationBarrier_ExpiredRequestKeepsNewerRequestArmed(t *testin
 // handles for the SAME key. The one that finishes first must not evict the
 // barrier the other one armed.
 //
-// Fail-on-revert: drop the `d.failoverActuateWait[key] == b` guard in
+// Fail-on-revert: drop the `wait[key] == b` guard in the registry in
 // disarmFailoverActuation and the stale handle deletes the live barrier — the
 // wait below returns nil and this reds.
 func TestFailoverActuationBarrier_StaleHandleCannotDisarmARearmedRequest(t *testing.T) {
@@ -257,7 +254,7 @@ func TestFailoverActuationBarrier_BatchTakesTheFirstFailure(t *testing.T) {
 // TestFailoverActuationBarrier_BatchFailureConsumesSiblingBarriers is the
 // #13221 regression: when the FIRST RG in a batch fails, the batch wait must
 // still release every sibling barrier (resolved ones consumed, unresolved
-// ones disarmed) instead of leaking them in failoverActuateWait for the
+// ones disarmed) instead of leaking them in the registry wait map for the
 // daemon's lifetime. The pre-fix early return only failed when the LAST
 // member failed, which is why the sibling test above never saw the leak.
 //
@@ -388,13 +385,13 @@ func TestFailoverConsumedLedgerIsBoundedAndFailsSafe9259(t *testing.T) {
 			"below would prove nothing")
 	}
 
-	d.failoverActuateMu.Lock()
-	for i := 0; i < failoverConsumedCap+1; i++ {
-		d.noteFailoverVerdictConsumedLocked(failoverActuationKey{rgID: 99, reqID: uint64(i + 1000)})
+	d.failoverActuations.mu.Lock()
+	for i := range failoverConsumedCap + 1 {
+		d.failoverActuations.noteVerdictConsumedLocked(failoverActuationKey{rgID: 99, reqID: uint64(i + 1000)})
 	}
-	d.failoverActuateMu.Unlock()
+	d.failoverActuations.mu.Unlock()
 
-	if n := len(d.failoverActuateConsumed); n > failoverConsumedCap {
+	if n := len(d.failoverActuations.consumed); n > failoverConsumedCap {
 		t.Errorf("#9259: the consumed ledger holds %d entries, cap is %d — it is "+
 			"unbounded and grows with every failover for the life of the process",
 			n, failoverConsumedCap)
