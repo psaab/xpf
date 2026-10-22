@@ -197,8 +197,8 @@ func TestApplyTailReconcilesSurfacesVRFError_5700(t *testing.T) {
 	}
 
 	injected := errors.New("injected: VRF reconcile (vrf-mgmt create) failed")
-	// vrfErr is the LAST operand of applyTailReconciles.
-	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, injected, nil, nil)
+	// #16170: vrfErr arrives in the VRF named field of applyPhaseErrors.
+	err := d.applyTailReconciles(cfg, applyPhaseErrors{VRF: injected})
 	if err == nil {
 		t.Fatal("applyTailReconciles must surface the VRF reconcile failure " +
 			"(fail-closed); got nil")

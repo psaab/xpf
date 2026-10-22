@@ -155,7 +155,7 @@ func TestFailedBootConvergenceBindsHeartbeatToManagementVRF12168(t *testing.T) {
 		t.Fatalf("enslave control interface to management VRF: %v", err)
 	}
 	d.publishMgmtVRFIfaces(map[string]bool{"em0": true})
-	_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, applyPhaseErrors{})
 
 	waitForHeartbeatVRF12168(t, d.cluster, config.ManagementVRFDeviceName)
 	if got := d.activeTransport().VRFDevice; got != config.ManagementVRFDeviceName {
@@ -359,7 +359,7 @@ func TestWarmFailedBootPublishInRetryWindow12168(t *testing.T) {
 	d.startClusterComms(d.daemonCtx)
 	time.Sleep(1500 * time.Millisecond)
 	d.publishMgmtVRFIfaces(map[string]bool{"em0": true})
-	_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, applyPhaseErrors{})
 	sockets := waitWarmVRFSockets12168(t, config.ManagementVRFDeviceName)
 	if got := d.activeTransport().VRFDevice; got != config.ManagementVRFDeviceName {
 		t.Fatalf("warm publish in retry window transport = %q, want vrf-mgmt", got)
@@ -381,7 +381,7 @@ func TestWarmFailedBootPublishAfterRetryWindow12168(t *testing.T) {
 	d.startClusterComms(d.daemonCtx)
 	time.Sleep(63 * time.Second)
 	d.publishMgmtVRFIfaces(map[string]bool{"em0": true})
-	_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, applyPhaseErrors{})
 	sockets := waitWarmVRFSockets12168(t, config.ManagementVRFDeviceName)
 	if got := d.activeTransport().VRFDevice; got != config.ManagementVRFDeviceName {
 		t.Fatalf("warm publish after retry window transport = %q, want vrf-mgmt", got)
@@ -416,7 +416,7 @@ func TestReassertConvergenceRestartsCommsWithoutCommit12168(t *testing.T) {
 	if err := restartHeartbeatAfterRebind(d.cluster); err != nil {
 		t.Fatalf("still-main heartbeat restart: %v", err)
 	}
-	_ = d.applyTailReconciles(cfg, unix.EBUSY, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, applyPhaseErrors{Networkd: unix.EBUSY})
 	before := warmVRFCommsGeneration12168(d)
 	ops.fail = false
 	d.reassertMgmtVRFOnce(context.Background())
@@ -450,7 +450,7 @@ func TestReassertConvergencePersistsWithoutCommit12168(t *testing.T) {
 		t.Fatalf("expected injected EBUSY, got %v", bindErr)
 	}
 	_ = restartHeartbeatAfterRebind(d.cluster)
-	_ = d.applyTailReconciles(cfg, bindErr, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, applyPhaseErrors{Networkd: bindErr})
 	ops.fail = false
 	before := warmVRFCommsGeneration12168(d)
 	d.reassertMgmtVRFOnce(context.Background())
@@ -497,7 +497,7 @@ func TestConvergingCommitRestartsHeartbeatWithoutStaleRetries12168(t *testing.T)
 		networkdErr = errors.Join(networkdErr, err)
 	}
 	restartDuration := time.Since(started)
-	commitErr := d.applyTailReconciles(cfg, networkdErr, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	commitErr := d.applyTailReconciles(cfg, applyPhaseErrors{Networkd: networkdErr})
 	if commitErr != nil {
 		t.Fatalf("converging commit returned error: %v", commitErr)
 	}
@@ -634,7 +634,7 @@ func TestStripRetryStep27RestartsEveryCommsSocket12168(t *testing.T) {
 		devices[4785] != "" || devices[50051] != "" {
 		t.Fatalf("step 2.7 must refresh only heartbeat before step 20, got %v", devices)
 	}
-	if err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil); err != nil {
+	if err := d.applyTailReconciles(cfg, applyPhaseErrors{}); err != nil {
 		t.Fatalf("commit step 20: %v", err)
 	}
 	if after := warmVRFCommsGeneration12168(d); after == before {

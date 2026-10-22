@@ -172,7 +172,7 @@ func TestApplyTailReconcilesSurfacesFRRError9947(t *testing.T) {
 	}
 
 	injected := errors.New("injected: FRR reload did not converge")
-	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, injected)
+	err := d.applyTailReconciles(cfg, applyPhaseErrors{FRR: injected})
 	if err == nil {
 		t.Fatal("applyTailReconciles must surface the FRR failure (fail-closed); got nil")
 	}
@@ -204,7 +204,7 @@ func TestApplyConfigLockedCapturesAndPassesFRRErr9947(t *testing.T) {
 	if end < 0 {
 		t.Fatal("malformed applyTailReconciles call")
 	}
-	if !strings.Contains(src[i:i+end], "frrErr") {
+	if !strings.Contains(src[i:i+end], "FRR:         frrErr") {
 		t.Errorf("applyConfigLocked does not PASS frrErr to "+
 			"applyTailReconciles; captured-but-unthreaded is the same false "+
 			"success. Call: %s", src[i:i+end+1])

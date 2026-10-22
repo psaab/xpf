@@ -33,9 +33,9 @@ import (
 //     programRethMemberMAC, so the apply loop cannot reach the wrapper any other
 //     way without tripping this count; and
 //  3. exactly one programRethMemberMAC call site, whose result is assigned with
-//     `=` (not `:=`) back into BOTH accumulators — networkdErr and
-//     needLinkCycleRecovery — and which is not nested inside a constant-false
-//     `if`.
+//     `=` (not `:=`) back into BOTH accumulators — result.Phase.Networkd
+//     (#16170; formerly the networkdErr local) and needLinkCycleRecovery —
+//     and which is not nested inside a constant-false `if`.
 //
 // It does NOT try to prove the fold itself is effective. It used to: r4 matched
 // the inline `if prepareErr != nil { networkdErr = errors.Join(...) }` statement
@@ -226,18 +226,29 @@ func checkRethMemberCallSite(t *testing.T, fset *token.FileSet, file string,
 	// the apply where every member ABORTS strands its link-cycle lease to the
 	// deferred abandon, which is the failure mode #7007 rejects a refcount for.
 	// #15276 adds the fourth result, this member's macChanged fact, bound to a
-	// loop-local the caller folds into macChangedRGs by hand.
-	want := []string{"networkdErr", "needLinkCycleRecovery", "rethRollbackKeptLease", "memberMACChanged"}
+	// loop-local the caller folds into macChangedRGs by hand. #16170: the
+	// commit-error accumulator is now the result.Phase.Networkd field of the
+	// applyCoreResult, so result 0 is a selector, not a bare identifier.
+	want := []string{"result.Phase.Networkd", "needLinkCycleRecovery", "rethRollbackKeptLease", "memberMACChanged"}
 	if len(assign.Lhs) != len(want) {
 		t.Errorf("%s:%d: programRethMemberMAC's result is assigned to %d targets, want %d "+
 			"(%v)", file, pos, len(assign.Lhs), len(want), want)
 		return
 	}
+	var render func(ast.Expr) string
+	render = func(e ast.Expr) string {
+		switch v := e.(type) {
+		case *ast.Ident:
+			return v.Name
+		case *ast.SelectorExpr:
+			return render(v.X) + "." + v.Sel.Name
+		}
+		return ""
+	}
 	for i, w := range want {
-		id, ok := assign.Lhs[i].(*ast.Ident)
-		if !ok || id.Name != w {
-			t.Errorf("%s:%d: programRethMemberMAC result %d is assigned to something other "+
-				"than %s — the accumulator the apply tail actually reads", file, pos, i, w)
+		if got := render(assign.Lhs[i]); got != w {
+			t.Errorf("%s:%d: programRethMemberMAC result %d is assigned to %q, want %q "+
+				"— the accumulator the apply tail actually reads", file, pos, i, got, w)
 		}
 	}
 

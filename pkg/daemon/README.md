@@ -3145,10 +3145,11 @@ never lock an operator out of a remote box it manages.
   while the looser old policy was still on the wire — a fail-open-to-stale on the
   main config path (the config-commit analog of the feeds publication-debt bug
   #5646/#5667). The fix captures that ordinary failure as a DEFERRED commit error
-  (`applyErr`, a fourth named return of `applyDataplaneAndHACore`) threaded into
-  the tail `errors.Join`, so the commit reports FAILURE while the rest of the
-  reconciles still run (fail-closed but complete, exactly like `networkdErr` /
-  `ifaceErr`). It is NOT demoted to abort: the dataplane stays armed with the old
+  (`applyErr`, the `Phase.Dataplane` field of `applyDataplaneAndHACore`'s
+  `applyCoreResult` — #16170) threaded into the tail `errors.Join`, so the
+  commit reports FAILURE while the rest of the reconciles still run
+  (fail-closed but complete, exactly like `networkdErr` / `ifaceErr`). It is
+  NOT demoted to abort: the dataplane stays armed with the old
   config, so `applyErrSkipsPeerSync` still returns `false` and the standby
   converges (#4034); and because the applied identity never advanced, the feed
   onUpdate retry (`applyConfigResult`, #5646) and any identical re-commit

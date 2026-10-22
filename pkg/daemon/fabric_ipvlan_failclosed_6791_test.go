@@ -98,7 +98,7 @@ func TestApplyTailReconcilesJoinsFabricErr_6791(t *testing.T) {
 	cfg := &config.Config{}
 	injected := errors.New("fabric-ipvlan-injected-6791")
 
-	err := d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, injected, nil)
+	err := d.applyTailReconciles(cfg, applyPhaseErrors{Fabric: injected})
 	if err == nil {
 		t.Fatalf("applyTailReconciles returned nil; a terminal fabric IPVLAN " +
 			"failure must fail the commit closed, not be acknowledged as success")
@@ -370,7 +370,7 @@ func TestApplyConfigLockedCapturesAndPassesFabricErr_6791(t *testing.T) {
 	if end < 0 {
 		t.Fatal("malformed applyTailReconciles call")
 	}
-	if !strings.Contains(src[i:i+end], "fabricErr") {
+	if !strings.Contains(src[i:i+end], "Fabric:      fabricErr") {
 		t.Errorf("applyConfigLocked does not PASS fabricErr to "+
 			"applyTailReconciles; captured-but-unthreaded is the same false "+
 			"success. Call: %s", src[i:i+end+1])

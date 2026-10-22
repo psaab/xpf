@@ -112,7 +112,7 @@ func bootstrapDebt12168(t *testing.T, reassert bool) int {
 	if got := clusterTransportFromConfig(corrected); got != started {
 		t.Fatalf("premise: corrected transport must be identical: started=%+v corrected=%+v", started, got)
 	}
-	_ = d.applyTailReconciles(corrected, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(corrected, applyPhaseErrors{})
 	return restarts
 }
 
