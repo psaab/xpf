@@ -1,0 +1,55 @@
+! xpf managed config - do not edit
+!
+router ospf
+ ospf router-id 10.0.0.1
+exit
+!
+interface ge-0-0-0
+ ip ospf bfd
+ ip ospf bfd profile xpf-300-3
+ ip ospf area 0.0.0.0
+exit
+!
+router ospf6
+ ospf6 router-id 10.0.0.4
+exit
+!
+interface ge-0-0-4
+ ipv6 ospf6 area 0.0.0.0
+ ipv6 ospf6 bfd
+exit
+!
+router bgp 65000
+ no bgp ebgp-requires-policy
+ neighbor 192.0.2.1 remote-as 65001
+ neighbor 192.0.2.1 bfd
+exit
+!
+router rip
+ network ge-0-0-1
+exit
+!
+router isis xpf
+ net 49.0001.0100.0000.0001.00
+ is-type level-2-only
+exit
+!
+interface ge-0-0-2
+ ip router isis xpf
+ ipv6 router isis xpf
+ isis bfd
+exit
+!
+bfd
+ peer 192.0.2.1
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+ profile xpf-300-3
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+exit
+!

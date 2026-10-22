@@ -1,0 +1,46 @@
+! xpf managed config - do not edit
+!
+router ospf vrf vrf-BLUE
+ ospf router-id 10.1.0.1
+exit
+!
+interface ge-0-0-0
+ ip ospf area 0.0.0.0
+exit
+!
+router ospf6 vrf vrf-BLUE
+ ospf6 router-id 10.1.0.2
+exit
+!
+interface ge-0-0-5
+ ipv6 ospf6 area 0.0.0.0
+exit
+!
+router bgp 65010 vrf vrf-BLUE
+ no bgp ebgp-requires-policy
+ neighbor 192.0.2.5 remote-as 65011
+ neighbor 192.0.2.5 bfd
+exit
+!
+router rip vrf vrf-BLUE
+ network ge-0-0-1
+exit
+!
+router isis xpf vrf vrf-BLUE
+ net 49.0001.0100.0000.0002.00
+ is-type level-2-only
+exit
+!
+interface ge-0-0-2
+ ip router isis xpf
+ ipv6 router isis xpf
+exit
+!
+bfd
+ peer 192.0.2.5 vrf vrf-BLUE
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+exit
+!

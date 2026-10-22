@@ -1,0 +1,47 @@
+! xpf managed config - do not edit
+!
+router ospf
+ ospf router-id 10.0.0.1
+ auto-cost reference-bandwidth 1000
+ passive-interface ge-0-0-1
+ area 0.0.0.1 stub no-summary
+ redistribute connected
+ redistribute static
+exit
+!
+interface ge-0-0-0
+ ip ospf cost 10
+ ip ospf hello-interval 5
+ ip ospf dead-interval 20
+ ip ospf bfd
+ ip ospf bfd profile xpf-300-3
+ ip ospf area 0.0.0.0
+exit
+!
+interface ge-0-0-1
+ ip ospf area 0.0.0.0
+exit
+!
+interface ge-0-0-2
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 ospf-secret
+ ip ospf area 0.0.0.1
+exit
+!
+interface ge-0-0-3
+ ip ospf area 0.0.0.2
+exit
+!
+router ospf
+ ospf router-id 10.0.0.1
+ area 0.0.0.2 virtual-link 10.0.0.9
+exit
+!
+bfd
+ profile xpf-300-3
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+exit
+!

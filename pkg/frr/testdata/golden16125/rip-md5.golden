@@ -1,0 +1,20 @@
+! xpf managed config - do not edit
+!
+router rip
+ network ge-0-0-0
+ network ge-0-0-1
+ passive-interface ge-0-0-1
+ redistribute connected
+ redistribute static
+exit
+!
+interface ge-0-0-0
+ ip rip authentication mode md5
+ ip rip authentication string rip-secret
+exit
+!
+interface ge-0-0-1
+ ip rip authentication mode md5
+ ip rip authentication string rip-secret
+exit
+!

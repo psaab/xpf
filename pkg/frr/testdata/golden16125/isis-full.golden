@@ -1,0 +1,37 @@
+! xpf managed config - do not edit
+!
+router isis xpf
+ net 49.0001.0100.0000.0001.00
+ is-type level-1-2
+ redistribute ipv4 connected level-1
+ redistribute ipv4 connected level-2
+ redistribute ipv6 connected level-1
+ redistribute ipv6 connected level-2
+ metric-style wide
+ area-password md5 isis-secret
+ domain-password md5 isis-secret
+exit
+!
+interface ge-0-0-0
+ ip router isis xpf
+ ipv6 router isis xpf
+ isis metric 10
+ isis bfd
+ isis bfd profile xpf-300-3
+exit
+!
+interface ge-0-0-1
+ ip router isis xpf
+ ipv6 router isis xpf
+ isis circuit-type level-2-only
+ isis passive
+exit
+!
+bfd
+ profile xpf-300-3
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+exit
+!

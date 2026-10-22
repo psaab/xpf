@@ -1,0 +1,126 @@
+// protocols_render_rip.go renders the RIP stanza of
+// generateProtocolsCluster15158 (#16125 verbatim extraction).
+//
+// The body below is the contiguous `if rip != nil` subtree moved
+// verbatim out of generateProtocolsCluster15158; output ordering
+// and every fail-closed auth belt are unchanged.
+
+package frr
+
+import (
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
+)
+
+// renderRIP16125 renders the `router rip` stanza and its
+// per-interface authentication blocks into b. Moved verbatim from
+// generateProtocolsCluster15158 (#16125).
+func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfSuffix string, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447) {
+	if rip != nil {
+		// #14398: a non-absent `authentication-type` with NO
+		// `authentication-key` must never render as a silent no-auth RIP
+		// block. The strict gate rejects it at commit; on the tolerant
+		// path (#1960 — a persisted config must still boot) fail closed
+		// by NOT enrolling any interface in RIP: emitting `router rip` +
+		// `network <iface>` with zero auth lines is exactly the silent
+		// unauthenticated adjacency the gate exists to prevent. Warn
+		// loudly; do NOT emit a keyless auth line (FRR behaviour for a
+		// keyless mode line is not established, and a rejected line
+		// would fail the whole managed-section reload).
+		//
+		// #14977 (D33-05): the same fail-closed rule covers the two
+		// shapes #14398 missed. (a) A non-empty key that is not a
+		// single vtysh token: previously every interface was enrolled
+		// and `ip rip authentication mode` rendered with NO string.
+		// (b) An UNRECOGNIZED type carrying a key: #8443 deliberately
+		// kept rendering it as plaintext (the recorded rationale is
+		// adjacency-flap avoidance on upgrade), but that leaves a
+		// silently DOWNGRADED adjacency — the operator's `show
+		// configuration` still claims the type they typed. #14977
+		// supersedes the render arm of that choice: fail closed and
+		// say so. Absent type + key keeps its #9105 plaintext render
+		// (a chosen plaintext and an absent type remain
+		// indistinguishable, and flipping it would flap adjacencies
+		// that never claimed a type); keyed md5/simple/text and the
+		// neither-leaf shape are byte-unchanged.
+		ripKeylessAuth14398 := !config.AuthTypeAbsent(rip.AuthType) && rip.AuthKey.Reveal() == ""
+		if ripKeylessAuth14398 {
+			slog.Warn("frr: rip authentication-type is set with NO authentication-key; "+
+				"NOT enrolling any interface in RIP rather than rendering unauthenticated RIP. "+
+				"Set authentication-key to provide the key (#14398)",
+				"authentication_type", rip.AuthType)
+		}
+		ripAuthTok14977, ripAuthTokOK14977 := "", true
+		if rip.AuthKey.Reveal() != "" {
+			ripAuthTok14977, ripAuthTokOK14977 = authTokenOrOmit("rip", &rip.AuthKey)
+		}
+		ripUnrecognized14977 := rip.AuthKey.Reveal() != "" && config.AuthTypeUnrecognized(rip.AuthType)
+		// #15013 (A12-01): an over-long key (>16 characters) is
+		// rejected by ripd on EVERY frr-reload, so emitting it would
+		// brick the reload forever. Fail closed exactly like the
+		// unrenderable-token arm: omit RIP enrollment entirely
+		ripResolvedKey15990, ripResolvedOK15990 := "", true
+		if rip.AuthKey.Reveal() != "" {
+			ripResolvedKey15990, ripResolvedOK15990 = resolvedAuthSecret(&rip.AuthKey)
+		}
+		ripKeyTooLong15013 := rip.AuthKey.Reveal() != "" && ripResolvedOK15990 && len([]rune(ripResolvedKey15990)) > config.MaxRIPAuthKeyLen
+		if ripKeyTooLong15013 {
+			slog.Warn("frr: rip authentication-key exceeds the 16-character maximum accepted by ripd; "+
+				"NOT enrolling any interface in RIP rather than rendering a line ripd rejects on every reload (#15013)",
+				"key_len", len([]rune(ripResolvedKey15990)), "max", config.MaxRIPAuthKeyLen)
+		}
+		ripFailClosed14977 := ripKeylessAuth14398 || !ripAuthTokOK14977 || ripUnrecognized14977 || ripKeyTooLong15013
+		if !ripAuthTokOK14977 {
+			slog.Warn("frr: rip authentication-key is not renderable as a single vtysh token; "+
+				"NOT enrolling any interface in RIP rather than rendering unauthenticated RIP (#14977)",
+				"authentication_type", rip.AuthType)
+		}
+		if ripUnrecognized14977 {
+			slog.Warn("frr: unrecognized rip authentication-type; "+
+				"NOT enrolling any interface in RIP rather than silently downgrading to plaintext (#14977)",
+				"authentication_type", rip.AuthType, "accepted", config.AuthTypeSpellings())
+		}
+		if ripFailClosed14977 {
+			// Fail closed on the enclosing capability: no `router rip`
+			// enrollment and no per-interface auth block at all.
+		} else {
+			fmt.Fprintf(b, "router rip%s\n", vrfSuffix)
+			for _, iface := range rip.Interfaces {
+				fmt.Fprintf(b, " network %s\n", iface)
+			}
+			for _, iface := range rip.Passive {
+				fmt.Fprintf(b, " passive-interface %s\n", iface)
+			}
+			b.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
+			b.WriteString("exit\n!\n")
+			// RIP per-interface authentication
+			if rip.AuthKey.Reveal() != "" {
+				for _, iface := range rip.Interfaces {
+					fmt.Fprintf(b, "interface %s\n", iface)
+					// #9105: an ABSENT type is not `unrecognized`, so this warning could not
+					// fire for it -- and it renders the key in CLEARTEXT exactly as a
+					// chosen `simple` does. Warn on both: the commit gate stops every NEW
+					// instance, this tells the operator about an existing one arriving
+					// through the tolerant load path. (An unrecognized type no
+					// longer reaches here: #14977 fails it closed above.)
+					if config.AuthTypeAbsent(rip.AuthType) {
+						slog.Warn("frr: rip authentication-key is set with NO authentication-type; "+
+							"rendering PLAINTEXT -- the key travels in clear in every PDU. Set "+
+							"authentication-type md5 to authenticate with a digest (#9105)",
+							"accepted", config.AuthTypeSpellings())
+					}
+					if config.AuthTypeIsMD5(rip.AuthType) {
+						b.WriteString(" ip rip authentication mode md5\n")
+					} else {
+						b.WriteString(" ip rip authentication mode text\n")
+					}
+					fmt.Fprintf(b, " ip rip authentication string %s\n", ripAuthTok14977)
+					b.WriteString("exit\n!\n")
+				}
+			}
+		}
+	}
+}

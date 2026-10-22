@@ -1,0 +1,24 @@
+! xpf managed config - do not edit
+!
+router ospf6
+ ospf6 router-id 10.0.0.2
+ area 0.0.0.2 nssa
+ redistribute connected
+exit
+!
+interface ge-0-0-0
+ ipv6 ospf6 area 0.0.0.0
+ ipv6 ospf6 cost 5
+ ipv6 ospf6 bfd
+exit
+!
+interface ge-0-0-1
+ ipv6 ospf6 area 0.0.0.0
+ ipv6 ospf6 passive
+ ipv6 ospf6 priority 0
+exit
+!
+interface ge-0-0-3
+ ipv6 ospf6 area 0.0.0.2
+exit
+!

@@ -1,0 +1,32 @@
+! xpf managed config - do not edit
+!
+ip route 0.0.0.0/0 192.0.2.254
+!
+ip route 0.0.0.0/0 Null0 tag 2500 250
+ipv6 route ::/0 Null0 tag 2500 250
+!
+route-map xpf-cluster-null0-xpf-redist deny 5
+ match tag 2500
+exit
+route-map xpf-cluster-null0-xpf-redist permit 10
+exit
+!
+router ospf
+ ospf router-id 10.0.0.1
+ redistribute static route-map xpf-cluster-null0-xpf-redist
+exit
+!
+interface ge-0-0-0
+ ip ospf area 0.0.0.0
+exit
+!
+router bgp 65000
+ no bgp ebgp-requires-policy
+ neighbor 192.0.2.1 remote-as 65001
+ redistribute static route-map xpf-cluster-null0-xpf-redist
+ !
+ address-family ipv6 unicast
+  redistribute static route-map xpf-cluster-null0-xpf-redist
+ exit-address-family
+exit
+!

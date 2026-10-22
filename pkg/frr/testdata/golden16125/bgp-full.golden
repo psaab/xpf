@@ -1,0 +1,47 @@
+! xpf managed config - do not edit
+!
+router bgp 65000
+ no bgp ebgp-requires-policy
+ bgp router-id 10.0.0.3
+ bgp cluster-id 10.0.0.3
+ bgp graceful-restart
+ bgp log-neighbor-changes
+ neighbor 192.0.2.1 remote-as 65001
+ neighbor 192.0.2.1 description ebgp peer
+ neighbor 192.0.2.1 bfd
+ neighbor 2001:db8::1 remote-as 65002
+ neighbor 10.0.0.9 remote-as 65000
+ neighbor 10.0.0.9 update-source 10.0.0.3
+ neighbor 10.0.0.9 bfd profile xpf-300-3
+ redistribute connected
+ redistribute static
+ !
+ address-family ipv4 unicast
+  no neighbor 2001:db8::1 activate
+ exit-address-family
+ !
+ address-family ipv6 unicast
+  redistribute connected
+  redistribute static
+  neighbor 2001:db8::1 activate
+ exit-address-family
+exit
+!
+bfd
+ peer 192.0.2.1
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+ peer 10.0.0.9 multihop local-address 10.0.0.3
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+ profile xpf-300-3
+  detect-multiplier 3
+  receive-interval 300
+  transmit-interval 300
+ exit
+exit
+!
