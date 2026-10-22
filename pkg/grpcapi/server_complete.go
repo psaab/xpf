@@ -2,7 +2,6 @@ package grpcapi
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -266,24 +265,6 @@ func (s *Server) completeConfigPairsAuth(words []string, partial string, auth *c
 	}
 }
 
-func appendPredefinedApplicationSetCompletions(out []config.SchemaCompletion) []config.SchemaCompletion {
-	emitted := make(map[string]struct{}, len(out)+len(config.PredefinedApplicationSets))
-	for _, candidate := range out {
-		emitted[candidate.Name] = struct{}{}
-	}
-	for name := range config.PredefinedApplicationSets {
-		if _, exists := emitted[name]; exists {
-			continue
-		}
-		out = append(out, config.SchemaCompletion{
-			Name: name,
-			Desc: "predefined application-set",
-		})
-		emitted[name] = struct{}{}
-	}
-	return out
-}
-
 // completionConfig returns the config completion draws from and whether
 // the predefined catalogue is suppressed (#15272 B24-04, #5763): in
 // config mode a candidate compile cached by generation; otherwise (or
@@ -301,6 +282,11 @@ func (s *Server) completionConfig() (*config.Config, bool) {
 	return s.store.ActiveConfig(), false
 }
 
+// valueProvider delegates to the shared config.ProvideValues (#16160).
+// Snapshot acquisition (completionConfig) stays here because it is
+// per-frontend store/candidate logic; the nil-receiver / nil-store /
+// nil-config guards mirror the pre-share behaviour (no config, no live
+// values).
 func (s *Server) valueProvider(hint config.ValueHint, path []string) []config.SchemaCompletion {
 	if s == nil || s.store == nil {
 		return nil
@@ -309,191 +295,7 @@ func (s *Server) valueProvider(hint config.ValueHint, path []string) []config.Sc
 	if cfg == nil {
 		return nil
 	}
-	switch hint {
-	case config.ValueHintZoneName:
-		var out []config.SchemaCompletion
-		for name, zone := range cfg.Security.Zones {
-			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
-				continue
-			}
-			desc := zone.Description
-			if desc == "" {
-				desc = "(configured)"
-			}
-			out = append(out, config.SchemaCompletion{Name: name, Desc: desc})
-		}
-		return out
-	case config.ValueHintAddressName:
-		var out []config.SchemaCompletion
-		if cfg.Security.AddressBook != nil {
-			for _, addr := range cfg.Security.AddressBook.Addresses {
-				out = append(out, config.SchemaCompletion{Name: addr.Name, Desc: addr.Value})
-			}
-			for _, as := range cfg.Security.AddressBook.AddressSets {
-				out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "address-set"})
-			}
-		}
-		return out
-	case config.ValueHintAppName:
-		var out []config.SchemaCompletion
-		for _, app := range cfg.Applications.Applications {
-			out = append(out, config.SchemaCompletion{Name: app.Name, Desc: app.Description})
-		}
-		for _, as := range cfg.Applications.ApplicationSets {
-			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
-		}
-		if catalogueSuppressed {
-			return out
-		}
-		for name := range config.PredefinedApplications {
-			out = append(out, config.SchemaCompletion{Name: name, Desc: "predefined"})
-		}
-		return appendPredefinedApplicationSetCompletions(out)
-	case config.ValueHintAppSetName:
-		var out []config.SchemaCompletion
-		for _, as := range cfg.Applications.ApplicationSets {
-			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
-		}
-		if catalogueSuppressed {
-			return out
-		}
-		return appendPredefinedApplicationSetCompletions(out)
-	case config.ValueHintPoolName:
-		var out []config.SchemaCompletion
-		for name := range cfg.Security.NAT.SourcePools {
-			out = append(out, config.SchemaCompletion{Name: name, Desc: "source pool"})
-		}
-		if cfg.Security.NAT.Destination != nil {
-			for name := range cfg.Security.NAT.Destination.Pools {
-				out = append(out, config.SchemaCompletion{Name: name, Desc: "destination pool"})
-			}
-		}
-		return out
-	case config.ValueHintScreenProfile:
-		var out []config.SchemaCompletion
-		for name := range cfg.Security.Screen {
-			out = append(out, config.SchemaCompletion{Name: name, Desc: "screen profile"})
-		}
-		return out
-	case config.ValueHintStreamName:
-		var out []config.SchemaCompletion
-		for name := range cfg.Security.Log.Streams {
-			out = append(out, config.SchemaCompletion{Name: name, Desc: "log stream"})
-		}
-		return out
-	case config.ValueHintInterfaceName:
-		var out []config.SchemaCompletion
-		for name, iface := range cfg.Interfaces.Interfaces {
-			if iface == nil { // #5886: skip a present-but-nil slot
-				continue
-			}
-			desc := iface.Description
-			if desc == "" {
-				desc = "(configured)"
-			}
-			out = append(out, config.SchemaCompletion{Name: name, Desc: desc})
-		}
-		return out
-	case config.ValueHintPolicyAddress:
-		out := []config.SchemaCompletion{
-			{Name: "any", Desc: "Any IPv4 or IPv6 address"},
-			{Name: "any-ipv4", Desc: "Any IPv4 address"},
-			{Name: "any-ipv6", Desc: "Any IPv6 address"},
-		}
-		if cfg.Security.AddressBook != nil {
-			for _, addr := range cfg.Security.AddressBook.Addresses {
-				out = append(out, config.SchemaCompletion{Name: addr.Name, Desc: addr.Value})
-			}
-			for _, as := range cfg.Security.AddressBook.AddressSets {
-				out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "address-set"})
-			}
-		}
-		return out
-	case config.ValueHintPolicyApp:
-		var out []config.SchemaCompletion
-		if !catalogueSuppressed {
-			out = append(out, config.SchemaCompletion{Name: "any", Desc: "Any application"})
-		}
-		for _, app := range cfg.Applications.Applications {
-			out = append(out, config.SchemaCompletion{Name: app.Name, Desc: app.Description})
-		}
-		for _, as := range cfg.Applications.ApplicationSets {
-			out = append(out, config.SchemaCompletion{Name: as.Name, Desc: "application-set"})
-		}
-		if catalogueSuppressed {
-			return out
-		}
-		for name := range config.PredefinedApplications {
-			out = append(out, config.SchemaCompletion{Name: name, Desc: "predefined"})
-		}
-		return appendPredefinedApplicationSetCompletions(out)
-	case config.ValueHintPolicyName:
-		var policies []*config.Policy
-		for i, tok := range path {
-			if tok == "from-zone" && i+3 < len(path) && path[i+2] == "to-zone" {
-				fromZone := path[i+1]
-				toZone := path[i+3]
-				for _, zpp := range cfg.Security.Policies {
-					// #3476: skip a nil zone-pair set (tolerant / HA-sync
-					// path) rather than dereferencing zpp.FromZone.
-					if zpp == nil {
-						continue
-					}
-					if zpp.FromZone == fromZone && zpp.ToZone == toZone {
-						policies = zpp.Policies
-						break
-					}
-				}
-				break
-			}
-			if tok == "global" {
-				policies = cfg.Security.GlobalPolicies
-				break
-			}
-		}
-		var out []config.SchemaCompletion
-		for _, pol := range policies {
-			// #3476: skip a nil policy (Policies / GlobalPolicies are
-			// []*Policy) rather than dereferencing pol.Description.
-			if pol == nil {
-				continue
-			}
-			desc := pol.Description
-			if desc == "" {
-				desc = "(configured)"
-			}
-			out = append(out, config.SchemaCompletion{Name: pol.Name, Desc: desc})
-		}
-		return out
-	case config.ValueHintUnitNumber:
-		var ifaceName string
-		for i, tok := range path {
-			if tok == "interfaces" && i+1 < len(path) {
-				ifaceName = path[i+1]
-				break
-			}
-		}
-		if ifaceName == "" {
-			return nil
-		}
-		iface := cfg.Interfaces.Interfaces[ifaceName]
-		if iface == nil {
-			return nil
-		}
-		var out []config.SchemaCompletion
-		for num, unit := range iface.Units {
-			if unit == nil { // #5886: skip a present-but-nil unit
-				continue
-			}
-			desc := unit.Description
-			if desc == "" {
-				desc = "(configured)"
-			}
-			out = append(out, config.SchemaCompletion{Name: fmt.Sprintf("%d", num), Desc: desc})
-		}
-		return out
-	}
-	return nil
+	return config.ProvideValues(cfg, hint, path, catalogueSuppressed)
 }
 
 // --- Completion RPC ---

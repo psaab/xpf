@@ -1,5 +1,19 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Share the completion value provider and hint-roots table across the
+    local CLI and the gRPC Complete RPC: pkg/config gains
+    ProvideValues(cfg, hint, path, catalogueSuppressed) and HintRoots
+    (completion_values.go), and both frontends now delegate their
+    12-hint valueProvider switches to it, keeping only snapshot
+    acquisition (completionConfig), nil-store guards, and their authz
+    wrappers. The duplicated hintRoots/hintRoots14988 tables and the
+    duplicated appendPredefinedApplicationSetCompletions helpers are
+    removed, so a new ValueHint or nil-slot guard lands in one place
+    instead of four sites in three packages. No schema, wire, or
+    authz-semantics change (#16160).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Collapse the twin compile orchestrators into one compileTree(tree,
     opts, nodeID *int): nil keeps the generic union-of-groups verdict
     (no stamped identity, ${node} via the #15031 node0-fallback pass),
@@ -11,6 +25,17 @@ xpf (0.0.0) unstable; urgency=medium
     emission sequence (node: fabric advisories hoisted above the
     unzoned/mgmt-zone/Rx-MTU trio; generic: trio first) so compiled
     output and warning order are unchanged (#16167).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Fix master pkg/config build (#16245): drop the pre-#16162
+    two-argument `cfg *Config` signature from
+    ValidateDNSProxyDefaultDomain left by the #16162/#16163 semantic
+    merge collision (body never read cfg) and update the #16163
+    census test's remaining two-argument LeafValidator,
+    PositionalKeyValidator, ValidateDNSDomain and SchemaValidate
+    call sites to the retired-cfg forms. No validation acceptance
+    logic changed.
 
 xpf (0.0.0) unstable; urgency=medium
 
@@ -58,6 +83,9 @@ xpf (0.0.0) unstable; urgency=medium
     Wire bytes are byte-identical (golden vectors), guard verdicts are
     pinned by a V4/V6 differential property test across cap/overflow
     cells, and encode stays at 1 alloc/op (#16173).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Add a lenient-bool completeness test that reflects recursively over
     compileOpts (including the embedded protocolScopeOpts) and requires
     every lenient*/sanitize* bool to be true in lenientCompileOpts(), so

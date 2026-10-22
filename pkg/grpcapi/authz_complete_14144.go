@@ -45,7 +45,7 @@ import (
 // the global address book from a policy-match cursor. A class denying
 // ^interfaces (or ^security address-book) therefore still received the
 // denied subtree's names, descriptions and CIDRs from any allowed cursor.
-// hintRoots maps each hint to the canonical config path(s) whose subtree
+// config.HintRoots maps each hint to the canonical config path(s) whose subtree
 // its values are drawn from; wrapProvider requires EVERY root to be
 // allowed in addition to the cursor path. Roots are stated in the same
 // space-joined spelling the *-configuration regexes match (the form the
@@ -180,25 +180,7 @@ func (a completionAuth) configPathFormsAllowed(path []string) bool {
 	return true
 }
 
-// hintRoots maps a ValueHint to the config subtree(s) its live values are
-// read from, in the space-joined spelling *-configuration regexes match.
-// A hint absent from the map draws only on the cursor path itself (or on
-// no configured data), so the cursor check suffices for it. Unknown hints
-// fail closed in providerHintAllowed.
-var hintRoots = map[config.ValueHint][]string{
-	config.ValueHintZoneName:      {"security zones"},
-	config.ValueHintAddressName:   {"security address-book"},
-	config.ValueHintAppName:       {"applications"},
-	config.ValueHintAppSetName:    {"applications"},
-	config.ValueHintPoolName:      {"security nat"},
-	config.ValueHintInterfaceName: {"interfaces"},
-	config.ValueHintScreenProfile: {"security screen"},
-	config.ValueHintStreamName:    {"security log"},
-	config.ValueHintPolicyAddress: {"security address-book"},
-	config.ValueHintPolicyApp:     {"applications"},
-	config.ValueHintPolicyName:    {"security policies"},
-	config.ValueHintUnitNumber:    {"interfaces"},
-}
+// Hint roots are the shared config.HintRoots table (#16160, #14708).
 
 // providerHintAllowed adjudicates one ValueProvider call by BOTH the cursor
 // path and the hint's owning subtree(s) (#14708). Either denial suppresses
@@ -213,7 +195,7 @@ func (a completionAuth) providerHintAllowed(hint config.ValueHint, path []string
 	if hint == config.ValueHintNone {
 		return true
 	}
-	roots, ok := hintRoots[hint]
+	roots, ok := config.HintRoots[hint]
 	if !ok {
 		return false
 	}
