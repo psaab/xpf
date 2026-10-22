@@ -5938,7 +5938,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // host-local session).
                                 policy_counter_idx: host_policy_counter_idx,
                                 policy_counter: host_policy_counter,
-                                nat_scope_ifindex: None,
+                                // #15951 rebase: stamp the validated NAT scope
+                                // like the transit install (#15176), using the
+                                // gated fabric scope or the locally resolved
+                                // logical unit. LocalDelivery DNAT sessions are
+                                // revalidated by source_nat_revocation_on_session_hit
+                                // (which runs before the #9563 LocalDelivery
+                                // zone-policy decline), so a None here would
+                                // rebuild an empty scope and falsely revoke a
+                                // fabric/scope-specific DNAT-to-local session.
+                                nat_scope_ifindex: if packet_fabric_ingress {
+                                    ingress_nat_scope_ifindex
+                                } else {
+                                    Some(ingress_logical)
+                                },
                             };
                             let local_session_capacity_available =
                                 if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
@@ -5993,7 +6006,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     continue;
                                 }
                             }
-                            if local_session_capacity_available
                             // #15951: a cacheable host-bound packet whose session
                             // cannot be installed must NOT fall through to the
                             // Trusted slow-path reinject: delivery without an
@@ -6002,7 +6014,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // Fail closed — count the refusal and recycle. This
                             // covers both the capacity-refused arm and an
                             // install-helper failure after a passing preflight.
-                            let local_installed = local_session_capacity_available
+                            if local_session_capacity_available
                                 && install_helper_local_session_on_miss(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
