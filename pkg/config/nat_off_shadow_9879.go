@@ -436,7 +436,7 @@ type dnatOffPorts struct {
 type dnatOffShape struct {
 	dests []dnatOffNet
 	srcs  []dnatOffNet // empty = unconstrained (match any source)
-	// protos holds canonical pinned protocols ("s:tcp" or "n:6"); anyProto is
+	// protos holds canonical pinned protocols ("n:<iana-number>", #15943); anyProto is
 	// the PROTO_ANY wildcard (only when no protocol is pinned).
 	protos   []string
 	anyProto bool
@@ -596,7 +596,7 @@ func portsConstrained(p dnatOffPorts) bool {
 func dnatOffProtos(tokens []string, constrained bool) ([]string, bool, bool) {
 	if len(tokens) == 0 {
 		if constrained {
-			return []string{"s:tcp", "s:udp"}, false, true
+			return []string{"n:6", "n:17"}, false, true
 		}
 		return nil, true, true
 	}
@@ -607,10 +607,7 @@ func dnatOffProtos(tokens []string, constrained bool) ([]string, bool, bool) {
 		if !dnatProtocolResolvable(norm) {
 			continue
 		}
-		canon := "s:" + norm
-		if n, err := strconv.Atoi(norm); err == nil {
-			canon = "n:" + strconv.Itoa(n)
-		}
+		canon := dnatOffProtoCanon(norm)
 		if _, ok := seen[canon]; ok {
 			continue
 		}
@@ -622,6 +619,65 @@ func dnatOffProtos(tokens []string, constrained bool) ([]string, bool, bool) {
 	}
 	sort.Strings(out)
 	return out, false, true
+}
+
+// dnatOffProtoCanon canonicalizes a resolvable protocol token by its IANA
+// number (#15943, H11-04). Before this, named protocols canonicalized as
+// textual `s:tcp` and numerics as `n:6` (and `icmpv6` vs `icmp6` stayed
+// distinct), so the #9879 off-shadow intersection compared tokens that
+// never equated across spellings: an `off` exemption for `tcp` versus a
+// translate rule for `6` (the same protocol) evaded the shadow witness.
+// Canonicalizing both spellings to `n:<number>` makes the witness compare
+// protocols, not spellings. The mapping mirrors the DNAT-resolvable set
+// (dnatProtocolResolvable) and the Rust proto_number numbers for those
+// names; an unmapped resolvable numeric token already carries its number.
+func dnatOffProtoCanon(norm string) string {
+	if n, ok := dnatOffNamedProtoNumber(norm); ok {
+		return "n:" + strconv.Itoa(n)
+	}
+	if n, err := strconv.Atoi(norm); err == nil {
+		return "n:" + strconv.Itoa(n)
+	}
+	// A resolvable token with no known number (unreachable for the current
+	// dnatProtocolResolvable set, which is exactly the names above plus
+	// numerics) keeps its textual form so it can only equate with itself.
+	return "s:" + norm
+}
+
+// dnatOffNamedProtoNumber maps the named DNAT-resolvable protocols to
+// their IANA numbers (mirrors userspace-dp ip_proto::proto_number).
+func dnatOffNamedProtoNumber(norm string) (int, bool) {
+	switch norm {
+	case "icmp":
+		return 1, true
+	case "igmp":
+		return 2, true
+	case "ipip":
+		return 4, true
+	case "tcp":
+		return 6, true
+	case "egp":
+		return 8, true
+	case "udp":
+		return 17, true
+	case "gre":
+		return 47, true
+	case "esp":
+		return 50, true
+	case "ah":
+		return 51, true
+	case "icmp6", "icmpv6":
+		return 58, true
+	case "ospf":
+		return 89, true
+	case "pim":
+		return 103, true
+	case "vrrp":
+		return 112, true
+	case "sctp":
+		return 132, true
+	}
+	return 0, false
 }
 
 // dnatOffPortCell is one emitted port cell: an exact port, a multi-port run
@@ -889,7 +945,7 @@ func dnatOffWitnessCandidates(te dnatOffEntry, off, tr dnatOffShape) []dnatOffFl
 func dnatOffWitnessProto(trProto string, off dnatOffShape) (string, bool) {
 	if trProto == "*" {
 		if off.anyProto {
-			return "s:tcp", true
+			return "n:6", true
 		}
 		if len(off.protos) == 0 {
 			return "", false

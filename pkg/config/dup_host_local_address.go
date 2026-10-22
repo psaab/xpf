@@ -146,6 +146,11 @@ func hostLocalAddrFamily(s string) (host, family string) {
 	if s == "" {
 		return "", ""
 	}
+	// #15943 (H11-04): normalize a tolerated NAT prefix spelling (`/+32`,
+	// `/024`) before parsing, mirroring parsePoolAddr — otherwise the
+	// raw parse failed, this returned ("", ""), and the #6751/#3718
+	// on-interface self-collision gates silently skipped the address.
+	s = NormalizeNATPrefixLen(s)
 	var ip net.IP
 	if parsed, _, err := net.ParseCIDR(s); err == nil && parsed != nil {
 		ip = parsed

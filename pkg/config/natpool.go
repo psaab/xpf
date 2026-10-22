@@ -41,7 +41,16 @@ func SourceNATPoolNets(nat *NATConfig, poolName string) ([]*net.IPNet, bool) {
 // parsePoolAddr parses a pool address entry — a CIDR or a bare IP
 // (bare IPs become /32 or /128 host networks). Returns nil for
 // unparseable entries.
+//
+// #15943 (H11-04): the prefix length is normalized first
+// (NormalizeNATPrefixLen, #7481), so a tolerated spelling the NAT grammar
+// accepts and installs (`/+32`, `/024`, `/0024`) parses to the same network
+// as its canonical form instead of returning nil and silently skipping
+// every overlap gate that consumes this helper. Without the normalization
+// a canonical-equivalent overlap escaped admission while the dataplane
+// installed the address.
 func parsePoolAddr(addr string) *net.IPNet {
+	addr = NormalizeNATPrefixLen(addr)
 	if _, n, err := net.ParseCIDR(addr); err == nil {
 		return n
 	}
