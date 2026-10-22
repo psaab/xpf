@@ -3539,6 +3539,114 @@ pub(crate) fn evaluate_policy_result_with_len(
 /// has to classify itself instead of inheriting whichever answer a negated
 /// comparison happened to give it. That is the failure
 /// `NonRoutingCountPolicy::counting` records for its own third variant.
+
+/// #16129: by-value query for one policy evaluation. All fields are `Copy`
+/// scalars / `IpAddr` (no cloned keys, no allocation) so the packet path pays
+/// no copy beyond the registers it already held; the mode fields select the
+/// counted / L3-aware / unresolved-egress behaviour previously threaded as
+/// loose bools + a hit-count enum. Thin wrappers below remain the permanent
+/// public constructors — they build this struct and delegate to
+/// `evaluate_policy_query`, so existing callers and the query path cannot
+/// diverge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyQuery {
+    pub(crate) from_id: u16,
+    pub(crate) to_id: u16,
+    pub(crate) src_ip: IpAddr,
+    pub(crate) dst_ip: IpAddr,
+    pub(crate) protocol: u8,
+    pub(crate) src_port: u16,
+    pub(crate) dst_port: u16,
+    pub(crate) packet_icmp: Option<(u8, u8)>,
+    pub(crate) packet_len: u64,
+    pub(crate) l4_present: bool,
+    pub(crate) hit_count: PolicyHitCount,
+    pub(crate) egress_resolved: bool,
+    pub(crate) now_ns: u64,
+}
+
+impl PolicyQuery {
+    /// Counted, L4-present, resolved-egress evaluation at `now_ns` — the
+    /// `evaluate_policy_result_with_icmp_at` mode.
+    pub(crate) fn counted_at(
+        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>,
+        packet_len: u64, now_ns: u64,
+    ) -> Self {
+        Self {
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, packet_len, l4_present: true,
+            hit_count: PolicyHitCount::Count, egress_resolved: true, now_ns,
+        }
+    }
+
+    /// Counted, L3-aware evaluation at `now_ns` — the
+    /// `evaluate_policy_result_l3_aware_at` mode.
+    pub(crate) fn l3_aware_at(
+        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>,
+        packet_len: u64, l4_present: bool, now_ns: u64,
+    ) -> Self {
+        Self {
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, packet_len, l4_present,
+            hit_count: PolicyHitCount::Count, egress_resolved: true, now_ns,
+        }
+    }
+
+    /// Counted, L3-aware, unresolved-egress evaluation at `now_ns` — the
+    /// `evaluate_policy_result_l3_aware_unresolved_egress_at` mode.
+    pub(crate) fn l3_aware_unresolved_egress_at(
+        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>,
+        packet_len: u64, l4_present: bool, now_ns: u64,
+    ) -> Self {
+        Self {
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, packet_len, l4_present,
+            hit_count: PolicyHitCount::Count, egress_resolved: false, now_ns,
+        }
+    }
+
+    /// Side-effect-free evaluation at `now_ns` — the
+    /// `evaluate_policy_result_without_counting_at` mode. `packet_len` is
+    /// forced to 0, matching that wrapper: bytes are meaningless when
+    /// nothing is counted.
+    pub(crate) fn without_counting_at(
+        from_id: u16, to_id: u16, src_ip: IpAddr, dst_ip: IpAddr, protocol: u8,
+        src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>, now_ns: u64,
+    ) -> Self {
+        Self {
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, packet_len: 0, l4_present: true,
+            hit_count: PolicyHitCount::Never, egress_resolved: true, now_ns,
+        }
+    }
+}
+
+/// #16129: evaluate one [`PolicyQuery`] against `state`.
+pub(crate) fn evaluate_policy_query(
+    state: &PolicyState,
+    query: &PolicyQuery,
+) -> PolicyEvaluationResult {
+    evaluate_policy_result_counted(
+        state,
+        query.from_id,
+        query.to_id,
+        query.src_ip,
+        query.dst_ip,
+        query.protocol,
+        query.src_port,
+        query.dst_port,
+        query.packet_icmp,
+        query.packet_len,
+        query.l4_present,
+        query.hit_count,
+        query.egress_resolved,
+        query.now_ns,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PolicyHitCount {
     /// The ordinary forwarding path: this packet is a new arrival at the policy
@@ -3608,19 +3716,12 @@ pub(crate) fn evaluate_policy_result_with_icmp_at(
     packet_len: u64,
     now_ns: u64,
 ) -> PolicyEvaluationResult {
-    evaluate_policy_result_l3_aware_at(
+    evaluate_policy_query(
         state,
-        from_id,
-        to_id,
-        src_ip,
-        dst_ip,
-        protocol,
-        src_port,
-        dst_port,
-        packet_icmp,
-        packet_len,
-        true,
-        now_ns,
+        &PolicyQuery::counted_at(
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, packet_len, now_ns,
+        ),
     )
 }
 
@@ -3678,21 +3779,12 @@ pub(crate) fn evaluate_policy_result_l3_aware_at(
     l4_present: bool,
     now_ns: u64,
 ) -> PolicyEvaluationResult {
-    evaluate_policy_result_counted(
+    evaluate_policy_query(
         state,
-        from_id,
-        to_id,
-        src_ip,
-        dst_ip,
-        protocol,
-        src_port,
-        dst_port,
-        packet_icmp,
-        packet_len,
-        l4_present,
-        PolicyHitCount::Count,
-        true,
-        now_ns,
+        &PolicyQuery::l3_aware_at(
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, packet_len, l4_present, now_ns,
+        ),
     )
 }
 
@@ -3747,21 +3839,12 @@ pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress_at(
     l4_present: bool,
     now_ns: u64,
 ) -> PolicyEvaluationResult {
-    evaluate_policy_result_counted(
+    evaluate_policy_query(
         state,
-        from_id,
-        to_id,
-        src_ip,
-        dst_ip,
-        protocol,
-        src_port,
-        dst_port,
-        packet_icmp,
-        packet_len,
-        l4_present,
-        PolicyHitCount::Count,
-        false,
-        now_ns,
+        &PolicyQuery::l3_aware_unresolved_egress_at(
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, packet_len, l4_present, now_ns,
+        ),
     )
 }
 /// #9385: evaluate WITHOUT bumping any hit counter.
@@ -3815,23 +3898,12 @@ pub(crate) fn evaluate_policy_result_without_counting_at(
     packet_icmp: Option<(u8, u8)>,
     now_ns: u64,
 ) -> PolicyEvaluationResult {
-    evaluate_policy_result_counted(
+    evaluate_policy_query(
         state,
-        from_id,
-        to_id,
-        src_ip,
-        dst_ip,
-        protocol,
-        src_port,
-        dst_port,
-        packet_icmp,
-        // Bytes are meaningless for a derivation that counts nothing, and the
-        // byte field is separately gated on a non-zero length anyway.
-        0,
-        true,
-        PolicyHitCount::Never,
-        true,
-        now_ns,
+        &PolicyQuery::without_counting_at(
+            from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port,
+            packet_icmp, now_ns,
+        ),
     )
 }
 

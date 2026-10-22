@@ -23,6 +23,91 @@ pub enum SeqVerdict {
     Unknown,
 }
 
+/// #16129: which hit mutations a session lookup defers until the caller has
+/// decided the packet's authority (#9519). Replaces the `(defer_close,
+/// defer_all)` bool pair — `(true, true)` was live but indistinguishable by
+/// type from the nonsensical reading; the enum makes the three live modes
+/// the only representable states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Defer {
+    /// Apply every hit mutation inline (ordinary packet lookup).
+    None,
+    /// Defer only the FIN/RST close-state mutation (#10636); refresh and
+    /// handshake state still apply.
+    Close,
+    /// Defer every hit mutation (#13938); the caller replays a
+    /// `Defer::None` lookup after an Owner verdict.
+    All,
+}
+
+impl Defer {
+    #[inline]
+    pub(crate) fn close(self) -> bool {
+        matches!(self, Self::Close | Self::All)
+    }
+
+    #[inline]
+    pub(crate) fn all(self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
+/// #16129: query for one session lookup. Borrows the key (`&SessionKey`, no
+/// clone) so the packet path pays no copy; `defer` selects the mutation
+/// mode. Thin wrappers below remain the permanent public constructors —
+/// they build this struct and delegate to `lookup_with_origin_query`, so
+/// existing callers and the query path cannot diverge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionQuery<'a> {
+    pub(crate) key: &'a SessionKey,
+    pub(crate) now_ns: u64,
+    pub(crate) tcp_flags: u8,
+    pub(crate) defer: Defer,
+    pub(crate) payload_len: u32,
+}
+
+impl<'a> SessionQuery<'a> {
+    /// Ordinary lookup — the `lookup_with_origin_with_payload` mode.
+    pub(crate) fn new(key: &'a SessionKey, now_ns: u64, tcp_flags: u8, payload_len: u32) -> Self {
+        Self {
+            key,
+            now_ns,
+            tcp_flags,
+            defer: Defer::None,
+            payload_len,
+        }
+    }
+
+    /// Close-deferring lookup — the
+    /// `lookup_with_origin_deferring_close_expiry` mode.
+    pub(crate) fn deferring_close(key: &'a SessionKey, now_ns: u64, tcp_flags: u8) -> Self {
+        Self {
+            key,
+            now_ns,
+            tcp_flags,
+            defer: Defer::Close,
+            payload_len: 0,
+        }
+    }
+
+    /// Authority-deferring lookup — the
+    /// `lookup_with_origin_deferring_authority_with_payload` mode.
+    pub(crate) fn deferring_authority(
+        key: &'a SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+    ) -> Self {
+        Self {
+            key,
+            now_ns,
+            tcp_flags,
+            defer: Defer::All,
+            payload_len,
+        }
+    }
+}
+
 impl SessionTable {
     /// Note seq/window for the entry matching `key` (this packet's direction).
     pub fn note_tcp_seq(&mut self, key: &SessionKey, seq: u32, ack: u32, window: u16, payload_len: u32, tcp_flags: u8, max_window: u32) {
@@ -468,7 +553,7 @@ impl SessionTable {
         tcp_flags: u8,
         payload_len: u32,
     ) -> Option<(SessionLookup, SessionOrigin)> {
-        match self.lookup_with_origin_inner(key, now_ns, tcp_flags, false, false, payload_len) {
+        match self.lookup_with_origin_query(&SessionQuery::new(key, now_ns, tcp_flags, payload_len)) {
             SessionExpiryProbe::Live(hit) => Some(hit),
             SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
         }
@@ -495,7 +580,7 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, false, 0)
+        self.lookup_with_origin_query(&SessionQuery::deferring_close(key, now_ns, tcp_flags))
     }
 
     /// #13938: a local hit is resolved before #9519 has decided whether this
@@ -522,18 +607,29 @@ impl SessionTable {
         tcp_flags: u8,
         payload_len: u32,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, true, payload_len)
+        self.lookup_with_origin_query(&SessionQuery::deferring_authority(
+            key, now_ns, tcp_flags, payload_len,
+        ))
+    }
+
+    /// #16129: execute one [`SessionQuery`].
+    pub(crate) fn lookup_with_origin_query(
+        &mut self,
+        query: &SessionQuery<'_>,
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
+        self.lookup_with_origin_inner(query)
     }
 
     fn lookup_with_origin_inner(
         &mut self,
-        key: &SessionKey,
-        now_ns: u64,
-        tcp_flags: u8,
-        defer_close: bool,
-        defer_all: bool,
-        payload_len: u32,
+        query: &SessionQuery<'_>,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
+        let key = query.key;
+        let now_ns = query.now_ns;
+        let tcp_flags = query.tcp_flags;
+        let defer_close = query.defer.close();
+        let defer_all = query.defer.all();
+        let payload_len = query.payload_len;
         // #964 Step 1: resolve handle from key. Direct-primary path
         // looks up via key_to_handle; alias path (NAT-translated
         // reverse key) goes via reverse_translated_index.
