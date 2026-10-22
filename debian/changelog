@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Snapshot neighbor resolution netlink state once per pass: interface
+    names are fetched once per link and neighbor tables once per
+    (link, family) instead of once per target, preserving the usable-entry
+    skip and probe decisions (#15952).
 
   * Preserve `to-zone junos-host` application's configured inactivity-timeout
     on LocalDelivery sessions. Matched host-local permit sessions now age on

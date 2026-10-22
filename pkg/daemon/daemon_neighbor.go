@@ -243,6 +243,92 @@ func (d *Daemon) collectNeighborProbeTargets(cfg *config.Config) []neighborProbe
 	return targets
 }
 
+// neighborResolveOps carries the netlink/probe operations
+// resolveNeighborTargets needs (#15952). Production passes the real
+// netlink entry points plus the warmup probe closure; tests pass
+// synthetics so the pass runs without touching the host neighbor table.
+type neighborResolveOps struct {
+	linkByIndex func(ifindex int) (netlink.Link, error)
+	listNeigh   func(ifindex, family int) ([]netlink.Neigh, error)
+	probe       func(ip net.IP, iface string)
+}
+
+// neighborFamilyKey keys the per-pass interface-name and
+// usable-neighbor snapshots (#15952).
+type neighborFamilyKey struct {
+	linkIndex int
+	family    int
+}
+
+// resolveNeighborTargets probes every target whose neighbor is not
+// already usable, snapshotting each link's interface name on first use
+// and each (linkIndex, family) neighbor table on first use per pass
+// (#15952). Each snapshot is frozen for the rest of the pass and taken
+// before that pair's remaining targets are probed, so an entry that
+// becomes usable mid-pass may draw one harmless extra probe, while an
+// entry usable when its table was snapshotted is never probed. It
+// returns the number of targets probed.
+func resolveNeighborTargets(targets []neighborProbeTarget, ops neighborResolveOps) int {
+	probe := ops.probe
+	if probe == nil {
+		probe = func(net.IP, string) {}
+	}
+	ifNames := make(map[int]string)
+	ifFailed := make(map[int]bool)
+	ifName := func(linkIndex int) (string, bool) {
+		if name, ok := ifNames[linkIndex]; ok {
+			return name, true
+		}
+		if ifFailed[linkIndex] {
+			return "", false
+		}
+		link, err := ops.linkByIndex(linkIndex)
+		if err != nil || link == nil || link.Attrs() == nil {
+			ifFailed[linkIndex] = true
+			return "", false
+		}
+		name := link.Attrs().Name
+		ifNames[linkIndex] = name
+		return name, true
+	}
+	usable := make(map[neighborFamilyKey]map[string]struct{})
+	isUsable := func(t neighborProbeTarget, family int) bool {
+		key := neighborFamilyKey{linkIndex: t.linkIndex, family: family}
+		set, ok := usable[key]
+		if !ok {
+			set = make(map[string]struct{})
+			neighs, _ := ops.listNeigh(t.linkIndex, family)
+			for _, n := range neighs {
+				if n.IP != nil && (n.State&(netlink.NUD_REACHABLE|netlink.NUD_STALE|netlink.NUD_PERMANENT)) != 0 {
+					set[n.IP.String()] = struct{}{}
+				}
+			}
+			usable[key] = set
+		}
+		_, ok = set[t.neighborIP.String()]
+		return ok
+	}
+
+	resolved := 0
+	for _, t := range targets {
+		ifName, ok := ifName(t.linkIndex)
+		if !ok {
+			continue
+		}
+		family := netlink.FAMILY_V4
+		if t.neighborIP.To4() == nil {
+			family = netlink.FAMILY_V6
+		}
+		// Skip if neighbor already exists and is usable.
+		if isUsable(t, family) {
+			continue
+		}
+		resolved++
+		probe(t.neighborIP, ifName)
+	}
+	return resolved
+}
+
 func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) {
 	// #1197 v3 (Codex code-review #5): use the shared
 	// collectNeighborProbeTargets helper instead of duplicating
@@ -251,45 +337,29 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 	// forceProbeNeighbors is impossible.
 	targets := d.collectNeighborProbeTargets(cfg)
 
-	// Resolve each target via ping (triggers kernel ARP/NDP resolution)
-	resolved := 0
-	for _, t := range targets {
-		link, err := netlink.LinkByIndex(t.linkIndex)
-		if err != nil {
-			continue
-		}
-		ifName := link.Attrs().Name
-		family := netlink.FAMILY_V4
-		if t.neighborIP.To4() == nil {
-			family = netlink.FAMILY_V6
-		}
-		// Skip if neighbor already exists and is usable
-		neighs, _ := netlink.NeighList(t.linkIndex, family)
-		skip := false
-		for _, n := range neighs {
-			if n.IP.Equal(t.neighborIP) && (n.State&(netlink.NUD_REACHABLE|netlink.NUD_STALE|netlink.NUD_PERMANENT)) != 0 {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
-		resolved++
-		// Trigger proactive neighbor discovery.
-		// IPv4 continues to use ping so the kernel owns ARP resolution.
-		// IPv6 additionally sends an explicit NS before pinging so the
-		// failover path also nudges peer neighbor caches directly.
-		go func(ip net.IP, iface string) {
-			if ip.To4() == nil {
-				if err := cluster.SendNDSolicitationFromInterface(iface, ip); err != nil {
-					slog.Debug("neighbor warmup: IPv6 NS probe failed",
-						"iface", iface, "ip", ip, "err", err)
-				}
-			}
-			sendICMPProbe(iface, ip)
-		}(t.neighborIP, ifName)
+	listNeigh := d.neighListFn
+	if listNeigh == nil {
+		listNeigh = netlink.NeighList
 	}
+	resolved := resolveNeighborTargets(targets, neighborResolveOps{
+		linkByIndex: netlink.LinkByIndex,
+		listNeigh:   listNeigh,
+		probe: func(ip net.IP, iface string) {
+			// Trigger proactive neighbor discovery.
+			// IPv4 continues to use ping so the kernel owns ARP resolution.
+			// IPv6 additionally sends an explicit NS before pinging so the
+			// failover path also nudges peer neighbor caches directly.
+			go func(ip net.IP, iface string) {
+				if ip.To4() == nil {
+					if err := cluster.SendNDSolicitationFromInterface(iface, ip); err != nil {
+						slog.Debug("neighbor warmup: IPv6 NS probe failed",
+							"iface", iface, "ip", ip, "err", err)
+					}
+				}
+				sendICMPProbe(iface, ip)
+			}(ip, iface)
+		},
+	})
 
 	if resolved > 0 {
 		slog.Info("proactive neighbor resolution", "resolving", resolved, "total_targets", len(targets))
