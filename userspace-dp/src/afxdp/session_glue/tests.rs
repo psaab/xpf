@@ -4192,6 +4192,161 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
     );
 }
 
+/// Fabric-ingress adoption (#16217): the NAT'd wire tuple of an
+/// ESTABLISHED synced session must be found by
+/// `lookup_shared_established_for_wire` and resolved to a local
+/// ForwardCandidate (worker row installed); without an established
+/// synced entry the lookup declines (the packet still discards), and
+/// a HandshakePending row never qualifies.
+#[test]
+fn fabric_ingress_adopts_established_synced_wire_session_16217() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = SessionDecision {
+        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+            .expect("fabric redirect"),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let translated_key = forward_wire_key(&key, decision.nat);
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let entry = SyncedSessionEntry {
+        key: translated_key.clone(),
+        decision,
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4242,
+        tcp_close_class: 0,
+        tcp_handshake_state: established,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00],
+        },
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // Without any synced entry the adoption lookup declines.
+    assert!(
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &translated_key,
+        )
+        .is_none(),
+        "no synced session -> no adoption (packet still discards)"
+    );
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    let found = crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+        &shared_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &translated_key,
+    )
+    .expect("established synced wire session must be adoptable");
+    assert_eq!(found.session_id, 4242);
+    // A non-established (still handshaking) row must not adopt.
+    let mut pending = entry.clone();
+    pending.key = {
+        let mut k = translated_key.clone();
+        k.src_port = 59999;
+        k
+    };
+    pending.tcp_handshake_state =
+        crate::session::TcpHandshakeState::HandshakePending.to_wire();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &pending,
+    );
+    assert!(
+        crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &pending.key,
+        )
+        .is_none(),
+        "pending handshake must not adopt"
+    );
+    // The adopted entry resolves to a local WAN ForwardCandidate and
+    // installs the worker row (the poll-path adoption outcome).
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let peer_worker_commands = Vec::new();
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(1, active_ha_runtime(1));
+    let flow = SessionFlow {
+        src_ip: translated_key.src_ip,
+        dst_ip: translated_key.dst_ip,
+        forward_key: translated_key.clone(),
+    };
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x18,
+        21,
+        0,
+        true,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
+    .expect("adopted wire session should resolve");
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(resolved.decision.resolution.egress_ifindex, 12);
+    assert!(
+        sessions.lookup(&translated_key, 1_000_000, 0x18).is_some(),
+        "adoption must install the worker row"
+    );
+}
+
 #[test]
 fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_fabric_ingress() {
     let mut sessions = SessionTable::new();

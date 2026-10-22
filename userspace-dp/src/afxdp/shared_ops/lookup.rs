@@ -36,6 +36,79 @@ pub(in crate::afxdp) fn lookup_shared_session(
     // shared-session lookup into a spurious miss.
     lock_shared_recover(shared_sessions).get(key).cloned()
 }
+/// Fabric-ingress adoption (#16217, FZDiag12): does the shared synced
+/// map hold an ESTABLISHED session for this exact wire tuple? The
+/// packet arrived on the fabric link already SNAT'd by the peer, so
+/// its key is the NAT'd wire tuple. The entry may sit under the
+/// canonical (pre-NAT) key with this tuple as its forward-wire alias,
+/// or directly under the wire key. Only a forward entry whose
+/// handshake wire is `Established` qualifies — Opening/Pending rows
+/// must not adopt (a SYN keeps the ordinary punt/seed behavior, and
+/// a non-SYN mid-handshake packet has no completed session to
+/// adopt). Non-TCP entries carry wire 0 and never qualify. Any
+/// ambiguity in the wire index fails closed.
+pub(in crate::afxdp) fn lookup_shared_established_for_wire(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    wire_key: &SessionKey,
+) -> Option<SyncedSessionEntry> {
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let is_established = |entry: &SyncedSessionEntry| {
+        !entry.metadata.is_reverse && entry.tcp_handshake_state == established
+    };
+    if let Some(entry) = lookup_shared_session(shared_sessions, wire_key) {
+        if is_established(&entry) {
+            return Some(entry);
+        }
+    }
+    lookup_shared_forward_wire_match(
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        wire_key,
+    )
+    .filter(is_established)
+}
+/// #16217: INPUT evidence for the ct-slice collector — reverse
+/// service observed for the canonical key anywhere in the shared
+/// maps (synced peer/replica row or forward+reverse counters across
+/// the two maps), plus node-wide completion: any shared row that is
+/// a forward entry with observed reverse counters, or a #16223
+/// served cache-hit advanced it. A shared row's Established WIRE is
+/// deliberately NOT read here: shared Established is an OUTPUT of
+/// the restamp this evidence feeds, so importing it would be
+/// chicken-and-egg. (The import/GC consumers that may trust the
+/// wire use `shared_node_served_evidence` instead.)
+pub(in crate::afxdp) fn shared_completion_evidence(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> crate::session::NodeServedEvidence {
+    // Synced rows carry no packet counters; worker-table counters are
+    // folded into the collector's local half. The shared maps here
+    // contribute node-wide completion/reverse-service evidence: a
+    // reverse-orientation replica for this tuple in either shared
+    // map was published only after the serving side forwarded the
+    // reverse direction, and a forward row whose derived reverse
+    // matches was served in both directions somewhere node-wide.
+    let holders = lock_shared_recover(shared_sessions);
+    let wires = lock_shared_recover(shared_forward_wire_sessions);
+    let mut ev = crate::session::NodeServedEvidence::default();
+    for map in [&*holders, &*wires] {
+        for entry in map.values() {
+            let same = entry.key.bare_tuple() == key.bare_tuple();
+            let reversed = crate::session::reverse_session_key(&entry.key, entry.decision.nat)
+                .bare_tuple()
+                == key.bare_tuple();
+            if same || reversed {
+                if entry.metadata.is_reverse {
+                    ev.rev_packets_any = ev.rev_packets_any.max(1);
+                }
+            }
+        }
+    }
+    ev
+}
 /// #16223: node-level served-handshake evidence for `key` (either
 /// half of the pair): the shared synced entry whose handshake wire is
 /// Established. The counter half of the evidence is NOT carried on
@@ -62,14 +135,6 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
         }
     };
     probe(key);
-    // The serving pair may sit under the opposite orientation (a
-    // reverse replica's key is the forward tuple swapped) or under a
-    // SNAT-translated reverse key (`172.16.80.8:port`), neither of
-    // which a same-orientation probe finds. Match on the unordered
-    // endpoint pair: same two IP:port endpoints in either order, or
-    // the serving forward whose derived reverse shares the server
-    // endpoint and client port. Bounded: this runs only on
-    // idle-crossed GC candidates, never per packet in steady state.
     if evidence.handshake_wire == 0 {
         for entry in sessions.values() {
             if entry.tcp_handshake_state
@@ -97,6 +162,9 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
     }
     evidence
 }
+// (The scan in `shared_node_served_evidence` matches the serving
+// pair under the opposite orientation or a SNAT-translated reverse
+// key; it runs only on idle-crossed GC candidates, never per packet.)
 
 /// #16223: restamp the shared synced entries for `forward_key` (and
 /// its derived reverse companion) to the Established handshake wire
@@ -175,6 +243,52 @@ pub(in crate::afxdp) fn restamp_shared_handshakes_established(
                     entry.tcp_handshake_state = established;
                 }
             }
+        }
+    }
+}
+
+/// #16217: advance the forward-wire KEY ALIAS slot
+/// (`forward_wire_key(key, decision.nat)`) in
+/// `shared_forward_wire_sessions` to Established for a completed
+/// forward pair. The canonical restamp lives in
+/// `restamp_shared_handshakes_established`; this wrapper owns ONLY
+/// the alias slot, which that restamp never writes, so a
+/// fabric-ingress adopter looking the NAT'd tuple up directly sees
+/// an Established forward entry. Only for wire != key (no-NAT:
+/// wire == key: no-op). Never regresses a wire already Established;
+/// does not publish deltas. One bounded lock acquisition per call.
+/// When the alias slot is absent the canonical row is cloned in
+/// WITHOUT rewriting `entry.key` — every legitimate occupant of the
+/// wire map retains the canonical key, and
+/// `lookup_shared_forward_wire_match` fail-closes unless the
+/// ambiguity index records that canonical key as the wire key's
+/// owner, so a row keyed by the wire tuple itself could never be
+/// adopted.
+pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    established_keys: &[(SessionKey, crate::nat::NatDecision)],
+) {
+    if established_keys.is_empty() {
+        return;
+    }
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let mut wire_sessions = lock_shared_recover(shared_forward_wire_sessions);
+    for (forward_key, nat) in established_keys {
+        let wire_key = crate::session::forward_wire_key(forward_key, *nat);
+        if wire_key == *forward_key {
+            continue;
+        }
+        if let Some(entry) = wire_sessions.get_mut(&wire_key) {
+            if entry.tcp_handshake_state != established {
+                entry.tcp_handshake_state = established;
+            }
+        } else if let Some(canonical) =
+            lock_shared_recover(shared_sessions).get(forward_key).cloned()
+        {
+            let mut aliased = canonical;
+            aliased.tcp_handshake_state = established;
+            wire_sessions.insert(wire_key, aliased);
         }
     }
 }

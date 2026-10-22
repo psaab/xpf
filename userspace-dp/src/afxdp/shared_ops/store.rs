@@ -1656,4 +1656,46 @@ mod handshake_monotonic_16223_tests {
         publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, opening, 78, false));
         assert_eq!(wire(&shared, &forward), opening, "new incarnation must not inherit stage");
     }
+
+    #[test]
+    fn forward_wire_alias_restamp_advances_wire_key_16217() {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(43002);
+        let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let nat = nat_decision();
+        let wire_key = crate::session::forward_wire_key(&forward, nat);
+        assert_ne!(wire_key, forward, "SNAT fixture must produce a distinct wire key");
+        publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry(&forward, pending, 79, false));
+        assert_eq!(wire(&shared, &forward), pending);
+        // Canonical restamp is the caller's job (`restamp_shared_handshakes_established`
+        // in the ct-slice); the wrapper owns only the alias slot.
+        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            &shared,
+            &[(forward.clone(), nat)],
+        );
+        crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+            &shared,
+            &wire_map,
+            &[(forward.clone(), nat)],
+        );
+        assert_eq!(wire(&shared, &forward), established, "canonical advanced");
+        assert_eq!(wire(&wire_map, &wire_key), established, "wire alias advanced");
+        let aliased = lock_shared_recover(&wire_map)
+            .get(&wire_key)
+            .cloned()
+            .expect("wire alias row present");
+        assert_eq!(aliased.key, forward, "alias row retains the canonical key");
+        assert!(!aliased.metadata.is_reverse, "alias stays a forward entry");
+        assert!(
+            crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+                &shared,
+                &wire_map,
+                &indexes,
+                &wire_key,
+            )
+            .is_some(),
+            "established wire alias must be adoptable"
+        );
+    }
 }

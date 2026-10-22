@@ -1927,6 +1927,68 @@ impl SessionTable {
         }
         if end >= cap { 0 } else { end }
     }
+    /// #16217: like `established_forward_slice`, but assembling
+    /// completion evidence NODE-WIDE for split-path rows no single
+    /// worker table can satisfy alone. A forward entry (any origin
+    /// except a peer-synced replica — serving rows only; closing
+    /// rows never qualify) is collected when the aggregated
+    /// evidence proves the tuple completed: (a) any worker's local
+    /// row Established (`served_and_completed` via the shared-map
+    /// aggregator), (b) reverse traffic observed for the canonical
+    /// key in the shared synced/replica maps (`rev_packets>0`
+    /// across the forward/reverse counters of both maps), or (c)
+    /// the #16223 `cache_hit_handshake_progress` completion stamp.
+    /// No chicken-and-egg: inputs are counters/completion observed
+    /// anywhere node-local; a shared row's Established wire is
+    /// OUTPUT only (the restamp this feeds), never an input here.
+    /// One bounded walk per slice.
+    pub(crate) fn node_served_forward_slice(
+        &self,
+        cursor: usize,
+        budget: usize,
+        shared_evidence: &dyn Fn(&SessionKey) -> NodeServedEvidence,
+        out: &mut Vec<(SessionKey, crate::nat::NatDecision)>,
+    ) -> usize {
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        if cap == 0 || budget == 0 {
+            return 0;
+        }
+        let start = if cursor >= cap { 0 } else { cursor };
+        let end = start.saturating_add(budget).min(cap);
+        for idx in start..end {
+            if let Some(record) = self.entries.get(idx) {
+                let entry = &record.entry;
+                if entry.metadata.is_reverse || entry.closing {
+                    continue;
+                }
+                // Serving rows only: a peer-synced replica's own
+                // flags are not node-level proof (its completion is
+                // announced via the HA Update carve-out instead).
+                let serving_origin = !entry.origin.is_peer_synced()
+                    || entry.origin == SessionOrigin::SharedPromote;
+                if !serving_origin {
+                    continue;
+                }
+                if entry.established && !entry.handshake_pending {
+                    // Already locally complete: the strict slice
+                    // covers it when it also served reverse traffic;
+                    // include it here too so the shared wire advances
+                    // even before the first reverse packet is folded.
+                    out.push((record.key.clone(), entry.decision.nat));
+                    continue;
+                }
+                let mut evidence = self.node_served_evidence(&record.key);
+                let shared = shared_evidence(&record.key);
+                evidence.rev_packets_any =
+                    evidence.rev_packets_any.max(evidence.rev_packets).max(shared.rev_packets_any);
+                evidence.served_completed = evidence.served_completed || shared.served_completed;
+                if evidence.served_and_completed() {
+                    out.push((record.key.clone(), entry.decision.nat));
+                }
+            }
+        }
+        if end >= cap { 0 } else { end }
+    }
     /// #5152: test-only read of an entry's `first_held_ns` — the standby
     /// bounded-leak HOLD clock (§6.4). Lets the session_glue activation-scan
     /// test assert the clock is PRESERVED for a session that re-resolves to

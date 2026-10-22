@@ -4630,8 +4630,20 @@ impl SessionTable {
         // lets the next sweep resend class 0. Peer imports stay silent.
         // #10038 item 5: TUN-origin stays silent too (the peer holds no copy
         // — nothing Opened — so an Update would plant TUN-derived state).
+        // #16217 stage-advancement carve-out: when a peer-synced row's
+        // handshake STAGE alone advances to Established (close class
+        // unchanged), emit the Update so the peer's synced wire learns
+        // the completion. Split-path serving rows complete on a
+        // peer/sibling worker; without this delta the peer's adoption
+        // gate (`lookup_shared_established_for_wire`) stays at
+        // HandshakePending forever. Close-class transitions on
+        // peer-synced rows stay silent (no echo of the owner's close).
+        let stage_advancement_only = class_after == class_before
+            && handshake_state_after == TcpHandshakeState::Established.to_wire()
+            && handshake_state_before != handshake_state_after;
         if forward.origin.is_local_tun_origin()
             || (forward.origin.is_peer_synced()
+                && !stage_advancement_only
                 && !(forward.origin == SessionOrigin::WorkerLocalImport
                     && self.session_id_carried_from_another_worker(forward.session_id)))
         {

@@ -153,6 +153,19 @@ pub(crate) struct NodeServedEvidence {
     /// forwarded on this node for the tuple, when the serving table
     /// is readable (same worker). 0 cross-worker.
     pub(crate) rev_packets: u64,
+    /// Node-wide reverse service observed for the tuple: any worker
+    /// on this node forwarded reverse-direction packets for the
+    /// canonical key. Carried separately from `rev_packets` (whose
+    /// consumers mean "the readable serving pair was promoted AND
+    /// served"); this is observed completion input only.
+    pub(crate) rev_packets_any: u64,
+    /// This node's workers observably completed the handshake for
+    /// the tuple: both directions were forwarded somewhere node-wide
+    /// (or a #16223 served cache-hit advanced it), so the pair is
+    /// Established as an OUTPUT even if no single worker table holds
+    /// an Established row. Input evidence only — never set from a
+    /// shared row's Established wire.
+    pub(crate) served_completed: bool,
     /// The Established wire came from the node's SHARED synced map:
     /// a serving worker published/restamped it only after its own
     /// pair completed the handshake. Trusted as completion proof on
@@ -176,6 +189,21 @@ impl NodeServedEvidence {
         self.shared_established
             || (self.handshake_wire == TcpHandshakeState::Established.to_wire()
                 && self.rev_packets > 0)
+    }
+
+    /// OUTPUT-ONLY test for collectors (ct-slice restamp): this node
+    /// knows the tuple completed — (a) any local row Established,
+    /// (b) reverse service observed anywhere node-wide, or (c) a
+    /// #16223 `cache_hit_handshake_progress` completion. Inputs are
+    /// counters/completion observed anywhere node-local; a shared
+    /// row's Established wire is deliberately NOT an input here
+    /// (pass shared Established as OUTPUT only, via
+    /// `promoted_and_served` where imports are the consumer).
+    #[inline]
+    pub(crate) fn served_and_completed(self) -> bool {
+        self.promoted_and_served()
+            || self.served_completed
+            || self.rev_packets_any > 0
     }
 }
 

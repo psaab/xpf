@@ -4185,6 +4185,82 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // Fabric-ingress adoption (#16217, FZDiag12):
+                        // the peer that owned the egress RG applied SNAT
+                        // and fabric-redirected this packet, so it
+                        // arrives here SNAT'd (`172.16.80.8:<sport>`) and
+                        // misses the worker-local pre-NAT session lookup.
+                        // The FIB demotes it ClusterTerminalHAInactive,
+                        // both HAInactive->FabricRedirect converters are
+                        // anti-loop gated on fabric ingress, and
+                        // ClusterTerminalHAInactive is not slow-path
+                        // eligible, so it discards forever with no
+                        // session ever installed on the new owner. When
+                        // the fabric LINK carried the packet (physical
+                        // fabric ifindex, not merely a zone stamp) and it
+                        // is not a SYN, adopt an ESTABLISHED synced
+                        // session for the exact NAT'd wire tuple: resolve
+                        // through the ordinary session-hit path, which
+                        // materializes the worker row from the synced
+                        // entry and re-resolves to a local WAN
+                        // ForwardCandidate. Only a ForwardCandidate
+                        // outcome is adopted — terminal-local, never
+                        // re-redirected; anything else falls through to
+                        // the ordinary miss discard, and a SYN keeps the
+                        // existing punt/seed behavior exactly.
+                        let adopted = if fabric_link_ingress
+                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                        {
+                            crate::afxdp::shared_ops::lookup_shared_established_for_wire(
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                &flow.forward_key,
+                            )
+                            .and_then(|_| {
+                                resolve_flow_session_decision_with_conntrack_and_payload(
+                                    sessions,
+                                    binding.bpf_maps.session_map.handle(),
+                                    conntrack_v4_fd,
+                                    conntrack_v6_fd,
+                                    worker_ctx.shared_sessions,
+                                    worker_ctx.shared_nat_sessions,
+                                    worker_ctx.shared_forward_wire_sessions,
+                                    &worker_ctx.shared_owner_rg_indexes,
+                                    worker_ctx.peer_worker_commands,
+                                    worker_ctx.worker_commands_by_id,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.ha_state,
+                                    worker_ctx.dynamic_neighbors,
+                                    flow,
+                                    now_ns,
+                                    now_secs,
+                                    meta.protocol,
+                                    meta.tcp_flags,
+                                    tcp_payload_len(packet_frame, meta),
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    fabric_ingress_for_session,
+                                    fabric_link_ingress,
+                                    ha_startup_grace_until_secs,
+                                    worker_id,
+                                    None,
+                                )
+                            })
+                            .filter(|resolved| {
+                                matches!(
+                                    resolved.decision.resolution.disposition,
+                                    ForwardingDisposition::ForwardCandidate
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some(resolved) = adopted {
+                            telemetry.counters.session_misses += 1;
+                            telemetry.dbg.session_miss += 1;
+                            resolved.decision
+                        } else {
                         telemetry.counters.session_misses += 1;
                         telemetry.dbg.session_miss += 1;
                         if !input_filter_denied_before_screens {
@@ -8418,6 +8494,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             }
                         }
                         decision
+                        }
                     }
                 } else if let Some(hit) = packet_frame
                     .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
