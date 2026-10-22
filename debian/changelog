@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Collapse the cluster session-sync V4/V6 twins behind narrow
+    generics: the length-gated session tail (Generation through the
+    metadata tail) is encoded/decoded once via a shared sessionTail
+    with per-family views (the V6-only NAT64 source splices at its
+    wire slot), and the generation-guard twins (install/delete guards,
+    record/tombstone, take-delete, stamp, bulk-outcome, recv-install
+    outcome tail) delegate to plain generic free functions over the
+    existing bounded-put helpers. Family-named wrappers stay, no
+    familyTraits mega-generic, and the dataplane store calls
+    (PutClusterSyncedV4/V6, scoped deletes) remain visibly separate.
+    Wire bytes are byte-identical (golden vectors), guard verdicts are
+    pinned by a V4/V6 differential property test across cap/overflow
+    cells, and encode stays at 1 alloc/op (#16173).
   * Add a lenient-bool completeness test that reflects recursively over
     compileOpts (including the embedded protocolScopeOpts) and requires
     every lenient*/sanitize* bool to be true in lenientCompileOpts(), so

@@ -211,103 +211,9 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	off += 6
 	binary.LittleEndian.PutUint16(buf[off:], val.FibGen)
 	off += 2
-	// #2170: install generation (length-gated trailing field).
-	binary.LittleEndian.PutUint64(buf[off:], val.Generation)
-	off += 8
-	// #3301: per-application idle timeout (seconds) + per-rule hit-counter
-	// handle (length-gated trailing fields). Old decoders stop after the
-	// generation and ignore these; absent => 0 (global timeout / no counter).
-	binary.LittleEndian.PutUint32(buf[off:], val.AppTimeout)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], val.PolicyCounterIdx)
-	off += 4
-	// #5274: admitting config epoch (length-gated trailing field). The cluster
-	// receiver refuses an install whose epoch is strictly older than its
-	// lastAppliedConfigGen (a stale permit across a config that now denies the
-	// session). Old decoders stop after PolicyCounterIdx and ignore it; absent
-	// => 0 (legacy peer / check disabled).
-	binary.LittleEndian.PutUint64(buf[off:], val.ConfigEpoch)
-	off += 8
-	// #5212: the originating node's stable RT_FLOW session id (length-gated
-	// trailing field). A peer-synced session ADOPTS this id on import instead of
-	// minting a fresh node-local one, so its RT_FLOW SESSION_CREATE/CLOSE records
-	// correlate across HA nodes. Old decoders stop after ConfigEpoch and ignore
-	// it; absent => 0 (legacy peer / fresh-local-id fallback).
-	binary.LittleEndian.PutUint64(buf[off:], val.RTFlowSessionID)
-	off += 8
-	// #7095: the CLUSTER-STABLE fold of the session's ingress interface name
-	// (length-gated trailing field). The #4983 ingress identity is an
-	// IFINDEX, which is node-local and would name a different NIC on the
-	// importing node, so what rides the wire is a fold of the RETH-RELATIVE
-	// name both chassis agree on. Old decoders stop after RTFlowSessionID and
-	// ignore it; absent => 0, which is also what a session with no
-	// cluster-stable ingress name and a fabric-redirected session (#7096)
-	// send. All three fall back to the #4792 zone approximation.
-	binary.LittleEndian.PutUint32(buf[off:], val.IngressIfaceFold)
-	off += 4
-	// #7188: the tunnel session-identity discriminator (length-gated trailing
-	// field). GRE is protocol 47 and has no L4 ports, so two RFC 2890 tunnels
-	// between one pair of outer endpoints are ONE 5-tuple and one wire key; this
-	// value is what the peer helper folds into the key it reconstructs so they
-	// stay two sessions. Opaque here — the tag is defined by the helper's
-	// TunnelDiscriminator::to_wire. Old decoders stop after IngressIfaceFold and
-	// ignore it; absent => 0, the RESERVED "not carried" tag, on which the peer
-	// helper WITHHOLDS a protocol-47 session rather than importing it aliased
-	// (#7188 decision 2). Every other protocol is unaffected.
-	binary.LittleEndian.PutUint64(buf[off:], val.TunnelDiscriminator)
-	off += 8
-	// #7239 (#7160/#2387): the session key's ROUTING DOMAIN (length-gated
-	// trailing field). CARRIED rather than derived on the peer: the importing
-	// node used to resolve the domain from IngressIfaceFold above, and that
-	// fold is stamped on the SEND path against the CURRENT config, so an
-	// ifindex recycled onto a sibling between install and sync imported the
-	// session into the SIBLING's routing domain — a cross-tenant mis-file in
-	// the field #7160 added to prevent one. This value is stamped at INSTALL
-	// from the interface the flow actually arrived on, so no later recycle can
-	// move it. Old decoders stop after TunnelDiscriminator; absent => 0, the
-	// default routing instance, which is legal and is the pre-#7160 behaviour.
-	// Like every trailing field since #2170 it does NOT bump
-	// SessionSyncWireVersion.
-	binary.LittleEndian.PutUint32(buf[off:], val.RoutingDomain)
-	off += 4
-	// #9412: the TCP close class (u8), length-gated after the routing domain.
-	// 0 = not carried or not closing. A decoder that predates this byte stops
-	// after RoutingDomain and imports the session exactly as before. Like every
-	// trailing field since #2170 it does NOT bump SessionSyncWireVersion.
-	buf[off] = val.TCPCloseClass
-	off++
-	// #9752: the installing-table identity (domain u32 LE + check u32 LE),
-	// length-gated after the close class. (0,0) = default table. A decoder
-	// that predates these 8 bytes stops after TCPCloseClass and imports the
-	// session exactly as before. Like every trailing field since #2170 it
-	// does NOT bump SessionSyncWireVersion.
-	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableDomain)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableCheck)
-	off += 4
-	// #10227: high SessionValue.Flags, length-gated after the existing
-	// install-table trailer. Old decoders stop before this byte; a new decoder
-	// reading an old payload defaults the high byte to zero. This preserves the
-	// mixed-version-safe default (legacy rows are treated as peer-owned by the
-	// receiver install path, while the map bit is never guessed on decode).
-	buf[off] = byte(val.Flags >> 8)
-	off++
-	// #11064: source-NAT ICMP identity follows high SessionValue.Flags.
-	// Its valid byte distinguishes absent metadata from (type=0, code=0).
-	buf[off] = 0
-	if val.SourceNatICMPValid {
-		buf[off] = 1
-	}
-	off++
-	buf[off] = val.SourceNatICMPType
-	off++
-	buf[off] = val.SourceNatICMPCode
-	off++
-	// #11070/#10888: policy rule ID and handshake state are a length-prefixed
-	// tail. #12075: a nonzero egress fold extends it after an explicit
-	// handshake byte, so legacy decoders read the same handshake and ignore
-	// the new trailing fold.
-	return appendSessionSyncMetadataTail(buf[:off], val.PolicyRuleID, val.TCPHandshakeState, val.EgressIfaceFold, val.PptpCallIDs, val.NatScopeFold)
+	tail := sessionValueTailView{&val}.sessionTail()
+	off = encodeSessionTailPreNat64(buf, off, tail)
+	return encodeSessionTailPostNat64(buf, off, tail)
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
 	payload := encodeSessionV6Payload(key, val)
@@ -396,93 +302,14 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	off += 6
 	binary.LittleEndian.PutUint16(buf[off:], val.FibGen)
 	off += 2
-	// #2170: install generation (length-gated trailing field).
-	binary.LittleEndian.PutUint64(buf[off:], val.Generation)
-	off += 8
-	// #3301: per-application idle timeout + per-rule hit-counter handle
-	// (length-gated trailing fields; see encodeSessionV4Payload).
-	binary.LittleEndian.PutUint32(buf[off:], val.AppTimeout)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], val.PolicyCounterIdx)
-	off += 4
-	// #4565: NAT64 translated pool SOURCE (4-byte IPv4), length-gated trailing
-	// field. Non-zero marks a NAT64 cross-family session so a peer-PROMOTED
-	// node rebuilds its reverse (v4->v6) BIB after failover. Only V6 sessions
-	// carry this (a NAT64 forward flow is keyed on the original IPv6 5-tuple).
-	// An old decoder stops after PolicyCounterIdx and ignores it (=> not NAT64).
+	tail := sessionValueV6TailView{&val}.sessionTail()
+	off = encodeSessionTailPreNat64(buf, off, tail)
+	// #4565: NAT64 translated pool SOURCE (4-byte IPv4), length-gated,
+	// V6-only: spliced between PolicyCounterIdx and ConfigEpoch exactly
+	// where the hand-written ladder carried it.
 	copy(buf[off:off+4], val.Nat64SnatV4[:])
 	off += 4
-	// #5274: admitting config epoch (length-gated trailing field; see
-	// encodeSessionV4Payload). Old decoders stop after Nat64SnatV4 and ignore
-	// it; absent => 0 (legacy peer / check disabled).
-	binary.LittleEndian.PutUint64(buf[off:], val.ConfigEpoch)
-	off += 8
-	// #5212: originating node's stable RT_FLOW session id (length-gated trailing
-	// field; see encodeSessionV4Payload). Old decoders stop after ConfigEpoch;
-	// absent => 0 (legacy peer / fresh-local-id fallback on import).
-	binary.LittleEndian.PutUint64(buf[off:], val.RTFlowSessionID)
-	off += 8
-	// #7095: the CLUSTER-STABLE fold of the session's ingress interface name
-	// (length-gated trailing field). The #4983 ingress identity is an
-	// IFINDEX, which is node-local and would name a different NIC on the
-	// importing node, so what rides the wire is a fold of the RETH-RELATIVE
-	// name both chassis agree on. Old decoders stop after RTFlowSessionID and
-	// ignore it; absent => 0, which is also what a session with no
-	// cluster-stable ingress name and a fabric-redirected session (#7096)
-	// send. All three fall back to the #4792 zone approximation.
-	binary.LittleEndian.PutUint32(buf[off:], val.IngressIfaceFold)
-	off += 4
-	// #7188: the tunnel session-identity discriminator (length-gated trailing
-	// field; see encodeSessionV4Payload for why identity needs it). Old decoders
-	// stop after IngressIfaceFold; absent => 0, the RESERVED "not carried" tag.
-	binary.LittleEndian.PutUint64(buf[off:], val.TunnelDiscriminator)
-	off += 8
-	// #7239 (#7160/#2387): the session key's ROUTING DOMAIN (length-gated
-	// trailing field). CARRIED rather than derived on the peer: the importing
-	// node used to resolve the domain from IngressIfaceFold above, and that
-	// fold is stamped on the SEND path against the CURRENT config, so an
-	// ifindex recycled onto a sibling between install and sync imported the
-	// session into the SIBLING's routing domain — a cross-tenant mis-file in
-	// the field #7160 added to prevent one. This value is stamped at INSTALL
-	// from the interface the flow actually arrived on, so no later recycle can
-	// move it. Old decoders stop after TunnelDiscriminator; absent => 0, the
-	// default routing instance, which is legal and is the pre-#7160 behaviour.
-	// Like every trailing field since #2170 it does NOT bump
-	// SessionSyncWireVersion.
-	binary.LittleEndian.PutUint32(buf[off:], val.RoutingDomain)
-	off += 4
-	// #9412: the TCP close class (u8), length-gated after the routing domain.
-	// 0 = not carried or not closing. A decoder that predates this byte stops
-	// after RoutingDomain and imports the session exactly as before.
-	buf[off] = val.TCPCloseClass
-	off++
-	// #9752: the installing-table identity (domain u32 LE + check u32 LE),
-	// length-gated after the close class. (0,0) = default table. A decoder
-	// that predates these 8 bytes stops after TCPCloseClass and imports the
-	// session exactly as before. Like every trailing field since #2170 it
-	// does NOT bump SessionSyncWireVersion.
-	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableDomain)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableCheck)
-	off += 4
-	// #10227: high SessionValue.Flags, length-gated after the existing
-	// install-table trailer. Old decoders stop before this byte; a new decoder
-	// reading an old payload defaults the high byte to zero.
-	buf[off] = byte(val.Flags >> 8)
-	off++
-	// #11064: v6 source-NAT ICMP identity follows high SessionValue.Flags.
-	// Its valid byte distinguishes absent metadata from (type=0, code=0).
-	buf[off] = 0
-	if val.SourceNatICMPValid {
-		buf[off] = 1
-	}
-	off++
-	buf[off] = val.SourceNatICMPType
-	off++
-	buf[off] = val.SourceNatICMPCode
-	off++
-	// #11070/#10888/#12075: v6 uses the same rule-ID/handshake/egress-fold tail.
-	return appendSessionSyncMetadataTail(buf[:off], val.PolicyRuleID, val.TCPHandshakeState, val.EgressIfaceFold, val.PptpCallIDs, val.NatScopeFold)
+	return encodeSessionTailPostNat64(buf, off, tail)
 }
 
 // appendSessionSyncMetadataTail preserves the optional legacy rule-ID and
@@ -528,6 +355,277 @@ func appendPptpCallIDs(payload []byte, callIDs uint64) []byte {
 	var pair [8]byte
 	binary.LittleEndian.PutUint64(pair[:], callIDs)
 	return append(payload, pair[:]...)
+}
+
+// sessionTail is the sync-only trailing field set both session value
+// types carry past the fixed on-map layout, in wire order (#16173).
+// SessionValue and SessionValueV6 hold every field under identical names
+// and types; Nat64SnatV4 is V6-only and sits between ConfigEpoch's
+// predecessors on the v6 wire (after PolicyCounterIdx, before
+// ConfigEpoch) — the family encoders/decoders splice it at exactly that
+// point and share everything else through this type. The local views
+// below adapt each value type without defining methods on dataplane
+// types.
+type sessionTail struct {
+	Generation          uint64
+	AppTimeout          uint32
+	PolicyCounterIdx    uint32
+	ConfigEpoch         uint64
+	RTFlowSessionID     uint64
+	IngressIfaceFold    uint32
+	TunnelDiscriminator uint64
+	RoutingDomain       uint32
+	TCPCloseClass       uint8
+	InstallTableDomain  uint32
+	InstallTableCheck   uint32
+	FlagsHigh           uint8 // high SessionValue.Flags byte (#10227)
+	SourceNatICMPValid  bool
+	SourceNatICMPType   uint8
+	SourceNatICMPCode   uint8
+	PolicyRuleID        string
+	TCPHandshakeState   uint8
+	EgressIfaceFold     uint32
+	PptpCallIDs         uint64
+	NatScopeFold        uint32
+}
+
+type sessionTailView interface {
+	sessionTail() sessionTail
+	setSessionTail(sessionTail)
+}
+
+type sessionValueTailView struct{ v *dataplane.SessionValue }
+
+func (w sessionValueTailView) sessionTail() sessionTail {
+	v := w.v
+	return sessionTail{
+		Generation: v.Generation, AppTimeout: v.AppTimeout, PolicyCounterIdx: v.PolicyCounterIdx,
+		ConfigEpoch: v.ConfigEpoch, RTFlowSessionID: v.RTFlowSessionID,
+		IngressIfaceFold: v.IngressIfaceFold, TunnelDiscriminator: v.TunnelDiscriminator,
+		RoutingDomain: v.RoutingDomain, TCPCloseClass: v.TCPCloseClass,
+		InstallTableDomain: v.InstallTableDomain, InstallTableCheck: v.InstallTableCheck,
+		FlagsHigh:          byte(v.Flags >> 8),
+		SourceNatICMPValid: v.SourceNatICMPValid, SourceNatICMPType: v.SourceNatICMPType,
+		SourceNatICMPCode: v.SourceNatICMPCode, PolicyRuleID: v.PolicyRuleID,
+		TCPHandshakeState: v.TCPHandshakeState, EgressIfaceFold: v.EgressIfaceFold,
+		PptpCallIDs: v.PptpCallIDs, NatScopeFold: v.NatScopeFold,
+	}
+}
+
+func (w sessionValueTailView) setSessionTail(t sessionTail) {
+	v := w.v
+	v.Generation, v.AppTimeout, v.PolicyCounterIdx = t.Generation, t.AppTimeout, t.PolicyCounterIdx
+	v.ConfigEpoch, v.RTFlowSessionID = t.ConfigEpoch, t.RTFlowSessionID
+	v.IngressIfaceFold, v.TunnelDiscriminator = t.IngressIfaceFold, t.TunnelDiscriminator
+	v.RoutingDomain, v.TCPCloseClass = t.RoutingDomain, t.TCPCloseClass
+	v.InstallTableDomain, v.InstallTableCheck = t.InstallTableDomain, t.InstallTableCheck
+	v.Flags = (v.Flags & 0x00FF) | uint16(t.FlagsHigh)<<8
+	v.SourceNatICMPValid, v.SourceNatICMPType, v.SourceNatICMPCode = t.SourceNatICMPValid, t.SourceNatICMPType, t.SourceNatICMPCode
+	v.PolicyRuleID, v.TCPHandshakeState = t.PolicyRuleID, t.TCPHandshakeState
+	v.EgressIfaceFold, v.PptpCallIDs, v.NatScopeFold = t.EgressIfaceFold, t.PptpCallIDs, t.NatScopeFold
+}
+
+type sessionValueV6TailView struct{ v *dataplane.SessionValueV6 }
+
+func (w sessionValueV6TailView) sessionTail() sessionTail {
+	v := w.v
+	return sessionTail{
+		Generation: v.Generation, AppTimeout: v.AppTimeout, PolicyCounterIdx: v.PolicyCounterIdx,
+		ConfigEpoch: v.ConfigEpoch, RTFlowSessionID: v.RTFlowSessionID,
+		IngressIfaceFold: v.IngressIfaceFold, TunnelDiscriminator: v.TunnelDiscriminator,
+		RoutingDomain: v.RoutingDomain, TCPCloseClass: v.TCPCloseClass,
+		InstallTableDomain: v.InstallTableDomain, InstallTableCheck: v.InstallTableCheck,
+		FlagsHigh:          byte(v.Flags >> 8),
+		SourceNatICMPValid: v.SourceNatICMPValid, SourceNatICMPType: v.SourceNatICMPType,
+		SourceNatICMPCode: v.SourceNatICMPCode, PolicyRuleID: v.PolicyRuleID,
+		TCPHandshakeState: v.TCPHandshakeState, EgressIfaceFold: v.EgressIfaceFold,
+		PptpCallIDs: v.PptpCallIDs, NatScopeFold: v.NatScopeFold,
+	}
+}
+
+func (w sessionValueV6TailView) setSessionTail(t sessionTail) {
+	v := w.v
+	v.Generation, v.AppTimeout, v.PolicyCounterIdx = t.Generation, t.AppTimeout, t.PolicyCounterIdx
+	v.ConfigEpoch, v.RTFlowSessionID = t.ConfigEpoch, t.RTFlowSessionID
+	v.IngressIfaceFold, v.TunnelDiscriminator = t.IngressIfaceFold, t.TunnelDiscriminator
+	v.RoutingDomain, v.TCPCloseClass = t.RoutingDomain, t.TCPCloseClass
+	v.InstallTableDomain, v.InstallTableCheck = t.InstallTableDomain, t.InstallTableCheck
+	v.Flags = (v.Flags & 0x00FF) | uint16(t.FlagsHigh)<<8
+	v.SourceNatICMPValid, v.SourceNatICMPType, v.SourceNatICMPCode = t.SourceNatICMPValid, t.SourceNatICMPType, t.SourceNatICMPCode
+	v.PolicyRuleID, v.TCPHandshakeState = t.PolicyRuleID, t.TCPHandshakeState
+	v.EgressIfaceFold, v.PptpCallIDs, v.NatScopeFold = t.EgressIfaceFold, t.PptpCallIDs, t.NatScopeFold
+}
+
+// encodeSessionTailPreNat64 writes the tail fields that precede the
+// V6-only Nat64SnatV4 slot: Generation, AppTimeout, PolicyCounterIdx.
+// encodeSessionTailPostNat64 writes the rest, in wire order, finishing
+// with the variable metadata tail. A family without the Nat64 slot calls
+// Pre then Post back-to-back, producing identical bytes to the previous
+// hand-written ladders (pinned by TestSessionTailGoldenBytes16173).
+func encodeSessionTailPreNat64(buf []byte, off int, t sessionTail) int {
+	// #2170: install generation (length-gated trailing field).
+	binary.LittleEndian.PutUint64(buf[off:], t.Generation)
+	off += 8
+	// #3301: per-application idle timeout (seconds) + per-rule hit-counter
+	// handle (length-gated trailing fields). Old decoders stop after the
+	// generation and ignore these; absent => 0.
+	binary.LittleEndian.PutUint32(buf[off:], t.AppTimeout)
+	off += 4
+	binary.LittleEndian.PutUint32(buf[off:], t.PolicyCounterIdx)
+	off += 4
+	return off
+}
+
+func encodeSessionTailPostNat64(buf []byte, off int, t sessionTail) []byte {
+	// #5274: admitting config epoch (length-gated). Old decoders stop
+	// after PolicyCounterIdx (v4) / Nat64SnatV4 (v6); absent => 0.
+	binary.LittleEndian.PutUint64(buf[off:], t.ConfigEpoch)
+	off += 8
+	// #5212: originating node's stable RT_FLOW session id (length-gated).
+	binary.LittleEndian.PutUint64(buf[off:], t.RTFlowSessionID)
+	off += 8
+	// #7095: cluster-stable ingress-interface fold (length-gated).
+	binary.LittleEndian.PutUint32(buf[off:], t.IngressIfaceFold)
+	off += 4
+	// #7188: tunnel session-identity discriminator (length-gated);
+	// absent => 0, the RESERVED "not carried" tag.
+	binary.LittleEndian.PutUint64(buf[off:], t.TunnelDiscriminator)
+	off += 8
+	// #7239: routing domain (length-gated). Absent => 0 (default RI).
+	binary.LittleEndian.PutUint32(buf[off:], t.RoutingDomain)
+	off += 4
+	// #9412: TCP close class (length-gated u8 after the routing domain).
+	buf[off] = t.TCPCloseClass
+	off++
+	// #9752: installing-table identity (domain u32 + check u32,
+	// length-gated after the close class).
+	binary.LittleEndian.PutUint32(buf[off:], t.InstallTableDomain)
+	off += 4
+	binary.LittleEndian.PutUint32(buf[off:], t.InstallTableCheck)
+	off += 4
+	// #10227: high SessionValue.Flags (length-gated byte).
+	buf[off] = t.FlagsHigh
+	off++
+	// #11064: source-NAT ICMP identity; the valid byte distinguishes an
+	// absent identity from (type=0, code=0).
+	buf[off] = 0
+	if t.SourceNatICMPValid {
+		buf[off] = 1
+	}
+	off++
+	buf[off] = t.SourceNatICMPType
+	off++
+	buf[off] = t.SourceNatICMPCode
+	off++
+	// #11070/#10888/#12075: rule-ID / handshake / egress-fold tail.
+	return appendSessionSyncMetadataTail(buf[:off], t.PolicyRuleID, t.TCPHandshakeState, t.EgressIfaceFold, t.PptpCallIDs, t.NatScopeFold)
+}
+
+// decodeSessionTailPreNat64 reads the tail fields preceding the V6-only
+// Nat64 slot, each length-gated (absent => 0 = legacy peer). It returns
+// the advanced offset; the caller splices its family-only field, then
+// calls decodeSessionTailPostNat64.
+func decodeSessionTailPreNat64(payload []byte, off int, t *sessionTail) int {
+	// #2170: install generation (length-gated; absent → 0 = legacy peer).
+	if off+8 <= len(payload) {
+		t.Generation = binary.LittleEndian.Uint64(payload[off:])
+		off += 8
+	}
+	// #3301: app timeout + policy counter (length-gated; absent → 0).
+	if off+4 <= len(payload) {
+		t.AppTimeout = binary.LittleEndian.Uint32(payload[off:])
+		off += 4
+	}
+	if off+4 <= len(payload) {
+		t.PolicyCounterIdx = binary.LittleEndian.Uint32(payload[off:])
+		off += 4
+	}
+	return off
+}
+
+func decodeSessionTailPostNat64(payload []byte, off int, t *sessionTail) {
+	// #5274: admitting config epoch (length-gated; absent → 0).
+	if off+8 <= len(payload) {
+		t.ConfigEpoch = binary.LittleEndian.Uint64(payload[off:])
+		off += 8
+	}
+	// #5212: RT_FLOW session id (length-gated; absent → 0).
+	if off+8 <= len(payload) {
+		t.RTFlowSessionID = binary.LittleEndian.Uint64(payload[off:])
+		off += 8
+	}
+	// #7095: ingress-interface fold (length-gated; absent → 0).
+	if off+4 <= len(payload) {
+		t.IngressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
+		off += 4
+	}
+	// #7188: tunnel discriminator (length-gated; absent → 0 RESERVED).
+	if off+8 <= len(payload) {
+		t.TunnelDiscriminator = binary.LittleEndian.Uint64(payload[off:])
+		off += 8
+	}
+	// #7239: routing domain (length-gated; absent => 0 default RI).
+	if off+4 <= len(payload) {
+		t.RoutingDomain = binary.LittleEndian.Uint32(payload[off:])
+		off += 4
+	}
+	// #9412: close class (length-gated; absent => 0 not carried).
+	if off+1 <= len(payload) {
+		t.TCPCloseClass = payload[off]
+		off++
+	}
+	// #9752 + #10227: installing-table identity, then — only after the
+	// complete table trailer — the high Flags byte. A partial legacy
+	// tail cannot be reinterpreted as origin bits.
+	if off+8 <= len(payload) {
+		t.InstallTableDomain = binary.LittleEndian.Uint32(payload[off:])
+		t.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4:])
+		off += 8
+		if off+1 <= len(payload) {
+			t.FlagsHigh = payload[off]
+			off++
+		}
+	}
+	// #11064: source-NAT ICMP identity after high Flags.
+	if off+3 <= len(payload) {
+		t.SourceNatICMPValid = payload[off] != 0
+		t.SourceNatICMPType = payload[off+1]
+		t.SourceNatICMPCode = payload[off+2]
+		off += 3
+	}
+	// #13965: an optional final u64 carries the PPTP pair after the
+	// variable metadata.
+	tailEnd := len(payload)
+	if t.TunnelDiscriminator>>32 == 2 && tailEnd-off >= 8 {
+		callIDs := binary.LittleEndian.Uint64(payload[tailEnd-8:])
+		if callIDs>>32 == 1 {
+			t.PptpCallIDs = callIDs
+			tailEnd -= 8
+		}
+	}
+	if off+2 <= tailEnd {
+		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
+		off += 2
+		if ruleIDLen <= tailEnd-off {
+			if ruleIDLen != 0 {
+				t.PolicyRuleID = string(payload[off : off+ruleIDLen])
+			}
+			off += ruleIDLen
+			remaining := tailEnd - off
+			if remaining >= 9 {
+				t.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+				off++
+				t.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
+				t.NatScopeFold = binary.LittleEndian.Uint32(payload[off+4:])
+			} else if remaining >= 5 {
+				t.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+				off++
+				t.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
+			} else if remaining > 0 {
+				t.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+			}
+		}
+	}
 }
 
 // PurgeRetirementOnly is the one cluster-owned interpretation of the
@@ -861,114 +959,10 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 		val.FibGen = binary.LittleEndian.Uint16(payload[off:])
 		off += 2
 	}
-	// #2170: install generation (length-gated; absent → 0 = legacy peer).
-	if off+8 <= len(payload) {
-		val.Generation = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #3301: per-application idle timeout + per-rule hit-counter handle
-	// (length-gated; absent → 0 = legacy peer / global timeout / no counter).
-	if off+4 <= len(payload) {
-		val.AppTimeout = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
-	if off+4 <= len(payload) {
-		val.PolicyCounterIdx = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
-	// #5274: admitting config epoch (length-gated; absent → 0 = legacy peer /
-	// config-epoch check disabled).
-	if off+8 <= len(payload) {
-		val.ConfigEpoch = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #5212: originating node's stable RT_FLOW session id (length-gated; absent →
-	// 0 = legacy peer, receiver allocs a fresh local id on import).
-	if off+8 <= len(payload) {
-		val.RTFlowSessionID = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #7095: cluster-stable ingress-interface fold (length-gated; absent → 0 =
-	// legacy peer / no stable name / fabric-redirected, all of which fall back
-	// to the zone approximation).
-	if off+4 <= len(payload) {
-		val.IngressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
-	// #7188: tunnel session-identity discriminator (length-gated; absent → 0 =
-	// the RESERVED "not carried" tag, on which the peer helper withholds a
-	// protocol-47 session rather than importing it aliased onto another RFC 2890
-	// tunnel's key).
-	if off+8 <= len(payload) {
-		val.TunnelDiscriminator = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #7239: length-gated trailing routing domain. Absent => 0 (the default
-	// routing instance), which is what a peer predating this field sends and
-	// what every deployment with no routing-instance interface membership
-	// carries.
-	if off+4 <= len(payload) {
-		val.RoutingDomain = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
-	// #9412: length-gated trailing close class. Absent => 0 (not carried),
-	// which is what a peer predating this field sends.
-	if off+1 <= len(payload) {
-		val.TCPCloseClass = payload[off]
-		off++
-	}
-	// #9752: length-gated trailing installing-table identity. Absent => (0,0)
-	// (default table), which is what a peer predating these bytes sends.
-	// #10227: high SessionValue.Flags follows only after the complete table
-	// trailer. A partial legacy tail cannot be reinterpreted as origin bits.
-	if off+8 <= len(payload) {
-		val.InstallTableDomain = binary.LittleEndian.Uint32(payload[off:])
-		val.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4:])
-		off += 8
-		if off+1 <= len(payload) {
-			val.Flags |= uint16(payload[off]) << 8
-			off++
-		}
-	}
-	// #11064: length-gated source-NAT ICMP identity after high SessionValue.Flags.
-	if off+3 <= len(payload) {
-		val.SourceNatICMPValid = payload[off] != 0
-		val.SourceNatICMPType = payload[off+1]
-		val.SourceNatICMPCode = payload[off+2]
-		off += 3
-	}
-	// #13965: an optional final u64 carries the PPTP pair after variable metadata.
-	tailEnd := len(payload)
-	if val.TunnelDiscriminator>>32 == 2 && tailEnd-off >= 8 {
-		callIDs := binary.LittleEndian.Uint64(payload[tailEnd-8:])
-		if callIDs>>32 == 1 {
-			val.PptpCallIDs = callIDs
-			tailEnd -= 8
-		}
-	}
-	if off+2 <= tailEnd {
-		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
-		off += 2
-		if ruleIDLen <= tailEnd-off {
-			if ruleIDLen != 0 {
-				val.PolicyRuleID = string(payload[off : off+ruleIDLen])
-			}
-			off += ruleIDLen
-			remaining := tailEnd - off
-			if remaining >= 9 {
-				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
-				off++
-				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
-				val.NatScopeFold = binary.LittleEndian.Uint32(payload[off+4:])
-			} else if remaining >= 5 {
-				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
-				off++
-				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
-			} else if remaining > 0 {
-				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
-			}
-		}
-	}
+	var tail sessionTail
+	off = decodeSessionTailPreNat64(payload, off, &tail)
+	decodeSessionTailPostNat64(payload, off, &tail)
+	sessionValueTailView{&val}.setSessionTail(tail)
 	return key, val, true
 }
 
@@ -1083,120 +1077,16 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 		val.FibGen = binary.LittleEndian.Uint16(payload[off:])
 		off += 2
 	}
-	// #2170: install generation (length-gated; absent → 0 = legacy peer).
-	if off+8 <= len(payload) {
-		val.Generation = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #3301: per-application idle timeout + per-rule hit-counter handle
-	// (length-gated; absent → 0 = legacy peer / global timeout / no counter).
-	if off+4 <= len(payload) {
-		val.AppTimeout = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
-	if off+4 <= len(payload) {
-		val.PolicyCounterIdx = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
+	var tail sessionTail
+	off = decodeSessionTailPreNat64(payload, off, &tail)
 	// #4565: NAT64 translated pool SOURCE (length-gated; absent => all-zero =
 	// not NAT64, the rolling-upgrade-safe default from a legacy peer).
 	if off+4 <= len(payload) {
 		copy(val.Nat64SnatV4[:], payload[off:off+4])
 		off += 4
 	}
-	// #5274: admitting config epoch (length-gated; absent → 0 = legacy peer /
-	// config-epoch check disabled).
-	if off+8 <= len(payload) {
-		val.ConfigEpoch = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #5212: originating node's stable RT_FLOW session id (length-gated; absent →
-	// 0 = legacy peer, receiver allocs a fresh local id on import).
-	if off+8 <= len(payload) {
-		val.RTFlowSessionID = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #7095: cluster-stable ingress-interface fold (length-gated; absent → 0 =
-	// legacy peer / no stable name / fabric-redirected, all of which fall back
-	// to the zone approximation).
-	if off+4 <= len(payload) {
-		val.IngressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
-	// #7188: tunnel session-identity discriminator (length-gated; absent → 0 =
-	// the RESERVED "not carried" tag, on which the peer helper withholds a
-	// protocol-47 session rather than importing it aliased onto another RFC 2890
-	// tunnel's key).
-	if off+8 <= len(payload) {
-		val.TunnelDiscriminator = binary.LittleEndian.Uint64(payload[off:])
-		off += 8
-	}
-	// #7239: length-gated trailing routing domain. Absent => 0 (the default
-	// routing instance), which is what a peer predating this field sends and
-	// what every deployment with no routing-instance interface membership
-	// carries.
-	if off+4 <= len(payload) {
-		val.RoutingDomain = binary.LittleEndian.Uint32(payload[off:])
-		off += 4
-	}
-	// #9412: length-gated trailing close class. Absent => 0 (not carried),
-	// which is what a peer predating this field sends.
-	if off+1 <= len(payload) {
-		val.TCPCloseClass = payload[off]
-		off++
-	}
-	// #9752: length-gated trailing installing-table identity. Absent => (0,0)
-	// (default table), which is what a peer predating these bytes sends.
-	// #10227: high SessionValue.Flags follows only after the complete table
-	// trailer. A partial legacy tail cannot be reinterpreted as origin bits.
-	if off+8 <= len(payload) {
-		val.InstallTableDomain = binary.LittleEndian.Uint32(payload[off:])
-		val.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4:])
-		off += 8
-		if off+1 <= len(payload) {
-			val.Flags |= uint16(payload[off]) << 8
-			off++
-		}
-	}
-	// #11064: length-gated source-NAT ICMP identity after high SessionValue.Flags.
-	if off+3 <= len(payload) {
-		val.SourceNatICMPValid = payload[off] != 0
-		val.SourceNatICMPType = payload[off+1]
-		val.SourceNatICMPCode = payload[off+2]
-		off += 3
-	}
-	// #13965: an optional final u64 carries the PPTP pair after variable metadata.
-	tailEnd := len(payload)
-	if val.TunnelDiscriminator>>32 == 2 && tailEnd-off >= 8 {
-		callIDs := binary.LittleEndian.Uint64(payload[tailEnd-8:])
-		if callIDs>>32 == 1 {
-			val.PptpCallIDs = callIDs
-			tailEnd -= 8
-		}
-	}
-	if off+2 <= tailEnd {
-		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
-		off += 2
-		if ruleIDLen <= tailEnd-off {
-			if ruleIDLen != 0 {
-				val.PolicyRuleID = string(payload[off : off+ruleIDLen])
-			}
-			off += ruleIDLen
-			remaining := tailEnd - off
-			if remaining >= 9 {
-				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
-				off++
-				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
-				val.NatScopeFold = binary.LittleEndian.Uint32(payload[off+4:])
-			} else if remaining >= 5 {
-				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
-				off++
-				val.EgressIfaceFold = binary.LittleEndian.Uint32(payload[off:])
-			} else if remaining > 0 {
-				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
-			}
-		}
-	}
+	decodeSessionTailPostNat64(payload, off, &tail)
+	sessionValueV6TailView{&val}.setSessionTail(tail)
 	return key, val, true
 }
 
