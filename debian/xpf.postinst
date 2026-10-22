@@ -236,7 +236,7 @@ case "$1" in
             # non-zero postinst leaves dpkg half-configured).
             # Establish a launchable path BEFORE handing control to seed-runtime.
             # If dpkg kills this shell while the child is copying or repointing
-            # links, #DEBHELPER# may never run and the next boot still needs the
+            # links, the debhelper snippet may never run and the next boot still needs the
             # staged binaries to exist at their stable sbin names.
             mkdir -p "$SBIN"
             for b in $BINS; do
