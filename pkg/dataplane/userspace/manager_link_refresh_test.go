@@ -275,6 +275,37 @@ func TestInterfaceLinkRefreshPreservesMarkersUntilRetrySucceeds11530(t *testing.
 	}
 }
 
+// TestInterfaceLinkRefreshAdoptsConflictRetryGeneration16153 is the
+// link-refresh call-site regression for the #9520 content-conflict retry:
+// the send consumes the refused generation 8 and republishes at 9, and
+// the adoption must commit 9 — not the stale pre-retry generation copied
+// into pub.snap before the send. A helper-only adoption test would miss
+// this, because the defect was the link-refresh caller not threading the
+// post-send snapshot into the shared adopter.
+func TestInterfaceLinkRefreshAdoptsConflictRetryGeneration16153(t *testing.T) {
+	cfg := interfaceLinkRefreshConfig11530()
+	m, _, setLink := interfaceLinkRefreshManager11530(t, cfg, "ge-0-0-0", 17, 1500)
+	m.appliedSnapshot = appliedSnapshot{Config: cfg, Generation: m.lastSnapshot.Generation}
+
+	rec := &applyRecorder9520{replies: []error{contentConflict9520(8)}}
+	m.controlRequestHook = rec.hook
+
+	setLink(17, 9000)
+	published, err := m.RefreshInterfaceRowsForLink(cfg, "ge-0-0-0")
+	if err != nil || !published {
+		t.Fatalf("link refresh after content conflict = (%t, %v), want successful publication", published, err)
+	}
+	if got := rec.generations(); len(got) != 2 || got[0] != 8 || got[1] != 9 {
+		t.Fatalf("apply_snapshot generations = %v, want [8 9]", got)
+	}
+	if m.generation != 9 || m.lastSnapshot.Generation != 9 ||
+		m.publishedSnapshot != 9 || m.appliedSnapshot.Generation != 9 {
+		t.Fatalf("link-refresh bookkeeping must commit the generation actually published (9): "+
+			"generation=%d last=%d published=%d applied=%d",
+			m.generation, m.lastSnapshot.Generation, m.publishedSnapshot, m.appliedSnapshot.Generation)
+	}
+}
+
 func TestInterfaceLinkRefreshUsesRealKernelLinkChurn11530(t *testing.T) {
 	runtime.LockOSThread()
 	original, err := netns.Get()

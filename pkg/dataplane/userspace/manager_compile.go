@@ -1291,18 +1291,12 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 		// tick and surfaces the stale-enforcement metric.
 		return fmt.Errorf("userspace: refusing snapshot publish to incompatible helper: %w", err)
 	}
-	next := *m.lastSnapshot
-	// A full snapshot can be retained before its first apply_snapshot when
-	// startup publication is deferred or the apply outcome is unknown. If this
-	// scheduler publish is the first accepted publication, keep its single-use
-	// rename metadata; otherwise this partial republish consumes it.
-	if !m.pendingFullSnapshotMetadata {
-		stripSingleUseCommitMetadata(&next)
-	}
-	nextGeneration := m.generation + 1
-	next.Generation = nextGeneration
-	next.FIBGeneration = m.readFIBGeneration()
-	next.GeneratedAt = time.Now().UTC()
+	// #16153 (P3): retained clone + bump via the shared pipeline (this
+	// publisher is a non-prehashed requestApplySnapshotLocked caller, so
+	// its post-publish hash stays authoritative — see the pipeline doc).
+	next, _ := m.cloneRetainedSnapshotLocked()
+	nextGeneration := m.bumpRetainedGenerationLocked(&next)
+	_ = nextGeneration
 	next.Config = cfg
 	next.schedulerActiveState = copyPolicySchedulerActiveState(activeCopy)
 	next.schedulerActiveStateSet = true
@@ -1343,48 +1337,13 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 		// retries autonomously on the next scheduler tick.
 		return fmt.Errorf("userspace: publish policy scheduler snapshot: %w", err)
 	}
-	// #15043: retain the prepared struct, not just its Interfaces.
-	// requestApplySnapshotLocked revalidated the rows and rebuilt every
-	// derived section (#14209) into publishSnap; copying back only
-	// Interfaces would keep the stale mirror/tunnel/route rows in
-	// m.lastSnapshot for every later republish while the hash below
-	// describes the rebuilt copy. Neighbors stays uncaptured: publishSnap
-	// carries the publishable-only filter, not the retained set.
-	next.Interfaces = publishSnap.Interfaces
-	next.Routes = publishSnap.Routes
-	next.LearnedRouteImportCapped = publishSnap.LearnedRouteImportCapped
-	next.Fabrics = publishSnap.Fabrics
-	next.TunnelEndpoints = publishSnap.TunnelEndpoints
-	next.MirrorConfigs = publishSnap.MirrorConfigs
-	next.MirrorExclusions = publishSnap.MirrorExclusions
-	next.SourceNAT = publishSnap.SourceNAT
-	next.Zones = publishSnap.Zones
-	next.Summary = publishSnap.Summary
-	next.ZoneSetValidated = publishSnap.ZoneSetValidated
-	next.zoneIDCollisions = publishSnap.zoneIDCollisions
-	next.wgFanUpBaseRows = publishSnap.wgFanUpBaseRows
-	next.xfrmDumpFailed = publishSnap.xfrmDumpFailed
-	// The helper accepted the snapshot, so its scheduler bits now match the
-	// desired state carried by this snapshot. Commit the applied/show cache only
-	// at this success boundary; every return above leaves it unchanged.
-	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
-	m.logWgEndpointSetTransitionLocked(&publishSnap, "policy-scheduler")
-	// #9520: commit the generation apply_snapshot carried, which a content-conflict
-	// republish moves past nextGeneration.
-	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
-	m.lastSnapshot = &next
-	m.rebuildNeighborIndex()
-	m.rebuildMonitoredIfindexes()
-	m.publishedSnapshot = next.Generation
-	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
-	// #2079: full apply_snapshot succeeded — record the applied snapshot.
-	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&publishSnap); ok {
-		m.lastSnapshotHash = h
-	}
-	m.resolvePartialOutcomesLocked(resampled)
-	m.armPendingHAStateReplayLocked(wasDebt)
+	// #15043/#16153: retain the prepared struct (copyPreparedSectionsBack
+	// inside adoptPreparedPublishLocked), then the shared adopt. The
+	// helper accepted the snapshot, so its scheduler bits now match the
+	// desired state; every return above leaves the applied cache unchanged.
+	// #9520: adopt commits the generation apply_snapshot carried, which a
+	// content-conflict republish moves past nextGeneration.
+	m.adoptPreparedPublishLocked(&next, &publishSnap, "policy-scheduler", wasDebt, resampled)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		// #3780: the snapshot DID land (generation bumped, lastSnapshot
 		// updated above) — the schedule transition converged. A status

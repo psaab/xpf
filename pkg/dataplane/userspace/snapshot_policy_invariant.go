@@ -36,6 +36,63 @@ import (
 // it and the next consistent publish converges.
 var errSnapshotPolicyMismatch = errors.New("userspace: snapshot policy count mismatch; refusing snapshot publish (#15742)")
 
+// #16153 (W2.4 P2-narrowed): typed policy actions with the invariant
+// check as the deliverable. Go gives no exhaustiveness, so instead of
+// pretending a string-to-enum conversion is checked, the send-site gate
+// validates every action token against the typed vocabulary below.
+// The permit/deny/reject (security policy) and accept/discard/reject
+// (firewall filter) vocabularies are deliberately NOT unified: they are
+// distinct Junos surfaces with distinct Rust readers, and the reject
+// token is shared spelling, not a shared meaning. The Rust enum is the
+// enforcement backstop (parse_action in userspace-dp/src/policy.rs
+// rejects unknown tokens fail-closed); it does not gate this Go check.
+
+// policyAction is the typed form of a security-policy wire action
+// (PolicyRuleSnapshot.Action and ConfigSnapshot.DefaultPolicy). The
+// string values are the wire tokens; typedPolicyAction validates
+// without changing them, so the wire stays byte-identical.
+type policyAction string
+
+const (
+	policyActionPermit policyAction = "permit"
+	policyActionDeny   policyAction = "deny"
+	policyActionReject policyAction = "reject"
+)
+
+// valid reports whether the token is one of the known policy actions.
+// The empty token is NOT valid for a rule action (every configured rule
+// carries a concrete action; Rust rejects empty fail-closed, #3365).
+// For DefaultPolicy the empty token is the legitimate omitempty wire
+// state that decodes to deny in Rust — validateSnapshotForSend applies
+// that exception explicitly rather than weakening this predicate.
+func (a policyAction) valid() bool {
+	switch a {
+	case policyActionPermit, policyActionDeny, policyActionReject:
+		return true
+	}
+	return false
+}
+
+// typedPolicyAction converts a wire token to its typed form, reporting
+// false for any token outside the vocabulary (empty, malformed, or a
+// future variant such as "reject-*"). Callers that admit a snapshot
+// must fail closed on !ok rather than collapsing the token to deny:
+// collapsing an unrecognized REJECT variant to deny loses the
+// RST/ICMP-unreachable reply (fail-open in effect), which is exactly
+// the Rust #3365 rationale mirrored at the Go send gate.
+func typedPolicyAction(token string) (policyAction, bool) {
+	a := policyAction(token)
+	return a, a.valid()
+}
+
+// errSnapshotPolicyAction marks a snapshot send refused because a
+// policy action token is outside the typed vocabulary. Like
+// errSnapshotPolicyMismatch it provably never reached the helper (the
+// gate runs before the control request), so isKnownUnsentFailure in
+// process_control.go matches it and it never adopts retry-debt
+// authority.
+var errSnapshotPolicyAction = errors.New("userspace: snapshot policy action invalid; refusing snapshot publish (#16153)")
+
 // firstPolicyZonePair renders the first published rule's zone pair for
 // refusal logs, or the first compiled config zone pair when the snapshot
 // carries no rules (the dropped-field case, where the zone pair is the
@@ -151,6 +208,35 @@ func (m *Manager) reconcileExpectedPolicyCountFromStatusLocked() {
 func (m *Manager) validateSnapshotForSend(snap *ConfigSnapshot) error {
 	if snap == nil {
 		return nil
+	}
+	// #16153 (P2): typed-action invariant. Every rule action must be a
+	// known permit/deny/reject token, and a non-empty DefaultPolicy must
+	// be one too (empty = the legitimate omitempty unspecified state
+	// Rust decodes to deny). An unknown/empty rule action or a garbage
+	// default is refused known-unsent BEFORE the count arms: the Go
+	// lowerer (policyActionString) can only emit the three tokens, so a
+	// violation here means a hand-built, corrupt, or version-drifted
+	// snapshot — failing closed here keeps the prior enforced snapshot
+	// live instead of shipping a token whose Rust reading the operator
+	// never configured. This check does not collapse unknown tokens to
+	// deny (see typedPolicyAction) and does not touch the firewall-
+	// filter accept/discard vocabulary, which has its own reader.
+	if _, ok := typedPolicyAction(snap.DefaultPolicy); snap.DefaultPolicy != "" && !ok {
+		slog.Error("userspace: refusing snapshot send: default policy action is not a known token",
+			"default_policy", snap.DefaultPolicy,
+			"generation", snap.Generation)
+		return fmt.Errorf("%w: default_policy %q is not a known policy action (generation %d)",
+			errSnapshotPolicyAction, snap.DefaultPolicy, snap.Generation)
+	}
+	for i := range snap.Policies {
+		if _, ok := typedPolicyAction(snap.Policies[i].Action); !ok {
+			slog.Error("userspace: refusing snapshot send: policy rule action is not a known token",
+				"rule", snap.Policies[i].Name,
+				"action", snap.Policies[i].Action,
+				"generation", snap.Generation)
+			return fmt.Errorf("%w: policy rule %q action %q is not a known policy action (generation %d)",
+				errSnapshotPolicyAction, snap.Policies[i].Name, snap.Policies[i].Action, snap.Generation)
+		}
 	}
 	if snap.Summary.PolicyCount != len(snap.Policies) {
 		slog.Error("userspace: refusing snapshot send: summary policy count does not match published policies",

@@ -125,12 +125,12 @@ func stampCaptureAuthorityWithRoutesMode(snap *ConfigSnapshot, provider CaptureE
 	if snap == nil || provider == nil {
 		return
 	}
-	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows :=
-		provider(snap.Generation, snap.FIBGeneration)
-	snap.PermitEpoch = permitEpoch
-	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
-	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
-	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+	// #16153 (P4): the four capture fields are stamped through the shared
+	// capture-authority helper so this builder stamp and the retained-
+	// snapshot refresh (refreshCaptureAuthorityLocked) cannot drift on
+	// which fields a stamp writes or how the slices are detached.
+	fields := captureAuthorityFromProvider(snap, provider)
+	fields.applyTo(snap)
 	if allowRouteDump {
 		stampPMechInventoryWithPrefetch(snap, prefetch)
 	} else if len(snap.IpsecTunnelRows) == 0 || prefetch.matches(snap) {
@@ -149,12 +149,9 @@ func (m *Manager) refreshCaptureAuthorityLocked(snap *ConfigSnapshot) {
 	if m == nil || snap == nil || m.captureEpochProvider == nil {
 		return
 	}
-	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows :=
-		m.captureEpochProvider(snap.Generation, snap.FIBGeneration)
-	snap.PermitEpoch = permitEpoch
-	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
-	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
-	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+	// #16153 (P4): same shared stamp as the builder path — see
+	// stampCaptureAuthorityWithRoutesMode.
+	captureAuthorityFromProvider(snap, m.captureEpochProvider).applyTo(snap)
 	refreshPMechInventoryLocked(snap)
 }
 

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
-	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -212,20 +211,17 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		return false, fmt.Errorf("refusing route overlay publish to incompatible helper: %w", err)
 	}
 
-	next := *m.lastSnapshot
-	// A full snapshot can be retained before its first apply_snapshot when
-	// startup publication is deferred or the apply outcome is unknown. This
-	// overlay can be the first accepted publication, so preserve its
-	// single-use rename metadata until a publication or status catch-up clears
-	// the latch. Generation inequality is insufficient because FIB bumps
-	// advance lastSnapshot.Generation without consuming a full snapshot.
-	if !m.pendingFullSnapshotMetadata {
-		stripSingleUseCommitMetadata(&next)
-	}
-	nextGeneration := m.generation + 1
-	next.Generation = nextGeneration
-	next.FIBGeneration = m.readFIBGeneration()
-	next.GeneratedAt = time.Now().UTC()
+	next, _ := m.cloneRetainedSnapshotLocked()
+	// #16153 (P3): clone/bump/hash/dedup/adopt bookkeeping is the shared
+	// partial-publisher pipeline (manager_partial_publish.go); this
+	// publisher keeps only its prep (route rebuild, scheduler rebuild,
+	// capture refresh) and its dedup predicate. The clone preserves the
+	// single-use rename metadata when the pending-full-snapshot latch
+	// says this overlay can be the first accepted publication (a FIB
+	// bump advancing lastSnapshot.Generation does not consume a full
+	// snapshot, so generation inequality cannot decide this).
+	nextGeneration := m.bumpRetainedGenerationLocked(&next)
+	_ = nextGeneration
 	next.Config = cfg
 	// Revalidate once before route derivation and content dedup. This isolated
 	// sample is also the interface state sent if the snapshot is published.
@@ -284,30 +280,27 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
 
 	m.refreshCaptureAuthorityLocked(&next)
-	// #15955: build the final publish snapshot BEFORE the dedup compare and
-	// hash it once. Nothing below mutates publishSnap's hashed content
-	// before the send: disarmBeforeUnsupportedPublishLocked only reads it,
+	// #15955/#16153: build the final publish snapshot BEFORE the dedup
+	// compare and hash it once (preparePrehashedPublish). Nothing below
+	// mutates the hashed content before the send:
+	// disarmBeforeUnsupportedPublishLocked only reads it,
 	// consumeRevalidateAttachLocked only attaches XDP programs, and the
 	// send site's only mutation before the wire is the ContentDigest stamp
 	// itself (zeroed inside the hash) plus, on a content conflict, the
 	// Generation bump (also zeroed). The single hash therefore serves the
-	// dedup compare, the digest stamp, and — via postPublishHash,
-	// because the send spends ClearPolicies
-	// after stamping and that marker is NOT hash-zeroed — the
-	// lastSnapshotHash recorded on success. Hashing `next` for the dedup
-	// and `publishSnap` again for the stamp (the pre-#15955 triple) cost
-	// two extra marshal+SHA-256 passes over up to 1.5 MB under m.mu.
-	publishSnap := next
-	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
-	publishHash, publishHashOK := snapshotContentHash(&publishSnap)
-	preSendClear := publishSnap.ClearPolicies
+	// dedup compare, the digest stamp, and — via postPublishHash, because
+	// the send spends ClearPolicies after stamping and that marker is NOT
+	// hash-zeroed — the lastSnapshotHash recorded on success.
+	pub := preparePrehashedPublish(&next)
+	publishSnap := pub.snap
 	// Duplicate-publish skip: identical content (e.g. the actuator ran
 	// twice for the same overlay) does not need a control-socket
-	// round-trip. The content hash excludes Generation/FIBGeneration. Not while an
-	// earlier apply's outcome is unknown (#9520), nor while a partial update's is
-	// (#9684): the hash then describes what Go last sent, not what the helper holds.
-	if publishHashOK && publishHash == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown &&
-		m.partialOutcomeUnknown == 0 {
+	// round-trip. The content hash excludes Generation/FIBGeneration.
+	// Route dedup predicate = the shared dedupHit (hash match + both
+	// unknown-outcome stand-downs, #9520/#9684); the capture publisher
+	// below ANDs an extra publishedSnapshot arm — the predicates differ
+	// deliberately and are characterization-pinned (#16153).
+	if m.dedupHit(pub) {
 		// #15042: even on a dedup skip, a revalidation that moved a row
 		// must attach its recreated ifindex before adopting next's hash.
 		m.consumeRevalidateAttachLocked(&next)
@@ -326,30 +319,16 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		return false, err
 	}
 	m.consumeRevalidateAttachLocked(&publishSnap)
-	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, publishHash, publishHashOK); err != nil {
+	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, pub.hash, pub.hashOK); err != nil {
 		return false, fmt.Errorf("publish route overlay snapshot: %w", err)
 	}
 	// The helper accepted the overlay snapshot, so commit any scheduler state
 	// it carries to the applied/show cache. Error returns above leave that
-	// cache at the previous enforced state.
-	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
-	m.logWgEndpointSetTransitionLocked(&publishSnap, "route-overlay")
-	// #9520: commit the generation apply_snapshot carried, which a content-conflict
+	// cache at the previous enforced state. #9520: adopt commits the
+	// generation apply_snapshot carried, which a content-conflict
 	// republish moves past nextGeneration.
-	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
-	m.lastSnapshot = &next
-	m.rebuildNeighborIndex()
-	m.rebuildMonitoredIfindexes()
-	m.publishedSnapshot = next.Generation
-	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
-	// #2079: full apply_snapshot succeeded — record the applied snapshot.
-	m.markAppliedSnapshotLocked()
-	if h, ok := postPublishHash(&publishSnap, publishHash, publishHashOK, preSendClear); ok {
-		m.lastSnapshotHash = h
-	}
-	m.resolvePartialOutcomesLocked(resampled)
-	m.armPendingHAStateReplayLocked(wasDebt)
+	pub.snap = publishSnap
+	m.adoptPublishedSnapshotLocked(&next, pub, "route-overlay", wasDebt, resampled)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		slog.Warn("userspace: failed to sync helper status after route overlay publish", "err", err)
 	}
@@ -375,31 +354,23 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 		return false, nil
 	}
 	wasDebt := m.snapshotRetryDebtLocked()
-	next := *m.lastSnapshot
-	if !m.pendingFullSnapshotMetadata {
-		stripSingleUseCommitMetadata(&next)
-	}
-	next.Generation = m.generation + 1
-	next.FIBGeneration = m.readFIBGeneration()
-	next.GeneratedAt = time.Now().UTC()
+	next, _ := m.cloneRetainedSnapshotLocked()
+	// #16153 (P3): shared pipeline — see PublishRouteOverlaySnapshotWithLatch.
+	m.bumpRetainedGenerationLocked(&next)
 	m.refreshCaptureAuthorityLocked(&next)
 	m.prepareSnapshotForApply(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next)
-	// #15955: one hash over the final publish snapshot drives the dedup
-	// compare, the digest stamp, and the post-publish bookkeeping; see
-	// PublishRouteOverlaySnapshotWithLatch for the proof obligations. The
-	// pre-send ClearPolicies value is threaded through postPublishHash
-	// because the send spends the marker after stamping and the marker
-	// is not hash-zeroed.
-	publishSnap := next
-	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
-	publishHash, publishHashOK := snapshotContentHash(&publishSnap)
-	preSendClear := publishSnap.ClearPolicies
-	if publishHashOK &&
-		publishHash == m.lastSnapshotHash &&
-		m.publishedSnapshot != 0 &&
-		!m.applySnapshotOutcomeUnknown &&
-		m.partialOutcomeUnknown == 0 {
+	// #15955/#16153: one hash over the final publish snapshot drives the
+	// dedup compare, the digest stamp, and the post-publish bookkeeping;
+	// see PublishRouteOverlaySnapshotWithLatch for the proof obligations.
+	pub := preparePrehashedPublish(&next)
+	publishSnap := pub.snap
+	// Capture dedup predicate = shared dedupHit AND publishedSnapshot != 0.
+	// The extra arm is the characterized route-vs-capture difference
+	// (#16153): a retained clone that was never published (publishedSnapshot
+	// == 0) must publish even when its hash coincides with lastSnapshotHash,
+	// because the helper does not yet hold that content.
+	if m.dedupHit(pub) && m.publishedSnapshot != 0 {
 		m.consumeRevalidateAttachLocked(&next)
 		return false, nil
 	}
@@ -412,28 +383,16 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	}
 	var status ProcessStatus
 	m.consumeRevalidateAttachLocked(&publishSnap)
-	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, publishHash, publishHashOK); err != nil {
+	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, pub.hash, pub.hashOK); err != nil {
 		return false, fmt.Errorf("republish capture authority: %w", err)
 	}
 
-	// The helper accepted the cloned snapshot. Use the same success bookkeeping
-	// as the other partial publishers, but do not pretend routes or policy were
-	// rebuilt: this call changed only the capture authority.
-	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
-	m.logWgEndpointSetTransitionLocked(&publishSnap, "capture-authority")
-	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
-	m.lastSnapshot = &next
-	m.rebuildNeighborIndex()
-	m.rebuildMonitoredIfindexes()
-	m.publishedSnapshot = next.Generation
-	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
-	m.markAppliedSnapshotLocked()
-	if h, ok := postPublishHash(&publishSnap, publishHash, publishHashOK, preSendClear); ok {
-		m.lastSnapshotHash = h
-	}
-	m.resolvePartialOutcomesLocked(resampled)
-	m.armPendingHAStateReplayLocked(wasDebt)
+	// The helper accepted the cloned snapshot. Use the same success
+	// bookkeeping as the other partial publishers, but do not pretend
+	// routes or policy were rebuilt: this call changed only the capture
+	// authority.
+	pub.snap = publishSnap
+	m.adoptPublishedSnapshotLocked(&next, pub, "capture-authority", wasDebt, resampled)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		slog.Warn("userspace: failed to sync helper status after capture-authority republish", "err", err)
 	}
