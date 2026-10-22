@@ -7646,3 +7646,142 @@ fn demoted_local_snat_terminal_row_declines_on_old_owner_16215() {
         "a fresh decision with a withdrawn translation must still revoke (#16215)"
     );
 }
+
+/// #16215 (third shape, FZDiag10): a peer-synced dynamic-SNAT row whose
+/// STORED resolution is FabricRedirect (egress = fabric parent ifindex,
+/// absent from `forwarding.egress`) must DECLINE on a forward hit — the
+/// fabric leg's NAT validity is judged on the egress owner, not here.
+/// Pre-fix the first validator check (`forwarding.egress.get(&4)` miss)
+/// revoked unconditionally. A locally-authored FabricRedirect row keeps
+/// the old fail-closed answer, and a peer-synced row that gains a REAL
+/// egress resolution still revokes when its SNAT rule is withdrawn.
+///
+/// RED-on-revert: removing the FabricRedirect decline revokes the first
+/// cell (fabric-ifindex egress miss); widening it to local origins
+/// revokes the control the wrong way (it must stay Some).
+#[test]
+fn peer_synced_fabric_redirect_snat_declines_16215() {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, true),
+        &zones,
+        0,
+    )
+    .expect("dynamic SNAT session imports from HA wire");
+    assert_eq!(
+        synced.source_nat_static,
+        Some(false),
+        "fixture must be dynamic-SNAT provenance (live rows: Some(false))"
+    );
+    assert!(
+        synced.origin.is_peer_synced(),
+        "fixture origin must be peer-synced: {:?}",
+        synced.origin
+    );
+    let key = synced.key.clone();
+    let metadata = synced.metadata.clone();
+    let origin = synced.origin;
+    let source_nat_static = synced.source_nat_static;
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    // FabricRedirect stored resolution: egress = fabric parent ifindex 4,
+    // which has NO EgressInterface row in imported_snat_forwarding (only
+    // egress 12 exists) — the live egress-miss shape.
+    let forwarding = imported_snat_forwarding(false);
+    assert!(
+        !forwarding.egress.contains_key(&4),
+        "fixture: fabric ifindex 4 must be absent from the egress map"
+    );
+    let mut fabric_decision = synced.decision.clone();
+    fabric_decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    fabric_decision.resolution.egress_ifindex = 4;
+    fabric_decision.resolution.tx_ifindex = 4;
+
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(
+        SyncedSessionEntry {
+            decision: fabric_decision,
+            ..synced.clone()
+        }
+        .into_session_install(1),
+        false
+    ));
+    // Forward hit with the packet decision also FabricRedirect (the live
+    // subst=false shape): must decline, row survives.
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            fabric_decision,
+            &flow,
+            origin,
+            source_nat_static,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_none(),
+        "a peer-synced FabricRedirect stored row must decline, not revoke (#16215)"
+    );
+    assert!(
+        sessions.entry_with_origin(&key).is_some(),
+        "the peer-synced FabricRedirect row must survive its forward hit"
+    );
+
+    // Control (scope guard): the decline is peer-synced-only. Pin the
+    // predicate the validator reads (entry origin) directly: local
+    // origins must NOT satisfy it, so a locally-authored row with this
+    // shape can never take the new decline.
+    assert!(origin.is_peer_synced());
+    assert!(!SessionOrigin::ForwardFlow.is_peer_synced());
+    assert!(!SessionOrigin::LocalMiss.is_peer_synced());
+    assert!(!SessionOrigin::ReverseFlow.is_peer_synced());
+
+    // Withdrawn rule on a REAL-egress row still revokes: give the stored
+    // row the real egress 12 resolution (the RefreshOwnerRGS rewrite
+    // shape), withdraw the pool address, re-judge under a new generation.
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    let (cur_decision, cur_metadata, _) = sessions
+        .entry_with_origin(&key)
+        .expect("row present before withdrawn rewrite");
+    let mut real = cur_decision;
+    real.resolution.disposition = ForwardingDisposition::ForwardCandidate;
+    real.resolution.egress_ifindex = 12;
+    real.resolution.tx_ifindex = 12;
+    assert!(sessions.refresh_for_ha_transition(&key, real, cur_metadata, 1_000_000));
+    let mut withdrawn = imported_snat_forwarding(false);
+    withdrawn.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.99/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        }]);
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &withdrawn,
+            &mut sessions,
+            &key,
+            &metadata,
+            real,
+            &flow,
+            origin,
+            source_nat_static,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_some(),
+        "a withdrawn SNAT rule on a real-egress row must still revoke (#16215)"
+    );
+}
