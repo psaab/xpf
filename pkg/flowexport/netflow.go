@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/logging"
@@ -533,7 +532,14 @@ func uptimeMs(boot, t time.Time) uint32 {
 }
 
 // Exporter sends NetFlow v9 packets to configured collectors.
+//
+// #16126: the shared enrichment/lifecycle state lives in the embedded
+// exporterCore (exporter_core.go); the fields below are the v9-only
+// stateful-encoder state that must NOT be unified with IPFIX -- the
+// per-MESSAGE sequence counter, the boot-time sysUptime anchor, and the
+// prebuilt template bytes.
 type Exporter struct {
+	exporterCore
 	cfg             *ExportConfig
 	bootTime        time.Time
 	sourceID        uint32
@@ -542,43 +548,12 @@ type Exporter struct {
 	recSizeV4       int
 	recSizeV6       int
 	templateFlowSet []byte
-	// #15655: active/inactive timeout tracker (nil = close-only export).
-	tracker *FlowTracker
 
-	mu    sync.Mutex
-	seq   uint32
-	conns *collectorConns
-
-	// #2866: resolves the per-flow src/dst route prefix length (NetFlow IE
-	// 9/13, IPv6 IE 29/30) from the FIB at export time. Nil on a zero-value
-	// exporter (masks stay 0, the pre-#2866 behaviour); the daemon reconcile
-	// path sets it via NewRouteMaskResolver so production records carry the
-	// real matching-route prefix length.
-	MaskResolver MaskResolver
-
-	// Batching: accumulate records, flush periodically
-	batch flowBatch
-
-	// Stats
-	exportedFlows atomic.Uint64
-	exportedPkts  atomic.Uint64
-	// #2465/#11699: count close records without a creation timestamp. Such
-	// records are emitted with zero duration at close time rather than a
-	// packet-count estimate; this remains visible for synthesized closes.
-	estimatedDurations atomic.Uint64
-	// #3744: count of route-mask HALVES (src and/or dst) that did not resolve
-	// to a FIB route at export time — the mask was exported as an unresolved 0
-	// rather than a real matched-route prefix length. Since #3743 the FIRST
-	// flow to any cold (ifindex,prefix) key resolves 0 while the background
-	// lookup warms, so a nonzero value is expected in steady state; a value
-	// climbing in lockstep with exportedFlows means masks are chronically
-	// unresolved (no route / churn faster than the TTL / wrong VRF scope) —
-	// the only operator-visible signal that an exported mask-0 is unresolved
-	// versus a real default-route /0.
-	routeMaskUnresolved atomic.Uint64
-	// #13305: close records whose Created timestamp is later than close time,
-	// clamped to zero duration.
-	clockSkewClamped atomic.Uint64
+	mu sync.Mutex
+	// seq counts MESSAGES sent (template and data alike), unlike the
+	// IPFIX cumulative data-record count. Kept on the outer struct so
+	// the divergence stays explicit (#16126).
+	seq uint32
 }
 
 // NewExporter creates a new NetFlow v9 exporter. cfg is held by pointer
@@ -598,12 +573,12 @@ func NewExporter(cfg *ExportConfig) (*Exporter, error) {
 		// from protocol/instance/template/family, so same-collector v4 and v6
 		// groups use separate observation domains. HA-symmetric (all inputs
 		// are config-synced).
-		sourceID:     stableExporterID("netflow9", cfg.InstanceName, cfg.TemplateName, cfg.GroupIsV6),
-		fieldsV4:     buildTemplateFieldsV4(cfg.V9TemplateOpts),
-		fieldsV6:     buildTemplateFieldsV6(cfg.V9TemplateOpts),
-		MaskResolver: NewRouteMaskResolver(0),
-		tracker:      NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout),
+		sourceID: stableExporterID("netflow9", cfg.InstanceName, cfg.TemplateName, cfg.GroupIsV6),
+		fieldsV4: buildTemplateFieldsV4(cfg.V9TemplateOpts),
+		fieldsV6: buildTemplateFieldsV6(cfg.V9TemplateOpts),
 	}
+	e.MaskResolver = NewRouteMaskResolver(0)
+	e.tracker = NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout)
 	e.recSizeV4 = recordSize(e.fieldsV4)
 	e.recSizeV6 = recordSize(e.fieldsV6)
 	e.templateFlowSet = encodeTemplateFlowSet(cfg.V9TemplateOpts)
@@ -646,137 +621,12 @@ func (e *Exporter) Run(ctx context.Context) {
 	}
 }
 
-// ExportSessionClose converts a session-close event into a flow record and queues it.
+// ExportSessionClose converts a session-close event into a flow record
+// and queues it. The enrichment is the shared exporterCore pipeline
+// (#16126); includeReverse=false because NetFlow v9 has no standard
+// reverse element and exports initiator-direction volume only (#3746).
 func (e *Exporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseData) {
-	// #2465/#11699: a missing creation timestamp cannot establish flow age;
-	// use the close time and count that fallback for operator visibility.
-	startTime, missingCreated, clockSkewClamped := flowStartTime(rec)
-	if missingCreated {
-		e.estimatedDurations.Add(1)
-	}
-	if clockSkewClamped {
-		e.clockSkewClamped.Add(1)
-	}
-	// #2526: resolve the post-NAT tuple with pre-NAT fallback so every
-	// exported record carries the RFC 5103 post-NAT fields (post == pre when
-	// the flow was not translated).
-	natSrcIP, natDstIP, natSrcPort, natDstPort := resolvePostNAT(
-		evt.SrcIP, evt.DstIP, evt.SrcPort, evt.DstPort,
-		evt.NATSrcIP, evt.NATDstIP, evt.NATSrcPort, evt.NATDstPort)
-	// #2866: resolve src/dst route prefix lengths (NetFlow IE 9/13, IPv6 IE
-	// 29/30) from the FIB. Masks default to 0 when no resolver is wired.
-	// #3744: scope the lookup to the flow's ingress VRF table (evt.InIf, with
-	// evt.OutIf as a fallback) and count any unresolved half so an exported
-	// mask-0 can be told apart from a real default-route /0.
-	srcMask, dstMask, maskMisses := resolveMasks(e.MaskResolver, evt.SrcIP, evt.DstIP, evt.InIf, evt.OutIf)
-	if maskMisses > 0 {
-		e.routeMaskUnresolved.Add(maskMisses)
-	}
-	fr := FlowRecord{
-		SrcIP:   evt.SrcIP,
-		DstIP:   evt.DstIP,
-		SrcPort: evt.SrcPort,
-		DstPort: evt.DstPort,
-		// #3939: source protocolIdentifier (IE 4) from the record's raw numeric
-		// IP protocol (rec.ProtocolNum, 0-255) — NOT a protocol-NAME re-lookup.
-		// The daemon callback derived evt.Protocol via a name table that only
-		// covered TCP/UDP/ICMP/ICMPv6, so GRE (47), ESP (50), AH (51) and every
-		// other protocol exported as 0 and were misattributed at the collector.
-		// rec.ProtocolNum is the authoritative number the dataplane stamped.
-		Protocol:  rec.ProtocolNum,
-		Packets:   rec.SessionPkts,
-		Bytes:     rec.SessionBytes,
-		StartTime: startTime,
-		EndTime:   rec.Time,
-		IsIPv6:    evt.IsIPv6,
-		SrcMask:   srcMask,
-		DstMask:   dstMask,
-		// #2749: ingress ifindex (SNMP ifIndex) -> NetFlow IE 10; plus the
-		// re-introduced srcTos (IE 5) / tcpFlags (IE 6) / OutputSNMP (IE 14).
-		InIf:     evt.InIf,
-		TOS:      evt.TOS,
-		TCPFlags: evt.TCPFlags,
-		OutIf:    evt.OutIf,
-		// #3270: flowDirection (IE 61), derived from sampling-direction in the
-		// daemon callback. Encoded only when the group enabled flow-dir.
-		Direction:  evt.Direction,
-		NATSrcIP:   natSrcIP,
-		NATDstIP:   natDstIP,
-		NATSrcPort: natSrcPort,
-		NATDstPort: natDstPort,
-	}
-
-	e.batch.add(fr)
-}
-
-// EstimatedDurations returns the count of exported close records missing a
-// creation timestamp. Those records use StartTime=EndTime rather than a
-// packet-count estimate.
-func (e *Exporter) EstimatedDurations() uint64 {
-	return e.estimatedDurations.Load()
-}
-
-// RouteMaskUnresolved returns the count of exported route-mask halves (#3744)
-// that did not resolve to a FIB route and were exported as an unresolved 0
-// rather than a real matched-route prefix length. See routeMaskUnresolved.
-func (e *Exporter) RouteMaskUnresolved() uint64 {
-	return e.routeMaskUnresolved.Load()
-}
-
-// ClockSkewClamped returns the number of exported close records whose future
-// creation timestamp was clamped to the close time (#13305).
-func (e *Exporter) ClockSkewClamped() uint64 { return e.clockSkewClamped.Load() }
-
-// BatchDepth returns the current number of flow records pending in the export
-// batch (both families combined). Normally near 0 — the Run goroutine drains
-// every 100ms; a sustained nonzero value means the drain cannot keep up
-// (stalled Run / slow collector / close storm) (#3747).
-func (e *Exporter) BatchDepth() uint64 { return e.batch.depth() }
-
-// BatchMaxDepth returns the high-water mark of the pending batch depth (#3747).
-func (e *Exporter) BatchMaxDepth() uint64 { return e.batch.MaxDepth() }
-
-// BatchDropped returns the cumulative count of flow records dropped because
-// the export batch was at capacity (#3747). A climbing value means records
-// are being lost to a stalled/overrun drain rather than growing memory
-// without bound.
-func (e *Exporter) BatchDropped() uint64 { return e.batch.Dropped() }
-
-// Retire quiesces the exporter's batch admission lease ahead of the final
-// flush that Run performs on ctx cancel. It flips the batch to retired and
-// waits for in-flight session-close adds to finish (so those records are still
-// drained by the final flush), after which any late session-close callback
-// that loaded the pre-reconcile bundle is rejected and counted rather than
-// silently stranded (#4963). The daemon reconcile calls this on the OLD
-// exporter generation AFTER publishing the new bundle and BEFORE cancelling
-// the old Run.
-func (e *Exporter) Retire() { e.batch.retire() }
-
-// HandoffDropped returns the count of session-close records this exporter
-// rejected because they arrived after it was retired (#4963).
-func (e *Exporter) HandoffDropped() uint64 { return e.batch.HandoffDropped() }
-
-// SetHandoffCounter injects a fixed-cardinality family-level counter that the
-// batch also increments on a handoff reject, so drops on a retired-and-
-// discarded exporter stay observable after it leaves the live bundle (#4963).
-// Called once at construction before Run starts.
-func (e *Exporter) SetHandoffCounter(c *atomic.Uint64) { e.batch.setSharedHandoff(c) }
-
-// Stats returns export statistics.
-func (e *Exporter) Stats() (flows, packets uint64) {
-	return e.exportedFlows.Load(), e.exportedPkts.Load()
-}
-
-// CollectorHealth returns a per-collector write-health snapshot (#2464):
-// write attempts/failures, last error and the last success/failure
-// timestamps for every collector this exporter writes to.
-func (e *Exporter) CollectorHealth() []CollectorHealth {
-	return e.conns.health()
-}
-
-// Close shuts down all collector connections.
-func (e *Exporter) Close() {
-	e.conns.close()
+	e.exportSessionClose(rec, evt, false)
 }
 
 func (e *Exporter) sendTemplates() {

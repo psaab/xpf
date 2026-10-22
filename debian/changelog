@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Share FlowRecord enrichment between NetFlow v9 and IPFIX behind an
+    embedded exporterCore (new exporter_core.go), keeping the two
+    stateful encoders separate (#16126): buildFlowRecord is now the
+    single flow-start/post-NAT/route-mask/protocol enrichment both
+    ExportSessionClose twins duplicated, with includeReverse as the
+    only divergence (IPFIX biflow counters; v9 leaves them zero).
+    Golden wire bytes for both protocols (templates, data, overflow,
+    v6, flow-dir, sampler options, sequence cadences) were captured
+    before the refactor into testdata/golden_16126.txt and must stay
+    byte-identical; per-flow enrichment is 0 allocs/op.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Refuse MTU above the userspace dataplane's single-frame receive
     budget (3566 bytes) at commit on AF_XDP-bound interfaces (#16244):
     the netdev already took the configured MTU (planPhysDesired writes

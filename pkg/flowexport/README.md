@@ -1016,6 +1016,15 @@ IPFIX:
 - `IPFIXExporter.ExportSessionClose(rec, evt)` — emit one record.
 
 Shared:
+- `exporterCore` / `buildFlowRecord(rec, evt, includeReverse)` — `exporter_core.go` (#16126).
+  The single FlowRecord enrichment pipeline (flow-start fallback, post-NAT
+  resolution, route masks, protocol number) plus the shared batch/collector/
+  stats lifecycle, embedded by both exporters. The only enrichment divergence
+  is `includeReverse`: IPFIX populates the RFC 5103 biflow reverse counters,
+  NetFlow v9 leaves them zero. The encoders stay separate and stateful — v9
+  sequence is per-message, IPFIX sequence is the cumulative data-record
+  count — and their wire bytes are frozen in `testdata/golden_16126.txt`
+  (captured before the refactor; see `golden_16126_test.go`).
 - `ExportConfig` — `manager.go`. Resolved per-group config: the collectors that
   referenced one template **and share one address family** (#2461 + #6811), that
   template's timeouts / field options, plus the instance-shared sampling state

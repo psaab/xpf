@@ -163,7 +163,7 @@ func TestExporterRouteMaskUnresolvedCounter(t *testing.T) {
 	}
 
 	t.Run("netflow", func(t *testing.T) {
-		e := Exporter{MaskResolver: partial}
+		e := Exporter{exporterCore: exporterCore{MaskResolver: partial}}
 		e.ExportSessionClose(rec, sd)
 		if got := e.RouteMaskUnresolved(); got != 1 {
 			t.Fatalf("RouteMaskUnresolved = %d, want 1 (dst unresolved not counted)", got)
@@ -181,7 +181,7 @@ func TestExporterRouteMaskUnresolvedCounter(t *testing.T) {
 	})
 
 	t.Run("ipfix", func(t *testing.T) {
-		e := IPFIXExporter{MaskResolver: partial}
+		e := IPFIXExporter{exporterCore: exporterCore{MaskResolver: partial}}
 		e.ExportSessionClose(rec, sd)
 		if got := e.RouteMaskUnresolved(); got != 1 {
 			t.Fatalf("RouteMaskUnresolved = %d, want 1 (dst unresolved not counted)", got)
@@ -189,7 +189,7 @@ func TestExporterRouteMaskUnresolvedCounter(t *testing.T) {
 	})
 
 	t.Run("both-resolved-no-miss", func(t *testing.T) {
-		e := Exporter{MaskResolver: maskResolverFor(sd.SrcIP, sd.DstIP)}
+		e := Exporter{exporterCore: exporterCore{MaskResolver: maskResolverFor(sd.SrcIP, sd.DstIP)}}
 		e.ExportSessionClose(rec, sd)
 		if got := e.RouteMaskUnresolved(); got != 0 {
 			t.Fatalf("RouteMaskUnresolved = %d, want 0 (both halves resolved)", got)

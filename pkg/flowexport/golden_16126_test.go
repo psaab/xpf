@@ -99,9 +99,11 @@ func (c *goldenStubConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (c *goldenStubConn) Close() error               { return nil }
+func (c *goldenStubConn) Close() error                     { return nil }
 func (c *goldenStubConn) SetWriteDeadline(time.Time) error { return nil }
-func (c *goldenStubConn) LocalAddr() net.Addr        { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1} }
+func (c *goldenStubConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+}
 
 func (c *goldenStubConn) packets() [][]byte {
 	c.mu.Lock()
@@ -299,9 +301,9 @@ func goldenRecord(dir bool, v6, nat, rev bool, i int) FlowRecord {
 		SrcIP: src, DstIP: dst, SrcPort: sp + uint16(i), DstPort: dp,
 		Protocol: 6, TOS: 0xB8, TCPFlags: 0x1B, InIf: 7, OutIf: 9,
 		Packets: uint64(1000 + i), Bytes: uint64(60000 + i*10),
-		StartTime:  goldenEpoch.Add(-time.Minute),
-		EndTime:    goldenEpoch,
-		SrcMask:    24, DstMask: 25, IsIPv6: v6,
+		StartTime: goldenEpoch.Add(-time.Minute),
+		EndTime:   goldenEpoch,
+		SrcMask:   24, DstMask: 25, IsIPv6: v6,
 		NATSrcIP: ns, NATDstIP: nd, NATSrcPort: nsp, NATDstPort: ndp,
 	}
 	if dir {
@@ -355,8 +357,8 @@ func TestGoldenNetFlowV9Wire(t *testing.T) {
 			fieldsV4:        buildTemplateFieldsV4(V9TemplateOptions{IncludeFlowDir: dir}),
 			fieldsV6:        buildTemplateFieldsV6(V9TemplateOptions{IncludeFlowDir: dir}),
 			templateFlowSet: encodeTemplateFlowSet(V9TemplateOptions{IncludeFlowDir: dir}),
-			conns:           goldenConns(conn),
 		}
+		e.conns = goldenConns(conn)
 		e.recSizeV4 = recordSize(e.fieldsV4)
 		e.recSizeV6 = recordSize(e.fieldsV6)
 		return e, conn
@@ -374,7 +376,7 @@ func TestGoldenNetFlowV9Wire(t *testing.T) {
 		if n := len(conn.packets()); n != 0 {
 			t.Fatalf("v9 %s: empty send emitted %d packets", tag, n)
 		}
-		e.sendTemplates() // seq 0
+		e.sendTemplates()                           // seq 0
 		e.sendRecords(goldenRecords(dir, false, 3)) // seq 1
 		// Overflow: more records than one maxPayload datagram holds.
 		recSize := e.recSizeV4
@@ -423,8 +425,8 @@ func TestGoldenIPFIXWire(t *testing.T) {
 			sourceID:    0x0A0B0C0D,
 			includeDir:  dir,
 			templateSet: encodeIPFIXTemplateSetDir(dir),
-			conns:       goldenConns(conn),
 		}
+		e.conns = goldenConns(conn)
 		if sampler {
 			e.emitSampler = true
 			e.optionsTemplateSet = encodeIPFIXOptionsTemplateSet()
