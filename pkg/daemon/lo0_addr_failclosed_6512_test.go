@@ -39,7 +39,7 @@ func TestMalformedPrefixListEntryReachesLo0Builder6512(t *testing.T) {
 	cfg.System.Lo0FilterInputV4 = "protect-re"
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "block-mgmt", SourcePrefixLists: []config.PrefixListRef{{Name: "mgmt"}}, Action: "discard"},
+			{Name: "block-mgmt", SourcePrefixLists: []config.PrefixListRef{{Name: "mgmt"}}, Action: config.FilterActionDiscard},
 		}},
 	}
 

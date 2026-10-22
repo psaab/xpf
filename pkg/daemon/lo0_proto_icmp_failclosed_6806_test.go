@@ -64,7 +64,7 @@ func lowerLo0Term6806(t *testing.T, cfg *config.Config) xnft.Lo0FilterTerm {
 // makes the builder's fail-closed possible at all.
 func TestUnresolvableProtocolReachesLo0Builder6806(t *testing.T) {
 	term := lowerLo0Term6806(t, lo0Cfg6806(&config.FirewallFilterTerm{
-		Name: "admit-one", Protocols: []string{"tcp", "not-a-protocol"}, Action: "accept",
+		Name: "admit-one", Protocols: []string{"tcp", "not-a-protocol"}, Action: config.FilterActionAccept,
 	}))
 	if !sliceContains(term.Protocols, "not-a-protocol") {
 		t.Fatalf("the unresolvable protocol must reach the builder VERBATIM; Protocols = %v",
@@ -86,7 +86,7 @@ func TestUnrepresentableICMPMarkerReachesLo0Builder6806(t *testing.T) {
 		Protocols:        []string{"icmp"},
 		UnknownICMPTypes: []string{"no-such-type"},
 		UnknownICMPCodes: []string{"no-such-code"},
-		Action:           "accept",
+		Action:           config.FilterActionAccept,
 	}))
 	if len(term.ICMPTypes) != 0 || len(term.ICMPCodes) != 0 {
 		t.Fatalf("setup: the unresolvable tokens must leave the resolved byte slices EMPTY "+
@@ -108,7 +108,7 @@ func TestUnrepresentableICMPMarkerReachesLo0Builder6806(t *testing.T) {
 func TestResolvedICMPDoesNotSetUnrepresentable6806(t *testing.T) {
 	term := lowerLo0Term6806(t, lo0Cfg6806(&config.FirewallFilterTerm{
 		Name: "ok-icmp", Protocols: []string{"icmp"},
-		ICMPTypes: []int{8}, ICMPCodes: []int{0}, Action: "accept",
+		ICMPTypes: []int{8}, ICMPCodes: []int{0}, Action: config.FilterActionAccept,
 	}))
 	if term.ICMPTypeUnrepresentable || term.ICMPCodeUnrepresentable {
 		t.Fatalf("a fully resolved icmp term must not be marked unrepresentable "+
@@ -130,21 +130,21 @@ func TestLo0TextOracleKeepsUnresolvableTokens6806(t *testing.T) {
 		{
 			name: "protocol",
 			term: &config.FirewallFilterTerm{
-				Name: "admit-one", Protocols: []string{"not-a-protocol"}, Action: "accept",
+				Name: "admit-one", Protocols: []string{"not-a-protocol"}, Action: config.FilterActionAccept,
 			},
 			want: "not-a-protocol",
 		},
 		{
 			name: "icmp_type",
 			term: &config.FirewallFilterTerm{
-				Name: "admit-icmp", UnknownICMPTypes: []string{"no-such-type"}, Action: "accept",
+				Name: "admit-icmp", UnknownICMPTypes: []string{"no-such-type"}, Action: config.FilterActionAccept,
 			},
 			want: "no-such-type",
 		},
 		{
 			name: "icmp_code",
 			term: &config.FirewallFilterTerm{
-				Name: "admit-icmp-code", UnknownICMPCodes: []string{"no-such-code"}, Action: "accept",
+				Name: "admit-icmp-code", UnknownICMPCodes: []string{"no-such-code"}, Action: config.FilterActionAccept,
 			},
 			want: "no-such-code",
 		},
@@ -167,7 +167,7 @@ func TestLo0TextOracleKeepsUnresolvableTokens6806(t *testing.T) {
 func TestLo0TextOracleUnchangedForResolvableTokens6806(t *testing.T) {
 	payload := buildLo0FilterPayload(lo0Cfg6806(&config.FirewallFilterTerm{
 		Name: "ok", Protocols: []string{"tcp"},
-		ICMPTypes: []int{8}, ICMPCodes: []int{0}, Action: "accept",
+		ICMPTypes: []int{8}, ICMPCodes: []int{0}, Action: config.FilterActionAccept,
 	}), "protect-re", "")
 	if !strings.Contains(payload, "meta l4proto 6") {
 		t.Errorf("a resolvable protocol must still render numerically; payload:\n%s", payload)
@@ -213,7 +213,7 @@ func TestLo0RenderersAgreeOnUnresolvableTokens6806(t *testing.T) {
 		{
 			name: "unresolvable_protocol",
 			term: &config.FirewallFilterTerm{
-				Name: "p", Protocols: []string{"not-a-protocol"}, Action: "accept",
+				Name: "p", Protocols: []string{"not-a-protocol"}, Action: config.FilterActionAccept,
 			},
 			raw: "not-a-protocol",
 			netlinkRefusable: func(lt xnft.Lo0FilterTerm) bool {
@@ -223,7 +223,7 @@ func TestLo0RenderersAgreeOnUnresolvableTokens6806(t *testing.T) {
 		{
 			name: "unrepresentable_icmp_type",
 			term: &config.FirewallFilterTerm{
-				Name: "i", UnknownICMPTypes: []string{"no-such-type"}, Action: "accept",
+				Name: "i", UnknownICMPTypes: []string{"no-such-type"}, Action: config.FilterActionAccept,
 			},
 			raw: "no-such-type",
 			netlinkRefusable: func(lt xnft.Lo0FilterTerm) bool {
@@ -233,7 +233,7 @@ func TestLo0RenderersAgreeOnUnresolvableTokens6806(t *testing.T) {
 		{
 			name: "unrepresentable_icmp_code",
 			term: &config.FirewallFilterTerm{
-				Name: "c", UnknownICMPCodes: []string{"no-such-code"}, Action: "accept",
+				Name: "c", UnknownICMPCodes: []string{"no-such-code"}, Action: config.FilterActionAccept,
 			},
 			raw: "no-such-code",
 			netlinkRefusable: func(lt xnft.Lo0FilterTerm) bool {

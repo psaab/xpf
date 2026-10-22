@@ -183,7 +183,7 @@ routing-instances {
 	if len(mgmtFilter.Terms[0].Protocols) != 1 || mgmtFilter.Terms[0].Protocols[0] != "tcp" {
 		t.Errorf("expected protocol [tcp], got %q", mgmtFilter.Terms[0].Protocols)
 	}
-	if mgmtFilter.Terms[0].Action != "reject" {
+	if mgmtFilter.Terms[0].Action != FilterActionReject {
 		t.Errorf("expected action reject, got %q", mgmtFilter.Terms[0].Action)
 	}
 	if len(mgmtFilter.Terms[0].DestinationPorts) != 1 {
@@ -202,7 +202,7 @@ routing-instances {
 	if len(raFilter.Terms[0].ICMPTypes) != 1 || raFilter.Terms[0].ICMPTypes[0] != 134 {
 		t.Errorf("expected icmp-type [134], got %v", raFilter.Terms[0].ICMPTypes)
 	}
-	if raFilter.Terms[0].Action != "discard" {
+	if raFilter.Terms[0].Action != FilterActionDiscard {
 		t.Errorf("expected action discard, got %q", raFilter.Terms[0].Action)
 	}
 	if len(cfg.RoutingInstances) != 2 {
@@ -394,7 +394,7 @@ func TestFirewallFilterPortRange(t *testing.T) {
 	if len(term.Protocols) != 1 || term.Protocols[0] != "tcp" {
 		t.Errorf("protocol = %q, want [tcp]", term.Protocols)
 	}
-	if term.Action != "discard" {
+	if term.Action != FilterActionDiscard {
 		t.Errorf("action = %q, want discard", term.Action)
 	}
 }
@@ -503,7 +503,7 @@ func TestFirewallFilterTCPFlags(t *testing.T) {
 	if len(f.Terms[0].TCPFlags) != 1 || f.Terms[0].TCPFlags[0] != "syn" {
 		t.Errorf("term syn-only: expected TCPFlags [syn], got %v", f.Terms[0].TCPFlags)
 	}
-	if f.Terms[0].Action != "discard" {
+	if f.Terms[0].Action != FilterActionDiscard {
 		t.Errorf("term syn-only: expected action discard, got %q", f.Terms[0].Action)
 	}
 	if len(f.Terms[1].TCPFlags) != 2 {
@@ -537,7 +537,7 @@ func TestFirewallFilterIsFragment(t *testing.T) {
 	if !f.Terms[0].IsFragment {
 		t.Error("expected IsFragment=true for drop-frags term")
 	}
-	if f.Terms[0].Action != "discard" {
+	if f.Terms[0].Action != FilterActionDiscard {
 		t.Errorf("expected action discard, got %q", f.Terms[0].Action)
 	}
 	if f.Terms[1].IsFragment {
@@ -779,7 +779,7 @@ func TestFirewallPrefixListSetSyntax(t *testing.T) {
 	if len(term.DestinationPorts) != 1 || term.DestinationPorts[0] != "22" {
 		t.Errorf("destination-port = %v, want [22]", term.DestinationPorts)
 	}
-	if term.Action != "reject" {
+	if term.Action != FilterActionReject {
 		t.Errorf("action = %q, want reject", term.Action)
 	}
 }

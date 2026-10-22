@@ -43,7 +43,7 @@ func TestNftFlexMatchExprSubByteMSBAligned14634(t *testing.T) {
 func TestNftRuleSubByteFlexRendersAligned14634(t *testing.T) {
 	fm := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 0, BitLength: 4, Value: 0x4, Mask: 0xF}
 	got := nftRule(t, &config.FirewallFilterTerm{
-		Name: "flex-subbyte", FlexMatch: &fm, Action: "discard",
+		Name: "flex-subbyte", FlexMatch: &fm, Action: config.FilterActionDiscard,
 	}, "ip", map[string]*config.PrefixList{})
 	if !strings.Contains(got, "@nh,0,8 & 0xf0 == 0x40") {
 		t.Errorf("sub-byte term rendered %q, want it to contain %q", got, "@nh,0,8 & 0xf0 == 0x40")

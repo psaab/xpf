@@ -18,14 +18,14 @@ func TestLo0UnresolvedExceptRefusesCandidate11451(t *testing.T) {
 		{
 			name: "accept",
 			term: config.FirewallFilterTerm{
-				Name: "accept-unresolved-except", Action: "accept",
+				Name: "accept-unresolved-except", Action: config.FilterActionAccept,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO", Except: true}},
 			},
 		},
 		{
 			name: "discard",
 			term: config.FirewallFilterTerm{
-				Name: "discard-unresolved-except", Action: "discard",
+				Name: "discard-unresolved-except", Action: config.FilterActionDiscard,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO", Except: true}},
 			},
 		},

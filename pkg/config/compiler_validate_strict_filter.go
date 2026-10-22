@@ -1703,7 +1703,7 @@ func validateFilterRoutingInstanceConflictStrict(cfg *Config) error {
 				if term.RoutingInstance == "" {
 					continue
 				}
-				if term.Action == "discard" || term.Action == "reject" {
+				if term.Action == FilterActionDiscard || term.Action == FilterActionReject {
 					return fmt.Errorf(
 						"firewall family %s filter %q term %q: `then routing-instance "+
 							"%s` and `then %s` are mutually exclusive in the same term — "+
@@ -1789,8 +1789,8 @@ func validateFilterTerminalConflictStrict(cfg *Config) error {
 					// Collect distinct terminals in first-seen order so the
 					// error is stable and reads in the order the operator
 					// wrote them.
-					seen := make(map[string]bool, len(term.TerminalActions))
-					distinct := make([]string, 0, len(term.TerminalActions))
+					seen := make(map[FilterAction]bool, len(term.TerminalActions))
+					distinct := make([]FilterAction, 0, len(term.TerminalActions))
 					for _, a := range term.TerminalActions {
 						if !seen[a] {
 							seen[a] = true
@@ -1802,7 +1802,7 @@ func validateFilterTerminalConflictStrict(cfg *Config) error {
 							"terminating actions %s — a term may have at most one "+
 							"terminating action (accept/reject/discard are mutually "+
 							"exclusive)",
-						family, name, term.Name, strings.Join(distinct, " and "))
+						family, name, term.Name, joinFilterActions(distinct))
 				}
 				// #5142 (security, fail-CLOSED): a SINGLE terminating action
 				// (discard/reject/accept) co-located with `then next term` is a
@@ -1833,12 +1833,12 @@ func validateFilterTerminalConflictStrict(cfg *Config) error {
 				// Rust evaluator would break the mirror contract stated at
 				// daemon_nft_term_lower.go. The bug is that the operator was
 				// allowed to author the contradiction at all.
-				terminal := ""
+				terminal := FilterActionUnset
 				switch {
 				case len(term.TerminalActions) > 0:
 					terminal = term.TerminalActions[0]
 				case term.RoutingInstance != "":
-					terminal = "routing-instance " + term.RoutingInstance
+					terminal = FilterAction("routing-instance " + term.RoutingInstance)
 				}
 				if term.NextTerm && terminal != "" {
 					return fmt.Errorf(

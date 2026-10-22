@@ -23,7 +23,7 @@ func TestFilterSnapshotPortExceptEmitted(t *testing.T) {
 			Protocols:         []string{"tcp"},
 			DestPortsExcept:   []string{"80", "443"},
 			SourcePortsExcept: []string{"22"},
-			Action:            "discard",
+			Action:            config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -46,7 +46,7 @@ func TestFilterSnapshotPortExceptEmptyStaysEmpty(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"pe": {Name: "pe", Terms: []*config.FirewallFilterTerm{{
-			Name: "t", Action: "accept",
+			Name: "t", Action: config.FilterActionAccept,
 		}}},
 	}
 	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]

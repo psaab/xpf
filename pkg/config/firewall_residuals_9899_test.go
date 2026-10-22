@@ -113,7 +113,7 @@ func TestImplicitInetFilter9899(t *testing.T) {
 					t.Fatal(err)
 				}
 				term := firstInetTerm(t, cfg, "F")
-				if term.Action != "discard" || !reflect.DeepEqual(term.Protocols, []string{"tcp"}) {
+				if term.Action != FilterActionDiscard || !reflect.DeepEqual(term.Protocols, []string{"tcp"}) {
 					t.Fatalf("implicit inet changed filter behavior: %#v", term)
 				}
 				if len(cfg.Firewall.FiltersInet6) != 0 {
@@ -158,7 +158,7 @@ func TestImplicitInetFilterGates9899(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reference to implicit inet filter did not resolve: %v", err)
 	}
-	if firstInetTerm(t, cfg, "F").Action != "discard" || cfg.Firewall.FiltersInet6["F"].Terms[0].Action != "accept" {
+	if firstInetTerm(t, cfg, "F").Action != FilterActionDiscard || cfg.Firewall.FiltersInet6["F"].Terms[0].Action != FilterActionAccept {
 		t.Fatal("implicit inet and explicit inet6 did not remain separate")
 	}
 }
@@ -170,13 +170,13 @@ func TestImplicitInetFilterGates9899(t *testing.T) {
 // template from a nested apply-groups lookup. Pre-fix RED: filter G loses its
 // inherited term while F keeps its own.
 func TestImplicitInetNestedGroupMultiFilter9899(t *testing.T) {
-	termsOf := func(t *testing.T, cfg *Config, filter string) map[string]string {
+	termsOf := func(t *testing.T, cfg *Config, filter string) map[string]FilterAction {
 		t.Helper()
 		f := cfg.Firewall.FiltersInet[filter]
 		if f == nil {
 			t.Fatalf("filter %q missing after nested group expansion", filter)
 		}
-		out := make(map[string]string, len(f.Terms))
+		out := make(map[string]FilterAction, len(f.Terms))
 		for _, term := range f.Terms {
 			out[term.Name] = term.Action
 		}

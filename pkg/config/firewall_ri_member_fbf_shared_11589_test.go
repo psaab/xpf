@@ -59,7 +59,7 @@ func TestMemberFBFSharedFilterSuppressesOnlyMemberAttachment11589(t *testing.T) 
 	if len(clone.Terms) != 1 {
 		t.Fatalf("clone %q must carry the same single term: %+v", cloneName, clone.Terms)
 	}
-	if got := clone.Terms[0]; got.RoutingInstance != "" || got.Action != "accept" {
+	if got := clone.Terms[0]; got.RoutingInstance != "" || got.Action != FilterActionAccept {
 		t.Fatalf("clone %q must strip the FBF override as terminal accept: got routing-instance %q action %q",
 			cloneName, got.RoutingInstance, got.Action)
 	}
@@ -101,7 +101,7 @@ func TestMemberFBFMemberOnlyAttachmentRebindsToClone11589(t *testing.T) {
 	if clone == nil || len(clone.Terms) != 1 {
 		t.Fatalf("stripped clone %q missing: %+v", got, clone)
 	}
-	if term := clone.Terms[0]; term.RoutingInstance != "" || term.Action != "accept" {
+	if term := clone.Terms[0]; term.RoutingInstance != "" || term.Action != FilterActionAccept {
 		t.Fatalf("clone %q must strip the FBF override as terminal accept: got routing-instance %q action %q",
 			got, term.RoutingInstance, term.Action)
 	}

@@ -190,7 +190,7 @@ firewall {
 		t.Fatalf("identical-body duplicate must not be quarantined: %v", cfg.Firewall.CollidingNames)
 	}
 	f, ok := cfg.Firewall.FiltersInet["blockX"]
-	if !ok || len(f.Terms) != 1 || f.Terms[0].Action != "discard" {
+	if !ok || len(f.Terms) != 1 || f.Terms[0].Action != FilterActionDiscard {
 		t.Fatalf("identical-body duplicate must stay enforceable as discard, got %+v ok=%v", f, ok)
 	}
 }

@@ -317,7 +317,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 			"lo0f": {Terms: []*config.FirewallFilterTerm{{
-				Name: "drop-frags", IsFragment: true, Action: "discard",
+				Name: "drop-frags", IsFragment: true, Action: config.FilterActionDiscard,
 			}}},
 		}
 		cfg.PolicyOptions.PrefixLists = map[string]*config.PrefixList{}
@@ -377,8 +377,8 @@ func runNftNetlinkParityInner(t *testing.T) {
 				cfg := &config.Config{}
 				cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 					"flexf": {Terms: []*config.FirewallFilterTerm{
-						{Name: "flex", Protocols: []string{"tcp"}, FlexMatch: &fm, Action: "accept"},
-						{Name: "deny-rest", Action: "discard"},
+						{Name: "flex", Protocols: []string{"tcp"}, FlexMatch: &fm, Action: config.FilterActionAccept},
+						{Name: "deny-rest", Action: config.FilterActionDiscard},
 					}},
 				}
 				nftDeleteTableBestEffort(xnft.Lo0TableName)
@@ -420,7 +420,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 					Protocols:           []string{"tcp"},
 					FlexMatchRangeNames: []string{"r1", "r2"},
 					FlexMatch:           &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff},
-					Action:              "accept",
+					Action:              config.FilterActionAccept,
 				},
 			},
 			{
@@ -432,7 +432,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 					Protocols:        []string{"tcp"},
 					UnknownFlexMatch: []string{"byte-offset=not-a-number"},
 					FlexMatch:        &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff},
-					Action:           "accept",
+					Action:           config.FilterActionAccept,
 				},
 			},
 			{
@@ -446,7 +446,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 					Name:      "oversized-width",
 					Protocols: []string{"tcp"},
 					FlexMatch: &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 40, Value: 1, Mask: 0xff},
-					Action:    "accept",
+					Action:    config.FilterActionAccept,
 				},
 			},
 			{
@@ -458,7 +458,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 					Name:      "unrepresentable-match-start",
 					Protocols: []string{"tcp"},
 					FlexMatch: &config.FlexMatchConfig{MatchStart: "payload", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff},
-					Action:    "accept",
+					Action:    config.FilterActionAccept,
 				},
 			},
 		} {
@@ -467,7 +467,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 				cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 					"flexbad": {Terms: []*config.FirewallFilterTerm{
 						tc.term,
-						{Name: "deny-rest", Action: "discard"},
+						{Name: "deny-rest", Action: config.FilterActionDiscard},
 					}},
 				}
 				nftDeleteTableBestEffort(xnft.Lo0TableName)
@@ -498,7 +498,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		badCfg := &config.Config{}
 		badCfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 			"badf": {Terms: []*config.FirewallFilterTerm{
-				{Name: "bad-port", Protocols: []string{"tcp"}, DestinationPorts: []string{"definitely-not-a-service"}, Action: "accept"},
+				{Name: "bad-port", Protocols: []string{"tcp"}, DestinationPorts: []string{"definitely-not-a-service"}, Action: config.FilterActionAccept},
 			}},
 		}
 		nftDeleteTableBestEffort(xnft.Lo0TableName)
@@ -545,13 +545,13 @@ func runNftNetlinkParityInner(t *testing.T) {
 				name: "unknown_from",
 				term: &config.FirewallFilterTerm{
 					Name: "ttl-term", Protocols: []string{"tcp"},
-					UnknownFrom: []string{"ttl"}, Action: "accept",
+					UnknownFrom: []string{"ttl"}, Action: config.FilterActionAccept,
 				},
 			},
 			{
 				name: "valueless_from",
 				term: &config.FirewallFilterTerm{
-					Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: "accept",
+					Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: config.FilterActionAccept,
 				},
 			},
 		} {
@@ -1095,24 +1095,24 @@ func parityLo0Config() *config.Config {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"lo0f": {Terms: []*config.FirewallFilterTerm{
-			{Name: "ssh-in", SourceAddresses: []string{"10.0.0.0/8"}, DestAddresses: []string{"10.0.1.1"}, Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Count: "ssh_hits", Action: "accept"},
+			{Name: "ssh-in", SourceAddresses: []string{"10.0.0.0/8"}, DestAddresses: []string{"10.0.1.1"}, Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Count: "ssh_hits", Action: config.FilterActionAccept},
 			// #6405 FIX-1: a NAMED destination port. The oracle emits the raw
 			// `th dport ssh`; nft resolves it via /etc/services -> 22. The netlink
 			// build must resolve it to the SAME number (config.ResolveFilterPortRange)
 			// and produce bit-identical kernel state — never drop the predicate.
-			{Name: "named-svc", Protocols: []string{"tcp"}, DestinationPorts: []string{"ssh"}, Action: "accept"},
-			{Name: "range-drop", SourcePorts: []string{"1024", "2048"}, DestinationPorts: []string{"33434-33523"}, DSCPs: []string{"ef"}, Log: true, Action: "discard"},
-			{Name: "reject-term", DestPortsExcept: []string{"80", "443"}, ICMPTypes: []int{3}, ICMPCodes: []int{4}, Action: "reject"},
-			{Name: "syn-only", TCPFlags: []string{"syn", "&", "!ack"}, Action: "accept"},
+			{Name: "named-svc", Protocols: []string{"tcp"}, DestinationPorts: []string{"ssh"}, Action: config.FilterActionAccept},
+			{Name: "range-drop", SourcePorts: []string{"1024", "2048"}, DestinationPorts: []string{"33434-33523"}, DSCPs: []string{"ef"}, Log: true, Action: config.FilterActionDiscard},
+			{Name: "reject-term", DestPortsExcept: []string{"80", "443"}, ICMPTypes: []int{3}, ICMPCodes: []int{4}, Action: config.FilterActionReject},
+			{Name: "syn-only", TCPFlags: []string{"syn", "&", "!ack"}, Action: config.FilterActionAccept},
 			{Name: "count-only", Count: "audit"},
-			{Name: "multi", DestAddresses: []string{"10.0.1.1", "10.0.1.2"}, Protocols: []string{"tcp", "udp"}, Action: "accept"},
+			{Name: "multi", DestAddresses: []string{"10.0.1.1", "10.0.1.2"}, Protocols: []string{"tcp", "udp"}, Action: config.FilterActionAccept},
 		}},
 	}
 	cfg.Firewall.FiltersInet6 = map[string]*config.FirewallFilter{
 		"lo0f6": {Terms: []*config.FirewallFilterTerm{
-			{Name: "v6-dscp", DestAddresses: []string{"2001:db8::/32"}, DSCPs: []string{"cs1"}, Action: "accept"},
-			{Name: "v6-frag", ICMPTypes: []int{1, 2}, IsFragment: true, Action: "discard"},
-			{Name: "v6-except", SourceAddresses: []string{"2001:db8:bad::/48"}, DestPortsExcept: []string{"22"}, Action: "accept"},
+			{Name: "v6-dscp", DestAddresses: []string{"2001:db8::/32"}, DSCPs: []string{"cs1"}, Action: config.FilterActionAccept},
+			{Name: "v6-frag", ICMPTypes: []int{1, 2}, IsFragment: true, Action: config.FilterActionDiscard},
+			{Name: "v6-except", SourceAddresses: []string{"2001:db8:bad::/48"}, DestPortsExcept: []string{"22"}, Action: config.FilterActionAccept},
 		}},
 	}
 	return cfg

@@ -59,7 +59,7 @@ func TestFirewallTermPackedKnownChildStillCommits10294(t *testing.T) {
 	if len(term.unknownChildren) != 0 {
 		t.Fatalf("packed known term tail recorded as unknown: %v", term.unknownChildren)
 	}
-	if term.Action != "discard" {
+	if term.Action != FilterActionDiscard {
 		t.Fatalf("packed known term tail lost action: %q", term.Action)
 	}
 }

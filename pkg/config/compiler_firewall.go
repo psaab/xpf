@@ -1130,8 +1130,8 @@ type effectiveTermProjection15997 struct {
 	UnknownAddresses              []string
 	TCPFlags                      []string
 	IsFragment                    bool
-	Action                        string
-	TerminalActions               []string
+	Action                        FilterAction
+	TerminalActions               []FilterAction
 	RoutingInstanceTargetFirst    string
 	RoutingInstanceTargetConflict string
 	UnknownActions                []string
@@ -2519,7 +2519,7 @@ func compileFilterThenTail11355(action *Node, term *FirewallFilterTerm) {
 // action earlier or later in the same statement cannot override the failure.
 func failClosedUnknownFilterAction(term *FirewallFilterTerm) {
 	if len(term.UnknownActions) > 0 {
-		term.Action = "discard"
+		term.Action = FilterActionDiscard
 	}
 }
 
@@ -2527,7 +2527,7 @@ func failClosedUnknownFilterAction(term *FirewallFilterTerm) {
 // than one distinct explicit terminal. The slice deliberately retains
 // duplicates, so identical repeated actions remain valid. Shared by the
 // strict gate and both dataplane renderers' tolerant-path refusal markers.
-func FilterHasConflictingTerminalActions(actions []string) bool {
+func FilterHasConflictingTerminalActions(actions []FilterAction) bool {
 	if len(actions) < 2 {
 		return false
 	}
@@ -2538,6 +2538,16 @@ func FilterHasConflictingTerminalActions(actions []string) bool {
 		}
 	}
 	return false
+}
+
+// joinFilterActions renders distinct terminating actions for diagnostics
+// in first-seen order (e.g. "accept and discard").
+func joinFilterActions(actions []FilterAction) string {
+	parts := make([]string, len(actions))
+	for i, a := range actions {
+		parts[i] = string(a)
+	}
+	return strings.Join(parts, " and ")
 }
 
 func recordFilterRoutingInstanceTarget(term *FirewallFilterTerm, target string) {
@@ -2569,7 +2579,7 @@ func failClosedFilterTerminalConflicts(cfg *Config) {
 					// consumer that cannot refuse a snapshot, but userspace and
 					// lo0 mirrors also carry the conflict as FromUnrepresentable
 					// and refuse this generation whole.
-					term.Action = "discard"
+					term.Action = FilterActionDiscard
 				}
 			}
 		}
@@ -2641,11 +2651,11 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 			}
 			switch k {
 			case "accept":
-				term.Action = "accept"
-				term.TerminalActions = append(term.TerminalActions, "accept")
+				term.Action = FilterActionAccept
+				term.TerminalActions = append(term.TerminalActions, FilterActionAccept)
 			case "reject":
-				term.Action = "reject"
-				term.TerminalActions = append(term.TerminalActions, "reject")
+				term.Action = FilterActionReject
+				term.TerminalActions = append(term.TerminalActions, FilterActionReject)
 				// Junos `then reject <message-type>`: the term is a plain
 				// reject; capture a KNOWN message-type for fidelity. Only
 				// consume the following token if it is a recognized type — a
@@ -2656,8 +2666,8 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 					term.RejectMessageType = keys[i]
 				}
 			case "discard":
-				term.Action = "discard"
-				term.TerminalActions = append(term.TerminalActions, "discard")
+				term.Action = FilterActionDiscard
+				term.TerminalActions = append(term.TerminalActions, FilterActionDiscard)
 			case "next":
 				// `then next term` / bare `then next` — explicit fall-through
 				// to the next term (a no-op terminating-wise). Consume an
@@ -2765,11 +2775,11 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 		}
 		switch child.Name() {
 		case "accept":
-			term.Action = "accept"
-			term.TerminalActions = append(term.TerminalActions, "accept")
+			term.Action = FilterActionAccept
+			term.TerminalActions = append(term.TerminalActions, FilterActionAccept)
 		case "reject":
-			term.Action = "reject"
-			term.TerminalActions = append(term.TerminalActions, "reject")
+			term.Action = FilterActionReject
+			term.TerminalActions = append(term.TerminalActions, FilterActionReject)
 			// `then reject <message-type>` — capture a KNOWN type for fidelity;
 			// a typo after reject is flagged (see leaf-form note above). The
 			// message-type is the second key (block form) or a single child.
@@ -2792,8 +2802,8 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 				}
 			}
 		case "discard":
-			term.Action = "discard"
-			term.TerminalActions = append(term.TerminalActions, "discard")
+			term.Action = FilterActionDiscard
+			term.TerminalActions = append(term.TerminalActions, FilterActionDiscard)
 		case "next":
 			// `then next term` / bare `then next` — explicit fall-through.
 			term.NextTerm = true

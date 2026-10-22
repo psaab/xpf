@@ -28,7 +28,7 @@ func TestFilterSnapshotICMPUnrepresentableSetsMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:             "bad",
-			Action:           "discard",
+			Action:           config.FilterActionDiscard,
 			ICMPTypes:        []int{8},          // one resolvable type
 			UnknownICMPTypes: []string{"bogus"}, // and one unresolvable name
 			UnknownICMPCodes: []string{"300"},   // out-of-range code
@@ -55,7 +55,7 @@ func TestFilterSnapshotICMPResolvableNoMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:      "ok",
-			Action:    "accept",
+			Action:    config.FilterActionAccept,
 			ICMPTypes: []int{0, 8},
 			ICMPCodes: []int{0},
 		}}},
@@ -81,7 +81,7 @@ func TestFilterSnapshotDSCPMatchUnrepresentableSetsMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:   "bad",
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 			DSCPs:  []string{"not-a-code-point"},
 		}}},
 	}
@@ -101,7 +101,7 @@ func TestFilterSnapshotDSCPMatchResolvableNoMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:   "ok",
-			Action: "accept",
+			Action: config.FilterActionAccept,
 			DSCPs:  []string{"ef", "10"},
 		}}},
 	}
@@ -124,7 +124,7 @@ func TestFilterSnapshotDSCPRewriteUnrepresentableNoMarkerNoValue(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:        "rw",
-			Action:      "accept",
+			Action:      config.FilterActionAccept,
 			DSCPRewrite: "not-a-code-point",
 		}}},
 	}
@@ -150,7 +150,7 @@ func TestFilterSnapshotFlexMatchOversizedWidthNotCapped(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:   "wide",
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 			FlexMatch: &config.FlexMatchConfig{
 				MatchStart: "layer-3",
 				ByteOffset: 0,
@@ -186,7 +186,7 @@ func TestFilterSnapshotMixedPortExceptWarns(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:              "mixed",
-			Action:            "discard",
+			Action:            config.FilterActionDiscard,
 			SourcePorts:       []string{"80"},
 			SourcePortsExcept: []string{"443"},
 			DestinationPorts:  []string{"22"},
@@ -216,7 +216,7 @@ func TestFilterSnapshotPureExceptPortNoWarn(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:              "exceptonly",
-			Action:            "accept",
+			Action:            config.FilterActionAccept,
 			SourcePortsExcept: []string{"443"},
 		}}},
 	}

@@ -572,6 +572,24 @@ const (
 	// field of an EXISTING walked struct, so the golden below moves.
 	// Version 66 (#16063, after #16049 took 64 and #16059 took 65) adds
 	// MirrorConfigSnapshot ingress_unit; the golden moves.
+	// v66 STANDS (#16140): FirewallFilterTerm.Action and
+	// FirewallFilterTerm.TerminalActions were retyped from string /
+	// []string to the string-underlying FilterAction / []FilterAction
+	// enum (NextTerm stays bool). Measured, not argued: this digest
+	// does NOT move — the depth-4 walk reaches Config.Firewall (depth
+	// 2 via ConfigSnapshot.Config) but FirewallFilterTerm sits below
+	// the cutoff, so no walked line names the retyped fields, and the
+	// pre/post digests are identical (f08c7403…). The serialized JSON
+	// is likewise byte-identical: FilterAction marshals as the same
+	// "accept"/"reject"/"discard"/"" tokens, and the userspace
+	// snapshot boundary converts with string(term.Action) into the
+	// unchanged FirewallTermSnapshot.Action string field. Rust models
+	// config as opaque serde_json::Value and reads only that snapshot
+	// field, so no helper of any vintage can observe the retype.
+	// Marshal-diff vs the pre-change snapshot bytes is pinned by
+	// TestFilterActionEnumMarshalDiff16140. No golden regen and no
+	// ProtocolVersion bump: bumping for a wire-invisible retype would
+	// spend the one signal that says the wire really changed.
 	snapshotShapeVersion8892 = 66
 )
 

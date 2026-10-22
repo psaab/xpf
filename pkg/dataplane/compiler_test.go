@@ -167,7 +167,7 @@ func TestExpandFilterTermNegateFlags(t *testing.T) {
 
 	term := &config.FirewallFilterTerm{
 		Name:   "negate-test",
-		Action: "accept",
+		Action: config.FilterActionAccept,
 		SourcePrefixLists: []config.PrefixListRef{
 			{Name: "rfc1918", Except: true},
 		},
@@ -210,7 +210,7 @@ func TestExpandFilterTermDstNegate(t *testing.T) {
 
 	term := &config.FirewallFilterTerm{
 		Name:   "dst-negate-test",
-		Action: "discard",
+		Action: config.FilterActionDiscard,
 		DestPrefixLists: []config.PrefixListRef{
 			{Name: "private", Except: true},
 		},
@@ -246,7 +246,7 @@ func TestExpandFilterTermNoNegateWithoutExcept(t *testing.T) {
 
 	term := &config.FirewallFilterTerm{
 		Name:   "no-negate",
-		Action: "accept",
+		Action: config.FilterActionAccept,
 		SourcePrefixLists: []config.PrefixListRef{
 			{Name: "allowed", Except: false},
 		},
@@ -332,7 +332,7 @@ func TestIsConfiguredVLANSubInterface(t *testing.T) {
 func TestExpandFilterTermFlexMatch(t *testing.T) {
 	term := &config.FirewallFilterTerm{
 		Name:   "flex-test",
-		Action: "discard",
+		Action: config.FilterActionDiscard,
 		FlexMatch: &config.FlexMatchConfig{
 			MatchStart: "layer-3",
 			ByteOffset: 9,
@@ -372,7 +372,7 @@ func TestExpandFilterTermPolicerAndFlex(t *testing.T) {
 	policerIDs := map[string]uint32{"my-pol": 1}
 	term := &config.FirewallFilterTerm{
 		Name:    "combo",
-		Action:  "accept",
+		Action:  config.FilterActionAccept,
 		Policer: "my-pol",
 		FlexMatch: &config.FlexMatchConfig{
 			MatchStart: "layer-3",

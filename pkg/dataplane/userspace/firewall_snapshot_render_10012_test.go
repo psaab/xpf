@@ -231,7 +231,7 @@ func TestSnapshotRenderPureFallThroughControl10012(t *testing.T) {
 // shape: a real action without next_term renders exactly the action.
 func TestSnapshotRenderPureTerminalControl10012(t *testing.T) {
 	terms := snapshotTerms10012(t, "edge", []*config.FirewallFilterTerm{
-		{Name: "deny", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: "discard", TerminalActions: []string{"discard"}},
+		{Name: "deny", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: config.FilterActionDiscard, TerminalActions: []config.FilterAction{config.FilterActionDiscard}},
 	})
 	if len(terms) != 1 {
 		t.Fatalf("expected 1 snapshot term, got %d: %+v", len(terms), terms)

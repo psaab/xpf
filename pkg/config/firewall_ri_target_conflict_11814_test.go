@@ -38,7 +38,7 @@ firewall { family inet { filter f { term t {
 		t.Fatalf("lenient term lost RI target conflict record: first=%q conflict=%q",
 			term.routingInstanceTargetFirst, term.routingInstanceTargetConflict)
 	}
-	if term.RoutingInstance != "red" || term.Action != "" {
+	if term.RoutingInstance != "red" || term.Action != FilterActionUnset {
 		t.Fatalf("lenient compile changed effective last target: routing-instance=%q action=%q", term.RoutingInstance, term.Action)
 	}
 	foundWarning := false
@@ -71,7 +71,7 @@ firewall { family inet { filter f { term t {
 		t.Fatalf("strict compile rejected duplicate same-target routing-instance actions: %v", err)
 	}
 	term := cfg.Firewall.FiltersInet["f"].Terms[0]
-	if term.RoutingInstance != "blue" || term.Action != "" {
+	if term.RoutingInstance != "blue" || term.Action != FilterActionUnset {
 		t.Fatalf("same-target duplicate changed effective FBF action: routing-instance=%q action=%q", term.RoutingInstance, term.Action)
 	}
 	if term.routingInstanceTargetFirst != "blue" || term.routingInstanceTargetConflict != "" {
@@ -90,7 +90,7 @@ func TestFilterSingleRoutingInstanceActionUnchanged11814(t *testing.T) {
 		t.Fatalf("single-target FBF compile failed: %v", err)
 	}
 	term := cfg.Firewall.FiltersInet["f"].Terms[0]
-	if term.RoutingInstance != "blue" || term.Action != "" || term.NextTerm {
+	if term.RoutingInstance != "blue" || term.Action != FilterActionUnset || term.NextTerm {
 		t.Fatalf("single-target FBF action changed: routing-instance=%q action=%q next-term=%t", term.RoutingInstance, term.Action, term.NextTerm)
 	}
 	if term.routingInstanceTargetFirst != "blue" || term.routingInstanceTargetConflict != "" {

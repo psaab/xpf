@@ -105,7 +105,7 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		}
 		snap := FirewallTermSnapshot{
 			Name:              term.Name,
-			Action:            term.Action,
+			Action:            string(term.Action),
 			Count:             term.Count,
 			Log:               term.Log,
 			RejectMessageType: term.RejectMessageType,
@@ -143,9 +143,9 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		// dataplane with NO address constraint (fail-open for accept/PBR,
 		// fail-closed for discard/reject — either way wrong).
 		srcAddrs, srcExcept, srcConstrained := resolvePrefixListAddrs(
-			term.SourceAddresses, term.SourcePrefixLists, cfg, filterName, term.Name, "source", term.Action)
+			term.SourceAddresses, term.SourcePrefixLists, cfg, filterName, term.Name, "source", string(term.Action))
 		dstAddrs, dstExcept, dstConstrained := resolvePrefixListAddrs(
-			term.DestAddresses, term.DestPrefixLists, cfg, filterName, term.Name, "destination", term.Action)
+			term.DestAddresses, term.DestPrefixLists, cfg, filterName, term.Name, "destination", string(term.Action))
 		snap.SourceAddresses = srcAddrs
 		snap.DestAddresses = dstAddrs
 		snap.SourceExcept = srcExcept
@@ -662,7 +662,7 @@ func portsHaveReal(ports []string) bool {
 // ResolveFilterPrefixListAddrs: unresolved positive / except scopes match NOTHING
 // for every non-deny action, preventing admission or PBR steering of traffic
 // whose scope cannot be resolved; a deny matches ALL so it cannot fall through
-// to a later permit. The action strings match FirewallFilterTerm.Action /
+// to a later permit. The action strings match string(FirewallFilterTerm.Action) /
 // FirewallTermSnapshot.Action ("accept"/"discard"/"reject"/"").
 func firewallFilterActionDenies(action string) bool {
 	return action == "discard" || action == "reject"

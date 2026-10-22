@@ -49,7 +49,7 @@ func TestFilterExpansionCount64ExceedsUint32NoWrap(t *testing.T) {
 	}
 	term := &FirewallFilterTerm{
 		Name:              "t",
-		Action:            "discard",
+		Action:            FilterActionDiscard,
 		SourcePrefixLists: []PrefixListRef{{Name: "src"}},
 		DestPrefixLists:   []PrefixListRef{{Name: "dst"}},
 	}
@@ -93,7 +93,7 @@ func TestFilterExpansionOverCapWarnsNotRejects(t *testing.T) {
 		"f": {Name: "f", Terms: []*FirewallFilterTerm{
 			{
 				Name:              "huge",
-				Action:            "discard",
+				Action:            FilterActionDiscard,
 				SourcePrefixLists: []PrefixListRef{{Name: "src"}},
 				DestPrefixLists:   []PrefixListRef{{Name: "dst"}},
 			},
@@ -120,7 +120,7 @@ func TestFilterExpansionAtCapNoWarning(t *testing.T) {
 		"f": {Name: "f", Terms: []*FirewallFilterTerm{
 			{
 				Name:              "atcap",
-				Action:            "discard",
+				Action:            FilterActionDiscard,
 				SourcePrefixLists: []PrefixListRef{{Name: "src"}}, // nSrc=cap, others=1
 			},
 		}},
@@ -142,7 +142,7 @@ func TestFilterExpansionNormalTermUnchanged(t *testing.T) {
 	}
 	term := &FirewallFilterTerm{
 		Name:              "t",
-		Action:            "accept",
+		Action:            FilterActionAccept,
 		SourceAddresses:   []string{"192.0.2.1/32"},         // nSrc = 1 literal + 2 prefixes = 3
 		SourcePrefixLists: []PrefixListRef{{Name: "src"}},   //
 		DestinationPorts:  []string{"80", "443"},            // nDstPorts = 2

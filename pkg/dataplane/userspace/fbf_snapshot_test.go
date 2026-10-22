@@ -51,7 +51,7 @@ func fbfTestConfig() *config.Config {
 					Count:           "fbf-isp-b",
 					RoutingInstance: "ISP-B",
 				},
-				{Name: "default", Action: "accept"},
+				{Name: "default", Action: config.FilterActionAccept},
 			},
 		},
 	}

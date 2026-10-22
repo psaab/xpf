@@ -143,6 +143,8 @@ func RenderFirewallFilterSnapshot(snap *FirewallFilterSnapshot) string {
 		if effectiveFallThrough {
 			fmt.Fprintf(&b, "    then next term (fall-through)\n")
 		} else {
+			// FirewallTermSnapshot.Action stays string; the typed
+			// config.FilterAction converts at snapshot build (filters.go).
 			action := term.Action
 			if action == "" {
 				action = "accept"

@@ -26,7 +26,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132(t *testi
 			term: &config.FirewallFilterTerm{
 				Name:              "t",
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
-				Action:            "discard",
+				Action:            config.FilterActionDiscard,
 			},
 		},
 		{
@@ -34,7 +34,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132(t *testi
 			term: &config.FirewallFilterTerm{
 				Name:              "t",
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
-				Action:            "reject",
+				Action:            config.FilterActionReject,
 			},
 		},
 		{
@@ -42,7 +42,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132(t *testi
 			term: &config.FirewallFilterTerm{
 				Name:            "t",
 				DestPrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
-				Action:          "discard",
+				Action:          config.FilterActionDiscard,
 			},
 		},
 		{
@@ -50,7 +50,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132(t *testi
 			term: &config.FirewallFilterTerm{
 				Name:              "t",
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
-				Action:            "accept",
+				Action:            config.FilterActionAccept,
 			},
 		},
 		{
@@ -61,7 +61,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132(t *testi
 					{Name: "known"},
 					{Name: "TYPO"},
 				},
-				Action: "discard",
+				Action: config.FilterActionDiscard,
 			},
 			lists: map[string]*config.PrefixList{
 				"known": {Name: "known", Prefixes: []string{"10.0.0.0/8"}},
@@ -73,7 +73,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132(t *testi
 				Name:              "t",
 				SourceAddresses:   []string{"192.0.2.0/24"},
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
-				Action:            "reject",
+				Action:            config.FilterActionReject,
 			},
 		},
 	}
@@ -119,7 +119,7 @@ func TestBuildFirewallFilterSnapshotsDefinedPositiveKeepsRepresentable14132(t *t
 					Terms: []*config.FirewallFilterTerm{{
 						Name:              "t",
 						SourcePrefixLists: []config.PrefixListRef{{Name: "known"}},
-						Action:            "discard",
+						Action:            config.FilterActionDiscard,
 					}},
 				},
 			}

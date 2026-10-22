@@ -441,7 +441,7 @@ func TestApplyTailProductionInterleaveOrder16170(t *testing.T) {
 	f.cfg.Security.Zones["trust"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"ssh"}}
 	f.cfg.System.Lo0FilterInputV4 = "mgmt-lockdown"
 	f.cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
-		"mgmt-lockdown": {Name: "mgmt-lockdown", Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: "discard"}}},
+		"mgmt-lockdown": {Name: "mgmt-lockdown", Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: config.FilterActionDiscard}}},
 	}
 	f.cfg.System.Login = &config.LoginConfig{Users: []*config.LoginUser{{Name: "admin", Class: "super-user"}}}
 	f.cfg.System.Services = &config.SystemServicesConfig{SSH: &config.SSHServiceConfig{RootLogin: "deny"}}

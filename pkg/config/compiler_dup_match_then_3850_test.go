@@ -349,7 +349,7 @@ firewall {
 	if term.Count != "C1" {
 		t.Fatalf("first then block count dropped: Count=%q", term.Count)
 	}
-	if term.Action != "accept" {
+	if term.Action != FilterActionAccept {
 		t.Fatalf("SECOND then block terminal action DROPPED (first-block-only); "+
 			"Action=%q, want accept", term.Action)
 	}
@@ -491,7 +491,7 @@ firewall {
 	term := fw.FiltersInet["F1"].Terms[0]
 	if !containsStr3850(term.SourceAddresses, "10.0.0.0/24") ||
 		!containsStr3850(term.DestAddresses, "20.0.0.0/24") ||
-		term.Count != "C1" || term.Action != "accept" {
+		term.Count != "C1" || term.Action != FilterActionAccept {
 		t.Fatalf("single-block filter term regressed: src=%v dst=%v count=%q action=%q",
 			term.SourceAddresses, term.DestAddresses, term.Count, term.Action)
 	}

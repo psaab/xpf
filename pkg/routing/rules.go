@@ -1534,7 +1534,7 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 		// Both an explicit terminal action and routing-instance terminate the
 		// userspace walk. Record every such term even if its own mirror cannot
 		// be emitted, so a later rule cannot bypass it.
-		if term.Action != "" || term.RoutingInstance != "" {
+		if term.Action != config.FilterActionUnset || term.RoutingInstance != "" {
 			precedingTerminating = append(precedingTerminating, term)
 		}
 		if term.RoutingInstance == "" {
@@ -1561,7 +1561,7 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 		// The strict commit gate (validateFilterRoutingInstanceConflictStrict)
 		// rejects this term, but is LENIENT on load / peer-sync (#1960 no-brick),
 		// so a contradictory term can still reach here — skip it (do NOT steer).
-		if term.Action == "discard" || term.Action == "reject" {
+		if term.Action == config.FilterActionDiscard || term.Action == config.FilterActionReject {
 			errs = append(errs, fmt.Errorf(
 				"PBR filter %s term %s co-locates routing-instance %q with a terminating "+
 					"%q action; the deny wins (mirroring the userspace drop, #4392) — no "+
@@ -1804,7 +1804,7 @@ func pbrTermsMayOverlap(prior, candidate *config.FirewallFilterTerm, family int)
 	// candidate term's remaining (non-overlapping) traffic too.
 	if prior.RoutingInstance != "" &&
 		prior.RoutingInstance == candidate.RoutingInstance &&
-		(prior.Action == "" || prior.Action == "accept") {
+		(prior.Action == config.FilterActionUnset || prior.Action == config.FilterActionAccept) {
 		return false
 	}
 	if pbrDSCPsProveDisjoint(prior.DSCPs, candidate.DSCPs) ||

@@ -27,7 +27,7 @@ func TestFilterSnapshotPortsUnrepresentableSetsMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:             "bad",
-			Action:           "discard",
+			Action:           config.FilterActionDiscard,
 			DestinationPorts: []string{"22", "bogussvc"}, // one resolved, one kept verbatim
 			UnknownPorts:     []string{"bogussvc"},
 		}}},
@@ -51,7 +51,7 @@ func TestFilterSnapshotPortsResolvableNoMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:             "ok",
-			Action:           "accept",
+			Action:           config.FilterActionAccept,
 			DestinationPorts: []string{"22", "80"},
 			SourcePorts:      []string{"1024-65535"},
 		}}},
@@ -73,7 +73,7 @@ func TestFilterSnapshotAddressUnrepresentableSetsMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:             "bad",
-			Action:           "discard",
+			Action:           config.FilterActionDiscard,
 			SourceAddresses:  []string{"10.0.0.0/8", "garbage.example"},
 			UnknownAddresses: []string{"garbage.example"},
 		}}},
@@ -91,7 +91,7 @@ func TestFilterSnapshotAddressResolvableNoMarker(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:            "ok",
-			Action:          "accept",
+			Action:          config.FilterActionAccept,
 			SourceAddresses: []string{"10.0.0.0/8", "192.0.2.1"},
 		}}},
 	}

@@ -389,7 +389,7 @@ func TestApplicationAndFilterCrossFieldGatesUseSharedSSOT_3723(t *testing.T) {
 	filterCfg := &Config{}
 	filterCfg.Firewall.FiltersInet = map[string]*FirewallFilter{
 		"f": {Name: "f", Terms: []*FirewallFilterTerm{
-			{Name: "t", Protocols: []string{"icmp"}, DestinationPorts: []string{"80"}, Action: "discard"},
+			{Name: "t", Protocols: []string{"icmp"}, DestinationPorts: []string{"80"}, Action: FilterActionDiscard},
 		}},
 	}
 	if err := validateFilterCrossFieldStrict(filterCfg); err == nil {

@@ -17,7 +17,7 @@ func TestBuildFirewallFilterSnapshotsUnresolvedExceptFailsClosed11451(t *testing
 			Terms: []*config.FirewallFilterTerm{{
 				Name:              "t",
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO", Except: true}},
-				Action:            "accept",
+				Action:            config.FilterActionAccept,
 			}},
 		},
 	}
@@ -43,7 +43,7 @@ func TestBuildFirewallFilterSnapshotsDefinedEmptyExceptKeepsMatchAll11451(t *tes
 			Terms: []*config.FirewallFilterTerm{{
 				Name:              "t",
 				SourcePrefixLists: []config.PrefixListRef{{Name: "none", Except: true}},
-				Action:            "accept",
+				Action:            config.FilterActionAccept,
 			}},
 		},
 	}

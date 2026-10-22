@@ -19,8 +19,8 @@ func TestLo0FlexMatchLayer4RendersTh14394(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"flexf": {Terms: []*config.FirewallFilterTerm{
-			{Name: "flex", Protocols: []string{"tcp"}, FlexMatch: &fm, Action: "accept"},
-			{Name: "deny-rest", Action: "discard"},
+			{Name: "flex", Protocols: []string{"tcp"}, FlexMatch: &fm, Action: config.FilterActionAccept},
+			{Name: "deny-rest", Action: config.FilterActionDiscard},
 		}},
 	}
 	oracle := buildLo0FilterPayload(cfg, "flexf", "")
@@ -45,7 +45,7 @@ func TestLo0FlexMatchLayer4RendersTh14394(t *testing.T) {
 func TestLo0FlexMatchLayer3StillRendersNh14394(t *testing.T) {
 	fm := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff}
 	got := nftRule(t, &config.FirewallFilterTerm{
-		Name: "flex-l3", FlexMatch: &fm, Action: "accept",
+		Name: "flex-l3", FlexMatch: &fm, Action: config.FilterActionAccept,
 	}, "ip", map[string]*config.PrefixList{})
 	if !strings.Contains(got, "@nh,") {
 		t.Fatalf("layer-3 control must still render @nh, got %q", got)
@@ -56,7 +56,7 @@ func TestLo0FlexMatchLayer3StillRendersNh14394(t *testing.T) {
 	// Empty match-start is the layer-3 default.
 	fm2 := config.FlexMatchConfig{MatchStart: "", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff}
 	got = nftRule(t, &config.FirewallFilterTerm{
-		Name: "flex-empty", FlexMatch: &fm2, Action: "accept",
+		Name: "flex-empty", FlexMatch: &fm2, Action: config.FilterActionAccept,
 	}, "ip", map[string]*config.PrefixList{})
 	if !strings.Contains(got, "@nh,") {
 		t.Fatalf("empty match-start must render @nh (layer-3 default), got %q", got)
@@ -67,7 +67,7 @@ func TestLo0FlexMatchUnrepresentableStartMatchesNothing14394(t *testing.T) {
 	for _, start := range []string{"payload", "bogus"} {
 		fm := config.FlexMatchConfig{MatchStart: start, ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff}
 		term := &config.FirewallFilterTerm{
-			Name: "flex-bad-start", FlexMatch: &fm, Action: "accept",
+			Name: "flex-bad-start", FlexMatch: &fm, Action: config.FilterActionAccept,
 		}
 		if !lo0FlexMatchUnrepresentable(term) {
 			t.Errorf("match-start %q: lo0FlexMatchUnrepresentable = false, want true", start)
@@ -87,7 +87,7 @@ func TestLo0FlexMatchUnrepresentableStartMatchesNothing14394(t *testing.T) {
 	okTerm := &config.FirewallFilterTerm{
 		Name:      "flex-l4",
 		FlexMatch: &config.FlexMatchConfig{MatchStart: "layer-4", ByteOffset: 0, BitLength: 8, Value: 1, Mask: 0xff},
-		Action:    "accept",
+		Action:    config.FilterActionAccept,
 	}
 	if lo0FlexMatchUnrepresentable(okTerm) {
 		t.Errorf("layer-4 must be representable in the oracle check")

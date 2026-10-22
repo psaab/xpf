@@ -224,8 +224,8 @@ func cloneFilterForMemberFBFSuppression11321(
 		termClone := *term
 		if termClone.RoutingInstance != "" {
 			termClone.RoutingInstance = ""
-			if termClone.Action == "" && !termClone.NextTerm {
-				termClone.Action = "accept"
+			if termClone.Action == FilterActionUnset && !termClone.NextTerm {
+				termClone.Action = FilterActionAccept
 			}
 		}
 		clone.Terms[i] = &termClone

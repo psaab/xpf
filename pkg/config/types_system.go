@@ -1549,6 +1549,36 @@ type FirewallFilter struct {
 	InterfaceSpecific bool
 }
 
+// FilterAction is the terminating action of a firewall filter term
+// (Junos `then accept|reject|discard`), #16140. It is a string-underlying
+// enum so the JSON token of FirewallFilterTerm.Action is unchanged
+// ("accept"/"reject"/"discard"/""); only the Go type moves — see the
+// v66 STANDS (#16140) ledger entry in
+// snapshot_shape_version_8892_test.go (measured: the depth-limited
+// #8892 digest does not reach this struct and the wire bytes are
+// identical, so no golden regen and no ProtocolVersion bump). NextTerm
+// deliberately stays a bool: folding it
+// in would lose the co-authored conflict evidence the strict gate
+// checks (NextTerm && terminal != "").
+type FilterAction string
+
+const (
+	// FilterActionUnset is the zero value: no terminating action was
+	// authored. The term either falls through (then next term, see
+	// NextTerm) or terminates as implicit accept when it carries only
+	// non-terminating modifiers.
+	FilterActionUnset FilterAction = ""
+	// FilterActionAccept accepts the packet and terminates the filter.
+	FilterActionAccept FilterAction = "accept"
+	// FilterActionReject drops the packet, sends a rejection response
+	// (TCP RST / ICMP administratively-prohibited), and terminates.
+	FilterActionReject FilterAction = "reject"
+	// FilterActionDiscard silently drops the packet and terminates.
+	// It is also the fail-closed action the tolerant compiler selects
+	// for unknown or conflicting authored actions.
+	FilterActionDiscard FilterAction = "discard"
+)
+
 // FirewallFilterTerm is a single match/action term within a filter.
 type FirewallFilterTerm struct {
 	Name string
@@ -1618,9 +1648,9 @@ type FirewallFilterTerm struct {
 	// the surviving prefixes (fail-OPEN via fall-through to the implicit accept).
 	// Mirrors UnknownPorts.
 	UnknownAddresses []string
-	TCPFlags         []string // TCP flags: "syn", "ack", "fin", "rst", "psh", "urg"
-	IsFragment       bool     // match IP fragments
-	Action           string   // "accept", "reject", "discard", ""
+	TCPFlags         []string     // TCP flags: "syn", "ack", "fin", "rst", "psh", "urg"
+	IsFragment       bool         // match IP fragments
+	Action           FilterAction // FilterActionAccept/Reject/Discard, or FilterActionUnset
 	// TerminalActions records EVERY terminating action keyword
 	// (accept/reject/discard) compileFilterThen encountered across all of the
 	// term's `then` blocks, in order and including duplicates. Action itself is
@@ -1637,7 +1667,7 @@ type FirewallFilterTerm struct {
 	// (count/log/forwarding-class/loss-priority/dscp/traffic-class/policer)
 	// coexist with a terminal and are NOT recorded here. Routing-instance is a
 	// terminating FBF action and is recorded separately below.
-	TerminalActions []string
+	TerminalActions []FilterAction
 	// routingInstanceTargetFirst and routingInstanceTargetConflict retain the
 	// first target and first distinct target seen by compileFilterThen. This
 	// distinguishes harmless repeats from conflicting FBF destinations without

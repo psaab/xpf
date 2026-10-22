@@ -33,7 +33,7 @@ func TestCompileFilterThenBlockFormAndMissingValueParity13213(t *testing.T) {
 		check func(*FirewallFilterTerm) (string, bool)
 	}{
 		{"policer", "policer { p1; } accept;", func(tm *FirewallFilterTerm) (string, bool) {
-			return tm.Policer, tm.Policer == "p1" && tm.Action == "accept"
+			return tm.Policer, tm.Policer == "p1" && tm.Action == FilterActionAccept
 		}},
 		{"count", "count { c1; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.Count, tm.Count == "c1" }},
 		{"forwarding-class", "forwarding-class { af11; } accept;", func(tm *FirewallFilterTerm) (string, bool) { return tm.ForwardingClass, tm.ForwardingClass == "af11" }},
@@ -91,7 +91,7 @@ func TestCompileFilterThenBlockFormAndMissingValueParity13213(t *testing.T) {
 			if !found {
 				t.Fatalf("bare %s: UnknownActions=%v, want %q", action, term.UnknownActions, action+" (missing value)")
 			}
-			if term.Action != "discard" {
+			if term.Action != FilterActionDiscard {
 				t.Fatalf("bare %s: lenient Action=%q, want discard (fail-closed)", action, term.Action)
 			}
 		})
@@ -117,7 +117,7 @@ func TestCompileFilterThenBlockFormAndMissingValueParity13213(t *testing.T) {
 		if term.Count != "c1" {
 			t.Fatalf("mixed shape: Count=%q, want c1 (Keys[1:] dropped when !IsLeaf)", term.Count)
 		}
-		if term.Action != "discard" {
+		if term.Action != FilterActionDiscard {
 			t.Fatalf("mixed shape: Action=%q, want discard from braced child", term.Action)
 		}
 	})

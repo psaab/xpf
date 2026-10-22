@@ -18,8 +18,8 @@ func TestRejectMessageTypeReachesTheSnapshot_6854(t *testing.T) {
 		"f": {
 			Name: "f",
 			Terms: []*config.FirewallFilterTerm{
-				{Name: "plain", Action: "reject"},
-				{Name: "typed", Action: "reject", RejectMessageType: "host-unreachable"},
+				{Name: "plain", Action: config.FilterActionReject},
+				{Name: "typed", Action: config.FilterActionReject, RejectMessageType: "host-unreachable"},
 			},
 		},
 	}

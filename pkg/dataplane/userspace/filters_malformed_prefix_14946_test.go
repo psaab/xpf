@@ -27,14 +27,14 @@ func TestFilterSnapshotMalformedReferencedPrefixFailsClosed14946(t *testing.T) {
 	}{
 		{
 			name: "discard positive source partially malformed",
-			term: &config.FirewallFilterTerm{Name: "t", Action: "discard",
+			term: &config.FirewallFilterTerm{Name: "t", Action: config.FilterActionDiscard,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "mgmt"}}},
 			lists:     map[string]*config.PrefixList{"mgmt": {Name: "mgmt", Prefixes: []string{"10.0.0.0/8", "10.0.0.0/99"}}},
 			wantAddrs: []string{"10.0.0.0/8", "10.0.0.0/99"},
 		},
 		{
 			name: "accept positive destination partially malformed",
-			term: &config.FirewallFilterTerm{Name: "t", Action: "accept",
+			term: &config.FirewallFilterTerm{Name: "t", Action: config.FilterActionAccept,
 				DestPrefixLists: []config.PrefixListRef{{Name: "mgmt"}}},
 			lists:     map[string]*config.PrefixList{"mgmt": {Name: "mgmt", Prefixes: []string{"192.168.0.0/16", "bogus-entry"}}},
 			wantAddrs: []string{"192.168.0.0/16", "bogus-entry"},
@@ -42,14 +42,14 @@ func TestFilterSnapshotMalformedReferencedPrefixFailsClosed14946(t *testing.T) {
 		},
 		{
 			name: "discard sole except partially malformed",
-			term: &config.FirewallFilterTerm{Name: "t", Action: "discard",
+			term: &config.FirewallFilterTerm{Name: "t", Action: config.FilterActionDiscard,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "mgmt", Except: true}}},
 			lists:     map[string]*config.PrefixList{"mgmt": {Name: "mgmt", Prefixes: []string{"10.0.0.0/8", "10.0.0.0/99"}}},
 			wantAddrs: []string{"10.0.0.0/8", "10.0.0.0/99"},
 		},
 		{
 			name: "accept zone-scoped entry in referenced list",
-			term: &config.FirewallFilterTerm{Name: "t", Action: "accept",
+			term: &config.FirewallFilterTerm{Name: "t", Action: config.FilterActionAccept,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "mgmt"}}},
 			lists:     map[string]*config.PrefixList{"mgmt": {Name: "mgmt", Prefixes: []string{"10.0.0.0/8", "fe80::1%eth0"}}},
 			wantAddrs: []string{"10.0.0.0/8", "fe80::1%eth0"},
@@ -122,7 +122,7 @@ func TestFilterSnapshotCleanReferencedPrefixNotMarked14946(t *testing.T) {
 	}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{
-			{Name: "t", Action: "discard", SourcePrefixLists: []config.PrefixListRef{{Name: "mgmt"}}},
+			{Name: "t", Action: config.FilterActionDiscard, SourcePrefixLists: []config.PrefixListRef{{Name: "mgmt"}}},
 		}},
 	}
 	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]

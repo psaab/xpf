@@ -344,7 +344,7 @@ func TestFBFDefaultDeclarationCollisionTolerantKeepsInstanceAndTerm11644(t *test
 	filter := cfg.Firewall.FiltersInet["f1"]
 	if filter == nil || len(filter.Terms) != 1 ||
 		filter.Terms[0].Name != "t1" || filter.Terms[0].RoutingInstance != "default" ||
-		filter.Terms[0].Action != "accept" {
+		filter.Terms[0].Action != FilterActionAccept {
 		t.Fatalf("tolerant compile rewrote or dropped the FBF term: %+v", filter)
 	}
 }

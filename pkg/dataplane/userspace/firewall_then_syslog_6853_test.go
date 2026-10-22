@@ -19,8 +19,8 @@ func TestThenSyslogReachesTheSnapshot_6853(t *testing.T) {
 		"f": {
 			Name: "f",
 			Terms: []*config.FirewallFilterTerm{
-				{Name: "only_log", Action: "accept", Log: true},
-				{Name: "only_syslog", Action: "accept", Log: true, Syslog: true},
+				{Name: "only_log", Action: config.FilterActionAccept, Log: true},
+				{Name: "only_syslog", Action: config.FilterActionAccept, Log: true, Syslog: true},
 			},
 		},
 	}

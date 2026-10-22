@@ -129,7 +129,7 @@ func TestApplyConfigLockedSurfacesLo0Failure(t *testing.T) {
 		"mgmt-lockdown": {
 			Name: "mgmt-lockdown",
 			Terms: []*config.FirewallFilterTerm{
-				{Name: "deny-all", Action: "discard"},
+				{Name: "deny-all", Action: config.FilterActionDiscard},
 			},
 		},
 	}

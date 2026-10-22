@@ -49,7 +49,7 @@ func TestVLANSubInterfaceFilterSilentlyUnapplied_6893(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"wan-in": {
 			Name:  "wan-in",
-			Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: "discard"}},
+			Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: config.FilterActionDiscard}},
 		},
 	}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -124,7 +124,7 @@ func TestVLANSubInterfaceFilterAppliedWhenResolvable_6893(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"wan-in": {
 			Name:  "wan-in",
-			Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: "discard"}},
+			Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: config.FilterActionDiscard}},
 		},
 	}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -193,7 +193,7 @@ func TestMissingInterfaceFilterBindingRecorded_6893(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"wan-in": {
 			Name:  "wan-in",
-			Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: "discard"}},
+			Terms: []*config.FirewallFilterTerm{{Name: "deny-all", Action: config.FilterActionDiscard}},
 		},
 	}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{

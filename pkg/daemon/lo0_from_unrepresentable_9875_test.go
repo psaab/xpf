@@ -68,7 +68,7 @@ func lowerLo0Term9875(t *testing.T, cfg *config.Config) xnft.Lo0FilterTerm {
 func TestUnknownFromReachesLo0Builder9875(t *testing.T) {
 	term := lowerLo0Term9875(t, lo0Cfg9875(&config.FirewallFilterTerm{
 		Name: "ttl-term", Protocols: []string{"tcp"},
-		UnknownFrom: []string{"ttl"}, Action: "accept",
+		UnknownFrom: []string{"ttl"}, Action: config.FilterActionAccept,
 	}))
 	if !term.FromUnrepresentable {
 		t.Error("#9875: UnknownFrom must set FromUnrepresentable — without it " +
@@ -82,7 +82,7 @@ func TestUnknownFromReachesLo0Builder9875(t *testing.T) {
 // only channel.
 func TestValuelessFromReachesLo0Builder9875(t *testing.T) {
 	term := lowerLo0Term9875(t, lo0Cfg9875(&config.FirewallFilterTerm{
-		Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: "accept",
+		Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: config.FilterActionAccept,
 	}))
 	if !term.FromUnrepresentable {
 		t.Error("#9875: ValuelessFrom must set FromUnrepresentable — without it " +
@@ -96,7 +96,7 @@ func TestValuelessFromReachesLo0Builder9875(t *testing.T) {
 func TestRepresentableFromDoesNotSetUnrepresentable9875(t *testing.T) {
 	term := lowerLo0Term9875(t, lo0Cfg9875(&config.FirewallFilterTerm{
 		Name: "ok", Protocols: []string{"tcp"},
-		DestinationPorts: []string{"22"}, Action: "accept",
+		DestinationPorts: []string{"22"}, Action: config.FilterActionAccept,
 	}))
 	if term.FromUnrepresentable {
 		t.Fatal("a fully representable term must not be marked unrepresentable")
@@ -124,20 +124,20 @@ func TestLo0TextOracleRefusesUnrepresentableFrom9875(t *testing.T) {
 			name: "unknown_from",
 			term: &config.FirewallFilterTerm{
 				Name: "ttl-term", Protocols: []string{"tcp"},
-				UnknownFrom: []string{"ttl"}, Action: "accept",
+				UnknownFrom: []string{"ttl"}, Action: config.FilterActionAccept,
 			},
 		},
 		{
 			name: "valueless_from",
 			term: &config.FirewallFilterTerm{
-				Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: "accept",
+				Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: config.FilterActionAccept,
 			},
 		},
 		{
 			name: "adversarial unknown name (GPT-3)",
 			term: &config.FirewallFilterTerm{
 				Name: "evil", Protocols: []string{"tcp"},
-				UnknownFrom: []string{adversarial}, Action: "accept",
+				UnknownFrom: []string{adversarial}, Action: config.FilterActionAccept,
 			},
 			raw: adversarial,
 		},
@@ -164,7 +164,7 @@ func TestLo0TextOracleRefusesUnrepresentableFrom9875(t *testing.T) {
 func TestLo0TextOracleUnchangedForRepresentableFrom9875(t *testing.T) {
 	payload := buildLo0FilterPayload(lo0Cfg9875(&config.FirewallFilterTerm{
 		Name: "ok", Protocols: []string{"tcp"},
-		DestinationPorts: []string{"22"}, Action: "accept",
+		DestinationPorts: []string{"22"}, Action: config.FilterActionAccept,
 	}), "protect-re", "")
 	if strings.Contains(payload, "__xpf_refuse_unrepresentable_from__") {
 		t.Errorf("a representable term must not carry the refusal bareword; payload:\n%s", payload)
@@ -201,13 +201,13 @@ func TestLo0RenderersAgreeOnUnrepresentableFrom9875(t *testing.T) {
 			name: "unknown_from",
 			term: &config.FirewallFilterTerm{
 				Name: "ttl-term", Protocols: []string{"tcp"},
-				UnknownFrom: []string{"ttl"}, Action: "accept",
+				UnknownFrom: []string{"ttl"}, Action: config.FilterActionAccept,
 			},
 		},
 		{
 			name: "valueless_from",
 			term: &config.FirewallFilterTerm{
-				Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: "accept",
+				Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: config.FilterActionAccept,
 			},
 		},
 	}
@@ -237,9 +237,9 @@ func TestLo0TextOracleRefusesMarkedMatchNothing9875(t *testing.T) {
 	cfg.System.Lo0FilterInputV4 = "protect-re"
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "ok", Protocols: []string{"tcp"}, Action: "accept"},
+			{Name: "ok", Protocols: []string{"tcp"}, Action: config.FilterActionAccept},
 			{Name: "marked-nothing", SourceAddresses: []string{"2001:db8::1/128"},
-				UnknownFrom: []string{"ttl"}, Action: "accept"},
+				UnknownFrom: []string{"ttl"}, Action: config.FilterActionAccept},
 		}},
 	}
 	payload := buildLo0FilterPayload(cfg, "protect-re", "")

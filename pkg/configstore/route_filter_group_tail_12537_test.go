@@ -241,7 +241,7 @@ func TestRouteFilterGroupUnparseableTrailerRejected_12687(t *testing.T) {
 // refused valid configs and the tolerant path compiled empty match sets.
 func TestFirewallGroupTermsKeepTheirMatches_12537(t *testing.T) {
 	type want struct {
-		action    string
+		action    config.FilterAction
 		proto     []string
 		dport     []string
 		src       []string
@@ -253,27 +253,27 @@ func TestFirewallGroupTermsKeepTheirMatches_12537(t *testing.T) {
 		want                         want
 	}{
 		{"protocol + destination-port", "inet", "term T from protocol tcp destination-port 80;", "term T then accept;",
-			want{action: "accept", proto: []string{"tcp"}, dport: []string{"80"}}},
+			want{action: config.FilterActionAccept, proto: []string{"tcp"}, dport: []string{"80"}}},
 		{"source-address", "inet", "term T from source-address 10.0.0.0/8;", "term T then discard;",
-			want{action: "discard", src: []string{"10.0.0.0/8"}}},
+			want{action: config.FilterActionDiscard, src: []string{"10.0.0.0/8"}}},
 		{"source-address with group then", "inet", "term T from source-address 10.0.0.0/8 then count C1;", "term T then discard;",
-			want{action: "discard", src: []string{"10.0.0.0/8"}}},
+			want{action: config.FilterActionDiscard, src: []string{"10.0.0.0/8"}}},
 		{"inline from", "inet", "term T then count C1;", "term T from protocol udp destination-port 53 then accept;",
-			want{action: "accept", proto: []string{"udp"}, dport: []string{"53"}}},
+			want{action: config.FilterActionAccept, proto: []string{"udp"}, dport: []string{"53"}}},
 		{"both from", "inet", "term T from source-address 10.0.0.0/8;", "term T from protocol tcp then discard;",
-			want{action: "discard", proto: []string{"tcp"}, src: []string{"10.0.0.0/8"}}},
+			want{action: config.FilterActionDiscard, proto: []string{"tcp"}, src: []string{"10.0.0.0/8"}}},
 		{"braced inline", "inet", "term T from protocol tcp destination-port 80;", "term T { then accept; }",
-			want{action: "accept", proto: []string{"tcp"}, dport: []string{"80"}}},
+			want{action: config.FilterActionAccept, proto: []string{"tcp"}, dport: []string{"80"}}},
 		{"icmp-type", "inet", "term T from protocol icmp icmp-type 8;", "term T then accept;",
-			want{action: "accept", proto: []string{"icmp"}, icmp: []int{8}}},
+			want{action: config.FilterActionAccept, proto: []string{"icmp"}, icmp: []int{8}}},
 		{"source-prefix-list", "inet", "term T from source-prefix-list PL;", "term T then accept;",
-			want{action: "accept", prefixLst: "PL"}},
+			want{action: config.FilterActionAccept, prefixLst: "PL"}},
 		{"inet6 source-address", "inet6", "term T from source-address 2001:db8::/32;", "term T then discard;",
-			want{action: "discard", src: []string{"2001:db8::/32"}}},
+			want{action: config.FilterActionDiscard, src: []string{"2001:db8::/32"}}},
 		{"inet6 next-header + destination-port", "inet6", "term T from next-header tcp destination-port 443;", "term T then accept;",
-			want{action: "accept", proto: []string{"tcp"}, dport: []string{"443"}}},
+			want{action: config.FilterActionAccept, proto: []string{"tcp"}, dport: []string{"443"}}},
 		{"inet6 inline from", "inet6", "term T then count C1;", "term T from next-header udp destination-port 53 then accept;",
-			want{action: "accept", proto: []string{"udp"}, dport: []string{"53"}}},
+			want{action: config.FilterActionAccept, proto: []string{"udp"}, dport: []string{"53"}}},
 	} {
 		t.Run(tc.fam+"/"+tc.name, func(t *testing.T) {
 			text := "groups { G { firewall { family " + tc.fam + " { filter F { " + tc.groupTerm + " } } } } } " +
