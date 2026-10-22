@@ -97,8 +97,9 @@ is reconciled against heartbeat-advertised RG ownership
 (`IsPeerPrimary` / `PeerPrimaryRGs`): committed transfers report success,
 anything else reports "outcome unknown … verify ownership before
 retrying" — never a bare `DeadlineExceeded` after the peer may have
-committed. The CLI twin (`pkg/cli/peer.go`) applies the same sizing and
-reconciliation.
+committed. Since #16154 the sizing and reconciliation live in the
+shared `pkg/peerclient` table (byte-golden there); both frontends keep
+their own dialers, RPC deadlines, and fabric-auth credentials.
 
 ### Peer hop markers are a listener capability, not a header (#5883)
 

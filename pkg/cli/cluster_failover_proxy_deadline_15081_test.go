@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
@@ -13,12 +12,15 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// #15081 (A43-02), CLI twin: pkg/cli/peer.go applied the same flat 5s
+// #15081 (A43-02), CLI surface: pkg/cli/peer.go applied the same flat 5s
 // deadline to forwarded node-targeted failovers as the gRPC proxy, so
 // `request chassis cluster failover ... node <peer>` printed a bare
 // DeadlineExceeded while the peer completed the move. The CLI now
 // sizes the forwarded failover from the cluster budget and reconciles
-// a deadline outcome against RG ownership.
+// a deadline outcome against RG ownership. Since #16154 that sizing
+// and reconciliation live in the shared pkg/peerclient table (byte-
+// golden there); these tests keep exercising the CLI frontend
+// end-to-end through handleRequestChassisClusterFailover.
 //
 // RED-on-revert: restoring the 5s deadline fails the deadline-capture
 // test; removing the reconciliation fails the committed/unknown tests
@@ -36,26 +38,17 @@ func failoverCLI15081(t *testing.T) *CLI {
 	return &CLI{cluster: mgr}
 }
 
-func TestCLIFailoverProxyDeadlineSizedFromClusterBudget15081(t *testing.T) {
-	c := failoverCLI15081(t)
-	// Production path: peerSystemActionFn receives the context the CLI
-	// built WITHOUT the proxy deadline (the deadline is applied only on
-	// the real dial path). Exercise requestPeerSystemAction's seam
-	// contract via the sizing helper and the dial-path capture below.
-	if got := peerSystemActionTimeout("cluster-failover:1:node1"); got < 40*time.Second {
-		t.Fatalf("peerSystemActionTimeout(targeted) = %v, want ~46s cluster budget (was 5s pre-fix)", got)
-	}
-	if got := peerSystemActionTimeout("cluster-failover-data:node1"); got < 40*time.Second {
-		t.Fatalf("peerSystemActionTimeout(data) = %v, want ~46s cluster budget", got)
-	}
-	if got := peerSystemActionTimeout("clear-persistent-nat"); got != 5*time.Second {
-		t.Fatalf("peerSystemActionTimeout(clear-persistent-nat) = %v, want 5s control", got)
-	}
-	if got := peerSystemActionTimeout("cluster-failover:1"); got != 5*time.Second {
-		t.Fatalf("peerSystemActionTimeout(untargeted) = %v, want 5s (never proxied)", got)
-	}
-	_ = c
-}
+// #16154 fold: the CLI timeout sizing is NOT pinned here by calling
+// the shared peerclient.TimeoutFor helper directly — that would pass
+// even if the CLI's own context site stopped consulting it. The
+// decisive cells are the dial-path goldens in
+// peerclient_frontend_golden_16154_test.go, which observe the
+// deadline the real loopback peer server receives through
+// dialPeer + context.WithTimeout(ctx, peerclient.TimeoutFor(action)).
+// This cell is retained only as the fast seam-level control that the
+// reconciled wording still flows through handleRequestChassis-
+// ClusterFailover; byte-exact wording is pinned there and in
+// pkg/peerclient.
 
 func TestCLIFailoverTimeoutAfterPeerCommitReportsSuccess15081(t *testing.T) {
 	c := failoverCLI15081(t)
