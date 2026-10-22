@@ -1,5 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Delete the cmdtree `set system dataplane` description overlay
+    (#16161): the per-knob help strings were a third mini-SSOT beside
+    pkg/config's setSchema, so adding or renaming a dataplane knob
+    could drift help, completion, and validation apart. The overlay's
+    better strings were upstreamed into schema_system.go
+    (claim-host-tunables, coalescence rx/tx-usecs; the schema's
+    cpu-governor pass-through note was kept as the better text),
+    pkg/config now exports DescribeSetPath as the read-only schema
+    description lookup, and cmdtree LookupDesc's config-mode path
+    falls back to it for set/delete/activate/deactivate/show/edit.
+    ConfigTopLevel's `set` is description-only; a regrowth test pins
+    that no verb re-grows config-grammar descendants. Canonicalize
+    never read ConfigTopLevel (all production calls pass
+    OperationalTree), so acceptance/authz behavior is unchanged —
+    help-text provenance only.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Stamp the applied-config marker through two UnderSem helpers:
     stampActiveAppliedIfConvergedUnderSem and
     stampDigestIfConvergedUnderSem own the convergence gate (no apply

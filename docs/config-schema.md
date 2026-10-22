@@ -1773,8 +1773,11 @@ gate AND wire it into `runUniformGates`, or the canary goes red naming it.
 The live config-mode completers — `pkg/cli` `completeConfigWithDesc` and
 `pkg/grpcapi` `completeConfigPairs` — route `set` paths through
 `config.CompleteSetPathWithValues` over `setSchema`. `cmdtree.ConfigTopLevel`
-only supplies the config-mode TOP-LEVEL keywords (`set`/`delete`/`commit`/
-`load`/...) plus the retained `set system dataplane` description overlay.
+only supplies the description-only config-mode TOP-LEVEL keywords
+(`set`/`delete`/`commit`/`load`/...); config-mode `?` descriptions below
+those keywords resolve from `setSchema` via `config.DescribeSetPath`
+(#16161 deleted the last cmdtree overlay, the retained
+`set system dataplane` map).
 
 ### RETH `redundancy-group` token fail-open (#6782)
 

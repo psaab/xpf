@@ -517,7 +517,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// string silently meant false.
 		"claim-host-tunables": {
 			args:          1,
-			desc:          "Allow xpfd to write host-scope tunables (true|false, default false)",
+			desc:          "Allow xpfd to write host-scope tunables (true|false; default false)",
 			valueType:     ValueBool,
 			valueDesc:     "Write host-scope tunables (true | false; default false)",
 			valueExamples: []string{"true", "false"},
@@ -558,7 +558,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			},
 			"rx-usecs": {
 				args:          1,
-				desc:          "RX coalescing µs",
+				desc:          "RX coalescing microseconds",
 				valueType:     ValueInteger,
 				valueDesc:     "RX interrupt coalescing in microseconds (>= 1)",
 				valueExamples: []string{"8"},
@@ -567,7 +567,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			},
 			"tx-usecs": {
 				args:          1,
-				desc:          "TX coalescing µs",
+				desc:          "TX coalescing microseconds",
 				valueType:     ValueInteger,
 				valueDesc:     "TX interrupt coalescing in microseconds (>= 1)",
 				valueExamples: []string{"8"},

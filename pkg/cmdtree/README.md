@@ -15,9 +15,11 @@ command here automatically propagates to all three frontends.
 > `completeConfigPairs`) route `set` paths through
 > `config.CompleteSetPathWithValues` over `setSchema` and never consult a
 > cmdtree config-grammar tree. `ConfigTopLevel` here only carries the
-> top-level keyword set (`set`/`delete`/`commit`/`load`/...) plus the
-> retained `set system dataplane` description overlay. See
-> `docs/config-schema.md` and `pkg/config/README.md`.
+> description-only top-level keyword set (`set`/`delete`/`commit`/`load`/...);
+> config-mode `?` descriptions below those keywords resolve from the
+> schema via `config.DescribeSetPath` (see `LookupDesc`). The last
+> cmdtree overlay (the retained `set system dataplane` map) was deleted
+> in #16161. See `docs/config-schema.md` and `pkg/config/README.md`.
 
 ## Entry points
 
@@ -31,10 +33,9 @@ command here automatically propagates to all three frontends.
 - `OperationalTree` — `tree.go`. Canonical root for `show`, `clear`,
   `request`, `monitor`, `ping`, `traceroute`, etc.
 - `ConfigTopLevel` — root for the config-mode TOP-LEVEL keywords
-  (`set`/`delete`/`show`/`edit`/`commit`/`load`/...). The config-grammar
-  BELOW `set` lives in `config.setSchema`, not here (see the two-SSOT note
-  above). The only sub-`set` content retained in cmdtree is the
-  `set system dataplane` description overlay (#785/#801 knob help).
+  (`set`/`delete`/`show`/`edit`/`commit`/`load`/...), description-only.
+  The config-grammar BELOW `set` lives in `config.setSchema`, not here
+  (see the two-SSOT note above); `set` carries no children (#16161).
 - `KeysFromTree(tree)` — `tree.go`. Used by `pkg/cli` and `pkg/grpcapi`
   for Junos-style prefix matching.
 - `WriteHelp`, `LookupDesc`, `PrintTreeHelp`, `CompleteFromTree`,
@@ -331,8 +332,8 @@ non-positive values and malformed selectors.
 `ValueType` is defined in `pkg/config` (`config.ValueType`) and re-exported
 here via aliases so cmdtree's operational leaves can carry it without a
 `config → cmdtree → config` import cycle. The typed-leaf fields on `Node`
-serve OPERATIONAL-tree leaves and the retained `set system dataplane`
-overlay.
+serve OPERATIONAL-tree leaves only (#16161 removed the last config-mode
+overlay).
 
 **Config-mode typed leaves do NOT live here.** The `class-of-service
 schedulers` typed leaves (`transmit-rate`/`priority`/`buffer-size`) and the
