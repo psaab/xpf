@@ -220,13 +220,16 @@ func seedHealthy16241(t *testing.T, coll *ebpf.Collection, extraFlags uint32) {
 // stay 0 — an attempt is never reported as a forward. Every other
 // slot counts where its arm decides; fragment_redirect is a
 // branch-attempt count and can co-occur with redirect/redirect_err,
-// so the 27 slots do not sum to packets. (A populated XSK map cannot
-// be built under the test runner — XSKMAP updates need a real AF_XDP
-// socket fd — so successful delivery is covered by the pending-main
-// attribution run; what is pinned here is the failure side — every
-// origin zero under metadata/helper failure — and, by the source
-// invariant below, that the only origin count call sits textually
-// between the XSK redirect call and its Ok arm.)
+// so the 27 slots do not sum to packets.
+//
+// Coverage boundary, stated honestly: the failure side EXECUTED here
+// is helper failure (empty XSK map). There is NO metadata-failure
+// fixture in this matrix (adjust_meta/meta_bounds cannot be forced
+// under BPF_PROG_TEST_RUN), and the success-origin counters
+// themselves are not executed here either — XSKMAP entries need a
+// real AF_XDP socket fd. Metadata-failure ordering is therefore
+// STATIC evidence only (the source-ordering invariant below), and
+// successful-redirect execution is pending-main attribution.
 //
 // Packet classes named by the issue — local / WG / GRE / NAT-miss /
 // early-filter — each appear, plus the plain-TCP hit-forward the
@@ -281,7 +284,7 @@ func TestXDPBranchDispositionMatrix16241(t *testing.T) {
 			packet:     xdpDispatchIPv4TCPPacket10864(src, transitDst, 12345, 443),
 			wantAction: xdpActionDrop,
 			wantArm:    "redirect_err",
-			absentArms: []string{"session_hit_redirect", "session_miss_redirect", "redirect", "session_miss_local"},
+			absentArms: []string{"session_hit_redirect", "session_miss_redirect", "session_miss_ifnat_redirect", "redirect", "session_miss_local"},
 		},
 		{
 			name:   "local destination session miss passes to kernel",
@@ -301,7 +304,7 @@ func TestXDPBranchDispositionMatrix16241(t *testing.T) {
 			},
 			wantAction: xdpActionDrop,
 			wantArm:    "redirect_err",
-			absentArms: []string{"session_miss_ifnat_redirect", "session_miss_redirect", "redirect", "session_miss_local"},
+			absentArms: []string{"session_hit_redirect", "session_miss_ifnat_redirect", "session_miss_redirect", "redirect", "session_miss_local"},
 		},
 		{
 			name:       "early-filter multicast passes before any session lookup",
@@ -472,18 +475,30 @@ func TestXDPBranchRedirectOriginsCountOnlyAtSuccess16241(t *testing.T) {
 		t.Fatalf("success-site origin count call appears %d time(s), want exactly 1", got)
 	}
 	ordered := []string{
-		"USERSPACE_BRANCH_ARM_ADJUST_META_FAIL",
-		"USERSPACE_BRANCH_ARM_META_BOUNDS_FAIL",
+		// Actual failure CALL statements (not the constant declarations
+		// at the top of lib.rs): each is the incr_branch_stat call
+		// immediately preceding its drop return inside
+		// try_xdp_userspace's metadata checks.
+		"incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_ADJUST_META_FAIL)",
+		"incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_META_BOUNDS_FAIL)",
 		"USERSPACE_XSK_MAP.redirect(binding_slot_ready, 0)",
 		"let origin = if redirect_origin ==",
 		"incr_branch_stat(ctrl.flags, origin)",
 		"incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_REDIRECT_ERR)",
 	}
+	// Search inside try_xdp_userspace's body (which also contains the
+	// metadata-failure calls), located via its signature, so constants
+	// declared elsewhere in the file cannot satisfy the ordering.
+	fnIdx := strings.Index(text, "fn try_xdp_userspace(")
+	if fnIdx < 0 {
+		t.Fatalf("try_xdp_userspace not found in the shim source")
+	}
+	body := text[fnIdx:]
 	prev := -1
 	for _, stmt := range ordered {
-		idx := strings.Index(text, stmt)
+		idx := strings.Index(body, stmt)
 		if idx < 0 {
-			t.Fatalf("statement %q not found in the shim source", stmt)
+			t.Fatalf("statement %q not found in try_xdp_userspace", stmt)
 		}
 		if idx <= prev {
 			t.Fatalf("statement %q is out of order: the origin count must sit "+

@@ -129,7 +129,9 @@ func TestShimHeadroomOutlinesStayOutlined14851(t *testing.T) {
 		// #16241: the branch-hit counter callee. It is reached from
 		// every dispatch arm; re-inlining it re-spends the map-update
 		// walk per arm (measured: the whole instrumentation costs
-		// +47273 outlined; inlined it is strictly worse).
+		// (historical figure from the pre-fold object: +47273; this
+		// object's measured delta is +41023 at 856646). Inlined it is
+		// strictly worse).
 		"incr_branch_stat",
 	} {
 		want := "#[inline(never)]\nfn " + fn + "("
