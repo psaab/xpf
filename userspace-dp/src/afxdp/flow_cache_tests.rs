@@ -124,6 +124,8 @@ fn make_entry(
         stamp,
         policy_deny: None,
         deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
@@ -840,6 +842,91 @@ fn from_deny_decision_retains_policy_replay_and_expiry_state() {
     assert_eq!(entry.descriptor.input_filter_log, input_filter_log);
     assert_eq!(entry.deny_expires_at_secs, 42);
     assert_eq!(entry.neighbor_shard, NEIGHBOR_SHARD_NONE);
+}
+
+/// #16269 (option c, seed time): a DiscardRoute deny seed carrying the
+/// FIB cluster-terminal provenance stamp (`source_ifindex > 0`, demoted
+/// ClusterTerminalHAInactive) must preserve that provenance INTO the
+/// cached entry and refuse the 1s deny TTL, so the hit-path takeover
+/// gate judges the entry against CURRENT ownership instead of losing
+/// it to deny-expiry/re-seed churn. An operator discard
+/// (`source_ifindex == 0`) keeps the caller's TTL and zero provenance
+/// bit-identically (fail-closed: never rescued).
+/// RED-on-revert: without the seed-time preservation the stamped cell
+/// gets `deny_expires_at_secs == 101` and zero provenance fields.
+#[test]
+fn deny_seed_preserves_cluster_terminal_provenance_16269() {
+    let rg_epochs = default_rg_epochs();
+    let (flow, meta, validation, mut decision, forwarding, ha_state) =
+        make_v4_round_trip_inputs();
+    decision.resolution.disposition = ForwardingDisposition::DiscardRoute;
+    // Egress ifindex 6 is RG1 in the fixture; the FIB provenance stamp
+    // names the would-be egress the terminal zeroed.
+    decision.resolution.source_ifindex = 6;
+    decision.resolution.egress_ifindex = 0;
+    decision.resolution.next_hop = None;
+    decision.resolution.neighbor_mac = None;
+    let entry = FlowCacheEntry::from_deny_decision(
+        &flow,
+        meta,
+        validation,
+        decision,
+        0,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        0,
+        None,
+        None,
+        None,
+        crate::filter::CachedFilterCounters::default(),
+        101,
+        &forwarding,
+        &ha_state,
+        &rg_epochs,
+    )
+    .expect("cluster-terminal DiscardRoute should seed a deny entry");
+    assert_eq!(entry.cluster_terminal_source_ifindex, 6);
+    // Stamp owner at seed: owner_rg_for_resolution keys on egress (0 for
+    // the demoted row) -> 0, exactly the live fw1 stamp_owner_rg=0 shape.
+    assert_eq!(entry.cluster_terminal_stamp_owner_rg, 0);
+    assert_eq!(
+        entry.deny_expires_at_secs,
+        CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS,
+        "cluster-terminal deny must not race the 1s deny TTL at takeover"
+    );
+    // The preserved provenance survives in the cached decision itself.
+    assert_eq!(entry.decision.resolution.source_ifindex, 6);
+
+    // Operator control: no stamp -> caller TTL, zero provenance.
+    let (flow, meta, validation, mut decision, forwarding, ha_state) =
+        make_v4_round_trip_inputs();
+    decision.resolution.disposition = ForwardingDisposition::DiscardRoute;
+    decision.resolution.source_ifindex = 0;
+    decision.resolution.egress_ifindex = 0;
+    decision.resolution.next_hop = None;
+    decision.resolution.neighbor_mac = None;
+    let entry = FlowCacheEntry::from_deny_decision(
+        &flow,
+        meta,
+        validation,
+        decision,
+        0,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        0,
+        None,
+        None,
+        None,
+        crate::filter::CachedFilterCounters::default(),
+        101,
+        &forwarding,
+        &ha_state,
+        &rg_epochs,
+    )
+    .expect("operator DiscardRoute should seed a deny entry");
+    assert_eq!(entry.cluster_terminal_source_ifindex, 0);
+    assert_eq!(entry.cluster_terminal_stamp_owner_rg, 0);
+    assert_eq!(entry.deny_expires_at_secs, 101);
 }
 // ----------------------------------------------------------------
 // (g) ForwardCandidate is cacheable
