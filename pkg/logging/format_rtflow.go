@@ -117,8 +117,9 @@ func escapeSDParamValue(v string) string {
 }
 
 // formatStructuredMsg formats an EventRecord as a Junos-compatible structured
-// syslog message with RT_FLOW_SESSION_CREATE/CLOSE/DENY event tags.
-// Output matches vSRX RT_FLOW format with [junos@2636.1.1.1.2.129 ...] wrapping.
+// syslog message with RT_FLOW_SESSION_CREATE/CLOSE/DENY and
+// RT_SCREEN_DROP event tags.
+// Output matches vSRX RT_FLOW/RT_IDS format with [junos@2636...] wrapping.
 func formatStructuredMsg(rec EventRecord, protoNum uint8) string {
 	// Split addr:port pairs
 	srcIP, srcPort := splitAddrPort(rec.SrcAddr)
@@ -164,6 +165,8 @@ func formatStructuredMsg(rec EventRecord, protoNum uint8) string {
 	inIface = escapeSDParamValue(inIface)
 	inZone := escapeSDParamValue(rec.InZoneName)
 	outZone := escapeSDParamValue(rec.OutZoneName)
+	screenCheck := escapeSDParamValue(rec.ScreenCheck)
+	action := escapeSDParamValue(rec.Action)
 
 	switch rec.Type {
 	case "SESSION_OPEN":
@@ -255,67 +258,119 @@ func formatStructuredMsg(rec EventRecord, protoNum uint8) string {
 			rec.SessionID,
 			inIface, appName, reason)
 
+	case "SCREEN_DROP":
+		// #15945 (H22-02): Junos sd-syslog screen shape, cited from the
+		// Graylog Juniper SRX content pack (Junos OS 17.4+ sd-syslog):
+		//   RT_IDS - RT_SCREEN_TCP [junos@2636.1.1.1.2.40
+		//   attack-name="..." source-address="..." source-port="..."
+		//   destination-address="..." destination-port="..."
+		//   source-zone-name="..." interface-name="..." action="drop"]
+		// The SD-ID suffix (.40) and param set are Junos's screen
+		// element, distinct from the session element (.129). The
+		// MSGID here is the generic RT_SCREEN_DROP: Junos further
+		// splits by attack category (RT_SCREEN_TCP/IP/... per the
+		// Juniper System Log Explorer), but the wire record carries
+		// only the free-form screen check name, so no category can be
+		// derived without inventing a mapping. Fields the record does
+		// not carry (session-id, policy-name, ...) are omitted rather
+		// than fabricated.
+		return fmt.Sprintf("RT_IDS - RT_SCREEN_DROP "+
+			"[junos@2636.1.1.1.2.40 "+
+			"attack-name=\"%s\" source-address=\"%s\" source-port=\"%s\" "+
+			"destination-address=\"%s\" destination-port=\"%s\" "+
+			"source-zone-name=\"%s\" interface-name=\"%s\" action=\"%s\"]",
+			screenCheck, srcIP, srcPort, dstIP, dstPort, inZone, inIface, action)
+
+	case "FILTER_LOG":
+		// #15945 (H22-02): no Junos sd-syslog reference was found for a
+		// firewall-filter log SD element (Junos filter logging is a
+		// system/firewall-facility message, not an RT_FLOW security-log
+		// record), so no SD params are invented here. The record still
+		// gets a well-formed RFC 5424 envelope from formatSDSyslogLine:
+		// MSGID=FILTER_LOG with NILVALUE SD and the flat body as MSG.
+		// Returning the flat body keeps splitRTFlowStructured from
+		// mistaking it for a session SD element.
+		return formatSyslogMsg(rec)
+
 	default:
 		return formatSyslogMsg(rec)
 	}
 }
 
 // splitRTFlowStructured splits a formatStructuredMsg output into the
-// MSGID token and the SD element. Structured output is shaped
-// "RT_FLOW - <MSGID> [<SD-ID> ...]" for session events; anything else
-// (the formatSyslogMsg fallback) returns ("", msg) unchanged.
-func splitRTFlowStructured(structured string) (msgid, sd string, ok bool) {
-	const prefix = "RT_FLOW - "
-	if !strings.HasPrefix(structured, prefix) {
-		return "", "", false
+// APP-NAME, MSGID and SD element. Structured output is shaped
+// "RT_FLOW - <MSGID> [<SD-ID> ...]" for session events and
+// "RT_IDS - <MSGID> [<SD-ID> ...]" for screen events; anything else
+// (the formatSyslogMsg fallback) returns ok=false unchanged.
+func splitRTFlowStructured(structured string) (appName, msgid, sd string, ok bool) {
+	for _, prefix := range []string{"RT_FLOW - ", "RT_IDS - "} {
+		if !strings.HasPrefix(structured, prefix) {
+			continue
+		}
+		rest := structured[len(prefix):]
+		sp := strings.IndexByte(rest, ' ')
+		if sp <= 0 {
+			return "", "", "", false
+		}
+		m, s := rest[:sp], strings.TrimSpace(rest[sp+1:])
+		if !strings.HasPrefix(s, "[junos@") {
+			return "", "", "", false
+		}
+		return strings.TrimSuffix(prefix, " - "), m, s, true
 	}
-	rest := structured[len(prefix):]
-	sp := strings.IndexByte(rest, ' ')
-	if sp <= 0 {
-		return "", "", false
-	}
-	msgid, sd = rest[:sp], strings.TrimSpace(rest[sp+1:])
-	if !strings.HasPrefix(sd, "[junos@") {
-		return "", "", false
-	}
-	return msgid, sd, true
+	return "", "", "", false
 }
 
-// formatSDSyslogLine renders one Junos sd-syslog record (#14611):
+// formatSDSyslogLine renders one Junos sd-syslog record (#14611, #15945):
 // "<PRI>1 TS HOST RT_FLOW - <MSGID> [<junos SD>]" for session events,
-// and "<PRI>1 TS HOST RT_FLOW - - <flat body>" for event types with no
-// SD shape. It is the single envelope builder shared by SyslogClient
-// and LocalLogWriter so the stream and event-mode writers cannot drift.
+// "<PRI>1 TS HOST RT_IDS - <MSGID> [<junos SD>]" for screen events, and
+// a NILVALUE-SD envelope for event types with no SD shape:
+// "<PRI>1 TS HOST RT_FLOW - FILTER_LOG - <flat body>",
+// "<PRI>1 TS HOST RT_FLOW - - - <flat body>", or
+// "<PRI>1 TS HOST xpf - - - <flat body>".
+// RFC 5424 §6: HEADER is PRI VERSION SP TIMESTAMP SP HOSTNAME SP
+// APP-NAME SP PROCID SP MSGID, followed by STRUCTURED-DATA (NILVALUE
+// "-" or 1*SD-ELEMENT) and optional MSG. The pre-#15945 fallbacks
+// emitted only two dashes after APP-NAME, placing the body in the
+// STRUCTURED-DATA slot where a strict parser misparses or drops it.
+// It is the single envelope builder shared by SyslogClient and
+// LocalLogWriter so the stream and event-mode writers cannot drift.
 // ts is the RFC 5424 TIMESTAMP the caller formats (one clock read per
 // record at the caller keeps stream/event behaviour aligned with the
 // pre-#14611 code, which read time.Now() inside each Send).
 func formatSDSyslogLine(priority int, ts, hostname, structured, flat string) string {
 	hostname = sanitizeSyslogHostname(hostname)
-	if msgid, sd, ok := splitRTFlowStructured(structured); ok {
-		return fmt.Sprintf("<%d>1 %s %s RT_FLOW - %s %s", priority, ts, hostname, msgid, sd)
+	if appName, msgid, sd, ok := splitRTFlowStructured(structured); ok {
+		return fmt.Sprintf("<%d>1 %s %s %s - %s %s", priority, ts, hostname, appName, msgid, sd)
 	}
 	// No SD shape: keep the record parseable. APP-NAME is still RT_FLOW
-	// for RT_FLOW bodies so SIEM routing by app-name keeps working.
+	// for RT_FLOW bodies so SIEM routing by app-name keeps working, and
+	// the STRUCTURED-DATA slot carries the NILVALUE "-".
 	body := structured
 	if body == "" {
 		body = flat
 	}
-	if strings.HasPrefix(body, "RT_FLOW ") || body == "RT_FLOW" {
-		return fmt.Sprintf("<%d>1 %s %s RT_FLOW - - %s", priority, ts, hostname, body)
+	if strings.HasPrefix(body, "RT_FLOW FILTER_LOG ") {
+		return fmt.Sprintf("<%d>1 %s %s RT_FLOW - FILTER_LOG - %s", priority, ts, hostname, body)
 	}
-	return fmt.Sprintf("<%d>1 %s %s xpf - - %s", priority, ts, hostname, body)
+	if strings.HasPrefix(body, "RT_FLOW ") || body == "RT_FLOW" {
+		return fmt.Sprintf("<%d>1 %s %s RT_FLOW - - - %s", priority, ts, hostname, body)
+	}
+	return fmt.Sprintf("<%d>1 %s %s xpf - - - %s", priority, ts, hostname, body)
 }
 
-// stripRTFlowLeadIn removes the "RT_FLOW - " lead-in formatStructuredMsg
-// historically emitted, leaving "<MSGID> [<SD>]". Used where the body is
-// carried as MSG (RFC 3164 structured, local structured) so the wire no
-// longer shows the doubled "RT_FLOW - RT_FLOW_SESSION_*" (#14611).
+// stripRTFlowLeadIn removes the "RT_FLOW - "/"RT_IDS - " lead-in
+// formatStructuredMsg historically emitted, leaving "<MSGID> [<SD>]".
+// Used where the body is carried as MSG (RFC 3164 structured, local
+// structured) so the wire no longer shows the doubled
+// "RT_FLOW - RT_FLOW_SESSION_*" (#14611).
 // Non-structured bodies are returned unchanged.
 func stripRTFlowLeadIn(msg string) string {
-	if _, _, ok := splitRTFlowStructured(msg); !ok {
+	if _, _, _, ok := splitRTFlowStructured(msg); !ok {
 		return msg
 	}
-	return strings.TrimPrefix(msg, "RT_FLOW - ")
+	msg = strings.TrimPrefix(msg, "RT_FLOW - ")
+	return strings.TrimPrefix(msg, "RT_IDS - ")
 }
 
 // splitAddrPort splits "10.0.1.5:443" or "[::1]:443" into IP and port strings.

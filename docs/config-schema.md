@@ -11950,10 +11950,17 @@ reserved for whole-dataplane selection where a rewrite shim
   MSGID is the `RT_FLOW_SESSION_CREATE` / `_CLOSE` / `_DENY` event name,
   and whose STRUCTURED-DATA is the `[junos@2636.1.1.1.2.129 ...]` element
   (with `source-address`, `policy-name`, zone and NAT params) — there is
-  no additional MSG after the SD. Event types with no SD shape
-  (screen/filter) keep the flat `RT_FLOW ...` body under
-  `RT_FLOW - -`, and non-RT_FLOW (generic system) text keeps
-  `xpf - - -`. `structured` is the same Junos RT_FLOW body carried as
+  no additional MSG after the SD. `SCREEN_DROP` carries the Junos
+  screen element instead (#15945): `RT_IDS - RT_SCREEN_DROP
+  [junos@2636.1.1.1.2.40 attack-name=... source-address=...
+  action=...]` (SD-ID/params cited from the Graylog Juniper SRX
+  sd-syslog content pack; MSGID generalized from Junos's per-category
+  `RT_SCREEN_TCP`/`IP` split, which the wire record cannot derive).
+  Event types with no SD shape keep a well-formed RFC 5424 envelope
+  with NILVALUE STRUCTURED-DATA (#15945): `FILTER_LOG` as
+  `RT_FLOW - FILTER_LOG - <flat body>`, other RT_FLOW bodies as
+  `RT_FLOW - - - <flat body>`, and non-RT_FLOW (generic system) text
+  as `xpf - - - <msg>`. `structured` is the same Junos RT_FLOW body carried as
   the MSG of the historical envelopes: RFC 3164 on the stream writer
   (`xpf: RT_FLOW_SESSION_CREATE [junos@...]`) and the local
   timestamp+tag prefix in event mode. Before #14611 the pairing was
