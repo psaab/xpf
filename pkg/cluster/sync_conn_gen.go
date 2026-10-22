@@ -340,32 +340,14 @@ func tombstoneScopedCore[K comparable, SK comparable](s *SessionSync, m *map[SK]
 
 // recordScopedGen records gen for skey under the cap with tombstone
 // eviction, then applies marked (tombstone vs live install bookkeeping
-// in the tombstone order). Index membership mirrors the map: when the
-// capped put evicted the oldest tombstone, the tuple index drops that
-// evicted key — determined explicitly here, never inferred from the
-// helper's conditional add. Caller holds recvGenMu.
+// in the tombstone order). Tuple-index membership is maintained by
+// putScopedGenEvictingTombstones itself: it removes an evicted oldest
+// tombstone from the index and adds every stored key (review H2 on
+// PR #16236: no extra bookkeeping here). Caller holds recvGenMu.
 func recordScopedGen[K comparable, SK comparable](s *SessionSync, m *map[SK]uint64, tombs *genTombstoneOrder[SK], ix *scopedTupleIndex[K, SK], tupleOf func(SK) K, skey SK, gen uint64, markTomb bool) {
-	attempt := func() (stored, evicted bool) {
-		_, known := (*m)[skey]
-		var evictKey *SK
-		if !known && len(*m) >= s.recvCap() {
-			if front := tombs.frontKey(); front != nil {
-				k := *front
-				evictKey = &k
-			}
-		}
-		stored, evicted = putScopedGenEvictingTombstones(*m, tombs, ix, tupleOf, skey, gen, s.recvCap())
-		if evicted && evictKey != nil {
-			ix.remove(tupleOf(*evictKey), *evictKey)
-		}
-		if stored {
-			ix.add(tupleOf(skey), skey)
-		}
-		return stored, evicted
-	}
-	stored, evicted := attempt()
+	stored, evicted := putScopedGenEvictingTombstones(*m, tombs, ix, tupleOf, skey, gen, s.recvCap())
 	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = attempt()
+		stored, evicted = putScopedGenEvictingTombstones(*m, tombs, ix, tupleOf, skey, gen, s.recvCap())
 	}
 	if evicted {
 		s.stats.GenTombstonesEvicted.Add(1)
@@ -827,7 +809,7 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 		scopedKeyOf,
 		&s.closeClassSentV4, &s.tcpHandshakeSentV4, &s.installTableSentV4,
 		&s.sourceNatICMPSentV4, &s.policyIdentitySentV4,
-		s.installTableRecvV4, s.sourceNatICMPRecvV4, s.policyIdentityRecvV4)
+		&s.installTableRecvV4, &s.sourceNatICMPRecvV4, &s.policyIdentityRecvV4)
 }
 
 // stampInstallGenV6 is the IPv6 twin of stampInstallGenV4.
@@ -841,7 +823,7 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 		scopedKeyOfV6,
 		&s.closeClassSentV6, &s.tcpHandshakeSentV6, &s.installTableSentV6,
 		&s.sourceNatICMPSentV6, &s.policyIdentitySentV6,
-		s.installTableRecvV6, s.sourceNatICMPRecvV6, s.policyIdentityRecvV6)
+		&s.installTableRecvV6, &s.sourceNatICMPRecvV6, &s.policyIdentityRecvV6)
 }
 
 // sessionStampView is the per-family field view stampInstallGen needs.
@@ -926,9 +908,9 @@ func stampInstallGen[K comparable, SK comparable](
 	installTableSent *map[K]sentInstallTable,
 	sourceNatSent *map[K]sourceNatICMPMemo,
 	policySent *map[K]policyIdentityMemo,
-	installTableRecv map[K]recvInstallTable,
-	sourceNatRecv map[K]sourceNatICMPMemo,
-	policyRecv map[K]policyIdentityMemo,
+	installTableRecv *map[K]recvInstallTable,
+	sourceNatRecv *map[K]sourceNatICMPMemo,
+	policyRecv *map[K]policyIdentityMemo,
 ) {
 	g := s.nextInstallGen()
 	*genOut = g
@@ -983,7 +965,7 @@ func stampInstallGen[K comparable, SK comparable](
 	// acquires outwards, so no cycle.
 	if *itDomain == 0 && *itCheck == 0 && sessionID != 0 {
 		s.recvGenMu.Lock()
-		if domain, check, ok := lookupRecvInstallTableLocked(installTableRecv, key, sessionID); ok {
+		if domain, check, ok := lookupRecvInstallTableLocked(*installTableRecv, key, sessionID); ok {
 			*itDomain, *itCheck = domain, check
 		}
 		s.recvGenMu.Unlock()
@@ -998,7 +980,7 @@ func stampInstallGen[K comparable, SK comparable](
 	}
 	if !*snValid && sessionID != 0 {
 		s.recvGenMu.Lock()
-		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(sourceNatRecv, key, sessionID); ok {
+		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(*sourceNatRecv, key, sessionID); ok {
 			*snValid, *snType, *snCode = true, icmpType, icmpCode
 		}
 		s.recvGenMu.Unlock()
@@ -1013,7 +995,7 @@ func stampInstallGen[K comparable, SK comparable](
 	}
 	if *ruleID == "" && *counter == 0 && sessionID != 0 {
 		s.recvGenMu.Lock()
-		if rid, cnt, ok := lookupPolicyIdentityLocked(policyRecv, key, sessionID); ok {
+		if rid, cnt, ok := lookupPolicyIdentityLocked(*policyRecv, key, sessionID); ok {
 			*ruleID, *counter = rid, cnt
 		}
 		s.recvGenMu.Unlock()
@@ -1123,7 +1105,7 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 		&s.genSentScopedV4, &s.genSentScopedByTupleV4,
 		&s.closeClassSentV4, &s.tcpHandshakeSentV4,
 		&s.installTableSentV4, &s.sourceNatICMPSentV4, &s.policyIdentitySentV4,
-		s.installTableRecvV4, s.sourceNatICMPRecvV4, s.policyIdentityRecvV4)
+		&s.installTableRecvV4, &s.sourceNatICMPRecvV4, &s.policyIdentityRecvV4)
 }
 
 func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
@@ -1132,7 +1114,7 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 		&s.genSentScopedV6, &s.genSentScopedByTupleV6,
 		&s.closeClassSentV6, &s.tcpHandshakeSentV6,
 		&s.installTableSentV6, &s.sourceNatICMPSentV6, &s.policyIdentitySentV6,
-		s.installTableRecvV6, s.sourceNatICMPRecvV6, s.policyIdentityRecvV6)
+		&s.installTableRecvV6, &s.sourceNatICMPRecvV6, &s.policyIdentityRecvV6)
 }
 
 // takeDeleteGen is the shared sender take-delete behind
@@ -1153,9 +1135,9 @@ func takeDeleteGen[K comparable, SK comparable](
 	installTableSent *map[K]sentInstallTable,
 	sourceNatSent *map[K]sourceNatICMPMemo,
 	policySent *map[K]policyIdentityMemo,
-	installTableRecv map[K]recvInstallTable,
-	sourceNatRecv map[K]sourceNatICMPMemo,
-	policyRecv map[K]policyIdentityMemo,
+	installTableRecv *map[K]recvInstallTable,
+	sourceNatRecv *map[K]sourceNatICMPMemo,
+	policyRecv *map[K]policyIdentityMemo,
 ) uint64 {
 	if hook := s.testBeforeDeleteGen; hook != nil {
 		hook()
@@ -1181,9 +1163,9 @@ func takeDeleteGen[K comparable, SK comparable](
 	// #9752 round 3: and for the identity received for it (genSentMu is
 	// a leaf, so nesting recvGenMu here cannot cycle).
 	s.recvGenMu.Lock()
-	delete(installTableRecv, key)
-	delete(sourceNatRecv, key)
-	delete(policyRecv, key)
+	delete(*installTableRecv, key)
+	delete(*sourceNatRecv, key)
+	delete(*policyRecv, key)
 	s.recvGenMu.Unlock()
 	if _, ok := (*genSent)[key]; !ok {
 		if *overflow {

@@ -183,16 +183,27 @@ func guardKeyV6_16173(idx int) dataplane.SessionKeyV6 {
 	return k
 }
 
+// tinyCapSync returns a SessionSync whose EFFECTIVE caps are really
+// ceiling (review F2: setting only genGuardMapCeilingOverride left
+// sentCap()/recvCap() at the 200k default because the stored side caps
+// were zero). Both side caps are pinned so grow is clamped at ceiling.
+func tinyCapSync_16173(ceiling int) *SessionSync {
+	s := &SessionSync{}
+	if ceiling != 0 {
+		s.genGuardMapCeilingOverride = ceiling
+		s.sentGenGuardCap = ceiling
+		s.recvGenGuardCap = ceiling
+	}
+	return s
+}
+
 // runGuardOpsV4 replays the op sequence through the v4 guard surface,
 // mirroring installClusterSynced/deleteClusterSynced verdict composition
 // (apply only when BOTH the bare and scoped guards admit; an admitted
 // delete tombstones through the guard itself), and returns a normalized
 // transcript: one verdict per op plus the final recorded state.
 func runGuardOpsV4_16173(ceiling int) []string {
-	s := &SessionSync{}
-	if ceiling != 0 {
-		s.genGuardMapCeilingOverride = ceiling
-	}
+	s := tinyCapSync_16173(ceiling)
 	out := []string{}
 	for _, op := range guardOps16173 {
 		key := guardKeyV4_16173(op.keyIdx)
@@ -239,15 +250,34 @@ func runGuardOpsV4_16173(ceiling int) []string {
 	for sk, g := range s.recvGenScopedV4 {
 		state = append(state, fmt.Sprintf("scoped %d/%d=%d", sk.Domain, keyIdxV4_16173(sk.Key), g))
 	}
+	// Review F2: index membership + tombstone order must mirror the map
+	// exactly, in normalized form, not just the generations.
+	for tuple, set := range s.recvGenScopedByTupleV4.byTuple {
+		for sk := range set {
+			if _, ok := s.recvGenScopedV4[sk]; !ok {
+				state = append(state, fmt.Sprintf("BADIX %d/%d", sk.Domain, keyIdxV4_16173(tuple)))
+			}
+		}
+	}
+	for sk := range s.recvGenScopedV4 {
+		found := false
+		for _, x := range s.recvGenScopedByTupleV4.keys(sk.Key) {
+			if x == sk {
+				found = true
+			}
+		}
+		if !found {
+			state = append(state, fmt.Sprintf("MISSIX %d/%d", sk.Domain, keyIdxV4_16173(sk.Key)))
+		}
+	}
+	state = append(state, fmt.Sprintf("tombs:%d evicted:%d overflow:%d",
+		s.recvTombV4.size()+s.recvTombScopedV4.size(), s.stats.GenTombstonesEvicted.Load(), s.stats.GenMapOverflow.Load()))
 	sort.Strings(state)
 	return append(out, state...)
 }
 
 func runGuardOpsV6_16173(ceiling int) []string {
-	s := &SessionSync{}
-	if ceiling != 0 {
-		s.genGuardMapCeilingOverride = ceiling
-	}
+	s := tinyCapSync_16173(ceiling)
 	out := []string{}
 	for _, op := range guardOps16173 {
 		key := guardKeyV6_16173(op.keyIdx)
@@ -290,6 +320,26 @@ func runGuardOpsV6_16173(ceiling int) []string {
 	for sk, g := range s.recvGenScopedV6 {
 		state = append(state, fmt.Sprintf("scoped %d/%d=%d", sk.Domain, keyIdxV6_16173(sk.Key), g))
 	}
+	for tuple, set := range s.recvGenScopedByTupleV6.byTuple {
+		for sk := range set {
+			if _, ok := s.recvGenScopedV6[sk]; !ok {
+				state = append(state, fmt.Sprintf("BADIX %d/%d", sk.Domain, keyIdxV6_16173(tuple)))
+			}
+		}
+	}
+	for sk := range s.recvGenScopedV6 {
+		found := false
+		for _, x := range s.recvGenScopedByTupleV6.keys(sk.Key) {
+			if x == sk {
+				found = true
+			}
+		}
+		if !found {
+			state = append(state, fmt.Sprintf("MISSIX %d/%d", sk.Domain, keyIdxV6_16173(sk.Key)))
+		}
+	}
+	state = append(state, fmt.Sprintf("tombs:%d evicted:%d overflow:%d",
+		s.recvTombV6.size()+s.recvTombScopedV6.size(), s.stats.GenTombstonesEvicted.Load(), s.stats.GenMapOverflow.Load()))
 	sort.Strings(state)
 	return append(out, state...)
 }
@@ -305,10 +355,7 @@ func keyIdxV6_16173(k dataplane.SessionKeyV6) int {
 // returns a nonzero draw, the second take returns 0 (or a fresh draw
 // once overflow latched), and recorded overflow stats match.
 func senderTranscriptV4_16173(ceiling int) []string {
-	s := &SessionSync{}
-	if ceiling != 0 {
-		s.genGuardMapCeilingOverride = ceiling
-	}
+	s := tinyCapSync_16173(ceiling)
 	k1, k2 := guardKeyV4_16173(1), guardKeyV4_16173(2)
 	v1 := dataplane.SessionValue{SessionID: 11, RoutingDomain: 1}
 	v2 := dataplane.SessionValue{SessionID: 22, RoutingDomain: 100007}
@@ -324,14 +371,14 @@ func senderTranscriptV4_16173(ceiling int) []string {
 	out = append(out, fmt.Sprintf("takeScoped>stamp:%v", ts > v2.Generation))
 	out = append(out, fmt.Sprintf("takeScoped-again==0:%v", s.takeDeleteGenScopedV4(100007, k2) == 0))
 	out = append(out, fmt.Sprintf("overflowStats:%d", s.stats.GenMapOverflow.Load()))
+	if ceiling != 0 {
+		out = append(out, overflowTranscriptV4_16173(s, ceiling)...)
+	}
 	return out
 }
 
 func senderTranscriptV6_16173(ceiling int) []string {
-	s := &SessionSync{}
-	if ceiling != 0 {
-		s.genGuardMapCeilingOverride = ceiling
-	}
+	s := tinyCapSync_16173(ceiling)
 	k1, k2 := guardKeyV6_16173(1), guardKeyV6_16173(2)
 	v1 := dataplane.SessionValueV6{SessionID: 11, RoutingDomain: 1}
 	v2 := dataplane.SessionValueV6{SessionID: 22, RoutingDomain: 100007}
@@ -347,12 +394,70 @@ func senderTranscriptV6_16173(ceiling int) []string {
 	out = append(out, fmt.Sprintf("takeScoped>stamp:%v", ts > v2.Generation))
 	out = append(out, fmt.Sprintf("takeScoped-again==0:%v", s.takeDeleteGenScopedV6(100007, k2) == 0))
 	out = append(out, fmt.Sprintf("overflowStats:%d", s.stats.GenMapOverflow.Load()))
+	if ceiling != 0 {
+		out = append(out, overflowTranscriptV6_16173(s, ceiling)...)
+	}
+	return out
+}
+
+// overflowTranscript stamps ceiling+3 distinct keys carrying nonempty
+// identity memos (review F2: the sender must ACTUALLY overflow).
+// At the tiny cap the sender map skip-records, GenMapOverflow grows,
+// and a take for a skip-recorded key still draws fresh (never 0 once
+// overflow latched). A (0,0)-stamp resend of a stamped key must restore
+// its identity from the sender memo, identically in both families.
+func overflowTranscriptV4_16173(s *SessionSync, ceiling int) []string {
+	out := []string{fmt.Sprintf("cap sent:%d recv:%d", s.sentCap(), s.recvCap())}
+	base := int(s.stats.GenMapOverflow.Load())
+	for i := 0; i < ceiling+3; i++ {
+		v := dataplane.SessionValue{SessionID: uint64(100 + i), RoutingDomain: 100007,
+			InstallTableDomain: 7, InstallTableCheck: 8,
+			SourceNatICMPValid: true, SourceNatICMPType: 3, SourceNatICMPCode: 4,
+			PolicyRuleID: "rule-x", PolicyCounterIdx: 9}
+		s.stampInstallGenV4(guardKeyV4_16173(10+i), &v)
+	}
+	out = append(out, fmt.Sprintf("senderOverflowDelta:%d sentLen:%d",
+		int(s.stats.GenMapOverflow.Load())-base, len(s.genSentV4)))
+	// Skip-recorded key (past cap): take must draw fresh, not 0.
+	skipKey := guardKeyV4_16173(10 + ceiling + 2)
+	out = append(out, fmt.Sprintf("skipTakeFresh:%v", s.takeDeleteGenV4(skipKey) != 0))
+	// Identity restore: fresh value with zero identity, same SessionID
+	// as a stamped key, must inherit the memo identity.
+	k0 := guardKeyV4_16173(10)
+	resend := dataplane.SessionValue{SessionID: 100, RoutingDomain: 100007}
+	s.stampInstallGenV4(k0, &resend)
+	out = append(out, fmt.Sprintf("restore table:%v/%v snat:%v rule:%v",
+		resend.InstallTableDomain, resend.InstallTableCheck, resend.SourceNatICMPValid, resend.PolicyRuleID))
+	return out
+}
+
+func overflowTranscriptV6_16173(s *SessionSync, ceiling int) []string {
+	out := []string{fmt.Sprintf("cap sent:%d recv:%d", s.sentCap(), s.recvCap())}
+	base := int(s.stats.GenMapOverflow.Load())
+	for i := 0; i < ceiling+3; i++ {
+		v := dataplane.SessionValueV6{SessionID: uint64(100 + i), RoutingDomain: 100007,
+			InstallTableDomain: 7, InstallTableCheck: 8,
+			SourceNatICMPValid: true, SourceNatICMPType: 3, SourceNatICMPCode: 4,
+			PolicyRuleID: "rule-x", PolicyCounterIdx: 9}
+		s.stampInstallGenV6(guardKeyV6_16173(10+i), &v)
+	}
+	out = append(out, fmt.Sprintf("senderOverflowDelta:%d sentLen:%d",
+		int(s.stats.GenMapOverflow.Load())-base, len(s.genSentV6)))
+	skipKey := guardKeyV6_16173(10 + ceiling + 2)
+	out = append(out, fmt.Sprintf("skipTakeFresh:%v", s.takeDeleteGenV6(skipKey) != 0))
+	k0 := guardKeyV6_16173(10)
+	resend := dataplane.SessionValueV6{SessionID: 100, RoutingDomain: 100007}
+	s.stampInstallGenV6(k0, &resend)
+	out = append(out, fmt.Sprintf("restore table:%v/%v snat:%v rule:%v",
+		resend.InstallTableDomain, resend.InstallTableCheck, resend.SourceNatICMPValid, resend.PolicyRuleID))
 	return out
 }
 
 func TestGuardTwinsIdenticalVerdicts16173(t *testing.T) {
-	// Ceiling 0 = production caps; 2 and 3 force the overflow /
-	// tombstone-eviction cells (identity at the cap) on every map.
+	// Ceiling 0 = production caps; 2 and 3 pin BOTH side caps via
+	// tinyCapSync so the overflow / tombstone-eviction cells (identity
+	// at the cap) actually execute — asserted via the cap/overflow/
+	// index lines in the transcripts, not just verdict equality.
 	for _, ceiling := range []int{0, 2, 3} {
 		v4 := runGuardOpsV4_16173(ceiling)
 		v6 := runGuardOpsV6_16173(ceiling)
@@ -560,4 +665,111 @@ func BenchmarkEncodeSessionTail16173(b *testing.B) {
 	for range b.N {
 		_ = encodeSessionV4Payload(k4, v4)
 	}
+}
+
+// Review F1 regression: the shared stamp/take cores must read the
+// receiver memo maps AFTER acquiring recvGenMu (the field's current
+// map), never a map value captured before the lock — a namespace
+// reset swaps all six receiver maps, and a stale captured map would
+// resurrect identity the reset discarded, or delete from a retired
+// map. The testBeforeDeleteGen hook fires before any lock inside
+// takeDeleteGen, which is exactly the capture window.
+func TestTakeDeleteReadsCurrentRecvMaps16173(t *testing.T) {
+	// V4 arm: swap in fresh receiver maps inside the hook; the take
+	// must clear the CURRENT maps, not the pre-hook ones.
+	s := &SessionSync{}
+	k := guardKeyV4_16173(1)
+	s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 11, domain: 7, check: 8}}
+	s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{k: {sessionID: 11, valid: true, typ: 3, code: 4}}
+	s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{k: {sessionID: 11, ruleID: "old", counter: 1}}
+	oldTable, oldPolicy := s.installTableRecvV4, s.policyIdentityRecvV4
+	s.testBeforeDeleteGen = func() {
+		s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 11, domain: 9, check: 9}}
+		s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{k: {sessionID: 11, valid: true, typ: 8, code: 8}}
+		s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{k: {sessionID: 11, ruleID: "new", counter: 2}}
+	}
+	s.takeDeleteGenV4(k)
+	if len(s.installTableRecvV4) != 0 || len(s.sourceNatICMPRecvV4) != 0 || len(s.policyIdentityRecvV4) != 0 {
+		t.Fatal("takeDeleteGenV4 deleted from a stale captured receiver map; current maps still hold the memo")
+	}
+	if len(oldTable) == 0 || len(oldPolicy) == 0 {
+		t.Fatal("fixture: retired maps should be untouched once swapped out")
+	}
+
+	s6 := &SessionSync{}
+	k6 := guardKeyV6_16173(1)
+	s6.installTableRecvV6 = map[dataplane.SessionKeyV6]recvInstallTable{k6: {sessionID: 11, domain: 7, check: 8}}
+	s6.sourceNatICMPRecvV6 = map[dataplane.SessionKeyV6]sourceNatICMPMemo{k6: {sessionID: 11, valid: true, typ: 3, code: 4}}
+	s6.policyIdentityRecvV6 = map[dataplane.SessionKeyV6]policyIdentityMemo{k6: {sessionID: 11, ruleID: "old", counter: 1}}
+	s6.testBeforeDeleteGen = func() {
+		s6.installTableRecvV6 = map[dataplane.SessionKeyV6]recvInstallTable{k6: {sessionID: 11, domain: 9, check: 9}}
+		s6.sourceNatICMPRecvV6 = map[dataplane.SessionKeyV6]sourceNatICMPMemo{k6: {sessionID: 11, valid: true, typ: 8, code: 8}}
+		s6.policyIdentityRecvV6 = map[dataplane.SessionKeyV6]policyIdentityMemo{k6: {sessionID: 11, ruleID: "new", counter: 2}}
+	}
+	s6.takeDeleteGenV6(k6)
+	if len(s6.installTableRecvV6) != 0 || len(s6.sourceNatICMPRecvV6) != 0 || len(s6.policyIdentityRecvV6) != 0 {
+		t.Fatal("takeDeleteGenV6 deleted from a stale captured receiver map; current maps still hold the memo")
+	}
+}
+
+// Stamp-restore half of F1: an OLD receiver record for the same
+// SessionID must not be restored once the receiver maps have been
+// swapped (namespace reset). The stale record is seeded before the
+// stamp; the current maps hold a DIFFERENT (or no) record, and only
+// the current one may be consulted. Race angle: run under -race with
+// the reset racing the stamp, which the detector arbitrates; the
+// deterministic half asserts the restored identity can only come
+// from the map installed at stamp time.
+func TestStampRestoreReadsCurrentRecvMaps16173(t *testing.T) {
+	s := &SessionSync{}
+	k := guardKeyV4_16173(1)
+	// Current (post-reset) receiver maps: empty. A stale record lives
+	// only in a retired map the field no longer points at.
+	retired := map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 7, check: 8}}
+	s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{}
+	s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{}
+	s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{}
+	v := dataplane.SessionValue{SessionID: 42}
+	s.stampInstallGenV4(k, &v)
+	if v.InstallTableDomain != 0 || v.InstallTableCheck != 0 {
+		t.Fatalf("restored identity from a retired receiver map: %v/%v (retired=%v)", v.InstallTableDomain, v.InstallTableCheck, retired)
+	}
+	// And the current map's record IS what gets restored when present.
+	s.installTableRecvV4[k] = recvInstallTable{sessionID: 42, domain: 5, check: 6}
+	v2 := dataplane.SessionValue{SessionID: 42}
+	s.stampInstallGenV4(k, &v2)
+	if v2.InstallTableDomain != 5 || v2.InstallTableCheck != 6 {
+		t.Fatalf("current receiver record not restored: %v/%v", v2.InstallTableDomain, v2.InstallTableCheck)
+	}
+}
+
+// Concurrent reset-vs-stamp/take coverage for F1: a goroutine swaps the
+// receiver maps (namespace-reset shape) while stamps/takes run. Under
+// -race any unsynchronized field capture is a detector failure; the
+// functional assertion is that restored identity always carries the
+// CURRENT marker domain (9), never the retired one (7).
+func TestRecvMapResetRace16173(t *testing.T) {
+	s := &SessionSync{}
+	k := guardKeyV4_16173(1)
+	s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 9, check: 9}}
+	s.sourceNatICMPRecvV4 = map[dataplane.SessionKey]sourceNatICMPMemo{}
+	s.policyIdentityRecvV4 = map[dataplane.SessionKey]policyIdentityMemo{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			s.recvGenMu.Lock()
+			s.installTableRecvV4 = map[dataplane.SessionKey]recvInstallTable{k: {sessionID: 42, domain: 9, check: 9}}
+			s.recvGenMu.Unlock()
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		v := dataplane.SessionValue{SessionID: 42}
+		s.stampInstallGenV4(k, &v)
+		if v.InstallTableDomain != 0 && v.InstallTableDomain != 9 {
+			t.Fatalf("restored retired receiver identity domain=%d", v.InstallTableDomain)
+		}
+		s.takeDeleteGenV4(k)
+	}
+	<-done
 }
