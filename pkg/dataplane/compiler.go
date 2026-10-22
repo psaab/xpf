@@ -88,16 +88,16 @@ var runEthtool = func(args ...string) ([]byte, error) {
 
 // CompileResult holds the result of a config compilation for reference.
 type CompileResult struct {
-	ZoneIDs     map[string]uint16 // zone name -> zone ID
-	ScreenIDs   map[string]uint16 // screen profile name -> profile ID (1-based)
-	AddrIDs     map[string]uint32 // address name -> address ID
-	AppIDs      map[string]uint32 // application name -> app ID
-	PoolIDs     map[string]uint8  // NAT pool name -> pool ID (0-based)
-	NextPoolID  uint8             // next available pool ID (after SNAT assignment)
-	PolicyNames map[uint32]string // rule_id -> "from-zone/to-zone/policy-name" (or "global/policy-name")
-	AppNames    map[uint16]string // app_id -> application name (for structured logging)
-	PolicySets  int               // number of policy sets created
-	FilterIDs   map[string]uint32 // "inet:name" or "inet6:name" -> filter_id
+	ZoneIDs     map[string]uint16               // zone name -> zone ID
+	ScreenIDs   map[string]uint16               // screen profile name -> profile ID (1-based)
+	AddrIDs     map[string]uint32               // address name -> address ID
+	AppIDs      map[string]config.AssignedAppID // application name -> assigned app ID
+	PoolIDs     map[string]uint8                // NAT pool name -> pool ID (0-based)
+	NextPoolID  uint8                           // next available pool ID (after SNAT assignment)
+	PolicyNames map[uint32]string               // rule_id -> "from-zone/to-zone/policy-name" (or "global/policy-name")
+	AppNames    map[config.AssignedAppID]string // app_id -> application name (for structured logging)
+	PolicySets  int                             // number of policy sets created
+	FilterIDs   map[string]uint32               // "inet:name" or "inet6:name" -> filter_id
 	FilterSpans map[string]FilterCounterSpan
 
 	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot
@@ -987,7 +987,7 @@ func compileAddressBook(dp DataPlane, cfg *config.Config, result *CompileResult)
 func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 	// Track written keys for populate-before-clear.
 	writtenApps := make(map[AppKey]bool)
-	result.AppNames = make(map[uint16]string)
+	result.AppNames = make(map[config.AssignedAppID]string)
 	var rangeIdx uint32 // next free slot in app_ranges ARRAY
 
 	userApps := cfg.Applications.Applications
@@ -1009,7 +1009,7 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 		return err
 	}
 	for _, appName := range refNames {
-		appID := uint32(idByName[appName])
+		appID := idByName[appName]
 
 		app, found := config.ResolveApplication(appName, userApps)
 		if !found {
@@ -1082,7 +1082,7 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 		dropped := config.ApplicationMatchWidened(app)
 		protoEmittable := protoOK || strings.TrimSpace(app.Protocol) == ""
 		if !dropped && protoEmittable && srcOK && dstOK && dstLow <= dstHigh && srcLow <= srcHigh {
-			result.AppNames[uint16(appID)] = appName
+			result.AppNames[appID] = appName
 		}
 
 		appTimeout := config.AppTimeoutWireSecs(app)
@@ -1121,7 +1121,7 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 					PortHigh:    dstHigh,
 					SrcPortLow:  srcLow,
 					SrcPortHigh: srcHigh,
-					AppID:       appID,
+					AppID:       uint32(appID),
 					Timeout:     appTimeout,
 				}
 				if err := dp.SetAppRange(rangeIdx, entry); err != nil {
@@ -1133,7 +1133,7 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 			// Small range or single port — expand into per-port HASH entries.
 			for _, p := range protos {
 				for port := dstLow; port <= dstHigh; port++ {
-					if err := dp.SetApplication(p, port, appID, appTimeout, algType, srcLow, srcHigh); err != nil {
+					if err := dp.SetApplication(p, port, uint32(appID), appTimeout, algType, srcLow, srcHigh); err != nil {
 						return fmt.Errorf("set application %s port %d: %w",
 							appName, port, err)
 					}
@@ -1486,13 +1486,13 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 		// Collect expanded rules first to know the total count.
 		type expandedRule struct {
 			pol   *config.Policy
-			appID uint32
+			appID config.AssignedAppID
 		}
 		var expanded []expandedRule
 
 		for _, pol := range zpp.Policies {
 			// Resolve application list, expanding application-sets
-			var appIDs []uint32
+			var appIDs []config.AssignedAppID
 			hasAny := false
 			for _, appName := range pol.Match.Applications {
 				if appName == "any" {
@@ -1501,9 +1501,9 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 				}
 			}
 			if hasAny || len(pol.Match.Applications) == 0 {
-				appIDs = []uint32{0} // single rule with app_id=0 (any)
+				appIDs = []config.AssignedAppID{0} // single rule with app_id=0 (any)
 			} else {
-				seen := make(map[uint32]bool)
+				seen := make(map[config.AssignedAppID]bool)
 				for _, appName := range pol.Match.Applications {
 					// Expand application-sets
 					if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {
@@ -1523,7 +1523,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 					}
 				}
 				if len(appIDs) == 0 {
-					appIDs = []uint32{0}
+					appIDs = []config.AssignedAppID{0}
 				}
 			}
 
@@ -1555,7 +1555,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 				RuleID:      uint32(policySetID*MaxRulesPerPolicy + uint32(i)),
 				PolicySetID: policySetID,
 				Sequence:    uint16(i),
-				AppID:       er.appID,
+				AppID:       uint32(er.appID),
 				Active:      1, // default active; scheduler may toggle to 0
 			}
 
@@ -1624,12 +1624,12 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 	if len(cfg.Security.GlobalPolicies) > 0 {
 		type expandedRule struct {
 			pol   *config.Policy
-			appID uint32
+			appID config.AssignedAppID
 		}
 		var expanded []expandedRule
 
 		for _, pol := range cfg.Security.GlobalPolicies {
-			var appIDs []uint32
+			var appIDs []config.AssignedAppID
 			hasAny := false
 			for _, appName := range pol.Match.Applications {
 				if appName == "any" {
@@ -1638,9 +1638,9 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 				}
 			}
 			if hasAny || len(pol.Match.Applications) == 0 {
-				appIDs = []uint32{0}
+				appIDs = []config.AssignedAppID{0}
 			} else {
-				seen := make(map[uint32]bool)
+				seen := make(map[config.AssignedAppID]bool)
 				for _, appName := range pol.Match.Applications {
 					if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {
 						exp, err := config.ExpandApplicationSet(appName, &cfg.Applications)
@@ -1659,7 +1659,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 					}
 				}
 				if len(appIDs) == 0 {
-					appIDs = []uint32{0}
+					appIDs = []config.AssignedAppID{0}
 				}
 			}
 
@@ -1690,7 +1690,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 				RuleID:      uint32(policySetID*MaxRulesPerPolicy + uint32(i)),
 				PolicySetID: policySetID,
 				Sequence:    uint16(i),
-				AppID:       er.appID,
+				AppID:       uint32(er.appID),
 				Active:      1,
 			}
 

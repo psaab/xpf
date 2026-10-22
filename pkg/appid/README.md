@@ -30,7 +30,7 @@ and resolves session display names from the dataplane's assigned `app_id`.
   `pkg/dataplane/userspace` ships `Entries` to the Rust dataplane as
   the snapshot `app_catalog` field (#2008 M5); the dataplane stamps
   the matched `app_id` on each new session.
-- `ResolveSessionName(appNames map[uint16]string, cfg *config.Config, proto uint8, srcPort, dstPort uint16, appID uint16) string` —
+- `ResolveSessionName(appNames map[config.AssignedAppID]string, cfg *config.Config, proto uint8, srcPort, dstPort uint16, appID config.AssignedAppID) string` —
   `runtime.go`. `srcPort` is the session source port; it is threaded
   through so the tuple fallback can honor a configured `source-port`
   constraint (#3428). Lookup order: dataplane `app_id` (authoritative from

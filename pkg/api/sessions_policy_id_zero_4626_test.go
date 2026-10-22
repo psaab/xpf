@@ -3,6 +3,7 @@ package api
 import (
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -33,7 +34,7 @@ func testSessionView() sessionView {
 	return sessionView{
 		zoneNames:    map[uint16]string{1: "trust", 2: "untrust"},
 		policyNames:  policyNamesWithFirstPolicy(),
-		appNames:     map[uint16]string{},
+		appNames:     map[config.AssignedAppID]string{},
 		zoneIfaces:   map[uint16][]string{},
 		egressIfaces: map[sessionEgressKey]string{},
 	}

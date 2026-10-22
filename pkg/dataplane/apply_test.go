@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/networkd"
 )
 
@@ -34,7 +35,7 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 		PolicyNames: map[uint32]string{
 			100: "trust/untrust/allow-all",
 		},
-		AppNames: map[uint16]string{
+		AppNames: map[config.AssignedAppID]string{
 			5: "junos-http",
 		},
 		PolicyScheduleRuleSlots: []PolicyScheduleRuleSlot{

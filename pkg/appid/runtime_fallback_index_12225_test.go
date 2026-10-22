@@ -66,7 +66,7 @@ func TestUnreferencedCollisionEdgeCells_12225(t *testing.T) {
 		proto    uint8
 		src, dst uint16
 		want     string
-		wantOnID uint16
+		wantOnID config.AssignedAppID
 	}{
 		{
 			name: "predefined-collider",

@@ -1,6 +1,10 @@
 package dataplane
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/psaab/xpf/pkg/config"
+)
 
 // ConntrackSessionValueSize / ConntrackSessionValueSizeV6 are the on-map
 // conntrack ABI value sizes (bytes) for the shared `sessions` / `sessions_v6`
@@ -237,7 +241,7 @@ func (v SessionValue) toBPF() bpfSessionValue {
 		ReverseKey:  v.ReverseKey,
 		ALGType:     v.ALGType,
 		LogFlags:    v.LogFlags,
-		AppID:       v.AppID,
+		AppID:       uint16(v.AppID),
 		FibIfindex:  v.FibIfindex,
 		FibVlanID:   v.FibVlanID,
 		FibDmac:     v.FibDmac,
@@ -279,7 +283,7 @@ func (v bpfSessionValue) sessionValue() SessionValue {
 		ReverseKey:  v.ReverseKey,
 		ALGType:     v.ALGType,
 		LogFlags:    v.LogFlags,
-		AppID:       v.AppID,
+		AppID:       config.AssignedAppID(v.AppID),
 		FibIfindex:  v.FibIfindex,
 		FibVlanID:   v.FibVlanID,
 		FibDmac:     v.FibDmac,
@@ -320,7 +324,7 @@ func (v SessionValueV6) toBPF() bpfSessionValueV6 {
 		ReverseKey:  v.ReverseKey,
 		ALGType:     v.ALGType,
 		LogFlags:    v.LogFlags,
-		AppID:       v.AppID,
+		AppID:       uint16(v.AppID),
 		FibIfindex:  v.FibIfindex,
 		FibVlanID:   v.FibVlanID,
 		FibDmac:     v.FibDmac,
@@ -361,7 +365,7 @@ func (v bpfSessionValueV6) sessionValue() SessionValueV6 {
 		ReverseKey:  v.ReverseKey,
 		ALGType:     v.ALGType,
 		LogFlags:    v.LogFlags,
-		AppID:       v.AppID,
+		AppID:       config.AssignedAppID(v.AppID),
 		FibIfindex:  v.FibIfindex,
 		FibVlanID:   v.FibVlanID,
 		FibDmac:     v.FibDmac,

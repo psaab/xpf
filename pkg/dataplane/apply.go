@@ -124,9 +124,9 @@ type ApplyResult struct {
 
 	// Display metadata carried from CompileResult so callers can migrate from
 	// LastCompileResult() to LastApplyResult() without losing runtime lookups.
-	PoolIDs     map[string]uint8  // NAT pool name -> pool ID (0-based)
-	PolicyNames map[uint32]string // rule_id -> policy path (zone/policy or global/policy)
-	AppNames    map[uint16]string // app_id -> application name (structured logging)
+	PoolIDs     map[string]uint8                // NAT pool name -> pool ID (0-based)
+	PolicyNames map[uint32]string               // rule_id -> policy path (zone/policy or global/policy)
+	AppNames    map[config.AssignedAppID]string // app_id -> application name (structured logging)
 
 	// PolicyScheduleRuleSlots records the compiled slots used by runtime
 	// scheduler updates. Callers must not recompute these slots from config

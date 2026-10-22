@@ -1221,7 +1221,7 @@ type sessionEgressKey struct {
 type sessionView struct {
 	zoneNames   map[uint16]string
 	policyNames map[uint32]string
-	appNames    map[uint16]string
+	appNames    map[config.AssignedAppID]string
 	appFallback *appid.FallbackIndex
 	// zoneIfaces holds EVERY interface bound to a zone, not just the first
 	// (#6960): collapsing a multi-interface zone to zone.Interfaces[0] made

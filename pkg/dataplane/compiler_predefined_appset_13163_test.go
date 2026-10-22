@@ -57,7 +57,7 @@ func TestCompilePoliciesPredefinedAppSetParity13163(t *testing.T) {
 	}
 	res := &CompileResult{
 		ZoneIDs: map[string]uint16{"trust": 1, "untrust": 2},
-		AddrIDs: make(map[string]uint32), AppIDs: make(map[string]uint32),
+		AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID),
 		PolicyNames: make(map[uint32]string),
 	}
 	dp := &d13163DP{}
@@ -77,14 +77,14 @@ func TestCompilePoliciesPredefinedAppSetParity13163(t *testing.T) {
 		t.Fatalf("AppIDs netbios=%d smb=%d, want distinct non-zero", nb, smb)
 	}
 	got := map[uint32]bool{dp.rules[0].AppID: true, dp.rules[1].AppID: true}
-	if !got[nb] || !got[smb] {
+	if !got[uint32(nb)] || !got[uint32(smb)] {
 		t.Fatalf("zone-pair predefined-set rules AppIDs=%d,%d, want {%d,%d} (no wildcard 0)", dp.rules[0].AppID, dp.rules[1].AppID, nb, smb)
 	}
-	if dp.rules[2].AppID != res.AppIDs["single-app"] {
+	if dp.rules[2].AppID != uint32(res.AppIDs["single-app"]) {
 		t.Fatalf("rule-after AppID=%d, want %d", dp.rules[2].AppID, res.AppIDs["single-app"])
 	}
 	gotG := map[uint32]bool{dp.rules[3].AppID: true, dp.rules[4].AppID: true}
-	if !gotG[nb] || !gotG[smb] {
+	if !gotG[uint32(nb)] || !gotG[uint32(smb)] {
 		t.Fatalf("global predefined-set rules AppIDs=%d,%d, want {%d,%d}", dp.rules[3].AppID, dp.rules[4].AppID, nb, smb)
 	}
 

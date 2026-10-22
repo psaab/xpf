@@ -215,7 +215,7 @@ func TestResolveSessionNameUsesAppIDWhenEnabled(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Services.ApplicationIdentification = true
 
-	got := ResolveSessionName(map[uint16]string{7: "junos-http"}, cfg, 6, 40000, 80, 7)
+	got := ResolveSessionName(map[config.AssignedAppID]string{7: "junos-http"}, cfg, 6, 40000, 80, 7)
 	if got != "junos-http" {
 		t.Fatalf("ResolveSessionName() = %q, want junos-http", got)
 	}
@@ -227,14 +227,14 @@ func TestResolveSessionNameUsesAppIDWhenEnabled(t *testing.T) {
 func TestSessionMatchesRestampedAppIDAfterRedefinition12191(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Services.ApplicationIdentification = true
-	appNames := map[uint16]string{11: "app-a", 22: "app-b"}
+	appNames := map[config.AssignedAppID]string{11: "app-a", 22: "app-b"}
 	const (
 		protoTCP = 6
 		srcPort  = 40000
 		dstPort  = 443
 	)
 
-	storedID := uint16(11) // create-time label while A owned TCP/443
+	storedID := config.AssignedAppID(11) // create-time label while A owned TCP/443
 	if !SessionMatches("app-a", appNames, cfg, protoTCP, srcPort, dstPort, storedID) {
 		t.Fatal("show/clear by A must select the row before revalidation")
 	}
@@ -511,7 +511,7 @@ func TestResolveSessionNameUnmappedNonzeroUnknown(t *testing.T) {
 	cfg.Services.ApplicationIdentification = true
 
 	// app_id 999 is not present in AppNames; tuple would guess junos-ssh.
-	got := ResolveSessionName(map[uint16]string{1: "mapped-app"}, cfg, 6, 40000, 22, 999)
+	got := ResolveSessionName(map[config.AssignedAppID]string{1: "mapped-app"}, cfg, 6, 40000, 22, 999)
 	if got != Unknown {
 		t.Fatalf("unmapped nonzero app_id with AppID enabled = %q, want %q (honest UNKNOWN, not a tuple guess)", got, Unknown)
 	}
@@ -696,7 +696,7 @@ func TestUDP4500FallbackMatchesEnabledCatalog_12222(t *testing.T) {
 	// for a hardcoded name, so a lower-app_id rival covering UDP/4500 flips
 	// the label the way the dataplane would stamp it.
 	inRange := func(lo, hi, p uint16) bool { return (lo == 0 && hi == 0) || (lo <= p && p <= hi) }
-	var appID uint16
+	var appID config.AssignedAppID
 	for _, e := range catalog.Entries {
 		portConstrained := e.DstPortLow != 0 || e.DstPortHigh != 0 || e.SrcPortLow != 0 || e.SrcPortHigh != 0
 		if e.Protocol != 17 || !portConstrained || !inRange(e.DstPortLow, e.DstPortHigh, 4500) || !inRange(e.SrcPortLow, e.SrcPortHigh, 40000) {

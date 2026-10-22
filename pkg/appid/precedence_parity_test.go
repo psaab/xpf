@@ -113,7 +113,7 @@ func TestAppIDPrecedenceParityFixture(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildCatalog: %v", err)
 			}
-			byID := map[uint16]CatalogEntry{}
+			byID := map[config.AssignedAppID]CatalogEntry{}
 			for _, e := range cat.Entries {
 				byID[e.AppID] = e
 			}
@@ -121,10 +121,10 @@ func TestAppIDPrecedenceParityFixture(t *testing.T) {
 				t.Fatalf("catalog entry count = %d, fixture records %d", len(cat.Entries), len(tc.Catalog))
 			}
 			for _, want := range tc.Catalog {
-				if got := cat.AppNames[want.AppID]; got != want.Name {
+				if got := cat.AppNames[config.AssignedAppID(want.AppID)]; got != want.Name {
 					t.Fatalf("BuildCatalog assigns app_id %d -> %q, fixture claims %q (Go sort drift)", want.AppID, got, want.Name)
 				}
-				got, ok := byID[want.AppID]
+				got, ok := byID[config.AssignedAppID(want.AppID)]
 				if !ok {
 					t.Fatalf("BuildCatalog produced no entry for app_id %d (%q)", want.AppID, want.Name)
 				}

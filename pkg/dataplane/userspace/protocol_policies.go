@@ -1,5 +1,7 @@
 package userspace
 
+import "github.com/psaab/xpf/pkg/config"
+
 type FirewallFilterSnapshot struct {
 	Name   string                 `json:"name"`
 	Family string                 `json:"family"` // "inet" or "inet6"
@@ -331,12 +333,12 @@ type PolicyApplicationSnapshot struct {
 // source-port constraint". AppID is never 0 (0 is the reserved unknown
 // sentinel). Rust mirror: AppCatalogEntry in protocol/snapshot.rs.
 type AppCatalogEntrySnapshot struct {
-	AppID       uint16 `json:"app_id"`
-	Protocol    uint8  `json:"protocol"`
-	DstPortLow  uint16 `json:"dst_port_low,omitempty"`
-	DstPortHigh uint16 `json:"dst_port_high,omitempty"`
-	SrcPortLow  uint16 `json:"src_port_low,omitempty"`
-	SrcPortHigh uint16 `json:"src_port_high,omitempty"`
+	AppID       config.AssignedAppID `json:"app_id"`
+	Protocol    uint8                `json:"protocol"`
+	DstPortLow  uint16               `json:"dst_port_low,omitempty"`
+	DstPortHigh uint16               `json:"dst_port_high,omitempty"`
+	SrcPortLow  uint16               `json:"src_port_low,omitempty"`
+	SrcPortHigh uint16               `json:"src_port_high,omitempty"`
 }
 
 type PolicyRuleSnapshot struct {

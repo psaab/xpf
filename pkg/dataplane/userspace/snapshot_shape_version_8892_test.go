@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "f08c7403277012f1a7f968cb0f50388562a3d23b076e909648a166aa3b5a16f6"
+	snapshotShapeGolden8892 = "c3001a08974db3c6ddad2b4f6edff7c7ee297fd11989ee173f732e6a3e71de1a"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -590,6 +590,20 @@ const (
 	// TestFilterActionEnumMarshalDiff16140. No golden regen and no
 	// ProtocolVersion bump: bumping for a wire-invisible retype would
 	// spend the one signal that says the wire really changed.
+	// Version 66 STANDS (#16142): AppCatalogEntrySnapshot.AppID changes its Go
+	// type from uint16 to config.AssignedAppID (underlying uint16, same
+	// `json:"app_id"` tag). The serialized JSON number is byte-identical
+	// (pinned by TestAssignedAppIDJSONParity_16142 and
+	// TestAppCatalogSnapshotJSONRoundTrip_M5), so no helper of any vintage
+	// can observe the change; the reflection walk records the Go type
+	// string, so only this golden moves. No ProtocolVersion bump.
+	// v66 STANDS (master drift folded on rebase): #16146 retyped
+	// Config.LenientNATUndefinedZoneRuleSets from map[string]bool to
+	// map[NATRuleSetRef]bool (`json:"-"`, compile-time only). The
+	// reflection walk reaches it under ConfigSnapshot.Config, moving
+	// this Go digest, but the field never serializes and no helper can
+	// observe it; the c3001a08… digest below therefore includes both
+	// that drift and the #16142 AppID retype, still at ProtocolVersion 66.
 	snapshotShapeVersion8892 = 66
 )
 

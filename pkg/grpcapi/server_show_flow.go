@@ -183,7 +183,7 @@ type topCand struct {
 	srcPort, dstPort                     uint16 // network order, as in the key
 	proto                                uint8
 	inZone, outZone                      uint16
-	appID                                uint16
+	appID                                config.AssignedAppID
 	fwdPkts, revPkts, fwdBytes, revBytes uint64
 	created                              uint64
 }
@@ -249,7 +249,7 @@ func (s *Server) showSessionsTop(ctx context.Context, cfg *config.Config, topic 
 
 	now := monotonicSeconds()
 	zoneNames := make(map[uint16]string)
-	var appNames map[uint16]string
+	var appNames map[config.AssignedAppID]string
 	if cr := s.applyResult(); cr != nil {
 		zoneNames = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 		appNames = cr.AppNames

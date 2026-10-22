@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/psaab/xpf/pkg/appid"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -52,7 +53,7 @@ type rawEvent struct {
 	RevPackets     uint64
 	RevBytes       uint64
 	IngressIfindex uint32
-	AppID          uint16
+	AppID          config.AssignedAppID
 	CloseReason    uint8
 	// #2508: per-policy RT_FLOW SYSLOG log gate (was reserved padding).
 	// Carried only on the userspace-dp SESSION_CREATE/SESSION_CLOSE
@@ -251,8 +252,8 @@ type EventReader struct {
 	ifNamesMu                sync.RWMutex
 	ifNames                  map[uint32]string // ifindex -> interface name
 	appNamesMu               sync.RWMutex
-	appNames                 map[uint16]string // app_id -> application name
-	sessionSeq               uint64            // #4915: per-EVENT monotonic ordinal (EventSeq), NOT a session id
+	appNames                 map[config.AssignedAppID]string // app_id -> application name
+	sessionSeq               uint64                          // #4915: per-EVENT monotonic ordinal (EventSeq), NOT a session id
 }
 
 // NewEventReader creates a new event reader for the given event source.
@@ -369,13 +370,13 @@ func (er *EventReader) resolveIfName(ifindex uint32) string {
 }
 
 // SetAppNames updates the app ID to application name mapping (goroutine-safe).
-func (er *EventReader) SetAppNames(names map[uint16]string) {
+func (er *EventReader) SetAppNames(names map[config.AssignedAppID]string) {
 	er.appNamesMu.Lock()
 	er.appNames = names
 	er.appNamesMu.Unlock()
 }
 
-func (er *EventReader) resolveAppName(id uint16) string {
+func (er *EventReader) resolveAppName(id config.AssignedAppID) string {
 	if id == 0 {
 		return "UNKNOWN"
 	}
@@ -737,7 +738,7 @@ func (er *EventReader) logEvent(data []byte) {
 		rec.RevSessionPkts = binary.LittleEndian.Uint64(data[112:120])
 		rec.RevSessionBytes = binary.LittleEndian.Uint64(data[120:128])
 		ifindex := binary.LittleEndian.Uint32(data[128:132])
-		appID := binary.LittleEndian.Uint16(data[132:134])
+		appID := config.AssignedAppID(binary.LittleEndian.Uint16(data[132:134]))
 		closeReasonCode = data[134]
 
 		rec.IngressIface = er.resolveIfName(ifindex)
@@ -1091,7 +1092,7 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	evt.RevPackets = binary.LittleEndian.Uint64(data[112:120])
 	evt.RevBytes = binary.LittleEndian.Uint64(data[120:128])
 	evt.IngressIfindex = binary.LittleEndian.Uint32(data[128:132])
-	evt.AppID = binary.LittleEndian.Uint16(data[132:134])
+	evt.AppID = config.AssignedAppID(binary.LittleEndian.Uint16(data[132:134]))
 	evt.CloseReason = data[134]
 	_, policyDenyStamped := policyDenyConfigGeneration(data)
 

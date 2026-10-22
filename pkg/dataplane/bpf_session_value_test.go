@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"testing"
 	"unsafe"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // Sizes of the on-map C `struct session_value` / `struct session_value_v6`
@@ -100,11 +102,11 @@ func TestBatchLookupSessionsRoundTrip(t *testing.T) {
 
 	const flows = 400 // spans multiple 256-entry batch chunks
 	for i := uint32(0); i < flows; i++ {
-		v4 := SessionValue{State: 1, Flags: SessFlagSNAT, TCPState: 2, SessionID: uint64(i) + 1, PolicyID: i, AppID: uint16(i)}
+		v4 := SessionValue{State: 1, Flags: SessFlagSNAT, TCPState: 2, SessionID: uint64(i) + 1, PolicyID: i, AppID: config.AssignedAppID(i)}
 		if err := m.SetSessionV4(clearTestV4Key(i, false), v4); err != nil {
 			t.Fatalf("set v4 %d: %v", i, err)
 		}
-		v6 := SessionValueV6{State: 1, Flags: SessFlagDNAT, TCPState: 2, SessionID: uint64(i) + 1, PolicyID: i, AppID: uint16(i)}
+		v6 := SessionValueV6{State: 1, Flags: SessFlagDNAT, TCPState: 2, SessionID: uint64(i) + 1, PolicyID: i, AppID: config.AssignedAppID(i)}
 		if err := m.SetSessionV6(clearTestV6Key(i, false), v6); err != nil {
 			t.Fatalf("set v6 %d: %v", i, err)
 		}

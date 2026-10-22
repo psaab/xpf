@@ -489,7 +489,7 @@ func newValidationResult() *CompileResult {
 		ZoneIDs:             make(map[string]uint16),
 		ScreenIDs:           make(map[string]uint16),
 		AddrIDs:             make(map[string]uint32),
-		AppIDs:              make(map[string]uint32),
+		AppIDs:              make(map[string]config.AssignedAppID),
 		PoolIDs:             make(map[string]uint8),
 		implicitSets:        make(map[string]uint32),
 		NATCounterIDs:       make(map[string]uint32),

@@ -20,7 +20,7 @@ import (
 // means "no source-port constraint".
 type CatalogEntry struct {
 	Name        string
-	AppID       uint16
+	AppID       config.AssignedAppID
 	Protocol    uint8
 	DstPortLow  uint16
 	DstPortHigh uint16
@@ -37,7 +37,7 @@ type CatalogEntry struct {
 // reports.
 type Catalog struct {
 	Entries  []CatalogEntry
-	AppNames map[uint16]string
+	AppNames map[config.AssignedAppID]string
 }
 
 // appProtocolCandidates is shared by catalog emission and the disabled
@@ -77,7 +77,7 @@ func appProtocolCandidates(appProtocol string, resolved uint8, resolvedOK bool) 
 // malformed name instead of UNKNOWN. compileApplications gates its AppNames the
 // same way, so the two maps stay byte-identical (appid_catalog_parity_test.go).
 func BuildCatalog(cfg *config.Config) (Catalog, error) {
-	cat := Catalog{AppNames: map[uint16]string{}}
+	cat := Catalog{AppNames: map[config.AssignedAppID]string{}}
 	if cfg == nil {
 		return cat, nil
 	}
@@ -93,7 +93,7 @@ func BuildCatalog(cfg *config.Config) (Catalog, error) {
 	// byte-identical (appid_catalog_parity_test.go). This replaces the legacy
 	// sorted 1..N positional counter, whose ids shifted whenever an
 	// earlier-sorting name was inserted and then mis-resolved a RETAINED
-	// session's frozen app_id against the rebuilt catalog (see StableAppID).
+	// session's frozen app_id against the rebuilt catalog (see NaturalAppIDCandidate).
 	// The #3438 H4 uint16-overflow fail-closed boundary now lives inside
 	// AssignStableAppIDs (a config with >65535 distinct apps is rejected).
 	idByName, err := config.AssignStableAppIDs(names)
@@ -291,7 +291,7 @@ func BuildCatalog(cfg *config.Config) (Catalog, error) {
 	// orders diverge, so we sort by id here to keep "first writer == lowest app_id"
 	// — the property the Rust exact-port tiebreak (and the scan-list min-id
 	// tiebreak) rely on to agree with the AppID-disabled Go fallback
-	// (resolveTupleFallback, keyed on lowest StableAppID). Secondary keys make the
+	// (resolveTupleFallback, keyed on lowest NaturalAppIDCandidate). Secondary keys make the
 	// order fully deterministic for fan-out/same-id rows.
 	sort.Slice(cat.Entries, func(i, j int) bool {
 		a, b := cat.Entries[i], cat.Entries[j]

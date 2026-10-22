@@ -189,7 +189,7 @@ func CatalogNames(cfg *config.Config, includeAll bool) ([]string, error) {
 // srcPort is the session source port; it is required so the tuple fallback can
 // honor a configured `source-port` constraint (#3428). Both the source and the
 // destination port are threaded through to the fallback matcher.
-func ResolveSessionName(appNames map[uint16]string, cfg *config.Config, proto uint8, srcPort, dstPort uint16, appID uint16) string {
+func ResolveSessionName(appNames map[config.AssignedAppID]string, cfg *config.Config, proto uint8, srcPort, dstPort uint16, appID config.AssignedAppID) string {
 	return ResolveSessionNameWithIndex(appNames, cfg, nil, proto, srcPort, dstPort, appID)
 }
 
@@ -197,7 +197,7 @@ func ResolveSessionName(appNames map[uint16]string, cfg *config.Config, proto ui
 // fallback index. Build the index once before rendering or matching a session
 // batch; a nil index is accepted for one-off callers and creates a temporary
 // index only if the disabled-path tie needs it.
-func ResolveSessionNameWithIndex(appNames map[uint16]string, cfg *config.Config, fallback *FallbackIndex, proto uint8, srcPort, dstPort uint16, appID uint16) string {
+func ResolveSessionNameWithIndex(appNames map[config.AssignedAppID]string, cfg *config.Config, fallback *FallbackIndex, proto uint8, srcPort, dstPort uint16, appID config.AssignedAppID) string {
 	if appID != 0 {
 		if name := appNames[appID]; name != "" {
 			return name
@@ -231,7 +231,7 @@ func ResolveSessionNameWithIndex(appNames map[uint16]string, cfg *config.Config,
 // — because the same predicate drives the destructive ClearSessions walk —
 // broaden a filtered clear to delete sessions the operator did not name. Junos
 // application filters are case-exact, so exact `==` here is the parity contract.
-func SessionMatches(filter string, appNames map[uint16]string, cfg *config.Config, proto uint8, srcPort, dstPort uint16, appID uint16) bool {
+func SessionMatches(filter string, appNames map[config.AssignedAppID]string, cfg *config.Config, proto uint8, srcPort, dstPort uint16, appID config.AssignedAppID) bool {
 	return SessionMatchesWithIndex(filter, appNames, cfg, nil, proto, srcPort, dstPort, appID)
 }
 
@@ -245,7 +245,7 @@ func SessionMatches(filter string, appNames map[uint16]string, cfg *config.Confi
 // depth/cycle bounds as config.ExpandApplicationSet. The warmed exact path
 // stays allocation-free; expansion is resolved once per distinct filter
 // per index.
-func SessionMatchesWithIndex(filter string, appNames map[uint16]string, cfg *config.Config, fallback *FallbackIndex, proto uint8, srcPort, dstPort uint16, appID uint16) bool {
+func SessionMatchesWithIndex(filter string, appNames map[config.AssignedAppID]string, cfg *config.Config, fallback *FallbackIndex, proto uint8, srcPort, dstPort uint16, appID config.AssignedAppID) bool {
 	if filter == "" {
 		return true
 	}
@@ -310,11 +310,11 @@ type fallbackCandidate struct {
 }
 
 type FallbackIndex struct {
-	// multiplicity counts distinct names per natural StableAppID, capped at
+	// multiplicity counts distinct names per natural NaturalAppIDCandidate, capped at
 	// two because the resolver only needs to know whether a slot collides.
 	// It covers predefined and user names, including shadowed names and
 	// present-but-nil user entries.
-	slots map[uint16]fallbackSlot
+	slots map[config.AssignedAppID]fallbackSlot
 	// names is the full-universe list for the lazy reassignment; the config
 	// assignment helper deduplicates a name shadowing a predefined app.
 	names []string
@@ -329,7 +329,7 @@ type FallbackIndex struct {
 	// set, with a nil set marking a filter that names no application-set.
 	sets map[string]map[string]struct{}
 	// fullIDs caches the AssignStableAppIDsQuiet result (or its error) on
-	fullIDs map[string]uint16
+	fullIDs map[string]config.AssignedAppID
 	fullErr error
 	fullOK  bool
 }
@@ -345,12 +345,12 @@ func NewFallbackIndex(cfg *config.Config) *FallbackIndex {
 	}
 	names := make([]string, 0, nameCount)
 	ix := &FallbackIndex{
-		slots: make(map[uint16]fallbackSlot, nameCount),
+		slots: make(map[config.AssignedAppID]fallbackSlot, nameCount),
 		cfg:   cfg,
 	}
 	add := func(name string) {
 		names = append(names, name)
-		id := config.StableAppID(name)
+		id := config.NaturalAppIDCandidate(name)
 		slot, exists := ix.slots[id]
 		if !exists {
 			slot.firstName = name
@@ -378,7 +378,7 @@ func NewFallbackIndex(cfg *config.Config) *FallbackIndex {
 // exists because assignedIDForName falls back to the natural ID when a
 // second name holds the natural slot, hiding a displaced catalogued ID
 // (#14725 leg 3).
-func activeIDOf(appNames map[uint16]string, name string) (uint16, bool) {
+func activeIDOf(appNames map[config.AssignedAppID]string, name string) (config.AssignedAppID, bool) {
 	for id, n := range appNames {
 		if n == name {
 			return id, true
@@ -388,20 +388,20 @@ func activeIDOf(appNames map[uint16]string, name string) (uint16, bool) {
 }
 
 // Collides reports whether another full-catalog name shares name's natural
-// StableAppID slot. It is O(1) work with zero allocations: one StableAppID
+// NaturalAppIDCandidate slot. It is O(1) work with zero allocations: one NaturalAppIDCandidate
 // hash plus one map load.
 func (ix *FallbackIndex) Collides(name string) bool {
 	if ix == nil {
 		return false
 	}
-	return ix.slots[config.StableAppID(name)].multiplicity > 1
+	return ix.slots[config.NaturalAppIDCandidate(name)].multiplicity > 1
 }
 
 // FullIDs returns the quiet full-universe name -> assigned-id map, building
 // it once on first use. The error (a >65535-name catalog) is cached like the
 // map so a pathological config cannot turn every colliding tie into a
 // rebuild-and-error storm.
-func (ix *FallbackIndex) FullIDs() (map[string]uint16, error) {
+func (ix *FallbackIndex) FullIDs() (map[string]config.AssignedAppID, error) {
 	if ix == nil {
 		return nil, nil
 	}
@@ -457,8 +457,8 @@ func (ix *FallbackIndex) SetMembers(filter string) (map[string]struct{}, bool) {
 // map lookup. Only a collision-displaced name needs a scan to find its assigned
 // id; returning presence alongside that result also avoids a duplicate scan for
 // the #12225 referenced-tie gate.
-func assignedIDForName(appNames map[uint16]string, name string) (uint16, bool) {
-	naturalID := config.StableAppID(name)
+func assignedIDForName(appNames map[config.AssignedAppID]string, name string) (config.AssignedAppID, bool) {
+	naturalID := config.NaturalAppIDCandidate(name)
 	if owner := appNames[naturalID]; owner == name {
 		return naturalID, true
 	} else if owner == "" {
@@ -474,11 +474,11 @@ func assignedIDForName(appNames map[uint16]string, name string) (uint16, bool) {
 
 // resolveTupleFallback keeps the one-off/internal test seam while batch
 // callers use resolveTupleFallbackWithIndex to share the config-derived work.
-func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Config, appNames map[uint16]string) string {
+func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Config, appNames map[config.AssignedAppID]string) string {
 	return resolveTupleFallbackWithIndex(proto, srcPort, dstPort, cfg, appNames, nil)
 }
 
-func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *config.Config, appNames map[uint16]string, fallback *FallbackIndex) string {
+func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *config.Config, appNames map[config.AssignedAppID]string, fallback *FallbackIndex) string {
 	if cfg != nil {
 		// #2578: cfg.Applications.Applications is a Go map; iterating it and
 		// returning the first match is non-deterministic. When BOTH a
@@ -488,7 +488,7 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 		// (a source-port and/or destination-port constraint) over a
 		// protocol-only one, and break same-tier ties by LOWEST assigned app_id.
 		//
-		// #10722/#12225: use assigned IDs, not natural StableAppID hashes, for
+		// #10722/#12225: use assigned IDs, not natural NaturalAppIDCandidate hashes, for
 		// same-tier ties involving an uncatalogued candidate and a hash
 		// collision. The per-request index makes that collision check O(1) and
 		// lazily caches the full-universe assignment. Catalogued candidates use
@@ -565,7 +565,7 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 					break
 				}
 			}
-			var full map[string]uint16
+			var full map[string]config.AssignedAppID
 			if needsFull {
 				if ids, err := fallback.FullIDs(); err == nil {
 					full = ids
@@ -573,7 +573,7 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 					needsFull = false
 				}
 			}
-			rankID := func(c fallbackCandidate) uint16 {
+			rankID := func(c fallbackCandidate) config.AssignedAppID {
 				if c.catalogued {
 					if id, ok := activeIDOf(appNames, c.name); ok {
 						return id
@@ -613,12 +613,12 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 					if !c.catalogued {
 						continue
 					}
-					natural := config.StableAppID(c.name)
+					natural := config.NaturalAppIDCandidate(c.name)
 					if full[c.name] == natural {
 						continue
 					}
 					for _, o := range tier {
-						if !o.catalogued && (config.StableAppID(o.name) == natural || full[o.name] < full[c.name]) {
+						if !o.catalogued && (config.NaturalAppIDCandidate(o.name) == natural || full[o.name] < full[c.name]) {
 							return c.name
 						}
 					}
@@ -628,7 +628,7 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 						continue
 					}
 					for _, o := range tier {
-						if !o.catalogued && config.StableAppID(o.name) == config.StableAppID(c.name) {
+						if !o.catalogued && config.NaturalAppIDCandidate(o.name) == config.NaturalAppIDCandidate(c.name) {
 							return c.name
 						}
 					}
@@ -638,7 +638,7 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 						continue
 					}
 					for _, o := range tier {
-						if !o.catalogued && !o.predefined && full[o.name] != config.StableAppID(o.name) && full[o.name] < full[c.name] {
+						if !o.catalogued && !o.predefined && full[o.name] != config.NaturalAppIDCandidate(o.name) && full[o.name] < full[c.name] {
 							return c.name
 						}
 					}

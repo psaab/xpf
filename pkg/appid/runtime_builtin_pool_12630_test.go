@@ -41,7 +41,7 @@ func TestBuiltinPoolOnOffParity_12630(t *testing.T) {
 				t.Fatalf("BuildCatalog(enabled): %v", err)
 			}
 			inRange := func(lo, hi, p uint16) bool { return (lo == 0 && hi == 0) || (lo <= p && p <= hi) }
-			var winID uint16
+			var winID config.AssignedAppID
 			winConstrained := false
 			for _, e := range cat.Entries {
 				if e.Protocol != 17 || !inRange(e.DstPortLow, e.DstPortHigh, 4500) || !inRange(e.SrcPortLow, e.SrcPortHigh, 40000) {

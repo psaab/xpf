@@ -62,7 +62,7 @@ type SessionValue struct {
 
 	ALGType  uint8
 	LogFlags uint8
-	AppID    uint16
+	AppID    config.AssignedAppID
 
 	FibIfindex uint32
 	FibVlanID  uint16
@@ -545,7 +545,7 @@ type SessionValueV6 struct {
 
 	ALGType  uint8
 	LogFlags uint8
-	AppID    uint16
+	AppID    config.AssignedAppID
 
 	FibIfindex uint32
 	FibVlanID  uint16
@@ -992,7 +992,7 @@ type Event struct {
 	RevPackets     uint64
 	RevBytes       uint64
 	IngressIfindex uint32
-	AppID          uint16
+	AppID          config.AssignedAppID
 	CloseReason    uint8
 	PadEvent       uint8
 	// #3056: the admitting policy's ID on a SESSION_CLOSE frame. The other

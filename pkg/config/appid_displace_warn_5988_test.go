@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// #5988: a user application whose stable name-derived StableAppID hash-collides
+// #5988: a user application whose stable name-derived NaturalAppIDCandidate hash-collides
 // with an already-placed id is DISPLACED to the lowest free id by
 // AssignStableAppIDs. That displaced id is NOT a pure function of the app name
 // alone, so the small colliding set can renumber across catalog edits — the one
@@ -52,7 +52,7 @@ func captureDisplaceWarns(t *testing.T) *[]displaceCaptureRecord {
 
 // TestAssignStableAppIDsDisplacementWarns_5988 constructs a real user-app vs
 // user-app fold collision (svc-217 and svc-396 both fold to the same
-// StableAppID), runs AssignStableAppIDs, and asserts a Warn fired for the app
+// NaturalAppIDCandidate), runs AssignStableAppIDs, and asserts a Warn fired for the app
 // that lost its natural slot — naming the app, its natural (wanted) id, and the
 // displaced id it actually got.
 //
@@ -66,9 +66,9 @@ func TestAssignStableAppIDsDisplacementWarns_5988(t *testing.T) {
 	// Fixture guard: the two names must still collide under the fold, and
 	// neither may have become a predefined name (a predefined would be placed
 	// first and win the slot, changing which app is displaced).
-	if StableAppID(a) != StableAppID(b) {
+	if NaturalAppIDCandidate(a) != NaturalAppIDCandidate(b) {
 		t.Skipf("test fixture stale: %q (id %d) no longer collides with %q (id %d) under the fold",
-			a, StableAppID(a), b, StableAppID(b))
+			a, NaturalAppIDCandidate(a), b, NaturalAppIDCandidate(b))
 	}
 	if _, ok := PredefinedApplications[a]; ok {
 		t.Skipf("test fixture stale: %q is now a predefined application", a)
@@ -76,7 +76,7 @@ func TestAssignStableAppIDsDisplacementWarns_5988(t *testing.T) {
 	if _, ok := PredefinedApplications[b]; ok {
 		t.Skipf("test fixture stale: %q is now a predefined application", b)
 	}
-	natural := StableAppID(a) // == StableAppID(b)
+	natural := NaturalAppIDCandidate(a) // == NaturalAppIDCandidate(b)
 
 	recs := captureDisplaceWarns(t)
 
@@ -115,14 +115,14 @@ func TestAssignStableAppIDsDisplacementWarns_5988(t *testing.T) {
 		nat, ok := r.attrs["natural_app_id"]
 		if !ok {
 			t.Errorf("displacement Warn for %q missing natural_app_id attribute", b)
-		} else if got := uint16(nat.Uint64()); got != natural {
+		} else if got := AssignedAppID(uint16(nat.Uint64())); got != natural {
 			t.Errorf("displacement Warn natural_app_id = %d, want the wanted slot %d", got, natural)
 		}
 
 		asn, ok := r.attrs["assigned_app_id"]
 		if !ok {
 			t.Errorf("displacement Warn for %q missing assigned_app_id attribute", b)
-		} else if got := uint16(asn.Uint64()); got != displacedID {
+		} else if got := AssignedAppID(uint16(asn.Uint64())); got != displacedID {
 			t.Errorf("displacement Warn assigned_app_id = %d, want the displaced id %d", got, displacedID)
 		}
 		break
@@ -140,7 +140,7 @@ func TestAssignStableAppIDsNoDisplacementNoWarn_5988(t *testing.T) {
 	// Two names that do NOT collide under the fold and are not predefined.
 	const a = "svc-217"
 	const c = "svc-218"
-	if StableAppID(a) == StableAppID(c) {
+	if NaturalAppIDCandidate(a) == NaturalAppIDCandidate(c) {
 		t.Skipf("test fixture stale: %q and %q now collide under the fold", a, c)
 	}
 
