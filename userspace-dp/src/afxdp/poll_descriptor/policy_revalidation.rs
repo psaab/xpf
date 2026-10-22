@@ -1326,6 +1326,31 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     {
         return None;
     }
+    // #16215 (third shape): a peer-synced row whose STORED resolution is
+    // FabricRedirect names the fabric pseudo-egress (the fabric parent
+    // ifindex, e.g. 4 for fab0@ge-0-0-0) as its egress. That ifindex has
+    // no EgressInterface row, zone pair, or SNAT geometry, so judging it
+    // below can only answer `forwarding.egress.get(&fabric)` miss =
+    // invalid = revoke-and-delete both halves — exactly the egress-miss
+    // revocation proven live on fw0 (egress 4, dest_valid=true, dynamic
+    // provenance Some(false)). The fabric leg's NAT validity is judged
+    // on the egress owner when the packet arrives there; here the row
+    // carries no local egress verdict to judge against, so DECLINE like
+    // the terminal decline above. This covers rows demoted/retagged to
+    // SyncImport by DemoteOwnerRGS as well as true peer imports, and it
+    // applies regardless of failover timing (the live revocations fired
+    // in the pre-failover demote/republish window). A genuinely
+    // withdrawn SNAT rule still revokes once the row gains a real
+    // egress resolution (live or re-resolved) and runs the full
+    // geometry check below; locally-authored rows are judged as before.
+    if forward_origin.is_peer_synced()
+        && matches!(
+            forward_decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect
+        )
+    {
+        return None;
+    }
     // #16215: judge the packet's re-resolved decision, not a stored
     // terminal one — on EVERY node, not only the activating one. A
     // peer-synced row can still carry its standby-side terminal
