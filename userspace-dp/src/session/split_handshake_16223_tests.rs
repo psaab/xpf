@@ -938,3 +938,179 @@ fn peer_synced_close_transition_stays_silent_16217() {
     );
 }
 
+/// #16217 (export stamp, change 1): `open_export_delta_with_provenance`
+/// must export `tcp_handshake_state = Established` when node-wide
+/// completion evidence holds for the tuple, even though the exporting
+/// table's own row still reads HandshakePending. The exporting table
+/// is a pending replica; the completion proof is the serving worker's
+/// stamp (`note_node_served_handshake` with an Established wire and
+/// admitted reverse counters). Control: with no stamp the export
+/// keeps the live pending wire.
+///
+/// MUTATION: drop the `completion_evidence_for` stamp in
+/// `open_export_delta_with_provenance` and the positive arm exports
+/// wire 2, failing the first assertion.
+#[test]
+fn export_stamp_open_delta_established_on_node_evidence_16217() {
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    assert!(table.upsert_synced_with_origin(
+        SessionInstall {
+            key: forward.clone(),
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::SharedPromote,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 97,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    // Control: no node evidence -> live pending wire exported.
+    let control = table
+        .open_export_delta_with_provenance(
+            forward.clone(),
+            decision(),
+            metadata(),
+            SessionOrigin::SharedPromote,
+            false,
+            ExportProvenance::Incremental,
+        )
+        .expect("forward export");
+    assert_eq!(
+        control.tcp_handshake_state,
+        TcpHandshakeState::HandshakePending.to_wire(),
+        "premise: without evidence the export keeps the pending wire"
+    );
+    // Serving worker on this node completed the pair and served
+    // reverse traffic; its stamp is the node-wide evidence.
+    table.note_node_served_handshake(
+        &forward,
+        TcpHandshakeState::Established.to_wire(),
+        5,
+    );
+    let stamped = table
+        .open_export_delta_with_provenance(
+            forward.clone(),
+            decision(),
+            metadata(),
+            SessionOrigin::SharedPromote,
+            false,
+            ExportProvenance::Incremental,
+        )
+        .expect("forward export");
+    assert_eq!(
+        stamped.tcp_handshake_state,
+        TcpHandshakeState::Established.to_wire(),
+        "#16217: export must stamp Established when node-wide evidence holds"
+    );
+}
+
+/// #16217 (export stamp, change 1): `emit_session_state_update` must
+/// stamp Established when node-wide evidence holds, and the
+/// shared-evidence variant must do the same from shared evidence
+/// alone. The row transitions Opening -> HandshakePending locally
+/// (a real transition, so the transition-only gate passes) but never
+/// completes locally; only the node stamp / shared evidence proves
+/// completion.
+///
+/// MUTATION: drop the evidence stamp in
+/// `emit_session_state_update_inner` and both positive arms emit the
+/// live pending wire, failing their assertions.
+#[test]
+fn export_stamp_update_established_on_node_and_shared_evidence_16217() {
+    let established = TcpHandshakeState::Established.to_wire();
+    let pending = TcpHandshakeState::HandshakePending.to_wire();
+    let now = 1_000_000_000u64;
+
+    let mk_table = |wire: u8| {
+        let forward = key_v4();
+        let mut table = SessionTable::new();
+        assert!(table.upsert_synced_with_origin(
+            SessionInstall {
+                key: forward.clone(),
+                decision: decision(),
+                metadata: metadata(),
+                origin: SessionOrigin::ForwardFlow,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 98,
+                tcp_close_class: 0,
+                tcp_handshake_state: wire,
+                source_nat_static: None,
+            },
+            false,
+        ));
+        (table, forward)
+    };
+
+    // Helper: a table whose row already reads HandshakePending. The
+    // caller passes `handshake_state_before = Opening`, modelling the
+    // hit path that observed the Opening row, promoted it, and now
+    // emits the transition Update (emit is transition-only on the
+    // before/after pair, exactly as the lookup callers drive it).
+    let updates_of = |table: &mut SessionTable, forward: &SessionKey| -> Vec<SessionDelta> {
+        table.drain_deltas(64);
+        table.emit_session_state_update(
+            forward,
+            0,
+            TcpHandshakeState::Opening.to_wire(),
+        );
+        table
+            .drain_deltas(64)
+            .into_iter()
+            .filter(|d| d.kind == SessionDeltaKind::Update)
+            .collect()
+    };
+
+    // (a) Table-local node evidence -> Update reads Established.
+    let (mut table, forward) = mk_table(pending);
+    table.note_node_served_handshake(&forward, established, 3);
+    let updates = updates_of(&mut table, &forward);
+    assert_eq!(updates.len(), 1, "transition must emit one Update");
+    assert_eq!(
+        updates[0].tcp_handshake_state, established,
+        "#16217: Update must stamp Established on node evidence"
+    );
+
+    // (b) Shared evidence alone (no local stamp): the shared variant
+    // stamps Established.
+    let shared = NodeServedEvidence {
+        rev_packets_any: 4,
+        ..NodeServedEvidence::default()
+    };
+    let (mut with_shared, forward2) = mk_table(pending);
+    with_shared.drain_deltas(64);
+    with_shared.emit_session_state_update_with_shared_evidence(
+        &forward2,
+        0,
+        TcpHandshakeState::Opening.to_wire(),
+        shared,
+    );
+    let updates: Vec<_> = with_shared
+        .drain_deltas(64)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        updates[0].tcp_handshake_state, established,
+        "#16217: shared-evidence Update must stamp Established"
+    );
+
+    // (c) Control: no evidence anywhere -> live pending wire.
+    let (mut plain, forward3) = mk_table(pending);
+    let updates = updates_of(&mut plain, &forward3);
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        updates[0].tcp_handshake_state, pending,
+        "control: without any evidence the Update keeps the pending wire"
+    );
+}
+

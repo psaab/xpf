@@ -113,6 +113,24 @@ pub(super) fn run_ct_slice(
                 key,
             )
         };
+        // #16217: snapshot this worker's ACTUAL reverse counts onto
+        // the shared rows BEFORE the evidence read below, so a pair
+        // whose reverse traffic landed since the last publish counts
+        // as node-wide evidence in this same slice (the serving
+        // worker's own table is the source; the shared row is the
+        // cross-worker carrier). Only rows this worker serves are
+        // stamped, and only with counts > 0.
+        for (key, nat) in &established {
+            let rev = sessions.rev_packets_for(key);
+            if rev > 0 {
+                crate::afxdp::shared_ops::restamp_shared_rev_packets(
+                    shared_sessions,
+                    key,
+                    *nat,
+                    rev,
+                );
+            }
+        }
         let mut node_served: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
         sessions.node_served_forward_slice(0, usize::MAX, &shared_evidence, &mut node_served);
         for pair in node_served {

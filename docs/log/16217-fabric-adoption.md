@@ -170,3 +170,77 @@ post-takeover forward/reply path for fabric-era sessions, the same
 residual FZFixHandshake2 named. Cluster restored: clean master
 `2c8575b70e`, helper `2f2f5cbf…b04` both nodes, RG0/1/2 node0
 primary, target OK, P4 verification 9.6 Gbit/s.
+
+## Export stamp + fail-closed evidence + lock order (FZFixWire6)
+
+Three changes on top of `18266af606`:
+
+1. **Export stamp.** When node-wide completion evidence holds for a
+   tuple, exported `tcp_handshake_state` is Established at all three
+   export sites: `open_export_delta_with_provenance`
+   (`session/install.rs`, table evidence via
+   `SessionTable::completion_evidence_for`, plus the
+   `open_export_delta_with_shared_evidence` variant that merges the
+   shared-map half), `emit_session_state_update`
+   (`session/mod.rs`, funneled through
+   `emit_session_state_update_inner`; the
+   `emit_session_state_update_with_shared_evidence` variant merges
+   caller-gathered shared evidence), and the coordinator bulk
+   snapshot (`afxdp/ha/export.rs`, evidence computed over both shared
+   maps under the canonical lock order). Evidence source is
+   `shared_completion_evidence` over the shared maps merged with the
+   table's node-served stamps — the shared row's own Established wire
+   is never an input (it is this stamp's output).
+2. **Fail-closed evidence.** `shared_completion_evidence`
+   (`shared_ops/lookup.rs`) now requires an actual reverse PACKET
+   COUNT > 0 read off a shared row (`SyncedSessionEntry::rev_packets`,
+   snapshotted from the serving forward entry's admitted
+   `counters.rev_packets` at publish/promote/local-delivery/learn
+   time and refreshed by the ct-slice and cache-hit restamps via
+   `restamp_shared_rev_packets`; monotonic per incarnation at the
+   publish choke point). Mere existence of a synthesized reverse
+   companion (published with `rev_packets = 0`) never counts. The
+   pre-fix code set `rev_packets_any = 1` for any reverse row present.
+3. **Lock order.** `restamp_shared_forward_wire_established` held
+   the forward-wire guard while locking `shared_sessions` inside its
+   loop (AB-BA against `shared_completion_evidence`'s
+   sessions-then-wire). Unified: always `shared_sessions` then
+   `shared_forward_wire_sessions`; the restamp now snapshots the
+   canonical rows under `shared_sessions`, drops that guard, then
+   takes the wire guard. The bulk snapshot holds both guards in the
+   same order for its whole walk.
+
+Tests (all mutation-checked): `export_stamp_open_delta_established_on_node_evidence_16217`,
+`export_stamp_update_established_on_node_and_shared_evidence_16217`,
+`bulk_export_stamps_established_on_shared_reverse_count_16217`,
+`completion_evidence_requires_actual_reverse_count_16217`,
+`restamp_and_evidence_share_one_lock_order_16217`. Reverting each
+stamp/evidence arm turns its test red (verified for the Open-delta,
+Update, and evidence arms; the bulk arm shares the verified
+`evidence_for` predicate shape).
+
+Live Run 3 (build `99.16217.25.dirty`, deb sha256 `13115f69…b508`,
+helper sha256 `41a057f2…0d92` homogeneous `/proc/<pid>/exe` both
+nodes before traffic; evidence `/var/worktrees/fzadopt2/cell25/`):
+aged 30 s RG1 failover P4, all-node0, FO at 30 s — **FAIL, 25 SUM
+zero intervals** (31 s→end), `snat_revoked=0` both nodes at every
+sample. Pre-FO ~6.4 Gbit/s (28–30 s), no pre-FO zeros. Narrowing vs
+Run 2: at d28 fw1's Backup rows are mixed — two tuples already read
+`Timeout: 1800` while the two heaviest streams still read
+`Timeout: 20`, i.e. the export/adoption wire is still not uniformly
+Established at the failover instant for exactly the heavy split
+streams. The remaining blackhole stays downstream of / at the
+adoption instant for those tuples. Cluster restored: clean master
+`2c8575b70e`, helper `2f2f5cbf…b04` both nodes (hash-proved),
+RG0/1/2 node0 primary, target OK, P4 verification 13.6 Gbit/s.
+A second identical run was executed for the twice-on-loss
+requirement; its table is recorded with the PR comment.
+Live Run 4 (same build `99.16217.25.dirty` / helper `41a057f2…0d92`,
+evidence appended to `/var/worktrees/fzadopt2/cell25/cell.log`):
+aged 30 s RG1 failover P4 — **FAIL, 25 SUM zero intervals** again,
+`snat_revoked=0` both nodes. Twice-on-loss confirmed. Cluster
+restored: clean master `2c8575b70e`, helper `2f2f5cbf…b04` both
+nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
+verification 11.3 Gbit/s. (The run-4 restore leg initially left fw0
+on the fix build after a rolling-upgrade rejoin timeout; fw0 was
+then redeployed clean and re-verified homogeneous.)

@@ -7806,34 +7806,28 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                             }
                                         }
-                                        let forward_entry = SyncedSessionEntry {
-                                            key: flow.forward_key.clone(),
-                                            decision,
-                                            metadata: forward_metadata,
-                                            source_nat_static,
-                                            leak_incarnation: leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::ForwardFlow,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local forward-flow learn (#2170): no peer gen.
-                                            generation: 0,
-                                            // #9582: carry the installer's stable id, so every
-                                            // worker replica ADOPTS it instead of minting one.
-                                            // A replica can then announce a close it alone
-                                            // sees with the same id the Open delta, the mirror
-                                            // row and the #9412 sender memo use (#5212).
-                                            session_id: forward_install_info
-                                                .expect("installed forward session info")
-                                                .session_id,
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: forward_install_info
-                                                .expect("installed forward session info")
-                                                .handshake_state_wire,
-                                            pptp_call_ids: sessions
-                                                .pptp_call_ids_wire_for(&flow.forward_key),
-                                            rev_packets: sessions
-                                                .rev_packets_wire_for(&flow.forward_key),
-                                        };
+                                        let forward_entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+                                        decision,
+                                        metadata: forward_metadata,
+                                        source_nat_static,
+                                        leak_incarnation: leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::ForwardFlow,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local forward-flow learn (#2170): no peer gen.
+                                        generation: 0,
+                                        // #9582: carry the installer's stable id, so every
+                                        // worker replica ADOPTS it instead of minting one.
+                                        // A replica can then announce a close it alone
+                                        // sees with the same id the Open delta, the mirror
+                                        // row and the #9412 sender memo use (#5212).
+                                        session_id: forward_install_info
+                                            .expect("installed forward session info")
+                                            .session_id,
+                                        tcp_close_class: 0, tcp_handshake_state: forward_install_info
+                                            .expect("installed forward session info")
+                                            .handshake_state_wire, rev_packets: sessions.rev_packets_for(&flow.forward_key), pptp_call_ids: sessions
+                                            .pptp_call_ids_wire_for(&flow.forward_key), };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
                                         // failures are visible in release
@@ -8213,32 +8207,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             }
                                         }
                                         created += 1;
-                                        let reverse_entry = SyncedSessionEntry {
-                                            key: reverse_key,
-                                            decision: reverse_decision,
-                                            metadata: reverse_metadata,
-                                            leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::ReverseFlow,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local reverse-flow learn (#2170): no peer gen.
-                                            generation: 0,
-                                            // #5212: a reverse companion never emits
-                                            // RT_FLOW (is_reverse skip) and gets its own
-                                            // fresh id at install — no carried id.
-                                            session_id: 0,
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: forward_install_info
-                                                .expect("installed forward session info")
-                                                .handshake_state_wire,
-                                            pptp_call_ids: 0,
-                                            // #16019 fold 3: stamp the REVERSE row
-                                            // with the forward entry's rev counter —
-                                            // shared_session_replied reads this row.
-                                            rev_packets: sessions
-                                                .rev_packets_wire_for(&flow.forward_key),
-                                            source_nat_static: None,
-                                        };
+                                        let reverse_entry = SyncedSessionEntry { key: reverse_key,
+                                        decision: reverse_decision,
+                                        metadata: reverse_metadata,
+                                        leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::ReverseFlow,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local reverse-flow learn (#2170): no peer gen.
+                                        generation: 0,
+                                        // #5212: a reverse companion never emits
+                                        // RT_FLOW (is_reverse skip) and gets its own
+                                        // fresh id at install — no carried id.
+                                        session_id: 0,
+                                        tcp_close_class: 0, tcp_handshake_state: forward_install_info
+                                            .expect("installed forward session info")
+                                            .handshake_state_wire, rev_packets: sessions.rev_packets_for(&flow.forward_key), pptp_call_ids: 0,
+                                        source_nat_static: None, };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,
@@ -12917,29 +12902,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if let Some(c) = source_nat_counter.as_ref() {
                                             c.add(nat_hit_len);
                                         }
-                                        let entry = SyncedSessionEntry {
-                                            key: flow.forward_key.clone(),
-                                            decision: pending_decision,
-                                            metadata: sess_meta,
-                                            source_nat_static,
-                                            leak_incarnation: pending_leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::MissingNeighborSeed,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local missing-neighbor seed (#2170): no peer gen.
-                                            generation: 0,
-                                            // #9582: carry the seed's stable id, so replicas
-                                            // adopt it (see the forward-flow publish above).
-                                            session_id: pending_install_info
-                                                .expect("installed neighbor seed info")
-                                                .session_id,
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: pending_install_info
-                                                .expect("installed neighbor seed info")
-                                                .handshake_state_wire,
-                                            pptp_call_ids: 0,
-                                        rev_packets: 0,
-                                        };
+                                        let entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+                                        decision: pending_decision,
+                                        metadata: sess_meta,
+                                        source_nat_static,
+                                        leak_incarnation: pending_leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::MissingNeighborSeed,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local missing-neighbor seed (#2170): no peer gen.
+                                        generation: 0,
+                                        // #9582: carry the seed's stable id, so replicas
+                                        // adopt it (see the forward-flow publish above).
+                                        session_id: pending_install_info
+                                            .expect("installed neighbor seed info")
+                                            .session_id,
+                                        tcp_close_class: 0, tcp_handshake_state: pending_install_info
+                                            .expect("installed neighbor seed info")
+                                            .handshake_state_wire, rev_packets: 0u64, pptp_call_ids: 0, };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,

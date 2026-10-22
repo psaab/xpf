@@ -3739,6 +3739,50 @@ impl SessionTable {
             .map(|entry| entry.tcp_handshake_state_wire(key.protocol))
             .unwrap_or(0)
     }
+    /// #16217: does node-wide completion evidence hold for the pair
+    /// named by `key` (either half)? The table-side half of the export
+    /// stamp: local serving rows plus the per-table node-served stamps
+    /// (serving workers stamp admitted reverse counters / completions
+    /// here). Deliberately the OUTPUT-ONLY test — a shared row's
+    /// Established wire never feeds it. Callers that also hold the
+    /// shared maps merge `shared_completion_evidence` (which requires
+    /// an actual reverse packet count > 0 on a shared row) into this
+    /// via `completion_evidence_with_shared`.
+    pub(crate) fn completion_evidence_for(&self, key: &SessionKey) -> bool {
+        self.node_served_evidence(key).served_and_completed()
+    }
+
+    /// #16217: `completion_evidence_for` merged with shared-map
+    /// evidence gathered by the caller (shared-map locks stay with the
+    /// caller; this is a pure merge). Fail-closed: shared evidence
+    /// alone counts only via `served_and_completed`, whose shared half
+    /// is `rev_packets_any > 0` — an actual reverse packet count read
+    /// off a reverse row, never mere existence of a synthesized
+    /// reverse companion (published with `rev_packets = 0`).
+    pub(crate) fn completion_evidence_with_shared(
+        &self,
+        key: &SessionKey,
+        shared: NodeServedEvidence,
+    ) -> bool {
+        let mut evidence = self.node_served_evidence(key);
+        evidence.rev_packets_any = evidence
+            .rev_packets_any
+            .max(evidence.rev_packets)
+            .max(shared.rev_packets_any);
+        evidence.served_completed = evidence.served_completed || shared.served_completed;
+        evidence.served_and_completed()
+    }
+
+    /// #16217: actual reverse packets this table's forward entry for
+    /// `key` has forwarded (0 when the forward half is absent or has
+    /// served none). The count snapshotted onto shared rows at
+    /// publish/restamp time.
+    pub(crate) fn rev_packets_for(&self, key: &SessionKey) -> u64 {
+        self.entry_by_key(key)
+            .map(|entry| entry.counters.rev_packets)
+            .unwrap_or(0)
+    }
+
 
     /// #16019 fold: node-level reply evidence for the pressure-shed
     /// victim check — true once this worker's live entry has seen a
@@ -4714,6 +4758,46 @@ impl SessionTable {
         class_before: u8,
         handshake_state_before: u8,
     ) {
+        self.emit_session_state_update_inner(
+            matched_key,
+            class_before,
+            handshake_state_before,
+            None,
+        );
+    }
+
+    /// #16217 (export stamp): `emit_session_state_update` with the
+    /// shared-map half of the completion evidence merged in. When the
+    /// merged evidence holds for the forward tuple, the emitted
+    /// Update's `tcp_handshake_state` is Established even if this
+    /// table's row still reads Opening/Pending — the peer's adoption
+    /// gate must learn a completion a sibling worker observed.
+    /// Fail-closed: the shared half counts only through
+    /// `served_and_completed` (actual reverse packet count > 0 on a
+    /// shared row, never synthesized-companion existence). The
+    /// transition-only and peer-synced-silence gates are unchanged.
+    pub(in crate::session) fn emit_session_state_update_with_shared_evidence(
+        &mut self,
+        matched_key: &SessionKey,
+        class_before: u8,
+        handshake_state_before: u8,
+        shared: NodeServedEvidence,
+    ) {
+        self.emit_session_state_update_inner(
+            matched_key,
+            class_before,
+            handshake_state_before,
+            Some(shared),
+        );
+    }
+
+    fn emit_session_state_update_inner(
+        &mut self,
+        matched_key: &SessionKey,
+        class_before: u8,
+        handshake_state_before: u8,
+        shared_evidence: Option<NodeServedEvidence>,
+    ) {
         let Some(matched) = self.entry_by_key(matched_key) else {
             return;
         };
@@ -4783,7 +4867,25 @@ impl SessionTable {
             is_admission: false,
             tcp_close_class: forward.tcp_close_class_wire(),
             purge_retirement: false,
-            tcp_handshake_state: forward.tcp_handshake_state_wire(forward_key.protocol),
+            // #16217 (export stamp): Established when node-wide
+            // completion evidence holds for the forward tuple — the
+            // table half always, plus the caller-merged shared half
+            // (actual reverse packet count > 0 on a shared row,
+            // via `emit_session_state_update_with_shared_evidence`).
+            // Otherwise the row's live wire, unchanged.
+            tcp_handshake_state: {
+                let completed = match shared_evidence {
+                    Some(shared) => {
+                        self.completion_evidence_with_shared(&forward_key, shared)
+                    }
+                    None => self.completion_evidence_for(&forward_key),
+                };
+                if completed {
+                    TcpHandshakeState::Established.to_wire()
+                } else {
+                    forward.tcp_handshake_state_wire(forward_key.protocol)
+                }
+            },
             pptp_call_ids,
             source_nat_static: forward.source_nat_static,
         };
