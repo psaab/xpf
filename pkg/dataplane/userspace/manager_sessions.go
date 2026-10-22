@@ -678,14 +678,14 @@ func (m *Manager) DeleteSessionScopedV6(sk dataplane.ScopedSessionKeyV6) error {
 // syncDeleteScopedKeyV4Locked sends one scoped singular helper delete
 // (#14965). m.mu must be held; m.proc must be non-nil (caller-checked).
 func (m *Manager) syncDeleteScopedKeyV4Locked(sk dataplane.ScopedSessionKey) error {
-	req := m.buildSessionSyncRequestV4("mirror_delete", sk.Key, deleteScopeVal(sk.RoutingDomain))
+	req := m.buildSessionSyncScopedDeleteV4("mirror_delete", sk.Key, sk.RoutingDomain)
 	req.PurgeTunnelVariants = sk.PurgeTunnelVariants
 	return m.syncSessionRequestLocked(req)
 }
 
 // syncDeleteScopedKeyV6Locked is the IPv6 analogue (#14965).
 func (m *Manager) syncDeleteScopedKeyV6Locked(sk dataplane.ScopedSessionKeyV6) error {
-	req := m.buildSessionSyncRequestV6("mirror_delete", sk.Key, deleteScopeValV6(sk.RoutingDomain))
+	req := m.buildSessionSyncScopedDeleteV6("mirror_delete", sk.Key, sk.RoutingDomain)
 	req.PurgeTunnelVariants = sk.PurgeTunnelVariants
 	return m.syncSessionRequestLocked(req)
 }
@@ -703,11 +703,11 @@ func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.Ses
 	if m.proc == nil {
 		return nil
 	}
-	scope := (*dataplane.SessionValue)(nil)
+	var scope *dataplane.SessionValue
 	if haveVal {
 		scope = deleteScopeVal(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV4("mirror_delete", key, scope)
+	req := m.buildSessionSyncScopedDeleteV4("mirror_delete", key, scopedRoutingDomain(scope))
 	if err := m.syncSessionRequestLocked(req); err != nil {
 		return err
 	}
@@ -722,11 +722,11 @@ func (m *Manager) syncDeleteV4LockedMarkedErr(key dataplane.SessionKey, val data
 	if m.proc == nil {
 		return false, errSessionHelperUnreachable
 	}
-	scope := (*dataplane.SessionValue)(nil)
+	var scope *dataplane.SessionValue
 	if haveVal {
 		scope = deleteScopeVal(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV4("mirror_delete", key, scope)
+	req := m.buildSessionSyncScopedDeleteV4("mirror_delete", key, scopedRoutingDomain(scope))
 	req.PeerDelete = peer
 	req.ForwardOnly = forwardOnly
 	err := m.syncSessionRequestLocked(req)
@@ -766,11 +766,11 @@ func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.S
 	if m.proc == nil {
 		return nil
 	}
-	scope := (*dataplane.SessionValueV6)(nil)
+	var scope *dataplane.SessionValueV6
 	if haveVal {
 		scope = deleteScopeValV6(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV6("mirror_delete", key, scope)
+	req := m.buildSessionSyncScopedDeleteV6("mirror_delete", key, scopedRoutingDomainV6(scope))
 	if err := m.syncSessionRequestLocked(req); err != nil {
 		return err
 	}
@@ -782,11 +782,11 @@ func (m *Manager) syncDeleteV6LockedMarkedErr(key dataplane.SessionKeyV6, val da
 	if m.proc == nil {
 		return false, errSessionHelperUnreachable
 	}
-	scope := (*dataplane.SessionValueV6)(nil)
+	var scope *dataplane.SessionValueV6
 	if haveVal {
 		scope = deleteScopeValV6(val.RoutingDomain)
 	}
-	req := m.buildSessionSyncRequestV6("mirror_delete", key, scope)
+	req := m.buildSessionSyncScopedDeleteV6("mirror_delete", key, scopedRoutingDomainV6(scope))
 	req.PeerDelete = peer
 	req.ForwardOnly = forwardOnly
 	err := m.syncSessionRequestLocked(req)
@@ -864,7 +864,7 @@ func (m *Manager) syncDeleteScopedV4Locked(key dataplane.SessionKey, domain uint
 	if m.proc == nil {
 		return false, errSessionHelperUnreachable
 	}
-	req := m.buildSessionSyncRequestV4("mirror_delete_scoped", key, deleteScopeVal(domain))
+	req := m.buildSessionSyncScopedDeleteV4("mirror_delete_scoped", key, domain)
 	req.PeerDelete = true
 	req.RTFlowSessionID = expectedID
 	req.RoutingDomain = scopedWireDomain(domain)
@@ -920,7 +920,7 @@ func (m *Manager) syncDeleteScopedV6Locked(key dataplane.SessionKeyV6, domain ui
 	if m.proc == nil {
 		return false, errSessionHelperUnreachable
 	}
-	req := m.buildSessionSyncRequestV6("mirror_delete_scoped", key, deleteScopeValV6(domain))
+	req := m.buildSessionSyncScopedDeleteV6("mirror_delete_scoped", key, domain)
 	req.PeerDelete = true
 	req.RTFlowSessionID = expectedID
 	req.RoutingDomain = scopedWireDomain(domain)
@@ -1229,8 +1229,8 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 			// helper does not have to probe for it and cannot refuse the delete
 			// as ambiguous. deleteScopeVal returns nil at domain 0, which is the
 			// pre-#9364 bare request, bit-identical.
-			req := m.buildSessionSyncRequestV4(
-				"mirror_delete_batch", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
+			req := m.buildSessionSyncScopedDeleteV4(
+				"mirror_delete_batch", keys[i].Key, keys[i].RoutingDomain)
 			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
@@ -1311,8 +1311,8 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 		reqs := make([]SessionSyncRequest, 0, end-start)
 		for i := start; i < end; i++ {
 			// #9364: name the domain — see the V4 twin.
-			req := m.buildSessionSyncRequestV6(
-				"mirror_delete_batch", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
+			req := m.buildSessionSyncScopedDeleteV6(
+				"mirror_delete_batch", keys[i].Key, keys[i].RoutingDomain)
 			req.PurgeTunnelVariants = keys[i].PurgeTunnelVariants
 			req.PeerDelete = peer
 			req.ForwardOnly = forwardOnly
