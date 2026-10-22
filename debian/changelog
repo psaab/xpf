@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Add a lenient-bool completeness test that reflects recursively over
+    compileOpts (including the embedded protocolScopeOpts) and requires
+    every lenient*/sanitize* bool to be true in lenientCompileOpts(), so
+    a new downgrade field added without its tolerant-path registration
+    fails the test instead of silently making tolerant load strict for
+    that gate (#16166). Test-only; no production behavior change.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Delete the cmdtree `set system dataplane` description overlay
     (#16161): the per-knob help strings were a third mini-SSOT beside
     pkg/config's setSchema, so adding or renaming a dataplane knob
