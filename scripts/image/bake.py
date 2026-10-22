@@ -142,11 +142,17 @@ def hugepages_conf(conf_text=None) -> str:
     (systemd-sysctl) does, not as a substring. Lines are processed in
     order against a per-key table:
 
-    - Keys are normalized with systemd's `sysctl_normalize`: the
-      ignore-errors prefix `-` is stripped, `path_simplify` collapses
-      redundant separators and removes a leading `/`, and `.`/`/` are
-      equivalent separators after the first (`vm/nr_hugepages`,
-      `/vm/nr_hugepages` and `vm.nr_hugepages` are ONE key).
+    - Keys are normalized with systemd's `sysctl_normalize` EXACTLY,
+      including its first-separator rule: find the first `/` or `.`;
+      only if it is a `.` are all separators swapped (`.`<->`/`, so
+      `vm.nr_hugepages`, `vm/nr_hugepages` and `.vm.nr_hugepages` are
+      one key). If the first separator is a `/`, separators are left
+      as-is, so `/vm.nr_hugepages` names a literal dotted filename
+      under /proc/sys — a DIFFERENT key that never touches
+      vm.nr_hugepages. Normalization finishes with path_simplify
+      (collapse redundant separators, resolve `.`/`..` textually) and
+      removal of one leading `/`. The table key is the resulting /proc
+      path with `/` as separator; the guarded key is `vm/nr_hugepages`.
     - A later line for the same normalized key REPLACES the earlier
       entry — including a bare negative-match directive (`-key` with no
       `=`), which systemd stores as a NULL value and then skips at
@@ -164,27 +170,43 @@ def hugepages_conf(conf_text=None) -> str:
     if conf_text is None:
         with open(HUGEPAGES_CONF_PATH) as f:
             conf_text = f.read()
-    # Per-key table mirroring systemd-sysctl's parse_line/apply_all:
-    # normalized key -> value string, or None for a bare negative-match
-    # directive (stored by systemd as NULL and skipped at apply time).
+    # Mirror systemd-sysctl's parse_line/apply_all: normalized /proc
+    # path -> value string, or None for a bare negative-match directive
+    # (stored by systemd as NULL and skipped at apply time).
+    def normalize(key: str) -> str:
+        # sysctl_normalize (systemd src/basic/sysctl-util.c), in order:
+        k = key.strip().lstrip("-").strip()
+        # 1. first-separator rule: swap separators only when the FIRST
+        #    separator is a dot.
+        first = next((i for i, c in enumerate(k) if c in "/."), None)
+        if first is not None and k[first] == ".":
+            k = k.translate(str.maketrans({".": "/", "/": "."}))
+        # 2. path_simplify: collapse repeated '/', resolve '.' and '..'
+        #    textually; a leading '..' that escapes the root makes the
+        #    write path non-normalized (systemd rejects it) — refuse.
+        absolute = k.startswith("/")
+        parts = []
+        for seg in k.split("/"):
+            if seg in ("", "."):
+                continue
+            if seg == "..":
+                if not parts:
+                    die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} "
+                        "escapes /proc/sys after normalization; refusing "
+                        "to bake a key that cannot be evaluated (#16243)")
+                parts.pop()
+            else:
+                parts.append(seg)
+        # 3. kill one leading slash (after simplification).
+        return "/".join(parts)
+
     entries = {}
     for line in conf_text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith(";"):
             continue
         key, sep, value = stripped.partition("=")
-        # systemd sysctl_normalize: strip the ignore-errors '-', then
-        # path_simplify the key (collapse redundant separators, drop a
-        # leading '/'), then map every '/' to '.' (first-separator rule:
-        # after simplification both spellings denote the same /proc
-        # path either way).
-        raw_key = key.strip().lstrip("-").strip()
-        segments = [s for s in raw_key.replace("\\", "/").split("/") if s not in ("", ".")]
-        if any(s == ".." for s in segments):
-            die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} contains "
-                "'..'; refusing to bake a file whose normalized key cannot "
-                "be evaluated at build time (#16243)")
-        normalized = ".".join(segments)
+        normalized = normalize(key)
         if "*" in normalized or "?" in normalized or "[" in normalized:
             die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} is a glob "
                 "pattern; systemd expands it against live /proc at boot, so "
@@ -198,12 +220,12 @@ def hugepages_conf(conf_text=None) -> str:
             # for the key, then skips it at apply time.
             entries[normalized] = None
         # Any other bare line is ignored by systemd's parser as well.
-    if "vm.nr_hugepages" not in entries or entries["vm.nr_hugepages"] is None:
+    if "vm/nr_hugepages" not in entries or entries["vm/nr_hugepages"] is None:
         die(f"{HUGEPAGES_CONF_PATH} has no effective vm.nr_hugepages "
             "assignment (absent, or suppressed by a bare negative-match "
             "directive); refusing to bake an image without the UMEM "
             "hugepage knob (#16243)")
-    raw_value = entries["vm.nr_hugepages"]
+    raw_value = entries["vm/nr_hugepages"]
     try:
         effective = int(raw_value)
     except ValueError:

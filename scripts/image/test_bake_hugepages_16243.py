@@ -81,8 +81,19 @@ class BakeHugepagesTests(unittest.TestCase):
             "slash-form non-integer": "vm/nr_hugepages = lots\n",
             "leading-slash zero override":
                 "vm.nr_hugepages = 1440\n/vm/nr_hugepages = 0\n",
-            "leading-slash dot-form short override":
-                "vm.nr_hugepages = 1440\n/vm.nr_hugepages = 600\n",
+            # First-separator rule: '/vm.nr_hugepages' keeps its dot
+            # (literal dotted filename under /proc/sys) — it never
+            # assigns vm.nr_hugepages, so alone it is no reservation,
+            # and after a zero it cannot rescue the pool.
+            "leading-slash dotted key alone is not the knob":
+                "/vm.nr_hugepages = 2400\n",
+            "leading-slash dotted key cannot rescue a zero":
+                "vm.nr_hugepages = 0\n/vm.nr_hugepages = 2400\n",
+            # ...while a LEADING DOT does alias (separators swap).
+            "leading-dot zero override":
+                "vm.nr_hugepages = 1440\n.vm.nr_hugepages = 0\n",
+            "backslash is not a separator":
+                "vm.nr_hugepages = 0\nvm\\nr_hugepages = 2400\n",
             "bare negative-match suppresses assignment":
                 "vm.nr_hugepages = 1440\n-vm.nr_hugepages\n",
             "bare negative-match slash form suppresses":
@@ -118,7 +129,12 @@ class BakeHugepagesTests(unittest.TestCase):
 
     def test_hugepages_conf_accepts_leading_slash_and_resumed_forms(self):
         for text in ("/vm/nr_hugepages = 2400\n",
-                     "/vm.nr_hugepages = 2400\n",
+                     # First-separator rule, other direction: a leading
+                     # dot swaps separators, so this IS the knob.
+                     ".vm.nr_hugepages = 2400\n",
+                     # A dotted-filename key alongside a valid pool is
+                     # an unrelated (inert) entry, not an override.
+                     "vm.nr_hugepages = 1440\n/vm.nr_hugepages = 0\n",
                      # A bare directive suppresses only until a later
                      # real assignment replaces it again.
                      "vm.nr_hugepages = 600\n-vm.nr_hugepages\n"

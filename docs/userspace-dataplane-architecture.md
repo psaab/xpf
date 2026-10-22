@@ -3189,8 +3189,9 @@ stopped.
 
   **The appliance image ships the reservation (#16243).** `scripts/image/bake.py`
   writes `/etc/sysctl.d/99-xpf-hugepages.conf` verbatim from the repo file
-  (`hugepages_conf()`, which parses the effective `vm.nr_hugepages` — last
-  uncommented exact-key assignment — and refuses to bake below 1440; pinned by
+  (`hugepages_conf()`, which models systemd-sysctl's effective-value
+  semantics for the file — normalized-key table with the exact
+  first-separator rule — and refuses to bake below 1440; pinned by
   `scripts/image/test_bake_hugepages_16243.py`), and `debian/rules` installs the
   same file into the `.deb` under `/usr/lib/sysctl.d/` (package-owned rather
   than an `/etc` conffile, so unattended adoption never prompts; an operator's
