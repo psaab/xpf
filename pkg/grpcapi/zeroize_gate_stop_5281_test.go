@@ -29,10 +29,8 @@ import (
 // (the gate is bypassed) AND stopped stay false (no stop scheduled), so this
 // test fails.
 func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
@@ -40,10 +38,10 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 	// sequence is gate → wipe → stop (never stop-before-wipe, never a bypassed
 	// gate).
 	var seq []string
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		seq = append(seq, "wipe")
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() { seq = append(seq, "stop") }
 
 	var gateWipeArg func() error
@@ -90,17 +88,15 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 // NOT stop xpfd (stopping a half-wiped box would strand prior-tenant secrets on
 // disk while the daemon is down).
 func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	wantErr := errors.New("configdb not fully erased")
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		return wantErr
-	}
+	}))
 	var stopped bool
 	scheduleStopDaemon = func() { stopped = true }
 
@@ -132,18 +128,16 @@ func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
 // directly) and still stops the daemon — the pre-#5281 behavior, preserved for a
 // build with no running reconcile loop to race.
 func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped, stopped bool
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		wiped = true
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() { stopped = true }
 
 	dir := t.TempDir()
@@ -198,17 +192,15 @@ func TestGatedZeroizeWipeRecordsPending10769(t *testing.T) {
 // commit delayed at the gate move the state file first, recording a stale
 // path the boot repair then sweeps instead of the residue.
 func TestGatedZeroizeSnapshotsHelperPathInsideGate10769(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 	var got factoryreset.Completion
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, c factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, c factoryreset.Completion) error {
 		got = c
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() {}
 	dir := t.TempDir()
 	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))

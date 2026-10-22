@@ -28,18 +28,16 @@ import (
 // and the handler proceeds to call the (stubbed) wipe — `wiped` flips true and
 // the fail-closed error disappears, tripping both assertions.
 func TestZeroizeRefusesSharedConfigRoot(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped bool
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		wiped = true
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	// A config file placed directly in a shared directory: filepath.Dir resolves

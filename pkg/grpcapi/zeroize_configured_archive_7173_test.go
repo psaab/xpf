@@ -34,20 +34,18 @@ import (
 // GREEN, 1340 collected, 0 failed. Binding the callee is not binding the
 // wiring, and the wiring is where the production defect lived.
 func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotArchive string
 	var called bool
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		called = true
 		gotArchive = archiveDir
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	dir := t.TempDir()
@@ -77,20 +75,18 @@ func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
 // Exercise the real archive eraser through the gRPC zeroize path so this cell
 // fails if the default path is skipped again.
 func TestZeroizeErasesDefaultArchiveWhenArchiveDirUnset10739(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	origArchive := configstore.DefaultArchiveDir
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 		configstore.DefaultArchiveDir = origArchive
 	})
 
 	// Keep this integration at the affected archive boundary: use the actual
 	// ownership-guarded eraser while avoiding the unrelated system wipe legs.
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		return configstore.FactoryResetArchiveDir(archiveDir)
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	for _, tc := range []struct {

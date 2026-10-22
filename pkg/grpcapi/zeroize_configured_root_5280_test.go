@@ -30,20 +30,18 @@ import (
 // defaultConfigDir instead of the store's temp root — so the gotDir/gotBase
 // assertions (and the explicit defaultConfigDir guard) fail.
 func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotDir, gotBase string
 	var called bool
-	factoryreset.PerformWipeWithLogInventoryForTest = func(configDir, configBase, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(configDir, configBase, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		called = true
 		gotDir, gotBase = configDir, configBase
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	// A configured root deliberately different from the hardcoded /etc/xpf
@@ -79,18 +77,16 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 // A bare Server with a nil store cannot resolve ConfigPath, so runZeroize must
 // return an error BEFORE ever invoking performZeroizeWipe or scheduling a stop.
 func TestZeroizeFailsClosedWithoutConfigRoot(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped, stopped bool
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		wiped = true
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() { stopped = true }
 
 	s := &Server{} // no store => config root undeterminable

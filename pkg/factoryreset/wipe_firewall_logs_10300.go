@@ -349,7 +349,7 @@ func wipeFirewallLogs(inv ZeroizeLogInventory) error {
 // completes every external secret/log leg before removing the config state,
 // and removes the marker only after every leg is durable.
 func PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
-	return PerformWipeWithLogInventoryForTest(configDir, configBase, archiveDir, inv, wipeComplete)
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, wipeComplete)
 }
 
 // Completion selects what a successful wipe records in the reset
@@ -361,11 +361,9 @@ func PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir string
 // write and daemon verification would otherwise open N+1 provisioning
 // over unverified residue (#10769 d05-F6). The ungated paths (no daemon
 // to verify) complete immediately, preserving the historical behavior.
-// Completion selects what a successful wipe records in the reset
-// handoff flag. It is exported (with PendingCompletion) so cross-package
-// callers and tests can drive the gated pending path and stub
-// PerformWipeWithLogInventoryForTest after the #16138 extraction;
-// production callers use PerformZeroizeWipePending /
+// Exported (with PendingCompletion) so pkg/grpcapi's gated closure can
+// construct the pending completion after the #16138 extraction;
+// production callers otherwise use PerformZeroizeWipePending /
 // PerformZeroizeWipeUngated instead of constructing one directly.
 type Completion struct {
 	// pending records ResetHandoffPending instead of clean, keeping the
@@ -387,7 +385,7 @@ var wipeComplete = Completion{}
 // Gated callers (daemon factoryReset) use it with the pre-wipe effective
 // helper state path, then flip the flag clean after post-verification.
 func PerformZeroizeWipePending(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
-	return PerformWipeWithLogInventoryForTest(configDir, configBase, archiveDir, inv, Completion{pending: true, helperPath: helperPath})
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, Completion{pending: true, helperPath: helperPath})
 }
 
 // PerformZeroizeWipeUngated runs the shared wipe to completion for callers
@@ -397,7 +395,7 @@ func PerformZeroizeWipePending(configDir, configBase, archiveDir string, inv Zer
 // unerased custom state file would otherwise survive under a clean
 // receipt. helperPath is the pre-wipe effective path (never "").
 func PerformZeroizeWipeUngated(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
-	return PerformWipeWithLogInventoryForTest(configDir, configBase, archiveDir, inv, Completion{pending: false, helperPath: helperPath})
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, Completion{pending: false, helperPath: helperPath})
 }
 
 // Pending reports whether this completion records a PENDING handoff
@@ -415,13 +413,28 @@ func PendingCompletion(helperPath string) Completion {
 	return Completion{pending: true, helperPath: helperPath}
 }
 
-// PerformWipeWithLogInventoryForTest is the stubbable wipe seam behind
-// PerformZeroizeWipeWithLogInventory and the Pending/Ungated variants.
-// It is a package var so RPC-boundary tests in pkg/grpcapi and pkg/cli
-// can capture the wipe without touching real system paths (the pre-#16138
-// unexported seam, exported for the extraction). Production code must
-// never reassign it.
-var PerformWipeWithLogInventoryForTest = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion Completion) error {
+// PerformZeroizeWipePendingWithInventory runs the shared wipe with the
+// gated PENDING completion (records pending with helperPath instead of
+// completing clean). It is the production entry pkg/grpcapi's gated
+// closure dispatches to; statically bound, never a variable.
+func PerformZeroizeWipePendingWithInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, PendingCompletion(helperPath))
+}
+
+// StubWipeWithLogInventoryForTest replaces the wipe dispatch used by
+// PerformZeroizeWipeWithLogInventory and the Pending/Ungated variants,
+// returning a restore func. Test-only: it is reachable only from test
+// code (grpcapi RPC-boundary cells capture the wipe without touching
+// real system paths, as with the pre-#16138 unexported seam); no
+// production entry point dispatches through the swapped variable —
+// production calls reach performWipeWithLogInventory directly.
+func StubWipeWithLogInventoryForTest(fn func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion Completion) error) (restore func()) {
+	old := performWipeWithLogInventory
+	performWipeWithLogInventory = fn
+	return func() { performWipeWithLogInventory = old }
+}
+
+var performWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion Completion) error {
 	// External cleanup authority must be proven empty before beginZeroize
 	// writes a marker or any destructive leg can remove provider credentials.
 	// Wrapped in the same sentinels as the inner erase legs so callers

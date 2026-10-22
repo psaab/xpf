@@ -20,16 +20,15 @@ import (
 // clean response must state that the firewall-log scope was erased; the old
 // response only said "Configuration erased" and omitted the surviving logs.
 func TestZeroizeReceiptAttestsFirewallLogScope10300(t *testing.T) {
-	origWipe, origStop := factoryreset.PerformWipeWithLogInventoryForTest, scheduleStopDaemon
+	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 	var got factoryreset.LogInventory
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, inv factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, inv factoryreset.LogInventory, _ factoryreset.Completion) error {
 		got = inv
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
@@ -66,16 +65,15 @@ func TestZeroizeReceiptAttestsFirewallLogScope10300(t *testing.T) {
 // race: a commit waiting for ZeroizeFn may add a destination before the wipe
 // closure runs, and that destination must be included in the final inventory.
 func TestZeroizeSnapshotsFirewallInventoryInsideGate10300(t *testing.T) {
-	origWipe, origStop := factoryreset.PerformWipeWithLogInventoryForTest, scheduleStopDaemon
+	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 	var got factoryreset.LogInventory
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, inv factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, inv factoryreset.LogInventory, _ factoryreset.Completion) error {
 		got = inv
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))

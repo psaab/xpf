@@ -1324,7 +1324,7 @@ func wipeCLIHistoryFiles(homes ...string) error {
 }
 
 func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
-	return PerformWipeWithLogInventoryForTest(configDir, configBase, archiveDir, ZeroizeLogInventory{}, wipeComplete)
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{}, wipeComplete)
 }
 
 // wipeRenderedNetworkd removes the xpf-rendered networkd drop-ins

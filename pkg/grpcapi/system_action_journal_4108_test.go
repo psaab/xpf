@@ -25,20 +25,18 @@ func TestSystemActionJournalsDestructiveVerbs(t *testing.T) {
 	// including the #5281 post-zeroize daemon stop, which the zeroize verb now
 	// schedules on a successful wipe.
 	origPower := schedulePowerAction
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
 		schedulePowerAction = origPower
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 	var poweredArg string
 	var wiped bool
 	schedulePowerAction = func(arg string) { poweredArg = arg }
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		wiped = true
 		return nil
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	cases := []struct {

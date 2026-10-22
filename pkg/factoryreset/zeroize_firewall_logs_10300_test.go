@@ -216,7 +216,7 @@ func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.
 		return originalSync(dir)
 	}
 
-	err = PerformWipeWithLogInventoryForTest(configDir, "xpf.conf", customArchive, inventory, wipeComplete)
+	err = performWipeWithLogInventory(configDir, "xpf.conf", customArchive, inventory, wipeComplete)
 	if !errors.Is(err, interrupt) || !configSyncFailed {
 		t.Fatalf("wipe error = %v, want simulated post-config interruption", err)
 	}
@@ -245,7 +245,7 @@ func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.
 	// inventory; the custom archive remains an explicit incomplete-reset error.
 	mustWriteFile(t, filepath.Join(varLog, "trace-10742.log"), []byte("late trace generation"))
 	mustWriteFile(t, filepath.Join(varLog, "syslog-10742.log"), []byte("late syslog generation"))
-	retryErr := PerformWipeWithLogInventoryForTest(configDir, "xpf.conf", "", ZeroizeLogInventory{}, wipeComplete)
+	retryErr := performWipeWithLogInventory(configDir, "xpf.conf", "", ZeroizeLogInventory{}, wipeComplete)
 	var archiveSkipped *configstore.ArchiveDirSkippedError
 	if !errors.As(retryErr, &archiveSkipped) {
 		t.Fatalf("retry error = %v, want persisted custom archive ownership failure", retryErr)

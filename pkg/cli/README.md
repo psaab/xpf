@@ -49,9 +49,13 @@ sibling files (same package, so unexported helpers stay reachable):
     (#5890).** `performConsoleZeroize` resolves+validates the configured
     config root (`zeroizeConfigRoot`, #5554/#5684 — fail-CLOSED on an
     undeterminable store/path so it never wipes the wrong directory) and then
-    DELEGATES to the exported log-aware `grpcapi.PerformZeroizeWipeWithLogInventory`
-    (the configured log inventory is snapshotted inside the transaction) — the
-    SAME primitive the gRPC `runZeroize` runs — before stopping xpfd. Both paths
+    DELEGATES to the exported log-aware
+    `factoryreset.PerformZeroizeWipeWithLogInventory`
+    (pkg/factoryreset, extracted from pkg/grpcapi in #16138; the
+    configured log inventory is snapshotted inside the transaction) — the
+    SAME primitive the gRPC `runZeroize` runs (via the gated
+    `factoryreset.PerformZeroizeWipePendingWithInventory`) — before
+    stopping xpfd. Both paths
     therefore erase an IDENTICAL owned-artifact set (config state + `tls/` +
     rendered service configs [frr/swanctl/kea] + provisioned login accounts
     [`shadow`/`authorized_keys`/`sudoers.d/xpf-*`] + config archive + BPF pins +

@@ -12,17 +12,15 @@ import (
 )
 
 func TestZeroizeCustomArchiveStillErasesDefault15729(t *testing.T) {
-	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	origArchive := configstore.DefaultArchiveDir
 	t.Cleanup(func() {
-		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 		configstore.DefaultArchiveDir = origArchive
 	})
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		return configstore.FactoryResetArchiveDir(archiveDir)
-	}
+	}))
 	scheduleStopDaemon = func() {}
 
 	dir := t.TempDir()

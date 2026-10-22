@@ -344,7 +344,7 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	wipe := func() error {
 		logInventory := factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
 		helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
-		return factoryreset.PerformWipeWithLogInventoryForTest(configDir, configBase, archiveDir, logInventory, factoryreset.PendingCompletion(helperPath))
+		return factoryreset.PerformZeroizeWipePendingWithInventory(configDir, configBase, archiveDir, logInventory, helperPath)
 	}
 	if s.zeroizeFn != nil {
 		return s.zeroizeFn(ctx, wipe)

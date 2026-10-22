@@ -19,9 +19,13 @@ gRPC package; clean cutover, no aliases kept in `pkg/grpcapi`.
   handoff; the daemon flips it clean only after post-verification.
 - `PerformZeroizeWipeUngated` — no-daemon path: erases and verifies the
   helper state file itself and completes clean in-wipe.
-- `PerformWipeWithLogInventoryForTest` + `Completion`/`PendingCompletion`
-  — the stubbable seam RPC-boundary tests capture (production never
-  reassigns it).
+- `PerformZeroizeWipePendingWithInventory` — the gated pending entry
+  `pkg/grpcapi`'s closure dispatches to (statically bound).
+  `StubWipeWithLogInventoryForTest` + `Completion`/`PendingCompletion`
+  are test-only: the stub swaps an unexported dispatch variable that
+  no production entry point routes through (production entries call
+  the wipe directly), so test interception cannot become the
+  production path.
 - `RedirectWipePathsForTesting` — redirects every filesystem path and
   command seam the wipe touches into a throwaway root (test-only).
 

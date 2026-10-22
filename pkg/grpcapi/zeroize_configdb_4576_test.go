@@ -21,11 +21,9 @@ const zeroizeMarker = "MARKER-SECRET-4576-ike-psk"
 // fully erase config state must surface an error at the RPC boundary, not
 // report a clean factory reset.
 func TestZeroizeSurfacesWipeError(t *testing.T) {
-	orig := factoryreset.PerformWipeWithLogInventoryForTest
-	t.Cleanup(func() { factoryreset.PerformWipeWithLogInventoryForTest = orig })
-	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		return errors.New("simulated .configdb wipe failure")
-	}
+	}))
 
 	dir := t.TempDir()
 	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))

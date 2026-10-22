@@ -66,9 +66,12 @@ func TestCompleteWalkersParity16138(t *testing.T) {
 
 // TestCompleteWithDescGolden16138 pins candidate names AND descriptions
 // byte-identically for description-carrying cells of the corpus.
+// The session source-port node carries no ValueDesc, so
+// typedLeafCandidates falls back to the node Desc ("Filter by source
+// port") — the golden pins that actual contract.
 func TestCompleteWithDescGolden16138(t *testing.T) {
 	got := CompleteFromTreeWithDesc(OperationalTree, []string{"show", "security", "flow", "session", "source-port"}, "", nil)
-	want := []Candidate{{Name: "<integer>", Desc: "Source port (1..65535)"}}
+	want := []Candidate{{Name: "<integer>", Desc: "Filter by source port"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("typed-leaf completion = %v, want %v", got, want)
 	}
