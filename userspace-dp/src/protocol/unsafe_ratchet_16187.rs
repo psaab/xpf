@@ -30,7 +30,13 @@
 //!   * files reachable only under `#[cfg(test)]` are excluded via
 //!     `cfg_test_modules` (the #12270 declaration graph — keyed on
 //!     resolved file paths, transitively closed over `mod`/`include!`,
-//!     so `#[path]`-renamed test files are still fixtures);
+//!     so `#[path]`-renamed test files are still fixtures). Reachable
+//!     from BOTH production and a test declaration counts as
+//!     production: the graph admits a target only when every
+//!     ungated edge into it starts from a test-only file, for `mod`
+//!     targets as for `include!` targets (`declared`, #16187 review
+//!     fold — dual `#[path] mod` previously classified such a file
+//!     test-only and its unsafe would never have been counted);
 //!   * `test_alloc.rs` is named explicitly: it is the #4971 test-only
 //!     counting allocator (`#[cfg(test)] mod test_alloc;` at the crate
 //!     root), and the declaration graph resolves crate-root modules

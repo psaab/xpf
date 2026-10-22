@@ -622,7 +622,14 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
     // production — the third defect this control caught.
     let mut seeds: Vec<String> = Vec::new();
     let mut edges: Vec<(String, String)> = Vec::new();
-    let mut included: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Every target reached by ANY declaration or include, gated or not.
+    // A `mod` target is not an `include!` target, so without this set a
+    // file declared both from production and under `#[cfg(test)]` (dual
+    // `#[path] mod`, say) would be seeded by the test declaration and
+    // admitted with no ungated edge ever blocking it - production
+    // source classified test-only. Pass 2 admits a target only when
+    // every ungated edge into it starts from a test-only file.
+    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut files = Vec::new();
     afxdp_rs_files(root, &mut files);
     for path in files {
@@ -671,7 +678,7 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
                     if let Some(end) = rest.find('"') {
                         if let Some(dir) = path.parent() {
                             let target = normalise(&dir.join(&rest[..end]), root);
-                            included.insert(target.clone());
+                            declared.insert(target.clone());
                             if cfg_test {
                                 seeds.push(target);
                             } else {
@@ -717,7 +724,9 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
                         ],
                     };
                     for cand in candidates {
-                        seeds.push(normalise(&cand, root));
+                        let key = normalise(&cand, root);
+                        declared.insert(key.clone());
+                        seeds.push(key);
                     }
                 } else {
                     // Not test-gated HERE, but may inherit if this owning file
@@ -735,7 +744,9 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
                     };
                     let from = normalise(&path, root);
                     for cand in candidates {
-                        edges.push((from.clone(), normalise(&cand, root)));
+                        let key = normalise(&cand, root);
+                        declared.insert(key.clone());
+                        edges.push((from.clone(), key));
                     }
                 }
                 cfg_test = false;
@@ -754,14 +765,21 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
     // valid Rust, but a scanner that hangs on malformed input is worse than one
     // that stops early.
     //
-    // include! exists to reuse text, so one file can be included by a
-    // test-only file and also declared or included by production. An include
-    // target is admitted only once every ungated edge into it starts from a
-    // test-only file; otherwise a test helper including shared production
-    // source would hide that source from every canary. Admission only becomes
-    // true as the set grows, so the iteration still reaches the least
-    // fixpoint: an includer found test-only on a later pass admits the target
-    // on the pass after.
+    // A target exists to be reused - by `include!`, and equally by `mod`:
+    // one file can be reached both from production and from a test-gated
+    // declaration (dual `#[path] mod` to the same file is ordinary,
+    // compiler-accepted Rust). Such a target is admitted only once every
+    // ungated edge into it starts from a test-only file; otherwise a test
+    // declaration would hide production source from every canary that
+    // consumes this set (#6929/#7015/#7053/#8121, and #16187's unsafe
+    // census, where the hidden file's unsafe would never be counted).
+    // The guard keys on `declared` - every target any declaration or
+    // include reaches - not only on `include!` targets: `mod` targets
+    // were previously admitted unconditionally, which is exactly the
+    // dual-reachability hole. Admission only becomes true as the set
+    // grows, so the iteration still reaches the least fixpoint: an
+    // includer/declarer found test-only on a later pass admits the
+    // target on the pass after.
     let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
     for _ in 0..=seeds.len() + edges.len() {
         let reached: Vec<String> = seeds
@@ -774,7 +792,7 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
             )
             .filter(|to| !out.contains(*to))
             .filter(|to| {
-                !included.contains(*to)
+                !declared.contains(*to)
                     || edges
                         .iter()
                         .all(|(from, edge_to)| edge_to != *to || out.contains(from))
@@ -1096,6 +1114,98 @@ fn cfg_test_include_targets_shared_with_production_stay_production_12270() {
         fixtures.contains("prod.rs"),
         "crate-root mod resolution changed: invert this pin and drop the crate-root \
          limit from the #12270 Risk text"
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+/// #16187: a file reached by BOTH a production `mod` and a
+/// `#[cfg(test)]` `mod` (dual `#[path]` to the same file - ordinary,
+/// compiler-accepted Rust) is production, not a fixture. Before this
+/// pin, pass 2's mixed-ownership guard keyed only on `include!`
+/// targets, so the test declaration seeded the file and it was
+/// admitted test-only with no ungated edge ever blocking it: every
+/// consumer of this set (#6929/#7015/#7053/#8121 canaries, #16187's
+/// unsafe census) would silently skip live production source.
+///
+/// Both directions in one cell, deliberately: a fix that simply
+/// stops seeding `mod` targets would satisfy the production row and
+/// break the test-only control, so the control is asserted here too.
+#[test]
+fn cfg_test_dual_mod_targets_shared_with_production_stay_production_16187() {
+    let temp = std::env::temp_dir().join(format!(
+        "xpf-dual-mod-16187-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp);
+    let scan = |name: &str, files: &[(&str, &str)]| {
+        let root = temp.join(name);
+        for (rel, text) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        cfg_test_modules(&root)
+    };
+
+    // The review fixture, verbatim in shape: one file, two
+    // `#[path]` declarations, one gated and one not.
+    let fixtures = scan(
+        "dual_path_mod",
+        &[
+            (
+                "main.rs",
+                "#[path = \"shared.rs\"]\nmod production;\n#[cfg(test)]\n#[path = \"shared.rs\"]\nmod test_copy;\n",
+            ),
+            ("shared.rs", "pub fn ordinary() { unsafe {} }\nmod child;\n"),
+            ("shared/child.rs", ""),
+        ],
+    );
+    assert!(
+        !fixtures.contains("shared.rs"),
+        "a file declared from production AND under cfg(test) was classified \
+         test-only - its production unsafe would never be counted"
+    );
+    assert!(
+        !fixtures.contains("shared/child.rs"),
+        "the shared file's own module child was hidden with it"
+    );
+
+    // Same file via plain `mod` from two parents: `x.rs` and
+    // `x/mod.rs` share owner directory `x/`, so both `mod shared;`
+    // declarations resolve to the one `x/shared.rs`. One parent is
+    // production, the other carries the gated declaration.
+    let fixtures = scan(
+        "dual_plain_mod",
+        &[
+            ("x.rs", "mod shared;\n"),
+            ("x/mod.rs", "#[cfg(test)]\nmod shared;\n"),
+            ("x/shared.rs", ""),
+        ],
+    );
+    assert!(
+        !fixtures.contains("x/shared.rs"),
+        "a plain-mod file declared from production AND test-only parents \
+         was classified test-only"
+    );
+
+    // Control: dual declaration where BOTH parents are test-only
+    // still classifies the target as a fixture - the fix must not
+    // simply stop admitting shared targets.
+    let fixtures = scan(
+        "dual_test_only_mod",
+        &[
+            (
+                "test_parent.rs",
+                "#[cfg(test)]\n#[path = \"tests/a.rs\"]\nmod a;\n#[cfg(test)]\n#[path = \"tests/b.rs\"]\nmod b;\n",
+            ),
+            ("tests/a.rs", "#[path = \"../shared.rs\"]\nmod a_shared;\n"),
+            ("tests/b.rs", "#[path = \"../shared.rs\"]\nmod b_shared;\n"),
+            ("shared.rs", ""),
+        ],
+    );
+    assert!(
+        fixtures.contains("shared.rs"),
+        "a file declared only from test-only files was left as production"
     );
     let _ = std::fs::remove_dir_all(&temp);
 }
