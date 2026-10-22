@@ -549,7 +549,7 @@ func (c *ctl) showCommand(command string) error {
 	topic, ok := cmdtree.ShowTextTopicForCommand(command)
 	if !ok {
 		return fmt.Errorf("internal: no ShowText topic registered for %q; "+
-			"add it to showTextTopicCommand in pkg/cmdtree/showtext_topic.go", command)
+			"add it to the ShowText registry in pkg/optopic", command)
 	}
 	return c.showTextFiltered(topic, "")
 }

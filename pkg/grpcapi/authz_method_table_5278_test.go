@@ -521,7 +521,8 @@ func isReqTopicSelector(e ast.Expr) bool {
 // about whether ShowText's 127 topics were classified. That is precisely how
 // the `test-*` topics shipped priced at view in the first revision.
 //
-// RED on revert: drop a topic from showTextViewTopics (the "unpriced" arm), or
+// RED on revert: drop a topic from the optopic registry (the "unpriced"
+// arm — it reds here through the derived showTextViewTopics view), or
 // price one that the dispatcher does not serve (the "stale" arm).
 func TestEveryShowTextTopicHasAPermission_5278(t *testing.T) {
 	topics := showTextTopicsFromDispatcher(t)
@@ -536,8 +537,8 @@ func TestEveryShowTextTopicHasAPermission_5278(t *testing.T) {
 		_, elevated := showTextElevatedTopics[topic]
 		if !elevated && !showTextViewTopics[topic] {
 			t.Errorf("ShowText topic %q is dispatched but unpriced: it would be "+
-				"charged %s (super-user only). Add it to showTextViewTopics, or "+
-				"to showTextElevatedTopics if a non-`show` command emits it (#5278)",
+				"charged %s (super-user only). Register it in pkg/optopic "+
+				"(at PermView, or above view if a non-`show` command emits it) (#5278)",
 				topic, permName(unmappedMethodPermission))
 		}
 		if elevated && showTextViewTopics[topic] {
@@ -547,13 +548,13 @@ func TestEveryShowTextTopicHasAPermission_5278(t *testing.T) {
 	}
 	for topic := range showTextViewTopics {
 		if !inDispatcher[topic] {
-			t.Errorf("showTextViewTopics prices %q, which the ShowText dispatcher "+
+			t.Errorf("the registry prices (view) ShowText topic %q, which the ShowText dispatcher "+
 				"does not serve — a stale entry hides an unpriced real topic (#5278)", topic)
 		}
 	}
 	for topic := range showTextElevatedTopics {
 		if !inDispatcher[topic] {
-			t.Errorf("showTextElevatedTopics prices %q, which the ShowText "+
+			t.Errorf("the registry prices (elevated) ShowText topic %q, which the ShowText "+
 				"dispatcher does not serve (#5278)", topic)
 		}
 	}

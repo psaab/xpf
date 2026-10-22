@@ -1,5 +1,7 @@
 package authz
 
+import "github.com/psaab/xpf/pkg/optopic"
+
 // SystemActionVerbCommand lives HERE, in the shared authorization package,
 // because BOTH local control surfaces dispatch the same verb and must charge it
 // the same command (#9952).
@@ -28,37 +30,18 @@ package authz
 // over what the handler accepts.
 //
 // The key set is pinned to the handler's own `switch req.Action` in both
-// directions by TestEverySystemActionVerbHasACanonicalCommand7172.
-var SystemActionVerbCommand = map[string]string{
-	// Destructive maintenance — `request system ...`.
-	"reboot":             "request system reboot",
-	"halt":               "request system halt",
-	"power-off":          "request system power-off",
-	"zeroize":            "request system zeroize",
-	"in-service-upgrade": "request system software in-service-upgrade",
-	// #15239: sent only by `xpfd upgrade kernel rejoin` (the orchestrator
-	// node rejoin); charged as the cluster-failover request family it
-	// belongs to (no dedicated operator CLI spelling exists).
-	"cluster-rejoin": "request chassis cluster failover",
-
-	// The `clear ...` family.
-	"clear-config-lock":           "clear system config-lock",
-	"clear-arp":                   "clear arp",
-	"clear-interfaces-statistics": "clear interfaces statistics",
-	"clear-ipv6-neighbors":        "clear ipv6 neighbors",
-	"clear-policy-counters":       "clear security policies hit-count",
-	"clear-firewall-counters":     "clear firewall all",
-	"clear-nat-counters":          "clear security nat statistics",
-	"clear-persistent-nat":        "clear security nat source persistent-nat-table",
-
-	// The non-maintenance `request ...` family.
-	"ospf-clear":                 "request protocols ospf clear",
-	"bgp-clear":                  "request protocols bgp clear",
-	"ipsec-sa-clear":             "request security ipsec sa clear",
-	"dhcp-renew":                 "request dhcp renew",
-	"dynamic-dns-update":         "request system dynamic-dns update",
-	"dynamic-dns-check":          "request system dynamic-dns check",
-	"dynamic-address-shrink-ack": "request security dynamic-address acknowledge-shrink",
-	"rescue-save":                "request system configuration rescue save",
-	"rescue-delete":              "request system configuration rescue delete",
-}
+// directions by the registry census in pkg/grpcapi (#16136).
+//
+// SystemActionVerbCommand is DERIVED from the optopic registry (#16136): from the optopic registry (#16136):
+// the verb -> command column of pkg/optopic's SystemAction entries. Add
+// or reprice a verb in pkg/optopic, not here.
+var SystemActionVerbCommand = func() map[string]string {
+	entries := optopic.SystemActionEntries()
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if !e.IsPrefix() {
+			out[e.Key] = e.Command
+		}
+	}
+	return out
+}()

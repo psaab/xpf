@@ -150,7 +150,7 @@ func TestEveryShowTextTopicHasACanonicalCommand7172(t *testing.T) {
 			t.Errorf("ShowText topic %q is dispatched but has no canonical command. 5b "+
 				"cannot evaluate deny-commands for it, so a class that configured "+
 				"regexes would be DENIED the topic outright. Add it to "+
-				"showTextTopicCommand in authz_command_table_topics.go, reading "+
+				"the ShowText registry in pkg/optopic, reading "+
 				"cmd/cli for the command that emits it. If NO operational command "+
 				"emits it, this table needs the named-absence mechanism "+
 				"methodsWithoutCanonicalCommand uses — do not invent a mapping.", topic)

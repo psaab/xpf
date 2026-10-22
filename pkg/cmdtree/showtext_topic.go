@@ -57,198 +57,24 @@ package cmdtree
 import (
 	"strings"
 	"sync"
+
+	"github.com/psaab/xpf/pkg/optopic"
 )
 
-var showTextTopicCommand = map[string]string{
-	// `show security ...`
-	"address-book":     "show security address-book",
-	"alg":              "show security alg",
-	"applications":     "show security applications",
-	"dynamic-address":  "show security dynamic-address",
-	"ike":              "show security ike",
-	"ipsec-statistics": "show security ipsec statistics",
-	"security-alarms":  "show security alarms",
-	// `detail` is a keyword child, so this is a longer real command rather
-	// than the same path with an argument.
-	"security-alarms-detail": "show security alarms detail",
-	"security-log":           "show security log",
-	"zones-detail":           "show security zones detail",
-	"wireguard":              "show security wireguard",
-	"wireguard-detail":       "show security wireguard detail",
-	"wireguard-public-key":   "show security wireguard public-key",
-
-	// `show security flow ...`. The bare `show security flow` renders the
-	// configured timeouts, which is why the topic is named for the render and
-	// the command is not.
-	"flow-timeouts":        "show security flow",
-	"flow-statistics":      "show security flow statistics",
-	"flow-traceoptions":    "show security flow traceoptions",
-	"sessions-top:bytes":   "show security flow session sort-by bytes",
-	"sessions-top:packets": "show security flow session sort-by packets",
-
-	// `show security policies ...`. The from-zone/to-zone selectors travel in
-	// the request's FILTER field, not the topic, so these paths are complete.
-	"policies-detail":    "show security policies detail",
-	"policies-hit-count": "show security policies hit-count",
-
-	// `show security screen ...`. The two ids-option topics differ by a
-	// `detail` keyword that follows the option NAME, so the common
-	// argument-free prefix is the same for both.
-	"screen":                    "show security screen",
-	"screen-ids-option:":        "show security screen ids-option",
-	"screen-ids-option-detail:": "show security screen ids-option",
-	// #8597 K47: a `request` verb served over ShowText because it produces
-	// text and mutates nothing. The canonical command is the one the operator
-	// types, not a `show` spelling that does not exist.
-	"policies-check": "request security policies check",
-
-	"screen-statistics-all": "show security screen statistics",
-	"screen-statistics:":    "show security screen statistics zone",
-
-	// `show security nat ...`
-	"nat-static":             "show security nat static",
-	"nat-static-rule":        "show security nat static rule",
-	"nat-static-rule-detail": "show security nat static rule detail",
-	"nat-nptv6":              "show security nat nptv6",
-	"nat64":                  "show security nat nat64",
-	"nat-source-rule-detail": "show security nat source rule detail",
-	"nat-dest-rule-detail":   "show security nat destination rule detail",
-	"persistent-nat":         "show security nat source persistent-nat-table",
-	"persistent-nat-detail":  "show security nat source persistent-nat-table detail",
-
-	// `show chassis ...`
-	"chassis":                       "show chassis",
-	"chassis-environment":           "show chassis environment",
-	"chassis-forwarding":            "show chassis forwarding",
-	"chassis-hardware":              "show chassis hardware",
-	"chassis-device-map":            "show chassis device-map",
-	"chassis-device-map-candidates": "show chassis device-map candidates",
-
-	// `show chassis cluster ...`
-	"chassis-cluster":                          "show chassis cluster",
-	"chassis-cluster-status":                   "show chassis cluster status",
-	"chassis-cluster-interfaces":               "show chassis cluster interfaces",
-	"chassis-cluster-information":              "show chassis cluster information",
-	"chassis-cluster-statistics":               "show chassis cluster statistics",
-	"chassis-cluster-control-plane-statistics": "show chassis cluster control-plane statistics",
-	"chassis-cluster-data-plane-statistics":    "show chassis cluster data-plane statistics",
-	"chassis-cluster-data-plane-interfaces":    "show chassis cluster data-plane interfaces",
-	"chassis-cluster-data-plane-fairness":      "show chassis cluster data-plane fairness",
-	"chassis-cluster-data-plane-flows":         "show chassis cluster data-plane flows",
-	"chassis-cluster-fabric-statistics":        "show chassis cluster fabric statistics",
-	"chassis-cluster-fence-status":             "show chassis cluster fence-status",
-	"chassis-cluster-ip-monitoring-status":     "show chassis cluster ip-monitoring status",
-
-	// `show class-of-service ...`. The bare `class-of-service` topic is the
-	// unfiltered `interface` view, NOT the umbrella command — cmd/cli emits it
-	// only from `case "interface"`.
-	"class-of-service":     "show class-of-service interface",
-	"class-of-service:":    "show class-of-service interface",
-	"cos-classifier":       "show class-of-service classifier",
-	"cos-classifier:":      "show class-of-service classifier",
-	"cos-rewrite-rule":     "show class-of-service rewrite-rule",
-	"cos-rewrite-rule:":    "show class-of-service rewrite-rule",
-	"cos-scheduler-map":    "show class-of-service scheduler-map",
-	"cos-scheduler-map:":   "show class-of-service scheduler-map",
-	"cos-forwarding-class": "show class-of-service forwarding-class",
-
-	// `show system ...`
-	"alarms":              "show system alarms",
-	"backup-router":       "show system backup-router",
-	"bootstrap-import":    "show system bootstrap-import",
-	"buffers":             "show system buffers",
-	"buffers-detail":      "show system buffers detail",
-	"commit-history":      "show system commit history",
-	"core-dumps":          "show system core-dumps",
-	"internet-options":    "show system internet-options",
-	"kernel-upgrade":      "show system kernel-upgrade",
-	"license":             "show system license",
-	"login":               "show system login",
-	"ntp":                 "show system ntp",
-	"root-authentication": "show system root-authentication",
-	"storage":             "show system storage",
-	"system-services":     "show system services",
-	"system-syslog":       "show system syslog",
-
-	// `show interfaces ...`. `tunnels` is the odd one: the command keyword is
-	// singular (`tunnel`), the topic is plural.
-	"interfaces-detail":     "show interfaces detail",
-	"interfaces-extensive":  "show interfaces extensive",
-	"interfaces-statistics": "show interfaces statistics",
-	"interfaces-queue":      "show interfaces queue",
-	"interfaces-queue:":     "show interfaces queue",
-	"tunnels":               "show interfaces tunnel",
-
-	// `show route ...`. `route-all` is the bare `show route`; `route-prefix:`
-	// is the same command with a destination in a value slot, so it resolves
-	// to the same argument-free path.
-	"route-all":       "show route",
-	"route-fib":       "show route fib",
-	"route-prefix:":   "show route",
-	"route-detail":    "show route detail",
-	"route-instance":  "show route instance",
-	"route-protocol:": "show route protocol",
-	"route-summary":   "show route summary",
-	"route-table:":    "show route table",
-	"route-terse":     "show route terse",
-
-	// `show firewall ...`. `firewall-effective-filter:` is
-	// `show firewall filter <name> effective`, whose argument-free prefix stops
-	// at the filter name — the same prefix as `firewall-filter:`.
-	"firewall":                   "show firewall",
-	"firewall-effective":         "show firewall effective",
-	"firewall-effective:":        "show firewall effective",
-	"firewall-filter:":           "show firewall filter",
-	"firewall-effective-filter:": "show firewall filter",
-
-	// `show services ...`
-	"rpm":                               "show services rpm",
-	"services-dynamic-dns":              "show services dynamic-dns",
-	"services-dynamic-dns-detail":       "show services dynamic-dns detail",
-	"services-ip-monitoring-status":     "show services ip-monitoring status",
-	"application-identification-status": "show services application-identification status",
-
-	// `show dhcp-server ...` / `show dhcp-relay`
-	"dhcp-relay":                     "show dhcp-relay",
-	"dhcp-server":                    "show dhcp-server",
-	"dhcp-server-detail":             "show dhcp-server detail",
-	"dhcp-server-dynamic-dns":        "show dhcp-server dynamic-dns",
-	"dhcp-server-dynamic-dns-detail": "show dhcp-server dynamic-dns detail",
-
-	// Top-level `show ...` singletons.
-	"bfd-peers":                         "show protocols bfd peers",
-	"event-options":                     "show event-options",
-	"flow-monitoring":                   "show flow-monitoring",
-	"flow-monitoring-statistics":        "show flow-monitoring statistics",
-	"forwarding-options":                "show forwarding-options",
-	"forwarding-options-port-mirroring": "show forwarding-options port-mirroring",
-	"ipv6-router-advertisement":         "show ipv6 router-advertisement",
-	"lldp":                              "show lldp",
-	"lldp-neighbors":                    "show lldp neighbors",
-	"log":                               "show log",
-	"log:":                              "show log",
-	"monitor-security-flow":             "show monitor security flow",
-	"policy-options":                    "show policy-options",
-	"route-map":                         "show route-map",
-	"routing-instances":                 "show routing-instances",
-	"routing-instances-detail":          "show routing-instances detail",
-	"routing-options":                   "show routing-options",
-	"schedulers":                        "show schedulers",
-	"snmp":                              "show snmp",
-	"snmp-v3":                           "show snmp v3",
-	"task":                              "show task",
-	"version":                           "show version",
-	"vlans":                             "show vlans",
-
-	// The `test ...` family. These are the three topics that are NOT a `show`,
-	// which is the same distinction showTextElevatedTopics prices at
-	// PermControl — and getting it wrong there is how a read-only class briefly
-	// held policy reconnaissance (#5278). The topic name is not the command:
-	// `test-zone:` is `test security-zone`.
-	"test-policy:":  "test policy",
-	"test-routing:": "test routing",
-	"test-zone:":    "test security-zone",
-}
+// showTextTopicCommand is DERIVED from the optopic registry (#16136):
+// the topic -> command column of pkg/optopic's ShowText entries. It was a
+// hand-maintained literal here until #16136; the registry is now the one
+// place a topic, its price, its command, and its fabric admission are
+// written down. This map (and the reverse lookup below) is built from it
+// so the client and server surfaces keep reading one fact.
+var showTextTopicCommand = func() map[string]string {
+	entries := optopic.ShowTextEntries()
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		out[e.Key] = e.Command
+	}
+	return out
+}()
 
 // ShowTextTopicCommands returns the topic -> canonical command table.
 //
