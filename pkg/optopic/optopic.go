@@ -26,14 +26,15 @@
 // and switch, server_diag_system_action.go's switch and default-branch
 // prefix forms). The registry does not replace that dispatch; it names and
 // prices what the dispatch serves. Equivalence between the registry and
-// the actual handler dispatch is proven by the census tests in pkg/grpcapi,
-// which keep an INDEPENDENT source scrape of the handler files (a
+// the actual handler dispatch is proven by the census tests in pkg/grpcapi:
+// the handler key set comes from an INDEPENDENT source scrape (a
 // differently-filtered extraction: AST case/==/HasPrefix literals in the
-// handler sources, not this registry) and assert registry ≡ scrape in
-// both directions, separately for exact topics, prefix topics,
-// exact verbs, prefix verbs, priced commands, and fabric admission.
-// The registry must never become its own truth-and-oracle: no census test
-// derives its expected set from this package.
+// handler sources, not this registry), asserted against the registry in
+// both directions, separately for exact topics, prefix topics, exact
+// verbs, and prefix verbs; per-key price/command attribution is graded
+// against a FROZEN pre-registry contract captured from the merge-base
+// literal tables — never against this package's own entries. The
+// registry must never become its own truth-and-oracle.
 //
 // Key spelling: a key ending in ':' is a PREFIX rule (the request string is
 // a delimiter-packed parameter string, e.g. "route-table:inet.0" is priced

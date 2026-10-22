@@ -19,37 +19,43 @@ import (
 // The optopic registry (pkg/optopic) is now the one place a ShowText topic /
 // SystemAction verb is written down with its price, canonical command, and
 // fabric admission. Typed handlers stay here in pkg/grpcapi. This file is
-// the retained INDEPENDENT instrument: it re-derives what the handlers
-// actually serve by scraping the handler SOURCE with filters that share no
-// code and no data with the registry —
+// the retained INDEPENDENT instrument, and it has three independent legs —
+// none of them reads an expected value out of pkg/optopic:
 //
-//   - ShowText: AST extraction of `switch req.Topic` case labels,
-//     `req.Topic == "x"`, and `strings.HasPrefix(req.Topic, "x")` in
-//     server_show.go (showTextTopicsFromDispatcher), PLUS a differently-
-//     shaped second scrape: the #6532 fabric audit's regexp extraction
-//     (dispatcherTopics), which walks every production file's
-//     `req.Topic ==`/`HasPrefix(req.Topic, ...)` text and the switch's case
-//     lines. The two scrapes must agree with each other before either is
-//     compared to the registry — a scrape bug cannot silently shrink both.
-//   - The default-branch topics ("log:", "monitor-security-flow") are not
-//     literals of the three dispatch shapes above; they are named
-//     explicitly below as the one hand-listed arm, and the behavioural
-//     probe (TestRegistryCensusBehavioural16136) drives "log:" through the
-//     real dispatcher so the name is verified by execution, not by trust.
-//   - SystemAction: AST extraction of `switch req.Action` case labels
-//     (systemActionVerbsFromHandler), PLUS the HasPrefix literals the
-//     handler branches on outside the switch (the attestation arm and the
-//     default-branch userspace forms), PLUS the cluster-failover grammar
-//     family admitted via clusterfailover.IsFailoverAction.
+//   - KEY CENSUS (what the handlers serve): ShowText via AST extraction of
+//     `switch req.Topic` case labels, `req.Topic == "x"`, and
+//     `strings.HasPrefix(req.Topic, "x")` in server_show.go
+//     (showTextTopicsFromDispatcher), PLUS a differently-shaped second
+//     scrape: the #6532 fabric audit's regexp extraction (dispatcherTopics),
+//     which walks every production file's `req.Topic ==` /
+//     `HasPrefix(req.Topic, ...)` text and the switch's case lines. The two
+//     scrapes must agree with each other before either is compared to the
+//     registry — a scrape bug cannot silently shrink both. SystemAction via
+//     AST `switch req.Action` case labels (systemActionVerbsFromHandler),
+//     PLUS the HasPrefix literals the handler branches on outside the
+//     switch, PLUS the cluster-failover grammar family.
+//   - ATTRIBUTION (what each key costs and which command emits it): the
+//     FROZEN pre-registry tables in authz_registry_frozen_16136_test.go,
+//     captured as literals from the merge-base literal tables
+//     (ba55ef764a: cmdtree's showTextTopicCommand, grpcapi's
+//     showTextViewTopics/showTextElevatedTopics/systemActionPermissions,
+//     authz's SystemActionVerbCommand) with the single justified delta
+//     `applications:`. Production lookups (showTextTopicPermission,
+//     showTextTopicCanonicalCommand, systemActionPermission,
+//     systemActionVerbCommand) are graded against THOSE rows, never
+//     against optopic entries — comparing them to the registry row they
+//     are derived from would prove only that the derivation ran.
+//   - ENUMERATED ARMS: prefix-priced families, fabric admission, and
+//     unknown-content strictness keep the literal expectations below.
 //
 // …and asserts, over the full census, separately enumerated:
 //
 //  1. exact handler cases ≡ exact registry keys (both directions);
 //  2. prefix handler arms ≡ prefix registry keys (both directions);
-//  3. every scraped key is PRICED (lookup resolves, at the tier its
-//     emitting command family charges) and COMMANDED (non-empty canonical
-//     command, and — via the pre-existing canonicality guards — a real
-//     operational command);
+//  3. every scraped key is PRICED and COMMANDED at exactly the frozen
+//     pre-registry expectation (attribution: a syntactically valid but
+//     wrong command, or a wrong price, reds here even though every
+//     derived view agrees with the registry);
 //  4. prefix-priced families: every prefix the handler serves is a
 //     registered PermMaint/PermAll family, and every registered family is
 //     served (no stale family, no unpriced family);
@@ -63,7 +69,7 @@ import (
 //     command, an unknown verb falls to PermMaint with no command, and
 //     neither is fabric-admitted.
 //
-// RED on revert: drop or rename one registry entry, reprice one entry,
+//// RED on revert: drop or rename one registry entry, reprice one entry,
 // add a handler case without registering it, or register a topic the
 // dispatcher does not serve — each reds a distinctly-named arm below.
 
@@ -164,40 +170,74 @@ func TestRegistryShowTextCensusEquivalence16136(t *testing.T) {
 
 func TestRegistryShowTextEveryScrapedTopicPricedAndCommanded16136(t *testing.T) {
 	scrapedExact, scrapedPrefix := scrapedShowTextCensus(t)
-	probe := func(topic string) {
-		entry, ok := optopic.LookupShowText(topic)
+	// The frozen fixture and the live scrape must cover exactly the same
+	// keys: a handler topic with no frozen row has no independent
+	// expectation (registering it in pkg/optopic alone must NOT make this
+	// pass — its frozen row is added by hand, with the emitting command
+	// as justification), and a frozen row the handler no longer serves is
+	// a stale contract.
+	scraped := map[string]bool{}
+	for k := range scrapedExact {
+		scraped[k] = true
+	}
+	for k := range scrapedPrefix {
+		scraped[k] = true
+	}
+	if len(scraped) != len(frozenShowText16136) {
+		t.Errorf("scraped %d ShowText topics but the frozen contract holds %d; a topic was added or removed without updating the frozen expectation (#16136)",
+			len(scraped), len(frozenShowText16136))
+	}
+	for k := range scraped {
+		if _, ok := frozenShowText16136[k]; !ok {
+			t.Errorf("ShowText topic %q is dispatched but has no frozen pre-registry expectation; add its row to authz_registry_frozen_16136_test.go by hand (#16136)", k)
+		}
+	}
+	for k := range frozenShowText16136 {
+		if !scraped[k] {
+			t.Errorf("frozen contract prices/commands ShowText topic %q, which the handler no longer dispatches (#16136)", k)
+		}
+	}
+	// Attribution: production price and production command for every key
+	// must equal the FROZEN row. The registry row is consulted only for
+	// existence (a scraped key the registry dropped), never as the
+	// expected value — an incorrect-but-valid command association (the
+	// discriminator in the #16136 review: applications: -> `show version`)
+	// moves registry, price view, and command view together and must
+	// still red here.
+	probe := func(key, probeTopic string) {
+		want, ok := frozenShowText16136[key]
 		if !ok {
-			t.Errorf("ShowText topic %q: registry lookup misses, so it prices at the strict default (#16136)", topic)
-			return
+			return // reported above
 		}
-		if entry.Command == "" {
-			t.Errorf("ShowText topic %q: registry entry has no canonical command; deny-commands cannot be evaluated for it (#16136)", topic)
+		if _, registered := optopic.LookupShowText(probeTopic); !registered {
+			t.Errorf("ShowText topic %q: registry lookup misses, so it prices at the strict default (#16136)", probeTopic)
 		}
-		// The grpcapi views must agree with the registry (they are derived
-		// from it; this pins the derivation, not the data).
-		if perm, priced := showTextTopicPermission(topic); !priced || perm != entry.Permission {
-			t.Errorf("ShowText topic %q: showTextTopicPermission=(%s,%v) but registry says %s (#16136)",
-				topic, permName(perm), priced, permName(entry.Permission))
+		if perm, priced := showTextTopicPermission(probeTopic); !priced || perm != want.permission {
+			t.Errorf("ShowText topic %q: production price=(%s,%v) but the frozen pre-registry contract says %s (#16136)",
+				probeTopic, permName(perm), priced, permName(want.permission))
 		}
-		if cmd, resolved := showTextTopicCanonicalCommand(topic); !resolved || cmd != entry.Command {
-			t.Errorf("ShowText topic %q: canonical command=(%q,%v) but registry says %q (#16136)",
-				topic, cmd, resolved, entry.Command)
+		if cmd, resolved := showTextTopicCanonicalCommand(probeTopic); !resolved || cmd != want.command {
+			t.Errorf("ShowText topic %q: production command=(%q,%v) but the frozen pre-registry contract says %q — wrong command attribution would charge deny-commands against the wrong path (#16136)",
+				probeTopic, cmd, resolved, want.command)
 		}
 	}
 	for topic := range scrapedExact {
-		probe(topic)
+		probe(topic, topic)
 	}
 	for topic := range scrapedPrefix {
-		probe(topic + "probe-value")
+		probe(topic, topic+"probe-value")
 	}
-	// Elevated (non-view) topics are exactly the non-`show` emitters.
-	for _, e := range optopic.ShowTextEntries() {
-		if e.Permission != config.PermView {
-			switch e.Key {
+	// Elevated (non-view) topics are exactly the non-`show` emitters in
+	// the frozen contract, at the frozen prices (the converse direction
+	// the key-set check cannot express: nothing may sit at view that the
+	// contract elevates, which the probe above already asserts per key).
+	for key, want := range frozenShowText16136 {
+		if want.permission != config.PermView {
+			switch key {
 			case "policies-check", "test-policy:", "test-routing:", "test-zone:":
 			default:
-				t.Errorf("ShowText topic %q priced %s; only the test-*/policies-check family may sit above view (#16136)",
-					e.Key, permName(e.Permission))
+				t.Errorf("frozen contract prices ShowText topic %q at %s; only the test-*/policies-check family may sit above view (#16136)",
+					key, permName(want.permission))
 			}
 		}
 	}
@@ -251,19 +291,32 @@ func TestRegistrySystemActionCensusEquivalence16136(t *testing.T) {
 	if len(regPrefix) != 0 {
 		t.Errorf("optopic SystemActionEntries carries prefix keys %v; prefix families belong in SystemActionPrefixPermissions (#16136)", keysOf(regPrefix))
 	}
-	// Verb commands: the shared authz table is the registry's command column.
+	// Attribution: production price and production command for every verb
+	// must equal the FROZEN pre-registry row, never the registry entry the
+	// production views are derived from. An incorrect exact-verb price
+	// (e.g. clear-arp repriced in pkg/optopic alone) moves registry, price
+	// view, and command view together and must still red here; the
+	// handler key census above stays unchanged while it does.
 	for verb := range verbs {
-		e, ok := optopic.LookupSystemAction(verb)
-		if !ok || e.Command == "" {
-			t.Errorf("SystemAction verb %q: registry lookup=(%+v,%v), want a commanded entry (#16136)", verb, e, ok)
+		want, ok := frozenSystemAction16136[verb]
+		if !ok {
+			t.Errorf("SystemAction verb %q is served but has no frozen pre-registry expectation; add its row to authz_registry_frozen_16136_test.go by hand (#16136)", verb)
 			continue
 		}
-		if got := systemActionVerbCommand[verb]; got != e.Command {
-			t.Errorf("SystemAction verb %q: systemActionVerbCommand=%q but registry says %q (#16136)", verb, got, e.Command)
+		if _, registered := optopic.LookupSystemAction(verb); !registered {
+			t.Errorf("SystemAction verb %q: registry lookup misses (#16136)", verb)
 		}
-		if perm := systemActionPermission(verb); perm != e.Permission {
-			t.Errorf("SystemAction verb %q: systemActionPermission=%s but registry says %s (#16136)",
-				verb, permName(perm), permName(e.Permission))
+		if got := systemActionVerbCommand[verb]; got != want.command {
+			t.Errorf("SystemAction verb %q: production command=%q but the frozen pre-registry contract says %q (#16136)", verb, got, want.command)
+		}
+		if perm := systemActionPermission(verb); perm != want.permission {
+			t.Errorf("SystemAction verb %q: production price=%s but the frozen pre-registry contract says %s (#16136)",
+				verb, permName(perm), permName(want.permission))
+		}
+	}
+	for verb := range frozenSystemAction16136 {
+		if !verbs[verb] {
+			t.Errorf("frozen contract prices/commands SystemAction verb %q, which the handler no longer serves (#16136)", verb)
 		}
 	}
 }
