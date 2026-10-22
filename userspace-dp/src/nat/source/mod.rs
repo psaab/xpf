@@ -7,7 +7,7 @@ pub(crate) use lease_note_7560::{dropped_persistent_lease_note, report_dropped_l
 // Owns rule parsing from snapshots, the address/port-pool match
 // pipeline, and the public release/rollback entry points that
 // drive the allocator. Pool ownership / persistent lease state
-// machine lives in the sibling allocator.rs.
+// machine lives in the sibling allocator/ directory (mod.rs facade).
 //
 // #3111: pool-mode SNAT only allocates/translates an L4 port for
 // protocols that actually carry one (TCP/UDP, via

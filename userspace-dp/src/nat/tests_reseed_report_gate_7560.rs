@@ -136,7 +136,7 @@ fn dropped_leases_are_not_this_gates_population_7560() {
 /// fails the next time someone adds a field.
 #[test]
 fn the_report_gate_destructure_stays_exhaustive_7560() {
-    let src = include_str!("allocator.rs");
+    let src = include_str!("allocator/mod.rs");
     let at = src
         .find("pub(crate) fn needs_report")
         .expect("needs_report must exist; the gate is what this file is about");

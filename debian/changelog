@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Split nat/allocator.rs into allocator/ (mod.rs facade +
+    deterministic.rs + occupancy.rs) as pure code motion (#16135):
+    the pre-split file reconstructs byte-for-byte after un-applying
+    only 25 private -> pub(in crate::nat::allocator) widenings in
+    occupancy.rs (0 in deterministic.rs). The issue's 124 textual
+    pub(super) occurrences (119 code + 5 comment) are reconciled in
+    allocator/mod.rs: none moved, so none needed widening. Lock-free
+    claim, FIFO recycle and global -> recycle lock order untouched.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Introduce by-value policy and session query structs in userspace-dp
     (#16129): PolicyQuery carries the counted / L3-aware /
     unresolved-egress / without-counting evaluation modes and

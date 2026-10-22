@@ -3,7 +3,7 @@
 Feature code lives in directories and a few flat files at the crate
 root, consumed by the per-worker hot path in `afxdp/`. Screen is
 `screen/` (mod.rs, scan.rs, stateless.rs, syncookie.rs, …), NAT44 is
-`nat/` (mod.rs, allocator.rs, source/, destination.rs, static_nat.rs),
+`nat/` (mod.rs, allocator/ (mod.rs facade + deterministic.rs + occupancy.rs, #16135), source/, destination.rs, static_nat.rs),
 NAT64 is the flat `nat64.rs`, and policy is the flat `policy.rs`.
 Test layout is mixed: most feature modules have a sibling
 `<feature>_tests.rs` (`nat64`, `nptv6`, `policy`, `prefix_set`); some
