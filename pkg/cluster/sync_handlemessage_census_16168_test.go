@@ -9,17 +9,20 @@
 // dispatch space, so "added a post-install constant, forgot the case"
 // (or dropped a label from a multi-label arm) goes red instead.
 //
-// The scan is SOURCE-based, mirroring TestLiveSyncMessageCensusIsComplete7163:
-// comment lines are stripped first (a doc comment quoting a case must
-// not satisfy the gate), and floors on both the clause and label counts
-// keep a broken scan — one that matches nothing — from reporting a
+// The scan parses the file with go/parser and walks the switch with
+// go/ast, so line comments AND /* */ block comments quoting a case
+// cannot satisfy (or inflate) the gate, and cases in other functions
+// cannot leak in. Floors on both the clause and label counts keep a
+// broken scan — one that matches nothing — from reporting a
 // complete census.
 
 package cluster
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -77,52 +80,60 @@ var wantHandleMessageLabels = []string{
 	"syncMsgSessionV6",
 }
 
-var handleMessageCaseRe = regexp.MustCompile(`^\s*case\s+((?:syncMsg[A-Za-z0-9_]+)(?:\s*,\s*syncMsg[A-Za-z0-9_]+)*)\s*:\s*$`)
-
-// scanHandleMessageLabels returns the case clause count and the sorted
-// label set found in the handleMessage switch. It locates the switch
-// by its function header so cases in other functions (or tests) in the
-// same file cannot leak in, and it strips comments before matching.
-func scanHandleMessageLabels(t *testing.T, body string) (clauses int, labels []string) {
+// scanHandleMessageLabels parses body and returns the case clause
+// count, the sorted label set, and whether the switch has a default
+// arm, all from the handleMessage switch only. Commented-out cases
+// (// or /* */) never appear in the AST and so never count.
+func scanHandleMessageLabels(t *testing.T, body string) (clauses int, labels []string, hasDefault bool) {
 	t.Helper()
-	lines := strings.Split(body, "\n")
-	start := -1
-	for i, line := range lines {
-		if strings.Contains(line, "func (s *SessionSync) handleMessage(") {
-			start = i
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sync_conn_read.go", body, 0)
+	if err != nil {
+		t.Fatalf("parse sync_conn_read.go: %v — the scan is broken", err)
+	}
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "handleMessage" {
+			fn = fd
 			break
 		}
 	}
-	if start < 0 {
+	if fn == nil || fn.Body == nil {
 		t.Fatalf("handleMessage not found in sync_conn_read.go — the scan is broken")
 	}
 	seen := map[string]bool{}
-	for _, line := range lines[start:] {
-		if strings.HasPrefix(strings.TrimSpace(line), "//") {
-			continue
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok {
+			return true
 		}
-		if k := strings.Index(line, "//"); k >= 0 {
-			line = line[:k]
-		}
-		if clauses > 0 && line == "}" {
-			break // closing brace of handleMessage
-		}
-		m := handleMessageCaseRe.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		clauses++
-		for _, lab := range strings.Split(m[1], ",") {
-			lab = strings.TrimSpace(lab)
-			if seen[lab] {
-				t.Errorf("duplicate case label %s in handleMessage", lab)
+		for _, stmt := range sw.Body.List {
+			cc, ok := stmt.(*ast.CaseClause)
+			if !ok {
+				continue
 			}
-			seen[lab] = true
-			labels = append(labels, lab)
+			if cc.List == nil {
+				hasDefault = true
+				continue
+			}
+			clauses++
+			for _, expr := range cc.List {
+				ident, ok := expr.(*ast.Ident)
+				if !ok {
+					t.Errorf("handleMessage case label is not an identifier: %T", expr)
+					continue
+				}
+				if seen[ident.Name] {
+					t.Errorf("duplicate case label %s in handleMessage", ident.Name)
+				}
+				seen[ident.Name] = true
+				labels = append(labels, ident.Name)
+			}
 		}
-	}
+		return false // only the outer dispatch switch is the census target
+	})
 	sort.Strings(labels)
-	return clauses, labels
+	return clauses, labels, hasDefault
 }
 
 func TestHandleMessageCaseCensus16168(t *testing.T) {
@@ -132,20 +143,20 @@ func TestHandleMessageCaseCensus16168(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sync_conn_read.go: %v", err)
 	}
-	clauses, got := scanHandleMessageLabels(t, string(body))
+	clauses, got, hasDefault := scanHandleMessageLabels(t, string(body))
 
-	// Floors: a regex that matched nothing would sweep zero clauses
+	// Floors: a scan that matched nothing would sweep zero clauses
 	// and report a complete census — a check that fails to a value
 	// indistinguishable from healthy.
 	if clauses < 42 {
-		t.Fatalf("the source scan found only %d handleMessage case clauses, which cannot be "+
+		t.Fatalf("the AST scan found only %d handleMessage case clauses, which cannot be "+
 			"right — the scan is broken, and a broken scan reports a complete census", clauses)
 	}
 	if clauses != 42 {
 		t.Errorf("handleMessage has %d case clauses, want exactly 42", clauses)
 	}
 	if len(got) < 44 {
-		t.Fatalf("the source scan found only %d handleMessage case labels, which cannot be "+
+		t.Fatalf("the AST scan found only %d handleMessage case labels, which cannot be "+
 			"right — the scan is broken, and a broken scan reports a complete census", len(got))
 	}
 	if len(got) != len(wantHandleMessageLabels) {
@@ -160,40 +171,15 @@ func TestHandleMessageCaseCensus16168(t *testing.T) {
 
 	// No default arm: unknown or retired types are ignored by design
 	// (a peer that predates a message simply never gets a reaction).
-	// The extraction must not introduce one. Scoped to the
-	// handleMessage switch itself — receiveLoop and
-	// handleConfigPayload in the same file legitimately use default.
-	{
-		lines := strings.Split(string(body), "\n")
-		inSwitch := false
-		for _, line := range lines {
-			if strings.Contains(line, "func (s *SessionSync) handleMessage(") {
-				inSwitch = true
-				continue
-			}
-			if !inSwitch {
-				continue
-			}
-			if line == "}" {
-				break
-			}
-			if strings.HasPrefix(strings.TrimSpace(line), "//") {
-				continue
-			}
-			if strings.TrimSpace(line) == "default:" {
-				t.Errorf("handleMessage gained a default arm; unknown sync types must stay ignored")
-				break
-			}
-		}
-		if !inSwitch {
-			t.Fatalf("handleMessage not found while checking for a default arm")
-		}
+	// The extraction must not introduce one.
+	if hasDefault {
+		t.Errorf("handleMessage gained a default arm; unknown sync types must stay ignored")
 	}
 }
 
 // TestHandleMessageCaseCensus16168Mutations proves the census is not
-// test-only-green: dropping a label, dropping a clause, or a scan
-// that finds nothing must all be detected.
+// test-only-green: dropping a label, dropping a clause, commenting a
+// case out, or a scan that finds nothing must all be detected.
 func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 	t.Parallel()
 
@@ -211,7 +197,7 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 	if mut == src {
 		t.Fatalf("mutation setup failed: two-label DHCP chunk arm not found")
 	}
-	clauses, labels := scanHandleMessageLabels(t, mut)
+	clauses, labels, _ := scanHandleMessageLabels(t, mut)
 	if clauses != 42 || len(labels) != 43 {
 		t.Errorf("label-drop mutation: got %d clauses / %d labels, want 42/43 — the census would not catch a dropped label", clauses, len(labels))
 	}
@@ -221,17 +207,42 @@ func TestHandleMessageCaseCensus16168Mutations(t *testing.T) {
 	if mut2 == src {
 		t.Fatalf("mutation setup failed: BarrierAck arm not found")
 	}
-	clauses, labels = scanHandleMessageLabels(t, mut2)
+	clauses, labels, _ = scanHandleMessageLabels(t, mut2)
 	if clauses != 41 || len(labels) != 43 {
 		t.Errorf("clause-drop mutation: got %d clauses / %d labels, want 41/43 — the census would not catch a dropped case", clauses, len(labels))
 	}
 
-	// A scan over empty input must hit the floor path (zero clauses),
-	// never a vacuous pass. scanHandleMessageLabels Fatalfs on a
-	// missing function header, so exercise the counters on a header
-	// with no cases instead.
-	clauses, labels = scanHandleMessageLabels(t,
-		"func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte) {\n}\n")
+	// A case inside a /* */ block comment is not dispatch: it must
+	// NOT count. (The line-regex scanner this replaces counted it,
+	// because it stripped only // comments.)
+	mut3 := strings.Replace(src,
+		"case syncMsgBarrierAck:\n\t\ts.handleBarrierAck(conn, payload)",
+		"/*\n\tcase syncMsgBarrierAck:\n\t\ts.handleBarrierAck(conn, payload)\n\t*/", 1)
+	if mut3 == src {
+		t.Fatalf("mutation setup failed: BarrierAck arm not found for block-comment mutation")
+	}
+	clauses, labels, _ = scanHandleMessageLabels(t, mut3)
+	if clauses != 41 || len(labels) != 43 {
+		t.Errorf("block-comment mutation: got %d clauses / %d labels, want 41/43 — a commented-out case was counted as active dispatch", clauses, len(labels))
+	}
+
+	// Likewise, an extra case quoted inside a /* */ comment must not
+	// inflate the census.
+	mut4 := strings.Replace(src,
+		"case syncMsgBarrierAck:",
+		"/* case syncMsgBarrier: */\n\tcase syncMsgBarrierAck:", 1)
+	if mut4 == src {
+		t.Fatalf("mutation setup failed: BarrierAck arm not found for quoted-case mutation")
+	}
+	clauses, labels, _ = scanHandleMessageLabels(t, mut4)
+	if clauses != 42 || len(labels) != 44 {
+		t.Errorf("quoted-case mutation: got %d clauses / %d labels, want 42/44 — a case inside a block comment was counted", clauses, len(labels))
+	}
+
+	// A scan over an empty switch must hit the floor path (zero
+	// clauses), never a vacuous pass.
+	clauses, labels, _ = scanHandleMessageLabels(t,
+		"package cluster\n\nimport \"net\"\n\nfunc (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte) {\n\tswitch msgType {\n\t}\n}\n")
 	if clauses != 0 || len(labels) != 0 {
 		t.Errorf("empty-switch scan: got %d clauses / %d labels, want 0/0", clauses, len(labels))
 	}
