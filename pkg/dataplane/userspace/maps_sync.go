@@ -989,6 +989,78 @@ func (m *Manager) readDegradedPathStatsLocked() map[string]uint64 {
 	return result
 }
 
+// xdpBranchArmNames maps the #16241 per-arm hit-counter array index to a
+// human-readable arm name. Must stay in sync with USERSPACE_BRANCH_ARM_*
+// in userspace-xdp/src/lib.rs (index order is dispatch order there); the
+// agreement test in xdp_branch_stats_16241_test.go reads the shim
+// constants and requires this table to match index-for-index, so adding
+// an arm in Rust enrols it here automatically.
+var xdpBranchArmNames = [27]string{
+	0:  "l2_parse_fail",
+	1:  "non_ip_pass",
+	2:  "qinq_drop",
+	3:  "stag_drop",
+	4:  "non_adjudicated_pass",
+	5:  "l3_parse_fail",
+	6:  "tagged_only_local_drop",
+	7:  "land_drop",
+	8:  "binding_not_ready",
+	9:  "wg_steer",
+	10: "early_filter",
+	11: "session_hit_redirect",
+	12: "session_hit_pass_kernel",
+	13: "session_miss_nat_ndp",
+	14: "session_miss_icmp_nat_local",
+	15: "session_miss_local",
+	16: "session_miss_ifnat_kernel_tunnel",
+	17: "session_miss_ifnat_redirect",
+	18: "session_miss_redirect",
+	19: "gre_inner_pass_kernel",
+	20: "fragment_redirect",
+	21: "redirect",
+	22: "redirect_err",
+	23: "adjust_meta_fail",
+	24: "meta_bounds_fail",
+	25: "ctrl_disabled_drop",
+	26: "ctrl_disabled_local",
+}
+
+// readXDPBranchStatsLocked reads the #16241 per-arm hit counters and
+// returns arm name -> cumulative count (summed across CPUs, zero arms
+// omitted). Counting in the shim is gated on the TRACE ctrl flag, so an
+// empty result means either no traffic or tracing was off — the arms
+// are diagnostic, not an accounting surface.
+func (m *Manager) readXDPBranchStatsLocked() map[string]uint64 {
+	statsMap := m.bpfShim.Map(mapNameUserspaceShimBranchStats)
+	if statsMap == nil {
+		return nil
+	}
+	result := make(map[string]uint64)
+	for i := uint32(0); i < uint32(len(xdpBranchArmNames)); i++ {
+		// Per-CPU array (#4113 shape): sum across CPUs.
+		var perCPU []uint64
+		if err := statsMap.Lookup(i, &perCPU); err != nil {
+			continue
+		}
+		var val uint64
+		for _, v := range perCPU {
+			val += v
+		}
+		if val == 0 {
+			continue
+		}
+		name := xdpBranchArmNames[i]
+		if name == "" {
+			name = fmt.Sprintf("arm_%d", i)
+		}
+		result[name] = val
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // entryProgramsLocked returns a map of ifindex -> attached XDP program name
 // by inspecting the bpfShim dataplane manager's link state.
 // Note: VLAN sub-interfaces are skipped during userspace-shim swaps and may

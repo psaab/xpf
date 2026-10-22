@@ -13,6 +13,8 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	// map, not the helper status payload. Refresh them on every publication so
 	// status and the existing Prometheus collector see actual degraded drops.
 	status.DegradedPathCounters = m.readDegradedPathStatsLocked()
+	// #16241: per-arm dispatch hit counters, same pinned-map projection.
+	status.XDPBranchCounters = m.readXDPBranchStatsLocked()
 	// #9642: stamp retry-debt health beside the mode classification (never
 	// remapping it — parent review round 2: a mode flip would install kernel
 	// blackhole routes that survive recovery). Assigned unconditionally so a

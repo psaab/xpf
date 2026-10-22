@@ -102,23 +102,72 @@ pub(in crate::afxdp) const DEGRADED_PATH_REASON_NAMES: &[&str] = &[
     "land_alarm",               // 20
 ];
 
+// #16241: per-arm XDP dispatch hit counters (the shim's
+// `userspace_branch_stats` map). Index order is dispatch order in
+// userspace-xdp/src/lib.rs; the agreement test below and the Go
+// mirror (`xdpBranchArmNames`) join by index. Counting in the shim
+// is TRACE-gated, so an empty dump means tracing was off.
+#[cfg(feature = "debug-log")]
+pub(in crate::afxdp) const XDP_BRANCH_STATS_PIN_PATH: &str =
+    "/sys/fs/bpf/xpf/userspace_branch_stats";
+#[cfg(any(test, feature = "debug-log"))]
+pub(in crate::afxdp) const XDP_BRANCH_ARM_NAMES: &[&str] = &[
+    "l2_parse_fail",                    // 0
+    "non_ip_pass",                      // 1
+    "qinq_drop",                        // 2
+    "stag_drop",                        // 3
+    "non_adjudicated_pass",             // 4
+    "l3_parse_fail",                    // 5
+    "tagged_only_local_drop",           // 6
+    "land_drop",                        // 7
+    "binding_not_ready",                // 8
+    "wg_steer",                         // 9
+    "early_filter",                     // 10
+    "session_hit_redirect",             // 11
+    "session_hit_pass_kernel",          // 12
+    "session_miss_nat_ndp",             // 13
+    "session_miss_icmp_nat_local",      // 14
+    "session_miss_local",               // 15
+    "session_miss_ifnat_kernel_tunnel", // 16
+    "session_miss_ifnat_redirect",      // 17
+    "session_miss_redirect",            // 18
+    "gre_inner_pass_kernel",            // 19
+    "fragment_redirect",                // 20
+    "redirect",                         // 21
+    "redirect_err",                     // 22
+    "adjust_meta_fail",                 // 23
+    "meta_bounds_fail",                 // 24
+    "ctrl_disabled_drop",               // 25
+    "ctrl_disabled_local",              // 26
+];
+
 #[cfg(feature = "debug-log")]
 pub(in crate::afxdp) fn read_degraded_path_stats() -> Option<Vec<(String, u64)>> {
-    let fd = OwnedFd::open_bpf_map(DEGRADED_PATH_STATS_PIN_PATH).ok()?;
-    // #4113 (F13): userspace_fallback_stats is a PER-CPU array. On a lookup
-    // the kernel fills value_size * num_possible_cpus bytes (one u64 per
-    // CPU), so the destination buffer MUST be sized for all possible CPUs —
-    // a single-u64 buffer would be overrun (stack corruption). Sum across
-    // CPUs to recover the cumulative per-reason count.
+    read_per_cpu_stats(DEGRADED_PATH_STATS_PIN_PATH, DEGRADED_PATH_REASON_NAMES)
+}
+
+#[cfg(feature = "debug-log")]
+pub(in crate::afxdp) fn read_xdp_branch_stats() -> Option<Vec<(String, u64)>> {
+    read_per_cpu_stats(XDP_BRANCH_STATS_PIN_PATH, XDP_BRANCH_ARM_NAMES)
+}
+
+#[cfg(feature = "debug-log")]
+fn read_per_cpu_stats(pin_path: &str, names: &[&str]) -> Option<Vec<(String, u64)>> {
+    let fd = OwnedFd::open_bpf_map(pin_path).ok()?;
+    // #4113 (F13): the stats maps are PER-CPU arrays. On a lookup the
+    // kernel fills value_size * num_possible_cpus bytes (one u64 per
+    // CPU), so the destination buffer MUST be sized for all possible
+    // CPUs — a single-u64 buffer would be overrun (stack corruption).
+    // Sum across CPUs to recover the cumulative per-slot count.
     let ncpus = unsafe { libbpf_sys::libbpf_num_possible_cpus() };
     if ncpus <= 0 {
         return None;
     }
     let ncpus = ncpus as usize;
     let mut result = Vec::new();
-    // Iterate the authoritative reason list rather than a hardcoded 16 so the
-    // scan cannot drift if a degraded-path reason is added or removed.
-    for idx in 0u32..DEGRADED_PATH_REASON_NAMES.len() as u32 {
+    // Iterate the authoritative name list rather than a hardcoded count
+    // so the scan cannot drift if a slot is added or removed.
+    for idx in 0u32..names.len() as u32 {
         let mut values = vec![0u64; ncpus];
         let rc = unsafe {
             libbpf_sys::bpf_map_lookup_elem(
@@ -130,10 +179,7 @@ pub(in crate::afxdp) fn read_degraded_path_stats() -> Option<Vec<(String, u64)>>
         if rc == 0 {
             let total: u64 = values.iter().copied().sum();
             if total > 0 {
-                let name = DEGRADED_PATH_REASON_NAMES
-                    .get(idx as usize)
-                    .copied()
-                    .unwrap_or("unknown");
+                let name = names.get(idx as usize).copied().unwrap_or("unknown");
                 result.push((name.to_string(), total));
             }
         }

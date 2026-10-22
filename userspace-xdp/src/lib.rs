@@ -57,6 +57,60 @@ const USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP: u32 = 18;
 const USERSPACE_FALLBACK_REASON_LAND_DROP: u32 = 19;
 const USERSPACE_FALLBACK_REASON_LAND_ALARM: u32 = 20;
 const USERSPACE_FALLBACK_REASON_MAX: u32 = 21;
+// #16241: per-arm hit counters for the healthy XDP dispatch, in a
+// SEPARATE per-CPU map from the degraded-path reasons above. The
+// degraded map's indices are a pinned operator ABI (Go
+// `degradedPathReasonNames`, the Rust debug reader, and the
+// #8258 agreement test join the two sides by index), so branch hits
+// must not be folded into it: a plain-TCP hit-forward is not a
+// degraded disposition, and renumbering or inflating that map would
+// re-label every operator drop counter. A new disposable map keeps
+// the existing ABI byte-identical while giving every dispatch arm a
+// hit slot. Per-CPU for the #4113 reason: native XDP runs one
+// program instance per RX queue on distinct CPUs, and the outlined
+// `incr_branch_stat` RMW is only correct CPU-locally. Counting is
+// gated on the TRACE ctrl flag (the `record_trace_packed` precedent):
+// with tracing off the hot path pays only the flag test inside the
+// one outlined callee, so the instrumentation is not itself a new
+// per-packet map cost on the plain-TCP hit-forward it measures.
+// LAND_ALARM has no slot here: `land_gate` runs without the ctrl
+// word, and its hit is already counted unconditionally by the
+// degraded map's `land_alarm` reason.
+//
+// Index order is dispatch order in `try_xdp_userspace` (healthy
+// path first, then the ctrl-disabled twin where it has one), so a
+// reader can walk the table top-to-bottom against the source. The
+// Go mirror is `xdpBranchArmNames` and the Rust debug mirror is
+// `XDP_BRANCH_ARM_NAMES`; both are agreement-tested index-for-index
+// against these constants.
+const USERSPACE_BRANCH_ARM_L2_PARSE_FAIL: u32 = 0;
+const USERSPACE_BRANCH_ARM_NON_IP_PASS: u32 = 1;
+const USERSPACE_BRANCH_ARM_QINQ_DROP: u32 = 2;
+const USERSPACE_BRANCH_ARM_STAG_DROP: u32 = 3;
+const USERSPACE_BRANCH_ARM_NON_ADJUDICATED_PASS: u32 = 4;
+const USERSPACE_BRANCH_ARM_L3_PARSE_FAIL: u32 = 5;
+const USERSPACE_BRANCH_ARM_TAGGED_ONLY_LOCAL_DROP: u32 = 6;
+const USERSPACE_BRANCH_ARM_LAND_DROP: u32 = 7;
+const USERSPACE_BRANCH_ARM_BINDING_NOT_READY: u32 = 8;
+const USERSPACE_BRANCH_ARM_WG_STEER: u32 = 9;
+const USERSPACE_BRANCH_ARM_EARLY_FILTER: u32 = 10;
+const USERSPACE_BRANCH_ARM_SESSION_HIT_REDIRECT: u32 = 11;
+const USERSPACE_BRANCH_ARM_SESSION_HIT_PASS_KERNEL: u32 = 12;
+const USERSPACE_BRANCH_ARM_SESSION_MISS_NAT_NDP: u32 = 13;
+const USERSPACE_BRANCH_ARM_SESSION_MISS_ICMP_NAT_LOCAL: u32 = 14;
+const USERSPACE_BRANCH_ARM_SESSION_MISS_LOCAL: u32 = 15;
+const USERSPACE_BRANCH_ARM_SESSION_MISS_IFNAT_KERNEL_TUNNEL: u32 = 16;
+const USERSPACE_BRANCH_ARM_SESSION_MISS_IFNAT_REDIRECT: u32 = 17;
+const USERSPACE_BRANCH_ARM_SESSION_MISS_REDIRECT: u32 = 18;
+const USERSPACE_BRANCH_ARM_GRE_INNER_PASS_KERNEL: u32 = 19;
+const USERSPACE_BRANCH_ARM_FRAGMENT_REDIRECT: u32 = 20;
+const USERSPACE_BRANCH_ARM_REDIRECT: u32 = 21;
+const USERSPACE_BRANCH_ARM_REDIRECT_ERR: u32 = 22;
+const USERSPACE_BRANCH_ARM_ADJUST_META_FAIL: u32 = 23;
+const USERSPACE_BRANCH_ARM_META_BOUNDS_FAIL: u32 = 24;
+const USERSPACE_BRANCH_ARM_CTRL_DISABLED_DROP: u32 = 25;
+const USERSPACE_BRANCH_ARM_CTRL_DISABLED_LOCAL: u32 = 26;
+const USERSPACE_BRANCH_ARM_MAX: u32 = 27;
 const USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED: u8 =
     degraded_ctrl_disabled::INGRESS_IFACE_FLAG_ADJUDICATED;
 const USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY: u8 = 2;
@@ -557,6 +611,13 @@ const USERSPACE_SESSION_ACTION_REDIRECT: u8 = 1;
 static USERSPACE_FALLBACK_STATS: PerCpuArray<u64> =
     PerCpuArray::with_max_entries(USERSPACE_FALLBACK_REASON_MAX, 0);
 
+// #16241: per-arm dispatch hit counters (see the USERSPACE_BRANCH_ARM_*
+// constants). Disposable like the degraded map: pinned so they survive
+// a daemon restart, reset only on an intended shape change.
+#[map(name = "userspace_branch_stats")]
+static USERSPACE_BRANCH_STATS: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(USERSPACE_BRANCH_ARM_MAX, 0);
+
 // #8249: a per-CPU scratch slot that LAUNDERS the IPv6 non-first-fragment
 // sighting out of the extension-header walk's exit state.
 //
@@ -605,6 +666,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     let Some((eth_proto, vlan_id, vlan_pcp, vlan_present, outer_stag, l3_offset)) =
         parse_l2(data, data_end)
     else {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_L2_PARSE_FAIL);
         return Ok(cpumap_or_pass(ctrl));
     };
     if eth_proto != ETH_P_IP && eth_proto != ETH_P_IPV6 {
@@ -624,6 +686,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         // Passing a shape that cannot be parsed is the hole; dropping it is
         // the fail-closed posture.
         if is_vlan_tpid(eth_proto) {
+            incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_QINQ_DROP);
             return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_QINQ_DROP);
         }
         // #10655: a SINGLE outer S-tag (0x88a8) is an explicit DROP, never
@@ -636,8 +699,10 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         // relocate the alias). Ordered AFTER the QinQ check: a double
         // tag with an 88a8 outer is still qinq_drop, never stag_drop.
         if outer_stag {
+            incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_STAG_DROP);
             return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_STAG_DROP);
         }
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_NON_IP_PASS);
         return Ok(pass_non_ip_l2_direct());
     }
 
@@ -680,6 +745,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // drive that state machine. Placing the test here changes the fate of no
     // packet except the one this fixes.
     if ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED == 0 {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_NON_ADJUDICATED_PASS);
         return Ok(cpumap_or_pass(ctrl));
     }
 
@@ -693,6 +759,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // the qinq_drop arm above instead (taxonomy pinned by
     // TestUserspaceXDPSTagOuterDoubleTagStaysQinQ_10655).
     if outer_stag {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_STAG_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_STAG_DROP);
     }
 
@@ -719,6 +786,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         }
     };
     let Some(parsed) = parsed else {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_L3_PARSE_FAIL);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_PARSE_FAIL);
     };
     let ingress_domain = ingress_domain_for(ingress_ifindex, &parsed);
@@ -729,6 +797,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // reject VID-0 frames to local or interface-NAT addresses before any
     // local PASS path (including session hits and degraded/control fallbacks).
     if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_TAGGED_ONLY_LOCAL_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
     // #13953/#15789: every kernel-pass arm below this point is terminal —
@@ -750,6 +819,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // every calling state; the tracked object fell to 3.67% headroom
     // (963340 processed insns) and rejects on the guest kernel.
     if land_gate(&parsed, ingress_ifindex) {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_LAND_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
     }
     let native_gre =
@@ -813,6 +883,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     let ready_code = (ready >> 32) as u32;
     let ready_slot = ready as u32;
     if ready_code != 0 {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_BINDING_NOT_READY);
         let (stage, reason, trace_slot) = match ready_code {
             2 => (
                 USERSPACE_TRACE_STAGE_BINDING_NOT_READY,
@@ -902,9 +973,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         && wg_steer_session_action != USERSPACE_SESSION_ACTION_REDIRECT
         && wg_steer_session_action != USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
     {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_WG_STEER);
         return Ok(cpumap_or_pass(ctrl));
     }
     if !native_gre_fragment && !wg_fragment && should_fallback_early(&parsed, ingress_domain) {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_EARLY_FILTER);
         record_trace(
             ctrl.flags,
             ingress_ifindex,
@@ -930,6 +1003,10 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // is_local_destination arm of the session-miss path. A remote
     // destination continues to the AF_XDP redirect and is adjudicated by
     // the worker.
+    // #16241: set by the classifying arms that fall through to the XSK
+    // redirect (session hit, plain miss, interface-NAT miss) so the
+    // redirect arm does not double-count them under the generic slot.
+    let mut redirect_origin_counted = false;
     if !native_gre && !native_gre_fragment && !wg_fragment {
         let session_action = if wg_steer_candidate {
             wg_steer_session_action
@@ -938,6 +1015,8 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         };
         match session_action {
             USERSPACE_SESSION_ACTION_REDIRECT => {
+                incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_HIT_REDIRECT);
+                redirect_origin_counted = true;
                 // Session exists and stays on the userspace dataplane.
             }
             USERSPACE_SESSION_ACTION_PASS_TO_KERNEL => {
@@ -960,6 +1039,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                     &parsed,
                 );
                 incr_fallback_stat(USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL);
+                incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_HIT_PASS_KERNEL);
                 return Ok(cpumap_or_pass(ctrl));
             }
             _ => {
@@ -974,6 +1054,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                         is_interface_nat_destination(&parsed, ingress_domain),
                     )
                 {
+                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_NAT_NDP);
                     return Ok(cpumap_or_pass(ctrl));
                 }
                 if is_icmp_to_interface_nat_local(&parsed, ingress_domain) {
@@ -987,6 +1068,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                         0,
                         &parsed,
                     );
+                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_ICMP_NAT_LOCAL);
                     return Ok(cpumap_or_pass(ctrl));
                 }
                 // #8274 step 3: a WireGuard TRANSPORT-DATA record for a
@@ -1027,6 +1109,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                         0,
                         &parsed,
                     );
+                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_LOCAL);
                     return Ok(cpumap_or_pass(ctrl));
                 }
                 // Interface-NAT session miss: redirect to helper (XSK)
@@ -1044,10 +1127,15 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                         parsed.wire_protocol,
                         (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0,
                     ) {
+                        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_IFNAT_KERNEL_TUNNEL);
                         return Ok(cpumap_or_pass(ctrl));
                     }
                     incr_fallback_stat(USERSPACE_FALLBACK_REASON_INTERFACE_NAT_NO_SESSION);
-                    // Fall through to XSK redirect below.
+                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_IFNAT_REDIRECT);
+                    redirect_origin_counted = true;
+                } else {
+                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_REDIRECT);
+                    redirect_origin_counted = true;
                 }
                 // Let all session misses through to the userspace dataplane.
                 // The userspace DP will evaluate policy and either create a
@@ -1055,6 +1143,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             }
         }
     } else if native_gre_fragment || wg_fragment {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_FRAGMENT_REDIRECT);
         // A fragmented head cannot be inner-classified / decapped; the
         // helper reassembles the whole datagram first (#14645/#15102).
     } else {
@@ -1076,17 +1165,20 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 &parsed,
             );
             incr_fallback_stat(USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL);
+            incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_GRE_INNER_PASS_KERNEL);
             return Ok(cpumap_or_pass(ctrl));
         }
     }
     let meta_len = mem::size_of::<UserspaceDpMeta>() as i32;
     let adjust_rc = unsafe { bpf_xdp_adjust_meta(ctx.ctx as *mut xdp_md, -meta_len) };
     if adjust_rc != 0 {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_ADJUST_META_FAIL);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_ADJUST_META);
     }
 
     let meta_ptr = ctx.metadata() as *mut UserspaceDpMeta;
     if (meta_ptr as usize).saturating_add(mem::size_of::<UserspaceDpMeta>()) > ctx.metadata_end() {
+        incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_META_BOUNDS_FAIL);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_META_BOUNDS);
     }
 
@@ -1176,8 +1268,20 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         &parsed,
     );
     match USERSPACE_XSK_MAP.redirect(binding_slot_ready, 0) {
-        Ok(action) => Ok(action),
+        Ok(action) => {
+            // #16241: SESSION_HIT_REDIRECT / SESSION_MISS_REDIRECT /
+            // SESSION_MISS_IFNAT_REDIRECT were already counted at their
+            // classifying arms above; this slot counts a redirect that no
+            // earlier arm claimed (WG worker claim, GRE-inner REDIRECT or
+            // miss). Together the four redirect slots partition every
+            // successful XSK redirect.
+            if !redirect_origin_counted {
+                incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_REDIRECT);
+            }
+            Ok(action)
+        }
         Err(_) => {
+            incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_REDIRECT_ERR);
             record_trace(
                 ctrl.flags,
                 ingress_ifindex,
@@ -1661,9 +1765,11 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
     {
         degraded_ctrl_disabled::DegradedCtrlDisabledDisposition::PassLocalControl => {
+            incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_CTRL_DISABLED_LOCAL);
             pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED)
         }
         degraded_ctrl_disabled::DegradedCtrlDisabledDisposition::DropTransit => {
+            incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_CTRL_DISABLED_DROP);
             drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED)
         }
     }
@@ -1851,6 +1957,26 @@ fn incr_fallback_stat(reason: u32) {
         return;
     }
     if let Some(ptr) = USERSPACE_FALLBACK_STATS.get_ptr_mut(reason) {
+        unsafe {
+            *ptr = (*ptr).saturating_add(1);
+        }
+    }
+}
+
+// #16241: the branch-hit twin of `incr_fallback_stat`, outlined for
+// the same #14851 reason: one verifier walk of the map update instead
+// of one per call site. Branch hits are diagnostic (like
+// `record_trace_packed`), so the gate rides the TRACE ctrl flag: with
+// tracing off the hot path pays only the flag test inside this one
+// outlined callee, not a map touch per arm. Gating at each call site
+// instead would re-walk the flag test under every calling state. Do
+// not re-inline without re-measuring through cmd/shimverify.
+#[inline(never)]
+fn incr_branch_stat(ctrl_flags: u32, arm: u32) {
+    if (ctrl_flags & USERSPACE_CTRL_FLAG_TRACE) == 0 || arm >= USERSPACE_BRANCH_ARM_MAX {
+        return;
+    }
+    if let Some(ptr) = USERSPACE_BRANCH_STATS.get_ptr_mut(arm) {
         unsafe {
             *ptr = (*ptr).saturating_add(1);
         }

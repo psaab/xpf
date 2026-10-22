@@ -407,6 +407,23 @@ func TestValidateUserspaceShimSpecSkipsDisposableFallbackStatsPin(t *testing.T) 
 	}
 }
 
+// #16241: the branch-stats counter map is disposable the same way, so a
+// stale pin shape must not fail the ABI pre-flight either — but unlike
+// the fallback map its Exclusion is by its own name, not inherited.
+func TestValidateUserspaceShimSpecSkipsDisposableBranchStatsPin16241(t *testing.T) {
+	t.Parallel()
+
+	base := validABIBaseSpec()
+	base.Maps[userspaceBranchStatsMapName] = &ebpf.MapSpec{Type: ebpf.PerCPUArray, KeySize: 4, ValueSize: 8, MaxEntries: 27}
+	reader := pinReaderWithOverride(base, map[string]userspaceMapABI{
+		userspaceBranchStatsMapName: {Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 27},
+	})
+	if err := validateUserspaceShimSpecWith(base, reader); err != nil {
+		t.Fatalf("live-pin ABI check must skip disposable %s (reconciled separately), got: %v",
+			userspaceBranchStatsMapName, err)
+	}
+}
+
 // TestValidateUserspaceShimSpecNoLivePinSkips proves a fresh node (no pins)
 // passes the live-pin comparison without a false failure — only the
 // expected-value checks apply.
