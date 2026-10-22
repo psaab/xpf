@@ -351,12 +351,18 @@ fn ranges_merge_covered_and_adjacent_15091() {
 }
 
 // -----------------------------------------------------------------
-// #16189: generic family machinery. `host_mask` is a required
-// trait method with the len==0 / len>=BITS guards inside it; the
-// merged-range builder must go through it (never an inline shift
-// at a call site). These cells pin the guarded values directly so
-// a regression that inlines `(1 << (BITS - len)) - 1` and drops a
-// guard fails here even before the range tests run.
+// #16189: generic family machinery. Two distinct claims, two cells:
+// (a) `host_mask_guards_boundaries_16189` pins the required trait
+//     method's guarded values directly — it catches a broken
+//     `host_mask` impl, but NOT a builder that bypasses it.
+// (b) `builder_uses_guarded_host_mask_16189` exercises the public
+//     Ranges builder at the lengths where an unguarded inline
+//     `(1 << (BITS - len)) - 1` at the call site breaks: len==BITS
+//     (/32, /128 — shift by BITS) and the shortest non-zero lens.
+//     A call-site bypass replacing `F::host_mask(..)` with an
+//     unguarded shift panics in debug / yields a wrong mask in
+//     release at those lens, so this cell fails on that revert
+//     even though the direct host_mask cell still passes.
 // -----------------------------------------------------------------
 
 #[test]
@@ -476,4 +482,57 @@ fn generic_set_boundary_membership_16189() {
     assert!(PrefixSetV6::default().is_match_any());
     assert!(PrefixSetV4::default().contains("203.0.113.1".parse().expect("ip")));
     assert!(PrefixSetV6::default().contains("2001:db8::1".parse().expect("ip")));
+}
+
+#[test]
+fn builder_uses_guarded_host_mask_16189() {
+    // Call-site cell (see header): drive the public Ranges builder
+    // (>16 prefixes) at len==BITS and near-BITS lens for BOTH
+    // families and assert the exact retained ranges. If
+    // `merged_ranges` ever bypasses `F::host_mask` with an
+    // unguarded `(1 << (BITS - len)) - 1`, the /32 (resp. /128)
+    // entries shift by 32 (resp. 128): debug panics, release
+    // produces a full-space mask and these ranges collapse wrong.
+    // v4: sixteen /32 hosts inside 10.0.0.0/24 plus the /24 itself
+    // and a disjoint /31 (len == BITS-1) at the top of the space.
+    let mut v4: Vec<PrefixV4> = (0..16).map(|i| p4(&format!("10.0.0.{i}/32"))).collect();
+    v4.push(p4("10.0.0.0/24"));
+    v4.push(p4("255.255.255.254/31"));
+    let set = PrefixSetV4::try_from_v3_literals(v4).expect("v4 set");
+    match &set {
+        PrefixSetV4::Ranges(r, n) => {
+            let expected: Vec<(u32, u32)> = vec![
+                (
+                    u32::from(Ipv4Addr::new(10, 0, 0, 0)),
+                    u32::from(Ipv4Addr::new(10, 0, 0, 255)),
+                ),
+                (
+                    u32::from(Ipv4Addr::new(255, 255, 255, 254)),
+                    u32::from(Ipv4Addr::new(255, 255, 255, 255)),
+                ),
+            ];
+            assert_eq!(*r, expected, "builder must use guarded host_mask (v4)");
+            assert_eq!(*n, 18);
+        }
+        other => panic!("expected Ranges, got {other:?}"),
+    }
+    // v6: sixteen /128 hosts inside 2001:db8::/112 plus the /112
+    // itself and a disjoint /127 (len == BITS-1).
+    let mut v6: Vec<PrefixV6> = (0..16)
+        .map(|i| p6(&format!("2001:db8::{i:x}/128")))
+        .collect();
+    v6.push(p6("2001:db8::/112"));
+    v6.push(p6("2001:db8:ffff::fffe/127"));
+    let set = PrefixSetV6::try_from_v3_literals(v6).expect("v6 set");
+    match &set {
+        PrefixSetV6::Ranges(r, n) => {
+            let lo112 = u128::from("2001:db8::".parse::<Ipv6Addr>().expect("ip"));
+            let lo127 = u128::from("2001:db8:ffff::fffe".parse::<Ipv6Addr>().expect("ip"));
+            let expected: Vec<(u128, u128)> =
+                vec![(lo112, lo112 + (1u128 << 16) - 1), (lo127, lo127 + 1)];
+            assert_eq!(*r, expected, "builder must use guarded host_mask (v6)");
+            assert_eq!(*n, 18);
+        }
+        other => panic!("expected Ranges, got {other:?}"),
+    }
 }
