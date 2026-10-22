@@ -276,3 +276,78 @@ func TestSDSyslogWellFormedScreenStillStructured15945(t *testing.T) {
 		t.Fatalf("attack-name=%q want %q", got, rec.ScreenCheck)
 	}
 }
+
+// RFC 5424 field-length/charset bounds (#16295 fold 2): SD-NAME is
+// 1*32PRINTUSASCII (§6 ABNF, further restricted for SD-ID/PARAM-NAME
+// to exclude "=" "]" '"') and MSGID is 1*32PRINTUSASCII (§6.2.7).
+// An overlong SD-ID, overlong/non-ASCII param name, or overlong/
+// non-ASCII/control MSGID must fall back to NILVALUE rather than
+// emit a header strict parsers reject or truncate differently.
+// (The non-ASCII param name already failed the fold-1 byte scan,
+// since every byte of a multi-byte sequence is >= 0x80 > 126; it is
+// kept here as a regression guard on the charset bound itself.)
+func TestSDSyslogOverlongNamesFallBack15945(t *testing.T) {
+	sdID33 := "junos@2636.1.1.1.2." + strings.Repeat("1", 14) // 33 chars
+	if len(sdID33) != 33 {
+		t.Fatalf("fixture: SD-ID is %d chars, want 33", len(sdID33))
+	}
+	longSDID := "[" + sdID33 + ` source-address="10.0.1.5"]`
+	longParam := `[junos@2636.1.1.1.2.40 this-param-name-is-way-too-long-x="v"]` // 33-char PARAM-NAME
+	nonASCIIParam := "[junos@2636.1.1.1.2.40 attaqué-name=\"v\"]"
+	msgID33 := "RT_FLOW_SESSION_CREATE_" + strings.Repeat("X", 10) // 33 chars
+	if len(msgID33) != 33 {
+		t.Fatalf("fixture: MSGID is %d chars, want 33", len(msgID33))
+	}
+	longMsgID := `RT_FLOW - ` + msgID33 + ` [junos@2636.1.1.1.2.129 source-address="10.0.1.5"]`
+	nonASCIIMsgID := "RT_FLOW - RT_FLOW_SESSION_CRÉATE [junos@2636.1.1.1.2.129 source-address=\"10.0.1.5\"]"
+	ctrlMsgID := "RT_FLOW - RT_FLOW\x01CREATE [junos@2636.1.1.1.2.129 source-address=\"10.0.1.5\"]"
+	cases := []struct {
+		name       string
+		structured string
+		wantApp    string
+	}{
+		{"sd_id_33_chars", `RT_IDS - RT_SCREEN_DROP ` + longSDID, "xpf"},
+		{"param_name_33_chars", `RT_IDS - RT_SCREEN_DROP ` + longParam, "xpf"},
+		{"param_name_non_ascii", `RT_IDS - RT_SCREEN_DROP ` + nonASCIIParam, "xpf"},
+		{"msgid_33_chars", longMsgID, "RT_FLOW"},
+		{"msgid_non_ascii", nonASCIIMsgID, "RT_FLOW"},
+		{"msgid_control_char", ctrlMsgID, "RT_FLOW"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := formatSDSyslogLine(14, ts15945, host15945, tc.structured, tc.structured)
+			app, msgid, sd, msg := rfc5424Fields15945(t, line)
+			if app != tc.wantApp || msgid != "-" || sd != "-" {
+				t.Fatalf("app=%q msgid=%q sd=%q, want NILVALUE fallback (app %q): %q", app, msgid, sd, tc.wantApp, line)
+			}
+			if !strings.Contains(msg, tc.structured) {
+				t.Fatalf("body did not survive verbatim as MSG:\n got msg: %q\nfull line: %q", msg, line)
+			}
+		})
+	}
+}
+
+// Boundary control: names exactly at the 32-char limit still pass —
+// an off-by-one here would NILVALUE well-formed records. (The
+// production MSGIDs RT_FLOW_SESSION_CREATE/CLOSE at 22/21 chars and
+// the Junos SD-IDs at 20/22 chars are all inside the limit; the
+// at-limit case is exercised synthetically.)
+func TestSDSyslogExactly32CharNamesStillStructured15945(t *testing.T) {
+	// Production shape stays structured.
+	line := sdLine15945(baseRecord9321("SESSION_OPEN"))
+	if _, msgid, sd, _ := rfc5424Fields15945(t, line); msgid != "RT_FLOW_SESSION_CREATE" || !strings.HasPrefix(sd, "[junos@2636.1.1.1.2.129 ") {
+		t.Fatalf("production session record fell back: %q", line)
+	}
+	// Synthetic at-limit: 32-char SD-ID (junos@ + 26) and 32-char
+	// PARAM-NAME in one element.
+	sdID32 := "junos@" + strings.Repeat("1", 26)
+	if len(sdID32) != 32 {
+		t.Fatalf("fixture: SD-ID is %d chars, want 32", len(sdID32))
+	}
+	atLimit := "RT_IDS - RT_SCREEN_DROP [" + sdID32 + " " + strings.Repeat("p", 32) + `="v"]`
+	line = formatSDSyslogLine(14, ts15945, host15945, atLimit, atLimit)
+	app, msgid, sd, _ := rfc5424Fields15945(t, line)
+	if app != "RT_IDS" || msgid != "RT_SCREEN_DROP" || !strings.HasPrefix(sd, "["+sdID32+" ") {
+		t.Fatalf("at-limit record fell back: app=%q msgid=%q sd=%q line=%q", app, msgid, sd, line)
+	}
+}

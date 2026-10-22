@@ -297,11 +297,45 @@ func formatStructuredMsg(rec EventRecord, protoNum uint8) string {
 	}
 }
 
+// maxSDName15945 is the RFC 5424 SD-NAME bound: 1*32PRINTUSASCII
+// (§6 ABNF; §6.3.2/§6.3.3 further exclude "=" "]" '"' from SD-ID and
+// PARAM-NAME). PRINTUSASCII is %d33-126.
+const maxSDName15945 = 32
+
+// validSDName15945 reports whether s is 1*32 printable-ASCII
+// (33-126) excluding "=", "]" and '"' — the SD-ID/PARAM-NAME shape.
+func validSDName15945(s string) bool {
+	if len(s) == 0 || len(s) > maxSDName15945 {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < 33 || s[i] > 126 || s[i] == '=' || s[i] == ']' || s[i] == '"' {
+			return false
+		}
+	}
+	return true
+}
+
+// validMSGID15945 reports whether s is a legal RFC 5424 MSGID:
+// 1*32PRINTUSASCII (§6.2.7) — any printable ASCII, no exclusions.
+func validMSGID15945(s string) bool {
+	if len(s) == 0 || len(s) > 32 {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < 33 || s[i] > 126 {
+			return false
+		}
+	}
+	return true
+}
+
 // validSDElement15945 reports whether s is exactly one complete
 // RFC 5424 SD-ELEMENT and nothing else: "[SD-ID *(SP PARAM-NAME=
-// \"%s\")]" where every PARAM-VALUE is quoted, only \" \\ \] escapes
-// appear inside it, and the closing "]" is the last byte. The scan is
-// by byte; all structural characters are ASCII, so it cannot split a
+// \"%s\")]" where SD-ID and every PARAM-NAME satisfy the 32-char
+// SD-NAME bound, every PARAM-VALUE is quoted (only \" \\ \] escapes
+// inside), and the closing "]" is the last byte. The scan is by
+// byte; all structural characters are ASCII, so it cannot split a
 // multi-byte UTF-8 sequence. This mirrors the reading rules of the
 // #9321 test oracle, independently implemented for the producer.
 func validSDElement15945(s string) bool {
@@ -309,16 +343,13 @@ func validSDElement15945(s string) bool {
 		return false
 	}
 	i := 1
-	// SD-ID: 1*(%d33-126 except "=" (%d61), "]" (%d93), '"' (%d34)).
+	// SD-ID runs to the first SP or ']'.
 	idStart := i
 	for i < len(s) && s[i] != ' ' && s[i] != ']' {
-		if s[i] < 33 || s[i] > 126 || s[i] == '=' || s[i] == '"' {
-			return false
-		}
 		i++
 	}
-	if i == idStart {
-		return false // empty SD-ID
+	if !validSDName15945(s[idStart:i]) {
+		return false
 	}
 	for {
 		if i >= len(s) {
@@ -331,17 +362,17 @@ func validSDElement15945(s string) bool {
 			return false
 		}
 		i++
-		// PARAM-NAME: 1*(%d33-126 except "=", "]", '"').
+		// PARAM-NAME runs to "=".
 		nameStart := i
 		for i < len(s) && s[i] != '=' {
-			if s[i] < 33 || s[i] > 126 || s[i] == ']' || s[i] == '"' || s[i] == ' ' {
-				return false
-			}
 			i++
 		}
-		if i == nameStart || i >= len(s) {
-			return false // empty name or ran out before "="
+		if i >= len(s) || !validSDName15945(s[nameStart:i]) {
+			return false // ran out before "=", or bad name
 		}
+		// A name scan that swallowed SP/quote/bracket bytes fails
+		// validSDName15945 (space is <33, the rest are excluded), so
+		// no separate structural check is needed here.
 		i++ // consume "="
 		if i >= len(s) || s[i] != '"' {
 			return false // value must be quoted
@@ -376,12 +407,14 @@ func validSDElement15945(s string) bool {
 // "RT_FLOW - <MSGID> [<SD-ID> ...]" for session events and
 // "RT_IDS - <MSGID> [<SD-ID> ...]" for screen events; anything else
 // (the formatSyslogMsg fallback) returns ok=false unchanged. The SD
-// arm is validated with validSDElement15945 (#16295 fold): a bare
-// prefix+"[junos@" trust let malformed SD (unterminated quote,
-// missing "]", trailing garbage) pass verbatim into the RFC 5424
-// STRUCTURED-DATA slot that formatSDSyslogLine emits, recreating
-// the strict-parser misparse H22-02 fixed. Malformed input falls
-// back to the NILVALUE envelope with the body intact as MSG.
+// arm is validated with validSDElement15945 and the MSGID with
+// validMSGID15945 (#16295 folds 1-2): a bare prefix+"[junos@" trust
+// let malformed SD (unterminated quote, missing "]", trailing
+// garbage), overlong (>32) SD names, and overlong/non-ASCII MSGIDs
+// pass verbatim into the RFC 5424 header/STRUCTURED-DATA slots that
+// formatSDSyslogLine emits, recreating the strict-parser misparse
+// H22-02 fixed. Any violation falls back to the NILVALUE envelope
+// with the body intact as MSG.
 func splitRTFlowStructured(structured string) (appName, msgid, sd string, ok bool) {
 	for _, prefix := range []string{"RT_FLOW - ", "RT_IDS - "} {
 		if !strings.HasPrefix(structured, prefix) {
@@ -393,7 +426,7 @@ func splitRTFlowStructured(structured string) (appName, msgid, sd string, ok boo
 			return "", "", "", false
 		}
 		m, s := rest[:sp], strings.TrimSpace(rest[sp+1:])
-		if !strings.HasPrefix(s, "[junos@") || !validSDElement15945(s) {
+		if !validMSGID15945(m) || !strings.HasPrefix(s, "[junos@") || !validSDElement15945(s) {
 			return "", "", "", false
 		}
 		return strings.TrimSuffix(prefix, " - "), m, s, true
