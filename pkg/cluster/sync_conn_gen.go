@@ -128,36 +128,12 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // the active authoritative receive bulk. Definitive outcomes clear old debt.
 // It does not affect incremental sync accounting.
 func (s *SessionSync) noteBulkInstallOutcomeV4(key dataplane.SessionKey, retry bool) {
-	s.bulkMu.Lock()
-	defer s.bulkMu.Unlock()
-	if !s.bulkInProgress {
-		return
-	}
-	if !retry {
-		delete(s.bulkInstallFailedV4, key)
-		return
-	}
-	if s.bulkInstallFailedV4 == nil {
-		s.bulkInstallFailedV4 = make(map[dataplane.SessionKey]struct{})
-	}
-	s.bulkInstallFailedV4[key] = struct{}{}
+	noteBulkInstallOutcomeCore(s, &s.bulkInstallFailedV4, key, retry)
 }
 
 // noteBulkInstallOutcomeV6 is the IPv6 twin of noteBulkInstallOutcomeV4.
 func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry bool) {
-	s.bulkMu.Lock()
-	defer s.bulkMu.Unlock()
-	if !s.bulkInProgress {
-		return
-	}
-	if !retry {
-		delete(s.bulkInstallFailedV6, key)
-		return
-	}
-	if s.bulkInstallFailedV6 == nil {
-		s.bulkInstallFailedV6 = make(map[dataplane.SessionKeyV6]struct{})
-	}
-	s.bulkInstallFailedV6[key] = struct{}{}
+	noteBulkInstallOutcomeCore(s, &s.bulkInstallFailedV6, key, retry)
 }
 
 // genGuardMapCap is the ABSOLUTE CEILING for the per-side EFFECTIVE guard
@@ -256,6 +232,245 @@ func putGenBounded[K comparable](m map[K]uint64, key K, gen uint64, maxEntries i
 	}
 	m[key] = gen
 	return true
+}
+
+// --- #16173: generic cores behind the V4/V6 twin wrappers. The wrappers
+// below stay as thin family-named methods (call sites and tests do not
+// churn); the logic lives once here. NO familyTraits mega-generic: the
+// dataplane store calls stay in the visibly separate install/delete
+// wrappers, and these cores only ever touch the generation maps, their
+// tombstone orders and tuple indexes, passed explicitly. Plain generic
+// free functions only — no per-record closures on the guard paths (the
+// scoped tupleOf extractor below is created once per wrapper call, not
+// per record; every other core is closure-free).
+
+// installGenGuardCore is the shared install-guard verdict (#2170):
+// refuse a strictly-older install; a gen-0 incoming install applies but
+// preserves the stored generation. Caller holds recvGenMu.
+func installGenGuardCore[K comparable](m map[K]uint64, key K, incoming uint64) (record uint64, apply bool) {
+	stored, ok := m[key]
+	if ok && stored != 0 && incoming != 0 && incoming < stored {
+		return 0, false
+	}
+	if incoming == 0 {
+		// Legacy / unknown install: apply but keep the stored generation
+		// (do not roll it back to 0).
+		return stored, true
+	}
+	return incoming, true
+}
+
+// recordInstalledGenCore records a live install (bare space), evicting
+// the oldest tombstone at the cap (#9719) and growing once on
+// full-of-live. Caller holds recvGenMu.
+func recordInstalledGenCore[K comparable](s *SessionSync, m *map[K]uint64, tombs *genTombstoneOrder[K], key K, gen uint64) {
+	if gen == 0 {
+		return
+	}
+	if *m == nil {
+		*m = make(map[K]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(*m, tombs, key, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(*m, tombs, key, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		// The key is live again; a tombstone it held is superseded by this
+		// generation, which the install guard already required to be >= it.
+		tombs.forget(key)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+}
+
+// recordInstalledGenScopedCore is recordInstalledGenCore for a scoped
+// map plus its tuple index. Caller holds recvGenMu.
+func recordInstalledGenScopedCore[K comparable, SK comparable](s *SessionSync, m *map[SK]uint64, tombs *genTombstoneOrder[SK], ix *scopedTupleIndex[K, SK], tupleOf func(SK) K, skey SK, gen uint64) {
+	if gen == 0 {
+		return
+	}
+	if *m == nil {
+		*m = make(map[SK]uint64)
+	}
+	recordScopedGen(s, m, tombs, ix, tupleOf, skey, gen, false)
+}
+
+// tombstoneBareCore records a bare tombstone at gen (or evicts on
+// gen-0), mirroring the delete guard's record half without its refusal
+// check. Caller holds recvGenMu. (#14358 cross-space coupling.)
+func tombstoneBareCore[K comparable](s *SessionSync, m *map[K]uint64, tombs *genTombstoneOrder[K], key K, gen uint64) {
+	if gen == 0 {
+		delete(*m, key)
+		tombs.forget(key)
+		return
+	}
+	if *m == nil {
+		*m = make(map[K]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(*m, tombs, key, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(*m, tombs, key, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		tombs.mark(key)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+}
+
+// tombstoneScopedCore records a scoped tombstone (or evicts on gen-0)
+// without a refusal check. Caller holds recvGenMu.
+func tombstoneScopedCore[K comparable, SK comparable](s *SessionSync, m *map[SK]uint64, tombs *genTombstoneOrder[SK], ix *scopedTupleIndex[K, SK], tupleOf func(SK) K, skey SK, gen uint64) {
+	if gen == 0 {
+		deleteScopedGen(*m, ix, tupleOf(skey), skey)
+		tombs.forget(skey)
+		return
+	}
+	if *m == nil {
+		*m = make(map[SK]uint64)
+	}
+	recordScopedGen(s, m, tombs, ix, tupleOf, skey, gen, true)
+}
+
+// recordScopedGen records gen for skey under the cap with tombstone
+// eviction, then applies marked (tombstone vs live install bookkeeping
+// in the tombstone order). Tuple-index membership is maintained by
+// putScopedGenEvictingTombstones itself: it removes an evicted oldest
+// tombstone from the index and adds every stored key (review H2 on
+// PR #16236: no extra bookkeeping here). Caller holds recvGenMu.
+func recordScopedGen[K comparable, SK comparable](s *SessionSync, m *map[SK]uint64, tombs *genTombstoneOrder[SK], ix *scopedTupleIndex[K, SK], tupleOf func(SK) K, skey SK, gen uint64, markTomb bool) {
+	stored, evicted := putScopedGenEvictingTombstones(*m, tombs, ix, tupleOf, skey, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putScopedGenEvictingTombstones(*m, tombs, ix, tupleOf, skey, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		if markTomb {
+			tombs.mark(skey)
+		} else {
+			tombs.forget(skey)
+		}
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+}
+
+// deleteGenGuardCore is the bare delete guard: refuse only a strictly
+// older non-zero delete, then tombstone the bare entry and every scoped
+// entry for the tuple at the delete generation (#14358 coupling), or
+// evict all of them on a gen-0 (legacy) delete. Caller holds recvGenMu.
+func deleteGenGuardCore[K comparable, SK comparable](s *SessionSync, bare *map[K]uint64, bareTombs *genTombstoneOrder[K], scoped *map[SK]uint64, scopedTombs *genTombstoneOrder[SK], ix *scopedTupleIndex[K, SK], tupleOf func(SK) K, key K, deleteGen uint64) bool {
+	stored := (*bare)[key]
+	if stored != 0 && deleteGen != 0 && deleteGen < stored {
+		return false
+	}
+	// A scoped tombstone for this tuple also orders bare deletes (a bare
+	// delete names no domain); live scoped entries of colliding tenants
+	// never refuse it.
+	for _, skey := range ix.keys(key) {
+		if _, isTomb := scopedTombs.elems[skey]; !isTomb {
+			continue
+		}
+		if tg := (*scoped)[skey]; tg != 0 && deleteGen != 0 && deleteGen < tg {
+			return false
+		}
+	}
+	if deleteGen != 0 {
+		tombstoneBareCore(s, bare, bareTombs, key, deleteGen)
+		for _, skey := range ix.keys(key) {
+			if (*scoped)[skey] > deleteGen {
+				continue
+			}
+			tombstoneScopedCore(s, scoped, scopedTombs, ix, tupleOf, skey, deleteGen)
+		}
+	} else {
+		delete(*bare, key)
+		bareTombs.forget(key)
+		for _, skey := range ix.keys(key) {
+			deleteScopedGen(*scoped, ix, key, skey)
+			scopedTombs.forget(skey)
+		}
+	}
+	return true
+}
+
+// deleteGenGuardScopedCore is the scoped delete guard (#10512/#14358):
+// refuse an older scoped delete against either space's high-water, then
+// tombstone the scoped entry and raise (never create, never lower) an
+// existing bare entry; a gen-0 delete evicts both. Caller holds recvGenMu.
+func deleteGenGuardScopedCore[K comparable, SK comparable](s *SessionSync, scoped *map[SK]uint64, scopedTombs *genTombstoneOrder[SK], scopedIx *scopedTupleIndex[K, SK], tupleOf func(SK) K, bare *map[K]uint64, bareTombs *genTombstoneOrder[K], skey SK, key K, deleteGen uint64) bool {
+	stored := (*scoped)[skey]
+	if stored != 0 && deleteGen != 0 && deleteGen < stored {
+		return false
+	}
+	if bareGen := (*bare)[key]; bareGen != 0 && deleteGen != 0 && deleteGen < bareGen {
+		return false
+	}
+	if deleteGen != 0 {
+		tombstoneScopedCore(s, scoped, scopedTombs, scopedIx, tupleOf, skey, deleteGen)
+		// Raise-only: a colliding domain's scoped delete must not lower
+		// (or create ordering against) a newer bare high-water.
+		if cur := (*bare)[key]; cur != 0 && cur <= deleteGen {
+			tombstoneBareCore(s, bare, bareTombs, key, deleteGen)
+		}
+	} else {
+		deleteScopedGen(*scoped, scopedIx, key, skey)
+		scopedTombs.forget(skey)
+		delete(*bare, key)
+		bareTombs.forget(key)
+	}
+	return true
+}
+
+// stampCloseClassSentCore records the close-class memo under the sender
+// cap, growing once on full-of-live. Caller holds genSentMu.
+func stampCloseClassSentCore[K comparable](s *SessionSync, m *map[K]sentCloseClass, key K, sessionID uint64, class *uint8) {
+	if *m == nil {
+		*m = make(map[K]sentCloseClass)
+	}
+	if _, ok := (*m)[key]; !ok && len(*m) >= s.sentCap() {
+		s.growSentCap()
+	}
+	stampCloseClassLocked(*m, key, sessionID, class, s.sentCap())
+}
+
+// stampTCPHandshakeStateSentCore is the handshake-state twin of
+// stampCloseClassSentCore. Caller holds genSentMu.
+func stampTCPHandshakeStateSentCore[K comparable](s *SessionSync, m *map[K]sentTCPHandshakeState, key K, sessionID uint64, state *uint8) {
+	if *m == nil {
+		*m = make(map[K]sentTCPHandshakeState)
+	}
+	if _, ok := (*m)[key]; !ok && len(*m) >= s.sentCap() {
+		s.growSentCap()
+	}
+	stampTCPHandshakeStateLocked(*m, key, sessionID, state, s.sentCap())
+}
+
+// noteBulkInstallOutcomeCore records whether key needs a transport retry
+// during the active authoritative receive bulk. Definitive outcomes
+// clear old debt. It does not affect incremental sync accounting.
+func noteBulkInstallOutcomeCore[K comparable](s *SessionSync, m *map[K]struct{}, key K, retry bool) {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if !s.bulkInProgress {
+		return
+	}
+	if !retry {
+		delete(*m, key)
+		return
+	}
+	if *m == nil {
+		*m = make(map[K]struct{})
+	}
+	(*m)[key] = struct{}{}
 }
 
 // putScopedGenBounded is putGenBounded for a scoped map plus its tuple
@@ -583,197 +798,205 @@ func (s *SessionSync) stampConfigEpoch() uint64 {
 // bumps the generation: the per-key stored generation only ever climbs, so a
 // journaled delete from before the re-send is strictly older and refused.
 func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane.SessionValue) {
-	g := s.nextInstallGen()
-	val.Generation = g
-	// #7095: stamp the cluster-stable ingress fold, and #12075: stamp the
-	// cluster-stable egress fold, on the same pass as the generation.
-	// Incremental sends stamp immediately before encoding; table-truth bulk
-	// sends stamp at their source decision boundary, before BulkStart and any
-	// row serialization.
+	// #7095/#12075/#15176: stamp the cluster-stable folds on the same
+	// pass as the generation (before the shared record pass).
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
 	val.EgressIfaceFold = s.stampEgressIfaceFold(val.FibIfindex, val.FibVlanID)
 	val.NatScopeFold = s.stampNatScopeFold(val.NatScopeIfindex)
-	// #5274/#11055: preserve the RG0 config-authority namespace and mark its
-	// source so a receiver can compare only when both nodes agree on the role.
-	val.ConfigEpoch = s.stampConfigEpoch()
+	stampInstallGen(s, key, sessionValueView{val}, &val.Generation, &val.ConfigEpoch,
+		&s.genSentV4, &s.genSentOverflowV4,
+		&s.genSentScopedV4, &s.genSentScopedByTupleV4, &s.genSentOverflowScopedV4,
+		scopedKeyOf,
+		&s.closeClassSentV4, &s.tcpHandshakeSentV4, &s.installTableSentV4,
+		&s.sourceNatICMPSentV4, &s.policyIdentitySentV4,
+		&s.installTableRecvV4, &s.sourceNatICMPRecvV4, &s.policyIdentityRecvV4)
+}
+
+// stampInstallGenV6 is the IPv6 twin of stampInstallGenV4.
+func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *dataplane.SessionValueV6) {
+	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
+	val.EgressIfaceFold = s.stampEgressIfaceFold(val.FibIfindex, val.FibVlanID)
+	val.NatScopeFold = s.stampNatScopeFold(val.NatScopeIfindex)
+	stampInstallGen(s, key, sessionValueV6View{val}, &val.Generation, &val.ConfigEpoch,
+		&s.genSentV6, &s.genSentOverflowV6,
+		&s.genSentScopedV6, &s.genSentScopedByTupleV6, &s.genSentOverflowScopedV6,
+		scopedKeyOfV6,
+		&s.closeClassSentV6, &s.tcpHandshakeSentV6, &s.installTableSentV6,
+		&s.sourceNatICMPSentV6, &s.policyIdentitySentV6,
+		&s.installTableRecvV6, &s.sourceNatICMPRecvV6, &s.policyIdentityRecvV6)
+}
+
+// sessionStampView is the per-family field view stampInstallGen needs.
+// SessionValue and SessionValueV6 carry the sync-only stamp fields under
+// identical names and types; the local wrappers below adapt each to this
+// view over its own fields. The dataplane store paths stay
+// family-specific (PutClusterSyncedV4/V6 are genuinely different) — only
+// the stamping pass is shared (#16173).
+type sessionStampView interface {
+	stampSessionID() uint64
+	stampRoutingDomainWire() uint32
+	stampTCPCloseClass() *uint8
+	stampTCPHandshakeState() *uint8
+	stampInstallTable() (*uint32, *uint32)
+	stampSourceNatICMP() (*bool, *uint8, *uint8)
+	stampPolicyIdentity() (*string, *uint32)
+}
+
+type sessionValueView struct{ v *dataplane.SessionValue }
+
+func (w sessionValueView) stampSessionID() uint64         { return w.v.SessionID }
+func (w sessionValueView) stampRoutingDomainWire() uint32 { return w.v.RoutingDomain }
+func (w sessionValueView) stampTCPCloseClass() *uint8     { return &w.v.TCPCloseClass }
+func (w sessionValueView) stampTCPHandshakeState() *uint8 { return &w.v.TCPHandshakeState }
+func (w sessionValueView) stampInstallTable() (*uint32, *uint32) {
+	return &w.v.InstallTableDomain, &w.v.InstallTableCheck
+}
+func (w sessionValueView) stampSourceNatICMP() (*bool, *uint8, *uint8) {
+	return &w.v.SourceNatICMPValid, &w.v.SourceNatICMPType, &w.v.SourceNatICMPCode
+}
+func (w sessionValueView) stampPolicyIdentity() (*string, *uint32) {
+	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
+}
+
+type sessionValueV6View struct{ v *dataplane.SessionValueV6 }
+
+func (w sessionValueV6View) stampSessionID() uint64         { return w.v.SessionID }
+func (w sessionValueV6View) stampRoutingDomainWire() uint32 { return w.v.RoutingDomain }
+func (w sessionValueV6View) stampTCPCloseClass() *uint8     { return &w.v.TCPCloseClass }
+func (w sessionValueV6View) stampTCPHandshakeState() *uint8 { return &w.v.TCPHandshakeState }
+func (w sessionValueV6View) stampInstallTable() (*uint32, *uint32) {
+	return &w.v.InstallTableDomain, &w.v.InstallTableCheck
+}
+func (w sessionValueV6View) stampSourceNatICMP() (*bool, *uint8, *uint8) {
+	return &w.v.SourceNatICMPValid, &w.v.SourceNatICMPType, &w.v.SourceNatICMPCode
+}
+func (w sessionValueV6View) stampPolicyIdentity() (*string, *uint32) {
+	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
+}
+
+// scopedKeyOf/scopedKeyOfV6 build the scoped sender keys; plain
+// functions (not closures) so the stamp pass stays allocation-free.
+func scopedKeyOf(domain uint32, key dataplane.SessionKey) scopedDeleteKeyV4 {
+	return scopedDeleteKeyV4{Domain: domain, Key: key}
+}
+
+func scopedKeyOfV6(domain uint32, key dataplane.SessionKeyV6) scopedDeleteKeyV6 {
+	return scopedDeleteKeyV6{Domain: domain, Key: key}
+}
+
+// stampInstallGen is the shared sender stamping pass behind
+// stampInstallGenV4/V6 (#16173 (3) generic recv/send core). It draws a
+// fresh generation, stamps the cluster-stable folds and config epoch,
+// records the bare + scoped sender generations under genSentMu, and
+// refreshes/restores the sync-only memos (close class, handshake state,
+// installing-table, source-NAT ICMP, policy identity) exactly as the
+// twin bodies did. The store-facing value types stay distinct through
+// sessionStampView; no dataplane store call happens here.
+func stampInstallGen[K comparable, SK comparable](
+	s *SessionSync,
+	key K,
+	view sessionStampView,
+	genOut, configEpochOut *uint64,
+	genSent *map[K]uint64,
+	overflow *bool,
+	genSentScoped *map[SK]uint64,
+	scopedIx *scopedTupleIndex[K, SK],
+	overflowScoped *bool,
+	makeScoped func(uint32, K) SK,
+	closeClassSent *map[K]sentCloseClass,
+	handshakeSent *map[K]sentTCPHandshakeState,
+	installTableSent *map[K]sentInstallTable,
+	sourceNatSent *map[K]sourceNatICMPMemo,
+	policySent *map[K]policyIdentityMemo,
+	installTableRecv *map[K]recvInstallTable,
+	sourceNatRecv *map[K]sourceNatICMPMemo,
+	policyRecv *map[K]policyIdentityMemo,
+) {
+	g := s.nextInstallGen()
+	*genOut = g
+	*configEpochOut = s.stampConfigEpoch()
+	sessionID := view.stampSessionID()
 	s.genSentMu.Lock()
-	if s.genSentV4 == nil {
-		s.genSentV4 = make(map[dataplane.SessionKey]uint64)
+	if *genSent == nil {
+		*genSent = make(map[K]uint64)
 	}
-	stored := putGenBounded(s.genSentV4, key, g, s.sentCap())
+	stored := putGenBounded(*genSent, key, g, s.sentCap())
 	if !stored && s.growSentCap() {
-		stored = putGenBounded(s.genSentV4, key, g, s.sentCap())
+		stored = putGenBounded(*genSent, key, g, s.sentCap())
 	}
 	if !stored {
 		s.stats.GenMapOverflow.Add(1)
-		// #9719: from now on a missing stamp no longer means "never sent in this
-		// boot"; see takeDeleteGenV4.
-		s.genSentOverflowV4 = true
+		// #9719: from now on a missing stamp no longer means "never sent
+		// in this boot"; see takeDeleteGenV4.
+		*overflow = true
 	}
 	// #10512: stamp the scoped sender space alongside (same generation,
 	// keyed by installing domain from the value).
-	skey := scopedDeleteKeyV4{Domain: scopedLogicalDomain(val.RoutingDomain), Key: key}
-	if s.genSentScopedV4 == nil {
-		s.genSentScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+	skey := makeScoped(scopedLogicalDomain(view.stampRoutingDomainWire()), key)
+	if *genSentScoped == nil {
+		*genSentScoped = make(map[SK]uint64)
 	}
-	storedScoped := putScopedGenBounded(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey, g, s.sentCap())
+	storedScoped := putScopedGenBounded(*genSentScoped, scopedIx, key, skey, g, s.sentCap())
 	if !storedScoped && s.growSentCap() {
-		storedScoped = putScopedGenBounded(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey, g, s.sentCap())
+		storedScoped = putScopedGenBounded(*genSentScoped, scopedIx, key, skey, g, s.sentCap())
 	}
 	if !storedScoped {
 		s.stats.GenMapOverflow.Add(1)
-		s.genSentOverflowScopedV4 = true
+		*overflowScoped = true
 	}
-	// #9412: keep this frame from regressing the close class already sent for
-	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
-	s.stampCloseClassSentV4(key, val.SessionID, &val.TCPCloseClass)
-	// #10888: mirror resends must retain the last handshake phase sent for
-	// this session incarnation.
-	s.stampTCPHandshakeStateSentV4(key, val.SessionID, &val.TCPHandshakeState)
-	// #9752: keep this frame from regressing the installing-table identity
-	// already sent for the same incarnation (a mirror-sourced resend carries
-	// (0,0): the BPF mirror has no slot for sync-only fields). Same lock.
-	if s.installTableSentV4 == nil {
-		s.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
+	// #9412: keep this frame from regressing the close class already sent
+	// for the same incarnation (a mirror-sourced resend carries 0).
+	stampCloseClassSentCore(s, closeClassSent, key, sessionID, view.stampTCPCloseClass())
+	// #10888: mirror resends must retain the last handshake phase sent.
+	stampTCPHandshakeStateSentCore(s, handshakeSent, key, sessionID, view.stampTCPHandshakeState())
+	// #9752: keep this frame from regressing the installing-table identity.
+	itDomain, itCheck := view.stampInstallTable()
+	if *installTableSent == nil {
+		*installTableSent = make(map[K]sentInstallTable)
 	}
-	if !stampInstallTableLocked(s.installTableSentV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap()) && s.growSentCap() {
-		stampInstallTableLocked(s.installTableSentV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap())
+	if !stampInstallTableLocked(*installTableSent, key, sessionID, itDomain, itCheck, s.sentCap()) && s.growSentCap() {
+		stampInstallTableLocked(*installTableSent, key, sessionID, itDomain, itCheck, s.sentCap())
 	}
-	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
+	if *itDomain != 0 || *itCheck != 0 {
 		s.pbrAnnouncedForFence.Store(true)
 	}
-	// #9752 round 3 item 5: still (0,0)? This node may have RECEIVED the
-	// incarnation without ever sending it (standby after failover) — the
-	// receive record holds the true stamp. Restore from it (read-only).
-	// genSentMu nests recvGenMu here; recvGenMu never acquires outwards,
-	// so no cycle (same nesting takeDeleteGenV4 already does).
-	if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 && val.SessionID != 0 {
+	// #9752 round 3 item 5: still (0,0)? Restore from the receive record
+	// (read-only). genSentMu nests recvGenMu here; recvGenMu never
+	// acquires outwards, so no cycle.
+	if *itDomain == 0 && *itCheck == 0 && sessionID != 0 {
 		s.recvGenMu.Lock()
-		if domain, check, ok := lookupRecvInstallTableLocked(s.installTableRecvV4, key, val.SessionID); ok {
-			val.InstallTableDomain, val.InstallTableCheck = domain, check
+		if domain, check, ok := lookupRecvInstallTableLocked(*installTableRecv, key, sessionID); ok {
+			*itDomain, *itCheck = domain, check
 		}
 		s.recvGenMu.Unlock()
 	}
-	// #11064: typed source-NAT identity is sync-only like the table stamp; a
-	// mirror-sourced resend restores the identity last sent for this session.
-	if s.sourceNatICMPSentV4 == nil {
-		s.sourceNatICMPSentV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
+	// #11064: typed source-NAT identity is sync-only; restore last sent.
+	snValid, snType, snCode := view.stampSourceNatICMP()
+	if *sourceNatSent == nil {
+		*sourceNatSent = make(map[K]sourceNatICMPMemo)
 	}
-	if !stampSourceNatICMPLocked(s.sourceNatICMPSentV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap()) && s.growSentCap() {
-		stampSourceNatICMPLocked(s.sourceNatICMPSentV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap())
+	if !stampSourceNatICMPLocked(*sourceNatSent, key, sessionID, snValid, snType, snCode, s.sentCap()) && s.growSentCap() {
+		stampSourceNatICMPLocked(*sourceNatSent, key, sessionID, snValid, snType, snCode, s.sentCap())
 	}
-	if !val.SourceNatICMPValid && val.SessionID != 0 {
+	if !*snValid && sessionID != 0 {
 		s.recvGenMu.Lock()
-		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(s.sourceNatICMPRecvV4, key, val.SessionID); ok {
-			val.SourceNatICMPValid, val.SourceNatICMPType, val.SourceNatICMPCode = true, icmpType, icmpCode
+		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(*sourceNatRecv, key, sessionID); ok {
+			*snValid, *snType, *snCode = true, icmpType, icmpCode
 		}
 		s.recvGenMu.Unlock()
 	}
-	// #14359: policy identity is sync-only like the stamps above; a
-	// mirror-sourced resend restores the identity last sent for this session,
-	// and a node that only RECEIVED it (promoted standby) resends that.
-	if s.policyIdentitySentV4 == nil {
-		s.policyIdentitySentV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+	// #14359: policy identity is sync-only; restore last sent / received.
+	ruleID, counter := view.stampPolicyIdentity()
+	if *policySent == nil {
+		*policySent = make(map[K]policyIdentityMemo)
 	}
-	if !stampPolicyIdentityLocked(s.policyIdentitySentV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap()) && s.growSentCap() {
-		stampPolicyIdentityLocked(s.policyIdentitySentV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap())
+	if !stampPolicyIdentityLocked(*policySent, key, sessionID, ruleID, counter, s.sentCap()) && s.growSentCap() {
+		stampPolicyIdentityLocked(*policySent, key, sessionID, ruleID, counter, s.sentCap())
 	}
-	if val.PolicyRuleID == "" && val.PolicyCounterIdx == 0 && val.SessionID != 0 {
+	if *ruleID == "" && *counter == 0 && sessionID != 0 {
 		s.recvGenMu.Lock()
-		if ruleID, counter, ok := lookupPolicyIdentityLocked(s.policyIdentityRecvV4, key, val.SessionID); ok {
-			val.PolicyRuleID, val.PolicyCounterIdx = ruleID, counter
-		}
-		s.recvGenMu.Unlock()
-	}
-	s.genSentMu.Unlock()
-}
-
-func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *dataplane.SessionValueV6) {
-	g := s.nextInstallGen()
-	val.Generation = g
-	// #7095: stamp the cluster-stable ingress fold, and #12075: stamp the
-	// cluster-stable egress fold, on the same pass as the generation.
-	// Incremental sends stamp immediately before encoding; table-truth bulk
-	// sends stamp at their source decision boundary, before BulkStart and any
-	// row serialization.
-	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
-	val.EgressIfaceFold = s.stampEgressIfaceFold(val.FibIfindex, val.FibVlanID)
-	val.NatScopeFold = s.stampNatScopeFold(val.NatScopeIfindex)
-	// #5274/#11055: v6 twin of the authority-relative v4 stamp.
-	val.ConfigEpoch = s.stampConfigEpoch()
-	s.genSentMu.Lock()
-	if s.genSentV6 == nil {
-		s.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
-	}
-	stored := putGenBounded(s.genSentV6, key, g, s.sentCap())
-	if !stored && s.growSentCap() {
-		stored = putGenBounded(s.genSentV6, key, g, s.sentCap())
-	}
-	if !stored {
-		s.stats.GenMapOverflow.Add(1)
-		s.genSentOverflowV6 = true // #9719: see stampInstallGenV4.
-	}
-	// #10512: scoped sender stamp alongside (see the v4 twin).
-	skey6 := scopedDeleteKeyV6{Domain: scopedLogicalDomain(val.RoutingDomain), Key: key}
-	if s.genSentScopedV6 == nil {
-		s.genSentScopedV6 = make(map[scopedDeleteKeyV6]uint64)
-	}
-	storedScoped6 := putScopedGenBounded(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey6, g, s.sentCap())
-	if !storedScoped6 && s.growSentCap() {
-		storedScoped6 = putScopedGenBounded(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey6, g, s.sentCap())
-	}
-	if !storedScoped6 {
-		s.stats.GenMapOverflow.Add(1)
-		s.genSentOverflowScopedV6 = true
-	}
-	// #9412: keep this frame from regressing the close class already sent for
-	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
-	s.stampCloseClassSentV6(key, val.SessionID, &val.TCPCloseClass)
-	// #10888: v6 twin of the handshake-state resend memo.
-	s.stampTCPHandshakeStateSentV6(key, val.SessionID, &val.TCPHandshakeState)
-	// #9752: v6 twin of the installing-table memo above.
-	if s.installTableSentV6 == nil {
-		s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
-	}
-	if !stampInstallTableLocked(s.installTableSentV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap()) && s.growSentCap() {
-		stampInstallTableLocked(s.installTableSentV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck, s.sentCap())
-	}
-	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
-		s.pbrAnnouncedForFence.Store(true)
-	}
-	// #9752 round 3 item 5: v6 twin of the receive-record restore above.
-	if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 && val.SessionID != 0 {
-		s.recvGenMu.Lock()
-		if domain, check, ok := lookupRecvInstallTableLocked(s.installTableRecvV6, key, val.SessionID); ok {
-			val.InstallTableDomain, val.InstallTableCheck = domain, check
-		}
-		s.recvGenMu.Unlock()
-	}
-	// #11064: v6 twin of the typed source-NAT identity restoration above.
-	if s.sourceNatICMPSentV6 == nil {
-		s.sourceNatICMPSentV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
-	}
-	if !stampSourceNatICMPLocked(s.sourceNatICMPSentV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap()) && s.growSentCap() {
-		stampSourceNatICMPLocked(s.sourceNatICMPSentV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap())
-	}
-	if !val.SourceNatICMPValid && val.SessionID != 0 {
-		s.recvGenMu.Lock()
-		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(s.sourceNatICMPRecvV6, key, val.SessionID); ok {
-			val.SourceNatICMPValid, val.SourceNatICMPType, val.SourceNatICMPCode = true, icmpType, icmpCode
-		}
-		s.recvGenMu.Unlock()
-	}
-	// #14359: v6 twin of the policy-identity restoration above.
-	if s.policyIdentitySentV6 == nil {
-		s.policyIdentitySentV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
-	}
-	if !stampPolicyIdentityLocked(s.policyIdentitySentV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap()) && s.growSentCap() {
-		stampPolicyIdentityLocked(s.policyIdentitySentV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap())
-	}
-	if val.PolicyRuleID == "" && val.PolicyCounterIdx == 0 && val.SessionID != 0 {
-		s.recvGenMu.Lock()
-		if ruleID, counter, ok := lookupPolicyIdentityLocked(s.policyIdentityRecvV6, key, val.SessionID); ok {
-			val.PolicyRuleID, val.PolicyCounterIdx = ruleID, counter
+		if rid, cnt, ok := lookupPolicyIdentityLocked(*policyRecv, key, sessionID); ok {
+			*ruleID, *counter = rid, cnt
 		}
 		s.recvGenMu.Unlock()
 	}
@@ -783,23 +1006,11 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 // stampCloseClassSentV4/V6 record the close class under the sender-side cap,
 // growing once on full-of-live like the generation stamps. Callers hold genSentMu.
 func (s *SessionSync) stampCloseClassSentV4(key dataplane.SessionKey, sessionID uint64, class *uint8) {
-	if s.closeClassSentV4 == nil {
-		s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
-	}
-	if _, ok := s.closeClassSentV4[key]; !ok && len(s.closeClassSentV4) >= s.sentCap() {
-		s.growSentCap()
-	}
-	stampCloseClassLocked(s.closeClassSentV4, key, sessionID, class, s.sentCap())
+	stampCloseClassSentCore(s, &s.closeClassSentV4, key, sessionID, class)
 }
 
 func (s *SessionSync) stampCloseClassSentV6(key dataplane.SessionKeyV6, sessionID uint64, class *uint8) {
-	if s.closeClassSentV6 == nil {
-		s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
-	}
-	if _, ok := s.closeClassSentV6[key]; !ok && len(s.closeClassSentV6) >= s.sentCap() {
-		s.growSentCap()
-	}
-	stampCloseClassLocked(s.closeClassSentV6, key, sessionID, class, s.sentCap())
+	stampCloseClassSentCore(s, &s.closeClassSentV6, key, sessionID, class)
 }
 
 // sentTCPHandshakeState records the greatest TCP handshake stage sent for one
@@ -849,25 +1060,13 @@ func stampTCPHandshakeStateLocked[K comparable](
 func (s *SessionSync) stampTCPHandshakeStateSentV4(
 	key dataplane.SessionKey, sessionID uint64, state *uint8,
 ) {
-	if s.tcpHandshakeSentV4 == nil {
-		s.tcpHandshakeSentV4 = make(map[dataplane.SessionKey]sentTCPHandshakeState)
-	}
-	if _, ok := s.tcpHandshakeSentV4[key]; !ok && len(s.tcpHandshakeSentV4) >= s.sentCap() {
-		s.growSentCap()
-	}
-	stampTCPHandshakeStateLocked(s.tcpHandshakeSentV4, key, sessionID, state, s.sentCap())
+	stampTCPHandshakeStateSentCore(s, &s.tcpHandshakeSentV4, key, sessionID, state)
 }
 
 func (s *SessionSync) stampTCPHandshakeStateSentV6(
 	key dataplane.SessionKeyV6, sessionID uint64, state *uint8,
 ) {
-	if s.tcpHandshakeSentV6 == nil {
-		s.tcpHandshakeSentV6 = make(map[dataplane.SessionKeyV6]sentTCPHandshakeState)
-	}
-	if _, ok := s.tcpHandshakeSentV6[key]; !ok && len(s.tcpHandshakeSentV6) >= s.sentCap() {
-		s.growSentCap()
-	}
-	stampTCPHandshakeStateLocked(s.tcpHandshakeSentV6, key, sessionID, state, s.sentCap())
+	stampTCPHandshakeStateSentCore(s, &s.tcpHandshakeSentV6, key, sessionID, state)
 }
 
 // takeDeleteGenV4 returns the generation a delete for this wire key should
@@ -901,6 +1100,45 @@ func (s *SessionSync) stampTCPHandshakeStateSentV6(
 // delete only while it holds a NEWER generation for the key, which is the
 // correct answer.
 func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
+	return takeDeleteGen(s, key,
+		&s.genSentV4, &s.genSentOverflowV4,
+		&s.genSentScopedV4, &s.genSentScopedByTupleV4,
+		&s.closeClassSentV4, &s.tcpHandshakeSentV4,
+		&s.installTableSentV4, &s.sourceNatICMPSentV4, &s.policyIdentitySentV4,
+		&s.installTableRecvV4, &s.sourceNatICMPRecvV4, &s.policyIdentityRecvV4)
+}
+
+func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
+	return takeDeleteGen(s, key,
+		&s.genSentV6, &s.genSentOverflowV6,
+		&s.genSentScopedV6, &s.genSentScopedByTupleV6,
+		&s.closeClassSentV6, &s.tcpHandshakeSentV6,
+		&s.installTableSentV6, &s.sourceNatICMPSentV6, &s.policyIdentitySentV6,
+		&s.installTableRecvV6, &s.sourceNatICMPRecvV6, &s.policyIdentityRecvV6)
+}
+
+// takeDeleteGen is the shared sender take-delete behind
+// takeDeleteGenV4/V6 (#16173): forget the incarnation's sync-only memos,
+// reclaim every scoped stamp for the tuple, then draw a fresh
+// strictly-greater generation for a stamped key (0 for a never-stamped
+// key, fresh again once the stamp map has overflowed, #9719). The long
+// #2221/#9719 rationale lives on takeDeleteGenV4 above.
+func takeDeleteGen[K comparable, SK comparable](
+	s *SessionSync,
+	key K,
+	genSent *map[K]uint64,
+	overflow *bool,
+	genSentScoped *map[SK]uint64,
+	scopedIx *scopedTupleIndex[K, SK],
+	closeClassSent *map[K]sentCloseClass,
+	handshakeSent *map[K]sentTCPHandshakeState,
+	installTableSent *map[K]sentInstallTable,
+	sourceNatSent *map[K]sourceNatICMPMemo,
+	policySent *map[K]policyIdentityMemo,
+	installTableRecv *map[K]recvInstallTable,
+	sourceNatRecv *map[K]sourceNatICMPMemo,
+	policyRecv *map[K]policyIdentityMemo,
+) uint64 {
 	if hook := s.testBeforeDeleteGen; hook != nil {
 		hook()
 	}
@@ -908,78 +1146,38 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	defer s.bulkSnapshotGenMu.Unlock()
 	s.genSentMu.Lock()
 	defer s.genSentMu.Unlock()
-	// #9412: the incarnation is being deleted; forget its close class. Before the
-	// early return, so a key with no generation stamp is still evicted.
-	delete(s.closeClassSentV4, key)
-	delete(s.tcpHandshakeSentV4, key)
-	// #14358: a bare close names no domain, so reclaim every scoped stamp
-	// for this tuple; otherwise ordinary churn leaks scoped entries to cap.
-	// #15039: via the tuple index, not a full-map scan.
-	for _, skey := range s.genSentScopedByTupleV4.keys(key) {
-		deleteScopedGen(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey)
+	// #9412: the incarnation is being deleted; forget its close class.
+	// Before the early return, so a key with no generation stamp is
+	// still evicted.
+	delete(*closeClassSent, key)
+	delete(*handshakeSent, key)
+	// #14358: a bare close names no domain, so reclaim every scoped
+	// stamp for this tuple (#15039: via the tuple index, not a scan).
+	for _, skey := range scopedIx.keys(key) {
+		deleteScopedGen(*genSentScoped, scopedIx, key, skey)
 	}
 	// #9752: same for its installing-table identity.
-	delete(s.installTableSentV4, key)
-	delete(s.sourceNatICMPSentV4, key)
-	delete(s.policyIdentitySentV4, key)
-	// #9752 round 3: and for the identity received for it (genSentMu is a
-	// leaf, so nesting recvGenMu here cannot cycle).
+	delete(*installTableSent, key)
+	delete(*sourceNatSent, key)
+	delete(*policySent, key)
+	// #9752 round 3: and for the identity received for it (genSentMu is
+	// a leaf, so nesting recvGenMu here cannot cycle).
 	s.recvGenMu.Lock()
-	delete(s.installTableRecvV4, key)
-	delete(s.sourceNatICMPRecvV4, key)
-	delete(s.policyIdentityRecvV4, key)
+	delete(*installTableRecv, key)
+	delete(*sourceNatRecv, key)
+	delete(*policyRecv, key)
 	s.recvGenMu.Unlock()
-	if _, ok := s.genSentV4[key]; !ok {
-		if s.genSentOverflowV4 {
-			// #9719: the stamp map has overflowed in this process, so this key may
-			// be a LIVE session whose stamp was skipped at the cap. Sending 0 would
-			// make the receiver apply the delete unconditionally. A fresh generation
-			// keeps the ordering guard, and still out-ranks every install of the key.
+	if _, ok := (*genSent)[key]; !ok {
+		if *overflow {
+			// #9719: the stamp map has overflowed in this process, so
+			// this key may be a LIVE session whose stamp was skipped at
+			// the cap. Sending 0 would make the receiver apply the
+			// delete unconditionally.
 			return s.nextInstallGen()
 		}
 		return 0
 	}
-	delete(s.genSentV4, key)
-	gen := s.nextInstallGen()
-	if hook := s.testAfterDeleteGen; hook != nil {
-		hook()
-	}
-	return gen
-}
-
-func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
-	if hook := s.testBeforeDeleteGen; hook != nil {
-		hook()
-	}
-	s.bulkSnapshotGenMu.Lock()
-	defer s.bulkSnapshotGenMu.Unlock()
-	s.genSentMu.Lock()
-	defer s.genSentMu.Unlock()
-	// #9412: the incarnation is being deleted; forget its close class. Before the
-	// early return, so a key with no generation stamp is still evicted.
-	delete(s.closeClassSentV6, key)
-	delete(s.tcpHandshakeSentV6, key)
-	// #14358: v6 twin of the scoped reclaim in takeDeleteGenV4.
-	for _, skey := range s.genSentScopedByTupleV6.keys(key) {
-		deleteScopedGen(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey)
-	}
-	// #9752: same for its installing-table identity.
-	delete(s.installTableSentV6, key)
-	delete(s.sourceNatICMPSentV6, key)
-	delete(s.policyIdentitySentV6, key)
-	// #9752 round 3: and for the identity received for it (see the v4 twin).
-	s.recvGenMu.Lock()
-	delete(s.installTableRecvV6, key)
-	delete(s.sourceNatICMPRecvV6, key)
-	delete(s.policyIdentityRecvV6, key)
-	s.recvGenMu.Unlock()
-	if _, ok := s.genSentV6[key]; !ok {
-		if s.genSentOverflowV6 {
-			return s.nextInstallGen() // #9719: see takeDeleteGenV4.
-		}
-		return 0
-	}
-	delete(s.genSentV6, key)
+	delete(*genSent, key)
 	gen := s.nextInstallGen()
 	if hook := s.testAfterDeleteGen; hook != nil {
 		hook()
@@ -995,30 +1193,24 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 // scoped-only: bare sender stamps (possibly another tenant's) are
 // never disturbed. Test hooks shared with the bare twin.
 func (s *SessionSync) takeDeleteGenScopedV4(domain uint32, key dataplane.SessionKey) uint64 {
-	if hook := s.testBeforeDeleteGen; hook != nil {
-		hook()
-	}
-	s.bulkSnapshotGenMu.Lock()
-	defer s.bulkSnapshotGenMu.Unlock()
-	s.genSentMu.Lock()
-	defer s.genSentMu.Unlock()
-	skey := scopedDeleteKeyV4{Domain: domain, Key: key}
-	if _, ok := s.genSentScopedV4[skey]; !ok {
-		if s.genSentOverflowScopedV4 {
-			return s.nextInstallGen() // #9719: see takeDeleteGenV4.
-		}
-		return 0
-	}
-	deleteScopedGen(s.genSentScopedV4, &s.genSentScopedByTupleV4, key, skey)
-	gen := s.nextInstallGen()
-	if hook := s.testAfterDeleteGen; hook != nil {
-		hook()
-	}
-	return gen
+	return takeDeleteGenScoped(s, scopedKeyOf(domain, key), key,
+		&s.genSentScopedV4, &s.genSentScopedByTupleV4, &s.genSentOverflowScopedV4)
 }
 
 // takeDeleteGenScopedV6 is the IPv6 twin of takeDeleteGenScopedV4.
 func (s *SessionSync) takeDeleteGenScopedV6(domain uint32, key dataplane.SessionKeyV6) uint64 {
+	return takeDeleteGenScoped(s, scopedKeyOfV6(domain, key), key,
+		&s.genSentScopedV6, &s.genSentScopedByTupleV6, &s.genSentOverflowScopedV6)
+}
+
+func takeDeleteGenScoped[K comparable, SK comparable](
+	s *SessionSync,
+	skey SK,
+	key K,
+	genSentScoped *map[SK]uint64,
+	scopedIx *scopedTupleIndex[K, SK],
+	overflowScoped *bool,
+) uint64 {
 	if hook := s.testBeforeDeleteGen; hook != nil {
 		hook()
 	}
@@ -1026,14 +1218,13 @@ func (s *SessionSync) takeDeleteGenScopedV6(domain uint32, key dataplane.Session
 	defer s.bulkSnapshotGenMu.Unlock()
 	s.genSentMu.Lock()
 	defer s.genSentMu.Unlock()
-	skey := scopedDeleteKeyV6{Domain: domain, Key: key}
-	if _, ok := s.genSentScopedV6[skey]; !ok {
-		if s.genSentOverflowScopedV6 {
-			return s.nextInstallGen()
+	if _, ok := (*genSentScoped)[skey]; !ok {
+		if *overflowScoped {
+			return s.nextInstallGen() // #9719: see takeDeleteGenV4.
 		}
 		return 0
 	}
-	deleteScopedGen(s.genSentScopedV6, &s.genSentScopedByTupleV6, key, skey)
+	deleteScopedGen(*genSentScoped, scopedIx, key, skey)
 	gen := s.nextInstallGen()
 	if hook := s.testAfterDeleteGen; hook != nil {
 		hook()
@@ -1085,29 +1276,13 @@ func (s *SessionSync) takeDeleteGenScopedV6(domain uint32, key dataplane.Session
 func (s *SessionSync) installGenGuardV4(key dataplane.SessionKey, incoming uint64) (record uint64, apply bool) {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	stored, ok := s.recvGenV4[key]
-	if ok && stored != 0 && incoming != 0 && incoming < stored {
-		return 0, false
-	}
-	if incoming == 0 {
-		// Legacy / unknown install: apply but keep the stored generation
-		// (do not roll it back to 0).
-		return stored, true
-	}
-	return incoming, true
+	return installGenGuardCore(s.recvGenV4, key, incoming)
 }
 
 func (s *SessionSync) installGenGuardV6(key dataplane.SessionKeyV6, incoming uint64) (record uint64, apply bool) {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	stored, ok := s.recvGenV6[key]
-	if ok && stored != 0 && incoming != 0 && incoming < stored {
-		return 0, false
-	}
-	if incoming == 0 {
-		return stored, true
-	}
-	return incoming, true
+	return installGenGuardCore(s.recvGenV6, key, incoming)
 }
 
 // installGenGuardScopedV4 is the scoped-space half of installGenGuardV4
@@ -1120,28 +1295,14 @@ func (s *SessionSync) installGenGuardV6(key dataplane.SessionKeyV6, incoming uin
 func (s *SessionSync) installGenGuardScopedV4(domain uint32, key dataplane.SessionKey, incoming uint64) (record uint64, apply bool) {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	stored, ok := s.recvGenScopedV4[scopedDeleteKeyV4{Domain: domain, Key: key}]
-	if ok && stored != 0 && incoming != 0 && incoming < stored {
-		return 0, false
-	}
-	if incoming == 0 {
-		return stored, true
-	}
-	return incoming, true
+	return installGenGuardCore(s.recvGenScopedV4, scopedDeleteKeyV4{Domain: domain, Key: key}, incoming)
 }
 
 // installGenGuardScopedV6 is the IPv6 twin of installGenGuardScopedV4.
 func (s *SessionSync) installGenGuardScopedV6(domain uint32, key dataplane.SessionKeyV6, incoming uint64) (record uint64, apply bool) {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	stored, ok := s.recvGenScopedV6[scopedDeleteKeyV6{Domain: domain, Key: key}]
-	if ok && stored != 0 && incoming != 0 && incoming < stored {
-		return 0, false
-	}
-	if incoming == 0 {
-		return stored, true
-	}
-	return incoming, true
+	return installGenGuardCore(s.recvGenScopedV6, scopedDeleteKeyV6{Domain: domain, Key: key}, incoming)
 }
 
 // recordInstalledGenScopedV4 records a live install into the scoped space
@@ -1150,104 +1311,33 @@ func (s *SessionSync) installGenGuardScopedV6(domain uint32, key dataplane.Sessi
 // forgotten, mirroring the bare twin) so later scoped deletes order
 // against the install instead of the stale tombstone.
 func (s *SessionSync) recordInstalledGenScopedV4(domain uint32, key dataplane.SessionKey, gen uint64) {
-	if gen == 0 {
-		return
-	}
 	s.recvGenMu.Lock()
-	skey := scopedDeleteKeyV4{Domain: domain, Key: key}
-	if s.recvGenScopedV4 == nil {
-		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
-	}
-	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		s.recvTombScopedV4.forget(skey)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	recordInstalledGenScopedCore(s, &s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4,
+		func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key },
+		scopedDeleteKeyV4{Domain: domain, Key: key}, gen)
 	s.recvGenMu.Unlock()
 }
 
 // recordInstalledGenScopedV6 is the IPv6 twin of recordInstalledGenScopedV4.
 func (s *SessionSync) recordInstalledGenScopedV6(domain uint32, key dataplane.SessionKeyV6, gen uint64) {
-	if gen == 0 {
-		return
-	}
 	s.recvGenMu.Lock()
-	skey := scopedDeleteKeyV6{Domain: domain, Key: key}
-	if s.recvGenScopedV6 == nil {
-		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
-	}
-	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		s.recvTombScopedV6.forget(skey)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	recordInstalledGenScopedCore(s, &s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6,
+		func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key },
+		scopedDeleteKeyV6{Domain: domain, Key: key}, gen)
 	s.recvGenMu.Unlock()
 }
 
 // recordInstalledGenV4 stores the per-key generation after a successful
 // install-apply, bounded by the effective receiver cap.
 func (s *SessionSync) recordInstalledGenV4(key dataplane.SessionKey, gen uint64) {
-	if gen == 0 {
-		return
-	}
 	s.recvGenMu.Lock()
-	if s.recvGenV4 == nil {
-		s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
-	}
-	// #9719: a new key at the cap first evicts the oldest tombstone, so churn
-	// cannot starve live keys of their ordering guard.
-	stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		// The key is live again; a tombstone it held is superseded by this
-		// generation, which the install guard already required to be >= it.
-		s.recvTombV4.forget(key)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	recordInstalledGenCore(s, &s.recvGenV4, &s.recvTombV4, key, gen)
 	s.recvGenMu.Unlock()
 }
 
 func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint64) {
-	if gen == 0 {
-		return
-	}
 	s.recvGenMu.Lock()
-	if s.recvGenV6 == nil {
-		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
-	}
-	// #9719: see the v4 twin.
-	stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		s.recvTombV6.forget(key)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	recordInstalledGenCore(s, &s.recvGenV6, &s.recvTombV6, key, gen)
 	s.recvGenMu.Unlock()
 }
 
@@ -1278,174 +1368,40 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 // The oldest tombstone is now evicted to make room (genTombstoneOrder); a live
 // entry never is.
 
-// tombstoneBareLocked records a bare tombstone at gen (or evicts on gen-0),
-// mirroring deleteGenGuardV4's record half without its refusal check.
-// Caller holds recvGenMu. #14358 cross-space coupling.
 func (s *SessionSync) tombstoneBareLocked(key dataplane.SessionKey, gen uint64) {
-	if gen == 0 {
-		delete(s.recvGenV4, key)
-		s.recvTombV4.forget(key)
-		return
-	}
-	if s.recvGenV4 == nil {
-		s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
-	}
-	stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		s.recvTombV4.mark(key)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	tombstoneBareCore(s, &s.recvGenV4, &s.recvTombV4, key, gen)
 }
 
 // tombstoneBareLockedV6 is the IPv6 twin of tombstoneBareLocked.
 func (s *SessionSync) tombstoneBareLockedV6(key dataplane.SessionKeyV6, gen uint64) {
-	if gen == 0 {
-		delete(s.recvGenV6, key)
-		s.recvTombV6.forget(key)
-		return
-	}
-	if s.recvGenV6 == nil {
-		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
-	}
-	stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		s.recvTombV6.mark(key)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	tombstoneBareCore(s, &s.recvGenV6, &s.recvTombV6, key, gen)
 }
 
 // tombstoneScopedLocked records a scoped tombstone (or evicts on gen-0)
 // without a refusal check. Caller holds recvGenMu.
 func (s *SessionSync) tombstoneScopedLocked(skey scopedDeleteKeyV4, gen uint64) {
-	if gen == 0 {
-		deleteScopedGen(s.recvGenScopedV4, &s.recvGenScopedByTupleV4, skey.Key, skey)
-		s.recvTombScopedV4.forget(skey)
-		return
-	}
-	if s.recvGenScopedV4 == nil {
-		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
-	}
-	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		s.recvTombScopedV4.mark(skey)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	tombstoneScopedCore(s, &s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4,
+		func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen)
 }
 
 // tombstoneScopedLockedV6 is the IPv6 twin of tombstoneScopedLocked.
 func (s *SessionSync) tombstoneScopedLockedV6(skey scopedDeleteKeyV6, gen uint64) {
-	if gen == 0 {
-		deleteScopedGen(s.recvGenScopedV6, &s.recvGenScopedByTupleV6, skey.Key, skey)
-		s.recvTombScopedV6.forget(skey)
-		return
-	}
-	if s.recvGenScopedV6 == nil {
-		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
-	}
-	stored, evicted := putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
-	if !stored && !evicted && s.growRecvCap() {
-		stored, evicted = putScopedGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen, s.recvCap())
-	}
-	if evicted {
-		s.stats.GenTombstonesEvicted.Add(1)
-	}
-	if stored {
-		s.recvTombScopedV6.mark(skey)
-	} else {
-		s.stats.GenMapOverflow.Add(1)
-	}
+	tombstoneScopedCore(s, &s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6,
+		func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen)
 }
 
 func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint64) bool {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	stored := s.recvGenV4[key]
-	if stored != 0 && deleteGen != 0 && deleteGen < stored {
-		return false
-	}
-	// #14358: a scoped tombstone for this tuple also orders bare deletes
-	// (a bare delete names no domain); live scoped entries of colliding
-	// tenants never refuse it.
-	for _, skey := range s.recvGenScopedByTupleV4.keys(key) {
-		if _, isTomb := s.recvTombScopedV4.elems[skey]; !isTomb {
-			continue
-		}
-		if tg := s.recvGenScopedV4[skey]; tg != 0 && deleteGen != 0 && deleteGen < tg {
-			return false
-		}
-	}
-	if deleteGen != 0 {
-		s.tombstoneBareLocked(key, deleteGen)
-		for _, skey := range s.recvGenScopedByTupleV4.keys(key) {
-			if s.recvGenScopedV4[skey] > deleteGen {
-				continue
-			}
-			s.tombstoneScopedLocked(skey, deleteGen)
-		}
-	} else {
-		delete(s.recvGenV4, key)
-		s.recvTombV4.forget(key)
-		for _, skey := range s.recvGenScopedByTupleV4.keys(key) {
-			deleteScopedGen(s.recvGenScopedV4, &s.recvGenScopedByTupleV4, key, skey)
-			s.recvTombScopedV4.forget(skey)
-		}
-	}
-	return true
+	return deleteGenGuardCore(s, &s.recvGenV4, &s.recvTombV4, &s.recvGenScopedV4, &s.recvTombScopedV4,
+		&s.recvGenScopedByTupleV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key, deleteGen)
 }
 
 func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uint64) bool {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	stored := s.recvGenV6[key]
-	if stored != 0 && deleteGen != 0 && deleteGen < stored {
-		return false
-	}
-	for _, skey := range s.recvGenScopedByTupleV6.keys(key) {
-		if _, isTomb := s.recvTombScopedV6.elems[skey]; !isTomb {
-			continue
-		}
-		if tg := s.recvGenScopedV6[skey]; tg != 0 && deleteGen != 0 && deleteGen < tg {
-			return false
-		}
-	}
-	if deleteGen != 0 {
-		s.tombstoneBareLockedV6(key, deleteGen)
-		for _, skey := range s.recvGenScopedByTupleV6.keys(key) {
-			if s.recvGenScopedV6[skey] > deleteGen {
-				continue
-			}
-			s.tombstoneScopedLockedV6(skey, deleteGen)
-		}
-	} else {
-		delete(s.recvGenV6, key)
-		s.recvTombV6.forget(key)
-		for _, skey := range s.recvGenScopedByTupleV6.keys(key) {
-			deleteScopedGen(s.recvGenScopedV6, &s.recvGenScopedByTupleV6, key, skey)
-			s.recvTombScopedV6.forget(skey)
-		}
-	}
-	return true
+	return deleteGenGuardCore(s, &s.recvGenV6, &s.recvTombV6, &s.recvGenScopedV6, &s.recvTombScopedV6,
+		&s.recvGenScopedByTupleV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key, deleteGen)
 }
 
 // deleteGenGuardScopedV4 is the receiver-side reorder guard for scoped
@@ -1463,54 +1419,18 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 func (s *SessionSync) deleteGenGuardScopedV4(domain uint32, key dataplane.SessionKey, deleteGen uint64) bool {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	skey := scopedDeleteKeyV4{Domain: domain, Key: key}
-	stored := s.recvGenScopedV4[skey]
-	if stored != 0 && deleteGen != 0 && deleteGen < stored {
-		return false
-	}
-	if bare := s.recvGenV4[key]; bare != 0 && deleteGen != 0 && deleteGen < bare {
-		return false
-	}
-	if deleteGen != 0 {
-		s.tombstoneScopedLocked(skey, deleteGen)
-		// Raise-only: a colliding domain's scoped delete must not lower
-		// (or create ordering against) a newer bare high-water.
-		if cur := s.recvGenV4[key]; cur != 0 && cur <= deleteGen {
-			s.tombstoneBareLocked(key, deleteGen)
-		}
-	} else {
-		deleteScopedGen(s.recvGenScopedV4, &s.recvGenScopedByTupleV4, key, skey)
-		s.recvTombScopedV4.forget(skey)
-		delete(s.recvGenV4, key)
-		s.recvTombV4.forget(key)
-	}
-	return true
+	return deleteGenGuardScopedCore(s, &s.recvGenScopedV4, &s.recvTombScopedV4, &s.recvGenScopedByTupleV4,
+		func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key },
+		&s.recvGenV4, &s.recvTombV4, scopedDeleteKeyV4{Domain: domain, Key: key}, key, deleteGen)
 }
 
 // deleteGenGuardScopedV6 is the IPv6 twin of deleteGenGuardScopedV4.
 func (s *SessionSync) deleteGenGuardScopedV6(domain uint32, key dataplane.SessionKeyV6, deleteGen uint64) bool {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
-	skey := scopedDeleteKeyV6{Domain: domain, Key: key}
-	stored := s.recvGenScopedV6[skey]
-	if stored != 0 && deleteGen != 0 && deleteGen < stored {
-		return false
-	}
-	if bare := s.recvGenV6[key]; bare != 0 && deleteGen != 0 && deleteGen < bare {
-		return false
-	}
-	if deleteGen != 0 {
-		s.tombstoneScopedLockedV6(skey, deleteGen)
-		if cur := s.recvGenV6[key]; cur != 0 && cur <= deleteGen {
-			s.tombstoneBareLockedV6(key, deleteGen)
-		}
-	} else {
-		deleteScopedGen(s.recvGenScopedV6, &s.recvGenScopedByTupleV6, key, skey)
-		s.recvTombScopedV6.forget(skey)
-		delete(s.recvGenV6, key)
-		s.recvTombV6.forget(key)
-	}
-	return true
+	return deleteGenGuardScopedCore(s, &s.recvGenScopedV6, &s.recvTombScopedV6, &s.recvGenScopedByTupleV6,
+		func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key },
+		&s.recvGenV6, &s.recvTombV6, scopedDeleteKeyV6{Domain: domain, Key: key}, key, deleteGen)
 }
 
 // resetRecvSessionGen resets only receiver-side session generation maps. A
@@ -1801,27 +1721,30 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 // per-key recv-gen high-water must stay where it was so the peer's next
 // re-sync of this key is admitted rather than refused as stale.
 func (s *SessionSync) rollBackStaleConfigInstallV4(key dataplane.SessionKey, epoch uint64) {
-	s.stats.SessionsStaleConfigIgnored.Add(1)
-	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, false); err != nil {
-		slog.Warn("cluster sync: could not roll back a v4 install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
-			"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load(), "err", err)
-		return
-	}
-	slog.Debug("cluster sync: rolled back a v4 install whose config epoch went stale during the dataplane write (#6368)",
-		"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
+	rollBackStaleConfigInstall(s, epoch, "v4",
+		func() error { return s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, false) })
 }
 
 // rollBackStaleConfigInstallV6 is the v6 twin of
 // rollBackStaleConfigInstallV4; see there for why the check is re-run after
 // the write instead of being serialized with it.
 func (s *SessionSync) rollBackStaleConfigInstallV6(key dataplane.SessionKeyV6, epoch uint64) {
+	rollBackStaleConfigInstall(s, epoch, "v6",
+		func() error { return s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, false) })
+}
+
+// rollBackStaleConfigInstall is the shared rollback behind the V4/V6
+// wrappers (#16173): the store delete itself stays a family call passed
+// by the wrapper (SessionKey vs SessionKeyV6 stores are genuinely
+// different); only the counting/logging is shared.
+func rollBackStaleConfigInstall(s *SessionSync, epoch uint64, af string, del func() error) {
 	s.stats.SessionsStaleConfigIgnored.Add(1)
-	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, false); err != nil {
-		slog.Warn("cluster sync: could not roll back a v6 install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
+	if err := del(); err != nil {
+		slog.Warn("cluster sync: could not roll back a "+af+" install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
 			"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load(), "err", err)
 		return
 	}
-	slog.Debug("cluster sync: rolled back a v6 install whose config epoch went stale during the dataplane write (#6368)",
+	slog.Debug("cluster sync: rolled back a "+af+" install whose config epoch went stale during the dataplane write (#6368)",
 		"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
 }
 
@@ -1875,51 +1798,19 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		stampPolicyIdentityLocked(s.policyIdentityRecvV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
 	}
 	s.recvGenMu.Unlock()
-	if err := s.sessions.PutClusterSyncedV4(key, val); err == nil {
-		// #6368: the check above and this write are not atomic. Re-read the
-		// threshold now — a config apply that raised the fence and ran its
-		// sweep while this install was in flight must not leave the session
-		// behind it.
+	err := s.sessions.PutClusterSyncedV4(key, val)
+	if err == nil {
+		// #6368: re-read the threshold after the write (see the shared
+		// core's contract via logInstallOutcome's rollback arm).
 		if s.configEpochStale(val.ConfigEpoch) {
 			s.rollBackStaleConfigInstallV4(key, val.ConfigEpoch)
 			return false
 		}
 		s.recordInstalledGenV4(key, record)
 		s.recordInstalledGenScopedV4(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
-		s.stats.SessionsInstalled.Add(1)
-		s.noteBulkInstallOutcomeV4(key, false)
-		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, nil)
-		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
-			s.OnForwardSessionInstalled()
-		}
-		return true
-	} else if errors.Is(err, dataplane.ErrSyncedImportRefused) {
-		// #6785: the helper REFUSED this import on semantic grounds and Go has
-		// already rolled its BPF mirror row back, so there is no split truth and
-		// no sick socket — do not bump Errors or fire the mirror-failure warning,
-		// which would make an oversubscribed-but-healthy standby read as a flaky
-		// mirror. Count it as its own debt instead: the peer still believes it
-		// synced a session this node does not hold.
-		s.stats.ImportsRefusedByHelper.Add(1)
-		slog.Debug("cluster sync: helper refused a synced-session import; the "+
-			"local mirror was rolled back and the peer holds a session this node does not",
-			"af", "v4", "err", err)
-		s.noteBulkInstallOutcomeV4(key, false)
-	} else if definitiveBulkInstallOutcome(err) {
-		// A committed worker-repair result or deterministic helper rejection
-		// cannot be repaired by re-sending the identical row. Keep it out of
-		// transient mirror-health state and clear this key's retry marker.
-		if errors.Is(err, dataplane.ErrSyncedImportRejected) {
-			s.stats.ImportsRejectedByHelper.Add(1)
-		}
-		slog.Debug("cluster sync: helper returned a committed or deterministic synced-session outcome",
-			"af", "v4", "err", err)
-		s.noteBulkInstallOutcomeV4(key, false)
-	} else {
-		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, err)
-		s.noteBulkInstallOutcomeV4(key, true)
+		return logInstallOutcome(s, "v4", nil, val.IsReverse, &s.bulkInstallFailedV4, key, &s.sessionMirrorWarnedV4)
 	}
-	return false
+	return logInstallOutcome(s, "v4", err, val.IsReverse, &s.bulkInstallFailedV4, key, &s.sessionMirrorWarnedV4)
 }
 
 // installClusterSyncedV6 applies a received v6 install through the ordering
@@ -1969,46 +1860,59 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		stampPolicyIdentityLocked(s.policyIdentityRecvV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
 	}
 	s.recvGenMu.Unlock()
-	if err := s.sessions.PutClusterSyncedV6(key, val); err == nil {
-		// #6368: see the v4 twin — re-read the threshold after the write so a
-		// config apply that completed its sweep during this install cannot
-		// leave the session behind it.
+	err := s.sessions.PutClusterSyncedV6(key, val)
+	if err == nil {
+		// #6368: see the v4 twin — re-read the threshold after the write.
 		if s.configEpochStale(val.ConfigEpoch) {
 			s.rollBackStaleConfigInstallV6(key, val.ConfigEpoch)
 			return false
 		}
 		s.recordInstalledGenV6(key, record)
 		s.recordInstalledGenScopedV6(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
+		return logInstallOutcome(s, "v6", nil, val.IsReverse, &s.bulkInstallFailedV6, key, &s.sessionMirrorWarnedV6)
+	}
+	return logInstallOutcome(s, "v6", err, val.IsReverse, &s.bulkInstallFailedV6, key, &s.sessionMirrorWarnedV6)
+}
+
+// logInstallOutcome is the shared post-write outcome tail behind
+// installClusterSyncedV4/V6 (#16173): on success it counts the install,
+// clears the bulk-retry debt, notes mirror health and fires the
+// forward-installed hook; on the helper's semantic refusal (#6785) or a
+// definitive outcome it counts the dedicated debt without poisoning
+// mirror health; otherwise it records the transient mirror failure.
+// The dataplane write itself stays in the family wrappers above —
+// PutClusterSyncedV4/V6 are genuinely different stores.
+func logInstallOutcome[K comparable](s *SessionSync, af string, err error, isReverse uint8, bulkFailed *map[K]struct{}, key K, warned *atomic.Bool) bool {
+	if err == nil {
 		s.stats.SessionsInstalled.Add(1)
-		s.noteBulkInstallOutcomeV6(key, false)
-		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, nil)
-		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, false)
+		s.noteHelperMirrorResult(af, warned, nil)
+		if isReverse == 0 && s.OnForwardSessionInstalled != nil {
 			s.OnForwardSessionInstalled()
 		}
 		return true
-	} else if errors.Is(err, dataplane.ErrSyncedImportRefused) {
-		// #6785: the helper REFUSED this import on semantic grounds and Go has
-		// already rolled its BPF mirror row back, so there is no split truth and
-		// no sick socket — do not bump Errors or fire the mirror-failure warning,
-		// which would make an oversubscribed-but-healthy standby read as a flaky
-		// mirror. Count it as its own debt instead: the peer still believes it
-		// synced a session this node does not hold.
+	}
+	if errors.Is(err, dataplane.ErrSyncedImportRefused) {
+		// #6785: the helper REFUSED this import on semantic grounds and
+		// Go has already rolled its BPF mirror row back, so there is no
+		// split truth and no sick socket — count it as its own debt.
 		s.stats.ImportsRefusedByHelper.Add(1)
 		slog.Debug("cluster sync: helper refused a synced-session import; the "+
 			"local mirror was rolled back and the peer holds a session this node does not",
-			"af", "v6", "err", err)
-		s.noteBulkInstallOutcomeV6(key, false)
+			"af", af, "err", err)
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, false)
 	} else if definitiveBulkInstallOutcome(err) {
-		// IPv6 twin of the v4 committed/deterministic outcome handling.
+		// A committed worker-repair result or deterministic helper
+		// rejection cannot be repaired by re-sending the identical row.
 		if errors.Is(err, dataplane.ErrSyncedImportRejected) {
 			s.stats.ImportsRejectedByHelper.Add(1)
 		}
 		slog.Debug("cluster sync: helper returned a committed or deterministic synced-session outcome",
-			"af", "v6", "err", err)
-		s.noteBulkInstallOutcomeV6(key, false)
+			"af", af, "err", err)
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, false)
 	} else {
-		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, err)
-		s.noteBulkInstallOutcomeV6(key, true)
+		s.noteHelperMirrorResult(af, warned, err)
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, true)
 	}
 	return false
 }
