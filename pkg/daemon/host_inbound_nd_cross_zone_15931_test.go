@@ -92,7 +92,7 @@ func TestNDExceptColdBootFencePreservesB15931(t *testing.T) {
 			t.Errorf("fence ND admit not B-scoped: %q\n%s", l, fence)
 		}
 	}
-	gap := buildHostInboundGapFencePayload(views, []string{"2001:db8:b::9"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil)
+	gap := buildHostInboundGapFencePayload(views, nil, []string{"2001:db8:b::9"}, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil)
 	if len(ndLines15931(gap)) == 0 {
 		t.Fatalf("gap fence dropped B's ND admission:\n%s", gap)
 	}
@@ -260,7 +260,7 @@ func TestNDAnyServiceFenceRetainsUnicast15931(t *testing.T) {
 	// exist (destination 2001:db8:17::1 in the union), none for ge-a.
 	for name, fence := range map[string]string{
 		"cold-boot": buildHostInboundFencePayload(views, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}),
-		"gap":       buildHostInboundGapFencePayload(views, []string{"2001:db8:17::9"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil),
+		"gap":       buildHostInboundGapFencePayload(views, nil, []string{"2001:db8:17::9"}, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil),
 	} {
 		found := false
 		for _, l := range strings.Split(fence, "\n") {
