@@ -136,6 +136,17 @@ xpf (0.0.0) unstable; urgency=medium
     wildcard), add the DHCP group interface key type, and add enum
     examples to fail-mode and the NTP threshold
     action. No schemaNode field or constructor changes.
+  * Replace the daemon apply pipeline's positional error plumbing with
+    named structs: applyTailReconciles now takes an applyPhaseErrors
+    (Networkd/Dataplane/DHCPServer/IPsec/Iface/RouteLeak/RoutingRule/
+    MgmtRoute/VRF/Fabric/FRR) instead of 11 positional error parameters,
+    and applyDataplaneAndHACore returns an applyCoreResult
+    {Overlay, Phase, Terminal} instead of five values, so a transposition
+    is a compile-visible review diff rather than a clean-compiling swap
+    that mislabels retry debt. applyPhaseErrors.join preserves the exact
+    pre-change errors.Join operand order (observable in commit output),
+    pinned by a sentinel-per-phase test; pure signature change, no phase
+    moves, no behaviour change (#16170).
 
 xpf (0.0.0) unstable; urgency=medium
 

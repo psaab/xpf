@@ -18,6 +18,75 @@ import (
 	"github.com/psaab/xpf/pkg/vrrp"
 )
 
+// applyPhaseErrors carries the deferred (fail-closed-but-complete) commit
+// errors produced by the independent phases of applyConfigLocked, one named
+// field per phase (#16170). It is the ONLY remnant of the rejected R9
+// applyCtx idea: do not build a second context struct later. Named fields make
+// a transposition a compile-visible review diff instead of a clean-compiling
+// positional swap that mislabels retry debt (the class that forced vrfTermErr
+// to be split out of networkdErr — see applyDataplaneAndHACore). Adding a
+// phase 12 is a one-field edit here plus its join() operand and its
+// assignment site.
+type applyPhaseErrors struct {
+	Networkd    error
+	Dataplane   error
+	DHCPServer  error
+	IPsec       error
+	Iface       error
+	RouteLeak   error
+	RoutingRule error
+	MgmtRoute   error
+	VRF         error
+	Fabric      error
+	FRR         error
+}
+
+// join returns errors.Join of the carried phase errors in exactly today's
+// operand order relative to each other
+// (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947):
+// Networkd, Dataplane, DHCPServer, IPsec, Iface, RouteLeak, RoutingRule,
+// MgmtRoute, VRF, Fabric, FRR — the flat tail order with the tail-local
+// operands (hostInboundErr/lo0Err/dnsErr, the five host-credential errors,
+// vrrpErr) removed. Error-string order is observable in commit output, so
+// this order MUST NOT change; it is pinned by
+// TestApplyPhaseErrorsSentinelPerPhase16170.
+func (e applyPhaseErrors) join() error {
+	return errors.Join(e.lead(), e.follow(), e.FRR)
+}
+
+// lead is the operand group that precedes the tail-local errors in the flat
+// tail join: Networkd, Dataplane, DHCPServer (then hostInboundErr, lo0Err,
+// dnsErr and the five host-credential errors, which originate inside
+// applyTailReconciles itself).
+func (e applyPhaseErrors) lead() error {
+	return errors.Join(e.Networkd, e.Dataplane, e.DHCPServer)
+}
+
+// follow is the operand group between the tail-local host-credential errors
+// and the tail-local vrrpErr in the flat tail join: IPsec, Iface, RouteLeak,
+// RoutingRule, MgmtRoute, VRF, Fabric (then vrrpErr, then FRR). errors.Join
+// flattens nested joins, so errors.Join(phase.lead(), <tail locals>,
+// phase.follow(), vrrpErr, phase.FRR) reproduces the pre-struct flat join
+// exactly, in error string and in Is/As traversal alike.
+func (e applyPhaseErrors) follow() error {
+	return errors.Join(e.IPsec, e.Iface, e.RouteLeak, e.RoutingRule, e.MgmtRoute, e.VRF, e.Fabric)
+}
+
+// applyCoreResult bundles the values applyDataplaneAndHACore returns to
+// applyConfigLocked (#16170). Phase holds the deferred errors the tail joins
+// (Networkd/Dataplane from the core itself; VRF holds the #10421 VRF
+// miss-terminator error, kept distinct from Networkd so it is joined into the
+// VRF commit error and #9693 retry debt without being mislabeled as a
+// networkd failure). Terminal is DISTINCT from Phase.Dataplane: a non-nil
+// Terminal (a #2926 context abort or a compileErrorMustAbortApply abort)
+// bails before the routing/service/tail reconciles, while a Phase.Dataplane
+// error is deferred — the OLD policy stays live and the tail MUST still run.
+type applyCoreResult struct {
+	Overlay  []config.RouteOverlayEntry
+	Phase    applyPhaseErrors
+	Terminal error
+}
+
 // applyTailReconciles runs steps 8–21 of applyConfigLocked — the tail of the
 // commit/apply pipeline that dispatches to independent subsystems after the
 // ordering-entangled head (VRF/tunnel/IPVLAN/dataplane/RETH-MAC/networkd/FRR,
@@ -31,22 +100,21 @@ import (
 //
 // Error-join contract: the deferred reconcile errors accumulate across the
 // whole apply body but are joined only at this tail (fail-closed — every step
-// still runs). networkdErr/applyErr/dhcpServerErr/ipsecErr/ifaceErr originate in
-// the head and are threaded in as parameters (applyErr is the #5679 ordinary
-// non-abort dataplane-apply failure that must fail the commit while the OLD
-// policy stays live); routeLeakErr is the #5696 route-leak snapshot
-// republish/FIB-bump failure (also head-produced, threaded in like ifaceErr);
-// vrrpErr originates in step 8 below when runtime identity validation rejects
-// the desired set (#5083); vrfErr is the #5700 VRF-device-setup (ReconcileVRFs)
-// failure and routingRuleErr/mgmtRouteErr are threaded from the caller;
-// frrErr is the #9947 F-007 FRR reload non-convergence (hard or transient
-// degraded) threaded from the caller — never latched as routing debt (#9693);
-// lo0Err/hostInboundErr originate in step 9.5, dnsErr in step 9 (#6792), and
-// the five host-credential errors (loginErr/sudoersErr/absentUsersErr/
-// sshConfigErr/rootAuthErr) in steps 11–13 (#6790). The returned errors.Join
-// preserves the explicit operand order
-// (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947).
-func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, dhcpServerErr, ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr error, fabricErr error, frrErr error) error {
+// still runs). The head-produced errors arrive in the phase parameter's named
+// fields (#16170; phase.Dataplane is the #5679 ordinary non-abort
+// dataplane-apply failure that must fail the commit while the OLD policy
+// stays live; phase.RouteLeak is the #5696 route-leak snapshot
+// republish/FIB-bump failure; phase.VRF is the #5700 VRF-device-setup
+// (ReconcileVRFs) failure; phase.FRR is the #9947 F-007 FRR reload
+// non-convergence (hard or transient degraded) — never latched as routing
+// debt (#9693)); vrrpErr originates in step 8 below when runtime identity
+// validation rejects the desired set (#5083); lo0Err/hostInboundErr originate
+// in step 9.5, dnsErr in step 9 (#6792), and the five host-credential errors
+// (loginErr/sudoersErr/absentUsersErr/sshConfigErr/rootAuthErr) in steps
+// 11–13 (#6790). The returned errors.Join preserves the explicit operand
+// order (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947) —
+// see applyPhaseErrors.join.
+func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors) error {
 	// 8. Apply VRRP config — merge user VRRP + RETH VRRP instances
 	var vrrpErr error
 	vrrpInstances := vrrp.CollectInstances(cfg)
@@ -467,9 +535,9 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 	// sshd / root-auth), whose failures were discarded here — a commit that did
 	// not actually revoke a removed operator's password or authorized_keys is
 	// not a successful commit. All are joined so none masks the other.
-	return errors.Join(networkdErr, applyErr, dhcpServerErr, hostInboundErr, lo0Err, dnsErr,
+	return errors.Join(phase.lead(), hostInboundErr, lo0Err, dnsErr,
 		loginErr, sudoersErr, absentUsersErr, sshConfigErr, rootAuthErr,
-		ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr, fabricErr, vrrpErr, frrErr)
+		phase.follow(), vrrpErr, phase.FRR)
 }
 
 // reconcileClusterTransportBinding compares the live transport epoch with

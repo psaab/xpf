@@ -673,7 +673,8 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		}
 	}()
 	d.policyActivationSecs = daemonMonotonicSeconds()
-	commitOverlay, networkdErr, applyErr, vrfTermErr, err := d.applyDataplaneAndHACore(ctx, cfg)
+	core := d.applyDataplaneAndHACore(ctx, cfg)
+	commitOverlay, applyErr, vrfTermErr, err := core.Overlay, core.Phase.Dataplane, core.Phase.VRF, core.Terminal
 	if err != nil {
 		// #5643 (M35): applyDataplaneAndHACore bailed at a #2926 ctx-cancellation
 		// boundary (C2 before the dataplane apply, or C3 after it) because the
@@ -778,13 +779,13 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// (it threads applyResult / rethMACPending / the deferred errors).
 	// The tail is independent per-subsystem dispatch reading only cfg (+
 	// nil-guarded managers), so grouping it here is a behavior-preserving
-	// mechanical move. The head-produced deferred errors
-	// (networkdErr/applyErr/dhcpServerErr/ipsecErr/ifaceErr) are threaded
-	// in — applyErr is the #5679 ordinary (non-abort) dataplane-apply failure
-	// that must fail the commit without disarming/aborting; routeLeakErr is the
-	// #5696 route-leak republish/FIB-bump failure; routingRuleErr is the #5844
+	// mechanical move. The head-produced deferred errors are carried in the
+	// applyPhaseErrors named fields (#16170) — Dataplane is the #5679
+	// ordinary (non-abort) dataplane-apply failure that must fail the commit
+	// without disarming/aborting; RouteLeak is the #5696 route-leak
+	// republish/FIB-bump failure; RoutingRule is the #5844
 	// next-table/rib-group/PBR ip-rule reconcile failure (a partial kernel
-	// policy-routing clear/add); frrErr is the #9947 F-007 FRR reload
+	// policy-routing clear/add); FRR is the #9947 F-007 FRR reload
 	// non-convergence (hard or transient degraded — stale config may still
 	// be installed while the in-manager retry converges it); the helper
 	// creates lo0Err/hostInboundErr and returns the joined errors.
@@ -805,7 +806,19 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		slog.Warn("web-management listener re-reconcile after networkd did not converge; retrying via re-assert owner",
 			"err", err)
 	}
-	return d.applyTailReconciles(cfg, networkdErr, applyErr, dhcpServerErr, ipsecErr, ifaceErr, routeLeakErr, routingRuleErr, mgmtRouteErr, vrfErr, fabricErr, frrErr)
+	return d.applyTailReconciles(cfg, applyPhaseErrors{
+		Networkd:    core.Phase.Networkd,
+		Dataplane:   applyErr,
+		DHCPServer:  dhcpServerErr,
+		IPsec:       ipsecErr,
+		Iface:       ifaceErr,
+		RouteLeak:   routeLeakErr,
+		RoutingRule: routingRuleErr,
+		MgmtRoute:   mgmtRouteErr,
+		VRF:         vrfErr,
+		Fabric:      fabricErr,
+		FRR:         frrErr,
+	})
 }
 
 // applyHostAuthorizationCloseout runs ONLY the security-critical host-

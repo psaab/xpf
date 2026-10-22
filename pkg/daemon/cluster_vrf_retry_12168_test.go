@@ -79,7 +79,7 @@ func TestVRFMembershipConvergenceRestartsClusterComms12168(t *testing.T) {
 	// Desired membership can publish before the authoritative post-networkd
 	// bind succeeds. That is not kernel evidence and must leave comms intact.
 	d.publishMgmtVRFIfaces(map[string]bool{"em0": true})
-	_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, applyPhaseErrors{})
 	if starts != 0 || generation() != before {
 		t.Fatalf("desired-only membership restarted comms: starts=%d generation=%d->%d",
 			starts, before, generation())
@@ -91,7 +91,7 @@ func TestVRFMembershipConvergenceRestartsClusterComms12168(t *testing.T) {
 	// Genuine kernel convergence, without changing the published set, is the
 	// transition that must restart the unbound comms epoch.
 	control.Attrs().MasterIndex = vrf.Attrs().Index
-	_ = d.applyTailReconciles(cfg, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	_ = d.applyTailReconciles(cfg, applyPhaseErrors{})
 	if starts != 1 {
 		t.Fatalf("kernel membership convergence started comms %d times, want 1 restart", starts)
 	}
