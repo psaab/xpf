@@ -913,9 +913,15 @@ fi
 # #16288: the run path must refuse the same flag-token env, and must refuse
 # it BEFORE the gate runs — an empty Makefile expansion once made
 # `--env --cluster ...` record env="--cluster" silently.
+# Hermetic even if that guard regresses: stub `incus` (the cluster-mode
+# attestation transport, via deploy_running_xpfd_sha256) BEFORE the run, so
+# a regressed guard reaches this recording stub — never the real Incus
+# binary / shared cluster. Same function-shadowing mechanism as §10 below.
 rm -rf "$LEDGER"
 ran_marker="$WORK/ran-flag-env.marker"
-rm -f "$ran_marker"
+incus_marker="$WORK/incus-flag-env.marker"
+rm -f "$ran_marker" "$incus_marker"
+incus() { touch "$incus_marker"; return 1; }
 printf '#!/usr/bin/env bash\ntouch %q\necho "2 passed, 0 failed"\n' "$ran_marker" >"$WORK/fake-flag-env.sh"
 chmod +x "$WORK/fake-flag-env.sh"
 if harness_result_run --ledger "$LEDGER" --cluster --env --cluster \
@@ -923,21 +929,24 @@ if harness_result_run --ledger "$LEDGER" --cluster --env --cluster \
 	bad "run wrapper ACCEPTED --env --cluster (flag token) instead of refusing it (#16288)"
 elif [[ -e "$ran_marker" ]]; then
 	bad "run wrapper refused flag-token env only AFTER running the gate (#16288)"
+elif [[ -e "$incus_marker" ]]; then
+	bad "run wrapper reached the (stubbed) Incus transport for a flag-token env (#16288)"
 elif [[ "$(ledger_rows)" != "0" ]]; then
 	bad "run wrapper wrote a row for a flag-token env (#16288)"
 else
-	ok "run wrapper refuses --env --cluster before running the gate, writes nothing (#16288)"
+	ok "run wrapper refuses --env --cluster before running the gate or Incus, writes nothing (#16288)"
 fi
 # #16288: Makefile must compute HARNESS_ENV from the FINAL CLUSTER_ENV for
 # every origin. The recipes are the ground truth (a make -pn database line
 # would pass vacuously if the recipes stopped using $(HARNESS_ENV)).
+# CLUSTER_ENV cases use TRUE make command-line form (`make CLUSTER_ENV=...`,
+# origin `command line` — the issue's tcp/udp workflow), not an environment
+# assignment prefix to make (origin `environment`), which would not exercise
+# the reported path. Only BPFRX_CLUSTER_ENV is passed via the environment,
+# which is its real origin.
 repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
-check_harness_env() {
-	local label="$1" expect="$2"
-	shift 2
-	local recipe env_token
-	recipe=$(env -u CLUSTER_ENV -u BPFRX_CLUSTER_ENV -u HARNESS_ENV "$@" \
-		make --no-print-directory -C "$repo_root" -n test-failover 2>/dev/null)
+_assert_harness_env() {
+	local label="$1" expect="$2" recipe="$3" env_token
 	case "$recipe" in
 	*--env\ "$expect"\ --cluster*) ok "#16288: Makefile $label records --env $expect" ;;
 	*)
@@ -946,11 +955,27 @@ check_harness_env() {
 		;;
 	esac
 }
+check_harness_env() {
+	local label="$1" expect="$2"
+	shift 2
+	local recipe
+	recipe=$(env -u CLUSTER_ENV -u BPFRX_CLUSTER_ENV -u HARNESS_ENV \
+		make --no-print-directory -C "$repo_root" -n "$@" test-failover 2>/dev/null)
+	_assert_harness_env "$label" "$expect" "$recipe"
+}
+check_harness_env_from_env() {
+	local label="$1" expect="$2"
+	shift 2
+	local recipe
+	recipe=$(env -u CLUSTER_ENV -u BPFRX_CLUSTER_ENV -u HARNESS_ENV "$@" \
+		make --no-print-directory -C "$repo_root" -n test-failover 2>/dev/null)
+	_assert_harness_env "$label" "$expect" "$recipe"
+}
 check_harness_env "default" "loss-userspace-cluster"
 check_harness_env "command-line CLUSTER_ENV (tcp)" "tcp-userspace-cluster" CLUSTER_ENV=test/incus/tcp-userspace-cluster.env
 check_harness_env "command-line CLUSTER_ENV (udp)" "udp-userspace-cluster" CLUSTER_ENV=test/incus/udp-userspace-cluster.env
-check_harness_env "empty CLUSTER_ENV" "local-cluster" CLUSTER_ENV=
-check_harness_env "environment BPFRX_CLUSTER_ENV" "custom-cluster" BPFRX_CLUSTER_ENV=test/incus/custom-cluster.env
+check_harness_env "command-line empty CLUSTER_ENV" "local-cluster" CLUSTER_ENV=
+check_harness_env_from_env "environment BPFRX_CLUSTER_ENV" "custom-cluster" BPFRX_CLUSTER_ENV=test/incus/custom-cluster.env
 
 # A row is always ONE physical line, even when the reason contains a newline.
 rm -rf "$LEDGER"
