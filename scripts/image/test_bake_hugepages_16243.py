@@ -123,6 +123,29 @@ class BakeHugepagesTests(unittest.TestCase):
             "full-width digits": "vm.nr_hugepages = １４４０\n",
             "negative": "vm.nr_hugepages = -1440\n",
             "hex below pool": "vm.nr_hugepages = 0x100\n",
+            # Lexical gate: consumers are byte-oriented. NBSP anywhere
+            # (value, key, or before a rescuing line), a Unicode line
+            # separator inside a comment, or any non-ASCII/control byte
+            # must refuse — Python's Unicode strip/splitlines would
+            # otherwise invent an effective reservation.
+            "NBSP before value": "vm.nr_hugepages = \u00a01440\n",
+            "NBSP before key": "\u00a0vm.nr_hugepages = 1440\n",
+            "NBSP rescue after zero":
+                "vm.nr_hugepages = 0\n\u00a0vm.nr_hugepages = 1440\n",
+            "U+2028 inside comment hides assignment":
+                "# copied comment\u2028vm.nr_hugepages = 1440\n",
+            "control byte in file": "vm.nr_hugepages = 1440\x0b\n",
+            # Kernel token length: 21 chars consumed = EINVAL
+            # (proc_get_long TMPBUFLEN=22), even for octal 1440.
+            "21-char zero-padded octal": "vm.nr_hugepages = " + "0" * 17 + "2640\n",
+            # Sibling pool mutator: mempolicy shares the default
+            # hstate pool under CONFIG_NUMA and applies in file order.
+            "trailing mempolicy shrinks pool":
+                "vm.nr_hugepages = 1440\nvm.nr_hugepages_mempolicy = 0\n",
+            "mempolicy before pool still refused":
+                "vm.nr_hugepages_mempolicy = 0\nvm.nr_hugepages = 1440\n",
+            "slash-form mempolicy refused":
+                "vm.nr_hugepages = 1440\nvm/nr_hugepages_mempolicy = 5\n",
         }
         for name, text in cases.items():
             with self.subTest(name=name):
@@ -131,9 +154,18 @@ class BakeHugepagesTests(unittest.TestCase):
 
     def test_hugepages_conf_accepts_effective_pool_despite_noise(self):
         text = ("# vm.nr_hugepages = 0\n"
-                "vm.nr_hugepages_mempolicy = 0\n"
+                "vm.unrelated_knob = 0\n"
                 "vm.nr_hugepages = 2400\n")
         self.assertEqual(bake.hugepages_conf(text), text)
+
+    def test_hugepages_conf_accepts_ascii_crlf_and_spacing(self):
+        # Positive controls for the lexical gate: CRLF line endings,
+        # tabs, and ordinary ASCII spacing are consumer-valid.
+        for text in ("vm.nr_hugepages = 1440\r\n",
+                     "\tvm.nr_hugepages\t=\t1440 \n",
+                     "vm.nr_hugepages = " + "0" * 16 + "2640\n"):  # 20-char octal
+            with self.subTest(text=text):
+                self.assertEqual(bake.hugepages_conf(text), text)
 
     def test_hugepages_conf_accepts_sysctl_normalized_forms(self):
         # sysctl accepts the slash form, the leading '-' (ignore-errors,

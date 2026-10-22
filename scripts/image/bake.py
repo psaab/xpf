@@ -181,17 +181,37 @@ def hugepages_conf(conf_text=None) -> str:
     the one file this guard claims to validate.
     """
     if conf_text is None:
-        with open(HUGEPAGES_CONF_PATH) as f:
-            conf_text = f.read()
-    # Mirror systemd-sysctl's parse_line/apply_all: normalized /proc
-    # path -> value string, or None for a bare negative-match directive
-    # (stored by systemd as NULL and skipped at apply time).
+        with open(HUGEPAGES_CONF_PATH, encoding="ascii",
+                 errors="strict", newline="") as f:
+            try:
+                conf_text = f.read()
+            except (UnicodeDecodeError, UnicodeError):
+                die(f"{HUGEPAGES_CONF_PATH} is not valid ASCII; "
+                    "systemd-sysctl and the kernel parse bytes, and "
+                    "non-ASCII bytes (e.g. a nonbreaking space pasted "
+                    "into a key or value) would be interpreted "
+                    "differently at boot — refusing to bake (#16243)")
+    # Lexical gate (review 16260): the consumers are byte-oriented.
+    # systemd strstrip trims only " \t\n\r", its line reader splits on
+    # LF/CR/NUL (not U+2028 & friends), and the kernel value grammar is
+    # ASCII digits. Python's Unicode strip/splitlines would invent
+    # keys, values, and line boundaries the boot consumer never sees.
+    # So: no non-ASCII bytes anywhere, and no control bytes outside
+    # tab/LF/CR. Ordinary ASCII spacing and CRLF stay valid.
+    for ch in conf_text:
+        if ord(ch) > 0x7F or (ord(ch) < 0x20 and ch not in "\t\n\r"):
+            die(f"{HUGEPAGES_CONF_PATH} contains byte U+{ord(ch):04X} "
+                "outside the ASCII sysctl grammar; refusing to bake a "
+                "file whose boot-time interpretation cannot be "
+                "validated at build time (#16243)")
+
     def normalize(key: str) -> str:
         # sysctl_normalize + parse_file (systemd sysctl-util.c/sysctl.c),
         # in consumer order. parse_file consumes ONE leading '-' itself
-        # (the caller has already removed it), then strstrip, then
+        # (the caller has already removed it), then strstrip (ASCII
+        # " \t\n\r" only — guaranteed by the lexical gate above), then
         # sysctl_normalize:
-        k = key.strip()
+        k = key.strip(" \t\n\r")
         # 1. first-separator rule: swap separators only when the FIRST
         #    separator is a dot.
         first = next((i for i, c in enumerate(k) if c in "/."), None)
@@ -214,8 +234,8 @@ def hugepages_conf(conf_text=None) -> str:
         return "/".join(parts)
 
     entries = {}
-    for line in conf_text.splitlines():
-        stripped = line.strip()
+    for line in conf_text.split("\n"):
+        stripped = line.strip(" \t\n\r")
         if not stripped or stripped.startswith("#") or stripped.startswith(";"):
             continue
         # parse_file: the ignore-failure marker is exactly ONE leading
@@ -230,8 +250,21 @@ def hugepages_conf(conf_text=None) -> str:
                 "pattern; systemd expands it against live /proc at boot, so "
                 "its effect on vm.nr_hugepages cannot be validated at build "
                 "time — refusing to ship it in the hugepage conf (#16243)")
+        if normalized.startswith("vm/nr_hugepages_mempolicy"):
+            # Sibling pool mutator (review 16260): under CONFIG_NUMA
+            # nr_hugepages_mempolicy shares hugetlb_sysctl_handler_common
+            # with obey_mempolicy=true against the SAME default hstate
+            # pool, and systemd applies distinct keys in insertion
+            # order — a trailing '= 0' shrinks the just-reserved,
+            # still-unused boot pool. Simulating host mempolicy is out
+            # of scope; the guarded file must not carry the key at all.
+            die(f"{HUGEPAGES_CONF_PATH}: key {key.strip()!r} mutates the "
+                "same hugepage pool under CONFIG_NUMA and is applied in "
+                "file order by systemd-sysctl; refusing to ship it in "
+                "the guarded hugepage conf — size the pool with "
+                "vm.nr_hugepages only (#16243)")
         if sep:
-            entries[normalized] = value.strip()
+            entries[normalized] = value.strip(" \t\n\r")
         elif ignore_failure:
             # Bare negative-match directive ('-key', no '='): systemd
             # stores it as a NULL entry replacing any earlier assignment
@@ -245,7 +278,15 @@ def hugepages_conf(conf_text=None) -> str:
         # '0x'/'0X' hex, leading '0' octal, else decimal; every byte
         # must be an ASCII digit of that base (no '+', '_', spaces, or
         # non-ASCII digits); negatives and unsigned-long overflow make
-        # the kernel write fail, so both are refused here.
+        # the kernel write fail, so both are refused here. Token
+        # length: proc_get_long reads into TMPBUFLEN=22 and returns
+        # EINVAL when conversion consumes all 21 characters, so a
+        # token longer than 20 characters is kernel-rejected even
+        # when its mathematical value would fit.
+        if len(text) > 20:
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "exceeds the kernel's 20-character numeric token limit "
+                "(proc_get_long TMPBUFLEN); refusing to bake (#16243)")
         if not text or text[0] == "-":
             die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
                 "is negative or empty; the kernel rejects it — refusing "
