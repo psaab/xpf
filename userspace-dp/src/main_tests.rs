@@ -1648,6 +1648,12 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         tx_kick_latency_count: 21,
         tx_kick_latency_sum_ns: 22,
         tx_kick_retry_count: 23,
+        tx_batch_hist: vec![24, 25],
+        tx_batch_commits: 26,
+        tx_batch_descriptors: 27,
+        tx_kick_batch_hist: vec![28],
+        tx_kick_batch_kicks: 29,
+        tx_kick_batch_descriptors: 30,
         // #878: UMEM / TX-ring utilization fields. Plausible
         // values so the wire-key assertions below also cover them.
         umem_total_frames: 24,
@@ -1710,6 +1716,13 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "tx_kick_latency_count",
         "tx_kick_latency_sum_ns",
         "tx_kick_retry_count",
+        // #16242: batch histogram wire keys.
+        "tx_batch_hist",
+        "tx_batch_commits",
+        "tx_batch_descriptors",
+        "tx_kick_batch_hist",
+        "tx_kick_batch_kicks",
+        "tx_kick_batch_descriptors",
         // #878: UMEM / TX-ring utilization wire keys (Copilot
         // A.1: must be in the asserted list since the comment
         // above claims wire-key assertions cover them).
@@ -2474,6 +2487,12 @@ fn tx_latency_hist_serialization_roundtrip() {
         tx_kick_latency_count: 4105,
         tx_kick_latency_sum_ns: 7_654_321,
         tx_kick_retry_count: 42,
+        tx_batch_hist: vec![1, 2],
+        tx_batch_commits: 3,
+        tx_batch_descriptors: 4,
+        tx_kick_batch_hist: vec![5],
+        tx_kick_batch_kicks: 6,
+        tx_kick_batch_descriptors: 7,
         // #878: UMEM / TX-ring utilization fields.
         umem_total_frames: 12_288,
         umem_inflight_frames: 4_096,

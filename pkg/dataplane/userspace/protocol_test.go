@@ -366,6 +366,51 @@ func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *test
 	}
 }
 
+func TestBindingBatchHistRoundTrip(t *testing.T) {
+	in := BindingStatus{
+		WorkerID:               3,
+		QueueID:                2,
+		TxBatchHist:            []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+		TxBatchCommits:         66,
+		TxBatchDescriptors:     999,
+		TxKickBatchHist:        []uint64{0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 3},
+		TxKickBatchKicks:       6,
+		TxKickBatchDescriptors: 400,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"tx_batch_hist", "tx_batch_commits", "tx_batch_descriptors", "tx_kick_batch_hist", "tx_kick_batch_kicks", "tx_kick_batch_descriptors"} {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			t.Fatalf("unmarshal obj: %v", err)
+		}
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing: %s", key, string(raw))
+		}
+	}
+	var back BindingStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(back.TxBatchHist, in.TxBatchHist) || back.TxBatchCommits != in.TxBatchCommits || back.TxBatchDescriptors != in.TxBatchDescriptors || !reflect.DeepEqual(back.TxKickBatchHist, in.TxKickBatchHist) || back.TxKickBatchKicks != in.TxKickBatchKicks || back.TxKickBatchDescriptors != in.TxKickBatchDescriptors {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+	snapIn := BindingCountersSnapshot{TxBatchHist: in.TxBatchHist, TxBatchCommits: 66, TxKickBatchHist: in.TxKickBatchHist, TxKickBatchKicks: 6}
+	snapRaw, err := json.Marshal(&snapIn)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	var snapBack BindingCountersSnapshot
+	if err := json.Unmarshal(snapRaw, &snapBack); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if !reflect.DeepEqual(snapBack, snapIn) {
+		t.Fatalf("snapshot round-trip mismatch: got %+v, want %+v", snapBack, snapIn)
+	}
+}
+
 func TestConfigSnapshotThreeColorPolicersRoundTrip(t *testing.T) {
 	in := ConfigSnapshot{
 		Version: 1,

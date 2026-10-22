@@ -95,6 +95,14 @@ pub(crate) struct WorkerTxPipeline {
     /// the histogram increment for these to avoid biasing the
     /// tail toward bucket 0 (plan §5.4).
     pub(crate) tx_submit_ns: Box<[u64]>,
+    /// #16242: descriptors committed since the last actual TX kick
+    /// (`sendto` in `maybe_wake_tx`). Worker-local (owner thread only,
+    /// no atomic): `record_tx_commit` adds each commit's `inserted`,
+    /// and the kick site drains it into `tx_kick_batch_hist`. Zero
+    /// between kicks in steady state only if every commit is kicked
+    /// immediately; under `needs_wakeup == false` zerocopy polls it
+    /// accumulates exactly the per-kick batch the kernel will see.
+    pub(crate) tx_pending_kick_descriptors: u32,
 }
 
 /// #15244 (A61-01): length of the per-binding submit-timestamp
@@ -146,6 +154,7 @@ impl WorkerTxPipeline {
             in_flight_prepared_recycles: FastMap::default(),
             in_flight_untracked_tx: FastSet::default(),
             tx_submit_ns: Box::new([]),
+            tx_pending_kick_descriptors: 0,
         }
     }
 

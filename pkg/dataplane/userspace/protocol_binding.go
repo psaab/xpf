@@ -494,6 +494,17 @@ type BindingStatus struct {
 	TxKickLatencyCount uint64   `json:"tx_kick_latency_count,omitempty"`
 	TxKickLatencySumNs uint64   `json:"tx_kick_latency_sum_ns,omitempty"`
 	TxKickRetryCount   uint64   `json:"tx_kick_retry_count,omitempty"`
+	// #16242: descriptors-per-commit / per-kick histograms (11
+	// buckets: 1..=7, [8,16), [16,32), [32,64), >=64). Mean batch =
+	// TxBatchDescriptors/TxBatchCommits; full-batch share =
+	// TxBatchHist[10]/TxBatchCommits. omitempty keeps pre-#16242
+	// helpers decoding as empty/zero.
+	TxBatchHist            []uint64 `json:"tx_batch_hist,omitempty"`
+	TxBatchCommits         uint64   `json:"tx_batch_commits,omitempty"`
+	TxBatchDescriptors     uint64   `json:"tx_batch_descriptors,omitempty"`
+	TxKickBatchHist        []uint64 `json:"tx_kick_batch_hist,omitempty"`
+	TxKickBatchKicks       uint64   `json:"tx_kick_batch_kicks,omitempty"`
+	TxKickBatchDescriptors uint64   `json:"tx_kick_batch_descriptors,omitempty"`
 	// #760 (#1642): the post-drain backup filter drop counters are
 	// binding-scoped in the Rust helper (protocol/binding.rs), not
 	// queue-scoped. They were previously declared on CoSQueueStatus, a
@@ -575,6 +586,14 @@ type BindingCountersSnapshot struct {
 	TxKickLatencyCount uint64   `json:"tx_kick_latency_count,omitempty"`
 	TxKickLatencySumNs uint64   `json:"tx_kick_latency_sum_ns,omitempty"`
 	TxKickRetryCount   uint64   `json:"tx_kick_retry_count,omitempty"`
+	// #16242: descriptors-per-commit / per-kick histograms, pulled
+	// through from BindingStatus.
+	TxBatchHist            []uint64 `json:"tx_batch_hist,omitempty"`
+	TxBatchCommits         uint64   `json:"tx_batch_commits,omitempty"`
+	TxBatchDescriptors     uint64   `json:"tx_batch_descriptors,omitempty"`
+	TxKickBatchHist        []uint64 `json:"tx_kick_batch_hist,omitempty"`
+	TxKickBatchKicks       uint64   `json:"tx_kick_batch_kicks,omitempty"`
+	TxKickBatchDescriptors uint64   `json:"tx_kick_batch_descriptors,omitempty"`
 	// #918: per-set LRU collision-eviction counter, brought through
 	// to the lean snapshot for fast-poll consumers that need the
 	// flow-cache thrash signal. Default keeps pre-#918 helpers parseable.

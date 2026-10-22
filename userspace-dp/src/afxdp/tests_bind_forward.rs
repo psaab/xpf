@@ -920,6 +920,7 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
         in_flight_prepared_recycles: FastMap::default(),
         in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
     };
     let mut counters = BatchCounters::default();
 
@@ -1125,6 +1126,7 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
         in_flight_prepared_recycles: FastMap::default(),
         in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
     };
     let mut counters = BatchCounters::default();
 
@@ -1203,6 +1205,7 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
         in_flight_prepared_recycles: FastMap::default(),
         in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
     };
     let mut counters2 = BatchCounters::default();
     crate::afxdp::icmp_ratelimit::reset_bucket_for_test(

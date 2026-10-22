@@ -1120,6 +1120,21 @@ pub(crate) struct BindingStatus {
     pub tx_kick_latency_sum_ns: u64,
     #[serde(rename = "tx_kick_retry_count", default)]
     pub tx_kick_retry_count: u64,
+    // #16242: descriptors-per-commit / per-kick histograms. 11
+    // buckets (1..=7, [8,16), [16,32), [32,64), >=64); see Rust
+    // TX_BATCH_BUCKETS. `default` keeps pre-#16242 helpers parseable.
+    #[serde(rename = "tx_batch_hist", default)]
+    pub tx_batch_hist: Vec<u64>,
+    #[serde(rename = "tx_batch_commits", default)]
+    pub tx_batch_commits: u64,
+    #[serde(rename = "tx_batch_descriptors", default)]
+    pub tx_batch_descriptors: u64,
+    #[serde(rename = "tx_kick_batch_hist", default)]
+    pub tx_kick_batch_hist: Vec<u64>,
+    #[serde(rename = "tx_kick_batch_kicks", default)]
+    pub tx_kick_batch_kicks: u64,
+    #[serde(rename = "tx_kick_batch_descriptors", default)]
+    pub tx_kick_batch_descriptors: u64,
     #[serde(rename = "last_error", default)]
     pub last_error: String,
     #[serde(rename = "last_change", skip_serializing_if = "Option::is_none")]
@@ -1257,6 +1272,21 @@ pub(crate) struct BindingCountersSnapshot {
     pub tx_kick_latency_sum_ns: u64,
     #[serde(rename = "tx_kick_retry_count", default)]
     pub tx_kick_retry_count: u64,
+    // #16242: descriptors-per-commit / per-kick histograms, pulled
+    // through from BindingStatus. `default` keeps pre-#16242
+    // helpers parseable.
+    #[serde(rename = "tx_batch_hist", default)]
+    pub tx_batch_hist: Vec<u64>,
+    #[serde(rename = "tx_batch_commits", default)]
+    pub tx_batch_commits: u64,
+    #[serde(rename = "tx_batch_descriptors", default)]
+    pub tx_batch_descriptors: u64,
+    #[serde(rename = "tx_kick_batch_hist", default)]
+    pub tx_kick_batch_hist: Vec<u64>,
+    #[serde(rename = "tx_kick_batch_kicks", default)]
+    pub tx_kick_batch_kicks: u64,
+    #[serde(rename = "tx_kick_batch_descriptors", default)]
+    pub tx_kick_batch_descriptors: u64,
     /// #918: collision-driven subset of flow-cache evictions
     /// (full-set LRU displacement). Surfaces hot-set thrash so
     /// the post-merge acceptance gate (`collision_evictions /
@@ -1363,6 +1393,13 @@ impl From<&BindingStatus> for BindingCountersSnapshot {
             tx_kick_latency_count: b.tx_kick_latency_count,
             tx_kick_latency_sum_ns: b.tx_kick_latency_sum_ns,
             tx_kick_retry_count: b.tx_kick_retry_count,
+            // #16242: owned clone / by-value scalars, same discipline.
+            tx_batch_hist: b.tx_batch_hist.clone(),
+            tx_batch_commits: b.tx_batch_commits,
+            tx_batch_descriptors: b.tx_batch_descriptors,
+            tx_kick_batch_hist: b.tx_kick_batch_hist.clone(),
+            tx_kick_batch_kicks: b.tx_kick_batch_kicks,
+            tx_kick_batch_descriptors: b.tx_kick_batch_descriptors,
             // #918: flow under by-value u64; same Send/'static
             // discipline as the other counters.
             flow_cache_collision_evictions: b.flow_cache_collision_evictions,

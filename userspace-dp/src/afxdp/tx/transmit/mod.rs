@@ -406,6 +406,8 @@ pub(in crate::afxdp) fn transmit_batch(
             .map(|(offset, _)| *offset),
         ts_submit,
     );
+    // #16242: descriptors-per-commit sample for this ring commit.
+    crate::afxdp::tx::record_tx_commit(binding, inserted);
 
     if inserted == 0 {
         binding.telemetry.dbg_tx_ring_full += 1;

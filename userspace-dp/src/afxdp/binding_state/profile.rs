@@ -6,7 +6,7 @@
 
 use std::sync::atomic::AtomicU64;
 
-use super::{DRAIN_HIST_BUCKETS, TX_SUBMIT_LAT_BUCKETS};
+use super::{DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS, TX_SUBMIT_LAT_BUCKETS};
 
 #[repr(align(64))]
 pub(in crate::afxdp) struct OwnerProfileOwnerWrites {
@@ -69,6 +69,33 @@ pub(in crate::afxdp) struct OwnerProfileOwnerWrites {
     /// counter), but surfaced on the `BindingLiveSnapshot` so it
     /// reaches the operator-facing protocol.
     pub(in crate::afxdp) tx_kick_retry_count: AtomicU64,
+    /// #16242: descriptors-per-commit histogram (see
+    /// `TX_BATCH_BUCKETS` for the layout). Written once per TX-ring
+    /// `writer.commit()` with `inserted > 0` by `record_tx_commit` —
+    /// single-writer (owner worker), `Relaxed` like the latency
+    /// histograms above. `sum(tx_batch_hist)` equals
+    /// `tx_batch_commits` single-threaded; the descriptor total is
+    /// `tx_batch_descriptors`, so the mean batch is
+    /// `descriptors / commits` and the full-batch share is
+    /// `tx_batch_hist[10] / tx_batch_commits`.
+    pub(in crate::afxdp) tx_batch_hist: [AtomicU64; TX_BATCH_BUCKETS],
+    /// #16242: number of TX-ring commits with `inserted > 0`.
+    pub(in crate::afxdp) tx_batch_commits: AtomicU64,
+    /// #16242: total descriptors across those commits.
+    pub(in crate::afxdp) tx_batch_descriptors: AtomicU64,
+    /// #16242: per-kick descriptor histogram — same bucket layout,
+    /// sampled in `maybe_wake_tx` as the descriptors committed since
+    /// the previous actual `sendto` kick on this binding. This is the
+    /// per-kick view of the same commits: a kick that follows no new
+    /// commit records nothing (it carries no batch-depth signal), so
+    /// `sum(tx_kick_batch_hist) <= tx_batch_commits`.
+    pub(in crate::afxdp) tx_kick_batch_hist: [AtomicU64; TX_BATCH_BUCKETS],
+    /// #16242: kicks that carried at least one newly-committed
+    /// descriptor (`sum(tx_kick_batch_hist)` single-threaded).
+    pub(in crate::afxdp) tx_kick_batch_kicks: AtomicU64,
+    /// #16242: descriptors attributed to those kicks; equals
+    /// `tx_batch_descriptors` once every commit has been kicked.
+    pub(in crate::afxdp) tx_kick_batch_descriptors: AtomicU64,
     /// #709: owner-local pps window. Formerly `pps_owner_vs_peer[0]`;
     /// split by writer for cacheline isolation (#746). The owner is
     /// the only writer; peers read through `snapshot()`.
@@ -148,13 +175,14 @@ const _: () = assert!(core::mem::align_of::<OwnerProfilePeerWrites>() == 64);
 // (6 cachelines). #825 adds 16 kick-latency hist atomics (128 B)
 // + 3 scalars (count, sum_ns, retry_count; 24 B) = 152 B more,
 // landing the struct at 480 B → 512 B padded (8 cachelines).
-// Ceiling raised to 512 B (plan §3.2 cap-raise). `#[repr(align(64))]`
-// alignment invariant is unchanged — the separate align assert
-// above still holds at 64 B.
+// #16242 adds 2×11 batch hist atomics (176 B) + 4 scalars (32 B) =
+// 208 B more, landing at 688 B → 704 B padded (11 cachelines).
+// Ceiling raised to 704 B. `#[repr(align(64))]` alignment invariant
+// is unchanged — the separate align assert above still holds.
 // Peer struct: 16 hist + 1 scalar AtomicU64 (peer_pps) = 136 B, padded
 // to 192 B (#5160 dropped the shared redirect_sample_counter — now a
 // producer-local thread-local, not a per-binding atomic).
-const _: () = assert!(core::mem::size_of::<OwnerProfileOwnerWrites>() <= 512);
+const _: () = assert!(core::mem::size_of::<OwnerProfileOwnerWrites>() <= 704);
 const _: () = assert!(core::mem::size_of::<OwnerProfilePeerWrites>() <= 320);
 
 impl OwnerProfileOwnerWrites {
@@ -176,6 +204,13 @@ impl OwnerProfileOwnerWrites {
             tx_kick_latency_count: AtomicU64::new(0),
             tx_kick_latency_sum_ns: AtomicU64::new(0),
             tx_kick_retry_count: AtomicU64::new(0),
+            // #16242: zero-init descriptors-per-commit/kick telemetry.
+            tx_batch_hist: std::array::from_fn(|_| AtomicU64::new(0)),
+            tx_batch_commits: AtomicU64::new(0),
+            tx_batch_descriptors: AtomicU64::new(0),
+            tx_kick_batch_hist: std::array::from_fn(|_| AtomicU64::new(0)),
+            tx_kick_batch_kicks: AtomicU64::new(0),
+            tx_kick_batch_descriptors: AtomicU64::new(0),
             owner_pps: AtomicU64::new(0),
             drain_sent_bytes_shaped_unconditional: AtomicU64::new(0),
             post_drain_backup_bytes: AtomicU64::new(0),

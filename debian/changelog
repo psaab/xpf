@@ -1,5 +1,3 @@
-xpf (0.0.0) unstable; urgency=medium
-
   * Genericise userspace-dp prefix_set.rs over the address family
     (#16189): PrefixSetV4/PrefixSetV6 become aliases for
     PrefixSet<PrefixV4Family>/PrefixSet<PrefixV6Family>, the twin
@@ -26,6 +24,16 @@ xpf (0.0.0) unstable; urgency=medium
     known prefix, mismatched class) pins old/new equivalence. No
     hot-path change; the fields are stamped only on the cold
     post-teardown refusal path.
+  * Measure TX batch depth before re-opening the #920 cap (#16242):
+    per-binding descriptors-per-commit and descriptors-per-kick
+    histograms (tx_batch_*/tx_kick_batch_* on BindingStatus and
+    BindingCountersSnapshot, Go mirrors included) recorded with cheap
+    Relaxed atomics at the six TX-ring commit sites and the sendto
+    kick. No batch size or const-assert changes; the reading guide
+    (mean batch, full-batch share, and the required mouse-latency
+    pairing) lives in userspace-dp/src/afxdp/tx/README.md.
+xpf (0.0.0) unstable; urgency=medium
+
 
 xpf (0.0.0) unstable; urgency=medium
 

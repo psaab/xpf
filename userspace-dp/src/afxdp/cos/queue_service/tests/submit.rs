@@ -1143,3 +1143,80 @@ fn prepared_clean_batch_no_drop_15786_control() {
     );
     assert!(binding.scratch.scratch_prepared_dropped_orig_idx.is_empty());
 }
+
+/// #16242 FAIL-ON-REVERT: a real 3-item submit through `submit_local`
+/// must record exactly one per-commit sample in bucket 2 (size 3) and
+/// attribute those 3 descriptors to the kick that follows. Removing
+/// the `record_tx_commit` call at the transmit site leaves both
+/// histograms at zero.
+#[test]
+fn submit_local_records_tx_batch_histogram() {
+    let now_ns = 1_000_000_000u64;
+    let mut root = test_cos_runtime_with_queues(
+        10_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "iperf-c".into(),
+            priority: 5,
+            transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: true,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    root.tokens = 10_000;
+    root.queues[0].hot.tokens = 10_000;
+    root.queues[0].hot.queued_bytes = 300;
+    let fast_interfaces = test_cos_fast_interfaces(
+        42,
+        42,
+        0,
+        vec![(0, test_queue_fast_path(false, 0, None, None))],
+        None,
+        None,
+    );
+    let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
+    let items: VecDeque<TxRequest> = (0..3)
+        .map(|_| TxRequest {
+            bytes: vec![0u8; 100].into(),
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 42,
+            cos_queue_id: Some(0),
+            dscp_rewrite: None,
+            mirror_clone: false,
+            overlap_admissions: None,
+            enqueue_ns: now_ns,
+        })
+        .collect();
+    let mut shared_recycles = Vec::new();
+    let progress = submit_local(
+        &mut binding,
+        42,
+        0,
+        CoSServicePhase::Surplus,
+        300,
+        items,
+        now_ns,
+        &mut shared_recycles,
+    );
+    assert!(progress, "submit_local must report progress");
+
+    let snap = binding.live.snapshot();
+    assert_eq!(snap.tx_batch_commits, 1, "one ring commit must be recorded");
+    assert_eq!(snap.tx_batch_descriptors, 3);
+    assert_eq!(snap.tx_batch_hist[2], 1, "size-3 commit lands in bucket 2");
+    assert_eq!(snap.tx_batch_hist.iter().sum::<u64>(), 1);
+    assert_eq!(snap.tx_kick_batch_kicks, 1, "the post-commit kick must be recorded");
+    assert_eq!(snap.tx_kick_batch_descriptors, 3);
+    assert_eq!(snap.tx_kick_batch_hist[2], 1);
+}

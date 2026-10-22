@@ -539,6 +539,7 @@ fn tx_pipeline() -> WorkerTxPipeline {
         in_flight_prepared_recycles: FastMap::default(),
         in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
     }
 }
 

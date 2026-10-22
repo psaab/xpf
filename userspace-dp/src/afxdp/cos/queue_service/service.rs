@@ -153,6 +153,8 @@ pub(super) fn service_exact_local_queue_direct(
             .map(|req| req.offset),
         ts_submit,
     );
+    // #16242: descriptors-per-commit sample for this ring commit.
+    crate::afxdp::tx::record_tx_commit(binding, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_exact_local_tx.len() as u64;
@@ -326,6 +328,8 @@ fn service_exact_local_queue_direct_flow_fair(
             .map(|(offset, _)| *offset),
         ts_submit,
     );
+    // #16242: descriptors-per-commit sample for this ring commit.
+    crate::afxdp::tx::record_tx_commit(binding, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_local_tx.len() as u64;
@@ -516,6 +520,8 @@ pub(super) fn service_exact_prepared_queue_direct(
             .map(|req| req.offset),
         ts_submit,
     );
+    // #16242: descriptors-per-commit sample for this ring commit.
+    crate::afxdp::tx::record_tx_commit(binding, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_exact_prepared_tx.len() as u64;
@@ -683,6 +689,8 @@ fn service_exact_prepared_queue_direct_flow_fair(
             .map(|req| req.offset),
         ts_submit,
     );
+    // #16242: descriptors-per-commit sample for this ring commit.
+    crate::afxdp::tx::record_tx_commit(binding, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_prepared_tx.len() as u64;
