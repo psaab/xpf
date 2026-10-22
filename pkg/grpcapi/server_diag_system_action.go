@@ -303,6 +303,17 @@ func (s *Server) zeroizeConfigRoot() (configDir, configBase string, err error) {
 	return dir, filepath.Base(p), nil
 }
 
+// zeroizePendingWipe / zeroizeUngatedWipe are grpcapi's dispatch seams
+// to the factoryreset wipe (#16138 fold-2). Production values are the
+// statically-bound factoryreset entries; grpcapi's own tests swap them
+// (via stubZeroizeWipes) to capture the wipe at this boundary without
+// touching factoryreset internals — factoryreset itself has no
+// dispatch variable at all.
+var (
+	zeroizePendingWipe = factoryreset.PerformZeroizeWipePendingWithInventory
+	zeroizeUngatedWipe = factoryreset.PerformZeroizeWipeUngated
+)
+
 // runZeroize erases on-disk state for a factory reset. It routes through the
 // daemon-owned apply gate (ZeroizeFn) when wired (#5281): the daemon acquires
 // its apply semaphore, enters the terminal reset generation, and runs the
@@ -344,7 +355,7 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	wipe := func() error {
 		logInventory := factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
 		helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
-		return factoryreset.PerformZeroizeWipePendingWithInventory(configDir, configBase, archiveDir, logInventory, helperPath)
+		return zeroizePendingWipe(configDir, configBase, archiveDir, logInventory, helperPath)
 	}
 	if s.zeroizeFn != nil {
 		return s.zeroizeFn(ctx, wipe)
@@ -354,7 +365,7 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	// follows. A custom path outside the wiped dirs would otherwise
 	// survive under a clean receipt.
 	helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
-	return factoryreset.PerformZeroizeWipeUngated(configDir, configBase, archiveDir, factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
+	return zeroizeUngatedWipe(configDir, configBase, archiveDir, factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
 }
 
 func (s *Server) acknowledgeDynamicAddressShrink(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {

@@ -37,11 +37,11 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 
 	var gotDir, gotBase string
 	var called bool
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(configDir, configBase, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		called = true
 		gotDir, gotBase = configDir, configBase
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() {}
 
 	// A configured root deliberately different from the hardcoded /etc/xpf
@@ -83,10 +83,10 @@ func TestZeroizeFailsClosedWithoutConfigRoot(t *testing.T) {
 	})
 
 	var wiped, stopped bool
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		wiped = true
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() { stopped = true }
 
 	s := &Server{} // no store => config root undeterminable

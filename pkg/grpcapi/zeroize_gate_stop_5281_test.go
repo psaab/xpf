@@ -38,10 +38,10 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 	// sequence is gate → wipe → stop (never stop-before-wipe, never a bypassed
 	// gate).
 	var seq []string
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		seq = append(seq, "wipe")
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() { seq = append(seq, "stop") }
 
 	var gateWipeArg func() error
@@ -94,9 +94,9 @@ func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
 	})
 
 	wantErr := errors.New("configdb not fully erased")
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		return wantErr
-	}))
+	})
 	var stopped bool
 	scheduleStopDaemon = func() { stopped = true }
 
@@ -134,10 +134,10 @@ func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
 	})
 
 	var wiped, stopped bool
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		wiped = true
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() { stopped = true }
 
 	dir := t.TempDir()
@@ -197,10 +197,14 @@ func TestGatedZeroizeSnapshotsHelperPathInsideGate10769(t *testing.T) {
 		scheduleStopDaemon = origStop
 	})
 	var got factoryreset.Completion
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, c factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(pending bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
+		var c factoryreset.Completion
+		if pending {
+			c = factoryreset.PendingCompletion(helperPath)
+		}
 		got = c
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() {}
 	dir := t.TempDir()
 	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))

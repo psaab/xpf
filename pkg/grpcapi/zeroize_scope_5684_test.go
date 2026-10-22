@@ -34,10 +34,10 @@ func TestZeroizeRefusesSharedConfigRoot(t *testing.T) {
 	})
 
 	var wiped bool
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		wiped = true
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() {}
 
 	// A config file placed directly in a shared directory: filepath.Dir resolves

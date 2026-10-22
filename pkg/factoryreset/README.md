@@ -21,11 +21,12 @@ gRPC package; clean cutover, no aliases kept in `pkg/grpcapi`.
   helper state file itself and completes clean in-wipe.
 - `PerformZeroizeWipePendingWithInventory` — the gated pending entry
   `pkg/grpcapi`'s closure dispatches to (statically bound).
-  `StubWipeWithLogInventoryForTest` + `Completion`/`PendingCompletion`
-  are test-only: the stub swaps an unexported dispatch variable that
-  no production entry point routes through (production entries call
-  the wipe directly), so test interception cannot become the
-  production path.
+  `Completion`/`PendingCompletion` let that caller construct the
+  pending completion. There is no dispatch variable in this package
+  (#16138 fold-2): every `Perform*` entry calls the plain
+  `performWipeWithLogInventory` func directly, and tests intercept at
+  their own call-site seams (e.g. grpcapi's `zeroizePendingWipe` var),
+  never inside factoryreset.
 - `RedirectWipePathsForTesting` — redirects every filesystem path and
   command seam the wipe touches into a throwaway root (test-only).
 

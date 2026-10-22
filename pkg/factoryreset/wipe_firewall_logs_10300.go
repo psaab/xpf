@@ -421,20 +421,11 @@ func PerformZeroizeWipePendingWithInventory(configDir, configBase, archiveDir st
 	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, PendingCompletion(helperPath))
 }
 
-// StubWipeWithLogInventoryForTest replaces the wipe dispatch used by
-// PerformZeroizeWipeWithLogInventory and the Pending/Ungated variants,
-// returning a restore func. Test-only: it is reachable only from test
-// code (grpcapi RPC-boundary cells capture the wipe without touching
-// real system paths, as with the pre-#16138 unexported seam); no
-// production entry point dispatches through the swapped variable —
-// production calls reach performWipeWithLogInventory directly.
-func StubWipeWithLogInventoryForTest(fn func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion Completion) error) (restore func()) {
-	old := performWipeWithLogInventory
-	performWipeWithLogInventory = fn
-	return func() { performWipeWithLogInventory = old }
-}
-
-var performWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion Completion) error {
+// performWipeWithLogInventory is the shared wipe implementation behind
+// every exported Perform* entry. It is a plain function (#16138 fold-2):
+// production wrappers call it directly and there is no dispatch variable
+// for any caller — production or test — to swap.
+func performWipeWithLogInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion Completion) error {
 	// External cleanup authority must be proven empty before beginZeroize
 	// writes a marker or any destructive leg can remove provider credentials.
 	// Wrapped in the same sentinels as the inner erase legs so callers

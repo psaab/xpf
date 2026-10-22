@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,5 +62,22 @@ func mustSymlink(t *testing.T, target, link string) {
 	}
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatalf("symlink %s -> %s: %v", link, target, err)
+	}
+}
+
+// stubZeroizeWipes swaps grpcapi's factoryreset dispatch seams
+// (zeroizePendingWipe / zeroizeUngatedWipe) for fn and restores them at
+// test cleanup (#16138 fold-2: interception lives at the grpcapi seam,
+// never inside factoryreset). fn receives the pending flag so a single
+// stub can serve both the gated and ungated entries.
+func stubZeroizeWipes(t *testing.T, fn func(pending bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error) {
+	t.Helper()
+	oldP, oldU := zeroizePendingWipe, zeroizeUngatedWipe
+	t.Cleanup(func() { zeroizePendingWipe, zeroizeUngatedWipe = oldP, oldU })
+	zeroizePendingWipe = func(configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
+		return fn(true, configDir, configBase, archiveDir, inv, helperPath)
+	}
+	zeroizeUngatedWipe = func(configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
+		return fn(false, configDir, configBase, archiveDir, inv, helperPath)
 	}
 }

@@ -18,9 +18,9 @@ func TestZeroizeCustomArchiveStillErasesDefault15729(t *testing.T) {
 		scheduleStopDaemon = origStop
 		configstore.DefaultArchiveDir = origArchive
 	})
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		return configstore.FactoryResetArchiveDir(archiveDir)
-	}))
+	})
 	scheduleStopDaemon = func() {}
 
 	dir := t.TempDir()

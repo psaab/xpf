@@ -25,10 +25,10 @@ func TestZeroizeReceiptAttestsFirewallLogScope10300(t *testing.T) {
 		scheduleStopDaemon = origStop
 	})
 	var got factoryreset.LogInventory
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, inv factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		got = inv
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() {}
 
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
@@ -70,10 +70,10 @@ func TestZeroizeSnapshotsFirewallInventoryInsideGate10300(t *testing.T) {
 		scheduleStopDaemon = origStop
 	})
 	var got factoryreset.LogInventory
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, _ string, inv factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		got = inv
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() {}
 
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))

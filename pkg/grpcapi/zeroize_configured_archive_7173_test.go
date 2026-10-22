@@ -41,11 +41,11 @@ func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
 
 	var gotArchive string
 	var called bool
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		called = true
 		gotArchive = archiveDir
 		return nil
-	}))
+	})
 	scheduleStopDaemon = func() {}
 
 	dir := t.TempDir()
@@ -84,9 +84,9 @@ func TestZeroizeErasesDefaultArchiveWhenArchiveDirUnset10739(t *testing.T) {
 
 	// Keep this integration at the affected archive boundary: use the actual
 	// ownership-guarded eraser while avoiding the unrelated system wipe legs.
-	t.Cleanup(factoryreset.StubWipeWithLogInventoryForTest(func(_, _, archiveDir string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		return configstore.FactoryResetArchiveDir(archiveDir)
-	}))
+	})
 	scheduleStopDaemon = func() {}
 
 	for _, tc := range []struct {
