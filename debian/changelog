@@ -1,3 +1,5 @@
+xpf (0.0.0) unstable; urgency=medium
+
   * Genericise userspace-dp prefix_set.rs over the address family
     (#16189): PrefixSetV4/PrefixSetV6 become aliases for
     PrefixSet<PrefixV4Family>/PrefixSet<PrefixV6Family>, the twin
@@ -32,8 +34,6 @@ xpf (0.0.0) unstable; urgency=medium
     kick. No batch size or const-assert changes; the reading guide
     (mean batch, full-batch share, and the required mouse-latency
     pairing) lives in userspace-dp/src/afxdp/tx/README.md.
-xpf (0.0.0) unstable; urgency=medium
-
 
 xpf (0.0.0) unstable; urgency=medium
 
