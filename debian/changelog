@@ -861,6 +861,18 @@ xpf (0.0.0) unstable; urgency=medium
     --cluster) as an --env value in harness-result run/emit so an empty
     expansion can never again be recorded as the next flag (#16288).
 
+  * Compiler validation/divergence fixes (#15943): return the partial
+    CompileResult on post-Phase-2 dataplane compile failures so host
+    divergence is accounted; normalize NAT /+N prefix and protocol
+    name/number spellings in the pool-overlap, host-local, and DNAT
+    off-shadow gates; track flex-match value/mask presence and width so
+    value-less ranges reject, explicit 0x0 masks survive, and out-of-width
+    values fail closed; accept `security user-identification` as
+    accepted-only like `services` and redact bind passwords under
+    authentication-source/device-information.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Preserve `to-zone junos-host` application's configured inactivity-timeout
     on LocalDelivery sessions. Matched host-local permit sessions now age on
     the app's idle window; zero/unset timeouts continue to use the global
