@@ -896,14 +896,15 @@ func (s *SyslogClient) dial() (net.Conn, error) {
 }
 
 // syslogDialTimeout bounds one syslog dial — including every DNS lookup it
-// performs — on the construction/commit path (#9326, #14613). A var (not a
-// const) so tests can shorten it; production never writes it.
+// performs — on the construction/commit path (#9326, #14613, #16178). A
+// var (not a const) so tests can shorten it; production never writes it.
 var syslogDialTimeout = 5 * time.Second
 
-// lookupSyslogIPAddr is the hostname-resolution seam for dialUDP's
-// source-bound branch. Production is the default resolver under the
-// caller's context; tests substitute a resolver that blocks until its
-// context is cancelled (the black-holed-DNS shape) to prove the bound.
+// lookupSyslogIPAddr is the hostname-resolution seam for the bounded
+// source-address resolution used by dialUDP, dialTCP and dialTLS.
+// Production is the default resolver under the caller's context; tests
+// substitute a resolver that blocks until its context is cancelled
+// (the black-holed-DNS shape) to prove the bound.
 var lookupSyslogIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
 	return net.DefaultResolver.LookupIPAddr(ctx, host)
 }
@@ -930,7 +931,10 @@ func resolveUDPAddrBounded(ctx context.Context, network, address string) (*net.U
 		return &net.UDPAddr{Port: pn}, nil
 	}
 	name, zone := host, ""
-	if i := strings.LastIndex(host, "%"); i >= 0 {
+	// Go splits the zone at the FIRST '%': the zone itself may contain
+	// further '%' (e.g. fe80::1%eth%0 -> zone "eth%0"). Splitting at the
+	// last '%' would mis-parse such literals as hostnames (#16224).
+	if i := strings.Index(host, "%"); i >= 0 {
 		name, zone = host[:i], host[i+1:]
 	}
 	if ip := net.ParseIP(name); ip != nil {
@@ -954,6 +958,87 @@ func resolveUDPAddrBounded(ctx context.Context, network, address string) (*net.U
 		zone = chosen.Zone
 	}
 	return &net.UDPAddr{IP: chosen.IP, Port: pn, Zone: zone}, nil
+}
+
+// resolveTCPAddrBounded resolves address ("host:port") under ctx. The
+// package-level net.ResolveTCPAddr has no context and performs an
+// unbounded hostname lookup, so IP literals (and the empty host) take
+// the parser fast path while hostnames go through lookupSyslogIPAddr
+// with the caller's deadline (#16178, TCP/TLS sibling of #14613).
+// Address selection preserves net's family semantics: "tcp" prefers
+// the first IPv4 result, "tcp4" requires IPv4 and "tcp6" requires
+// IPv6 — the forResolve order with a family filter.
+func resolveTCPAddrBounded(ctx context.Context, network, address string) (*net.TCPAddr, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		// Not host:port (e.g. a bare literal): the package parser owns
+		// the error taxonomy, and no name lookup is involved.
+		return net.ResolveTCPAddr(network, address)
+	}
+	pn, perr := net.LookupPort("tcp", port)
+	if perr != nil {
+		return nil, perr
+	}
+	if host == "" {
+		return &net.TCPAddr{Port: pn}, nil
+	}
+	name, zone := host, ""
+	// As resolveUDPAddrBounded: Go splits the zone at the FIRST '%'
+	// (zone may contain further '%', e.g. fe80::1%eth%0).
+	if i := strings.Index(host, "%"); i >= 0 {
+		name, zone = host[:i], host[i+1:]
+	}
+	if ip := net.ParseIP(name); ip != nil {
+		// Match net.ResolveTCPAddr's family filter so a literal of the
+		// wrong family errors (tcp4 + IPv6 literal) instead of binding.
+		if network == "tcp4" && ip.To4() == nil ||
+			network == "tcp6" && ip.To4() != nil {
+			return nil, &net.OpError{Op: "dial", Net: network, Source: nil, Addr: nil,
+				Err: &net.AddrError{Err: "no suitable address found", Addr: name}}
+		}
+		return &net.TCPAddr{IP: ip, Port: pn, Zone: zone}, nil
+	}
+	ips, err := lookupSyslogIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("lookup %s: no suitable address found", host)
+	}
+	var chosen *net.IPAddr
+	for i := range ips {
+		cand := &ips[i]
+		switch network {
+		case "tcp4":
+			if cand.IP.To4() != nil {
+				chosen = cand
+			}
+		case "tcp6":
+			if cand.IP.To4() == nil {
+				chosen = cand
+			}
+		case "tcp":
+			// Prefer the first IPv4; otherwise keep the first result.
+			if cand.IP.To4() != nil {
+				chosen = cand
+			} else if chosen == nil {
+				chosen = cand
+			}
+		default:
+			// Unknown network: the package parser owns the taxonomy.
+			return net.ResolveTCPAddr(network, address)
+		}
+		if chosen != nil && (network != "tcp" || cand.IP.To4() != nil) {
+			break
+		}
+	}
+	if chosen == nil {
+		return nil, fmt.Errorf("lookup %s: no suitable address found", host)
+	}
+	if zone == "" {
+		zone = chosen.Zone
+	}
+	return &net.TCPAddr{IP: chosen.IP, Port: pn, Zone: zone}, nil
 }
 
 func (s *SyslogClient) dialUDP() (net.Conn, error) {
@@ -995,30 +1080,43 @@ func (s *SyslogClient) dialUDP() (net.Conn, error) {
 }
 
 func (s *SyslogClient) dialTCP() (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	// #16178: the 5 s Dialer bounds the remote connect, NOT the
+	// source-address hostname lookup that precedes it. Resolve the
+	// source under the bounded context (mirroring resolveUDPAddrBounded,
+	// #14613) and dial remote + connect under the same deadline, so a
+	// hostname source from the tolerant/peer-loaded path cannot stall
+	// (re)connection indefinitely. The "resolve source" taxonomy is
+	// preserved verbatim.
+	ctx, cancel := context.WithTimeout(context.Background(), syslogDialTimeout)
+	defer cancel()
+	dialer := &net.Dialer{Timeout: syslogDialTimeout}
 	if s.sourceAddr != "" {
-		laddr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(s.sourceAddr, "0"))
+		laddr, err := resolveTCPAddrBounded(ctx, "tcp", net.JoinHostPort(s.sourceAddr, "0"))
 		if err != nil {
 			return nil, fmt.Errorf("resolve source %s: %w", s.sourceAddr, err)
 		}
 		dialer.LocalAddr = laddr
 	}
-	return dialer.Dial("tcp", s.remoteAddr)
+	return dialer.DialContext(ctx, "tcp", s.remoteAddr)
 }
 
 func (s *SyslogClient) dialTLS() (net.Conn, error) {
+	// #16178: as dialTCP above, the source-address lookup must be bounded
+	// (the tls.Dialer's 5 s NetDialer bounds the remote connect only).
+	ctx, cancel := context.WithTimeout(context.Background(), syslogDialTimeout)
+	defer cancel()
 	dialer := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: 5 * time.Second},
+		NetDialer: &net.Dialer{Timeout: syslogDialTimeout},
 		Config:    s.tlsConfig,
 	}
 	if s.sourceAddr != "" {
-		laddr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(s.sourceAddr, "0"))
+		laddr, err := resolveTCPAddrBounded(ctx, "tcp", net.JoinHostPort(s.sourceAddr, "0"))
 		if err != nil {
 			return nil, fmt.Errorf("resolve source %s: %w", s.sourceAddr, err)
 		}
 		dialer.NetDialer.LocalAddr = laddr
 	}
-	return dialer.DialContext(context.Background(), "tcp", s.remoteAddr)
+	return dialer.DialContext(ctx, "tcp", s.remoteAddr)
 }
 
 // reconnect attempts to re-establish the connection, subject to a cooldown so

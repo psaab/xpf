@@ -782,6 +782,21 @@ Three changes, and the asymmetry between them is the part to keep:
   taxonomy. Tests: `syslog_udp_srcaddr_bound_14613_test.go` (a resolver
   seam that blocks until cancelled proves the bound; literal and
   hostname-success controls pin the bind and delivery).
+- **TCP/TLS source-address resolution carries the same bound (#16178).**
+  `dialTCP`/`dialTLS` resolved the source with `net.ResolveTCPAddr` —
+  no context, no deadline — before dialing; their 5 s dialers bound the
+  remote connect only, not that lookup. Strict config forces a source
+  IP literal, but the tolerant/peer-loaded path can hand in a hostname,
+  whose lookup could then stall (re)connection indefinitely (deferred
+  construction keeps it off the commit path, so the stall lands on
+  first-Send/reconnect). Both now resolve the source under the shared
+  `syslogDialTimeout` context via `resolveTCPAddrBounded` (same
+  `lookupSyslogIPAddr` seam; literals/zone forms parse directly,
+  `tcp` prefers first IPv4, `tcp4`/`tcp6` filter by family) and dial
+  under the same deadline, keeping the `resolve source` taxonomy.
+  Tests: `syslog_tcp_srcaddr_bound_16178_test.go` (blocking-seam cells
+  for both dials; literal/zone/family cells; TCP hostname-bind and
+  TLS literal-bind success controls).
 
 The #3351 operator signal ("receiver unreachable at apply") is preserved rather
 than dropped: `warmSyslogClients` runs the connect asynchronously and logs the
