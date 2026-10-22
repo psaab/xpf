@@ -264,7 +264,7 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				cfg.Warnings = append(cfg.Warnings,
 					fmt.Sprintf("nat undefined zone (downgraded to warning on tolerant path): %s", offender))
 			}
-			cfg.LenientNATUndefinedZoneRuleSets = NATUndefinedZoneRuleSetNames(cfg)
+			cfg.LenientNATUndefinedZoneRuleSets = NATUndefinedZoneRuleSets(cfg)
 		} else {
 			return err
 		}
