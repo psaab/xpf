@@ -34,6 +34,14 @@ xpf (0.0.0) unstable; urgency=medium
     kick. No batch size or const-assert changes; the reading guide
     (mean batch, full-batch share, and the required mouse-latency
     pairing) lives in userspace-dp/src/afxdp/tx/README.md.
+  * Ship the UMEM hugepage reservation on every provisioning path
+    (#16243): the bake writes etc/sysctl.d/99-xpf-hugepages.conf verbatim
+    into the appliance image and debian/rules installs the same file in
+    the .deb. Previously no path installed it, so ring-entries 16384
+    rigs booted with HugePages_Total=0 and reported
+    `Hugepage-backed bindings: 0/N`. New bake regression tests pin the
+    verbatim install and the 1440-page reference-topology pool;
+    docs/deploy-quickstart.md documents the knob and the remedy.
 
 xpf (0.0.0) unstable; urgency=medium
 

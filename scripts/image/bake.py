@@ -113,6 +113,39 @@ SYSCTL_CONF = (
     # entries box-oriented after the apply-time flush (#10752).
     "net.netfilter.nf_conntrack_tcp_loose=0\n"
 )
+#
+# #16243: hugepage reservation for AF_XDP UMEM at ring-entries 16384.
+# UMEM tries MAP_HUGETLB first and falls back to 4 KiB pages + an advisory
+# THP hint when the pool is short -- the plan measured
+# `Hugepage-backed bindings: 0/30` on a ring-16384 rig whose only defect
+# was that NO provisioning path installed etc/sysctl.d/99-xpf-hugepages.conf:
+# the file existed in the repo but neither the bake, the .deb, nor any
+# deploy tool copied it to /etc/sysctl.d. Ship it in the image so the knob
+# is live by default. Sizing (80 x SUM min(rx_queues,16) = 1440 for the
+# reference 18-binding topology) is documented in the conf itself and in
+# docs/deploy-quickstart.md / docs/userspace-dataplane-architecture.md;
+# resizing for a larger topology stays an operator edit of that one file.
+# Hugepages are withheld from ordinary allocation, so do not raise this
+# blindly on small appliances -- see the conf header.
+HUGEPAGES_CONF_PATH = os.path.join(ROOT, "etc", "sysctl.d", "99-xpf-hugepages.conf")
+
+def hugepages_conf() -> str:
+    """Return the shipped UMEM hugepage reservation, verbatim.
+
+    Single source of truth is etc/sysctl.d/99-xpf-hugepages.conf in the
+    repo (also the file an operator installs on a foreign host). Reading
+    it here -- rather than duplicating the value -- keeps the bake, the
+    on-box file, and the 80-pages-per-binding formula pinned by
+    userspace-dp's umem_sizing_contract_tests from drifting apart. Fail
+    the bake if it is missing or stops reserving the pool.
+    """
+    with open(HUGEPAGES_CONF_PATH) as f:
+        conf = f.read()
+    if "vm.nr_hugepages" not in conf:
+        die(f"{HUGEPAGES_CONF_PATH} no longer sets vm.nr_hugepages; "
+            "refusing to bake an image without the UMEM hugepage knob (#16243)")
+    return conf
+
 
 # apt-get update exits 0 even when an index fetch fails; --error-on=any
 # makes that fatal, one retry covers a transient blip.
@@ -650,6 +683,7 @@ def virt_customize(work_qcow, xpf_deb):
         "--copy-in", f"{HERE}/99-incus-agent.rules:/usr/lib/udev/rules.d",
         "--run-command", "chmod 0755 /usr/lib/systemd/incus-agent-setup",
         "--write", f"/etc/sysctl.d/99-xpf.conf:{SYSCTL_CONF}",
+        "--write", f"/etc/sysctl.d/99-xpf-hugepages.conf:{hugepages_conf()}",
         "--run-command", "mkdir -p /etc/xpf && chmod 0750 /etc/xpf",
         # #7114: the appliance-image marker. xpfd's #1922 bootstrap lifeline
         # refuses to rename or bring up ANY NIC when it cannot identify a
