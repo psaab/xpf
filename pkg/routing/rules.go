@@ -425,52 +425,70 @@ func hasExactlyOneVRFRuleInterface(r netlink.Rule) bool {
 // brief, unobservable self-healing-orphan window described in #2273.
 
 func (n *nextTableManager) clear() error {
+	return clearMatchingRules(n.ops, "next-table", func(r netlink.Rule) bool {
+		leakShape := isNonReservedRuleTable(r.Table) && r.Src == nil &&
+			r.OifName == "" && hasNoAdditionalRuleSelectors(r)
+		inCurrent := r.Priority >= nextTableRulePriority &&
+			r.Priority < nextTableRulePriority+config.RouteLeakRulePriorityWindow &&
+			r.Dst != nil && r.IifName != "" && leakShape
+		inPrevious := r.Priority >= previousNextTableRulePriority &&
+			r.Priority < previousNextTableRulePriority+maxNextTableRules &&
+			r.Dst != nil && r.IifName != "" && leakShape
+		// Both pre-#9420 global and #9420 ingress-scoped legacy rules
+		// carried a destination and target table; iif is intentionally not
+		// part of this test so both stale generations are removed.
+		inLegacy := r.Priority >= legacyNextTableRulePriority &&
+			r.Priority < legacyNextTableRulePriority+maxNextTableRules &&
+			r.Dst != nil && leakShape
+		return inCurrent || inPrevious || inLegacy
+	})
+}
+
+// clearMatchingRules is the shared clear() skeleton for exactly the two
+// true twins nextTableManager and ribGroupManager (#16174). Each caller
+// keeps its own ownership predicate and its kind string, from which the
+// list/delete error text and the log messages are formed, so the
+// per-family error and ordering contract is unchanged: families are
+// walked AF_INET then AF_INET6, every listed rule the predicate matches
+// is deleted, and failures are aggregated in walk order with
+// errors.Join.
+//
+// A per-family RuleList dump failure is aggregated and the walk
+// continues with the next family (see the #2273 rationale on
+// nextTableManager.clear). A RuleDel failure is likewise aggregated
+// (#5118: a stale route-leak rule is an active cross-VRF forwarding
+// instruction sitting BEFORE the main table, so a silent success would
+// preserve an inter-VRF leak after a "successful" commit) — except
+// ENOENT, where the rule is already absent and the desired end-state is
+// reached, which is debug-logged only so an idempotent re-clear does
+// not spuriously fail the apply.
+//
+// pbrManager.clear and probePinManager.clear are deliberately NOT
+// callers: PBR first retries a delete under the other rule action on
+// ENOENT, and probe-pin per-item deletes are Debug-only best-effort.
+// Folding either in would change its failure semantics.
+func clearMatchingRules(ops ruleOps, kind string, match func(netlink.Rule) bool) error {
 	var errs []error
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		rules, err := n.ops.RuleList(family)
+		rules, err := ops.RuleList(family)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("list next-table rules family %d: %w", family, err))
+			errs = append(errs, fmt.Errorf("list %s rules family %d: %w", kind, family, err))
 			continue
 		}
 		for _, r := range rules {
-			leakShape := isNonReservedRuleTable(r.Table) && r.Src == nil &&
-				r.OifName == "" && hasNoAdditionalRuleSelectors(r)
-			inCurrent := r.Priority >= nextTableRulePriority &&
-				r.Priority < nextTableRulePriority+config.RouteLeakRulePriorityWindow &&
-				r.Dst != nil && r.IifName != "" && leakShape
-			inPrevious := r.Priority >= previousNextTableRulePriority &&
-				r.Priority < previousNextTableRulePriority+maxNextTableRules &&
-				r.Dst != nil && r.IifName != "" && leakShape
-			// Both pre-#9420 global and #9420 ingress-scoped legacy rules
-			// carried a destination and target table; iif is intentionally not
-			// part of this test so both stale generations are removed.
-			inLegacy := r.Priority >= legacyNextTableRulePriority &&
-				r.Priority < legacyNextTableRulePriority+maxNextTableRules &&
-				r.Dst != nil && leakShape
-			if inCurrent || inPrevious || inLegacy {
-				if err := n.ops.RuleDel(&r); err != nil {
-					if isRuleAlreadyGone(err) {
-						// The rule is already absent (ENOENT / no such
-						// rule) — a delete of a rule that is not there IS
-						// the desired end-state, not a failure. Log for
-						// diagnostics but do NOT aggregate so an idempotent
-						// re-clear does not spuriously fail the apply.
-						slog.Debug("stale next-table rule already absent",
-							"priority", r.Priority, "err", err)
-						continue
-					}
-					// #5118: a real RuleDel failure leaves a STALE next-table
-					// route-leak rule in the kernel. That rule is an active
-					// cross-VRF forwarding instruction sitting BEFORE the main
-					// table, so a silent success here would preserve an
-					// inter-VRF leak after a "successful" commit. Aggregate the
-					// error (mirroring pbrManager.clear) so Apply — and the
-					// daemon apply loop — observe the divergence instead of nil.
-					slog.Warn("failed to delete stale next-table rule",
+			if !match(r) {
+				continue
+			}
+			if err := ops.RuleDel(&r); err != nil {
+				if isRuleAlreadyGone(err) {
+					slog.Debug("stale "+kind+" rule already absent",
 						"priority", r.Priority, "err", err)
-					errs = append(errs, fmt.Errorf(
-						"delete stale next-table rule prio %d: %w", r.Priority, err))
+					continue
 				}
+				slog.Warn("failed to delete stale "+kind+" rule",
+					"priority", r.Priority, "err", err)
+				errs = append(errs, fmt.Errorf(
+					"delete stale %s rule prio %d: %w", kind, r.Priority, err))
 			}
 		}
 	}
@@ -799,51 +817,22 @@ func splitConnectedPrefixesByFamily(prefixes []string) (v4, v6 []string) {
 // Per-family RuleList dump failures are aggregated and returned rather
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
 func (rg *ribGroupManager) clear() error {
-	var errs []error
-	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		rules, err := rg.ops.RuleList(family)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("list rib-group rules family %d: %w", family, err))
-			continue
-		}
-		for _, r := range rules {
-			inCurrent := r.Priority >= ribGroupLeakRulePriority &&
-				r.Priority < ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow &&
-				r.Dst != nil && r.IifName == "" && r.OifName == "" &&
-				r.Src == nil && isNonReservedRuleTable(r.Table) &&
-				hasNoAdditionalRuleSelectors(r)
-			legacyBlanketShape := r.Dst == nil && r.Src == nil &&
-				r.IifName == "" && r.OifName == "" &&
-				isNonReservedRuleTable(r.Table) && hasNoAdditionalRuleSelectors(r)
-			inOldBlanket := r.Priority >= ribGroupRulePriority &&
-				r.Priority < ribGroupRulePriority+100 && legacyBlanketShape
-			inReturn := IsRibGroupReturnRulePriority(r.Priority) &&
-				r.Dst != nil && r.Src == nil && isNonReservedRuleTable(r.Table) &&
-				hasExactlyOneVRFRuleInterface(r) && hasNoAdditionalRuleSelectors(r)
-			if inCurrent || inOldBlanket || inReturn {
-				if err := rg.ops.RuleDel(&r); err != nil {
-					if isRuleAlreadyGone(err) {
-						// Already absent — the desired end-state, not a
-						// failure. Log only; do not fail an idempotent
-						// re-clear (see isRuleAlreadyGone / #5118).
-						slog.Debug("stale rib-group rule already absent",
-							"priority", r.Priority, "err", err)
-						continue
-					}
-					// #5118: a real RuleDel failure leaves a STALE rib-group
-					// route-leak rule (a per-prefix connected-route leak that
-					// precedes the main table) in the kernel. Aggregate it so
-					// Apply surfaces the inter-VRF leak instead of reporting a
-					// silent success, mirroring pbrManager.clear.
-					slog.Warn("failed to delete stale rib-group rule",
-						"priority", r.Priority, "err", err)
-					errs = append(errs, fmt.Errorf(
-						"delete stale rib-group rule prio %d: %w", r.Priority, err))
-				}
-			}
-		}
-	}
-	return errors.Join(errs...)
+	return clearMatchingRules(rg.ops, "rib-group", func(r netlink.Rule) bool {
+		inCurrent := r.Priority >= ribGroupLeakRulePriority &&
+			r.Priority < ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow &&
+			r.Dst != nil && r.IifName == "" && r.OifName == "" &&
+			r.Src == nil && isNonReservedRuleTable(r.Table) &&
+			hasNoAdditionalRuleSelectors(r)
+		legacyBlanketShape := r.Dst == nil && r.Src == nil &&
+			r.IifName == "" && r.OifName == "" &&
+			isNonReservedRuleTable(r.Table) && hasNoAdditionalRuleSelectors(r)
+		inOldBlanket := r.Priority >= ribGroupRulePriority &&
+			r.Priority < ribGroupRulePriority+100 && legacyBlanketShape
+		inReturn := IsRibGroupReturnRulePriority(r.Priority) &&
+			r.Dst != nil && r.Src == nil && isNonReservedRuleTable(r.Table) &&
+			hasExactlyOneVRFRuleInterface(r) && hasNoAdditionalRuleSelectors(r)
+		return inCurrent || inOldBlanket || inReturn
+	})
 }
 
 // PBRRule describes a single policy-based routing rule derived from a
