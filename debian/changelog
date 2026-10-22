@@ -1,5 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Genericise userspace-dp prefix_set.rs over the address family
+    (#16189): PrefixSetV4/PrefixSetV6 become aliases for
+    PrefixSet<PrefixV4Family>/PrefixSet<PrefixV6Family>, the twin
+    merged_ranges and factory/contains impls collapse to one generic
+    body, and host_mask is a required PrefixFamily method with the
+    len==0 / len>=BITS guards inside each impl. prefix.rs is
+    untouched (PrefixV4 keeps directed_broadcast); merged-range
+    outputs, budget behaviour, and the fail-open MatchAny defaults
+    are unchanged per family.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Add additive structured boundary errors for one prefix site
     (#16133): ControlResponse gains error_code/error_retry_class beside
     the prose error on both Go and Rust sides, and the #10702

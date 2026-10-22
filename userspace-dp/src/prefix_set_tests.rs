@@ -199,7 +199,10 @@ fn duplicate_prefixes_dont_corrupt_the_set() {
             // 17 unique /24s + 1 deduped (10.0.0.0/24): 18 distinct
             // prefixes. The /24s are adjacent (5.5.0..5.5.16) so
             // they merge into fewer disjoint ranges.
-            assert_eq!(*n, 18, "distinct prefix count should dedupe exact duplicates");
+            assert_eq!(
+                *n, 18,
+                "distinct prefix count should dedupe exact duplicates"
+            );
             assert!(r.len() < 18, "adjacent /24s must merge: {} ranges", r.len());
         }
         _ => panic!("expected ranges variant"),
@@ -309,8 +312,7 @@ fn ranges_at_budget_still_compiles_15091() {
             p6(&format!("{}/128", Ipv6Addr::from(addr)))
         })
         .collect();
-    let set = PrefixSetV6::try_from_v3_literals(prefixes)
-        .expect("at-budget set must compile");
+    let set = PrefixSetV6::try_from_v3_literals(prefixes).expect("at-budget set must compile");
     assert_eq!(set.prefix_count(), MAX_PREFIX_SET_RANGES);
     assert!(set.contains(Ipv6Addr::from(
         0x2001_0db8_0000_0000_0000_0000_0000_0000u128
@@ -346,4 +348,132 @@ fn ranges_merge_covered_and_adjacent_15091() {
     assert!(set.contains("2001:db8:ffff::1".parse().expect("ip")));
     assert!(set.contains("2001:db9::1".parse().expect("ip")));
     assert!(!set.contains("2001:dba::1".parse().expect("ip")));
+}
+
+// -----------------------------------------------------------------
+// #16189: generic family machinery. `host_mask` is a required
+// trait method with the len==0 / len>=BITS guards inside it; the
+// merged-range builder must go through it (never an inline shift
+// at a call site). These cells pin the guarded values directly so
+// a regression that inlines `(1 << (BITS - len)) - 1` and drops a
+// guard fails here even before the range tests run.
+// -----------------------------------------------------------------
+
+#[test]
+fn host_mask_guards_boundaries_16189() {
+    // v4: /0 covers everything, /32 is a single host.
+    assert_eq!(PrefixV4Family::BITS, 32);
+    assert_eq!(PrefixV6Family::BITS, 128);
+    assert_eq!(PrefixV4Family::host_mask(0), u32::MAX);
+    assert_eq!(PrefixV4Family::host_mask(1), 0x7fff_ffff);
+    assert_eq!(PrefixV4Family::host_mask(24), 0xff);
+    assert_eq!(PrefixV4Family::host_mask(31), 1);
+    assert_eq!(PrefixV4Family::host_mask(32), 0);
+    // Out-of-range lengths stay guarded (no shift overflow/panic).
+    assert_eq!(PrefixV4Family::host_mask(33), 0);
+    assert_eq!(PrefixV4Family::host_mask(255), 0);
+    // v6: ::/0 covers everything, /128 is a single host.
+    assert_eq!(PrefixV6Family::host_mask(0), u128::MAX);
+    assert_eq!(PrefixV6Family::host_mask(1), (1u128 << 127) - 1);
+    assert_eq!(PrefixV6Family::host_mask(64), (1u128 << 64) - 1);
+    assert_eq!(PrefixV6Family::host_mask(127), 1);
+    assert_eq!(PrefixV6Family::host_mask(128), 0);
+    assert_eq!(PrefixV6Family::host_mask(129), 0);
+    assert_eq!(PrefixV6Family::host_mask(255), 0);
+}
+
+#[test]
+fn merged_ranges_byte_identical_per_family_16189() {
+    // Corpus hitting len 0-adjacent (no /0 — constructor funnels it
+    // to MatchAny), len==BITS (/32, /128), covered, adjacent and
+    // disjoint inputs. Assert the retained ranges themselves, not
+    // just `contains`, so a generic/host_mask drift that happens to
+    // preserve membership on the probed IPs still fails.
+    let v4_in: Vec<PrefixV4> = vec![
+        p4("10.0.0.0/24"),
+        p4("10.0.1.0/24"),    // adjacent → merges with previous
+        p4("10.0.0.128/25"),  // covered by the /24
+        p4("10.0.0.7/32"),    // covered, len==BITS
+        p4("192.168.0.0/16"), // disjoint
+        p4("192.168.255.255/32"),
+    ];
+    let mut v4_pad: Vec<PrefixV4> = v4_in.clone();
+    // Pad past the Linear threshold with prefixes inside 10.0.0.0/23.
+    for i in 0..16u32 {
+        v4_pad.push(p4(&format!("10.0.0.{i}/32")));
+    }
+    let set = PrefixSetV4::try_from_v3_literals(v4_pad).expect("v4 set");
+    match &set {
+        PrefixSetV4::Ranges(r, n) => {
+            let expected: Vec<(u32, u32)> = vec![
+                (
+                    u32::from(Ipv4Addr::new(10, 0, 0, 0)),
+                    u32::from(Ipv4Addr::new(10, 0, 1, 255)),
+                ),
+                (
+                    u32::from(Ipv4Addr::new(192, 168, 0, 0)),
+                    u32::from(Ipv4Addr::new(192, 168, 255, 255)),
+                ),
+            ];
+            assert_eq!(*r, expected, "v4 merged ranges must be byte-identical");
+            // 6 named + 16 padded, minus exact dup 10.0.0.7/32 = 21.
+            assert_eq!(*n, 21);
+        }
+        other => panic!("expected Ranges, got {other:?}"),
+    }
+
+    let mut v6_pad: Vec<PrefixV6> = vec![
+        p6("2001:db8::/48"),
+        p6("2001:db8:1::/48"), // adjacent → merges
+        p6("2001:db8::1/128"), // covered, len==BITS
+        p6("2001:db9::/48"),   // disjoint
+    ];
+    for i in 0..16u32 {
+        v6_pad.push(p6(&format!("2001:db8::{i:x}/128")));
+    }
+    let set = PrefixSetV6::try_from_v3_literals(v6_pad).expect("v6 set");
+    match &set {
+        PrefixSetV6::Ranges(r, n) => {
+            let base = u128::from("2001:db8::".parse::<Ipv6Addr>().expect("ip"));
+            let expected: Vec<(u128, u128)> = vec![
+                (base, base + (1u128 << 81) - 1), // 2001:db8::/47 span
+                (
+                    u128::from("2001:db9::".parse::<Ipv6Addr>().expect("ip")),
+                    u128::from("2001:db9::".parse::<Ipv6Addr>().expect("ip")) + (1u128 << 80) - 1,
+                ),
+            ];
+            assert_eq!(*r, expected, "v6 merged ranges must be byte-identical");
+            // 4 named + 16 padded, minus exact dup 2001:db8::1/128 = 19.
+            assert_eq!(*n, 19);
+        }
+        other => panic!("expected Ranges, got {other:?}"),
+    }
+}
+
+#[test]
+fn generic_set_boundary_membership_16189() {
+    // len==BITS host prefixes at the address-space edges, built
+    // through the generic Ranges path (>16 inputs).
+    let mut v4: Vec<PrefixV4> = (0..17).map(|i| p4(&format!("0.0.0.{i}/32"))).collect();
+    v4.push(p4("255.255.255.255/32"));
+    let set = PrefixSetV4::from_prefixes(v4);
+    assert!(matches!(set, PrefixSetV4::Ranges(..)));
+    assert!(set.contains("0.0.0.0".parse().expect("ip")));
+    assert!(set.contains("0.0.0.16".parse().expect("ip")));
+    assert!(!set.contains("0.0.0.17".parse().expect("ip")));
+    assert!(set.contains("255.255.255.255".parse().expect("ip")));
+    assert!(!set.contains("255.255.255.254".parse().expect("ip")));
+
+    let mut v6: Vec<PrefixV6> = (0..17).map(|i| p6(&format!("::1:{i:x}/128"))).collect();
+    v6.push(p6("ffff::ffff/128"));
+    let set = PrefixSetV6::from_prefixes(v6);
+    assert!(matches!(set, PrefixSetV6::Ranges(..)));
+    assert!(set.contains("::1:0".parse().expect("ip")));
+    assert!(!set.contains("::1:11".parse().expect("ip")));
+    assert!(set.contains("ffff::ffff".parse().expect("ip")));
+    // Fail-open defaults unchanged per family.
+    assert!(PrefixSetV4::default().is_match_any());
+    assert!(PrefixSetV6::default().is_match_any());
+    assert!(PrefixSetV4::default().contains("203.0.113.1".parse().expect("ip")));
+    assert!(PrefixSetV6::default().contains("2001:db8::1".parse().expect("ip")));
 }

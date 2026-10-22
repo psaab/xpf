@@ -24,12 +24,20 @@
 //! every forwarding publish. Sorted merged ranges cost 32 B per
 //! retained v6 range (8 B per v4 range), need no per-bit nodes,
 //! and collapse covered/overlapping prefixes at build time.
+//!
+//! #16189: the set/range machinery is generic over the address
+//! family via [`PrefixFamily`]. Only the family-specific
+//! conversions and the guarded `host_mask` live in the trait
+//! impls; `merged_ranges`, the factories, `contains`, and the
+//! accessors are written once. The family prefix types in
+//! `prefix.rs` are NOT genericised — `PrefixV4` keeps its
+//! v4-only `directed_broadcast` surface.
 
 use crate::prefix::{PrefixV4, PrefixV6};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Threshold below which a `Linear` variant is used. See
-/// `docs/pr/923-policy-prefix-set/plan.md` \u00a7"Threshold rationale".
+/// `docs/pr/923-policy-prefix-set/plan.md` §"Threshold rationale".
 /// 16 is a starting tunable. A threshold-sweep + lookup-cost
 /// microbench is a follow-up if the constant turns out to be
 /// poorly tuned in production traces.
@@ -46,7 +54,7 @@ pub(crate) const PREFIX_SET_LINEAR_MAX: usize = 16;
 /// representation actually stored: a set that merges above this
 /// many disjoint ranges exceeds the memory the cap was sized for
 /// and the snapshot build must fail closed. See
-/// `PrefixSetV4::try_from_prefixes` / `try_from_v3_literals`.
+/// `PrefixSet::try_from_prefixes` / `try_from_v3_literals`.
 pub(crate) const MAX_PREFIX_SET_RANGES: usize = 1 << 20;
 
 /// #15091: a prefix set whose merged range count exceeds
@@ -62,7 +70,138 @@ pub(crate) struct PrefixSetBudgetExceeded {
     pub limit: usize,
 }
 
-/// IPv4 prefix membership set. See module docs.
+/// Integer address key used for range arithmetic in one family.
+///
+/// The ordering/arithmetic operations `merged_ranges` and
+/// `contains` rely on. `u32`/`u128` satisfy them natively; the
+/// trait exists so the generic code names the bound once instead
+/// of repeating a long `where` clause at every use site.
+pub(crate) trait PrefixKey: Copy + Ord + std::ops::Add<Output = Self> {
+    fn saturating_add_one(self) -> Self;
+}
+
+impl PrefixKey for u32 {
+    fn saturating_add_one(self) -> Self {
+        self.saturating_add(1)
+    }
+}
+
+impl PrefixKey for u128 {
+    fn saturating_add_one(self) -> Self {
+        self.saturating_add(1)
+    }
+}
+
+/// Address family for the generic prefix-set machinery (#16189).
+///
+/// One impl per family (`PrefixV4Family` / `PrefixV6Family`).
+/// `host_mask` is a REQUIRED method with the length guards inside
+/// it: the `(1 << (BITS - len)) - 1` computation is only safe
+/// behind the `len == 0` / `len >= BITS` guards, so call sites
+/// must not inline it. There is deliberately no default body — a
+/// new family cannot forget the guards.
+pub(crate) trait PrefixFamily: Sized {
+    /// Stored prefix type (`PrefixV4` / `PrefixV6`).
+    type Prefix: Copy;
+    /// Address type probed by `contains` (`Ipv4Addr` / `Ipv6Addr`).
+    type Addr: Copy;
+    /// Integer key for range arithmetic (`u32` / `u128`).
+    type Key: PrefixKey;
+
+    /// Address bits in this family (32 / 128).
+    const BITS: u32;
+
+    fn prefix_len(prefix: Self::Prefix) -> u8;
+    fn prefix_addr(prefix: Self::Prefix) -> Self::Addr;
+    fn prefix_contains(prefix: Self::Prefix, addr: Self::Addr) -> bool;
+    fn addr_key(addr: Self::Addr) -> Self::Key;
+
+    /// Host mask for `prefix_len`: all-ones host part.
+    ///
+    /// Required method — the guards MUST live here, not at call
+    /// sites. `len == 0` yields the all-ones mask and
+    /// `len >= BITS` yields zero; only between them is
+    /// `(1 << (BITS - len)) - 1` evaluated, where the shift count
+    /// is in `1..BITS` and cannot overflow.
+    fn host_mask(prefix_len: u8) -> Self::Key;
+}
+
+/// IPv4 family marker for [`PrefixSet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrefixV4Family;
+
+impl PrefixFamily for PrefixV4Family {
+    type Prefix = PrefixV4;
+    type Addr = Ipv4Addr;
+    type Key = u32;
+
+    const BITS: u32 = 32;
+    fn prefix_len(prefix: Self::Prefix) -> u8 {
+        prefix.prefix_len()
+    }
+
+    fn prefix_addr(prefix: Self::Prefix) -> Self::Addr {
+        prefix.addr()
+    }
+
+    fn prefix_contains(prefix: Self::Prefix, addr: Self::Addr) -> bool {
+        prefix.contains(addr)
+    }
+
+    fn addr_key(addr: Self::Addr) -> Self::Key {
+        u32::from(addr)
+    }
+
+    fn host_mask(prefix_len: u8) -> Self::Key {
+        if prefix_len == 0 {
+            u32::MAX
+        } else if u32::from(prefix_len) >= Self::BITS {
+            0
+        } else {
+            (1u32 << (Self::BITS - u32::from(prefix_len))) - 1
+        }
+    }
+}
+
+/// IPv6 family marker for [`PrefixSet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrefixV6Family;
+
+impl PrefixFamily for PrefixV6Family {
+    type Prefix = PrefixV6;
+    type Addr = Ipv6Addr;
+    type Key = u128;
+
+    const BITS: u32 = 128;
+    fn prefix_len(prefix: Self::Prefix) -> u8 {
+        prefix.prefix_len()
+    }
+
+    fn prefix_addr(prefix: Self::Prefix) -> Self::Addr {
+        prefix.addr()
+    }
+
+    fn prefix_contains(prefix: Self::Prefix, addr: Self::Addr) -> bool {
+        prefix.contains(addr)
+    }
+
+    fn addr_key(addr: Self::Addr) -> Self::Key {
+        u128::from(addr)
+    }
+
+    fn host_mask(prefix_len: u8) -> Self::Key {
+        if prefix_len == 0 {
+            u128::MAX
+        } else if u32::from(prefix_len) >= Self::BITS {
+            0
+        } else {
+            (1u128 << (Self::BITS - u32::from(prefix_len))) - 1
+        }
+    }
+}
+
+/// Prefix membership set, generic over the address family. See
+/// module docs.
 ///
 /// `MatchNone` (#1606) is distinct from `MatchAny`: it means
 /// "no criteria specified; the address-side of the rule does not
@@ -70,54 +209,47 @@ pub(crate) struct PrefixSetBudgetExceeded {
 /// (legacy convention preserved for back-compat), while the new
 /// `from_v3_literals(empty)` returns `MatchNone`.
 #[derive(Debug, Clone)]
-pub(crate) enum PrefixSetV4 {
+pub(crate) enum PrefixSet<F: PrefixFamily> {
     MatchAny,
     MatchNone,
-    Linear(Vec<PrefixV4>),
+    Linear(Vec<F::Prefix>),
     /// Sorted merged ranges plus the distinct-prefix count
     /// (`prefix_count` keeps its pre-#15091 cardinality meaning:
     /// covered prefixes still count, exact duplicates do not).
-    Ranges(Vec<(u32, u32)>, usize),
+    Ranges(Vec<(F::Key, F::Key)>, usize),
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum PrefixSetV6 {
-    MatchAny,
-    MatchNone,
-    Linear(Vec<PrefixV6>),
-    Ranges(Vec<(u128, u128)>, usize),
-}
+/// IPv4 prefix membership set.
+pub(crate) type PrefixSetV4 = PrefixSet<PrefixV4Family>;
+
+/// IPv6 prefix membership set.
+pub(crate) type PrefixSetV6 = PrefixSet<PrefixV6Family>;
 
 /// #15091: build sorted, merged, disjoint inclusive ranges from
-/// v4 prefixes. Returns `Err` when the merged count exceeds the
-/// budget; the caller fails the snapshot closed.
-fn merged_ranges_v4(
-    prefixes: &[PrefixV4],
-) -> Result<(Vec<(u32, u32)>, usize), PrefixSetBudgetExceeded> {
-    let mut distinct: Vec<(u32, u8)> = prefixes
+/// prefixes in one family. Returns `Err` when the merged count
+/// exceeds the budget; the caller fails the snapshot closed.
+fn merged_ranges<F: PrefixFamily>(
+    prefixes: &[F::Prefix],
+) -> Result<(Vec<(F::Key, F::Key)>, usize), PrefixSetBudgetExceeded> {
+    let mut distinct: Vec<(F::Key, u8)> = prefixes
         .iter()
-        .map(|p| (u32::from(p.addr()), p.prefix_len()))
+        .map(|&p| (F::addr_key(F::prefix_addr(p)), F::prefix_len(p)))
         .collect();
     distinct.sort_unstable();
     distinct.dedup();
     let distinct_count = distinct.len();
-    let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(prefixes.len());
-    for p in prefixes {
-        let lo = u32::from(p.addr());
-        let host = if p.prefix_len() == 0 {
-            u32::MAX
-        } else if p.prefix_len() >= 32 {
-            0
-        } else {
-            (1u32 << (32 - p.prefix_len())) - 1
-        };
-        ranges.push((lo, lo.wrapping_add(host)));
+    let mut ranges: Vec<(F::Key, F::Key)> = Vec::with_capacity(prefixes.len());
+    for &p in prefixes {
+        let lo = F::addr_key(F::prefix_addr(p));
+        // Guards live inside `host_mask`; do not inline the shift.
+        let host = F::host_mask(F::prefix_len(p));
+        ranges.push((lo, lo + host));
     }
     ranges.sort_unstable();
-    let mut out: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    let mut out: Vec<(F::Key, F::Key)> = Vec::with_capacity(ranges.len());
     for (lo, hi) in ranges {
         match out.last_mut() {
-            Some((_, prev_hi)) if lo <= prev_hi.saturating_add(1) => {
+            Some((_, prev_hi)) if lo <= prev_hi.saturating_add_one() => {
                 if hi > *prev_hi {
                     *prev_hi = hi;
                 }
@@ -136,79 +268,33 @@ fn merged_ranges_v4(
     Ok((out, distinct_count))
 }
 
-/// #15091: v6 mirror of `merged_ranges_v4`.
-fn merged_ranges_v6(
-    prefixes: &[PrefixV6],
-) -> Result<(Vec<(u128, u128)>, usize), PrefixSetBudgetExceeded> {
-    let mut distinct: Vec<(u128, u8)> = prefixes
-        .iter()
-        .map(|p| (u128::from(p.addr()), p.prefix_len()))
-        .collect();
-    distinct.sort_unstable();
-    distinct.dedup();
-    let distinct_count = distinct.len();
-    let mut ranges: Vec<(u128, u128)> = Vec::with_capacity(prefixes.len());
-    for p in prefixes {
-        let lo = u128::from(p.addr());
-        let host = if p.prefix_len() == 0 {
-            u128::MAX
-        } else if p.prefix_len() >= 128 {
-            0
-        } else {
-            (1u128 << (128 - p.prefix_len())) - 1
-        };
-        ranges.push((lo, lo.wrapping_add(host)));
-    }
-    ranges.sort_unstable();
-    let mut out: Vec<(u128, u128)> = Vec::with_capacity(ranges.len());
-    for (lo, hi) in ranges {
-        match out.last_mut() {
-            Some((_, prev_hi)) if lo <= prev_hi.saturating_add(1) => {
-                if hi > *prev_hi {
-                    *prev_hi = hi;
-                }
-            }
-            _ => {
-                out.push((lo, hi));
-                if out.len() > MAX_PREFIX_SET_RANGES {
-                    return Err(PrefixSetBudgetExceeded {
-                        ranges: out.len(),
-                        limit: MAX_PREFIX_SET_RANGES,
-                    });
-                }
-            }
-        }
-    }
-    Ok((out, distinct_count))
-}
-
-impl PrefixSetV4 {
+impl<F: PrefixFamily> PrefixSet<F> {
     /// Legacy factory: empty input collapses to `MatchAny`. Used by
     /// the non-v3-shaped fallback path that parses fully-expanded
     /// `source_addresses` from old-Go snapshots. Infallible
     /// wrapper over `try_from_prefixes`: an over-budget set (only
     /// reachable from a corrupt/hand-built snapshot, since the Go
     /// producer is capped) degrades to `MatchNone` rather than
-    /// panicking \u2014 never `MatchAny`, so it cannot widen a deny.
-    pub(crate) fn from_prefixes(prefixes: Vec<PrefixV4>) -> Self {
+    /// panicking — never `MatchAny`, so it cannot widen a deny.
+    pub(crate) fn from_prefixes(prefixes: Vec<F::Prefix>) -> Self {
         Self::try_from_prefixes(prefixes).unwrap_or(Self::MatchNone)
     }
 
     /// #15091 fallible legacy factory.
-    pub(crate) fn try_from_prefixes(prefixes: Vec<PrefixV4>) -> Result<Self, PrefixSetBudgetExceeded> {
+    pub(crate) fn try_from_prefixes(
+        prefixes: Vec<F::Prefix>,
+    ) -> Result<Self, PrefixSetBudgetExceeded> {
         if prefixes.is_empty() {
             return Ok(Self::MatchAny);
         }
-        if prefixes.iter().any(|p| p.prefix_len() == 0) {
+        if prefixes.iter().any(|&p| F::prefix_len(p) == 0) {
             return Ok(Self::MatchAny);
         }
         if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
             Ok(Self::Linear(prefixes))
         } else {
-            {
-                let (r, n) = merged_ranges_v4(&prefixes)?;
-                Ok(Self::Ranges(r, n))
-            }
+            let (r, n) = merged_ranges::<F>(&prefixes)?;
+            Ok(Self::Ranges(r, n))
         }
     }
 
@@ -218,37 +304,37 @@ impl PrefixSetV4 {
     /// is v3-shaped on this side, and when building book entries.
     /// Infallible wrapper over `try_from_v3_literals` (see
     /// `from_prefixes` for the over-budget posture).
-    pub(crate) fn from_v3_literals(prefixes: Vec<PrefixV4>) -> Self {
+    pub(crate) fn from_v3_literals(prefixes: Vec<F::Prefix>) -> Self {
         Self::try_from_v3_literals(prefixes).unwrap_or(Self::MatchNone)
     }
 
     /// #15091 fallible v3 factory.
-    pub(crate) fn try_from_v3_literals(prefixes: Vec<PrefixV4>) -> Result<Self, PrefixSetBudgetExceeded> {
+    pub(crate) fn try_from_v3_literals(
+        prefixes: Vec<F::Prefix>,
+    ) -> Result<Self, PrefixSetBudgetExceeded> {
         if prefixes.is_empty() {
             return Ok(Self::MatchNone);
         }
-        if prefixes.iter().any(|p| p.prefix_len() == 0) {
+        if prefixes.iter().any(|&p| F::prefix_len(p) == 0) {
             return Ok(Self::MatchAny);
         }
         if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
             Ok(Self::Linear(prefixes))
         } else {
-            {
-                let (r, n) = merged_ranges_v4(&prefixes)?;
-                Ok(Self::Ranges(r, n))
-            }
+            let (r, n) = merged_ranges::<F>(&prefixes)?;
+            Ok(Self::Ranges(r, n))
         }
     }
 
     /// Returns true iff some prefix in the set covers `ip`.
     #[inline]
-    pub(crate) fn contains(&self, ip: Ipv4Addr) -> bool {
+    pub(crate) fn contains(&self, ip: F::Addr) -> bool {
         match self {
             Self::MatchAny => true,
             Self::MatchNone => false,
-            Self::Linear(v) => v.iter().any(|p| p.contains(ip)),
+            Self::Linear(v) => v.iter().any(|&p| F::prefix_contains(p, ip)),
             Self::Ranges(r, _) => {
-                let x = u32::from(ip);
+                let x = F::addr_key(ip);
                 let idx = r.partition_point(|&(_, hi)| hi < x);
                 matches!(r.get(idx), Some(&(lo, _)) if lo <= x)
             }
@@ -278,99 +364,12 @@ impl PrefixSetV4 {
 
     /// #15091: heap bytes retained by this set (variant payload
     /// only, excluding the enum itself). `Ranges` costs 8 B/range
-    /// (v4) with no per-bit nodes.
+    /// (v4) / 32 B/range (v6) with no per-bit nodes.
     pub(crate) fn heap_bytes(&self) -> usize {
         match self {
             Self::MatchAny | Self::MatchNone => 0,
-            Self::Linear(v) => v.capacity() * std::mem::size_of::<PrefixV4>(),
-            Self::Ranges(r, _) => r.capacity() * std::mem::size_of::<(u32, u32)>(),
-        }
-    }
-}
-
-impl PrefixSetV6 {
-    pub(crate) fn from_prefixes(prefixes: Vec<PrefixV6>) -> Self {
-        Self::try_from_prefixes(prefixes).unwrap_or(Self::MatchNone)
-    }
-
-    /// #15091 fallible legacy factory.
-    pub(crate) fn try_from_prefixes(prefixes: Vec<PrefixV6>) -> Result<Self, PrefixSetBudgetExceeded> {
-        if prefixes.is_empty() {
-            return Ok(Self::MatchAny);
-        }
-        if prefixes.iter().any(|p| p.prefix_len() == 0) {
-            return Ok(Self::MatchAny);
-        }
-        if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
-            Ok(Self::Linear(prefixes))
-        } else {
-            {
-                let (r, n) = merged_ranges_v6(&prefixes)?;
-                Ok(Self::Ranges(r, n))
-            }
-        }
-    }
-
-    pub(crate) fn from_v3_literals(prefixes: Vec<PrefixV6>) -> Self {
-        Self::try_from_v3_literals(prefixes).unwrap_or(Self::MatchNone)
-    }
-
-    /// #15091 fallible v3 factory.
-    pub(crate) fn try_from_v3_literals(prefixes: Vec<PrefixV6>) -> Result<Self, PrefixSetBudgetExceeded> {
-        if prefixes.is_empty() {
-            return Ok(Self::MatchNone);
-        }
-        if prefixes.iter().any(|p| p.prefix_len() == 0) {
-            return Ok(Self::MatchAny);
-        }
-        if prefixes.len() <= PREFIX_SET_LINEAR_MAX {
-            Ok(Self::Linear(prefixes))
-        } else {
-            {
-                let (r, n) = merged_ranges_v6(&prefixes)?;
-                Ok(Self::Ranges(r, n))
-            }
-        }
-    }
-
-    #[inline]
-    pub(crate) fn contains(&self, ip: Ipv6Addr) -> bool {
-        match self {
-            Self::MatchAny => true,
-            Self::MatchNone => false,
-            Self::Linear(v) => v.iter().any(|p| p.contains(ip)),
-            Self::Ranges(r, _) => {
-                let x = u128::from(ip);
-                let idx = r.partition_point(|&(_, hi)| hi < x);
-                matches!(r.get(idx), Some(&(lo, _)) if lo <= x)
-            }
-        }
-    }
-
-    #[inline]
-    pub(crate) fn is_match_any(&self) -> bool {
-        matches!(self, Self::MatchAny)
-    }
-
-    #[inline]
-    pub(crate) fn is_match_none(&self) -> bool {
-        matches!(self, Self::MatchNone)
-    }
-
-    pub(crate) fn prefix_count(&self) -> usize {
-        match self {
-            Self::MatchAny | Self::MatchNone => 0,
-            Self::Linear(v) => v.len(),
-            Self::Ranges(_, n) => *n,
-        }
-    }
-
-    /// #15091: v6 `Ranges` costs 32 B/range. See v4 `heap_bytes`.
-    pub(crate) fn heap_bytes(&self) -> usize {
-        match self {
-            Self::MatchAny | Self::MatchNone => 0,
-            Self::Linear(v) => v.capacity() * std::mem::size_of::<PrefixV6>(),
-            Self::Ranges(r, _) => r.capacity() * std::mem::size_of::<(u128, u128)>(),
+            Self::Linear(v) => v.capacity() * std::mem::size_of::<F::Prefix>(),
+            Self::Ranges(r, _) => r.capacity() * std::mem::size_of::<(F::Key, F::Key)>(),
         }
     }
 }
@@ -414,7 +413,6 @@ impl Default for PrefixSetV6 {
         Self::MatchAny
     }
 }
-
 
 #[cfg(test)]
 #[path = "prefix_set_tests.rs"]
