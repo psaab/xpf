@@ -20,7 +20,7 @@ import (
 //  2. At the root (empty editPath) no [edit] header was printed at all,
 //     so top-level +/- lines had no context header.
 func TestCompareReEmitsHeaderAfterRecursedSibling15169(t *testing.T) {
-	oldTree := mustParse15169(t, `security {
+	oldTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy keep {
@@ -50,7 +50,7 @@ func TestCompareReEmitsHeaderAfterRecursedSibling15169(t *testing.T) {
 	// Remove deny-x entirely and change keep's nested `then` so the keep
 	// policy is recursed into (printing a deeper header) BEFORE the
 	// removed deny-x stanza is rendered at the parent level.
-	newTree := mustParse15169(t, `security {
+	newTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy keep {
@@ -87,7 +87,7 @@ func TestCompareReEmitsHeaderAfterRecursedSibling15169(t *testing.T) {
 	idxDeny := strings.Index(out, "-    policy deny-x {")
 	if idxDeny >= 0 {
 		lastHeader := strings.LastIndex(out[:idxDeny], "[edit ")
-		governing := out[lastHeader:strings.Index(out[lastHeader:], "\n")+lastHeader]
+		governing := out[lastHeader : strings.Index(out[lastHeader:], "\n")+lastHeader]
 		if governing != "[edit security policies from-zone trust to-zone untrust]" {
 			t.Errorf("deny-x removal governed by %q, want the policies-level header:\n%s", governing, out)
 		}
@@ -97,7 +97,7 @@ func TestCompareReEmitsHeaderAfterRecursedSibling15169(t *testing.T) {
 	idxReject := strings.Index(out, "+    reject;")
 	if idxReject >= 0 {
 		lastHeader := strings.LastIndex(out[:idxReject], "[edit ")
-		governing := out[lastHeader:strings.Index(out[lastHeader:], "\n")+lastHeader]
+		governing := out[lastHeader : strings.Index(out[lastHeader:], "\n")+lastHeader]
 		if governing != "[edit security policies from-zone trust to-zone untrust policy keep then]" {
 			t.Errorf("keep's reject governed by %q, want the deeper policy keep then header:\n%s", governing, out)
 		}
@@ -109,7 +109,7 @@ func TestCompareReEmitsHeaderAfterRecursedSibling15169(t *testing.T) {
 // so the #15168 removals-first ordering does not move it ahead of the
 // recursion — pre-fix it inherited the deeper header outright.
 func TestCompareAddedSiblingAfterRecursedSibling15169(t *testing.T) {
-	oldTree := mustParse15169(t, `security {
+	oldTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy keep {
@@ -126,7 +126,7 @@ func TestCompareAddedSiblingAfterRecursedSibling15169(t *testing.T) {
     }
 }
 `)
-	newTree := mustParse15169(t, `security {
+	newTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy keep {
@@ -164,7 +164,7 @@ func TestCompareAddedSiblingAfterRecursedSibling15169(t *testing.T) {
 		t.Fatalf("fixture premise broken: recursed keep block does not precede the addition:\n%s", out)
 	}
 	lastHeader := strings.LastIndex(out[:idxNew], "[edit ")
-	governing := out[lastHeader:strings.Index(out[lastHeader:], "\n")+lastHeader]
+	governing := out[lastHeader : strings.Index(out[lastHeader:], "\n")+lastHeader]
 	if governing != "[edit security policies from-zone trust to-zone untrust]" {
 		t.Errorf("added new-x governed by %q, want the re-emitted policies-level header:\n%s", governing, out)
 	}
@@ -173,11 +173,11 @@ func TestCompareAddedSiblingAfterRecursedSibling15169(t *testing.T) {
 // Root-level probe: a top-level addition must be preceded by a bare
 // [edit] header (the pre-fix root printed no header at all).
 func TestCompareRootHeader15169(t *testing.T) {
-	oldTree := mustParse15169(t, `system {
+	oldTree := parseHierText(t, `system {
     host-name alpha;
 }
 `)
-	newTree := mustParse15169(t, `system {
+	newTree := parseHierText(t, `system {
     host-name alpha;
 }
 security {
@@ -216,11 +216,11 @@ security {
 // header for that level and no root [edit] header — the re-emission must
 // not add spurious headers when nothing was recursed into first.
 func TestCompareSingleHeaderControl15169(t *testing.T) {
-	oldTree := mustParse15169(t, `system {
+	oldTree := parseHierText(t, `system {
     host-name alpha;
 }
 `)
-	newTree := mustParse15169(t, `system {
+	newTree := parseHierText(t, `system {
     host-name beta;
 }
 `)
@@ -239,7 +239,7 @@ func TestCompareSingleHeaderControl15169(t *testing.T) {
 // Control: when a level's own lines all precede any recursion, the header
 // appears once at the top of the level and is not duplicated.
 func TestCompareNoDuplicateHeaderWithoutFollowingSiblings15169(t *testing.T) {
-	oldTree := mustParse15169(t, `security {
+	oldTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy keep {
@@ -256,7 +256,7 @@ func TestCompareNoDuplicateHeaderWithoutFollowingSiblings15169(t *testing.T) {
     }
 }
 `)
-	newTree := mustParse15169(t, `security {
+	newTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy keep {
@@ -282,13 +282,4 @@ func TestCompareNoDuplicateHeaderWithoutFollowingSiblings15169(t *testing.T) {
 	if strings.Contains(out, "[edit security policies from-zone trust to-zone untrust]\n") {
 		t.Errorf("parent header emitted with no lines under it:\n%s", out)
 	}
-}
-
-func mustParse15169(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors: %v", errs)
-	}
-	return tree
 }

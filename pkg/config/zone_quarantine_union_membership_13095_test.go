@@ -21,15 +21,6 @@ import (
 // node1-only security-zone a177301 quarantines the local mgmt cluster-wide.
 // z174/z214 are the #12829 pair, used the same way.
 
-func parseZoneQuarantineUnion13095(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 const peerNodeQuarantineFixture13095 = `
 groups {
 	node0 { }
@@ -72,7 +63,7 @@ func TestPeerNodeZoneQuarantineStopsMembershipCascade13095(t *testing.T) {
 	if StableZoneID("mgmt") != StableZoneID("a177301") {
 		t.Fatalf("test premise broken: mgmt/a177301 no longer collide")
 	}
-	tree := parseZoneQuarantineUnion13095(t, peerNodeQuarantineFixture13095)
+	tree := parseHierText(t, peerNodeQuarantineFixture13095)
 	cfg, err := CompileConfigForNodeLenient(tree, 0)
 	if err != nil {
 		t.Fatalf("CompileConfigForNodeLenient: %v", err)
@@ -108,7 +99,7 @@ func TestPeerNodeZoneQuarantineStopsMembershipCascade13095(t *testing.T) {
 // duplicate membership — strict still rejects it, tolerant still quarantines
 // the interface keys for both zones (fail closed, #9914).
 func TestZoneMembershipConflictStillDetectedWithoutCollision13095(t *testing.T) {
-	tree := parseZoneQuarantineUnion13095(t, `
+	tree := parseHierText(t, `
 interfaces {
 	ge-0/0/0 {
 		unit 0 {

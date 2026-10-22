@@ -43,7 +43,7 @@ system { apply-groups { G; } domain-name example.com; }`,
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			cfg := compile9422(t, parseTree9422(t, r.text))
+			cfg := compile9422(t, parseHierText(t, r.text))
 			if cfg.System.HostName != r.host {
 				t.Fatalf("block apply-groups not inherited: HostName=%q want %q", cfg.System.HostName, r.host)
 			}
@@ -61,7 +61,7 @@ func TestApplyGroupsExceptBlockSpellingExcludes11777(t *testing.T) {
 	const control = `groups { G { system { host-name FROM-GROUP; } } }
 apply-groups G;
 system { domain-name example.com; }`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if ctrl.System.HostName != "FROM-GROUP" {
 		t.Fatalf("POSITIVE CONTROL broken: without the exclusion the group must be inherited, got HostName=%q", ctrl.System.HostName)
 	}
@@ -88,7 +88,7 @@ system { apply-groups-except { G; H; } domain-name example.com; }`,
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			cfg := compile9422(t, parseTree9422(t, r.text))
+			cfg := compile9422(t, parseHierText(t, r.text))
 			if cfg.System.HostName != "" || cfg.System.TimeZone != "" {
 				t.Fatalf("block apply-groups-except did not exclude: HostName=%q TimeZone=%q", cfg.System.HostName, cfg.System.TimeZone)
 			}

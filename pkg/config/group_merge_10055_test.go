@@ -15,7 +15,7 @@ import (
 func TestPackedBracketedPeerTailMerge10055(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 priority 200; } } } } } } } apply-groups G; ` +
 		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 virtual-address [ 10.0.61.1/24 10.0.61.3/24 ]; } } } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -41,7 +41,7 @@ func TestPackedBracketedPeerTailMerge10055(t *testing.T) {
 func TestPackedBracketedPeerInlineWins10055(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 priority 200; } } } } } } } apply-groups G; ` +
 		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 virtual-address [ 10.0.61.1/24 10.0.61.3/24 ] priority 100; } } } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -66,7 +66,7 @@ func TestPackedBracketedPeerInlineWins10055(t *testing.T) {
 func TestPackedBracketedRunThenSibling10055(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 preempt; } } } } } } } apply-groups G; ` +
 		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 virtual-address [ 10.0.61.1/24 10.0.61.3/24 ] priority 100; } } } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -92,7 +92,7 @@ func TestPackedBracketedRunThenSibling10055(t *testing.T) {
 func TestPackedBareLeftoverStillBails10055(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 priority 200; } } } } } } } apply-groups G; ` +
 		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 virtual-address 10.0.61.1/24 10.0.61.3/24; } } } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)

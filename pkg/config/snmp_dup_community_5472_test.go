@@ -25,7 +25,7 @@ import (
 // proof: block 1 carries the allowlist, block 2 (same name) carries none, and
 // the merged community must still enforce block 1's restriction.
 func TestSNMPDupCommunityEmptySecondBlockKeepsAllowlist(t *testing.T) {
-	c := communityFrom(t, parseHier(t, `
+	c := communityFrom(t, parseHierText(t, `
 snmp {
     community public {
         authorization read-only;
@@ -56,7 +56,7 @@ snmp {
 // TestSNMPDupCommunityUnionsClients: when BOTH duplicate blocks carry clients,
 // the merged allowlist is the union of the two — neither block is dropped.
 func TestSNMPDupCommunityUnionsClients(t *testing.T) {
-	c := communityFrom(t, parseHier(t, `
+	c := communityFrom(t, parseHierText(t, `
 snmp {
     community mgmt {
         authorization read-only;
@@ -89,7 +89,7 @@ snmp {
 // default. An explicit later authorization does update.
 func TestSNMPDupCommunityAuthorizationNotCleared(t *testing.T) {
 	// Block 1 sets read-write; block 2 omits authorization entirely.
-	c := communityFrom(t, parseHier(t, `
+	c := communityFrom(t, parseHierText(t, `
 snmp {
     community rw {
         authorization read-write;
@@ -109,7 +109,7 @@ snmp {
 	}
 
 	// An explicit later authorization DOES win (last explicit value).
-	c2 := communityFrom(t, parseHier(t, `
+	c2 := communityFrom(t, parseHierText(t, `
 snmp {
     community upd {
         authorization read-only;
@@ -128,7 +128,7 @@ snmp {
 // change on the common single-block case: one community with an allowlist
 // still enforces exactly as before.
 func TestSNMPSingleCommunityUnchanged(t *testing.T) {
-	c := communityFrom(t, parseHier(t, `
+	c := communityFrom(t, parseHierText(t, `
 snmp {
     community solo {
         authorization read-only;

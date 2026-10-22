@@ -45,14 +45,14 @@ func TestApplicationExcludedRejectedStrict15662(t *testing.T) {
 		{
 			name: "zone-pair hierarchical standalone",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; destination-address any; application junos-http; application-excluded;`))
 			},
 		},
 		{
 			name: "global hierarchical standalone",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, globalHier(
+				return parseHierText(t, globalHier(
 					`source-address any; destination-address any; application junos-http; application-excluded;`))
 			},
 		},
@@ -133,7 +133,7 @@ func TestApplicationExcludedLenientWarnsAndPoisons15662(t *testing.T) {
 		{
 			name: "zone-pair hierarchical standalone",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; destination-address any; application junos-http; application-excluded;`))
 			},
 			pol: "p",
@@ -141,7 +141,7 @@ func TestApplicationExcludedLenientWarnsAndPoisons15662(t *testing.T) {
 		{
 			name: "global hierarchical standalone",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, globalHier(
+				return parseHierText(t, globalHier(
 					`source-address any; destination-address any; application junos-http; application-excluded;`))
 			},
 			pol: "g",

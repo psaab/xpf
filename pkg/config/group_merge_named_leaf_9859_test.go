@@ -9,7 +9,7 @@ import (
 
 func compileSchedulers9859(t *testing.T, text string) map[string]*CoSScheduler {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -116,7 +116,7 @@ func TestGroupNamedLeafSameInstanceKeepsInlineOverride9859(t *testing.T) {
 // adopted beside its inline braced spelling.
 func TestGroupNamedLeafSameInstanceBracedPeer9859(t *testing.T) {
 	text := `groups { G { system { syslog { host 10.0.0.1; } } } } apply-groups G; system { syslog { host 10.0.0.1 { any info; } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestGroupNamedLeafSameInstanceBracedPeer9859(t *testing.T) {
 func TestGroupNamedLeafUnexpandableTailBracedPeer9859(t *testing.T) {
 	text := `groups { G { class-of-service { schedulers sched-a unknown-tail edge; } } } apply-groups G; class-of-service { schedulers sched-a { priority high; } }`
 
-	cfgTree := parseHierarchical(t, text)
+	cfgTree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(cfgTree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
@@ -159,7 +159,7 @@ func TestGroupNamedLeafUnexpandableTailBracedPeer9859(t *testing.T) {
 		t.Fatalf("scheduler = %+v, want inline braced priority", scheduler)
 	}
 
-	expanded := parseHierarchical(t, text)
+	expanded := parseHierText(t, text)
 	if err := expanded.ExpandGroups(); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestGroupNamedLeafUnexpandableTailBracedPeer9859(t *testing.T) {
 func TestGroupValueListNamedLeavesStayOnKeywordPath9859(t *testing.T) {
 	t.Run("NTP server list", func(t *testing.T) {
 		text := `groups { G { system { ntp { server 192.0.2.2; } } } } apply-groups G; system { ntp { server [ 192.0.2.1 192.0.2.2 ]; } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -197,7 +197,7 @@ func TestGroupValueListNamedLeavesStayOnKeywordPath9859(t *testing.T) {
 
 	t.Run("DHCP interface list", func(t *testing.T) {
 		text := `groups { G { system { services { dhcp-local-server { group g { interface ge-0/0/1.0; } } } } } } apply-groups G; system { services { dhcp-local-server { group g { interface [ ge-0/0/0.0 ge-0/0/1.0 ]; } } } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -217,7 +217,7 @@ func TestGroupValueListNamedLeavesStayOnKeywordPath9859(t *testing.T) {
 // identity, while different area IDs remain separate instances.
 func TestGroupCanonicalAreaKeepsKeywordOverride9859(t *testing.T) {
 	text := `groups { G { protocols { ospf { area 0 area-type stub; } } } } apply-groups G; protocols { ospf { area 0.0.0.0; } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -231,7 +231,7 @@ func TestGroupCanonicalAreaKeepsKeywordOverride9859(t *testing.T) {
 	}
 	t.Run("different area IDs remain distinct", func(t *testing.T) {
 		text := `groups { G { protocols { ospf { area 1 area-type stub; } } } } apply-groups G; protocols { ospf { area 2; } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -255,7 +255,7 @@ func TestGroupCanonicalAreaKeepsKeywordOverride9859(t *testing.T) {
 // the two raw tokens.
 func TestGroupCanonicalRedundancyGroupKeepsKeywordOverride9859(t *testing.T) {
 	text := `groups { G { chassis { cluster { redundancy-group 01 node 0 priority 200; } } } } apply-groups G; chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-9859; node 0; redundancy-group 1 node 0 priority 100; } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -272,7 +272,7 @@ func TestGroupCanonicalRedundancyGroupKeepsKeywordOverride9859(t *testing.T) {
 	}
 	t.Run("different RG IDs remain distinct", func(t *testing.T) {
 		text := `groups { G { chassis { cluster { redundancy-group 2 node 0 priority 200; } } } } apply-groups G; chassis { cluster { cluster-id 1; authentication-key test-cluster-psk-9859; node 0; redundancy-group 1 node 0 priority 100; } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -297,7 +297,7 @@ func TestGroupCanonicalRedundancyGroupKeepsKeywordOverride9859(t *testing.T) {
 
 func TestGroupCanonicalInterfaceUnitKeepsKeywordOverride9859(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 01 description group-unit; } } } } apply-groups G; interfaces { ge-0/0/0 { unit 1 description inline-unit; } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestGroupCanonicalInterfaceUnitKeepsKeywordOverride9859(t *testing.T) {
 
 	t.Run("different unit IDs remain distinct", func(t *testing.T) {
 		text := `groups { G { interfaces { ge-0/0/0 { unit 2 description group-unit; } } } } apply-groups G; interfaces { ge-0/0/0 { unit 1 description inline-unit; } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		if err := tree.ExpandGroups(); err != nil {
 			t.Fatalf("ExpandGroups: %v", err)
 		}
@@ -343,7 +343,7 @@ func TestGroupCanonicalInterfaceUnitKeepsKeywordOverride9859(t *testing.T) {
 // class-of-service interfaces unit alias independently of regular interfaces.
 func TestGroupCanonicalCoSInterfaceUnitKeepsKeywordOverride9859(t *testing.T) {
 	text := `groups { G { class-of-service { interfaces ge-0/0/0 { unit 01 scheduler-map group-map; } } } } apply-groups G; class-of-service { interfaces ge-0/0/0 { unit 1 scheduler-map inline-map; } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestGroupCanonicalCoSInterfaceUnitKeepsKeywordOverride9859(t *testing.T) {
 	}
 	t.Run("different unit IDs remain distinct", func(t *testing.T) {
 		text := `groups { G { class-of-service { interfaces ge-0/0/0 { unit 2 scheduler-map group-map; } } } } apply-groups G; class-of-service { interfaces ge-0/0/0 { unit 1 scheduler-map inline-map; } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		if err := tree.ExpandGroups(); err != nil {
 			t.Fatalf("ExpandGroups: %v", err)
 		}
@@ -424,7 +424,7 @@ func TestGroupCoSShapingRateKeepsInlineScalar9859(t *testing.T) {
 					`interfaces ge-0/0/0 { `+tc.inline+` }`
 			}
 			text := `groups { G { class-of-service { ` + groupBody + ` } } } apply-groups G; class-of-service { ` + inlineBody + ` }`
-			tree := parseHierarchical(t, text)
+			tree := parseHierText(t, text)
 			if err := tree.ExpandGroups(); err != nil {
 				t.Fatalf("ExpandGroups: %v", err)
 			}
@@ -493,7 +493,7 @@ func TestGroupCoSShapingRateOrderedGroups9859(t *testing.T) {
 				except = ` system { apply-groups-except NEVER; }`
 			}
 			text := `groups { G1 { class-of-service { interfaces ge-0/0/0 { shaping-rate 10m burst-size 1m; } } } G2 { class-of-service { interfaces ge-0/0/0 { shaping-rate 20m burst-size 2m; } } } } apply-groups [ ` + tc.order + ` ]; class-of-service { interfaces ge-0/0/0 { } }` + except
-			tree := parseHierarchical(t, text)
+			tree := parseHierText(t, text)
 			if err := tree.ExpandGroups(); err != nil {
 				t.Fatalf("ExpandGroups: %v", err)
 			}
@@ -528,7 +528,7 @@ func TestGroupCanonicalWireGuardPeerKeepsKeywordOverride9859(t *testing.T) {
 
 	t.Run("interface tunnel peer", func(t *testing.T) {
 		text := `groups { G { interfaces { wg0 { tunnel { wireguard { peer ` + strings.ToUpper(upperPeer) + `; } } } } } } apply-groups G; interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key ` + privateKey + `; peer ` + lowerPeer + `; } } } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -541,7 +541,7 @@ func TestGroupCanonicalWireGuardPeerKeepsKeywordOverride9859(t *testing.T) {
 	})
 	t.Run("interface distinct peers remain distinct", func(t *testing.T) {
 		text := `groups { G { interfaces { wg0 { tunnel { wireguard { peer ` + upperPeer + `; } } } } } } apply-groups G; interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key ` + privateKey + `; peer ` + basePeer + `; } } } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -562,7 +562,7 @@ func TestGroupCanonicalWireGuardPeerKeepsKeywordOverride9859(t *testing.T) {
 
 	t.Run("unit tunnel peer", func(t *testing.T) {
 		text := `groups { G { interfaces { wg0 { unit 1 { tunnel { wireguard { peer ` + strings.ToUpper(upperPeer) + `; } } } } } } } apply-groups G; interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key ` + privateKey + `; peer ` + basePeer + `; } } unit 1 { tunnel { wireguard { peer ` + lowerPeer + `; } } } } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -582,7 +582,7 @@ func TestGroupCanonicalWireGuardPeerKeepsKeywordOverride9859(t *testing.T) {
 	})
 	t.Run("unit distinct peers remain distinct", func(t *testing.T) {
 		text := `groups { G { interfaces { wg0 { unit 1 { tunnel { wireguard { peer ` + upperPeer + `; } } } } } } } apply-groups G; interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key ` + privateKey + `; peer ` + basePeer + `; } } unit 1 { tunnel { wireguard { peer ` + otherPeer + `; } } } } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -620,7 +620,7 @@ func TestGroupCanonicalVRRPKeepsKeywordOverride9859(t *testing.T) {
 	}
 	t.Run("different VRRP IDs remain distinct", func(t *testing.T) {
 		text := `groups { G { ` + addr(`vrrp-group 2 priority 200 virtual-address 10.0.61.3/24;`) + ` } } apply-groups G; ` + addr(`vrrp-group 1 priority 100 virtual-address 10.0.61.1/24;`)
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -735,7 +735,7 @@ func TestGroupBracketedAddressUnion9859(t *testing.T) {
 	}
 	compile := func(t *testing.T, text string) []string {
 		t.Helper()
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -773,7 +773,7 @@ func TestGroupBracketedAddressUnion9859(t *testing.T) {
 		if got := compile(t, text); !slices.Equal(got, want) {
 			t.Fatalf("addresses = %v, want %v (a distinct inherited address must survive)", got, want)
 		}
-		expanded := parseHierarchical(t, text)
+		expanded := parseHierText(t, text)
 		if err := expanded.ExpandGroups(); err != nil {
 			t.Fatalf("expand: %v", err)
 		}
@@ -801,7 +801,7 @@ func TestGroupBracketedAddressUnion9859(t *testing.T) {
 		text := famBody("inet",
 			`address "10.0.0.3/24";`,
 			`address [ "10.0.0.1/24" 10.0.0.2/24 ];`)
-		expanded := parseHierarchical(t, text)
+		expanded := parseHierText(t, text)
 		if err := expanded.ExpandGroups(); err != nil {
 			t.Fatalf("expand: %v", err)
 		}

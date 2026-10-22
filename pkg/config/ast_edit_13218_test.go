@@ -17,7 +17,7 @@ func TestSetPathGroupCompactDHCPv6ClientPreservesUpdateRA(t *testing.T) {
 	} } } } } }
 	interfaces { ge-0/0/0 { unit 0 { family inet6 { address 2001:db8::1/64; } } } }
 	apply-groups g1;`
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := dhcpv6Client12714(compileTree12714(t, tree)); got == nil || got.UpdateRAInterface != "ge-0/0/1.0" {
 		t.Fatalf("precondition UpdateRAInterface = %+v, want ge-0/0/1.0", got)
 	}
@@ -43,7 +43,7 @@ func TestSetPathGroupCompactDHCPv6ClientPreservesPrefixDelegating(t *testing.T) 
 	} } } } } }
 	interfaces { ge-0/0/0 { unit 0 { family inet6 { address 2001:db8::1/64; } } } }
 	apply-groups g1;`
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := dhcpv6Client12714(compileTree12714(t, tree)); got == nil || got.PrefixDelegatingPrefixLen != 48 {
 		t.Fatalf("precondition PrefixDelegatingPrefixLen = %+v, want 48", got)
 	}
@@ -68,7 +68,7 @@ func TestSetPathGroupCompactSamplingPreservesInstance(t *testing.T) {
 		sampling instance i1 input rate 100;
 	} } }
 	apply-groups g1;`
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := samplingInstance12714(compileTree12714(t, tree), "i1"); got == nil || got.InputRate != 100 {
 		t.Fatalf("precondition i1 = %+v, want rate 100", got)
 	}
@@ -89,7 +89,7 @@ func TestSetPathCompactDHCPv6ClientPreservesUpdateRA(t *testing.T) {
 	input := `interfaces { ge-0/0/0 { unit 0 { family inet6 {
 		dhcpv6-client update-router-advertisement interface ge-0/0/1.0;
 	} } } }`
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := dhcpv6Client12714(compileTree12714(t, tree)); got == nil || got.UpdateRAInterface != "ge-0/0/1.0" {
 		t.Fatalf("precondition UpdateRAInterface = %+v, want ge-0/0/1.0", got)
 	}

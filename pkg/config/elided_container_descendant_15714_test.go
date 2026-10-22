@@ -16,15 +16,6 @@ import (
 // container itself, a bare elided leaf, a sibling statement, and an absent
 // descendant (which must stay a refusal and leave the tree untouched).
 
-func tree15714(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tr, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("fixture does not parse: %v", errs)
-	}
-	return tr
-}
-
 func render15714(tr *ConfigTree) string {
 	var out []string
 	var walk func(n *Node)
@@ -64,7 +55,7 @@ func assertSerializedBody15714(t *testing.T, tr *ConfigTree, keeps []string) {
 			t.Errorf("serialized body LOST: %q not in FormatSet %q", keep, flat)
 		}
 	}
-	reloaded := tree15714(t, tr.Format())
+	reloaded := parseHierText(t, tr.Format())
 	got := render15714(reloaded)
 	for _, keep := range keeps {
 		if !strings.Contains(got, keep) {
@@ -114,7 +105,7 @@ func TestElidedDescendantDelete15714(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := tree15714(t, tc.text)
+			tr := parseHierText(t, tc.text)
 			if err := tr.DeletePath(tc.path); err != nil {
 				t.Fatalf("DeletePath(%v): %v", tc.path, err)
 			}
@@ -170,7 +161,7 @@ func TestElidedDescendantDeactivate15714(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := tree15714(t, tc.text)
+			tr := parseHierText(t, tc.text)
 			if err := tr.DeactivatePath(tc.path); err != nil {
 				t.Fatalf("DeactivatePath(%v): %v", tc.path, err)
 			}
@@ -218,7 +209,7 @@ func TestElidedDescendantDeactivate15714(t *testing.T) {
 // keep its current whole-node meaning, not be braced into a stub.
 func TestElidedContainerItselfStillWholeNode15714(t *testing.T) {
 	text := "protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 passive; } } }"
-	tr := tree15714(t, text)
+	tr := parseHierText(t, text)
 	if err := tr.DeletePath([]string{"protocols", "ospf", "area", "0.0.0.0", "interface", "ge-0/0/0.0"}); err != nil {
 		t.Fatalf("delete container itself: %v", err)
 	}
@@ -226,7 +217,7 @@ func TestElidedContainerItselfStillWholeNode15714(t *testing.T) {
 		t.Errorf("CONTROL BROKE: deleting the interface itself left it behind: %q", got)
 	}
 
-	tr2 := tree15714(t, text)
+	tr2 := parseHierText(t, text)
 	if err := tr2.DeactivatePath([]string{"protocols", "ospf", "area", "0.0.0.0", "interface", "ge-0/0/0.0"}); err != nil {
 		t.Fatalf("deactivate container itself: %v", err)
 	}
@@ -235,7 +226,7 @@ func TestElidedContainerItselfStillWholeNode15714(t *testing.T) {
 	}
 
 	// Bare elided leaf (#8992/#8997/#13535 shapes) still deletes/toggles whole.
-	tr3 := tree15714(t, `chassis cluster strict-session-auth;`)
+	tr3 := parseHierText(t, `chassis cluster strict-session-auth;`)
 	if err := tr3.DeletePath([]string{"chassis", "cluster", "strict-session-auth"}); err != nil {
 		t.Fatalf("bare elided leaf delete: %v", err)
 	}
@@ -249,7 +240,7 @@ func TestElidedContainerItselfStillWholeNode15714(t *testing.T) {
 // its original elided spelling (no silent bracing, no deletion).
 func TestElidedDescendantAbsentIsRefusal15714(t *testing.T) {
 	text := "protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 passive; } } }"
-	tr := tree15714(t, text)
+	tr := parseHierText(t, text)
 	before := render15714(tr)
 	err := tr.DeletePath([]string{"protocols", "ospf", "area", "0.0.0.0", "interface", "ge-0/0/0.0", "bogus-leaf"})
 	if err == nil {
@@ -275,7 +266,7 @@ func TestElidedDescendantAbsentIsRefusal15714(t *testing.T) {
 // not its child, so a delete of the match descendant that re-braces
 // the node must leave `then { source-nat interface; }` intact.
 func TestElidedBodySurvivesDeleteOfSiblingPacked15714(t *testing.T) {
-	tr := tree15714(t, dr14h2SNATPacked)
+	tr := parseHierText(t, dr14h2SNATPacked)
 	before := render15714(tr)
 	path := []string{"security", "nat", "source", "rule-set", "rs1", "rule", "r1", "match", "source-address", "10.0.0.0/24"}
 	if err := tr.DeletePath(path); err != nil {

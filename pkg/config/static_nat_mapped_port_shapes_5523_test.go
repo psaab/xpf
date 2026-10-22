@@ -185,7 +185,7 @@ func TestStaticNATMappedPortPrefixNameSeparateLine5523(t *testing.T) {
 // grandchild scan in staticNATMappedPortForNode.
 func TestStaticNATMappedPortHierPrefixName5523(t *testing.T) {
 	build := func(op string) *ConfigTree {
-		return buildHier(t, `security {
+		return parseHierText(t, `security {
     zones { security-zone untrust; }
     address-book { global { address MP_TARGET 10.0.0.5/32; } }
     nat {
@@ -378,7 +378,7 @@ func TestStaticNATMappedPortNPTv65523(t *testing.T) {
 	// Hierarchical: nptv6-prefix block with a nested mapped-port.
 	t.Run("hierarchical-valid-rejects", func(t *testing.T) {
 		assertNPTv6MappedPortReject(t, func() *ConfigTree {
-			return buildHier(t, `security {
+			return parseHierText(t, `security {
     zones { security-zone untrust; }
     nat {
         static {

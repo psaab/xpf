@@ -42,7 +42,7 @@ func TestSynFloodRepeated12870(t *testing.T) {
 				mode, compile = "lenient", CompileConfigLenient
 			}
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
-				tree := parseHier5180(t, `security { screen {
+				tree := parseHierText(t, `security { screen {
 					ids-option repeated { tcp { `+tc.body+` } }
 					ids-option separate { tcp { syn-flood; } }
 				} }`)
@@ -94,7 +94,7 @@ func TestSynFloodRepeatedDiagnostics12870(t *testing.T) {
 				body = "syn-flood { " + bad + "; } syn-flood { attack-threshold 75; }"
 			}
 			t.Run(body, func(t *testing.T) {
-				tree := parseHier5180(t, `security { screen { ids-option repeated { tcp { `+body+` } } } }`)
+				tree := parseHierText(t, `security { screen { ids-option repeated { tcp { `+body+` } } } }`)
 				if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), strings.Fields(bad)[0]) {
 					t.Fatalf("strict must reject invalid leaf %q: %v", bad, err)
 				}

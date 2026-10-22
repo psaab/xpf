@@ -77,15 +77,6 @@ func prefixListRefsForLeaf10081(term *FirewallFilterTerm, leaf string) []PrefixL
 	return term.SourcePrefixLists
 }
 
-func parsePrefixList10081(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(src).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture did not parse: %v\n%s", perrs, src)
-	}
-	return tree
-}
-
 // TestFilterPackedPrefixListCensus10081 is the dual-shape census guard. The
 // valued row proves that a packed reference survives as a named typed ref; the
 // valueless row proves that the same packed site remains loud and records its
@@ -97,8 +88,8 @@ func parsePrefixList10081(t *testing.T, src string) *ConfigTree {
 func TestFilterPackedPrefixListCensus10081(t *testing.T) {
 	for _, row := range prefixListPackedCensusRows10081(t) {
 		t.Run(row.site, func(t *testing.T) {
-			bracedValued := parsePrefixList10081(t, prefixListPackedFixture10081(row.family, row.leaf, "AAA", true))
-			packedValued := parsePrefixList10081(t, prefixListPackedFixture10081(row.family, row.leaf, "AAA", false))
+			bracedValued := parseHierText(t, prefixListPackedFixture10081(row.family, row.leaf, "AAA", true))
+			packedValued := parseHierText(t, prefixListPackedFixture10081(row.family, row.leaf, "AAA", false))
 			bracedCfg, err := CompileConfig(bracedValued)
 			if err != nil {
 				t.Fatalf("braced valued control must be strict-clean: %v", err)
@@ -119,8 +110,8 @@ func TestFilterPackedPrefixListCensus10081(t *testing.T) {
 				t.Fatalf("valued packed and braced configs differ; packed ref was not lowered equivalently")
 			}
 
-			bracedValueless := parsePrefixList10081(t, prefixListPackedFixture10081(row.family, row.leaf, "", true))
-			packedValueless := parsePrefixList10081(t, prefixListPackedFixture10081(row.family, row.leaf, "", false))
+			bracedValueless := parseHierText(t, prefixListPackedFixture10081(row.family, row.leaf, "", true))
+			packedValueless := parseHierText(t, prefixListPackedFixture10081(row.family, row.leaf, "", false))
 			for spelling, tree := range map[string]*ConfigTree{"braced": bracedValueless, "packed": packedValueless} {
 				_, err := CompileConfig(tree)
 				if err == nil || !strings.Contains(err.Error(), row.leaf) {
@@ -147,7 +138,7 @@ func TestFilterPackedPrefixListCensus10081(t *testing.T) {
 // TestFilterFromPackedValuedPrefixList10081 pins the issue's exact spelling,
 // independently of the generated census population and its family controls.
 func TestFilterFromPackedValuedPrefixList10081(t *testing.T) {
-	tree := parsePrefixList10081(t, `policy-options { prefix-list AAA { 10.0.0.0/8; } }
+	tree := parseHierText(t, `policy-options { prefix-list AAA { 10.0.0.0/8; } }
 firewall { family inet { filter F { term T { from source-prefix-list AAA; then { discard; } } } } }`)
 	cfg, err := CompileConfig(tree)
 	if err != nil {

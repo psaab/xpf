@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-func fwTree9876(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(src).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture did not parse: %v", perrs)
-	}
-	return tree
-}
-
 // TestValuelessFirewallFromBracedFamilyRejects9876 is the #9876 gate.
 //
 // The #8480 gate took `fam.Children` as the filter level, so the braced-nested
@@ -44,7 +35,7 @@ func TestValuelessFirewallFromBracedFamilyRejects9876(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			src := `firewall { family { inet { filter F { term T { from { ` + row.from +
 				` } then { ` + row.then + `; } } } } } }`
-			_, err := CompileConfig(fwTree9876(t, src))
+			_, err := CompileConfig(parseHierText(t, src))
 			if err == nil {
 				t.Fatalf("a braced-nested valueless `from %s` was accepted — the term "+
 					"matches EVERY packet on that criterion", row.from)
@@ -70,7 +61,7 @@ func TestValuelessFirewallFromBracedFamilyRejects9876(t *testing.T) {
 func TestValuelessFirewallFromFlatStillRejects9876(t *testing.T) {
 	t.Run("flat family inet names the family", func(t *testing.T) {
 		src := `firewall { family inet { filter F { term T { from { source-prefix-list; } then { discard; } } } } }`
-		_, err := CompileConfig(fwTree9876(t, src))
+		_, err := CompileConfig(parseHierText(t, src))
 		if err == nil {
 			t.Fatal("flat valueless `from source-prefix-list;` was accepted")
 		}
@@ -89,7 +80,7 @@ func TestValuelessFirewallFromFlatStillRejects9876(t *testing.T) {
 		// the same compiler view as the explicit spelling and the
 		// diagnostic names family inet. The reject itself is unchanged.
 		src := `firewall { filter F { term T { from { source-prefix-list; } then { discard; } } } }`
-		_, err := CompileConfig(fwTree9876(t, src))
+		_, err := CompileConfig(parseHierText(t, src))
 		if err == nil {
 			t.Fatal("family-less valueless `from source-prefix-list;` was accepted")
 		}
@@ -116,7 +107,7 @@ func TestValuelessFirewallFromBlockNamesReject9876(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			_, err := CompileConfig(fwTree9876(t, row.src))
+			_, err := CompileConfig(parseHierText(t, row.src))
 			if err == nil {
 				t.Fatalf("%s: valueless prefix-list was accepted", row.name)
 			}
@@ -136,17 +127,17 @@ func TestValuelessFirewallFromBracedValuedCommits9876(t *testing.T) {
 			` } then { discard; } } } } } }`
 	}
 	t.Run("valued protocol commits", func(t *testing.T) {
-		if _, err := CompileConfig(fwTree9876(t, braced(`protocol tcp;`))); err != nil {
+		if _, err := CompileConfig(parseHierText(t, braced(`protocol tcp;`))); err != nil {
 			t.Fatalf("valued leaf must commit, got: %v", err)
 		}
 	})
 	t.Run("is-fragment flag commits", func(t *testing.T) {
-		if _, err := CompileConfig(fwTree9876(t, braced(`is-fragment;`))); err != nil {
+		if _, err := CompileConfig(parseHierText(t, braced(`is-fragment;`))); err != nil {
 			t.Fatalf("presence-only flag must commit, got: %v", err)
 		}
 	})
 	t.Run("empty from commits", func(t *testing.T) {
-		if _, err := CompileConfig(fwTree9876(t, braced(``))); err != nil {
+		if _, err := CompileConfig(parseHierText(t, braced(``))); err != nil {
 			t.Fatalf("empty from must commit, got: %v", err)
 		}
 	})
@@ -154,7 +145,7 @@ func TestValuelessFirewallFromBracedValuedCommits9876(t *testing.T) {
 		// PL1 is undefined, so strict still rejects — but through the
 		// undefined-reference gate, proving this gate correctly read the leaf
 		// as valued rather than flagging it.
-		_, err := CompileConfig(fwTree9876(t, braced(`source-prefix-list PL1;`)))
+		_, err := CompileConfig(parseHierText(t, braced(`source-prefix-list PL1;`)))
 		if err == nil {
 			t.Fatal("undefined prefix-list reference must still reject")
 		}
@@ -169,10 +160,10 @@ func TestValuelessFirewallFromBracedValuedCommits9876(t *testing.T) {
 // with a warning on the tolerant path.
 func TestValuelessFirewallFromBracedLenientWarns9876(t *testing.T) {
 	src := `firewall { family { inet { filter F { term T { from { source-prefix-list; } then { discard; } } } } } }`
-	if _, err := CompileConfig(fwTree9876(t, src)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, src)); err == nil {
 		t.Fatal("control failed: the strict path must reject this")
 	}
-	cfg, err := CompileConfigLenient(fwTree9876(t, src))
+	cfg, err := CompileConfigLenient(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("the tolerant path must not brick the node: %v", err)
 	}
@@ -202,7 +193,7 @@ func TestValuelessFirewallFromBracedLenientWarns9876(t *testing.T) {
 func TestValuelessFirewallFromSkipsQuarantinedMembers9876(t *testing.T) {
 	const src = `firewall { family inett { filter Q { term TQ { from { source-prefix-list; } then { discard; } } } } family { inett inet { filter R { term TR { from { source-prefix-list; } then { discard; } } } } } family inet { filter F { term T { from { source-prefix-list; } then { discard; } } } } }`
 	t.Run("strict rejects via the token gate", func(t *testing.T) {
-		_, err := CompileConfig(fwTree9876(t, src))
+		_, err := CompileConfig(parseHierText(t, src))
 		if err == nil {
 			t.Fatal("control failed: strict must reject the unknown family")
 		}
@@ -212,7 +203,7 @@ func TestValuelessFirewallFromSkipsQuarantinedMembers9876(t *testing.T) {
 	})
 	lenient := func(t *testing.T) *Config {
 		t.Helper()
-		cfg, err := CompileConfigLenient(fwTree9876(t, src))
+		cfg, err := CompileConfigLenient(parseHierText(t, src))
 		if err != nil {
 			t.Fatalf("the tolerant path must not brick the node: %v", err)
 		}

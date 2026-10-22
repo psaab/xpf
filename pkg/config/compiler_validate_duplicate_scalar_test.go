@@ -28,7 +28,7 @@ import (
 
 func apiAuthTree14448(t *testing.T, body string) *ConfigTree {
 	t.Helper()
-	return mustParse(t, "system {\n    services {\n        web-management {\n            api-auth {\n"+body+"\n            }\n        }\n    }\n}\n")
+	return parseHierText(t, "system {\n    services {\n        web-management {\n            api-auth {\n"+body+"\n            }\n        }\n    }\n}\n")
 }
 
 const apiAuthAlice14448 = `user alice { password "correct-horse-battery"; }`
@@ -215,7 +215,7 @@ func TestAPIAuthDuplicateScalarControls14448(t *testing.T) {
 	})
 
 	t.Run("no api-auth compiles", func(t *testing.T) {
-		tree := mustParse(t, "system { host-name fw0; }")
+		tree := parseHierText(t, "system { host-name fw0; }")
 		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("config without api-auth rejected: %v", err)
 		}

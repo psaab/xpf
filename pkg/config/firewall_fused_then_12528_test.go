@@ -15,15 +15,6 @@ import (
 // The positive controls pin the position-aware scope (Review12678 B2):
 // keyword-shaped names and legitimate packed spellings still commit.
 
-func hier12528(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 func flat12528(t *testing.T, lines ...string) *ConfigTree {
 	t.Helper()
 	return replaySetLines(t, lines)
@@ -101,7 +92,7 @@ type fused12528Row struct {
 
 func fusedRows12528() []fused12528Row {
 	hier := func(text string) func(*testing.T) *ConfigTree {
-		return func(t *testing.T) *ConfigTree { return hier12528(t, text) }
+		return func(t *testing.T) *ConfigTree { return parseHierText(t, text) }
 	}
 	flat := func(lines ...string) func(*testing.T) *ConfigTree {
 		return func(t *testing.T) *ConfigTree { return flat12528(t, lines...) }
@@ -243,7 +234,7 @@ func TestFirewallFusedThenNestedMatchWasDropped12528(t *testing.T) {
 // names the same term and carries the #10294 tag, and the loop below pins
 // that first-error text so a future precedence shift is deliberate.
 func TestFirewallFusedThenKeepsOlderDiagnostics12528(t *testing.T) {
-	n2 := hier12528(t, `firewall { family inet { filter F { term T { from is-fragment then discard; } } } }`)
+	n2 := parseHierText(t, `firewall { family inet { filter F { term T { from is-fragment then discard; } } } }`)
 	if err := SchemaValidate(n2); err == nil || strings.Contains(err.Error(), "#12528") ||
 		!strings.Contains(err.Error(), "names a SIBLING statement") || !strings.Contains(err.Error(), "#8437") {
 		t.Fatalf("N2 SchemaValidate error = %v, want the #8437 fused-sibling diagnostic", err)
@@ -263,14 +254,14 @@ func TestFirewallFusedThenKeepsOlderDiagnostics12528(t *testing.T) {
 		// nameless diagnostic first.
 		`family inet { filter F { term { T accept { from { is-fragment then discard; } } } } }`,
 	} {
-		tree := hier12528(t, "firewall { "+body+" }")
+		tree := parseHierText(t, "firewall { "+body+" }")
 		_, err := CompileConfig(tree)
 		if err == nil || strings.Contains(err.Error(), "#12528") ||
 			!strings.Contains(err.Error(), "nameless `term` block starting with") ||
 			!strings.Contains(err.Error(), "#10294/#12092/#12526") {
 			t.Errorf("%s: CompileConfig error = %v, want the #12526 pre-walk nameless diagnostic first", body, err)
 		}
-		cfg, err := CompileConfigLenient(hier12528(t, "firewall { "+body+" }"))
+		cfg, err := CompileConfigLenient(parseHierText(t, "firewall { "+body+" }"))
 		if err != nil {
 			t.Fatalf("%s: lenient compile: %v", body, err)
 		}
@@ -300,10 +291,10 @@ func TestFirewallFusedThenLenientWarnsEveryTerm12528(t *testing.T) {
 		want12528("flex", "inet", "G", "U", ""),
 		want12528("packed", "inet6", "H", "V", "is-fragment"),
 	}
-	if _, err := CompileConfig(hier12528(t, text)); err == nil || err.Error() != want[0] {
+	if _, err := CompileConfig(parseHierText(t, text)); err == nil || err.Error() != want[0] {
 		t.Fatalf("strict error = %v\nwant the first offending term: %s", err, want[0])
 	}
-	cfg, err := CompileConfigLenient(hier12528(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
@@ -341,7 +332,7 @@ func TestFirewallFusedThenDisplaySetRoundTrip12528(t *testing.T) {
 			replayedAction: FilterActionDiscard},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := hier12528(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			_, err := CompileConfig(tree)
 			if tc.hierWant == "" && err != nil {
 				t.Fatalf("hierarchical spelling must commit: %v", err)
@@ -376,7 +367,7 @@ func TestFirewallFusedThenPositiveControls12528(t *testing.T) {
 		dports string
 	}
 	hier := func(text string) func(*testing.T) *ConfigTree {
-		return func(t *testing.T) *ConfigTree { return hier12528(t, text) }
+		return func(t *testing.T) *ConfigTree { return parseHierText(t, text) }
 	}
 	flat := func(lines ...string) func(*testing.T) *ConfigTree {
 		return func(t *testing.T) *ConfigTree { return flat12528(t, lines...) }

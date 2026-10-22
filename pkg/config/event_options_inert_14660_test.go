@@ -23,15 +23,6 @@ import (
 // runPreWalkGates (or its lenient flag) makes every Reject/Warn cell
 // below accept silently.
 
-func hierTree14660(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors: %v", errs)
-	}
-	return tree
-}
-
 func hasWarningContaining14660(cfg *Config, subs ...string) bool {
 	for _, w := range cfg.Warnings {
 		ok := true
@@ -59,7 +50,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 	}{
 		{
 			name: "unknown event hier",
-			tree: hierTree14660(t, `event-options { policy p { events snmp_trap_link_down; then { change-configuration { commands "set system host-name x"; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events snmp_trap_link_down; then { change-configuration { commands "set system host-name x"; } } } }`),
 			want: []string{"p", "snmp_trap_link_down", "ping_test_failed"},
 		},
 		{
@@ -71,7 +62,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "uppercase event hier (case-sensitive)",
-			tree: hierTree14660(t, `event-options { policy p { events PING_TEST_FAILED; } }`),
+			tree: parseHierText(t, `event-options { policy p { events PING_TEST_FAILED; } }`),
 			want: []string{"p", "PING_TEST_FAILED"},
 		},
 		{
@@ -81,7 +72,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "mixed valid and unknown events hier bracket",
-			tree: hierTree14660(t, `event-options { policy p { events [ ping_test_failed snmp_trap_link_down ]; } }`),
+			tree: parseHierText(t, `event-options { policy p { events [ ping_test_failed snmp_trap_link_down ]; } }`),
 			want: []string{"snmp_trap_link_down"},
 		},
 		{
@@ -91,7 +82,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "then execute-commands hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { execute-commands { commands "show version"; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { execute-commands { commands "show version"; } } } }`),
 			want: []string{"p", "execute-commands", "change-configuration"},
 		},
 		{
@@ -103,7 +94,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "then raise-trap hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { raise-trap; } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { raise-trap; } } }`),
 			want: []string{"raise-trap"},
 		},
 		{
@@ -113,7 +104,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "then ignore hier packed",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then ignore; } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then ignore; } }`),
 			want: []string{"ignore"},
 		},
 		{
@@ -123,7 +114,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "event-options bogus child hier",
-			tree: hierTree14660(t, `event-options { generate-event FOO { time-of-day "2020-01-01"; } policy p { events ping_test_failed; } }`),
+			tree: parseHierText(t, `event-options { generate-event FOO { time-of-day "2020-01-01"; } policy p { events ping_test_failed; } }`),
 			want: []string{"generate-event"},
 		},
 		{
@@ -133,7 +124,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "policy bogus child hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; generate-event FOO; } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; generate-event FOO; } }`),
 			want: []string{"p", "generate-event"},
 		},
 		{
@@ -145,7 +136,7 @@ func TestEventOptionsInert14660StrictRejects(t *testing.T) {
 		},
 		{
 			name: "second policy block unknown event (duplicate-block discipline)",
-			tree: hierTree14660(t, `event-options { policy a { events ping_test_failed; } } event-options { policy b { events never_fired_event; } }`),
+			tree: parseHierText(t, `event-options { policy a { events ping_test_failed; } } event-options { policy b { events never_fired_event; } }`),
 			want: []string{"b", "never_fired_event"},
 		},
 	}
@@ -184,7 +175,7 @@ func TestEventOptionsInert15134ChangeConfigChildren(t *testing.T) {
 	}{
 		{
 			name: "commit-options check block hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commit-options { check; } commands "set system host-name x"; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commit-options { check; } commands "set system host-name x"; } } } }`),
 			want: []string{"p", "commit-options", "commands"},
 		},
 		{
@@ -197,7 +188,7 @@ func TestEventOptionsInert15134ChangeConfigChildren(t *testing.T) {
 		},
 		{
 			name: "user-name hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { user-name bob; commands "set system host-name x"; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { user-name bob; commands "set system host-name x"; } } } }`),
 			want: []string{"p", "user-name"},
 		},
 		{
@@ -210,37 +201,37 @@ func TestEventOptionsInert15134ChangeConfigChildren(t *testing.T) {
 		},
 		{
 			name: "retry hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { retry 3; commands "set system host-name x"; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { retry 3; commands "set system host-name x"; } } } }`),
 			want: []string{"p", "retry"},
 		},
 		{
 			name: "junk child hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { junk-thing foo; commands "set system host-name x"; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { junk-thing foo; commands "set system host-name x"; } } } }`),
 			want: []string{"p", "junk-thing"},
 		},
 		{
 			name: "commit-options packed then block hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration { commit-options { check; } commands "set system host-name x"; } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then change-configuration { commit-options { check; } commands "set system host-name x"; } } }`),
 			want: []string{"p", "commit-options"},
 		},
 		{
 			name: "commit-options packed cc hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration commit-options { check; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration commit-options { check; } } } }`),
 			want: []string{"p", "commit-options"},
 		},
 		{
 			name: "user-name packed cc hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration user-name bob; } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration user-name bob; } } }`),
 			want: []string{"p", "user-name"},
 		},
 		{
 			name: "junk packed then-cc hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration junk-thing foo; } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then change-configuration junk-thing foo; } }`),
 			want: []string{"p", "junk-thing"},
 		},
 		{
 			name: "second change-configuration block junk hier",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name a"; } change-configuration { retry 3; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name a"; } change-configuration { retry 3; } } } }`),
 			want: []string{"p", "retry"},
 		},
 	}
@@ -292,10 +283,10 @@ func TestEventOptionsInert15134ChangeConfigControls(t *testing.T) {
 		tree         *ConfigTree
 		wantCommands bool
 	}{
-		"hier block commands":         {hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name x"; } } } }`), true},
-		"hier packed then cc block":   {hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration { commands "set system host-name x"; } } }`), false},
-		"hier packed then packed cmd": {hierTree14660(t, `event-options { policy p { events ping_test_failed; then change-configuration commands "set system host-name x"; } }`), false},
-		"hier cc block-list commands": {hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands { "set system host-name a"; "set system host-name b"; } } } } }`), true},
+		"hier block commands":         {parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name x"; } } } }`), true},
+		"hier packed then cc block":   {parseHierText(t, `event-options { policy p { events ping_test_failed; then change-configuration { commands "set system host-name x"; } } }`), false},
+		"hier packed then packed cmd": {parseHierText(t, `event-options { policy p { events ping_test_failed; then change-configuration commands "set system host-name x"; } }`), false},
+		"hier cc block-list commands": {parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands { "set system host-name a"; "set system host-name b"; } } } } }`), true},
 		"flat commands": {setTree6659(t,
 			`set event-options policy p events ping_test_failed`,
 			`set event-options policy p then change-configuration commands "set system host-name x"`), true},
@@ -331,7 +322,7 @@ func TestEventOptionsInert15134ChangeConfigControls(t *testing.T) {
 // with no #14660 warning.
 func TestEventOptionsInert14660ValidControls(t *testing.T) {
 	trees := map[string]*ConfigTree{
-		"hier all three events": hierTree14660(t, `event-options {
+		"hier all three events": parseHierText(t, `event-options {
 			policy p {
 				events [ ping_probe_failed ping_test_failed ping_test_completed ];
 				within 60 { trigger on 1; }
@@ -344,7 +335,7 @@ func TestEventOptionsInert14660ValidControls(t *testing.T) {
 			`set event-options policy p events ping_test_failed`,
 			`set event-options policy p events ping_test_completed`,
 			`set event-options policy p then change-configuration commands "set system host-name recovered"`),
-		"hier plant-class": hierTree14660(t, `event-options { policy p { events ping_test_failed; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`),
+		"hier plant-class": parseHierText(t, `event-options { policy p { events ping_test_failed; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`),
 	}
 	for name, tree := range trees {
 		t.Run(name+"/strict", func(t *testing.T) {
@@ -384,7 +375,7 @@ func TestEventOptionsInert14660LenientWarns(t *testing.T) {
 		},
 		{
 			name: "then execute-commands",
-			tree: hierTree14660(t, `event-options { policy p { events ping_test_failed; then { execute-commands { commands "show version"; } } } }`),
+			tree: parseHierText(t, `event-options { policy p { events ping_test_failed; then { execute-commands { commands "show version"; } } } }`),
 			want: []string{"execute-commands", "#14660"},
 		},
 		{
@@ -417,7 +408,7 @@ func TestEventOptionsInert14660LenientWarns(t *testing.T) {
 // TestEventOptionsInert14660DirectValidator exercises the AST gate
 // directly (unit-level, independent of the full pipeline wiring).
 func TestEventOptionsInert14660DirectValidator(t *testing.T) {
-	tree := hierTree14660(t, `event-options { policy p { events ping_test_failed bogus_event; then { raise-trap; } } }`)
+	tree := parseHierText(t, `event-options { policy p { events ping_test_failed bogus_event; then { raise-trap; } } }`)
 	// Strict: first error names the unknown event.
 	if _, err := validateEventOptionsInertAST(tree.Children, false); err == nil ||
 		!strings.Contains(err.Error(), "bogus_event") {
@@ -433,7 +424,7 @@ func TestEventOptionsInert14660DirectValidator(t *testing.T) {
 		t.Fatalf("lenient direct warnings %v missing bogus_event/raise-trap", warnings)
 	}
 	// Valid control: no error, no warnings either way.
-	good := hierTree14660(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name x"; } } } }`)
+	good := parseHierText(t, `event-options { policy p { events ping_test_failed; then { change-configuration { commands "set system host-name x"; } } } }`)
 	if w, err := validateEventOptionsInertAST(good.Children, false); err != nil || len(w) != 0 {
 		t.Fatalf("strict direct valid = warnings %v err %v", w, err)
 	}

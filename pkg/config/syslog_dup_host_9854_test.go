@@ -29,7 +29,7 @@ import "testing"
 // OR, and first-seen host order is preserved.
 //
 // SHAPE NOTE: a duplicate host block is most directly expressible via the
-// hierarchical / NewParser path — parseHierarchical is the primary
+// hierarchical / NewParser path — parseHierText is the primary
 // reproducer here. Flat-set is NOT fully immune: identical facility paths
 // merge into one node, but a BARE `set ... host X` leaf and a later
 // `set ... host X <body>` container are SEPARATE nodes (SetPath's leaf
@@ -43,7 +43,7 @@ import "testing"
 
 func compileSyslogHosts9854(t *testing.T, text string) []*SyslogHostConfig {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -62,7 +62,7 @@ func compileSyslogHosts9854(t *testing.T, text string) []*SyslogHostConfig {
 // valueless `source-address;` guard cell: strict says "missing value").
 func compileSyslogHostsLenient9854(t *testing.T, text string) []*SyslogHostConfig {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)

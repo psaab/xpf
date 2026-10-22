@@ -40,7 +40,7 @@ func TestMixedKeyedZonePairBracesWarnSpecificallyOnTolerantLoad11346(t *testing.
 		{name: "defined-policy-zone", addPolicyZone: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(mustParseTree7523(t, mixedZonePairBrace11346(tc.addPolicyZone)))
+			cfg, err := CompileConfigLenient(parseHierText(t, mixedZonePairBrace11346(tc.addPolicyZone)))
 			if err != nil {
 				t.Fatalf("tolerant load must preserve boot availability: %v", err)
 			}
@@ -58,14 +58,4 @@ func TestMixedKeyedZonePairBracesWarnSpecificallyOnTolerantLoad11346(t *testing.
 			}
 		})
 	}
-}
-
-func mustParseTree7523(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	p := NewParser(src)
-	tree, err := p.Parse()
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	return tree
 }

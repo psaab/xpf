@@ -68,7 +68,7 @@ import (
 //     SetPath / schema refactor cannot silently break it.
 //
 // IMPORTANT (per CLAUDE.md): flat-set syntax is built with ParseSetCommand +
-// tree.SetPath, never NewParser; the hierarchical shape uses parseHierarchical.
+// tree.SetPath, never NewParser; the hierarchical shape uses parseHierText (#16139 kit).
 
 // hib6391 is a normalized (sorted) view of one compiled per-interface
 // HostInboundTraffic that captures BOTH admission dimensions — system-services
@@ -250,7 +250,7 @@ func TestHostInbound6391ProtocolsNoSiblingLeak(t *testing.T) {
 // The genuine multi-member intent is the DISTINCT Keys=[a,b] shape covered by
 // TestHostInbound6391HierarchicalBracketBodyFansToAllMembers.
 func TestHostInbound6391HierarchicalNestedChildNoSiblingLeak(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones {
         security-zone trust {
@@ -303,7 +303,7 @@ security {
 // mangled into an uncompilable leaf, and `load merge` of a hierarchical file
 // hit the same replay INSIDE the daemon.
 func TestHostInbound6391HierarchicalBracketBodyFansToAllMembers(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones {
         security-zone trust {
@@ -337,7 +337,7 @@ security {
 // incidental. If a future lexer change made the two forms diverge, the
 // bracketed test above would keep passing while this one caught it.
 func TestHostInbound6391BareMultiMemberBodyFansToAllMembers(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones {
         security-zone trust {
@@ -374,7 +374,7 @@ security {
 // zoneInterfaceMembers); it simply falls back to the zone-level host-inbound,
 // which is the conservative direction.
 func TestHostInbound6391BracketBodyNestedExtraMemberScope(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones {
         security-zone trust {
@@ -509,7 +509,7 @@ func TestHostInbound6391FlatSetNeverYieldsMultiKeyContainer(t *testing.T) {
 // on both: ge-0/0/0 must end up with ssh+ping and ge-0/0/1 with ssh ONLY. Without
 // cloneHostInbound, ge-0/0/1 wrongly admits ping too.
 func TestHostInbound6391BracketBodyMembersDoNotShareBackingStore(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones {
         security-zone trust {

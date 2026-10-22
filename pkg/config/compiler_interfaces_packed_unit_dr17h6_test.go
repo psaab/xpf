@@ -12,17 +12,9 @@ import (
 // was dropped; the unit compiled empty yet still got a zoned snapshot
 // row (fail-open).
 
-func hierTree14435(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(src).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("parse: %v", perrs)
-	}
-	return tree
-}
 func unit14435(t *testing.T, src, ifName string, num int) *InterfaceUnit {
 	t.Helper()
-	cfg, err := CompileConfig(hierTree14435(t, src))
+	cfg, err := CompileConfig(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}

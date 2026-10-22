@@ -114,7 +114,7 @@ func TestFirewallMatchValues6714ReadsEveryKeyOfEveryChild(t *testing.T) {
 func TestFlowTraceFlags6714NestedTailCompilesAndValidates(t *testing.T) {
 	// `flag` implements exactly two tokens, so the multi-token child carries
 	// both of them; a third would be an unknown flag and is asserted below.
-	cfg, err := CompileConfig(hierTree6659(t, `
+	cfg, err := CompileConfig(parseHierText(t, `
 security { flow { traceoptions { flag { basic-datapath session; } } } }`))
 	if err != nil {
 		t.Fatalf("strict compile: %v", err)
@@ -128,7 +128,7 @@ security { flow { traceoptions { flag { basic-datapath session; } } } }`))
 
 	// A bracketed list nested inside the block — the shape #6714 names — is
 	// the same AST node and must read the same.
-	cfg, err = CompileConfig(hierTree6659(t, `
+	cfg, err = CompileConfig(parseHierText(t, `
 security { flow { traceoptions { flag { [ basic-datapath session ]; } } } }`))
 	if err != nil {
 		t.Fatalf("strict compile: %v", err)
@@ -142,7 +142,7 @@ security { flow { traceoptions { flag { [ basic-datapath session ]; } } } }`))
 	// (compiler_security_flow.go), so a dropped token was ALSO a dropped
 	// check. An unknown flag past the first slot committed CLEAN and enabled
 	// nothing.
-	if _, err := CompileConfig(hierTree6659(t, `
+	if _, err := CompileConfig(parseHierText(t, `
 security { flow { traceoptions { flag { basic-datapath totally-bogus; } } } }`)); err == nil {
 		t.Fatalf("strict compile ACCEPTED an unknown flow trace flag riding on a " +
 			"block child's tail")
@@ -162,7 +162,7 @@ func TestPolicyCommunityAction6714BlockFormIsNotLost(t *testing.T) {
 		{"leaf form (control)", `policy-options { community cA { members 65000:100; } policy-statement PS { term T { then { community add cA; } } } }`, "add", "65000:100"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfig(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("strict compile: %v", err)
 			}
@@ -214,7 +214,7 @@ event-options { policy P { events ping_test_failed; then { change-configuration 
   commands { "set system host-name a"; "set system host-name b"; } } } } }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfig(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("strict compile: %v", err)
 			}
@@ -259,7 +259,7 @@ policy-options { policy-statement p1 { term t { then accept; } } policy-statemen
 routing-options { forwarding-table { export p1; } forwarding-table { export p2; } }`
 
 	// Strict: the ambiguity is now operator-visible.
-	if _, err := CompileConfig(hierTree6659(t, twoPolicies)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, twoPolicies)); err == nil {
 		t.Fatalf("strict compile ACCEPTED two forwarding-table blocks naming two " +
 			"different export policies; only one renders, so accepting it is the " +
 			"silent drop this gate exists to reject")
@@ -269,7 +269,7 @@ routing-options { forwarding-table { export p1; } forwarding-table { export p2; 
 
 	// Tolerant: boots, warns, and renders exactly what it rendered before —
 	// the FIRST block's policy (#1960 no-brick).
-	cfg, err := CompileConfigLenient(hierTree6659(t, twoPolicies))
+	cfg, err := CompileConfigLenient(parseHierText(t, twoPolicies))
 	if err != nil {
 		t.Fatalf("tolerant compile: %v", err)
 	}
@@ -284,7 +284,7 @@ routing-options { forwarding-table { export p1; } forwarding-table { export p2; 
 	// A leading block with no export must NOT let a later block's export
 	// become the rendered policy: master resolved `forwarding-table` with
 	// FindChild and looked for an export inside whatever it got.
-	cfg, err = CompileConfigLenient(hierTree6659(t, `
+	cfg, err = CompileConfigLenient(parseHierText(t, `
 policy-options { policy-statement p1 { term t { then accept; } } }
 routing-options { forwarding-table { indirect-next-hop; } forwarding-table { export p1; } }`))
 	if err != nil {
@@ -303,14 +303,14 @@ routing-options { forwarding-table { indirect-next-hop; } forwarding-table { exp
 	// commit clean — the cardinality gate counts DISTINCT non-empty values
 	// (#6673), and this is the row that proves the widening did not turn a
 	// harmless duplicate into a rejection.
-	if _, err := CompileConfig(hierTree6659(t, `
+	if _, err := CompileConfig(parseHierText(t, `
 policy-options { policy-statement p1 { term t { then accept; } } }
 routing-options { forwarding-table { export p1; } forwarding-table { export p1; } }`)); err != nil {
 		t.Fatalf("strict compile rejected two blocks naming ONE policy: %v", err)
 	}
 
 	// A single block is bit-identical to before.
-	cfg, err = CompileConfigLenient(hierTree6659(t, `
+	cfg, err = CompileConfigLenient(parseHierText(t, `
 policy-options { policy-statement p1 { term t { then accept; } } }
 routing-options { forwarding-table { export p1; } }`))
 	if err != nil {
@@ -342,7 +342,7 @@ func TestProxyARPMalformedRange6714IsDiagnosedNotSilent(t *testing.T) {
 	const mixed = `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ 192.0.2.1 192.0.2.2 to 192.0.2.4 ]; } } } }`
 
-	if _, err := CompileConfig(hierTree6659(t, mixed)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, mixed)); err == nil {
 		t.Fatalf("strict compile ACCEPTED a proxy-arp address list mixing a " +
 			"discrete address with a range; the compiler installs only the first " +
 			"value, so accepting it silently narrows the proxy-ARP set")
@@ -350,7 +350,7 @@ security { nat { proxy-arp { interface ge-0-0-0 { address [ 192.0.2.1 192.0.2.2 
 		t.Fatalf("rejected by the wrong gate: %v", err)
 	}
 
-	cfg, err := CompileConfigLenient(hierTree6659(t, mixed))
+	cfg, err := CompileConfigLenient(parseHierText(t, mixed))
 	if err != nil {
 		t.Fatalf("tolerant compile: %v", err)
 	}
@@ -383,7 +383,7 @@ security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1 { to 192.0
 			"192.0.2.1 to 192.0.2.4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("tolerant compile: %v", err)
 			}
@@ -406,7 +406,7 @@ security { nat { proxy-arp { interface ge-0-0-0 { address [ 192.0.2.1 192.0.2.2 
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; 192.0.2.2; } } } } }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfig(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("strict compile rejected a well-formed statement: %v", err)
 			}

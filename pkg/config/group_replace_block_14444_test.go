@@ -60,7 +60,7 @@ firewall {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -235,7 +235,7 @@ security {
     }
 }
 `
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		if err := tree.ExpandGroups(); err != nil {
 			t.Fatalf("ExpandGroups: %v", err)
 		}
@@ -277,7 +277,7 @@ security {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -321,7 +321,7 @@ policy-options {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -365,7 +365,7 @@ firewall {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -406,7 +406,7 @@ firewall {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -469,7 +469,7 @@ firewall {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -508,7 +508,7 @@ policy-options {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -563,7 +563,7 @@ firewall {
     }
 }
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}

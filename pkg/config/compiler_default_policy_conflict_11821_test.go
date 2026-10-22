@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-func defaultPolicyTree11821(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("parse default-policy config: %v", errs)
-	}
-	return tree
-}
-
 func TestConflictingDefaultPolicyStanzasRejectedAndFailClosed11821(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -73,7 +64,7 @@ func TestConflictingDefaultPolicyStanzasRejectedAndFailClosed11821(t *testing.T)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if err == nil {
 				t.Fatal("strict compile accepted conflicting default-policy stanzas")
 			}
@@ -83,7 +74,7 @@ func TestConflictingDefaultPolicyStanzasRejectedAndFailClosed11821(t *testing.T)
 				}
 			}
 
-			cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -128,7 +119,7 @@ func TestIdenticalDefaultPolicyStanzasRemainAccepted11821(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("strict compile rejected identical stanzas: %v", err)
 			}

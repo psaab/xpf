@@ -53,7 +53,7 @@ func TestGenerateRouteInvalidPrefixRejected15658(t *testing.T) {
 }
 
 func TestGenerateRouteInvalidPrefixHierarchical15658(t *testing.T) {
-	tree := parseHierarchical(t, `routing-options {
+	tree := parseHierText(t, `routing-options {
     generate {
         route 999.999.0.0/99 {
             discard;
@@ -108,7 +108,7 @@ func TestGenerateRouteSamePrefixMerge15658(t *testing.T) {
 	}
 	_ = cfg
 
-	hier := parseHierarchical(t, `routing-options {
+	hier := parseHierText(t, `routing-options {
     generate {
         route 10.0.0.0/8 { discard; }
         route 10.0.0.0/8 { }
@@ -128,7 +128,7 @@ func TestGenerateRouteSamePrefixMerge15658(t *testing.T) {
 
 	// Masked aliases of one prefix (host bits differ) merge too, first
 	// spelling wins.
-	alias := parseHierarchical(t, `routing-options {
+	alias := parseHierText(t, `routing-options {
     generate {
         route 10.1.2.3/8 { discard; }
         route 10.0.0.0/8 { }
@@ -145,7 +145,7 @@ func TestGenerateRouteSamePrefixMerge15658(t *testing.T) {
 	}
 
 	// Distinct prefixes stay distinct, in source order.
-	distinct := parseHierarchical(t, `routing-options {
+	distinct := parseHierText(t, `routing-options {
     generate {
         route 10.0.0.0/8 { discard; }
         route 192.168.0.0/16 { discard; }
@@ -224,7 +224,7 @@ func TestGenerateRouteMaskSpelling15658(t *testing.T) {
 	// but strict still rejects: the operator authored a spelling the
 	// helper cannot parse, mirroring staticRouteHelperRefusedMaskSpellings
 	// checking folded aliases, not just the survivor.
-	folded := parseHierarchical(t, `routing-options {
+	folded := parseHierText(t, `routing-options {
     generate {
         route 10.0.0.0/008 { discard; }
         route 10.0.0.0/8 { discard; }

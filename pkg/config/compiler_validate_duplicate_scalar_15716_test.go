@@ -16,7 +16,7 @@ func TestDuplicateRootLoginPackedGroups15716(t *testing.T) {
 		{"header-packed system with braced child", "system services ssh root-login deny { services { ssh { root-login allow; } } }"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := CompileConfig(parseHierarchical(t, tc.text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil {
 				t.Fatalf("strict accepted conflicting duplicate root-login; want reject (#15716)")
 			} else {
 				for _, want := range []string{"root-login", "allow", "deny", "14447"} {
@@ -30,7 +30,7 @@ func TestDuplicateRootLoginPackedGroups15716(t *testing.T) {
 }
 
 func TestDuplicateRootLoginPackedGroupsLenient15716(t *testing.T) {
-	cfg, err := CompileConfigLenient(parseHierarchical(t, "groups { G1 { system services ssh root-login allow; } G2 { system services ssh root-login deny; } } system { services { ssh { protocol-version v2; } } apply-groups G1; apply-groups G2; }"))
+	cfg, err := CompileConfigLenient(parseHierText(t, "groups { G1 { system services ssh root-login allow; } G2 { system services ssh root-login deny; } } system { services { ssh { protocol-version v2; } } apply-groups G1; apply-groups G2; }"))
 	if err != nil {
 		t.Fatalf("lenient: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestDuplicateRootLoginPackedGroupsLenient15716(t *testing.T) {
 		t.Fatalf("lenient warnings missing root-login/14447: %v", cfg.Warnings)
 	}
 	// Header-packed lenient: header deny is first, braced allow is last.
-	cfg2, err := CompileConfigLenient(parseHierarchical(t, "system services ssh root-login deny { services { ssh { root-login allow; } } }"))
+	cfg2, err := CompileConfigLenient(parseHierText(t, "system services ssh root-login deny { services { ssh { root-login allow; } } }"))
 	if err != nil {
 		t.Fatalf("lenient header: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestDuplicateRootLoginPackedControls15716(t *testing.T) {
 		{"identical header+braced", "system services ssh root-login deny { services { ssh { root-login deny; } } }", "deny"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parseHierarchical(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("strict: %v", err)
 			}
@@ -89,7 +89,7 @@ func TestDuplicateRootLoginPackedControls15716(t *testing.T) {
 	// Inline braced deny + single group packed allow: inline peer is not
 	// group-adopted, so group is dropped (inline wins) — single effective
 	// value, no conflict. This neighbours the adopt-beside gate.
-	cfg, err := CompileConfig(parseHierarchical(t, "groups { G1 { system services ssh root-login allow; } } system { services { ssh { root-login deny; } } apply-groups G1; }"))
+	cfg, err := CompileConfig(parseHierText(t, "groups { G1 { system services ssh root-login allow; } } system { services { ssh { root-login deny; } } apply-groups G1; }"))
 	if err != nil {
 		t.Fatalf("inline-wins control strict: %v", err)
 	}

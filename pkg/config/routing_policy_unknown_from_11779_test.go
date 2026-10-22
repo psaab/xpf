@@ -153,15 +153,6 @@ func TestRoutingPolicySupportedFromDimensionsRemainCompiled11779(t *testing.T) {
 	}
 }
 
-func parsePolicyTreeFromSource11779(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse test source: %v", errs)
-	}
-	return tree
-}
-
 // FAIL-ON-REVERT: a route-filter's trailing argument belongs to that leaf, not
 // to UnknownFrom. Strictly supported match types preserve their typed fields;
 // `through` remains rejected by its backend gate, not by #11779. Tolerant
@@ -211,7 +202,7 @@ func TestRoutingPolicyPackedRouteFilterTrailersRemainTyped11779(t *testing.T) {
 				}
 			}
 
-			cfg, err := CompileConfig(parsePolicyTreeFromSource11779(t, src))
+			cfg, err := CompileConfig(parseHierText(t, src))
 			if tc.strictReject {
 				if err == nil {
 					t.Fatalf("strict compile accepted unsupported through route-filter")
@@ -223,7 +214,7 @@ func TestRoutingPolicyPackedRouteFilterTrailersRemainTyped11779(t *testing.T) {
 				check("strict", cfg)
 			}
 
-			cfg, err = CompileConfigLenient(parsePolicyTreeFromSource11779(t, src))
+			cfg, err = CompileConfigLenient(parseHierText(t, src))
 			if err != nil {
 				t.Fatalf("tolerant compile: %v", err)
 			}
@@ -254,7 +245,7 @@ func TestRoutingPolicyPackedTermBracketedFromValuesRemainAccepted11779(t *testin
 		"T-ASPATH": {nil, nil, {"AP1", "AP2"}},
 	}
 	for _, lenient := range []bool{false, true} {
-		tree := parsePolicyTreeFromSource11779(t, src)
+		tree := parseHierText(t, src)
 		var cfg *Config
 		var err error
 		if lenient {
@@ -304,12 +295,12 @@ func TestRoutingPolicyUnknownAfterPackedBracketedFromStillFailsClosed11779(t *te
   term T from prefix-list [ PL1 PL2 ] rib inet.0 then accept;
  }
 }`
-	_, strictErr := CompileConfig(parsePolicyTreeFromSource11779(t, src))
+	_, strictErr := CompileConfig(parseHierText(t, src))
 	if strictErr == nil {
 		t.Fatalf("unsupported leaf after bracketed values compiled cleanly")
 	}
 
-	cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, src))
+	cfg, err := CompileConfigLenient(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("tolerant compile: %v", err)
 	}
@@ -334,7 +325,7 @@ func TestRoutingPolicyPackedRouteFilterPreservesTypedSibling11779(t *testing.T) 
  }
 }`
 	for _, lenient := range []bool{false, true} {
-		tree := parsePolicyTreeFromSource11779(t, src)
+		tree := parseHierText(t, src)
 		var cfg *Config
 		var err error
 		if lenient {
@@ -376,10 +367,10 @@ func TestRoutingPolicyNormalizedFromTail11779(t *testing.T) {
   }
  }
 }`
-	if _, err := CompileConfig(parsePolicyTreeFromSource11779(t, unknown)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, unknown)); err == nil {
 		t.Fatalf("unknown normalized trailer compiled cleanly")
 	}
-	cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, unknown))
+	cfg, err := CompileConfigLenient(parseHierText(t, unknown))
 	if err != nil {
 		t.Fatalf("tolerant compile: %v", err)
 	}
@@ -404,7 +395,7 @@ func TestRoutingPolicyNormalizedFromTail11779(t *testing.T) {
  }
 }`
 	for _, lenient := range []bool{false, true} {
-		tree := parsePolicyTreeFromSource11779(t, sibling)
+		tree := parseHierText(t, sibling)
 		var got *Config
 		if lenient {
 			got, err = CompileConfigLenient(tree)
@@ -458,11 +449,11 @@ func TestRoutingPolicyUnclosedBracketedFromListFailsClosed11779(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parsePolicyTreeFromSource11779(t, tc.src)
+			tree := parseHierText(t, tc.src)
 			if _, err := CompileConfig(tree); err == nil {
 				t.Fatal("strict compile accepted an unclosed bracketed from-list")
 			}
-			cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, tc.src))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.src))
 			if err != nil {
 				t.Fatalf("tolerant compile: %v", err)
 			}
@@ -498,7 +489,7 @@ func TestRoutingPolicyQuotedClauseKeywordInBracketedFromList11779(t *testing.T) 
  }
 }`
 	for _, lenient := range []bool{false, true} {
-		tree := parsePolicyTreeFromSource11779(t, src)
+		tree := parseHierText(t, src)
 		var cfg *Config
 		var err error
 		if lenient {
@@ -529,7 +520,7 @@ func TestRoutingPolicyQuotedClauseKeywordInBracketedFromList11779(t *testing.T) 
   }
  }
 }`
-		tree := parsePolicyTreeFromSource11779(t, finalSrc)
+		tree := parseHierText(t, finalSrc)
 		for _, replay := range []struct {
 			name string
 			text string
@@ -554,7 +545,7 @@ func TestRoutingPolicyQuotedClauseKeywordInBracketedFromList11779(t *testing.T) 
 						}
 					}
 				} else {
-					replayed = parsePolicyTreeFromSource11779(t, replay.text)
+					replayed = parseHierText(t, replay.text)
 				}
 				cfg, err := CompileConfig(replayed)
 				if err != nil {
@@ -573,7 +564,7 @@ func TestRoutingPolicyQuotedClauseKeywordInBracketedFromList11779(t *testing.T) 
 }
 
 func TestRoutingPolicyThenInsideFromIsQuarantined11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  policy-statement P { term T { from { then accept; } } }
 }`)
 	if _, err := CompileConfig(tree.Clone()); err == nil ||
@@ -592,7 +583,7 @@ func TestRoutingPolicyThenInsideFromIsQuarantined11779(t *testing.T) {
 }
 
 func TestRoutingPolicyNestedProtocolDirectNeighborFailsClosed11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  policy-statement P {
   term T { from { protocol direct { neighbor 192.0.2.1; } } then accept; }
  }
@@ -647,7 +638,7 @@ func TestRoutingPolicyClosedBracketedBareClauseValues11779(t *testing.T) {
  }
 }`
 				for _, lenient := range []bool{false, true} {
-					tree := parsePolicyTreeFromSource11779(t, src)
+					tree := parseHierText(t, src)
 					var got *Config
 					var err error
 					if lenient {
@@ -684,10 +675,10 @@ func TestRoutingPolicyUnbracketedScalarUnknownTrailerFailsClosed11779(t *testing
   }
  }
 }`
-	if _, err := CompileConfig(parsePolicyTreeFromSource11779(t, unknown)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, unknown)); err == nil {
 		t.Fatal("strict compile accepted an unsupported from trailer")
 	}
-	cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, unknown))
+	cfg, err := CompileConfigLenient(parseHierText(t, unknown))
 	if err != nil {
 		t.Fatalf("tolerant compile: %v", err)
 	}
@@ -709,7 +700,7 @@ func TestRoutingPolicyUnbracketedScalarUnknownTrailerFailsClosed11779(t *testing
   }
  }
 }`
-	cfg, err = CompileConfig(parsePolicyTreeFromSource11779(t, single))
+	cfg, err = CompileConfig(parseHierText(t, single))
 	if err != nil {
 		t.Fatalf("single-value prefix-list name rejected: %v", err)
 	}
@@ -742,7 +733,7 @@ func TestRoutingPolicyFromMultiValuesSurviveCanonicalReplay11779(t *testing.T) {
   }
  }
 	}`
-	tree := parsePolicyTreeFromSource11779(t, src)
+	tree := parseHierText(t, src)
 	for _, replay := range []struct {
 		name string
 		text string
@@ -755,7 +746,7 @@ func TestRoutingPolicyFromMultiValuesSurviveCanonicalReplay11779(t *testing.T) {
 			if replay.name == "FormatSet" {
 				replayed = buildTreeFromSet(t, strings.Split(strings.TrimSpace(replay.text), "\n"))
 			} else {
-				replayed = parsePolicyTreeFromSource11779(t, replay.text)
+				replayed = parseHierText(t, replay.text)
 			}
 			for _, lenient := range []bool{false, true} {
 				var cfg *Config
@@ -790,7 +781,7 @@ func TestRoutingPolicyMixedPackedTermAndBodyFailsClosed11779(t *testing.T) {
   term T from neighbor 10.0.0.1 { then accept; }
  }
 }`
-	tree := parsePolicyTreeFromSource11779(t, src)
+	tree := parseHierText(t, src)
 	if _, err := CompileConfig(tree.Clone()); err == nil {
 		t.Fatal("strict compile ignored packed `from` keys because the term had children")
 	}
@@ -808,7 +799,7 @@ func TestRoutingPolicyMixedPackedTermAndBodyFailsClosed11779(t *testing.T) {
 // FAIL-ON-REVERT: a policy-level `from` is not a term, but must not be silently
 // ignored while an accompanying default accept remains active.
 func TestRoutingPolicyPolicyLevelFromFailsClosed11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  policy-statement P {
   from neighbor 10.0.0.1;
   then accept;
@@ -839,7 +830,7 @@ func TestRoutingPolicyPolicyLevelFromFailsClosed11779(t *testing.T) {
 // FAIL-ON-REVERT: a from leaf with an opaque child body must not promote those
 // child tokens into prefix-list names and lose the unsupported nested match.
 func TestRoutingPolicyNestedUnknownUnderMultiValueFromFailsClosed11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  prefix-list PL1 10.0.0.0/8;
  policy-statement P {
   term T {
@@ -865,7 +856,7 @@ func TestRoutingPolicyNestedUnknownUnderMultiValueFromFailsClosed11779(t *testin
 // FAIL-ON-REVERT: invalid route-filter operands are not typed trailer values.
 // In particular `upto rib` must not become an unset /32-wide filter.
 func TestRoutingPolicyInvalidRouteFilterTrailerFailsClosed11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  policy-statement P {
   term T {
    from { route-filter 10.0.0.0/8 upto rib; }
@@ -890,7 +881,7 @@ func TestRoutingPolicyInvalidRouteFilterTrailerFailsClosed11779(t *testing.T) {
 // FAIL-ON-REVERT: clause-like words inside a bracket list do not prove that the
 // list closed. A quoted "then" must not hide an absent closing bracket.
 func TestRoutingPolicyQuotedClauseInUnclosedListFailsClosed11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  prefix-list PL1 10.0.0.0/8;
  policy-statement P {
   term T from prefix-list [ PL1 "then" reject;
@@ -913,7 +904,7 @@ func TestRoutingPolicyQuotedClauseInUnclosedListFailsClosed11779(t *testing.T) {
 // FAIL-ON-REVERT: every term changed by tolerant compilation must be named in
 // the warning; warning only for the first while rewriting all is misleading.
 func TestRoutingPolicyTolerantWarningNamesEveryChangedTerm11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  policy-statement P {
   term FIRST { from { rib inet.0; } then accept; }
   term SECOND { from { neighbor 10.0.0.1; } then next policy; }
@@ -939,7 +930,7 @@ func TestRoutingPolicyTolerantWarningNamesEveryChangedTerm11779(t *testing.T) {
 // FAIL-ON-REVERT: the packed-term protocol reader must stop at the same
 // unsupported match heads as the block reader and quarantine the unknown term.
 func TestRoutingPolicyPackedProtocolUnknownTailFailsClosed11779(t *testing.T) {
-	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
  policy-statement P {
   term T from protocol bgp neighbor 10.0.0.1 then accept;
  }
@@ -976,7 +967,7 @@ func TestRoutingPolicyActionlessClosedFromListRemainsBalanced11779(t *testing.T)
  }
 }`,
 	} {
-		cfg, err := CompileConfig(parsePolicyTreeFromSource11779(t, src))
+		cfg, err := CompileConfig(parseHierText(t, src))
 		if err != nil {
 			t.Fatalf("balanced actionless list was rejected: %v", err)
 		}
@@ -1005,7 +996,7 @@ func TestRoutingPolicyFromMultiValuesAndUnknownTailWithoutBrackets11779(t *testi
  as-path AP1 "^65000"; as-path AP2 "^65001";
  policy-statement P { term T { from ` + tc.list + ` ` + tc.tail + `; then accept; } }
 }`
-		cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, src))
+		cfg, err := CompileConfigLenient(parseHierText(t, src))
 		if err != nil {
 			t.Fatalf("tolerant compile for %q: %v", tc.list, err)
 		}

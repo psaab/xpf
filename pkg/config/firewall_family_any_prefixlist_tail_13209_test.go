@@ -47,7 +47,7 @@ func TestFirewallFamilyAnyPrefixListCompactAndBracketed13209(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			list := tc.list
-			tree := parseHier(t, familyAnyPLTailTree(tc.pl, list+";"))
+			tree := parseHierText(t, familyAnyPLTailTree(tc.pl, list+";"))
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig: expected #4426 rejection of single-family %s prefix-list under family any, got nil", tc.name)
@@ -60,7 +60,7 @@ func TestFirewallFamilyAnyPrefixListCompactAndBracketed13209(t *testing.T) {
 }
 
 func TestFirewallFamilyAnyPrefixListCompactExcept13209(t *testing.T) {
-	tree := parseHier(t, familyAnyPLTailTree("prefix-list v4-only 10.0.0.0/8;", "v4-only except;"))
+	tree := parseHierText(t, familyAnyPLTailTree("prefix-list v4-only 10.0.0.0/8;", "v4-only except;"))
 	_, err := CompileConfig(tree)
 	if err == nil {
 		t.Fatal("CompileConfig: expected #4426 rejection of v4-only except prefix-list under family any, got nil")
@@ -71,7 +71,7 @@ func TestFirewallFamilyAnyPrefixListCompactExcept13209(t *testing.T) {
 }
 
 func TestFirewallFamilyAnyPrefixListCompactLenientWarns13209(t *testing.T) {
-	tree := parseHier(t, familyAnyPLTailTree("prefix-list v4-only 10.0.0.0/8;", "v4-only;"))
+	tree := parseHierText(t, familyAnyPLTailTree("prefix-list v4-only 10.0.0.0/8;", "v4-only;"))
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: got error: %v", err)
@@ -88,7 +88,7 @@ func TestFirewallFamilyAnyPrefixListCompactLenientWarns13209(t *testing.T) {
 }
 
 func TestFirewallFamilyAnyPrefixListCompactMixedCommits13209(t *testing.T) {
-	tree := parseHier(t, familyAnyPLTailTree("prefix-list mixed [ 10.0.0.0/8 2001:db8::/32 ];", "mixed;"))
+	tree := parseHierText(t, familyAnyPLTailTree("prefix-list mixed [ 10.0.0.0/8 2001:db8::/32 ];", "mixed;"))
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("CompileConfig: mixed compact/bracketed list must commit, got: %v", err)
 	}

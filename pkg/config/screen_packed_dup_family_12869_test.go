@@ -30,7 +30,7 @@ var packedDupFamilies12869 = []struct {
 
 func screen12869(t *testing.T, src string) (*Config, error) {
 	t.Helper()
-	tree := parseHier5180(t, src)
+	tree := parseHierText(t, src)
 	if len(tree.Children) == 0 {
 		t.Fatalf("fixture parsed to an empty tree: %q", src)
 	}
@@ -99,7 +99,7 @@ func TestPackedRepeatedScreenFamilyRejected_12869(t *testing.T) {
 	})
 
 	t.Run("tolerant load warns for packed repeated family", func(t *testing.T) {
-		tree := parseHier5180(t, `security { screen { ids-option s1 icmp ping-death icmp fragment; } }`)
+		tree := parseHierText(t, `security { screen { ids-option s1 icmp ping-death icmp fragment; } }`)
 		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
 			t.Fatalf("tolerant load must warn rather than reject, got: %v", err)

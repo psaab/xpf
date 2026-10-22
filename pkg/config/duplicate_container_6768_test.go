@@ -151,7 +151,7 @@ protocols {
 func TestDuplicateContainerRejectedAtCommit_6768(t *testing.T) {
 	for _, tc := range dup6768Cases() {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier5180(t, tc.dupSrc)
+			tree := parseHierText(t, tc.dupSrc)
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig accepted a duplicate %s %q; the duplicate silently "+
@@ -172,7 +172,7 @@ func TestDuplicateContainerRejectedAtCommit_6768(t *testing.T) {
 func TestDuplicateContainerLenientWarns_6768(t *testing.T) {
 	for _, tc := range dup6768Cases() {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier5180(t, tc.dupSrc)
+			tree := parseHierText(t, tc.dupSrc)
 			cfg, err := CompileConfigLenient(tree)
 			if err != nil {
 				t.Fatalf("CompileConfigLenient hard-rejected a duplicate %s: %v", tc.kind, err)
@@ -199,7 +199,7 @@ func TestDuplicateContainerLenientWarns_6768(t *testing.T) {
 func TestSingleContainerStillCompiles_6768(t *testing.T) {
 	for _, tc := range dup6768Cases() {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier5180(t, tc.oneSrc)
+			tree := parseHierText(t, tc.oneSrc)
 			if _, err := CompileConfig(tree); err != nil {
 				t.Fatalf("CompileConfig rejected the singly-authored form: %v", err)
 			}
@@ -213,7 +213,7 @@ func TestSingleContainerStillCompiles_6768(t *testing.T) {
 // every repeated sibling would satisfy every cell above while breaking configs
 // that are fine, so this cell must stay green.
 func TestUnregisteredContainerRepeatStillAccepted_6768(t *testing.T) {
-	tree := parseHier5180(t, `services {
+	tree := parseHierText(t, `services {
     application-identification;
     application-identification;
 }`)
@@ -222,7 +222,7 @@ func TestUnregisteredContainerRepeatStillAccepted_6768(t *testing.T) {
 	}
 
 	// Repeated empty flow-monitoring leaves carry no config and remain accepted.
-	leafTree := parseHier5180(t, `services {
+	leafTree := parseHierText(t, `services {
     flow-monitoring;
     flow-monitoring;
 }`)
@@ -277,7 +277,7 @@ func anyCoveredKind(covered map[string]bool, kind string) bool {
 // transitive; GUARDEDNESS-closure is not, so this cell proves the new rows are
 // actually reached on the expanded path rather than assuming it.
 func TestDuplicateContainerInGroupBodyCaught_6768(t *testing.T) {
-	tree := parseHier5180(t, `groups {
+	tree := parseHierText(t, `groups {
     g1 {
         services {
             flow-monitoring { version9 { template t { flow-active-timeout 30; } } }
@@ -365,7 +365,7 @@ protocols {
 
 func lenientHier6768(t *testing.T, src string) *Config {
 	t.Helper()
-	cfg, err := CompileConfigLenient(parseHier5180(t, src))
+	cfg, err := CompileConfigLenient(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}

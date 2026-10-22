@@ -18,7 +18,7 @@ func TestInvalidSecondDefaultPolicyFailsClosed15998(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -34,7 +34,7 @@ func TestInvalidSecondDefaultPolicyFailsClosed15998(t *testing.T) {
 			if !found {
 				t.Fatalf("missing #15998 warning: %v", cfg.Warnings)
 			}
-			if _, err := CompileConfig(defaultPolicyTree11821(t, tc.text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil {
 				t.Fatal("strict compile accepted invalid default-policy value")
 			}
 		})
@@ -55,7 +55,7 @@ func TestInvalidTrailingTokenInOneStanzaFailsClosed15998(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if err == nil {
 				t.Fatal("strict compile accepted invalid trailing default-policy token")
 			}
@@ -69,7 +69,7 @@ func TestInvalidTrailingTokenInOneStanzaFailsClosed15998(t *testing.T) {
 				{"lenient", CompileConfigLenient},
 				{"node lenient", func(tr *ConfigTree) (*Config, error) { return CompileConfigForNodeLenient(tr, 0) }},
 			} {
-				cfg, err := compile.fn(defaultPolicyTree11821(t, tc.text))
+				cfg, err := compile.fn(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s compile: %v", compile.name, err)
 				}
@@ -101,7 +101,7 @@ func TestEmptyDefaultPolicyTokenFailsClosed15998(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := CompileConfig(defaultPolicyTree11821(t, tc.text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil {
 				t.Fatal("strict compile accepted empty/missing default-policy value")
 			} else if !strings.Contains(err.Error(), "#15998") {
 				t.Fatalf("strict error %q does not name #15998", err)
@@ -113,7 +113,7 @@ func TestEmptyDefaultPolicyTokenFailsClosed15998(t *testing.T) {
 				{"lenient", CompileConfigLenient},
 				{"node lenient", func(tr *ConfigTree) (*Config, error) { return CompileConfigForNodeLenient(tr, 0) }},
 			} {
-				cfg, err := compile.fn(defaultPolicyTree11821(t, tc.text))
+				cfg, err := compile.fn(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s compile: %v", compile.name, err)
 				}
@@ -144,7 +144,7 @@ func TestNestedDefaultPolicyChildFailsClosed15998(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := CompileConfig(defaultPolicyTree11821(t, tc.text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil {
 				t.Fatal("strict compile accepted nested default-policy child")
 			} else if !strings.Contains(err.Error(), "#15998") {
 				t.Fatalf("strict error %q does not name #15998", err)
@@ -156,7 +156,7 @@ func TestNestedDefaultPolicyChildFailsClosed15998(t *testing.T) {
 				{"lenient", CompileConfigLenient},
 				{"node lenient", func(tr *ConfigTree) (*Config, error) { return CompileConfigForNodeLenient(tr, 0) }},
 			} {
-				cfg, err := compile.fn(defaultPolicyTree11821(t, tc.text))
+				cfg, err := compile.fn(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s compile: %v", compile.name, err)
 				}
@@ -178,7 +178,7 @@ func TestNestedDefaultPolicyChildFailsClosed15998(t *testing.T) {
 }
 
 func TestSingleInvalidDefaultPolicyAloneIsDeny15998(t *testing.T) {
-	cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, "security { policies { default-policy { bogus; } } }"))
+	cfg, err := CompileConfigLenient(parseHierText(t, "security { policies { default-policy { bogus; } } }"))
 	if err != nil {
 		t.Fatalf("lenient: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestValidDefaultPoliciesUnaffected15998(t *testing.T) {
 		{"security { policies { default-policy { reject-all; } } }", PolicyReject},
 		{"security { policies { default-policy { permit-all; } default-policy { permit-all; } } }", PolicyPermit},
 	} {
-		cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+		cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 		if err != nil {
 			t.Fatalf("lenient %q: %v", tc.text, err)
 		}

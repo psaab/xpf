@@ -25,15 +25,6 @@ func globalText9571(body string) string {
 	return `security { ` + zones9571 + ` policies { global { ` + body + ` } } }`
 }
 
-func parse9571(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("fixture must parse: %v", errs)
-	}
-	return tree
-}
-
 func policies9571(cfg *Config) []*Policy {
 	var out []*Policy
 	for _, z := range cfg.Security.Policies {
@@ -90,11 +81,11 @@ func TestFoldNeverTurnsAStatementsDenyIntoAPermit9571(t *testing.T) {
 			`policy p1 { ` + anyMatch9571 + ` then { permit; } } policy p1 { then { deny; } } policy p1 { then { permit; } }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := CompileConfig(parse9571(t, tc.text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil {
 				t.Fatal("strict commit accepted a duplicate policy name; #9571 must leave the #3473 gate unchanged")
 			}
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, tc.text))
+				cfg, err := entry.compile(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s must accept the config (#1960 no-brick): %v", entry.label, err)
 				}
@@ -154,7 +145,7 @@ func TestFoldControlsStillMergeWithoutPoison9571(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, tc.text))
+				cfg, err := entry.compile(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s: %v", entry.label, err)
 				}
@@ -199,12 +190,12 @@ func TestGroupInheritedTerminalActionConflictPoisonsLenientCompile11063(t *testi
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text := groupConflictText11063(tc.inlineAction, tc.groupAction)
-			if _, err := CompileConfig(parse9571(t, text)); err == nil ||
+			if _, err := CompileConfig(parseHierText(t, text)); err == nil ||
 				!strings.Contains(err.Error(), "conflicting terminal actions") {
 				t.Fatalf("strict compile must reject the effective group conflict, got %v", err)
 			}
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, text))
+				cfg, err := entry.compile(parseHierText(t, text))
 				if err != nil {
 					t.Fatalf("%s must load the persisted group conflict: %v", entry.label, err)
 				}
@@ -231,7 +222,7 @@ func TestGroupConflictScanKeepsSafeMixedActionFoldUnpoisoned11063(t *testing.T) 
 	text := groupPolicyPrefix11063(groupPolicy) + zonePairText9571(
 		`policy p1 { `+anyMatch9571+` then { permit; } } policy p1 { then { deny; } }`)
 	for _, entry := range lenientEntries9571 {
-		cfg, err := entry.compile(parse9571(t, text))
+		cfg, err := entry.compile(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("%s: %v", entry.label, err)
 		}
@@ -291,12 +282,12 @@ func TestNestedAndPeeledPolicyInstancesAreFoldedAndChecked12820(t *testing.T) {
 				}
 				text := prefix + bodyText + suffix
 				if body.name == "conflicting terminal actions in one policy" &&
-					len(collectDirectTerminalActionConflictsFromExpandedTree(parse9571(t, text))) == 0 {
+					len(collectDirectTerminalActionConflictsFromExpandedTree(parseHierText(t, text))) == 0 {
 					t.Fatal("direct conflict walker missed the nested or peeled policy instance")
 				}
 				t.Run(body.name, func(t *testing.T) {
 					for _, entry := range lenientEntries9571 {
-						cfg, err := entry.compile(parse9571(t, text))
+						cfg, err := entry.compile(parseHierText(t, text))
 						if err != nil {
 							t.Fatalf("%s: %v", entry.label, err)
 						}
@@ -339,11 +330,11 @@ func TestNestedAndPeeledSafePolicyFoldRemainsUnpoisoned12820(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if conflicts := collectDirectTerminalActionConflictsFromExpandedTree(
-				parse9571(t, tc.text)); len(conflicts) != 0 {
+				parseHierText(t, tc.text)); len(conflicts) != 0 {
 				t.Fatalf("safe policy containers reported direct conflicts: %+v", conflicts)
 			}
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, tc.text))
+				cfg, err := entry.compile(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s: %v", entry.label, err)
 				}
@@ -360,7 +351,7 @@ func TestSiblingPeeledPolicyContainersFoldTogether12820(t *testing.T) {
 		policy { p1 { ` + anyMatch9571 + ` then { deny; } } }
 		policy { p1 { ` + anyMatch9571 + ` then { permit; } } }
 	} } }`
-	tree := parse9571(t, text)
+	tree := parseHierText(t, text)
 	for _, entry := range lenientEntries9571 {
 		cfg, err := entry.compile(tree.Clone())
 		if err != nil {
@@ -383,7 +374,7 @@ func TestGlobalPeeledWrappersFoldAcross12820(t *testing.T) {
 	// the global arm previously folded each wrapper independently).
 	const any = `match { source-address any; destination-address any; application any; }`
 	text := globalText9571(`policy { p1 { ` + any + ` then { deny; } } } policy { p1 { ` + any + ` then { permit; } } }`)
-	cfg, err := CompileConfigLenient(parse9571(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}

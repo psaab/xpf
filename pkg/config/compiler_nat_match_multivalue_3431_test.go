@@ -22,7 +22,7 @@ import (
 //
 // Both AST shapes are exercised: flat `set` commands via buildTree
 // (ParseSetCommand + SetPath, the only correct way per CLAUDE.md) AND a
-// hierarchical block with bracket lists via mustParse (NewParser).
+// hierarchical block with bracket lists via parseHierText (NewParser).
 
 func natMultiAppsSNAT(t *testing.T) *Config {
 	t.Helper()
@@ -132,7 +132,7 @@ func TestNATDestMatchMultiValueFlat(t *testing.T) {
 // hierarchical (NewParser) AST shape, where a bracket list also lands on
 // Keys[1:] of the single leaf (#2419).
 func TestNATMatchMultiValueHierarchical(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     zones {
         security-zone untrust;
     }

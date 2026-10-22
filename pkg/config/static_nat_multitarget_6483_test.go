@@ -24,7 +24,7 @@ import (
 // splicing extra flat-set lines (e.g. an address-book entry) on top.
 func mtBuildHier(t *testing.T, hier string, extra ...string) *ConfigTree {
 	t.Helper()
-	tree := buildHier(t, hier)
+	tree := parseHierText(t, hier)
 	for _, line := range extra {
 		path, err := ParseSetCommand(line)
 		if err != nil {

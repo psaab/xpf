@@ -12,17 +12,8 @@ import (
 // collision gate, and the runtime quarantine name set omitted zones
 // declared only in the second block.
 
-func parseSiblingZones12829(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 func TestCollectZoneNamesSeesSecondZonesBlock12829(t *testing.T) {
-	tree := parseSiblingZones12829(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust { } }
     zones { security-zone secondonly { } }
@@ -48,7 +39,7 @@ func TestZoneIDCollisionAcrossSiblingZonesBlocks12829(t *testing.T) {
 	if StableZoneID("z174") != StableZoneID("z214") {
 		t.Fatalf("test premise broken: z174/z214 no longer collide")
 	}
-	tree := parseSiblingZones12829(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone z174 { } }
     zones { security-zone z214 { } }
@@ -105,13 +96,13 @@ func TestSiblingZonesNoFalsePositive12829(t *testing.T) {
 	// Nil nodes and an empty security root contribute no names.
 	names := map[string]struct{}{}
 	collectZoneNamesAST(nil, names)
-	empty := parseSiblingZones12829(t, "security { }").FindChild("security")
+	empty := parseHierText(t, "security { }").FindChild("security")
 	collectZoneNamesAST(empty, names)
 	if len(names) != 0 {
 		t.Fatalf("nil or empty security root contributed zone names: %v", names)
 	}
 
-	tree := parseSiblingZones12829(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust { } }
     zones { security-zone untrust { } }
@@ -121,7 +112,7 @@ security {
 		t.Fatalf("strict compile rejected distinct zones across sibling blocks: %v", err)
 	}
 	// Single-block unchanged.
-	tree2 := parseSiblingZones12829(t, `
+	tree2 := parseHierText(t, `
 security {
     zones { security-zone trust { } security-zone untrust { } }
 }

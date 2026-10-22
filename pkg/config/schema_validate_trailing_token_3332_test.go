@@ -201,17 +201,8 @@ func TestSchema3332_AddressBookValidForms_Accepted(t *testing.T) {
 // rest. Built with the hierarchical parser (NewParser is correct for a
 // hierarchical block — the flat-set caveat is about `set` lines).
 
-func parseHier3332(t *testing.T, input string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(input).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors for hierarchical input: %v", errs)
-	}
-	return tree
-}
-
 func TestSchema3332_DynamicHostnameCompactTrailing_Rejected(t *testing.T) {
-	tree := parseHier3332(t, `security {
+	tree := parseHierText(t, `security {
     ike {
         gateway dyn-gw {
             ike-policy pol1;
@@ -230,7 +221,7 @@ func TestSchema3332_DynamicHostnameCompactTrailing_Rejected(t *testing.T) {
 }
 
 func TestSchema3332_DynamicHostnameCompactValid_Accepted(t *testing.T) {
-	tree := parseHier3332(t, `security {
+	tree := parseHierText(t, `security {
     ike {
         gateway dyn-gw {
             ike-policy pol1;

@@ -138,15 +138,6 @@ func replayDisplaySet6668(t *testing.T, setText string) *ConfigTree {
 	return out
 }
 
-func parseHier6668(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("fixture parse errors: %v", errs)
-	}
-	return tree
-}
-
 const zoneIfaceBracketBody6668 = `
 interfaces {
     ge-0/0/0 { unit 0 { family inet { address 10.0.1.1/24; } } }
@@ -170,7 +161,7 @@ security {
 // carries the boundary, the replayed tree has the same node, and the two
 // compile to the same typed config.
 func TestBracketedContainerSurvivesDisplaySet_6668(t *testing.T) {
-	hier := parseHier6668(t, zoneIfaceBracketBody6668)
+	hier := parseHierText(t, zoneIfaceBracketBody6668)
 
 	setText := hier.FormatSet()
 	if !strings.Contains(setText, "[ ge-0/0/0 ge-0/0/1 ]") {
@@ -280,7 +271,7 @@ func TestDisplaySetReplayKeepsTheCommitVerdict_6668(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hier := parseHier6668(t, tc.hier)
+			hier := parseHierText(t, tc.hier)
 			_, hierErr := CompileConfig(hier)
 			if (hierErr == nil) != tc.wantCommit {
 				t.Fatalf("fixture bug (%s): authored form commit=%v, want %v (err=%v)",
@@ -318,7 +309,7 @@ func TestBracketedValueLeavesRenderUnchanged_6668(t *testing.T) {
 	}
 	for name, src := range fixtures {
 		t.Run(name, func(t *testing.T) {
-			hier := parseHier6668(t, src)
+			hier := parseHierText(t, src)
 			setText := hier.FormatSet()
 			if strings.Contains(setText, "[") || strings.Contains(setText, "]") {
 				t.Errorf("value list acquired a bracket delimiter — this is churn, not a fix:\n%s", setText)
@@ -342,7 +333,7 @@ func TestBracketedValueLeavesRenderUnchanged_6668(t *testing.T) {
 // for. Measured, not assumed: this fixture carries containers with more keys
 // than their arity and NO bracket, and must render bare.
 func TestPackedContainerIsNotBracketed_6668(t *testing.T) {
-	hier := parseHier6668(t, `
+	hier := parseHierText(t, `
 class-of-service {
     scheduler-maps edge-map { forwarding-class best-effort { scheduler be-sched; } }
     interfaces ge-0/0/1 { unit 0 shaping-rate 10g { burst-size 125m; } }
@@ -360,7 +351,7 @@ class-of-service {
 // way. Before the grouped delete/deactivate entries it did not, and the replay
 // aborted — which on LoadMerge fails the whole file.
 func TestDeactivatedBracketedContainerRoundTrips_6668(t *testing.T) {
-	hier := parseHier6668(t, `
+	hier := parseHierText(t, `
 security { zones { security-zone trust { interfaces {
     inactive: [ ge-0/0/0 ge-0/0/1 ] { host-inbound-traffic { system-services ssh; } }
 } } } }
@@ -386,7 +377,7 @@ security { zones { security-zone trust { interfaces {
 // and persists the tree as JSON. A provenance that does not survive either one
 // means the very next render after a merge or a reboot flattens the group again.
 func TestBracketProvenanceSurvivesCloneAndJSON_6668(t *testing.T) {
-	hier := parseHier6668(t, zoneIfaceBracketBody6668)
+	hier := parseHierText(t, zoneIfaceBracketBody6668)
 	want := hier.FormatSet()
 
 	if got := hier.Clone().FormatSet(); got != want {
@@ -409,7 +400,7 @@ func TestBracketProvenanceSurvivesCloneAndJSON_6668(t *testing.T) {
 	// actually read — but it is a NO-OP (no clone at all) when nothing is
 	// deactivated, so a fixture with no inactive node cannot exercise the copy
 	// and would pass with the provenance dropped. Give it something to strip.
-	withInactive := parseHier6668(t, zoneIfaceBracketBody6668+`
+	withInactive := parseHierText(t, zoneIfaceBracketBody6668+`
 system {
     inactive: host-name fw-standby;
 }

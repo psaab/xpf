@@ -24,7 +24,7 @@ import (
 // reverted to iface.Name()-only.
 //
 // IMPORTANT (per CLAUDE.md): flat-set syntax is built with ParseSetCommand +
-// tree.SetPath, never NewParser; the hierarchical shape uses parseHierarchical.
+// tree.SetPath, never NewParser; the hierarchical shape uses parseHierText (#16139 kit).
 
 // compileZonesFromSet5248 builds a tree from flat-set commands and compiles just
 // the zones subtree, returning the zone membership by name. It targets
@@ -107,7 +107,7 @@ func TestZoneInterfacesBracket5248DualASTParity(t *testing.T) {
 		"set security zones security-zone Z interfaces [ ge-0/0/0 ge-0/0/1 ]",
 	)["Z"]
 
-	hierTree := parseHierarchical(t, `
+	hierTree := parseHierText(t, `
 security {
     zones {
         security-zone Z {

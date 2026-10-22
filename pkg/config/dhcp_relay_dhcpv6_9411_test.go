@@ -15,15 +15,6 @@ import (
 // ACCEPTS the stanza: the refusal lives in the compiler's pre-walk, because the
 // stanza compiles to nothing and the schema walk is open-world under dhcp-relay.
 
-func bracedTree9411(t *testing.T, txt string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(txt).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse %q: %v", txt, errs[0])
-	}
-	return tree
-}
-
 func flatTree9411(t *testing.T, lines ...string) *ConfigTree {
 	t.Helper()
 	tr := &ConfigTree{}
@@ -67,10 +58,10 @@ func TestDHCPRelayDHCPv6IsAcceptedInEveryShape9553(t *testing.T) {
 		wantV4G  int
 	}{
 		{"braced nested", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }")
+			return parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }")
 		}, 0, 0},
 		{"relay elided onto dhcpv6", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } }")
+			return parseHierText(t, "forwarding-options { dhcp-relay dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } }")
 		}, 0, 0},
 		{"flat-set", func(t *testing.T) *ConfigTree {
 			return flatTree9411(t,
@@ -79,13 +70,13 @@ func TestDHCPRelayDHCPv6IsAcceptedInEveryShape9553(t *testing.T) {
 				"set forwarding-options dhcp-relay dhcpv6 group g6 interface ge-0/0/0.0")
 		}, 0, 0},
 		{"BESIDE a working v4 relay", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/1.0; } } } }")
+			return parseHierText(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/1.0; } } } }")
 		}, 1, 1},
 		{"relay-elided dhcpv6 BEFORE a v4 relay block", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/1.0; } } dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }")
+			return parseHierText(t, "forwarding-options { dhcp-relay dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/1.0; } } dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }")
 		}, 1, 1},
 		{"injected via apply-groups", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "groups { g1 { forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } } } } apply-groups g1;")
+			return parseHierText(t, "groups { g1 { forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } } } } apply-groups g1;")
 		}, 0, 0},
 	} {
 		tc := tc
@@ -142,11 +133,11 @@ func TestDHCPRelayDHCPv6UnsupportedRemainderRefused9553(t *testing.T) {
 		{"IPv4 server", "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 192.0.2.5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(bracedTree9411(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if err == nil || !strings.Contains(err.Error(), "#9553") {
 				t.Fatalf("#9553: unsupported DHCPv6 remainder committed or used the obsolete refusal: %v", err)
 			}
-			lenient, err := CompileConfigLenient(bracedTree9411(t, tc.text))
+			lenient, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("#9553 no-brick: tolerant compile rejected persisted remainder: %v", err)
 			}
@@ -181,7 +172,7 @@ func TestDHCPRelayDHCPv6GateDoesNotRefuseAWorkingV4Relay9411(t *testing.T) {
 		wantSG, wantG    int // -1 = not asserted
 	}{
 		{"CONTROL braced v4 relay", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }")
+			return parseHierText(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group g1 { active-server-group isp; interface ge-0/0/0.0; } } }")
 		}, true, 1, 1},
 		{"CONTROL flat-set v4 relay", func(t *testing.T) *ConfigTree {
 			return flatTree9411(t,
@@ -190,7 +181,7 @@ func TestDHCPRelayDHCPv6GateDoesNotRefuseAWorkingV4Relay9411(t *testing.T) {
 				"set forwarding-options dhcp-relay group g1 interface ge-0/0/0.0")
 		}, true, 1, 1},
 		{"v4 GROUP named dhcpv6, braced", func(t *testing.T) *ConfigTree {
-			return bracedTree9411(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group dhcpv6 { active-server-group isp; interface ge-0/0/0.0; } } }")
+			return parseHierText(t, "forwarding-options { dhcp-relay { server-group isp { 10.0.0.5; } group dhcpv6 { active-server-group isp; interface ge-0/0/0.0; } } }")
 		}, true, 1, 1},
 		{"v4 GROUP named dhcpv6, flat-set", func(t *testing.T) *ConfigTree {
 			return flatTree9411(t,
@@ -208,14 +199,14 @@ func TestDHCPRelayDHCPv6GateDoesNotRefuseAWorkingV4Relay9411(t *testing.T) {
 			// Elided spelling of the named group: the assertion is only that THIS
 			// gate does not fire, since the elided grammar is not this fix's subject.
 			"v4 GROUP named dhcpv6, fully elided", func(t *testing.T) *ConfigTree {
-				return bracedTree9411(t, "forwarding-options dhcp-relay group dhcpv6 interface ge-0/0/0.0;")
+				return parseHierText(t, "forwarding-options dhcp-relay group dhcpv6 interface ge-0/0/0.0;")
 			}, false, -1, -1},
 		{
 			// A DEACTIVATED dhcpv6 stanza is inert by design and is pruned before the
 			// gate runs (measured). Refusing it would stop an operator committing a
 			// deactivated migration artefact they have deliberately set aside.
 			"inactive: dhcpv6 is NOT refused", func(t *testing.T) *ConfigTree {
-				return bracedTree9411(t, "forwarding-options { dhcp-relay { inactive: dhcpv6 { group g6 { interface ge-0/0/0.0; } } } }")
+				return parseHierText(t, "forwarding-options { dhcp-relay { inactive: dhcpv6 { group g6 { interface ge-0/0/0.0; } } } }")
 			}, true, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

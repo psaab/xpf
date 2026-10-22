@@ -57,15 +57,6 @@ func buildFlat(t *testing.T, extra ...string) *ConfigTree {
 	return tree
 }
 
-func buildHier(t *testing.T, cfg string) *ConfigTree {
-	t.Helper()
-	tree, err := NewParser(cfg).Parse()
-	if err != nil {
-		t.Fatalf("NewParser.Parse: %v", err)
-	}
-	return tree
-}
-
 // assertMappedPortAccept compiles tree in strict mode, requires success, and
 // asserts the resolved MappedPort equals want.
 func assertMappedPortAccept(t *testing.T, tree *ConfigTree, want int) {
@@ -152,7 +143,7 @@ func TestStaticNATMappedPortShapeMatrix6479(t *testing.T) {
 			// child of the prefix node, prefix VALUE carried on the prefix Keys.
 			name: "hier-nested-under-prefix-value",
 			build: func(t *testing.T, op string) *ConfigTree {
-				return buildHier(t, `security {
+				return parseHierText(t, `security {
     zones { security-zone untrust; }
     nat {
         static {
@@ -182,7 +173,7 @@ func TestStaticNATMappedPortShapeMatrix6479(t *testing.T) {
 			// block carrying BOTH the IP value and the mapped-port as children.
 			name: "hier-nested-value-as-child",
 			build: func(t *testing.T, op string) *ConfigTree {
-				return buildHier(t, `security {
+				return parseHierText(t, `security {
     zones { security-zone untrust; }
     nat {
         static {

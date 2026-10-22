@@ -11,15 +11,6 @@ import (
 // warn, remain bootable, and keep UsableValue empty so policy/NAT cannot use
 // the otherwise-valid prefix alone.
 
-func hier9524(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("fixture must parse: %v", errs)
-	}
-	return tree
-}
-
 func TestMixedAddressValueFormRejectedAtCommit9524(t *testing.T) {
 	const global = "set security address-book global address mixed "
 	const zl = "set security zones security-zone trust address-book address mixed "
@@ -36,7 +27,7 @@ func TestMixedAddressValueFormRejectedAtCommit9524(t *testing.T) {
 	}
 	h := func(body string) func(t *testing.T) *ConfigTree {
 		return func(t *testing.T) *ConfigTree {
-			return hier9524(t, `security { address-book { global { `+body+` } } zones { security-zone trust; } }`)
+			return parseHierText(t, `security { address-book { global { `+body+` } } zones { security-zone trust; } }`)
 		}
 	}
 	for _, r := range []row{

@@ -70,19 +70,19 @@ func TestImplicitInetFilter9899(t *testing.T) {
 		build func(*testing.T) *ConfigTree
 	}{
 		{"hierarchical", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall { filter F { term T { from { protocol tcp; } then { discard; } } } }`)
+			return parseHierText(t, `firewall { filter F { term T { from { protocol tcp; } then { discard; } } } }`)
 		}},
 		{"elided firewall root", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall filter F { term T { from { protocol tcp; } then { discard; } } }`)
+			return parseHierText(t, `firewall filter F { term T { from { protocol tcp; } then { discard; } } }`)
 		}},
 		{"packed root and filter", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall filter F term T { from protocol tcp; then discard; }`)
+			return parseHierText(t, `firewall filter F term T { from protocol tcp; then discard; }`)
 		}},
 		{"elided group firewall", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `groups { G { firewall filter F { term T { from { protocol tcp; } then { discard; } } } } } apply-groups G;`)
+			return parseHierText(t, `groups { G { firewall filter F { term T { from { protocol tcp; } then { discard; } } } } } apply-groups G;`)
 		}},
 		{"nested names", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall { filter { F { term { T { from { protocol tcp; } then { discard; } } } } } }`)
+			return parseHierText(t, `firewall { filter { F { term { T { from { protocol tcp; } then { discard; } } } } } }`)
 		}},
 		{"flat set", func(t *testing.T) *ConfigTree {
 			return firewallSetTree9899(t,
@@ -90,7 +90,7 @@ func TestImplicitInetFilter9899(t *testing.T) {
 				`set firewall filter F term T then discard`)
 		}},
 		{"group inheritance", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `groups { G { firewall { filter F { term T { from { protocol tcp; } then { discard; } } } } } } apply-groups G;`)
+			return parseHierText(t, `groups { G { firewall { filter F { term T { from { protocol tcp; } then { discard; } } } } } } apply-groups G;`)
 		}},
 		{"flat group inheritance", func(t *testing.T) *ConfigTree {
 			return firewallSetTree9899(t,
@@ -134,7 +134,7 @@ func TestImplicitInetFilterGates9899(t *testing.T) {
 		{"unknown match", `firewall { filter F { term T { from { unknown-match 1; } then { accept; } } } }`, "unknown-match"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := fwRawTree9875(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			if _, err := CompileConfig(tree); err == nil {
 				t.Fatal("implicit inet bypassed existing strict filter gate")
 			} else if !strings.Contains(err.Error(), tc.diagnostic) {
@@ -149,7 +149,7 @@ func TestImplicitInetFilterGates9899(t *testing.T) {
 			}
 		})
 	}
-	tree := fwRawTree9875(t, `firewall {
+	tree := parseHierText(t, `firewall {
 		filter F { term T { then { discard; } } }
 		family inet6 { filter F { term T { then { accept; } } } }
 	}
@@ -218,7 +218,7 @@ func TestImplicitInetNestedGroupMultiFilter9899(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := fwRawTree9875(t, tc.group+" "+tc.main)
+			tree := parseHierText(t, tc.group+" "+tc.main)
 			cfg, err := CompileConfig(tree)
 			if err != nil {
 				t.Fatal(err)

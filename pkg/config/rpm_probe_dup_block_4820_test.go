@@ -19,7 +19,7 @@ import "testing"
 // expressible via the hierarchical / NewParser (load-override) path.
 // Flat-set ParseSetCommand + SetPath merges two lines with an identical
 // key-path into one node, so it is structurally immune and is NOT the
-// reproducer here — parseHierarchical is.
+// reproducer here — parseHierText is.
 
 // TestRPMProbeDupBlock4820TestsMerge is the primary RED-on-revert guard: two
 // `probe p1 { ... }` top-level instances, each declaring a different test.
@@ -27,7 +27,7 @@ import "testing"
 // instance makes the second instance replace the first, so test t1 is
 // dropped — RED.
 func TestRPMProbeDupBlock4820TestsMerge(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 services {
     rpm {
         probe p1 {
@@ -68,7 +68,7 @@ services {
 // test, to guard against an off-by-one find-or-create that only handles a
 // pair.
 func TestRPMProbeDupBlock4820ThreeInstancesAllTestsSurvive(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 services {
     rpm {
         probe p1 {
@@ -107,7 +107,7 @@ services {
 // negative control: a single probe instance with two tests must compile
 // exactly as before the find-or-create change.
 func TestRPMProbeDupBlock4820SingleBlockUnchanged(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 services {
     rpm {
         probe p1 {

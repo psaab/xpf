@@ -120,7 +120,7 @@ func TestInterfacesOpenWorldWarn15199(t *testing.T) {
 	}
 	// Hier spelling
 	hier := "interfaces { ge-0/0/1 { ether-options { 802.3ad ae0; } unit 0 { family inet { address 10.0.1.1/24; } } } }"
-	cfg, err := CompileConfig(parseHier(t, hier))
+	cfg, err := CompileConfig(parseHierText(t, hier))
 	if err != nil {
 		t.Fatalf("hier: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestVRRPInet6JunosSpelling15199(t *testing.T) {
 	}
 	// Hierarchical Junos
 	hierJunos := "interfaces { reth0 { unit 0 { family inet6 { address 2001:db8::10/64 { vrrp-inet6-group 1 { virtual-inet6-address 2001:db8::1/64; priority 150; } } } } } }"
-	cfg, err := CompileConfig(parseHier(t, hierJunos))
+	cfg, err := CompileConfig(parseHierText(t, hierJunos))
 	if err != nil {
 		t.Fatalf("hier Junos: %v", err)
 	}

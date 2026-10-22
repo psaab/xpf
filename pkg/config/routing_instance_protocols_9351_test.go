@@ -42,15 +42,6 @@ func setTree9351(t *testing.T, lines ...string) *ConfigTree {
 	return tree
 }
 
-func bracedTree9351(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("parse braced fixture: %v", perrs)
-	}
-	return tree
-}
-
 func compile9351(t *testing.T, tree *ConfigTree) *Config {
 	t.Helper()
 	// These fixtures exercise protocol-tree parsing, not missing router-AS
@@ -139,7 +130,7 @@ func TestPerInstanceBGPNeighbourSubKeywordSurvivesFlatSet9351(t *testing.T) {
 // that already worked. The fix reshapes the flat-set walk; nothing about the
 // braced walk should move, and a cell that only drove flat-set could not tell.
 func TestPerInstanceBGPNeighbourSubKeywordSurvivesBraced9351(t *testing.T) {
-	cfg := compile9351(t, bracedTree9351(t, `
+	cfg := compile9351(t, parseHierText(t, `
 routing-instances {
     VRF-A {
         instance-type vrf;
@@ -343,7 +334,7 @@ func TestPerInstanceProtocolsSpellingsAgree9351(t *testing.T) {
 					flat = row.read(t, ri)
 				}
 			}
-			for _, ri := range compile9351(t, bracedTree9351(t, row.instBraced)).RoutingInstances {
+			for _, ri := range compile9351(t, parseHierText(t, row.instBraced)).RoutingInstances {
 				if ri.Name == "V" {
 					braced = row.read(t, ri)
 				}

@@ -15,15 +15,6 @@ import (
 // removed. Before the fix the two were byte-identical in their compiled output,
 // which is the whole finding — removing the statement changed nothing.
 
-func parseTree9422(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 func flatTree9422(t *testing.T, lines ...string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
@@ -67,8 +58,8 @@ system { domain-name example.com; }`
 	}{
 		{
 			name:        "hierarchical",
-			excepted:    parseTree9422(t, withExcept),
-			controlTree: parseTree9422(t, control),
+			excepted:    parseHierText(t, withExcept),
+			controlTree: parseHierText(t, control),
 		},
 		{
 			name: "flat set",
@@ -113,7 +104,7 @@ system { domain-name example.com; }`
 // of `apply-groups`, not a child of any container the group contributes to — so
 // it is the cell that binds the entry-level check.
 func TestApplyGroupsExceptAtTopLevel9422(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `groups { G { system { host-name FROM-GROUP; } } }
+	cfg := compile9422(t, parseHierText(t, `groups { G { system { host-name FROM-GROUP; } } }
 apply-groups G;
 apply-groups-except G;
 system { domain-name example.com; }`))
@@ -123,7 +114,7 @@ system { domain-name example.com; }`))
 	if cfg.System.DomainName != "example.com" {
 		t.Fatalf("authored config lost: DomainName=%q", cfg.System.DomainName)
 	}
-	ctrl := compile9422(t, parseTree9422(t, `groups { G { system { host-name FROM-GROUP; } } }
+	ctrl := compile9422(t, parseHierText(t, `groups { G { system { host-name FROM-GROUP; } } }
 apply-groups G;
 system { domain-name example.com; }`))
 	if ctrl.System.HostName != "FROM-GROUP" {
@@ -134,7 +125,7 @@ system { domain-name example.com; }`))
 // The exclusion is per-GROUP, not "stop inheriting". A sibling group applied by
 // the same `apply-groups` statement must still be inherited.
 func TestApplyGroupsExceptIsPerGroup9422(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `groups {
+	cfg := compile9422(t, parseHierText(t, `groups {
   G { system { host-name FROM-G; } }
   H { system { time-zone UTC; } }
 }
@@ -151,7 +142,7 @@ system { apply-groups-except G; domain-name example.com; }`))
 // A bracketed list of excluded groups collapses onto one node's Keys (#2419
 // class), so every key past the keyword is a group name.
 func TestApplyGroupsExceptBracketList9422(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `groups {
+	cfg := compile9422(t, parseHierText(t, `groups {
   G { system { host-name FROM-G; } }
   H { system { time-zone UTC; } }
 }
@@ -172,7 +163,7 @@ system { apply-groups-except [ G H ]; domain-name example.com; }`))
 // about whether they exclude the group. A decision taken once against the group
 // body cannot express that.
 func TestApplyGroupsExceptIsPerDestination9422(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `groups { G { interfaces { <*> { description FROM-GROUP; } } } }
+	cfg := compile9422(t, parseHierText(t, `groups { G { interfaces { <*> { description FROM-GROUP; } } } }
 apply-groups G;
 interfaces {
   ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
@@ -199,7 +190,7 @@ interfaces {
 // config honoured the statement with one `system` block and IGNORED it with two,
 // which is the defect this issue is about wearing a different shape.
 func TestApplyGroupsExceptAcrossDuplicateBlocks9422(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `system { host-name p; }
+	cfg := compile9422(t, parseHierText(t, `system { host-name p; }
 groups { G { system { domain-name FROM-GROUP; } } }
 apply-groups G;
 system { apply-groups-except G; time-zone UTC; }`))
@@ -212,7 +203,7 @@ system { apply-groups-except G; time-zone UTC; }`))
 			cfg.System.HostName, cfg.System.TimeZone)
 	}
 	// Control: with the statement removed, the group reaches the merged level.
-	ctrl := compile9422(t, parseTree9422(t, `system { host-name p; }
+	ctrl := compile9422(t, parseHierText(t, `system { host-name p; }
 groups { G { system { domain-name FROM-GROUP; } } }
 apply-groups G;
 system { time-zone UTC; }`))
@@ -224,7 +215,7 @@ system { time-zone UTC; }`))
 // The exclusion is scoped to the stanza that carries it and everything BELOW,
 // which is how the Junos statement reads. A sibling stanza keeps inheriting.
 func TestApplyGroupsExceptScopedToItsSubtree9422(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `groups { G {
+	cfg := compile9422(t, parseHierText(t, `groups { G {
   system { host-name FROM-GROUP; }
   snmp { description FROM-GROUP; }
 } }
@@ -245,7 +236,7 @@ snmp { location LAB; }`))
 // would break a shared cluster config that excludes a `${node}` group defined
 // only in the peer's view.
 func TestApplyGroupsExceptUndefinedGroupIsNoOp9422(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `groups { G { system { host-name FROM-GROUP; } } }
+	cfg := compile9422(t, parseHierText(t, `groups { G { system { host-name FROM-GROUP; } } }
 apply-groups G;
 system { apply-groups-except NOPE; domain-name example.com; }`))
 	if cfg.System.HostName != "FROM-GROUP" {
@@ -260,7 +251,7 @@ func TestApplyGroupsExceptResolvesNodeVar9422(t *testing.T) {
 	const src = `groups { node0 { system { host-name FROM-NODE0; } } }
 apply-groups "${node}";
 system { apply-groups-except "${node}"; domain-name example.com; }`
-	cfg, err := CompileConfigForNode(parseTree9422(t, src), 0)
+	cfg, err := CompileConfigForNode(parseHierText(t, src), 0)
 	if err != nil {
 		t.Fatalf("CompileConfigForNode: %v", err)
 	}
@@ -268,7 +259,7 @@ system { apply-groups-except "${node}"; domain-name example.com; }`
 		t.Errorf(`apply-groups-except "${node}" did not resolve: HostName=%q`, cfg.System.HostName)
 	}
 	// Control: without the exclusion the same node compile inherits it.
-	ctrl, err := CompileConfigForNode(parseTree9422(t, `groups { node0 { system { host-name FROM-NODE0; } } }
+	ctrl, err := CompileConfigForNode(parseHierText(t, `groups { node0 { system { host-name FROM-NODE0; } } }
 apply-groups "${node}";
 system { domain-name example.com; }`), 0)
 	if err != nil {
@@ -283,7 +274,7 @@ system { domain-name example.com; }`), 0)
 // is now CONSULTED, not that it is refused. A commit carrying it must not start
 // erroring.
 func TestApplyGroupsExceptStillAcceptedOnEveryChannel9422(t *testing.T) {
-	tree := parseTree9422(t, `groups { G { system { host-name FROM-GROUP; } } }
+	tree := parseHierText(t, `groups { G { system { host-name FROM-GROUP; } } }
 apply-groups G;
 system { apply-groups-except G; domain-name example.com; }`)
 	cfg, err := CompileConfig(tree)

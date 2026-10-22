@@ -117,7 +117,7 @@ func TestInheritanceRedactedDDNSProvider15979(t *testing.T) {
 // likely above the caller's scope. The inherited copy must render (proving
 // expansion ran) and must be masked.
 func TestInheritanceRedactedInheritedCommunity15979(t *testing.T) {
-	tree := parseRedactTree10948(t, `groups {
+	tree := parseHierText(t, `groups {
     g-secrets {
         snmp {
             community `+leakSNMP15979+` {

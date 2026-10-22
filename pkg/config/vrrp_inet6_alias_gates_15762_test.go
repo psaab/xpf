@@ -13,7 +13,7 @@ import (
 // committed clean and activated unauthenticated / with last-wins tracking.
 // These tests pin the inet6 spelling to the same strict-reject /
 // lenient-drop behaviour as its vrrp-group twin. Helpers
-// (replaySetLines, parseHier, firstVRRPGroupWithVIP, hasWarningContaining)
+// (replaySetLines, parseHierText, firstVRRPGroupWithVIP, hasWarningContaining)
 // are defined in sibling test files in this package.
 
 const vrrpInet6VIP15762 = "2001:db8::1/64"
@@ -46,7 +46,7 @@ func TestVRRPInet6AuthStrictReject15762(t *testing.T) {
         }
     }
 }`
-	if _, err := CompileConfig(parseHier(t, hier)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, hier)); err == nil {
 		t.Fatal("hierarchical: vrrp-inet6-group authentication must strict-reject")
 	} else if !strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "secret15762") {
 		t.Fatalf("hierarchical: error must name authentication without leaking the key, got: %v", err)
@@ -99,12 +99,12 @@ const vrrpInet6MisplacedHier15762 = `interfaces {
 // its subtree must reject strict / drop lenient — this exercises
 // collectVRRPGroups and vrrpMisplacedAuth, which also keyed on vrrp-group.
 func TestVRRPInet6MisplacedAuth15762(t *testing.T) {
-	if _, err := CompileConfig(parseHier(t, vrrpInet6MisplacedHier15762)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, vrrpInet6MisplacedHier15762)); err == nil {
 		t.Fatal("strict: misplaced auth above vrrp-inet6-group must reject")
 	} else if !strings.Contains(err.Error(), "authentication-key") || strings.Contains(err.Error(), "secret15762") {
 		t.Fatalf("strict: error must name authentication-key without leaking it, got: %v", err)
 	}
-	cfg, err := CompileConfigLenient(parseHier(t, vrrpInet6MisplacedHier15762))
+	cfg, err := CompileConfigLenient(parseHierText(t, vrrpInet6MisplacedHier15762))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
@@ -175,12 +175,12 @@ const vrrpInet6DupTrackHier15762 = `interfaces {
 // Strict: duplicate track-interface under vrrp-inet6-group rejects.
 // Lenient: first track-interface wins with a warning, as for vrrp-group.
 func TestVRRPInet6DuplicateTrack15762(t *testing.T) {
-	if _, err := CompileConfig(parseHier(t, vrrpInet6DupTrackHier15762)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, vrrpInet6DupTrackHier15762)); err == nil {
 		t.Fatal("strict: duplicate track-interface under vrrp-inet6-group must reject")
 	} else if !strings.Contains(err.Error(), "track-interface") {
 		t.Fatalf("strict: error must mention track-interface, got: %v", err)
 	}
-	cfg, err := CompileConfigLenient(parseHier(t, vrrpInet6DupTrackHier15762))
+	cfg, err := CompileConfigLenient(parseHierText(t, vrrpInet6DupTrackHier15762))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}

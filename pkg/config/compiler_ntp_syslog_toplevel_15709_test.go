@@ -58,7 +58,7 @@ func TestNTPeerCompiles15709(t *testing.T) {
 		t.Fatalf("NTPServers=%v", cfg.System.NTPServers)
 	}
 	// Hier spelling
-	tree := parseHierarchical(t, "system { ntp { peer 192.0.2.5; server 192.0.2.6; } }")
+	tree := parseHierText(t, "system { ntp { peer 192.0.2.5; server 192.0.2.6; } }")
 	cfg2, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestSyslogTopLevel15709(t *testing.T) {
 		}
 	}
 	// Hier spelling
-	tree := parseHierarchical(t, "system { syslog { source-address 10.0.0.9; console { any info; } time-format year; host 192.0.2.10 { any any; } } }")
+	tree := parseHierText(t, "system { syslog { source-address 10.0.0.9; console { any info; } time-format year; host 192.0.2.10 { any any; } } }")
 	cfg2, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatal(err)

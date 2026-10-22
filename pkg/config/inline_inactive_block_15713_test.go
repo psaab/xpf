@@ -16,7 +16,7 @@ import (
 // GREEN: outer stays active, inner sub-block is its sole inactive child.
 
 func TestInlineInactiveGovernedBlock15713(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     zones {
         security-zone trust {
             interfaces {
@@ -81,7 +81,7 @@ func TestInlineInactiveGovernedBlock15713(t *testing.T) {
 
 	// Format (hierarchical) round-trip.
 	hier := tree.Format()
-	reparsed := mustParse(t, hier)
+	reparsed := parseHierText(t, hier)
 	rIface := reparsed.FindChild("security").FindChild("zones").FindChild("security-zone").FindChild("interfaces").FindChild("ge-0/0/0.0")
 	if rIface == nil || rIface.Inactive {
 		t.Fatalf("round-trip outer = %+v, want active ge-0/0/0.0; hier:\n%s", rIface, hier)
@@ -92,7 +92,7 @@ func TestInlineInactiveGovernedBlock15713(t *testing.T) {
 }
 
 func TestInlineInactiveGovernedMultiKeyBlock15713(t *testing.T) {
-	tree := mustParse(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     ge-0/0/0 {
         unit 0 inactive: family inet6 {
             address 2001:db8::1/64;
@@ -141,7 +141,7 @@ func TestInlineInactiveGovernedMultiKeyBlock15713(t *testing.T) {
 
 func TestInlineInactiveMarkerAtEndBeforeBlock15713(t *testing.T) {
 	// i == len(keys)-1: whole outer block deactivated (existing test shape).
-	tree := mustParse(t, "parent {\n child name inactive: {\n hidden value;\n }\n}")
+	tree := parseHierText(t, "parent {\n child name inactive: {\n hidden value;\n }\n}")
 	parent := tree.FindChild("parent")
 	var n *Node
 	for _, c := range parent.Children {
@@ -158,7 +158,7 @@ func TestInlineInactiveMarkerAtEndBeforeBlock15713(t *testing.T) {
 }
 
 func TestInlineInactiveLeafTailStillDropped15713(t *testing.T) {
-	tree := mustParse(t, "system {\n host-name keep inactive: extra token;\n}")
+	tree := parseHierText(t, "system {\n host-name keep inactive: extra token;\n}")
 	hn := tree.FindChild("system").FindChild("host-name")
 	if hn == nil || hn.Inactive || !reflect.DeepEqual(hn.Keys, []string{"host-name", "keep"}) {
 		t.Fatalf("leaf inline inactive changed: %+v", hn)

@@ -18,14 +18,14 @@ import (
 // `set firewall family any ...` collapses and never mints a structured filter.
 // A `family any` filter reaches compileFirewall's structured path only via a
 // HIERARCHICAL config-file parse or a directly-built / peer-synced AST — the
-// same paths #3884 documents — so the fixtures use parseHier.
+// same paths #3884 documents — so the fixtures use parseHierText.
 
 // RED-on-revert: a `family any` discard filter must land in BOTH the IPv4 and
 // IPv6 pools. On revert of the #4287 fix this goes RED — the filter compiles
 // into FiltersInet only and the IPv6 forwarding path (FilterInputV6 →
 // FiltersInet6) never sees it, so v6 passes (fail-open).
 func TestFirewallFilterFamilyAnyAppliesToBothPools(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family any {
         filter drop6 {
@@ -65,7 +65,7 @@ firewall {
 // (fail-open on the v6 side). On revert this goes RED (no error, silent
 // overwrite).
 func TestFirewallFilterFamilyAnyInet6NameCollisionRejected(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet6 {
         filter blockV6 {
@@ -100,7 +100,7 @@ firewall {
 // Lenient (load / peer-sync): the any+inet6 collision downgrades to a warning
 // so an already-persisted or peer-synced config still boots.
 func TestFirewallFilterFamilyAnyInet6NameCollisionLenientWarns(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet6 {
         filter blockV6 {
@@ -143,7 +143,7 @@ firewall {
 // commits cleanly with no collision error/warning — the gate must not
 // over-reject the legitimate dual-family case.
 func TestFirewallFilterFamilyAnyNoCollisionCommits(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family any {
         filter dropBoth {

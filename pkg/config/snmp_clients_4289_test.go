@@ -56,7 +56,7 @@ func TestSNMPClientsFlatSetParseAndEnforce(t *testing.T) {
 // allow denies the /24 while the rest of the /16 is allowed. A source matching
 // no entry is denied (clients configured = default-deny for the unlisted).
 func TestSNMPClientsHierLongestPrefix(t *testing.T) {
-	c := communityFrom(t, parseHier(t, `
+	c := communityFrom(t, parseHierText(t, `
 snmp {
     community mgmt {
         authorization read-only;
@@ -83,7 +83,7 @@ snmp {
 // A community without `clients` is allow-all (Junos default) — the enforcement
 // must not change the common unscoped case.
 func TestSNMPClientsAbsentIsAllowAll(t *testing.T) {
-	c := communityFrom(t, parseHier(t, `snmp { community open { authorization read-only; } }`), "open")
+	c := communityFrom(t, parseHierText(t, `snmp { community open { authorization read-only; } }`), "open")
 	if len(c.Clients) != 0 {
 		t.Fatalf("expected no clients, got %+v", c.Clients)
 	}
@@ -96,7 +96,7 @@ func TestSNMPClientsAbsentIsAllowAll(t *testing.T) {
 
 // IPv6 prefixes are honored too.
 func TestSNMPClientsIPv6(t *testing.T) {
-	c := communityFrom(t, parseHier(t, `
+	c := communityFrom(t, parseHierText(t, `
 snmp {
     community v6 {
         authorization read-only;

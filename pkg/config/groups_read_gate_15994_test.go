@@ -134,8 +134,8 @@ func TestGroupsReadScopedGateRefuses15994(t *testing.T) {
 	}
 
 	// Nested groups: innermost body priced.
-	nested := mustTree14981(t, "groups { H { system { host-name h15994; } } G { apply-groups H; } } apply-groups G;")
-	inner := mustTree14981(t, "groups { H { security { zones { security-zone trust { description NESTED-15994; } } } } G { apply-groups H; } } apply-groups G;")
+	nested := parseHierText(t, "groups { H { system { host-name h15994; } } G { apply-groups H; } } apply-groups G;")
+	inner := parseHierText(t, "groups { H { security { zones { security-zone trust { description NESTED-15994; } } } } G { apply-groups H; } } apply-groups G;")
 	if err := AuthorizeConfigShowPathRendered(cfgSec, "limited", []string{"groups", "G", "system"}, "", nested); err != nil {
 		t.Errorf("nested allowed path refused: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestGroupsReadOpArm15994(t *testing.T) {
 
 func TestGroupsReadWhole15994(t *testing.T) {
 	tree := tree15994(t)
-	plain := mustTree14981(t, "system { host-name plain-15994; }")
+	plain := parseHierText(t, "system { host-name plain-15994; }")
 
 	// deny-configuration ^security: group body refuses whole.
 	cfgSec := cfgOp15994(t, "", "^security", "", "")
@@ -191,7 +191,7 @@ func TestGroupsReadWhole15994(t *testing.T) {
 		t.Error("unscoped rollback with denied group body ALLOWED (#15994)")
 	}
 	// Scoped controls stay admitted.
-	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", mustTree14981(t,
+	if err := AuthorizeConfigShowWholeAtTree(cfgSec, "limited", "", parseHierText(t,
 		"groups { H { system { host-name ok15994; } } } system { host-name top15994; }")); err != nil {
 		t.Errorf("allowed-only groups whole refused: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestGroupsReadUnrestricted15994(t *testing.T) {
 	// Zero-regex class: unresolvable groups scope must NOT fail
 	// closed (fold M1).
 	open := cfgOp15994(t, "", "", "", "")
-	groupless := mustTree14981(t, "system { host-name plain-15994; }")
+	groupless := parseHierText(t, "system { host-name plain-15994; }")
 	if err := AuthorizeConfigShowPathRendered(open, "limited", []string{"groups"}, "", groupless); err != nil {
 		t.Errorf("unrestricted [groups] on groupless tree refused (fold M1): %v", err)
 	}
@@ -274,7 +274,7 @@ func TestGroupsReadUnrestricted15994(t *testing.T) {
 // Fold2-4: display inheritance runs the groups walk even when
 // config rules exist; nested applied-group content priced.
 func TestGroupsExpandedInheritance15994(t *testing.T) {
-	inner := mustTree14981(t, "groups { H { security { zones { security-zone trust { description NESTED-15994; } } } } G { apply-groups H; } } apply-groups G;")
+	inner := parseHierText(t, "groups { H { security { zones { security-zone trust { description NESTED-15994; } } } } G { apply-groups H; } } apply-groups G;")
 	sec := cfgOp15994(t, "", "^security", "", "")
 	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups", "G", "security"}, "display inheritance", -1, inner); err == nil {
 		t.Fatal("nested expanded denied path ALLOWED (fold2-4)")
@@ -289,7 +289,7 @@ func TestGroupsExpandedInheritance15994(t *testing.T) {
 	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"security"}, "display inheritance", -1, inner); err == nil {
 		t.Fatal("expanded effective security ALLOWED")
 	}
-	allowed := mustTree14981(t, "groups { G { system { host-name ok15994; } } } apply-groups G;")
+	allowed := parseHierText(t, "groups { G { system { host-name ok15994; } } } apply-groups G;")
 	if err := AuthorizeExpandedConfigShowPathRendered(sec, "limited", []string{"groups"}, "display inheritance", -1, allowed); err != nil {
 		t.Fatalf("allowed expanded groups refused: %v", err)
 	}

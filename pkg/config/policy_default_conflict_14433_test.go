@@ -13,15 +13,6 @@ import (
 // Strict commit rejects; tolerant load warns and fails closed (reject).
 // Single / repeated-same / no default are unchanged.
 
-func parse14433(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, err := NewParser(text).Parse()
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	return tree
-}
-
 const groupConflict14433 = `groups {
     G {
         policy-options {
@@ -102,7 +93,7 @@ const duplicateThen14433 = `policy-options {
 
 func assertStrictRejects14433(t *testing.T, text string) {
 	t.Helper()
-	_, err := CompileConfig(parse14433(t, text))
+	_, err := CompileConfig(parseHierText(t, text))
 	if err == nil {
 		t.Fatalf("strict CompileConfig accepted conflicting statement-level defaults; want rejection (#14433)")
 	}
@@ -114,7 +105,7 @@ func assertStrictRejects14433(t *testing.T, text string) {
 
 func assertLenientFailsClosed14433(t *testing.T, text string) {
 	t.Helper()
-	cfg, err := CompileConfigLenient(parse14433(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("lenient compile must not brick (#1960): %v", err)
 	}
@@ -152,14 +143,14 @@ func TestPolicyStatementDefaultConflictDuplicateThen14433(t *testing.T) {
 }
 
 func TestPolicyStatementDefaultGroupSingleControls14433(t *testing.T) {
-	cfg, err := CompileConfig(parse14433(t, "groups { G { policy-options { policy-statement P { then accept; } } } }\npolicy-options { policy-statement P { term t1 { then accept; } } }\napply-groups G;"))
+	cfg, err := CompileConfig(parseHierText(t, "groups { G { policy-options { policy-statement P { then accept; } } } }\npolicy-options { policy-statement P { term t1 { then accept; } } }\napply-groups G;"))
 	if err != nil {
 		t.Fatalf("group-only default must compile: %v", err)
 	}
 	if got := cfg.PolicyOptions.PolicyStatements["P"].DefaultAction; got != "accept" {
 		t.Fatalf("group-only default = %q, want accept", got)
 	}
-	cfg, err = CompileConfig(parse14433(t, "groups { G { policy-options { policy-statement P { then accept; } } } }\npolicy-options { policy-statement P { then accept; } }\napply-groups G;"))
+	cfg, err = CompileConfig(parseHierText(t, "groups { G { policy-options { policy-statement P { then accept; } } } }\npolicy-options { policy-statement P { then accept; } }\napply-groups G;"))
 	if err != nil {
 		t.Fatalf("same-action group+inline default must compile: %v", err)
 	}
@@ -224,7 +215,7 @@ func TestPolicyStatementDefaultSingleControls14433(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parse14433(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("single/repeated-same default must compile: %v", err)
 			}
@@ -236,7 +227,7 @@ func TestPolicyStatementDefaultSingleControls14433(t *testing.T) {
 	}
 	// Isolation: different statements each with a single different default
 	// must not leak into a conflict.
-	cfg, err := CompileConfig(parse14433(t, `policy-options {
+	cfg, err := CompileConfig(parseHierText(t, `policy-options {
         policy-statement P { then accept; }
         policy-statement Q { then reject; }
     }`))

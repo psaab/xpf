@@ -22,7 +22,7 @@ interfaces {
   ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
   ge-0/0/1 { unit 0 { family inet { address 10.0.1.1/24; } } }
 }`
-	cfg := compile9422(t, parseTree9422(t, text))
+	cfg := compile9422(t, parseHierText(t, text))
 	for _, name := range []string{"ge-0/0/0", "ge-0/0/1"} {
 		ifc := cfg.Interfaces.Interfaces[name]
 		if ifc == nil {
@@ -45,7 +45,7 @@ interfaces {
   ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
   ge-0/0/1 { unit 0 { family inet { address 10.0.1.1/24; } } }
 }`
-	cfg := compile9422(t, parseTree9422(t, text))
+	cfg := compile9422(t, parseHierText(t, text))
 	for _, name := range []string{"ge-0/0/0", "ge-0/0/1"} {
 		ifc := cfg.Interfaces.Interfaces[name]
 		if ifc == nil || ifc.Description != "FROM-H" {
@@ -63,7 +63,7 @@ func TestNestedWildcardUnmatchedStillPrunes10054(t *testing.T) {
 }
 apply-groups G;
 system { host-name p; }`
-	tree := parseTree9422(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -82,7 +82,7 @@ system { host-name p; }`
 		}
 	}
 	walk(tree.Children)
-	if got := len(compile9422(t, parseTree9422(t, text)).Interfaces.Interfaces); got != 0 {
+	if got := len(compile9422(t, parseHierText(t, text)).Interfaces.Interfaces); got != 0 {
 		t.Fatalf("compiled %d interfaces, want 0", got)
 	}
 }
@@ -101,7 +101,7 @@ interfaces {
   ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
   ge-0/0/1 { unit 0 { family inet { address 10.0.1.1/24; } } }
 }`
-	cfg := compile9422(t, parseTree9422(t, text))
+	cfg := compile9422(t, parseHierText(t, text))
 	for _, name := range []string{"ge-0/0/0", "ge-0/0/1"} {
 		ifc := cfg.Interfaces.Interfaces[name]
 		if ifc == nil || ifc.Description != "FROM-H" {
@@ -122,7 +122,7 @@ apply-groups [ G H ];
 interfaces {
   ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	ifc := compile9422(t, parseTree9422(t, text)).Interfaces.Interfaces["ge-0/0/0"]
+	ifc := compile9422(t, parseHierText(t, text)).Interfaces.Interfaces["ge-0/0/0"]
 	if ifc == nil || ifc.Description != "FROM-H" {
 		t.Fatalf("ge-0/0/0 Description=%q, want FROM-H", ifc.Description)
 	}
@@ -141,7 +141,7 @@ interfaces {
   ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
   ge-0/0/1 { apply-groups-except H; unit 0 { family inet { address 10.0.1.1/24; } } }
 }`
-	cfg := compile9422(t, parseTree9422(t, text))
+	cfg := compile9422(t, parseHierText(t, text))
 	applied := cfg.Interfaces.Interfaces["ge-0/0/0"]
 	excluded := cfg.Interfaces.Interfaces["ge-0/0/1"]
 	if applied == nil || excluded == nil {
@@ -168,7 +168,7 @@ apply-groups G;
 interfaces {
   ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	ifc := compile9422(t, parseTree9422(t, text)).Interfaces.Interfaces["ge-0/0/0"]
+	ifc := compile9422(t, parseHierText(t, text)).Interfaces.Interfaces["ge-0/0/0"]
 	if ifc == nil {
 		t.Fatal("fixture broken: ge-0/0/0 missing")
 	}

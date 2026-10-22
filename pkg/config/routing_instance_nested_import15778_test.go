@@ -71,12 +71,12 @@ func TestNestedRoutingOptionsInstanceImportExportRejected15778(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name+"/hier", func(t *testing.T) {
-			if _, err := CompileConfig(parse9323(t, tc.hier)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.hier)); err == nil {
 				t.Fatalf("strict CompileConfig ACCEPTED nested %s via routing-options", tc.keyword)
 			} else {
 				check11314Diagnostic(t, "strict hier", err.Error(), tc.keyword)
 			}
-			cfg, err := CompileConfigLenient(parse9323(t, tc.hier))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.hier))
 			if err != nil {
 				t.Fatalf("lenient REJECTED nested %s (no-brick #1960): %v", tc.keyword, err)
 			}
@@ -111,7 +111,7 @@ func TestNestedRoutingOptionsInstanceImportExportRejected15778(t *testing.T) {
 	// Valid routing-instance config still commits clean of #11314/#10707
 	// instance-import diagnostics.
 	valid := "routing-instances {\n  VRF-A {\n    instance-type vrf;\n    routing-options {\n      static {\n        route 10.0.0.0/24 next-hop 10.0.0.1;\n      }\n    }\n  }\n}\n"
-	cfg, err := CompileConfig(parse9323(t, valid))
+	cfg, err := CompileConfig(parseHierText(t, valid))
 	if err != nil {
 		t.Fatalf("valid routing-instance config rejected: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestNestedRoutingOptionsInstanceImportExportRejected15778(t *testing.T) {
 	}
 	// Global routing-options instance-import is NOT the per-instance
 	// #11314 form: it stays on the #10707 warn-only path.
-	gcfg, err := CompileConfig(parse9323(t, "routing-options {\n  instance-import policy-a;\n}\n"))
+	gcfg, err := CompileConfig(parseHierText(t, "routing-options {\n  instance-import policy-a;\n}\n"))
 	if err != nil {
 		t.Fatalf("global routing-options instance-import must stay warn-only (#10707), got reject: %v", err)
 	}
@@ -185,14 +185,14 @@ func TestCompactUnknownRoutingLeavesWarn10707_15778(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parse9323(t, tc.hier))
+			cfg, err := CompileConfig(parseHierText(t, tc.hier))
 			if err != nil {
 				t.Fatalf("compact unknown leaf must stay warn-only (#10707), got reject: %v", err)
 			}
 			if !has10707For(cfg.Warnings, tc.keyword) {
 				t.Fatalf("compact form escaped #10707 warning for %q; warnings=%v", tc.keyword, cfg.Warnings)
 			}
-			lcfg, err := CompileConfigLenient(parse9323(t, tc.hier))
+			lcfg, err := CompileConfigLenient(parseHierText(t, tc.hier))
 			if err != nil {
 				t.Fatalf("lenient: %v", err)
 			}
@@ -223,7 +223,7 @@ func TestCompactUnknownRoutingLeavesWarn10707_15778(t *testing.T) {
 		},
 	} {
 		t.Run("control/"+tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parse9323(t, tc.hier))
+			cfg, err := CompileConfig(parseHierText(t, tc.hier))
 			if err != nil {
 				t.Fatalf("valid compact control rejected: %v", err)
 			}

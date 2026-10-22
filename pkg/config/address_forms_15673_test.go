@@ -13,7 +13,7 @@ import (
 
 func soleFormTree(t *testing.T, body string) *ConfigTree {
 	t.Helper()
-	return hier9524(t, `security { address-book { global { `+body+` } } zones { security-zone trust; } }`)
+	return parseHierText(t, `security { address-book { global { `+body+` } } zones { security-zone trust; } }`)
 }
 
 // Sole unsupported forms: strict must reject deterministically.
@@ -237,7 +237,7 @@ func TestDescribedAddressKeepsSubStanzas15673(t *testing.T) {
 // parseAddressBookEntries: hierarchical leaf entries inside an unknown book
 // stanza must populate Names and quarantine collisions.
 func TestUnknownBookLeafNamesQuarantined15673(t *testing.T) {
-	tree := hier9524(t, `security { address-book { global { address good 10.0.0.1/32; bogus-book { address leafname 10.9.9.9/32; } } } zones { security-zone trust; } }`)
+	tree := parseHierText(t, `security { address-book { global { address good 10.0.0.1/32; bogus-book { address leafname 10.9.9.9/32; } } } zones { security-zone trust; } }`)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatal(err)

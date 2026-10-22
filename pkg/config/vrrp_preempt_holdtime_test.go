@@ -55,7 +55,7 @@ const vrrpPreemptHoldHier = `interfaces {
 // TestVRRPPreemptHoldTime_Hierarchical drives the braced `preempt {
 // hold-time <n>; }` shape.
 func TestVRRPPreemptHoldTime_Hierarchical(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, vrrpPreemptHoldHier))
+	cfg, err := CompileConfig(parseHierText(t, vrrpPreemptHoldHier))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}

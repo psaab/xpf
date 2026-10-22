@@ -38,7 +38,7 @@ var lldpNamelessBlockForms15138 = []struct {
 func TestLLDPNamelessInterfaceBlockDoesNotPanicStrict15138(t *testing.T) {
 	for _, tc := range lldpNamelessBlockForms15138 {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseLLDP14616(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			cfg, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("strict CompileConfig accepted nameless %q; compiled LLDP = %+v, want rejection", tc.text, cfg.Protocols.LLDP)
@@ -56,7 +56,7 @@ func TestLLDPNamelessInterfaceBlockDoesNotPanicStrict15138(t *testing.T) {
 func TestLLDPNamelessInterfaceBlockLenientWarnsAndDrops15138(t *testing.T) {
 	for _, tc := range lldpNamelessBlockForms15138 {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseLLDP14616(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			cfg, err := CompileConfigLenient(tree)
 			if err != nil {
 				t.Fatalf("lenient CompileConfigLenient must not brick on %q: %v", tc.text, err)
@@ -95,7 +95,7 @@ func TestLLDPBlockFormCensusProbe15138(t *testing.T) {
 					t.Fatalf("CompileConfig panicked on %q: %v", tc.text, r)
 				}
 			}()
-			tree := parseLLDP14616(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			_, _ = CompileConfig(tree)
 			_, _ = CompileConfigLenient(tree)
 		})

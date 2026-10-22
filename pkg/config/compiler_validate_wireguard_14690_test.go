@@ -125,7 +125,7 @@ func TestWireguardMixedCasePrefixOwnerCanonical(t *testing.T) {
 
 func TestWireguardMixedCaseAuthoredPeerCanonicalEmit(t *testing.T) {
 	text := "interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key " + wg14690Priv + "; peer " + wg14690Upper + " { allowed-ips 10.90.0.0/24; } } } } }"
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("single uppercase peer must compile: %v", err)

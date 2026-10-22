@@ -24,19 +24,10 @@ import (
 	"testing"
 )
 
-func mustParse(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors for %q: %v", src, errs)
-	}
-	return tree
-}
-
 // --- Parser: marker lift + lone-marker error ---------------------------
 
 func TestInactive_ParserLeafMarkerLifted(t *testing.T) {
-	tree := mustParse(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     ge-0/0/0 {
         unit 0 {
             family inet {
@@ -62,7 +53,7 @@ func TestInactive_ParserLeafMarkerLifted(t *testing.T) {
 }
 
 func TestInactive_ParserBlockMarkerLifted(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             inactive: policy long-ssh {
@@ -98,7 +89,7 @@ func TestInactive_ParserBlockMarkerLifted(t *testing.T) {
 }
 
 func TestInactive_InlineMarkerBeforeBlockDeactivatesSubtree(t *testing.T) {
-	tree := mustParse(t, `parent {
+	tree := parseHierText(t, `parent {
     child name inactive: {
         hidden value;
     }
@@ -159,7 +150,7 @@ func TestInactive_InlineMarkerBeforeBlockDeactivatesSubtree(t *testing.T) {
 		t.Fatalf("Format output differs from inactive-block golden.\n got:\n%s\nwant:\n%s",
 			formatted, wantFormat)
 	}
-	reparsed := mustParse(t, formatted)
+	reparsed := parseHierText(t, formatted)
 	reparsedParent := reparsed.FindChild("parent")
 	roundTripInactive := false
 	for _, n := range reparsedParent.Children {
@@ -246,13 +237,13 @@ func TestInactive_TextRoundTrip(t *testing.T) {
         }
     }
 }`
-	tree := mustParse(t, src)
+	tree := parseHierText(t, src)
 	out := tree.Format()
 	if !strings.Contains(out, "inactive: policy p1 {") {
 		t.Fatalf("Format dropped inactive: prefix:\n%s", out)
 	}
 	// Re-parse the formatted output: the flag must survive a full round trip.
-	reparsed := mustParse(t, out)
+	reparsed := parseHierText(t, out)
 	pol := reparsed.FindChild("security").FindChild("policies").
 		FindChild("from-zone").FindChild("policy")
 	if pol == nil || !pol.Inactive {
@@ -262,12 +253,12 @@ func TestInactive_TextRoundTrip(t *testing.T) {
 
 func TestInactive_LeafTextRoundTrip(t *testing.T) {
 	src := "system {\n    inactive: host-name parked;\n}"
-	tree := mustParse(t, src)
+	tree := parseHierText(t, src)
 	out := tree.Format()
 	if !strings.Contains(out, "inactive: host-name parked;") {
 		t.Fatalf("Format dropped inactive: leaf prefix:\n%s", out)
 	}
-	reparsed := mustParse(t, out)
+	reparsed := parseHierText(t, out)
 	hn := reparsed.FindChild("system").FindChild("host-name")
 	if hn == nil || !hn.Inactive {
 		t.Fatalf("inactive leaf flag lost on round trip:\n%s", out)
@@ -286,7 +277,7 @@ func TestInactive_SetFormEmitsDeactivate(t *testing.T) {
         }
     }
 }`
-	tree := mustParse(t, src)
+	tree := parseHierText(t, src)
 	out := tree.FormatSet()
 	if !strings.Contains(out, "set security policies from-zone trust to-zone untrust policy p1 then permit") {
 		t.Fatalf("FormatSet missing the set line:\n%s", out)
@@ -297,7 +288,7 @@ func TestInactive_SetFormEmitsDeactivate(t *testing.T) {
 }
 
 func TestInactive_XMLAttribute(t *testing.T) {
-	tree := mustParse(t, "system {\n    inactive: host-name h;\n}")
+	tree := parseHierText(t, "system {\n    inactive: host-name h;\n}")
 	out := tree.FormatXML()
 	if !strings.Contains(out, `<host-name inactive="inactive">h</host-name>`) {
 		t.Fatalf("FormatXML missing inactive attribute:\n%s", out)
@@ -305,7 +296,7 @@ func TestInactive_XMLAttribute(t *testing.T) {
 }
 
 func TestInactive_JSONMarker(t *testing.T) {
-	tree := mustParse(t, "system {\n    inactive: host-name h;\n}")
+	tree := parseHierText(t, "system {\n    inactive: host-name h;\n}")
 	out := tree.FormatJSON()
 	if !strings.Contains(out, `"host-name h @inactive": "inactive"`) {
 		t.Fatalf("FormatJSON missing inactive marker:\n%s", out)
@@ -320,7 +311,7 @@ func TestInactive_JSONMarker(t *testing.T) {
 // --- Compile strip: inactive node is excluded --------------------------
 
 func TestInactive_CompileExcludesPolicy(t *testing.T) {
-	withInactive := mustParse(t, `security {
+	withInactive := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     policies {
         from-zone trust to-zone untrust {
@@ -348,7 +339,7 @@ func TestInactive_CompileExcludesPolicy(t *testing.T) {
 	}
 
 	// The compiled output must equal the active-only equivalent config.
-	activeOnly := mustParse(t, `security {
+	activeOnly := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     policies {
         from-zone trust to-zone untrust {
@@ -372,7 +363,7 @@ func TestInactive_CompileExcludesPolicy(t *testing.T) {
 // TestInactive_CompileDoesNotMutateInput proves the strip works on a clone
 // — the caller's tree must retain the inactive node for display/persistence.
 func TestInactive_CompileDoesNotMutateInput(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     policies {
         from-zone trust to-zone untrust {
@@ -396,7 +387,7 @@ func TestInactive_CompileDoesNotMutateInput(t *testing.T) {
 
 func TestInactive_ApplyGroupsSuppressed(t *testing.T) {
 	// `inactive: apply-groups g` must NOT inherit g's content.
-	withInactiveAG := mustParse(t, `groups {
+	withInactiveAG := parseHierText(t, `groups {
     g {
         system { host-name from-group; }
     }
@@ -412,7 +403,7 @@ system { domain-name example.com; }`)
 	}
 
 	// Sanity: an ACTIVE apply-groups DOES inherit.
-	withActiveAG := mustParse(t, `groups {
+	withActiveAG := parseHierText(t, `groups {
     g {
         system { host-name from-group; }
     }
@@ -432,7 +423,7 @@ system { domain-name example.com; }`)
 
 func TestInactive_SchemaValidateSkipsInactiveLeaf(t *testing.T) {
 	// An ACTIVE bad transmit-rate must be rejected by the typed-leaf gate.
-	active := mustParse(t, `class-of-service {
+	active := parseHierText(t, `class-of-service {
     schedulers { s { transmit-rate garbage; } }
 }`)
 	if err := SchemaValidate(active); err == nil {
@@ -440,7 +431,7 @@ func TestInactive_SchemaValidateSkipsInactiveLeaf(t *testing.T) {
 	}
 
 	// The SAME bad value, deactivated, must pass (Junos parks WIP).
-	inactive := mustParse(t, `class-of-service {
+	inactive := parseHierText(t, `class-of-service {
     schedulers { s { inactive: transmit-rate garbage; } }
 }`)
 	if err := SchemaValidate(inactive); err != nil {
@@ -483,7 +474,7 @@ func TestInactive_JSONStructOmitemptyForActive(t *testing.T) {
 
 func TestInactive_UpgradeEquivalence(t *testing.T) {
 	// New behavior: parsed `inactive:` -> Inactive flag -> stripped.
-	newForm := mustParse(t, `security {
+	newForm := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     policies {
         from-zone trust to-zone untrust {
@@ -629,7 +620,7 @@ func TestInactive_DualASTFlatSet(t *testing.T) {
 //     would reload ACTIVE and the inactive assertion fails.
 func TestInactive_FormatSetRoundTripsDeactivate(t *testing.T) {
 	// Author an active + a deactivated leaf, plus a deactivated block.
-	src := mustParse(t, `system {
+	src := parseHierText(t, `system {
     host-name keep;
     inactive: name-server 9.9.9.9;
 }
@@ -699,7 +690,7 @@ security {
 // --- HA: both nodes compile the same active set ------------------------
 
 func TestInactive_HABothNodesExcludeSame(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     policies {
         from-zone trust to-zone untrust {
@@ -730,10 +721,10 @@ func TestInactive_HABothNodesExcludeSame(t *testing.T) {
 // --- Compare: pure activate/deactivate shows as a diff -----------------
 
 func TestInactive_CompareShowsDeactivate(t *testing.T) {
-	active := mustParse(t, `system {
+	active := parseHierText(t, `system {
     host-name h;
 }`)
-	deactivated := mustParse(t, `system {
+	deactivated := parseHierText(t, `system {
     inactive: host-name h;
 }`)
 	out := FormatCompare(active, deactivated)

@@ -78,17 +78,8 @@ firewall {
 }
 `
 
-func parseHier15192(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(text).Parse()
-	if len(perrs) != 0 {
-		t.Fatalf("parse: %v", perrs)
-	}
-	return tree
-}
-
 func TestDuplicateFilterTermRejectedStrict15192(t *testing.T) {
-	_, err := CompileConfig(parseHier15192(t, dupTermText15192))
+	_, err := CompileConfig(parseHierText(t, dupTermText15192))
 	if err == nil {
 		t.Fatal("strict CompileConfig accepted a repeated term T stanza inside one filter; " +
 			"it must reject naming the duplicate term (#15192)")
@@ -104,7 +95,7 @@ func TestDuplicateFilterTermRejectedStrict15192(t *testing.T) {
 func TestDuplicateFilterTermRejectedInet6AndAny15192(t *testing.T) {
 	for _, fam := range []string{"inet6", "any"} {
 		text := strings.Replace(dupTermText15192, "family inet {", "family "+fam+" {", 1)
-		_, err := CompileConfig(parseHier15192(t, text))
+		_, err := CompileConfig(parseHierText(t, text))
 		if err == nil {
 			t.Fatalf("family %s: strict CompileConfig accepted a repeated term T stanza (#15192)", fam)
 		}
@@ -115,7 +106,7 @@ func TestDuplicateFilterTermRejectedInet6AndAny15192(t *testing.T) {
 }
 
 func TestDuplicateFilterTermLenientWarnsAndPreserves15192(t *testing.T) {
-	cfg, err := CompileConfigLenient(parseHier15192(t, dupTermText15192))
+	cfg, err := CompileConfigLenient(parseHierText(t, dupTermText15192))
 	if err != nil {
 		t.Fatalf("lenient compile must still boot (#1960), got error: %v", err)
 	}
@@ -145,7 +136,7 @@ func TestDuplicateFilterTermLenientWarnsAndPreserves15192(t *testing.T) {
 
 func TestMergedAndDistinctFilterTermsCompile15192(t *testing.T) {
 	// Oracle: the hand-merged spelling is ONE term and must compile clean.
-	cfg, err := CompileConfig(parseHier15192(t, mergedTermText15192))
+	cfg, err := CompileConfig(parseHierText(t, mergedTermText15192))
 	if err != nil {
 		t.Fatalf("merged single-term filter must compile strict: %v", err)
 	}
@@ -160,7 +151,7 @@ func TestMergedAndDistinctFilterTermsCompile15192(t *testing.T) {
 	}
 	// Control: two DIFFERENT term names in one filter must compile clean —
 	// an over-broad gate that rejects any second term fails here.
-	cfg2, err := CompileConfig(parseHier15192(t, distinctTermText15192))
+	cfg2, err := CompileConfig(parseHierText(t, distinctTermText15192))
 	if err != nil {
 		t.Fatalf("distinct term names must compile strict: %v", err)
 	}
@@ -181,7 +172,7 @@ firewall {
     }
 }
 `
-	if _, err := CompileConfig(parseHier15192(t, twoFilters)); err != nil {
+	if _, err := CompileConfig(parseHierText(t, twoFilters)); err != nil {
 		t.Fatalf("same term name in different filters must compile strict: %v", err)
 	}
 }
@@ -202,7 +193,7 @@ firewall {
     }
 }
 `
-	_, err := CompileConfig(parseHier15192(t, text))
+	_, err := CompileConfig(parseHierText(t, text))
 	if err == nil {
 		t.Fatal("implicit-inet: strict CompileConfig accepted a repeated term T stanza (#15192)")
 	}

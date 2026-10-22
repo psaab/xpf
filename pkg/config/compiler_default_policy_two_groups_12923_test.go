@@ -99,7 +99,7 @@ func TestTwoApplyGroupsDefaultPolicyConflict12923(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if err == nil {
 				t.Fatal("strict compile accepted two apply-groups with conflicting default-policy actions")
 			}
@@ -108,7 +108,7 @@ func TestTwoApplyGroupsDefaultPolicyConflict12923(t *testing.T) {
 					t.Errorf("strict error %q does not name %q", err, want)
 				}
 			}
-			cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -141,7 +141,7 @@ func TestTwoApplyGroupsDefaultPolicyMaterializesBothStanzas12923(t *testing.T) {
 	text := twoGroupsDefaultPolicyConfig12923(
 		"default-policy permit-all;", "default-policy deny-all;",
 		"security { policies { } }\n")
-	tree := defaultPolicyTree11821(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -190,14 +190,14 @@ func TestTwoApplyGroupsDefaultPolicySameAction12923(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("strict compile rejected identical group default-policy actions: %v", err)
 			}
 			if cfg.Security.DefaultPolicy != tc.want {
 				t.Fatalf("default-policy = %v, want %v", cfg.Security.DefaultPolicy, tc.want)
 			}
-			cfg2, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg2, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -229,14 +229,14 @@ func TestTwoApplyGroupsDefaultPolicyInlineOverrideStays12923(t *testing.T) {
 			text := twoGroupsDefaultPolicyConfig12923(
 				"default-policy permit-all;", "default-policy deny-all;",
 				"security { policies { "+tc.inline+" } }\n")
-			cfg, err := CompileConfig(defaultPolicyTree11821(t, text))
+			cfg, err := CompileConfig(parseHierText(t, text))
 			if err != nil {
 				t.Fatalf("strict compile rejected inline override over two groups: %v", err)
 			}
 			if cfg.Security.DefaultPolicy != tc.want {
 				t.Fatalf("default-policy = %v, want inline value %v", cfg.Security.DefaultPolicy, tc.want)
 			}
-			cfg2, err := CompileConfigLenient(defaultPolicyTree11821(t, text))
+			cfg2, err := CompileConfigLenient(parseHierText(t, text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}

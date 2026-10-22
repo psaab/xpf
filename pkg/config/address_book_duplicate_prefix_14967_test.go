@@ -29,7 +29,7 @@ import (
 
 func dup14967(t *testing.T, text string) (*Config, error) {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	return CompileConfig(tree)
 }
 
@@ -58,7 +58,7 @@ func TestAddressBookDuplicatePrefixRejected14967(t *testing.T) {
 				t.Fatalf("error = %q, want duplicate/trailing diagnostic", err)
 			}
 			// Tolerant path boots but refuses the entry.
-			tree := parseHierarchical(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			lcfg, lerr := CompileConfigLenient(tree)
 			if lerr != nil {
 				t.Fatalf("lenient must boot (#1960): %v", lerr)
@@ -140,7 +140,7 @@ func TestAddressBookDuplicateControlsGreen14967(t *testing.T) {
 // tolerant path (the strict path already rejects the duplicate itself).
 func TestAddressBookDuplicatePolicyRefusedLenient14967(t *testing.T) {
 	text := `security { address-book { global { address A 10.0.0.1/32; address A 10.0.0.2/32; address-set S { address A; } } } zones { security-zone trust; security-zone untrust; } policies { from-zone trust to-zone untrust { policy p { match { source-address S; destination-address any; application any; } then { deny; } } } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient: %v", err)

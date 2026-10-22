@@ -42,7 +42,7 @@ func TestRoutingInstanceRoutingOptionsFlatMatchesHierarchical15065(t *testing.T)
 	}
 	assertInstanceRoutingOptions15065(t, flat)
 
-	hier, err := CompileConfig(parseHierarchical(t, `policy-options {
+	hier, err := CompileConfig(parseHierText(t, `policy-options {
 		policy-statement export-policy { term t { then accept; } }
 	}
 	routing-instances {
@@ -82,7 +82,7 @@ func TestRoutingInstanceRoutingOptionsFlatMatchesHierarchical15065(t *testing.T)
 
 	// Display-set restore: serializing the good hierarchical tree to flat
 	// `set` lines and replaying them must compile identically.
-	tree := parseHierarchical(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
 		policy-statement export-policy { term t { then accept; } }
 	}
 	routing-instances {

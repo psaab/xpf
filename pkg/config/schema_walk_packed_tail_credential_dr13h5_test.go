@@ -12,15 +12,6 @@ import (
 // therefore formed unauthenticated on a clean, warning-free commit while
 // `show configuration` displayed the authentication the operator wrote.
 
-func parseHier14412(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("Parse: %v", errs)
-	}
-	return tree
-}
-
 func hasWarning14412(cfg *Config, token string) bool {
 	if cfg == nil {
 		return false
@@ -76,7 +67,7 @@ var packedCredentialCases14412 = []struct {
 func TestPackedTailCredentialStrictReject14412(t *testing.T) {
 	for _, tc := range packedCredentialCases14412 {
 		t.Run(tc.name, func(t *testing.T) {
-			err := SchemaValidate(parseHier14412(t, tc.src))
+			err := SchemaValidate(parseHierText(t, tc.src))
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted packed-tail credential %q; want strict reject (#14412)", tc.token)
 			}
@@ -95,7 +86,7 @@ func TestPackedTailCredentialStrictReject14412(t *testing.T) {
 func TestPackedTailCredentialWarns10707_14412(t *testing.T) {
 	for _, tc := range packedCredentialCases14412 {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parseHier14412(t, tc.src))
+			cfg, err := CompileConfig(parseHierText(t, tc.src))
 			if err != nil {
 				// A strict-compile rejection naming the token also satisfies
 				// the criterion; the silent path is the defect.
@@ -129,7 +120,7 @@ func TestPackedTailCredentialChildControls16108(t *testing.T) {
 	// the token, no secret echo; compile must not be silent either.
 	ospfSrc := `protocols { ospf { area 0.0.0.0 {
 		interface ge-0/0/0.0 { passive; authentication-key SECRET14412; } } } }`
-	if err := SchemaValidate(parseHier14412(t, ospfSrc)); err == nil ||
+	if err := SchemaValidate(parseHierText(t, ospfSrc)); err == nil ||
 		!strings.Contains(err.Error(), "authentication-key") {
 		t.Fatalf("ospf braced authentication-key must strict-reject (#14402), got: %v", err)
 	} else if strings.Contains(err.Error(), "SECRET14412") {
@@ -142,7 +133,7 @@ func TestPackedTailCredentialChildControls16108(t *testing.T) {
 	// compile rejects via #14399. Never silently accepted.
 	isisSrc := `protocols { isis { net 49.0001.0000.0000.0001.00;
 		interface ge-0/0/0.0 { Authentication-Key SECRET14412; authentication-type md5; } } }`
-	cfg, err := CompileConfigLenient(parseHier14412(t, isisSrc))
+	cfg, err := CompileConfigLenient(parseHierText(t, isisSrc))
 	if err != nil {
 		t.Fatalf("isis lenient compile must warn, not error: %v", err)
 	}
@@ -186,7 +177,7 @@ func TestPackedTailCredentialValidPackedTails14412(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := SchemaValidate(parseHier14412(t, tc.src)); err != nil {
+			if err := SchemaValidate(parseHierText(t, tc.src)); err != nil {
 				t.Fatalf("SchemaValidate rejected valid packed tail: %v (#14412)", err)
 			}
 			// Compile is asserted only where the config is complete enough
@@ -194,7 +185,7 @@ func TestPackedTailCredentialValidPackedTails14412(t *testing.T) {
 			// authentication-type beside a key); the #14412 claim for a lone
 			// validly packed key is the schema-walk acceptance above plus
 			// the absence of a #10707 credential warning below.
-			cfg, err := CompileConfig(parseHier14412(t, tc.src))
+			cfg, err := CompileConfig(parseHierText(t, tc.src))
 			if err != nil {
 				if strings.Contains(err.Error(), "#14412") ||
 					(strings.Contains(err.Error(), tc.token) && !strings.Contains(err.Error(), "#9105")) {
@@ -221,10 +212,10 @@ func TestPackedTailCredentialValidPackedTails14412(t *testing.T) {
 func TestPackedTailCredentialValuePosition16108(t *testing.T) {
 	src := `protocols { ospf { area 0.0.0.0 {
 		interface ge-0/0/0.0 authentication md5 1 key authentication-key; } } }`
-	if err := SchemaValidate(parseHier14412(t, src)); err != nil {
+	if err := SchemaValidate(parseHierText(t, src)); err != nil {
 		t.Fatalf("SchemaValidate rejected credential value in value position: %v (#16108)", err)
 	}
-	cfg, err := CompileConfig(parseHier14412(t, src))
+	cfg, err := CompileConfig(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfig rejected credential value in value position: %v (#16108)", err)
 	}
@@ -243,10 +234,10 @@ func TestPackedTailCredentialValuePosition16108(t *testing.T) {
 	// Same for the simple-password value position.
 	src2 := `protocols { ospf { area 0.0.0.0 {
 		interface ge-0/0/0.0 authentication simple-password authentication-key; } } }`
-	if err := SchemaValidate(parseHier14412(t, src2)); err != nil {
+	if err := SchemaValidate(parseHierText(t, src2)); err != nil {
 		t.Fatalf("SchemaValidate rejected simple-password value: %v (#16108)", err)
 	}
-	cfg2, err := CompileConfig(parseHier14412(t, src2))
+	cfg2, err := CompileConfig(parseHierText(t, src2))
 	if err != nil {
 		t.Fatalf("CompileConfig rejected simple-password value: %v (#16108)", err)
 	}
@@ -261,7 +252,7 @@ func TestPackedTailCredentialValuePosition16108(t *testing.T) {
 func TestPackedTailCredentialQuotedValueNotFlagged14412(t *testing.T) {
 	src := `protocols { ospf { area 0.0.0.0 {
 		interface ge-0/0/0.0 passive "authentication-key"; } } }`
-	if err := SchemaValidate(parseHier14412(t, src)); err != nil {
+	if err := SchemaValidate(parseHierText(t, src)); err != nil {
 		t.Fatalf("SchemaValidate flagged a quoted value token: %v (#14412/#9635)", err)
 	}
 }

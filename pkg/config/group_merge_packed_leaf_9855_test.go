@@ -24,7 +24,7 @@ import (
 
 func compileSyslogHosts9855(t *testing.T, text string) []*SyslogHostConfig {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -40,7 +40,7 @@ func compileSyslogHosts9855(t *testing.T, text string) []*SyslogHostConfig {
 
 func vrrpGroup9855(t *testing.T, text string) *VRRPGroup {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -179,7 +179,7 @@ func TestPackedGroupLeafVRRP9855(t *testing.T) {
 	t.Run("different instance remains distinct", func(t *testing.T) {
 		text := group(`vrrp-group 2 priority 200 virtual-address 10.0.61.3/24;`) +
 			addr(`vrrp-group 1 virtual-address 10.0.61.1/24;`)
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
@@ -231,7 +231,7 @@ func TestPackedGroupLeafVRRP9855(t *testing.T) {
 		prioritiesByOrder := make(map[string]map[int]int, len(orders))
 		for _, order := range orders {
 			t.Run(order.name, func(t *testing.T) {
-				tree := parseHierarchical(t,
+				tree := parseHierText(t,
 					group(order.inner)+addr(`vrrp-group 1 virtual-address 10.0.61.1/24;`))
 				cfg, err := CompileConfig(tree)
 				if err != nil {
@@ -266,7 +266,7 @@ func TestPackedGroupLeafVRRP9855(t *testing.T) {
 func TestPackedGroupLeafTypoTailKeepsOverride9855(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 priority 200; } } } } } } } apply-groups G; ` +
 		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 scren edge; } } } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
@@ -278,7 +278,7 @@ func TestPackedGroupLeafTypoTailKeepsOverride9855(t *testing.T) {
 	if prio != 100 {
 		t.Fatalf("priority = %d, want 100 (the group tail was dropped by override)", prio)
 	}
-	expanded := parseHierarchical(t, text)
+	expanded := parseHierText(t, text)
 	if err := expanded.ExpandGroups(); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestPackedGroupLeafSingleHostNode9855(t *testing.T) {
 		{`host 10.0.0.1 any emergency;`, `host 10.0.0.1 { any info; }`},
 	} {
 		text := `groups { G { system { syslog { ` + tc.group + ` } } } } apply-groups G; system { syslog { ` + tc.inline + ` } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		if err := tree.ExpandGroups(); err != nil {
 			t.Fatalf("expand: %v", err)
 		}
@@ -349,7 +349,7 @@ func TestPackedGroupLeafBareTwinSuppressed9855(t *testing.T) {
 	if got, want := facilities9855(hosts), []SyslogFacility{{Facility: "any", Severity: "any"}}; !slices.Equal(got, want) {
 		t.Fatalf("facilities = %+v, want %+v", got, want)
 	}
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestPackedGroupLeafSuccessiveDifferentInstanceAdopts9859(t *testing.T) {
 func TestPackedGroupLeafBracketedPeerBails9855(t *testing.T) {
 	text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 priority 200; } } } } } } } apply-groups G; ` +
 		`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 virtual-address [ 10.0.61.1/24 10.0.61.3/24 ] scren edge; } } } } }`
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
@@ -449,7 +449,7 @@ func TestPackedGroupLeafBracketedPeerBails9855(t *testing.T) {
 		!slices.Equal(vg.VirtualAddresses[:2], []string{"10.0.61.1/24", "10.0.61.3/24"}) {
 		t.Fatalf("virtual-addresses = %v, want the two inline VIPs first", vg.VirtualAddresses)
 	}
-	expanded := parseHierarchical(t, text)
+	expanded := parseHierText(t, text)
 	if err := expanded.ExpandGroups(); err != nil {
 		t.Fatalf("expand: %v", err)
 	}

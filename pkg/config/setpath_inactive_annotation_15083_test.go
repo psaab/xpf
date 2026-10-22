@@ -33,7 +33,7 @@ func findLeaf15083(t *testing.T, tree *ConfigTree, names ...string) *Node {
 }
 
 func TestSetPathSingleValueLeafPreservesInactiveAnnotation15083(t *testing.T) {
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     root-authentication {
         /* rotated 2026-10-01, parked until rollout */
         inactive: encrypted-password "$6$old";
@@ -87,7 +87,7 @@ func TestSetPathSingleValueLeafPreservesInactiveAnnotation15083(t *testing.T) {
 }
 
 func TestSetPathSingleValueLeafSameValuePreservesInactive15083(t *testing.T) {
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     host-name old-name;
 }`)
 	path, err := ParseSetCommand(`set system host-name old-name`)
@@ -115,7 +115,7 @@ func TestSetPathSingleValueLeafSameValuePreservesInactive15083(t *testing.T) {
 
 func TestSetPathSingleValueLeafActiveUnannotatedControl15083(t *testing.T) {
 	// Control: an active, unannotated leaf re-set behaves exactly as before.
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     host-name old-name;
 }`)
 	path, err := ParseSetCommand(`set system host-name new-name`)
@@ -148,7 +148,7 @@ func TestSetPathSingleValueLeafActiveUnannotatedControl15083(t *testing.T) {
 func TestSetPathMultiLeafStillKeepsNode15083(t *testing.T) {
 	// Adjacent control: the flag/multi arm already keeps the node; an
 	// inactive multi leaf re-set must remain inactive (exact-duplicate path).
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     root-authentication {
         inactive: ssh-ed25519 "ssh-ed25519 AAAA";
     }

@@ -24,15 +24,6 @@ func parseAPIAuthSecretsTree10825(t *testing.T, commands ...string) *ConfigTree 
 	return tree
 }
 
-func parseAPIAuthSecretsConfig10825(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("parse API-auth fixture: %v", errs)
-	}
-	return tree
-}
-
 func TestHashAPIAuthSecretsScopesActualWebManagementPath10825(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -104,7 +95,7 @@ func TestHashAPIAuthSecretsHashesCredentialSlots10825(t *testing.T) {
 		keyB  = "machine-generated-key-bravo"
 		named = "automation-key-secret-alpha"
 	)
-	tree := parseAPIAuthSecretsConfig10825(t, `system {
+	tree := parseHierText(t, `system {
  services {
   web-management {
    api-auth {
@@ -202,7 +193,7 @@ func TestHashAPIAuthSecretsHandlesActualSchemaPathInsideGroup10825(t *testing.T)
 }
 
 func TestHashAPIAuthSecretsKeepsDeniedShortLegacyVerifierStable10825(t *testing.T) {
-	tree := parseAPIAuthSecretsConfig10825(t, `system { services { web-management { api-auth {
+	tree := parseHierText(t, `system { services { web-management { api-auth {
 		expires 2099-01-01;
 		user admin { password tiny; }
 		api-key tiny;
@@ -302,7 +293,7 @@ func TestHashAPIAuthSecretsDoesNotLaunderTaggedVerifier10825(t *testing.T) {
 		{name: "invalid verifier tag", value: apiAuthInvalidBcryptPrefix + "not-a-bcrypt-verifier", wantError: "invalid stored verifier"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseAPIAuthSecretsConfig10825(t,
+			tree := parseHierText(t,
 				"system { services { web-management { api-auth { user admin { password "+
 					strconv.Quote(tc.value)+"; } } } } }")
 			before := tree.Format()
@@ -355,7 +346,7 @@ func TestAPIAuthStrictSchemaValidationRunsCredentialValidators10825(t *testing.T
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseAPIAuthSecretsConfig10825(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			err := SchemaValidate(tree)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("SchemaValidate error = %v, want %q", err, tc.want)
@@ -363,7 +354,7 @@ func TestAPIAuthStrictSchemaValidationRunsCredentialValidators10825(t *testing.T
 		})
 	}
 
-	valid := parseAPIAuthSecretsConfig10825(t, `system { services { web-management { api-auth {
+	valid := parseHierText(t, `system { services { web-management { api-auth {
 		expires 2099-01-01;
 		user admin { password "correct-horse-battery"; }
 		api-key "machine-generated-key-alpha";

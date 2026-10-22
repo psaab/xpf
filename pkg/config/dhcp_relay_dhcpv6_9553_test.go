@@ -11,7 +11,7 @@ import (
 // relay agent lands, the refusal is retired in the same change and this cell
 // goes GREEN. It then grows the typed assertions on the compiled v6 relay.
 func TestDHCPRelayDHCPv6CompilesToV6Relay9553(t *testing.T) {
-	tree := bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+	tree := parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
 		"relay-agent-interface-id global-iid; "+
 		"server-group isp6 { 2001:db8::5; } "+
 		"group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }")
@@ -46,7 +46,7 @@ func TestDHCPRelayDHCPv6BareInterfaceIDDefaults9553(t *testing.T) {
 	}{
 		{
 			name: "family",
-			tree: bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+			tree: parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
 				"relay-agent-interface-id; "+
 				"server-group isp6 { 2001:db8::5; } "+
 				"group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"),
@@ -61,7 +61,7 @@ func TestDHCPRelayDHCPv6BareInterfaceIDDefaults9553(t *testing.T) {
 		},
 		{
 			name: "group",
-			tree: bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+			tree: parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
 				"server-group isp6 { 2001:db8::5; } "+
 				"group g6 { active-server-group isp6; interface ge-0/0/0.0; "+
 				"relay-agent-interface-id; } } } }"),
@@ -78,20 +78,20 @@ func TestDHCPRelayDHCPv6BareInterfaceIDDefaults9553(t *testing.T) {
 		},
 		{
 			name: "family-fully-elided-before-sibling",
-			tree: bracedTree9411(t, "forwarding-options dhcp-relay dhcpv6 relay-agent-interface-id server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0;"),
+			tree: parseHierText(t, "forwarding-options dhcp-relay dhcpv6 relay-agent-interface-id server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0;"),
 		},
 		{
 			name:  "group-fully-elided-before-sibling",
-			tree:  bracedTree9411(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 group g6 relay-agent-interface-id interface ge-0/0/0.0 active-server-group isp6;"),
+			tree:  parseHierText(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 group g6 relay-agent-interface-id interface ge-0/0/0.0 active-server-group isp6;"),
 			group: true,
 		},
 		{
 			name: "family-singly-elided-before-sibling",
-			tree: bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 relay-agent-interface-id server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0; } }"),
+			tree: parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 relay-agent-interface-id server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0; } }"),
 		},
 		{
 			name:  "group-singly-elided-before-sibling",
-			tree:  bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 server-group isp6 2001:db8::5 group g6 relay-agent-interface-id interface ge-0/0/0.0 active-server-group isp6; } }"),
+			tree:  parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 server-group isp6 2001:db8::5 group g6 relay-agent-interface-id interface ge-0/0/0.0 active-server-group isp6; } }"),
 			group: true,
 		},
 	} {
@@ -116,7 +116,7 @@ func TestDHCPRelayDHCPv6BareInterfaceIDDefaults9553(t *testing.T) {
 }
 
 func TestDHCPRelayDHCPv6BareGroupSuppressesFamilyOverride9553(t *testing.T) {
-	tree := bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+	tree := parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
 		"relay-agent-interface-id family-iid; "+
 		"server-group isp6 { 2001:db8::5; } "+
 		"group g6 { active-server-group isp6; interface ge-0/0/0.0; "+
@@ -153,9 +153,9 @@ func TestDHCPRelayDHCPv6BracedAndPackedScalarResults9553(t *testing.T) {
 		name string
 		tree *ConfigTree
 	}{
-		{"braced", bracedTree9411(t, braced)},
-		{"packed", bracedTree9411(t, packed)},
-		{"singly-elided", bracedTree9411(t, singly)},
+		{"braced", parseHierText(t, braced)},
+		{"packed", parseHierText(t, packed)},
+		{"singly-elided", parseHierText(t, singly)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := CompileConfig(tc.tree)
@@ -182,7 +182,7 @@ func TestDHCPRelayDHCPv6BracedAndPackedScalarResults9553(t *testing.T) {
 	}
 }
 func TestDHCPRelayDHCPv6BracketedInterfaceList9553(t *testing.T) {
-	tree := bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface [ ge-0/0/0.0 ge-0/0/1.0 ]; } } } }")
+	tree := parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface [ ge-0/0/0.0 ge-0/0/1.0 ]; } } } }")
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("bracketed DHCPv6 interface list rejected: %v", err)
@@ -209,7 +209,7 @@ func TestDHCPRelayDHCPv6MetaStatementsRemainLegal9553(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := bracedTree9411(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			if _, err := validateDHCPRelayDHCPv6AST(tree.Children, false); err != nil {
 				t.Fatalf("legal %s-scope meta statements were rejected by v6 gate: %v", tc.name, err)
 			}
@@ -222,7 +222,7 @@ func TestDHCPRelayDHCPv6MetaStatementsRemainLegal9553(t *testing.T) {
 // still compile as DHCPv6, while an unknown token in the same packed tail must
 // remain visible to the strict #9553 remainder gate.
 func TestDHCPRelayDHCPv6FullyElidedPackedRemainder9553(t *testing.T) {
-	valid := bracedTree9411(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0;")
+	valid := parseHierText(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0;")
 	cfg, err := CompileConfig(valid)
 	if err != nil {
 		t.Fatalf("#9553: supported fully-elided DHCPv6 relay was rejected: %v", err)
@@ -239,7 +239,7 @@ func TestDHCPRelayDHCPv6FullyElidedPackedRemainder9553(t *testing.T) {
 		{"unknown group token", "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 group g6 active-server-group isp6 unsupported-knob foo interface ge-0/0/0.0;"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			unsupported := bracedTree9411(t, tc.text)
+			unsupported := parseHierText(t, tc.text)
 			if _, err := CompileConfig(unsupported); err == nil || !strings.Contains(err.Error(), "#9553") {
 				t.Fatalf("#9553: unknown packed DHCPv6 token committed clean: %v", err)
 			}
@@ -266,7 +266,7 @@ func TestDHCPRelayDHCPv6FullyElidedPackedRemainder9553(t *testing.T) {
 // which allowed a fully elided AST to bypass the refusal boundary. Keep this
 // cell on the raw parser tree: supported tokens pass, while an unsupported
 func TestDHCPRelayDHCPv6GateSeesRawElidedShape9411(t *testing.T) {
-	supported := bracedTree9411(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0;")
+	supported := parseHierText(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 group g6 active-server-group isp6 interface ge-0/0/0.0;")
 	family := dhcpRelayV6Nodes9553(supported.Children[0])
 	if len(family) != 1 || family[0] == nil {
 		t.Fatalf("raw elided DHCPv6 family disappeared before gate: %+v", supported)
@@ -274,7 +274,7 @@ func TestDHCPRelayDHCPv6GateSeesRawElidedShape9411(t *testing.T) {
 	if _, err := validateDHCPRelayDHCPv6AST(supported.Children, false); err != nil {
 		t.Fatalf("supported raw elided shape was refused: %v", err)
 	}
-	unsupported := bracedTree9411(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 unsupported-knob foo;")
+	unsupported := parseHierText(t, "forwarding-options dhcp-relay dhcpv6 server-group isp6 2001:db8::5 unsupported-knob foo;")
 	if _, err := CompileConfig(unsupported); err == nil || !strings.Contains(err.Error(), "#9553") {
 		t.Fatalf("unsupported raw elided shape bypassed the strict gate: %v", err)
 	}
@@ -290,27 +290,27 @@ func TestDHCPRelayDHCPv6RejectsNestedLeafChildren9553(t *testing.T) {
 	}{
 		{
 			"braced interface child",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0 { disable; } } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0 { disable; } } } } }"),
 		},
 		{
 			"braced interface member child",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface { ge-0/0/0.0 { disable; } } } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface { ge-0/0/0.0 { disable; } } } } } }"),
 		},
 		{
 			"braced server-group member child",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5 { bogus; } } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5 { bogus; } } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"),
 		},
 		{
 			"braced Interface-ID child",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; relay-agent-interface-id { use-option-82; } } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; relay-agent-interface-id { use-option-82; } } } } }"),
 		},
 		{
 			"braced family active-server-group child",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { active-server-group isp6 { unsupported; } server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { active-server-group isp6 { unsupported; } server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"),
 		},
 		{
 			"braced group active-server-group child",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6 { unsupported; } interface ge-0/0/0.0; } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6 { unsupported; } interface ge-0/0/0.0; } } } }"),
 		},
 		{
 			"flat interface packed tail",
@@ -336,15 +336,15 @@ func TestDHCPRelayDHCPv6RejectsNestedLeafChildren9553(t *testing.T) {
 		},
 		{
 			"valueless family active-server-group with group fallback",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { active-server-group; server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { active-server-group; server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }"),
 		},
 		{
 			"valueless group active-server-group with family fallback",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { active-server-group isp6; server-group isp6 { 2001:db8::5; } group g6 { active-server-group; interface ge-0/0/0.0; } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { active-server-group isp6; server-group isp6 { 2001:db8::5; } group g6 { active-server-group; interface ge-0/0/0.0; } } } }"),
 		},
 		{
 			"valueless interface with another valid interface",
-			bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface; interface ge-0/0/0.0; } } } }"),
+			parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { server-group isp6 { 2001:db8::5; } group g6 { active-server-group isp6; interface; interface ge-0/0/0.0; } } } }"),
 		},
 	}
 	wantMessages := map[string]string{
@@ -422,12 +422,12 @@ func TestDHCPRelayDHCPv6RejectsDocumentedInterfaceIDSuboptions9553(t *testing.T)
 						}
 						tree = flatTree9411(t, lines...)
 					} else if scope == "family" {
-						tree = bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+						tree = parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
 							"relay-agent-interface-id { "+suboption+"; } "+
 							"server-group isp6 { 2001:db8::5; } "+
 							"group g6 { active-server-group isp6; interface ge-0/0/0.0; } } } }")
 					} else {
-						tree = bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+						tree = parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
 							"server-group isp6 { 2001:db8::5; } "+
 							"group g6 { active-server-group isp6; interface ge-0/0/0.0; "+
 							"relay-agent-interface-id { "+suboption+"; } } } } }")
@@ -475,7 +475,7 @@ func TestDHCPRelayDHCPv6RejectsDocumentedInterfaceIDSuboptions9553(t *testing.T)
 }
 
 func TestDHCPRelayDHCPv6LenientChildDoesNotInstallInterfaceID9553(t *testing.T) {
-	tree := bracedTree9411(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+	tree := parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
 		"server-group isp6 { 2001:db8::5; } "+
 		"group g6 { active-server-group isp6; interface ge-0/0/0.0; "+
 		"relay-agent-interface-id { unimplemented-modifier; } } } } }")

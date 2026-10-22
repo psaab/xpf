@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-func alg12833Tree(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tr, perrs := NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture must parse: %v", perrs)
-	}
-	return tr
-}
-
 // #12833 (D2-10): algDisabled read only the FIRST same-protocol child
 // (FindChild). A second `ftp` block carrying the only `disable` was silently
 // dropped, leaving the ALG enabled on a successful commit. Mutant: revert to
@@ -26,7 +17,7 @@ func TestALGDuplicateProtoBlocks12833(t *testing.T) {
 		{"second packed after braced", `security { alg { ftp { } ftp disable; } }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := alg12833Tree(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate must accept valid duplicate ALG blocks: %v", err)
 			}
@@ -41,7 +32,7 @@ func TestALGDuplicateProtoBlocks12833(t *testing.T) {
 	}
 	// Ordering control: disable in first block still works, unaffected protos off.
 	t.Run("first disables control", func(t *testing.T) {
-		cfg, err := CompileConfig(alg12833Tree(t, `security { alg { ftp { disable; } ftp { } } }`))
+		cfg, err := CompileConfig(parseHierText(t, `security { alg { ftp { disable; } ftp { } } }`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +45,7 @@ func TestALGDuplicateProtoBlocks12833(t *testing.T) {
 	})
 	// Unsupported protos in multiple blocks each reported.
 	t.Run("multiple blocks unsupported", func(t *testing.T) {
-		cfg, err := CompileConfig(alg12833Tree(t, `security { alg { h323 { gatekeeper; } h323 { gatekeeper; } } }`))
+		cfg, err := CompileConfig(parseHierText(t, `security { alg { h323 { gatekeeper; } h323 { gatekeeper; } } }`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -73,7 +64,7 @@ func TestALGPackedTypoRejected12833(t *testing.T) {
 		{"unknown token after valid disable", `security { alg { ftp disable bogus; } }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := alg12833Tree(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted packed typo %q", tc.text)
@@ -85,7 +76,7 @@ func TestALGPackedTypoRejected12833(t *testing.T) {
 	}
 	// Braced typo control: existing closed-world rejection remains active.
 	t.Run("braced typo control", func(t *testing.T) {
-		tree := alg12833Tree(t, `security { alg { ftp { desable; } } }`)
+		tree := parseHierText(t, `security { alg { ftp { desable; } } }`)
 		if err := SchemaValidate(tree); err == nil {
 			t.Fatal("braced typo should be rejected (existing closed-world)")
 		}
@@ -100,14 +91,14 @@ func TestALGPackedTypoRejected12833(t *testing.T) {
 		`security { alg { h323 gatekeeper; } }`,
 	} {
 		t.Run("valid/"+text, func(t *testing.T) {
-			if err := SchemaValidate(alg12833Tree(t, text)); err != nil {
+			if err := SchemaValidate(parseHierText(t, text)); err != nil {
 				t.Errorf("valid spelling rejected: %v", err)
 			}
 		})
 	}
 	// Tolerant path must not brick: lenient compile succeeds.
 	t.Run("lenient compiles packed typo", func(t *testing.T) {
-		tree := alg12833Tree(t, `security { alg { ftp desable; } }`)
+		tree := parseHierText(t, `security { alg { ftp desable; } }`)
 		if _, err := CompileConfigLenient(tree); err != nil {
 			t.Errorf("lenient compile bricked: %v", err)
 		}

@@ -49,15 +49,6 @@ func firstSecurity(t *testing.T, tree *ConfigTree) *Node {
 	return nil
 }
 
-func parse3566(t *testing.T, cfgText string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(cfgText).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("Parse: %v", perrs)
-	}
-	return tree
-}
-
 // --- validateFlowTraceFileAST (#3420 path-traversal gate) ---
 
 // TestFlowTraceFilePathTraversalRejectedAcrossDuplicateSubBlocks proves the
@@ -123,7 +114,7 @@ security {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parse3566(t, tc.cfg)
+			tree := parseHierText(t, tc.cfg)
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig accepted a non-basename flow-trace file in the SECOND duplicate %s sub-block; want a strict reject (#3566 sub-level bypass)", tc.dupAt)
@@ -182,7 +173,7 @@ security {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parse3566(t, tc.cfg)
+			tree := parseHierText(t, tc.cfg)
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig accepted an unknown flow-trace flag in the SECOND duplicate %s sub-block; want a strict reject (#3566 sub-level bypass)", tc.dupAt)
@@ -254,7 +245,7 @@ security {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parse3566(t, tc.cfg)
+			tree := parseHierText(t, tc.cfg)
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig accepted an out-of-range trace file size in the SECOND duplicate %s sub-block; want a strict reject (#3566 sub-level bypass)", tc.dupAt)
@@ -276,7 +267,7 @@ security {
 // FindChild("log") makes strict CompileConfig see only the first log block and
 // compile clean → this assertion goes RED.
 func TestLogStreamTLSProfileRejectedAcrossDuplicateLogBlock(t *testing.T) {
-	tree := parse3566(t, `
+	tree := parseHierText(t, `
 security {
     log {
         stream plain {

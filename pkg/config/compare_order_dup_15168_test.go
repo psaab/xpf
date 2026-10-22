@@ -71,8 +71,8 @@ const compare15168PolicyPairReordered = `security {
 // semantic change (deny-ssh now loses to allow-all). The compare must show
 // deny-ssh moved as a -/+ pair, not [no changes] (empty diff).
 func TestFormatCompareReorder15168(t *testing.T) {
-	oldTree := mustParse(t, compare15168PolicyPair)
-	newTree := mustParse(t, compare15168PolicyPairReordered)
+	oldTree := parseHierText(t, compare15168PolicyPair)
+	newTree := parseHierText(t, compare15168PolicyPairReordered)
 	diff := FormatCompare(oldTree, newTree)
 	if diff == "" {
 		t.Fatalf("reordered first-match policies rendered as no changes; want deny-ssh moved")
@@ -93,8 +93,8 @@ func TestFormatCompareReorder15168(t *testing.T) {
 // TestFormatCompareIdenticalOrderControl15168: identical trees (same order)
 // must still render no changes — the order-aware diff must not invent moves.
 func TestFormatCompareIdenticalOrderControl15168(t *testing.T) {
-	a := mustParse(t, compare15168PolicyPair)
-	b := mustParse(t, compare15168PolicyPair)
+	a := parseHierText(t, compare15168PolicyPair)
+	b := parseHierText(t, compare15168PolicyPair)
 	if diff := FormatCompare(a, b); diff != "" {
 		t.Fatalf("identical trees rendered a diff:\n%s", diff)
 	}
@@ -105,7 +105,7 @@ func TestFormatCompareIdenticalOrderControl15168(t *testing.T) {
 // from the first container must show `- policy deny-ssh` and must NOT show
 // allow-all (from the surviving container) as removed.
 func TestFormatCompareDuplicateContainerRemoval15168(t *testing.T) {
-	oldTree := mustParse(t, `security {
+	oldTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy deny-ssh {
@@ -134,7 +134,7 @@ func TestFormatCompareDuplicateContainerRemoval15168(t *testing.T) {
     }
 }
 `)
-	newTree := mustParse(t, `security {
+	newTree := parseHierText(t, `security {
     policies {
         from-zone trust to-zone untrust {
             policy allow-all {
@@ -169,8 +169,8 @@ func TestFormatCompareDuplicateContainerRemoval15168(t *testing.T) {
 // TestFormatCompareNodesEqualOrder15168: nodesEqual must be order-sensitive
 // for ordered sibling lists and duplicate-aware.
 func TestFormatCompareNodesEqualOrder15168(t *testing.T) {
-	a := mustParse(t, compare15168PolicyPair)
-	b := mustParse(t, compare15168PolicyPairReordered)
+	a := parseHierText(t, compare15168PolicyPair)
+	b := parseHierText(t, compare15168PolicyPairReordered)
 	pa := a.FindChild("security").FindChild("policies")
 	pb := b.FindChild("security").FindChild("policies")
 	if pa == nil || pb == nil {
@@ -179,7 +179,7 @@ func TestFormatCompareNodesEqualOrder15168(t *testing.T) {
 	if nodesEqual(pa, pb) {
 		t.Fatal("nodesEqual treated reordered first-match policies as equal")
 	}
-	c := mustParse(t, compare15168PolicyPair)
+	c := parseHierText(t, compare15168PolicyPair)
 	pc := c.FindChild("security").FindChild("policies")
 	if !nodesEqual(pa, pc) {
 		t.Fatal("nodesEqual treated identically-ordered policies as unequal")

@@ -54,7 +54,7 @@ const vrrp6Hier = `interfaces {
 }`
 
 func TestVRRP6_HierarchicalCompiles(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, vrrp6Hier))
+	cfg, err := CompileConfig(parseHierText(t, vrrp6Hier))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestVRRP6_FlatSetCompiles(t *testing.T) {
 // there is no collision. The engine family-detects each VIP, so a shared
 // group ID across families is fine.
 func TestVRRP6_DualStackNoCollision(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {

@@ -33,7 +33,7 @@ func TestGroupDefaultPolicyInlineOverride12823(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			text := groupDefaultPolicyConfig12823(tc.group, tc.inline)
-			tree := defaultPolicyTree11821(t, text)
+			tree := parseHierText(t, text)
 			cfg, err := CompileConfig(tree)
 			if err != nil {
 				t.Fatalf("strict compile rejected valid inline override of group default-policy: %v\n%s", err, text)
@@ -44,11 +44,11 @@ func TestGroupDefaultPolicyInlineOverride12823(t *testing.T) {
 			// SchemaValidate runs on the authored (pre-expansion) tree in
 			// some callers and on expanded trees in others; the authored
 			// tree must validate.
-			if err := SchemaValidate(defaultPolicyTree11821(t, text)); err != nil {
+			if err := SchemaValidate(parseHierText(t, text)); err != nil {
 				t.Fatalf("SchemaValidate rejected valid override config: %v", err)
 			}
 			// Lenient must also yield inline value without ambiguity warning.
-			cfg2, err := CompileConfigLenient(defaultPolicyTree11821(t, text))
+			cfg2, err := CompileConfigLenient(parseHierText(t, text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -67,7 +67,7 @@ func TestGroupDefaultPolicyInlineOverride12823(t *testing.T) {
 // Group value alone (no inline) must still be inherited.
 func TestGroupDefaultPolicyInheritedWithoutInline12823(t *testing.T) {
 	text := "groups {\n    G12823 {\n        security {\n            policies {\n                default-policy {\n                    permit-all;\n                }\n            }\n        }\n    }\n}\napply-groups G12823;\nsecurity {\n    policies {\n    }\n}\n"
-	cfg, err := CompileConfig(defaultPolicyTree11821(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("strict compile rejected group-only default-policy: %v", err)
 	}
@@ -82,12 +82,12 @@ func TestGroupDefaultPolicyInheritedWithoutInline12823(t *testing.T) {
 func TestGroupDefaultPolicySameTierAmbiguityStillRejects12823(t *testing.T) {
 	// Inline-authored two-child block alongside a group value.
 	text := groupDefaultPolicyConfig12823("permit-all", "default-policy {\n            deny-all;\n            reject-all;\n        }")
-	if _, err := CompileConfig(defaultPolicyTree11821(t, text)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 		t.Fatal("strict compile accepted inline-authored two-child default-policy block")
 	} else if !strings.Contains(err.Error(), "default-policy") {
 		t.Fatalf("error %q does not name default-policy", err)
 	}
-	cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
@@ -100,11 +100,11 @@ func TestGroupDefaultPolicySameTierAmbiguityStillRejects12823(t *testing.T) {
 		"permit-all",
 		"default-policy deny-all;\n        default-policy reject-all;",
 	)
-	if _, err := CompileConfig(defaultPolicyTree11821(t, duplicates)); err == nil ||
+	if _, err := CompileConfig(parseHierText(t, duplicates)); err == nil ||
 		!strings.Contains(err.Error(), "#11821") {
 		t.Fatalf("strict compile error = %v, want #11821 duplicate-stanza rejection", err)
 	}
-	cfg, err = CompileConfigLenient(defaultPolicyTree11821(t, duplicates))
+	cfg, err = CompileConfigLenient(parseHierText(t, duplicates))
 	if err != nil {
 		t.Fatalf("lenient duplicate-stanza compile: %v", err)
 	}
@@ -140,7 +140,7 @@ security {
         apply-groups G12823;
     }
 }`
-	tree := defaultPolicyTree11821(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}
@@ -165,10 +165,10 @@ security {
 func TestConflictingGroupsDefaultPolicy12823(t *testing.T) {
 	base := "groups {\n    GA {\n        security { policies { default-policy { permit-all; } } }\n    }\n    GB {\n        security { policies { default-policy { deny-all; } } }\n    }\n}\napply-groups [ GA GB ];\n"
 	noInline := base + "security { policies { } }\n"
-	if _, err := CompileConfig(defaultPolicyTree11821(t, noInline)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, noInline)); err == nil {
 		t.Fatal("strict compile accepted conflicting group default-policy values with no inline override")
 	}
-	cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, noInline))
+	cfg, err := CompileConfigLenient(parseHierText(t, noInline))
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestConflictingGroupsDefaultPolicy12823(t *testing.T) {
 		t.Fatalf("lenient conflicting groups = %v, want deny (fail-closed)", cfg.Security.DefaultPolicy)
 	}
 	withInline := base + "security { policies { default-policy { reject-all; } } }\n"
-	cfg2, err := CompileConfig(defaultPolicyTree11821(t, withInline))
+	cfg2, err := CompileConfig(parseHierText(t, withInline))
 	if err != nil {
 		t.Fatalf("strict compile rejected inline override over conflicting groups: %v", err)
 	}
@@ -238,12 +238,12 @@ func TestNestedGroupsDefaultPolicyConflict12823(t *testing.T) {
 		{"nested conflict with apply-groups-except", nestedGroupDefaultPolicyConfig12823("deny-all", "permit-all", true)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := CompileConfig(defaultPolicyTree11821(t, tc.text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil {
 				t.Fatal("strict compile accepted nested group default-policy conflict (permit-all over deny-all)")
 			} else if !strings.Contains(err.Error(), "default-policy") {
 				t.Fatalf("error %q does not name default-policy", err)
 			}
-			cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -266,7 +266,7 @@ func TestNestedGroupsDefaultPolicySameAction12823(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := tc.want
-			cfg, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("strict compile rejected nested same-action default-policy: %v", err)
 			}
@@ -274,7 +274,7 @@ func TestNestedGroupsDefaultPolicySameAction12823(t *testing.T) {
 				t.Fatalf("nested same-action default-policy = %v, want %v", cfg.Security.DefaultPolicy, want)
 			}
 			// apply-groups-except presence must not flip the outcome.
-			cfg2, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg2, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}

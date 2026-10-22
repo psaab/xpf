@@ -17,14 +17,6 @@ import (
 // drops the lenient quarantine, so this file goes RED.
 
 // known keywords kept only for messages; braced names are the dropped entries.
-func parseHier14200(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
 
 func unknownHas14200(ab *AddressBook, keyword, name string) bool {
 	if ab == nil {
@@ -53,7 +45,7 @@ func TestContainerShapedAddressEntriesStrictRejected14200(t *testing.T) {
 		{"zone-local address-set", `security { zones { security-zone trust { address-book { address-set { s1 { address h1; } } } } } }`, "address-set", "s1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier14200(t, tc.src)
+			tree := parseHierText(t, tc.src)
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("strict compile accepted container-shaped %s entry %q", tc.keyword, tc.entry)
@@ -115,7 +107,7 @@ func TestContainerZoneLocalDoesNotFallBackToGlobal14200(t *testing.T) {
 			}
 		}
 	}`
-	tree := parseHier14200(t, src)
+	tree := parseHierText(t, src)
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatalf("strict compile accepted dropped zone-local h1 (would fall back to global 10.9.0.0/24)")
 	}
@@ -174,7 +166,7 @@ func TestContainerZoneLocalAddressSetDoesNotFallBack14200(t *testing.T) {
 			}
 		}
 	}`
-	tree := parseHier14200(t, src)
+	tree := parseHierText(t, src)
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatalf("strict compile accepted dropped zone-local s1")
 	}
@@ -193,7 +185,7 @@ func TestValidAddressShapesNoUnknown14200(t *testing.T) {
 		`security { address-book { global { address h1 { 10.0.0.1/32; } } } }`,
 		`security { zones { security-zone trust { address-book { address h1 10.0.0.1/32; address-set s1 { address h1; } } } } }`,
 	} {
-		tree := parseHier14200(t, src)
+		tree := parseHierText(t, src)
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("valid config rejected: %v (%s)", err, src)

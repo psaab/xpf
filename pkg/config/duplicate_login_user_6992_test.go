@@ -71,15 +71,6 @@ var dupUserFlat6992 = []string{
 	`set system login user alice authentication ssh-rsa "ssh-rsa AAAAB3SECOND alice@b"`,
 }
 
-func hierTree6992(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("fixture parse errors: %v", errs)
-	}
-	return tree
-}
-
 func flatTree6992(t *testing.T, lines []string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
@@ -112,7 +103,7 @@ func renderUsers6992(users []*LoginUser) string {
 // still provisioning an account the operator did not describe, and a count-based
 // guard is exactly the kind that goes vacuous.
 func TestDuplicateUserFoldsToOneEntry_6992(t *testing.T) {
-	cfg, err := CompileConfigLenient(hierTree6992(t, dupUserHier6992))
+	cfg, err := CompileConfigLenient(parseHierText(t, dupUserHier6992))
 	if err != nil {
 		t.Fatalf("tolerant compile: %v", err)
 	}
@@ -169,7 +160,7 @@ func TestDuplicateUserFoldsToOneEntry_6992(t *testing.T) {
 // choice: the flat spelling already merges these statements, so the
 // hierarchical one must land on the same config rather than on a third answer.
 func TestDuplicateUserFoldMatchesTheFlatSpelling_6992(t *testing.T) {
-	hierCfg, err := CompileConfigLenient(hierTree6992(t, dupUserHier6992))
+	hierCfg, err := CompileConfigLenient(parseHierText(t, dupUserHier6992))
 	if err != nil {
 		t.Fatalf("hierarchical compile: %v", err)
 	}
@@ -199,7 +190,7 @@ func TestDuplicateUserFoldMatchesTheFlatSpelling_6992(t *testing.T) {
 // for that name must come from ONE entry. Pre-fix this failed: the first entry
 // carried `admins` and the second carried the key that reaches authorized_keys.
 func TestClassAndCredentialComeFromTheSameBlock_6992(t *testing.T) {
-	cfg, err := CompileConfigLenient(hierTree6992(t, dupUserHier6992))
+	cfg, err := CompileConfigLenient(parseHierText(t, dupUserHier6992))
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -241,7 +232,7 @@ func TestClassAndCredentialComeFromTheSameBlock_6992(t *testing.T) {
 // (#1960 no-brick). A test that only checked the reject would pass on a change
 // that made the tolerant load fail closed and brick an upgrading node.
 func TestDuplicateUserRejectedAtCommit_6992(t *testing.T) {
-	tree := hierTree6992(t, dupUserHier6992)
+	tree := parseHierText(t, dupUserHier6992)
 
 	_, err := CompileConfig(tree)
 	if err == nil {
@@ -278,7 +269,7 @@ func TestDuplicateUserRejectedAtCommit_6992(t *testing.T) {
 // every other assertion in this file would still pass, because they all author
 // one block.
 func TestDuplicateUserAcrossTwoLoginBlocks_6992(t *testing.T) {
-	tree := hierTree6992(t, `
+	tree := parseHierText(t, `
 system {
     login {
         class ops { permissions [ view ]; }
@@ -309,7 +300,7 @@ system {
 // must be invisible to every config that authors a name once — which is every
 // real config — so a distinct-name fixture must compile unchanged and commit.
 func TestSingleUserBlockUnaffected_6992(t *testing.T) {
-	cfg, err := CompileConfig(hierTree6992(t, `
+	cfg, err := CompileConfig(parseHierText(t, `
 system {
     login {
         class ops { permissions [ view ]; }
@@ -349,7 +340,7 @@ system {
 // leaves a later statement authors and leaves the others in place. Folding to
 // the last BLOCK instead of the last LEAF would silently zero the uid.
 func TestPartialDuplicateInheritsUnauthoredLeaves_6992(t *testing.T) {
-	cfg, err := CompileConfigLenient(hierTree6992(t, `
+	cfg, err := CompileConfigLenient(parseHierText(t, `
 system {
     login {
         class ops { permissions [ view ]; }

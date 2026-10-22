@@ -36,15 +36,7 @@ import (
 	"testing"
 )
 
-// parseDupBlockTree parses a hierarchical config and returns the tree.
-func parseDupBlockTree(t *testing.T, cfg string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(cfg).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("parse: %v", perrs)
-	}
-	return tree
-}
+// Hierarchical trees are built via parseHierText (#16139 kit).
 
 // zonePairPolicyNode locates the from-zone trust to-zone untrust policy `name`
 // AST node so a test can assert the duplicate-block precondition.
@@ -101,7 +93,7 @@ func TestPolicyDupMatchBlockAccumulated_3842(t *testing.T) {
         }
     }
 }`
-	tree := parseDupBlockTree(t, cfg)
+	tree := parseHierText(t, cfg)
 	polNode := zonePairPolicyNode(t, tree, "p")
 	if n := len(polNode.FindChildren("match")); n != 2 {
 		t.Fatalf("precondition: expected 2 match blocks (the #3842 dup-block shape), got %d", n)
@@ -155,7 +147,7 @@ func TestPolicyDupThenBlockConflictRejected_3842(t *testing.T) {
         }
     }
 }`
-	tree := parseDupBlockTree(t, cfg)
+	tree := parseHierText(t, cfg)
 	polNode := zonePairPolicyNode(t, tree, "p")
 	if n := len(polNode.FindChildren("then")); n != 2 {
 		t.Fatalf("precondition: expected 2 then blocks (the #3842 dup-block shape), got %d", n)
@@ -204,7 +196,7 @@ func TestPolicyDupMatchBlockUnsupportedLeafRejected_3842(t *testing.T) {
         }
     }
 }`
-	tree := parseDupBlockTree(t, cfg)
+	tree := parseHierText(t, cfg)
 	polNode := zonePairPolicyNode(t, tree, "p")
 	if n := len(polNode.FindChildren("match")); n != 2 {
 		t.Fatalf("precondition: expected 2 match blocks, got %d", n)
@@ -268,7 +260,7 @@ func TestPolicyDupThenBlockUnsupportedModifierRejected_3842(t *testing.T) {
         }
     }
 }`
-	tree := parseDupBlockTree(t, cfg)
+	tree := parseHierText(t, cfg)
 	polNode := zonePairPolicyNode(t, tree, "p")
 	if n := len(polNode.FindChildren("then")); n != 2 {
 		t.Fatalf("precondition: expected 2 then blocks, got %d", n)
@@ -315,7 +307,7 @@ func TestPolicyDupMatchBlockSplitDimensionsAccepted_3842(t *testing.T) {
         }
     }
 }`
-	tree := parseDupBlockTree(t, cfg)
+	tree := parseHierText(t, cfg)
 	polNode := zonePairPolicyNode(t, tree, "p")
 	if n := len(polNode.FindChildren("match")); n != 2 {
 		t.Fatalf("precondition: expected 2 match blocks, got %d", n)
@@ -357,7 +349,7 @@ func TestPolicySingleMatchThenBlockUnchanged_3842(t *testing.T) {
         }
     }
 }`
-	tree := parseDupBlockTree(t, cfg)
+	tree := parseHierText(t, cfg)
 	c, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)

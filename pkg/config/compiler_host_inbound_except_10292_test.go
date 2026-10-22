@@ -9,15 +9,6 @@ import (
 	"testing"
 )
 
-func parse10292(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 func flat10292(t *testing.T, lines ...string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
@@ -61,12 +52,12 @@ func TestHostInboundExcept10292ShapesAgree(t *testing.T) {
 	}{
 		{
 			name: "hierarchical-subblock",
-			tree: parse10292(t, prefix+`system-services { all; ssh { except; } }`+suffix),
+			tree: parseHierText(t, prefix+`system-services { all; ssh { except; } }`+suffix),
 			want: without10292(HostInboundAllExpansionServices(), "ssh", "ssh-netconf", "netconf-ssh"),
 		},
 		{
 			name: "hierarchical-flat-tail",
-			tree: parse10292(t, prefix+`system-services { all; ssh except; }`+suffix),
+			tree: parseHierText(t, prefix+`system-services { all; ssh except; }`+suffix),
 			want: without10292(HostInboundAllExpansionServices(), "ssh", "ssh-netconf", "netconf-ssh"),
 		},
 		{
@@ -78,7 +69,7 @@ func TestHostInboundExcept10292ShapesAgree(t *testing.T) {
 		},
 		{
 			name: "repeated-host-inbound-blocks",
-			tree: parse10292(t, `security { zones { security-zone trust {
+			tree: parseHierText(t, `security { zones { security-zone trust {
 				host-inbound-traffic { system-services { all; } }
 				host-inbound-traffic { system-services { ssh { except; } } }
 			} } }`),
@@ -86,7 +77,7 @@ func TestHostInboundExcept10292ShapesAgree(t *testing.T) {
 		},
 		{
 			name: "plain-control",
-			tree: parse10292(t, prefix+`system-services { ssh; ping; }`+suffix),
+			tree: parseHierText(t, prefix+`system-services { ssh; ping; }`+suffix),
 			want: []string{"ssh", "ping"},
 		},
 	}
@@ -188,7 +179,7 @@ func hostInboundAdmissionTupleSet12053(tokens []string, family string) map[hostI
 }
 
 func TestHostInboundExceptAllMetaTokenPreservesExplicitServices12053(t *testing.T) {
-	_, err := CompileConfig(parse10292(t,
+	_, err := CompileConfig(parseHierText(t,
 		`security { zones { security-zone trust { host-inbound-traffic { system-services { ssh; ping; all { except; } } } } } }`))
 	if err == nil || !strings.Contains(err.Error(), "all") {
 		t.Fatalf("strict CompileConfig error = %v, want rejection of all except", err)
@@ -215,7 +206,7 @@ func hostInboundTupleOverlap12053(a, b L4Match) bool {
 }
 
 func TestHostInboundAllExceptSSHCompilesWithoutSSHAliases12053(t *testing.T) {
-	got := hostInbound10292(t, parse10292(t,
+	got := hostInbound10292(t, parseHierText(t,
 		`security { zones { security-zone trust { host-inbound-traffic { system-services { all; ssh { except; } } } } } }`))
 	for _, token := range got.SystemServices {
 		for _, family := range []string{"ip", "ip6"} {
@@ -235,7 +226,7 @@ func TestHostInboundAllExceptSSHCompilesWithoutSSHAliases12053(t *testing.T) {
 // XPF_HOST_INBOUND_EXCEPT_REGEN=1 go test ./pkg/config -run TestHostInboundAllExceptSSHEmissionMatchesRustFixture12053
 // then re-run the Rust consumer cell to confirm parity.
 func TestHostInboundAllExceptSSHEmissionMatchesRustFixture12053(t *testing.T) {
-	got := hostInbound10292(t, parse10292(t,
+	got := hostInbound10292(t, parseHierText(t,
 		`security { zones { security-zone trust { host-inbound-traffic { system-services { all; ssh { except; } } } } } }`))
 	emitted, err := json.MarshalIndent(got.SystemServices, "", "  ")
 	if err != nil {
@@ -260,7 +251,7 @@ func TestHostInboundAllExceptSSHEmissionMatchesRustFixture12053(t *testing.T) {
 }
 
 func TestHostInboundExceptTupleFiltersAliasAcrossMergedStanzas12053(t *testing.T) {
-	got := hostInbound10292(t, parse10292(t, `security { zones { security-zone trust {
+	got := hostInbound10292(t, parseHierText(t, `security { zones { security-zone trust {
 		host-inbound-traffic { system-services { all; ssh { except; } } }
 		host-inbound-traffic { system-services { netconf-ssh; } }
 	} } }`))
@@ -326,12 +317,12 @@ func TestHostInboundProtocolsExceptIgmpDvmrpAndControls12318(t *testing.T) {
 	}{
 		{
 			name: "igmp-except-hierarchical",
-			tree: parse10292(t, prefix+`protocols { all; igmp except; }`+suffix),
+			tree: parseHierText(t, prefix+`protocols { all; igmp except; }`+suffix),
 			want: wantWithoutProto2,
 		},
 		{
 			name: "dvmrp-except-hierarchical",
-			tree: parse10292(t, prefix+`protocols { all; dvmrp except; }`+suffix),
+			tree: parseHierText(t, prefix+`protocols { all; dvmrp except; }`+suffix),
 			want: wantWithoutProto2,
 		},
 		{
@@ -343,7 +334,7 @@ func TestHostInboundProtocolsExceptIgmpDvmrpAndControls12318(t *testing.T) {
 		},
 		{
 			name: "all-control-retains-proto-2",
-			tree: parse10292(t, prefix+`protocols { all; }`+suffix),
+			tree: parseHierText(t, prefix+`protocols { all; }`+suffix),
 			want: []string{"all"},
 		},
 	}
@@ -372,7 +363,7 @@ func TestHostInboundProtocolsExceptIgmpDvmrpAndControls12318(t *testing.T) {
 }
 
 func TestHostInboundProtocolsExceptFiltersMergedStanzas12318(t *testing.T) {
-	got := hostInbound10292(t, parse10292(t, `security { zones { security-zone trust {
+	got := hostInbound10292(t, parseHierText(t, `security { zones { security-zone trust {
 		host-inbound-traffic { protocols { all; igmp except; } }
 		host-inbound-traffic { protocols { dvmrp; rsvp; } }
 	} } }`))
@@ -388,7 +379,7 @@ func TestHostInboundProtocolsExceptFiltersMergedStanzas12318(t *testing.T) {
 // change with:
 // XPF_HOST_INBOUND_EXCEPT_IGMP_REGEN=1 go test ./pkg/config -run TestHostInboundAllExceptIGMPEmissionMatchesRustFixture12318
 func TestHostInboundAllExceptIGMPEmissionMatchesRustFixture12318(t *testing.T) {
-	got := hostInbound10292(t, parse10292(t,
+	got := hostInbound10292(t, parseHierText(t,
 		`security { zones { security-zone trust { host-inbound-traffic { protocols { all; igmp except; } } } } }`))
 	emitted, err := json.MarshalIndent(got.Protocols, "", "  ")
 	if err != nil {
@@ -422,11 +413,11 @@ func TestHostInboundExcept10292Protocols(t *testing.T) {
 	}{
 		{
 			name: "hierarchical-subblock",
-			tree: parse10292(t, prefix+`protocols { all; ospf { except; } }`+suffix),
+			tree: parseHierText(t, prefix+`protocols { all; ospf { except; } }`+suffix),
 		},
 		{
 			name: "hierarchical-flat-tail",
-			tree: parse10292(t, prefix+`protocols { all; ospf except; }`+suffix),
+			tree: parseHierText(t, prefix+`protocols { all; ospf except; }`+suffix),
 		},
 		{
 			name: "flat-set-tail",
@@ -449,7 +440,7 @@ func TestHostInboundExcept10292UnknownOperandFails(t *testing.T) {
 	const config = `security { zones { security-zone trust { host-inbound-traffic {
 		system-services { all; ssssh except; }
 	} } } }`
-	_, err := CompileConfig(parse10292(t, config))
+	_, err := CompileConfig(parseHierText(t, config))
 	if err == nil {
 		t.Fatal("unknown except operand committed instead of reaching strict token validation")
 	}
@@ -462,7 +453,7 @@ func TestHostInboundExcept10292StandaloneModifierFails(t *testing.T) {
 	const config = `security { zones { security-zone trust { host-inbound-traffic {
 		system-services { all; ssh; except; }
 	} } } }`
-	if _, err := CompileConfig(parse10292(t, config)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, config)); err == nil {
 		t.Fatal("standalone except sibling was accepted as a modifier")
 	}
 }
@@ -470,19 +461,19 @@ func TestHostInboundExcept10292StandaloneModifierFails(t *testing.T) {
 func TestHostInboundExcept10292NestedNonExceptChildrenAreRejected(t *testing.T) {
 	const prefix = `security { zones { security-zone trust { host-inbound-traffic { `
 	const suffix = ` } } } }`
-	_, err := CompileConfig(parse10292(t, prefix+`system-services { ssh { ping; } }`+suffix))
+	_, err := CompileConfig(parseHierText(t, prefix+`system-services { ssh { ping; } }`+suffix))
 	if err == nil || !strings.Contains(err.Error(), "ping") {
 		t.Fatalf("nested non-except child committed, error = %v; want rejection naming ping", err)
 	}
 	t.Run("payload-after-except-is-rejected", func(t *testing.T) {
-		_, err := CompileConfig(parse10292(t,
+		_, err := CompileConfig(parseHierText(t,
 			prefix+`system-services { ssh { except; ping; } }`+suffix))
 		if err == nil || !strings.Contains(err.Error(), "except") {
 			t.Fatalf("compile error = %v, want malformed except rejection", err)
 		}
 	})
 	t.Run("nested-except-payload-is-rejected", func(t *testing.T) {
-		_, err := CompileConfig(parse10292(t,
+		_, err := CompileConfig(parseHierText(t,
 			prefix+`system-services { ssh { except { ping; } } }`+suffix))
 		if err == nil || !strings.Contains(err.Error(), "except") {
 			t.Fatalf("compile error = %v, want malformed except rejection", err)
@@ -494,7 +485,7 @@ func TestHostInboundExcept10292QuotedExceptIsValue(t *testing.T) {
 	const config = `security { zones { security-zone trust { host-inbound-traffic {
 		system-services { ssh "except"; }
 	} } } }`
-	_, err := CompileConfig(parse10292(t, config))
+	_, err := CompileConfig(parseHierText(t, config))
 	if err == nil || !strings.Contains(err.Error(), "except") {
 		t.Fatalf("compile error = %v, want quoted except token rejection", err)
 	}
@@ -507,9 +498,9 @@ func TestHostInboundExcept10292StandaloneShapesCompileEmpty(t *testing.T) {
 		name string
 		tree *ConfigTree
 	}{
-		{name: "services-hierarchical", tree: parse10292(t, prefix+`system-services { ssh { except; } }`+suffix)},
+		{name: "services-hierarchical", tree: parseHierText(t, prefix+`system-services { ssh { except; } }`+suffix)},
 		{name: "services-flat", tree: flat10292(t, "set security zones security-zone trust host-inbound-traffic system-services ssh except")},
-		{name: "protocols-hierarchical", tree: parse10292(t, prefix+`protocols { ospf { except; } }`+suffix)},
+		{name: "protocols-hierarchical", tree: parseHierText(t, prefix+`protocols { ospf { except; } }`+suffix)},
 		{name: "protocols-flat", tree: flat10292(t, "set security zones security-zone trust host-inbound-traffic protocols ospf except")},
 	}
 	for _, tc := range cases {
@@ -524,7 +515,7 @@ func TestHostInboundExcept10292DoubleModifierFails(t *testing.T) {
 	const config = `security { zones { security-zone trust { host-inbound-traffic {
 		system-services { ssh except except; }
 	} } } }`
-	_, err := CompileConfig(parse10292(t, config))
+	_, err := CompileConfig(parseHierText(t, config))
 	if err == nil || !strings.Contains(err.Error(), "except") {
 		t.Fatalf("compile error = %v, want malformed modifier rejection", err)
 	}
@@ -562,7 +553,7 @@ func TestHostInboundExcept10292PerInterfaceShapes(t *testing.T) {
 		name string
 		tree *ConfigTree
 	}{
-		{name: "hierarchical", tree: parse10292(t, hierarchical)},
+		{name: "hierarchical", tree: parseHierText(t, hierarchical)},
 		{name: "flat", tree: flat10292(t,
 			"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
 			"set security zones security-zone trust interfaces ge-0/0/0.0 host-inbound-traffic system-services ssh except",

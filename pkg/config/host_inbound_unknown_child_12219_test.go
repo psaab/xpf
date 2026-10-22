@@ -145,7 +145,7 @@ func TestHostInboundUnknownCompactKeyTailsWarn12219(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHierarchical(t, tc.config)
+			tree := parseHierText(t, tc.config)
 			_, strictErr := CompileConfig(tree)
 			if strictErr == nil || !strings.Contains(strictErr.Error(), `unknown child keyword "`+tc.wantKeyword+`"`) {
 				t.Fatalf("strict compile error = %v, want unknown child %q", strictErr, tc.wantKeyword)
@@ -211,7 +211,7 @@ func TestHostInboundKnownPackedTailsAndBracketListsStillBind12219(t *testing.T) 
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(parseHierarchical(t, tc.config))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.config))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -253,7 +253,7 @@ func TestHostInboundZoneApplyMetaNotUnknown12219(t *testing.T) {
 		}
 		interfaces { ge-0/0/0.0; }
 	} } }`
-	tree := parseHierarchical(t, config)
+	tree := parseHierText(t, config)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig rejected zone-level apply-groups-except/apply-macro: %v", err)
@@ -286,7 +286,7 @@ func TestHostInboundCompactApplyGroupsIsDiagnosed12219(t *testing.T) {
 	} } } } }
 	apply-groups G;`
 
-	braced := parseHierarchical(t, group+` security { zones { security-zone trust {
+	braced := parseHierText(t, group+` security { zones { security-zone trust {
 		host-inbound-traffic { apply-groups G; }
 	} } }`)
 	bracedCfg, err := CompileConfig(braced)
@@ -298,7 +298,7 @@ func TestHostInboundCompactApplyGroupsIsDiagnosed12219(t *testing.T) {
 		t.Fatalf("braced apply-groups services = %v, want [ssh]", bracedHib.SystemServices)
 	}
 
-	compact := parseHierarchical(t, group+` security { zones { security-zone trust {
+	compact := parseHierText(t, group+` security { zones { security-zone trust {
 		host-inbound-traffic apply-groups G;
 	} } }`)
 	if _, err := CompileConfig(compact); err == nil ||
@@ -358,7 +358,7 @@ func TestHostInboundUnknownChildDenyAllClaimUsesEffectiveOverride12219(t *testin
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(parseHierarchical(t, tc.config))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.config))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}

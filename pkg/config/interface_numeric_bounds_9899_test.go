@@ -49,15 +49,6 @@ func ifaceNumFlatTree9899(t *testing.T, cmds ...string) *ConfigTree {
 	return tree
 }
 
-func ifaceNumHierTree9899(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("hierarchical fixture must parse: %v", errs)
-	}
-	return tree
-}
-
 func ifaceNumWarnHas9899(warnings []string, subs ...string) bool {
 	for _, w := range warnings {
 		ok := true
@@ -117,7 +108,7 @@ func ifaceNumSchemaFlat9899(t *testing.T, cmds ...string) error {
 
 func ifaceNumSchemaHier9899(t *testing.T, text string) error {
 	t.Helper()
-	return SchemaValidate(ifaceNumHierTree9899(t, text))
+	return SchemaValidate(parseHierText(t, text))
 }
 
 func ifaceNumAssertSchema9899(t *testing.T, what, leaf string, err error, accept bool) {
@@ -302,7 +293,7 @@ func TestInterfaceTunnelBounds9899(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var tree *ConfigTree
 			if tc.hier != "" {
-				tree = ifaceNumHierTree9899(t, tc.hier)
+				tree = parseHierText(t, tc.hier)
 			} else {
 				tree = ifaceNumFlatTree9899(t, tc.flat...)
 			}
@@ -315,7 +306,7 @@ func TestInterfaceTunnelBounds9899(t *testing.T) {
 
 			var ltree *ConfigTree
 			if tc.hier != "" {
-				ltree = ifaceNumHierTree9899(t, tc.hier)
+				ltree = parseHierText(t, tc.hier)
 			} else {
 				ltree = ifaceNumFlatTree9899(t, tc.flat...)
 			}
@@ -395,7 +386,7 @@ func TestInterfaceTunnelBounds9899(t *testing.T) {
 	})
 
 	t.Run("valid unit key max plus ttl max hier", func(t *testing.T) {
-		cfg, err := CompileConfig(ifaceNumHierTree9899(t, `interfaces {
+		cfg, err := CompileConfig(parseHierText(t, `interfaces {
   gr-0/0/0 {
     tunnel {
       source 10.0.0.1;
@@ -538,7 +529,7 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			build := func() *ConfigTree {
 				if tc.hier != "" {
-					return ifaceNumHierTree9899(t, tc.hier)
+					return parseHierText(t, tc.hier)
 				}
 				return ifaceNumFlatTree9899(t, tc.flat...)
 			}
@@ -584,7 +575,7 @@ func TestInterfaceVLANBounds9899(t *testing.T) {
 	})
 
 	t.Run("valid vlan boundaries hier", func(t *testing.T) {
-		cfg, err := CompileConfig(ifaceNumHierTree9899(t, `interfaces {
+		cfg, err := CompileConfig(parseHierText(t, `interfaces {
   ge-0/0/2 {
     unit 50 {
       vlan-id 1;

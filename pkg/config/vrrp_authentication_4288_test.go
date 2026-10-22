@@ -55,7 +55,7 @@ const vrrpAuthHier = `interfaces {
 
 // Strict commit rejects authentication in the hierarchical (braced) shape too.
 func TestVRRPAuthenticationRejectedHierarchical(t *testing.T) {
-	_, err := CompileConfig(parseHier(t, vrrpAuthHier))
+	_, err := CompileConfig(parseHierText(t, vrrpAuthHier))
 	if err == nil {
 		t.Fatal("CompileConfig: expected rejection of VRRP authentication (hier), got nil")
 	}
@@ -74,7 +74,7 @@ func TestVRRPAuthenticationRejectedHierarchical(t *testing.T) {
 // while the operator REQUIRED auth — a false-security, unauthenticated group
 // left running. Fail-closed: the group is DROPPED (not compiled), warned loudly.
 func TestVRRPAuthenticationLenientWarns(t *testing.T) {
-	cfg, err := CompileConfigLenient(parseHier(t, vrrpAuthHier))
+	cfg, err := CompileConfigLenient(parseHierText(t, vrrpAuthHier))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: VRRP auth must downgrade to a warning, got error: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestVRRPAuthenticationLenientDropsGroup_FlatSet(t *testing.T) {
 // prune that nuked the whole address (or interface) would be an availability
 // regression beyond the security intent.
 func TestVRRPAuthenticationLenientKeepsBaseAddress(t *testing.T) {
-	cfg, err := CompileConfigLenient(parseHier(t, vrrpAuthHier))
+	cfg, err := CompileConfigLenient(parseHierText(t, vrrpAuthHier))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
@@ -210,7 +210,7 @@ const vrrpAuthSecret = "SUPERSECRETVRRPKEY"
 
 func TestVRRPAuthenticationRejectDoesNotLeakSecret_KeysPacked(t *testing.T) {
 	// Hierarchical leaf form packs the value onto the vrrp-group node's Keys.
-	tree := parseHier(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {
@@ -253,7 +253,7 @@ func TestVRRPAuthenticationRejectDoesNotLeakSecret_FlatSet(t *testing.T) {
 
 // The lenient warning must also be value-free.
 func TestVRRPAuthenticationWarnDoesNotLeakSecret_KeysPacked(t *testing.T) {
-	tree := parseHier(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {

@@ -285,7 +285,7 @@ func TestDeactivateMultiLeaf_PolicyMatchSourceAddress(t *testing.T) {
 func TestDeactivateMultiLeaf_BlockShapeMember(t *testing.T) {
 	// Block shape only comes from hierarchical text (NewParser); the flat-set
 	// path always yields the bracket shape.
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     zones {
         security-zone trust {
             host-inbound-traffic {

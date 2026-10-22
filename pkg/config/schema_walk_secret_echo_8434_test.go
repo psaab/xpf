@@ -49,7 +49,7 @@ func TestSecretLeafValueNeverEchoedInCommitError8434(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier(t, tc.cfg)
+			tree := parseHierText(t, tc.cfg)
 			// SchemaValidate, NOT CompileConfig. The typed-leaf validators —
 			// including ValidateCryptHash, which is what rejects this value —
 			// run here; CompileConfig is a layer BELOW and returns nil for
@@ -108,7 +108,7 @@ func TestSecretLeafExtraTokenNeverEchoed16066(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier(t, tc.cfg)
+			tree := parseHierText(t, tc.cfg)
 			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatal("fixture must produce a validation error (extra token), " +
@@ -145,7 +145,7 @@ func TestSecretLeafFusedTokenNeverEchoed16066(t *testing.T) {
 		t.Run(leaf+"/braced", func(t *testing.T) {
 			text := "system { services { dynamic-dns { provider p { " +
 				leaf + " firstvalue backend; } } } }"
-			err := SchemaValidate(parseHier(t, text))
+			err := SchemaValidate(parseHierText(t, text))
 			if err == nil || !strings.Contains(err.Error(), "names a SIBLING") {
 				t.Fatalf("fixture did not reach the #8437 formatter: %v", err)
 			}
@@ -262,7 +262,7 @@ func TestSecretLeafEscapedExtraTokenNeverEchoed16066(t *testing.T) {
 func TestPlaceholderGuardNeverEchoesPrecedingSecret16066(t *testing.T) {
 	const canary = "CANARYPRE16066"
 	text := "system { services { dynamic-dns { provider p { password \"" + canary + "\" \"##SECRET-DATA##\"; } } } }"
-	err := SchemaValidate(parseHier(t, text))
+	err := SchemaValidate(parseHierText(t, text))
 	if err == nil {
 		t.Fatal("placeholder fixture must be rejected")
 	}
@@ -285,7 +285,7 @@ func TestPlaceholderGuardEscapedSecretNeverEchoed16066(t *testing.T) {
 	// Config text: password "pa\"ss\\CANARY4" "##SECRET-DATA##"
 	// Lexer decodes to token: pa"ss\CANARY4
 	text := `system { services { dynamic-dns { provider p { password "pa\"ss\\CANARY4" "##SECRET-DATA##"; } } } }`
-	err := SchemaValidate(parseHier(t, text))
+	err := SchemaValidate(parseHierText(t, text))
 	if err == nil {
 		t.Fatal("placeholder fixture must be rejected")
 	}
@@ -386,7 +386,7 @@ func TestEmbeddedTwiceEscapedSecretNeverEchoed16090(t *testing.T) {
 // intact, typed-leaf classification intact.
 func TestCommonWordSecretKeepsPublicDiagnostics16090(t *testing.T) {
 	text := `system { root-authentication { encrypted-password password; } }`
-	err := SchemaValidate(parseHier(t, text))
+	err := SchemaValidate(parseHierText(t, text))
 	if err == nil {
 		t.Fatal("fixture: plaintext must be rejected")
 	}
@@ -414,7 +414,7 @@ func TestCommonWordSecretKeepsPublicDiagnostics16090(t *testing.T) {
 func TestCoincidentSecretDoesNotManglePublicPath16090(t *testing.T) {
 	text := `system { services { dynamic-dns { provider p { password security; } } } } ` +
 		`security { zones { security-zone trust { bogus; } } }`
-	err := SchemaValidate(parseHier(t, text))
+	err := SchemaValidate(parseHierText(t, text))
 	if err == nil || !IsUnknownSecurityZoneChildSchemaError(err) {
 		t.Fatalf("fixture not on unknown-zone branch: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestSecretLeafShortVocabExtraTokensNeverEchoed16090(t *testing.T) {
 // list omitted these words and ate them.
 func TestVocabularyWordsSurviveDiagnostics16090(t *testing.T) {
 	text := `system { root-authentication { encrypted-password plaintext; } }`
-	err := SchemaValidate(parseHier(t, text))
+	err := SchemaValidate(parseHierText(t, text))
 	if err == nil {
 		t.Fatal("plaintext fixture must be rejected")
 	}
@@ -542,7 +542,7 @@ func TestRebuiltWrapperRescrubbedOnRender16090(t *testing.T) {
 	const secret = "security-zone trust: unknown"
 	text := `system { services { dynamic-dns { provider p { password "` + secret + `"; } } } } ` +
 		`security { zones { security-zone trust { bogus; } } }`
-	err := SchemaValidate(parseHier(t, text))
+	err := SchemaValidate(parseHierText(t, text))
 	if err == nil || !IsUnknownSecurityZoneChildSchemaError(err) {
 		t.Fatalf("fixture not on unknown-zone branch: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestRebuiltWrapperRescrubbedOnRender16090(t *testing.T) {
 	}
 	// Fused-statement location (GLM F2): the #8437 error on a secret
 	// leaf keeps its stanza location while the operand stays absent.
-	ferr := SchemaValidate(parseHier(t, "system { services { dynamic-dns { provider p { password firstvalue backend; } } } }"))
+	ferr := SchemaValidate(parseHierText(t, "system { services { dynamic-dns { provider p { password firstvalue backend; } } } }"))
 	if ferr == nil {
 		t.Fatal("fused fixture must be rejected")
 	}
@@ -586,7 +586,7 @@ func TestUnknownZoneKeywordCollisionNeverEchoed16066(t *testing.T) {
 	const collide = "collidekw16066"
 	text := "system { services { dynamic-dns { provider p { password " + collide + "; } } } }\n" +
 		"security { zones { security-zone trust { " + collide + "; } } }"
-	err := SchemaValidate(parseHier(t, text))
+	err := SchemaValidate(parseHierText(t, text))
 	if err == nil {
 		t.Fatal("unknown zone child fixture must be rejected")
 	}

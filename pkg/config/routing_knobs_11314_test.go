@@ -74,7 +74,7 @@ protocols { bgp { local-as 65000; } }`},
 	}
 	for _, tc := range configs {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parseHierarchical(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("CompileConfig: %v", err)
 			}
@@ -120,7 +120,7 @@ func TestStaticRouteRibGroupHasSpecificWarning11314(t *testing.T) {
 		{
 			name: "hierarchical",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-options {
+				return parseHierText(t, `routing-options {
 					static {
 						route 192.0.2.0/24 {
 							next-hop 192.0.2.1;
@@ -176,7 +176,7 @@ func TestInstanceRoutingOptionsUnappliedKnobsHaveSpecificWarnings11314(t *testin
 		{
 			name: "hierarchical",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-instances {
+				return parseHierText(t, `routing-instances {
 					edge {
 						instance-type vrf;
 						routing-options {
@@ -236,7 +236,7 @@ func TestRibGroupImportPolicyIsRejectedOrWarned11314(t *testing.T) {
 		{
 			name: "hierarchical",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-options {
+				return parseHierText(t, `routing-options {
 					rib-groups { leak { import-rib inet.0; import-policy FILTER; } }
 				}`)
 			},

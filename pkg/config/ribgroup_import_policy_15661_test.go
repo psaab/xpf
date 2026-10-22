@@ -40,7 +40,7 @@ func TestRibGroupImportPolicyRejectedAcrossAllASTShapes(t *testing.T) {
 		{
 			name: "hierarchical-global-braced",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-options {
+				return parseHierText(t, `routing-options {
 					rib-groups { leak { import-rib inet.0; import-policy BLOCK; } }
 				}`)
 			},
@@ -49,7 +49,7 @@ func TestRibGroupImportPolicyRejectedAcrossAllASTShapes(t *testing.T) {
 		{
 			name: "hierarchical-global-named-instance",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-options {
+				return parseHierText(t, `routing-options {
 					rib-groups leak { import-rib inet.0; import-policy BLOCK; }
 				}`)
 			},
@@ -58,7 +58,7 @@ func TestRibGroupImportPolicyRejectedAcrossAllASTShapes(t *testing.T) {
 		{
 			name: "hierarchical-global-packed-leaf",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-options {
+				return parseHierText(t, `routing-options {
 					rib-groups { leak import-policy BLOCK; }
 				}`)
 			},
@@ -88,7 +88,7 @@ func TestRibGroupImportPolicyRejectedAcrossAllASTShapes(t *testing.T) {
 		{
 			name: "hierarchical-per-instance-braced",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-instances { blue {
+				return parseHierText(t, `routing-instances { blue {
 					instance-type virtual-router;
 					routing-options { rib-groups { leak { import-rib blue.inet.0; import-policy BLOCK; } } }
 				} }`)
@@ -98,7 +98,7 @@ func TestRibGroupImportPolicyRejectedAcrossAllASTShapes(t *testing.T) {
 		{
 			name: "hierarchical-per-instance-named-instance",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `routing-instances { blue {
+				return parseHierText(t, `routing-instances { blue {
 					instance-type virtual-router;
 					routing-options { rib-groups leak { import-rib blue.inet.0; import-policy BLOCK; } }
 				} }`)
@@ -172,7 +172,7 @@ func TestRibGroupImportPolicyRejectedAcrossAllASTShapes(t *testing.T) {
 				"set routing-instances blue instance-type virtual-router",
 				"set routing-instances blue routing-options rib-groups leak import-rib blue.inet.0",
 			}),
-			parseHierarchical(t, `routing-options {
+			parseHierText(t, `routing-options {
 				rib-groups leak { import-rib inet.0; }
 			}`),
 		} {

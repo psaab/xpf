@@ -5,18 +5,9 @@ import (
 	"testing"
 )
 
-func parseLLDP14616(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse %q: %v", text, errs)
-	}
-	return tree
-}
-
 func compiledLLDP14616(t *testing.T, text string) *LLDPConfig {
 	t.Helper()
-	cfg, err := CompileConfig(parseLLDP14616(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig %q: %v", text, err)
 	}
@@ -37,7 +28,7 @@ func TestLLDPInterfacePackedDisable14616(t *testing.T) {
 		{"hierarchical packed under protocols brace", `protocols lldp { interface ge-0/0/0 disable; }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := SchemaValidate(parseLLDP14616(t, tc.text)); err != nil {
+			if err := SchemaValidate(parseHierText(t, tc.text)); err != nil {
 				t.Fatalf("SchemaValidate rejected packed disable: %v", err)
 			}
 			lldp := compiledLLDP14616(t, tc.text)
@@ -87,7 +78,7 @@ func TestLLDPInterfacePackedDisable14616(t *testing.T) {
 		{"hierarchical junk after name with extra", `protocols { lldp { interface ge-0/0/0 disable disable; } }`, "disable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseLLDP14616(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted %q, want rejection naming %q", tc.text, tc.want)
@@ -122,7 +113,7 @@ func TestLLDPInterfacePackedDisable14616(t *testing.T) {
 			`protocols { lldp { interface ge-0/0/0 disable; } }`,
 			`protocols { lldp { interface ge-0/0/0 frobnicate; } }`,
 		} {
-			cfg, err := CompileConfigLenient(parseLLDP14616(t, text))
+			cfg, err := CompileConfigLenient(parseHierText(t, text))
 			if err != nil {
 				t.Fatalf("lenient %q: %v", text, err)
 			}
@@ -131,7 +122,7 @@ func TestLLDPInterfacePackedDisable14616(t *testing.T) {
 			}
 		}
 		// Lenient packed disable should still take effect (not just not brick).
-		cfg, err := CompileConfigLenient(parseLLDP14616(t, `protocols { lldp { interface ge-0/0/0 disable; } }`))
+		cfg, err := CompileConfigLenient(parseHierText(t, `protocols { lldp { interface ge-0/0/0 disable; } }`))
 		if err != nil {
 			t.Fatalf("lenient disable: %v", err)
 		}

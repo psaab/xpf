@@ -44,7 +44,7 @@ func TestSNMPClientsCompiledCachePopulated(t *testing.T) {
 // An unscoped community (no `clients`) leaves clientNets nil and stays allow-all
 // — the empty-list default must be untouched by the caching.
 func TestSNMPClientsCompiledCacheEmptyIsAllowAll(t *testing.T) {
-	c := communityFrom(t, parseHier(t, `snmp { community open { authorization read-only; } }`), "open")
+	c := communityFrom(t, parseHierText(t, `snmp { community open { authorization read-only; } }`), "open")
 	if c.clientNets != nil {
 		t.Errorf("unscoped community should have nil clientNets, got %+v", c.clientNets)
 	}

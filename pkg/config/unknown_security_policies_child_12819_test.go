@@ -37,19 +37,19 @@ func TestFusedEnforcementUnderNonEnforcementNamesPoisons12819(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			text := fusedPoliciesConfig12819(tc.child)
 			// Strict: schema + compile must reject.
-			tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree := parseHierText(t, text)
 			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("strict schema accepted fused enforcement child %s", tc.child)
 			} else if !strings.Contains(err.Error(), "content") || !strings.Contains(err.Error(), "traceoptions") &&
 				!strings.Contains(err.Error(), "policy-stats") && !strings.Contains(err.Error(), "pre-id-default-policy") {
 				t.Fatalf("schema rejection does not identify rejected child content: %v", err)
 			}
-			treeS := parseUnknownSecurityPoliciesChildren12217(t, text)
+			treeS := parseHierText(t, text)
 			if _, err := CompileConfig(treeS); err == nil {
 				t.Fatalf("strict compile accepted fused enforcement child %s", tc.child)
 			}
 			// Lenient: must record, warn as unknown (#12217, not #12628 benign), and poison.
-			tree2 := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree2 := parseHierText(t, text)
 			cfg, err := CompileConfigLenient(tree2)
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
@@ -101,14 +101,14 @@ func TestGenuineNonEnforcementStillExempt12819(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text := fusedPoliciesConfig12819(tc.child)
-			tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree := parseHierText(t, text)
 			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("strict schema rejected genuine %s: %v", tc.name, err)
 			}
 			if _, err := CompileConfig(tree); err != nil {
 				t.Fatalf("strict compile rejected genuine %s: %v", tc.name, err)
 			}
-			tree2 := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree2 := parseHierText(t, text)
 			cfg, err := CompileConfigLenient(tree2)
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
@@ -127,11 +127,11 @@ func TestFusedPolicyDiagnosticsNameRejectedContentShape12819(t *testing.T) {
 	text := fusedPoliciesConfig12819(`traceoptions { global { policy deny-bad { then { deny; } } } }`)
 	const shape = "traceoptions/global/policy/then/deny"
 
-	tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+	tree := parseHierText(t, text)
 	if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), shape) {
 		t.Fatalf("strict schema error = %v, want rejected content shape %q", err, shape)
 	}
-	tree = parseUnknownSecurityPoliciesChildren12217(t, text)
+	tree = parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
@@ -154,7 +154,7 @@ func TestMixedBenignAndFusedChildren12819(t *testing.T) {
 		"  traceoptions { file trace.log; }\n" +
 		"  policy-stats { global { policy deny-bad { then { deny; } } } }\n" +
 		policiesClose12628
-	tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
@@ -169,7 +169,7 @@ func TestMixedBenignAndFusedChildren12819(t *testing.T) {
 		t.Fatal("valid permit policy lost")
 	}
 	// Strict rejects the fused sibling even with a benign sibling present.
-	tree2 := parseUnknownSecurityPoliciesChildren12217(t, text)
+	tree2 := parseHierText(t, text)
 	if _, err := CompileConfig(tree2); err == nil {
 		t.Fatal("strict compile accepted fused sibling")
 	}
@@ -182,7 +182,7 @@ func TestFusedDuplicateExemptNamePoisons12819(t *testing.T) {
 		"  traceoptions { file trace.log; }\n" +
 		"  traceoptions { global { policy deny-bad { then { deny; } } } }\n" +
 		policiesClose12628
-	tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
@@ -203,7 +203,7 @@ func TestDuplicateBenignTraceoptionsDeduped12819(t *testing.T) {
 	text := policiesBase12628 +
 		"  traceoptions { file a.log; }\n  traceoptions { file b.log; }\n" +
 		policiesClose12628
-	tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)

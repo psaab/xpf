@@ -112,9 +112,9 @@ func TestCompileFirewall_EmptyKeysNoPanic(t *testing.T) {
 // same-name-cross-family collision is still detected. `family any` only
 // reaches a structured filter subtree via a hierarchical parse (the flat
 // `set` schema collapses it into an unstructured leaf — see
-// compiler_firewall_family_collision_3884_test.go), so this uses parseHier.
+// compiler_firewall_family_collision_3884_test.go), so this uses parseHierText.
 func TestFirewallFilterFamilyCollisions_ValidTreeStillWorks(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {

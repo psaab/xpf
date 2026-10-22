@@ -17,18 +17,10 @@ import (
 // return `nil, nil` at the top (a clean assertion RED, not a build break) — the
 // strict sub-tests then no longer see a #5649 error and go RED.
 
-// parseHier5649 parses a hierarchical (brace-delimited) config via NewParser —
+// Hierarchical trees are built via parseHierText (#16139 kit, NewParser) —
 // the correct tool for hierarchical duplicate blocks. Flat `set` MERGES a
 // repeated rule onto one node (see the equivalence sub-test), so only the
 // hierarchical shape can express the duplicate this gate targets.
-func parseHier5649(t *testing.T, input string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(input).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
 
 func setTree5649(t *testing.T, cmds []string) *ConfigTree {
 	t.Helper()
@@ -120,7 +112,7 @@ func TestDuplicateNATRuleNameRejected(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier5649(t, tc.cfg)
+			tree := parseHierText(t, tc.cfg)
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig must reject a duplicate NAT %s rule name", tc.name)
@@ -154,7 +146,7 @@ func TestDuplicateNATRuleNameNPTv6Counterless(t *testing.T) {
 	// Two same-named NPTv6 rules with DIFFERENT, non-overlapping prefixes — the
 	// overlap gate would not flag them even if it compared them, so this gate is
 	// the sole catcher.
-	tree := parseHier5649(t, `security {
+	tree := parseHierText(t, `security {
     nat {
         static {
             rule-set RS {
@@ -193,7 +185,7 @@ func TestDuplicateNATRuleNameNPTv6Counterless(t *testing.T) {
 // peer-sync) downgrades the reject to a warning so an already-persisted or
 // peer-synced config still boots through (#1960 class).
 func TestDuplicateNATRuleNameLenientWarns(t *testing.T) {
-	tree := parseHier5649(t, `security {
+	tree := parseHierText(t, `security {
     nat {
         source {
             rule-set RS {
@@ -236,7 +228,7 @@ func TestDuplicateNATRuleNameLenientWarns(t *testing.T) {
 // repeated rule onto one node) must all pass strict.
 func TestDuplicateNATRuleNameNoFalsePositive(t *testing.T) {
 	t.Run("distinct rule names in one rule-set", func(t *testing.T) {
-		tree := parseHier5649(t, `security {
+		tree := parseHierText(t, `security {
     nat {
         source {
             rule-set RS {
@@ -252,7 +244,7 @@ func TestDuplicateNATRuleNameNoFalsePositive(t *testing.T) {
 	})
 
 	t.Run("same rule name in two different rule-sets", func(t *testing.T) {
-		tree := parseHier5649(t, `security {
+		tree := parseHierText(t, `security {
     nat {
         source {
             rule-set RS_A {

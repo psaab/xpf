@@ -23,18 +23,9 @@ import (
 // TestDuplicatePolicyNameFlatSetMergesToOnePolicy, which doubles as an over-reject
 // negative control).
 
-// parseHierarchical parses a hierarchical config string with NewParser (the
-// correct builder for the duplicate-block / LoadOverride path — flat-set SetPath
-// would merge same-name siblings).
-func parseHierarchical(t *testing.T, cfgText string) *ConfigTree {
-	t.Helper()
-	p := NewParser(cfgText)
-	tree, perrs := p.Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("Parse: %v", perrs)
-	}
-	return tree
-}
+// Hierarchical trees are built via parseHierText (#16139 kit, NewParser —
+// the correct builder for the duplicate-block / LoadOverride path; flat-set
+// SetPath would merge same-name siblings).
 
 // validPolicyBody is a minimal complete policy body (a match on each axis plus a
 // terminal permit) so the duplicate-name gate — not the required-match /
@@ -47,7 +38,7 @@ const validPolicyBody = `{ match { source-address any; destination-address any; 
 // at strict commit. Reverting the validateDuplicatePolicyNamesStrict call in
 // compiler.go makes CompileConfig accept the duplicate and this test goes RED.
 func TestDuplicatePolicyNameZonePairRejectedHierarchical(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust; security-zone untrust; }
     policies {
@@ -74,7 +65,7 @@ security {
 // validator catches it because it reads the aggregated slice. Reverting the gate
 // makes CompileConfig accept it and this test goes RED.
 func TestDuplicatePolicyNameZonePairRejectedAcrossDuplicateSecurityBlocks(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust; security-zone untrust; }
     policies {
@@ -112,7 +103,7 @@ security {
 // TestDuplicateGlobalPolicyNameRejectedHierarchical is the global-rulebase
 // RED-on-revert guard: two global policies named `audit` must be rejected.
 func TestDuplicateGlobalPolicyNameRejectedHierarchical(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust; security-zone untrust; }
     policies {
@@ -136,7 +127,7 @@ security {
 // separate `security {}` block and the typed GlobalPolicies slice aggregates
 // both. Reverting the gate makes CompileConfig accept it and this test goes RED.
 func TestDuplicateGlobalPolicyNameRejectedAcrossDuplicateSecurityBlocks(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust; security-zone untrust; }
     policies {
@@ -212,7 +203,7 @@ func TestDuplicatePolicyNameFlatSetMergesToOnePolicy(t *testing.T) {
 // global rulebase (each is its own namespace). None of these is a duplicate, so
 // CompileConfig must accept the config unchanged.
 func TestPolicyNameReuseAcrossContextsCompilesClean(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust; security-zone untrust; }
     policies {
@@ -230,7 +221,7 @@ security {
 // negative control: two DIFFERENTLY-named policies in the same zone-pair are
 // legal and must compile clean.
 func TestDistinctPolicyNamesSameContextCompilesClean(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust; security-zone untrust; }
     policies {
@@ -250,7 +241,7 @@ security {
 // to a cfg.Warnings entry instead of failing the load, so an already-persisted or
 // peer-synced config an older binary accepted still boots.
 func TestDuplicatePolicyNameLenientDowngradesToWarning(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     zones { security-zone trust; security-zone untrust; }
     policies {

@@ -9,16 +9,6 @@ import (
 // merged by Junos/flat-set semantics but were silently dropped by singular
 // FindChild reads, and ip-monitoring validation depended on Go map order.
 
-func parseHier13216(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	p := NewParser(src)
-	tree, errs := p.Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors: %v", errs)
-	}
-	return tree
-}
-
 func TestCompileServicesMultipleSiblingBlocks13216(t *testing.T) {
 	src := `services {
   rpm { probe p1 { test t1 { probe-type icmp-ping; target address 192.0.2.1; } } }
@@ -28,7 +18,7 @@ func TestCompileServicesMultipleSiblingBlocks13216(t *testing.T) {
   flow-monitoring { version9 { template v9a { flow-active-timeout 60; } } }
   flow-monitoring { version-ipfix { template ipfixa { flow-active-timeout 61; } } }
 }`
-	cfg, err := CompileConfigLenient(parseHier13216(t, src))
+	cfg, err := CompileConfigLenient(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
@@ -55,7 +45,7 @@ func TestCompileFlowMonitoringMultipleVersionBlocks13216(t *testing.T) {
     version-ipfix { template ipfixb { flow-active-timeout 63; } }
   }
 }`
-	cfg, err := CompileConfigLenient(parseHier13216(t, src))
+	cfg, err := CompileConfigLenient(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
@@ -77,7 +67,7 @@ func TestCompileDHCPLocalServerMultipleDynamicDNS13216(t *testing.T) {
     }
   }
 }`
-	cfg, err := CompileConfigLenient(parseHier13216(t, src))
+	cfg, err := CompileConfigLenient(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}

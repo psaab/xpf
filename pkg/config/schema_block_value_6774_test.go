@@ -21,15 +21,6 @@ import (
 // asked of different code: what does `keyword { value; }` mean to the walker,
 // and to the compiler.
 
-func mustParseTree6774(t *testing.T, cfg string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(cfg).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("parse: %v\n--- config ---\n%s", perrs, cfg)
-	}
-	return tree
-}
-
 func defaultPolicyBlock(action string) string {
 	return "security {\n    policies {\n        default-policy {\n            " + action + ";\n        }\n    }\n}"
 }
@@ -43,7 +34,7 @@ func defaultPolicyFlat(action string) string {
 // same action as the flat spelling.
 func TestDefaultPolicyBlockFormCommits_6774(t *testing.T) {
 	for _, action := range []string{"permit-all", "deny-all", "reject-all"} {
-		blkTree := mustParseTree6774(t, defaultPolicyBlock(action))
+		blkTree := parseHierText(t, defaultPolicyBlock(action))
 		_, err := CompileConfig(blkTree)
 		if err != nil {
 			t.Fatalf("%s: block form failed to compile: %v", action, err)
@@ -61,8 +52,8 @@ func TestDefaultPolicyBlockFormCommits_6774(t *testing.T) {
 // a constant would only catch it on the side the test happened to encode.
 func TestDefaultPolicyBlockAndFlatFormsAgree_6774(t *testing.T) {
 	for _, action := range []string{"permit-all", "deny-all", "reject-all"} {
-		flatTree := mustParseTree6774(t, defaultPolicyFlat(action))
-		blkTree := mustParseTree6774(t, defaultPolicyBlock(action))
+		flatTree := parseHierText(t, defaultPolicyFlat(action))
+		blkTree := parseHierText(t, defaultPolicyBlock(action))
 
 		flatCfg, ferr := CompileConfig(flatTree)
 		blkCfg, berr := CompileConfig(blkTree)
@@ -107,7 +98,7 @@ func TestDefaultPolicyBlockRejectsAmbiguousAndInvalid_6774(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := mustParseTree6774(t, tc.cfg)
+			tree := parseHierText(t, tc.cfg)
 			_, _ = CompileConfig(tree)
 			err := SchemaValidate(tree)
 			if err == nil {
@@ -132,7 +123,7 @@ func TestDefaultPolicyAmbiguityStrictAndLenient11367(t *testing.T) {
 }`
 	const diagnostic = "expected exactly one block value, found 2 children"
 
-	tree := mustParseTree6774(t, ambiguous)
+	tree := parseHierText(t, ambiguous)
 	strictCompilers := []struct {
 		name    string
 		compile func(*ConfigTree) (*Config, error)
@@ -178,7 +169,7 @@ func TestDefaultPolicyAmbiguityStrictAndLenient11367(t *testing.T) {
 	}
 
 	// A later duplicate security root must not override the fail-closed result.
-	ambiguousThenPermit := mustParseTree6774(t, ambiguous+`
+	ambiguousThenPermit := parseHierText(t, ambiguous+`
 security {
     policies {
         default-policy permit-all;
@@ -203,7 +194,7 @@ security {
 // fallback would pass every other test in this file.
 func TestBlockValueIsOptInNotBlanketRelaxation_6774(t *testing.T) {
 	cfg := "interfaces {\n    ge-0/0/0 {\n        mtu {\n            1500;\n        }\n    }\n}"
-	tree := mustParseTree6774(t, cfg)
+	tree := parseHierText(t, cfg)
 	_, _ = CompileConfig(tree)
 	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("strict validation accepted `mtu { 1500; }`: the block-form " +
@@ -212,7 +203,7 @@ func TestBlockValueIsOptInNotBlanketRelaxation_6774(t *testing.T) {
 	}
 	// Control: the same leaf in its real spelling must still commit, so the
 	// test above cannot pass merely because everything about mtu is broken.
-	okTree := mustParseTree6774(t, "interfaces {\n    ge-0/0/0 {\n        mtu 1500;\n    }\n}")
+	okTree := parseHierText(t, "interfaces {\n    ge-0/0/0 {\n        mtu 1500;\n    }\n}")
 	_, err := CompileConfig(okTree)
 	if err != nil {
 		t.Fatalf("control: `mtu 1500` failed to compile: %v", err)
@@ -263,7 +254,7 @@ func TestSingleBlockValueShape_6774(t *testing.T) {
 // evidence, and including deny-all silently would make this look like three
 // discriminating cases when it is two.
 func TestDefaultPolicySchemaAcceptanceMatchesCompilerSupport_6774(t *testing.T) {
-	baseTree := mustParseTree6774(t, "security {\n    policies {\n    }\n}")
+	baseTree := parseHierText(t, "security {\n    policies {\n    }\n}")
 	baseCfg, err := CompileConfig(baseTree)
 	if err != nil {
 		t.Fatalf("baseline compile: %v", err)
@@ -278,7 +269,7 @@ func TestDefaultPolicySchemaAcceptanceMatchesCompilerSupport_6774(t *testing.T) 
 	// honoured the stanza.
 	for _, action := range []string{"permit-all", "reject-all"} {
 		for name, render := range spellings {
-			tree := mustParseTree6774(t, render(action))
+			tree := parseHierText(t, render(action))
 			cfg, cerr := CompileConfig(tree)
 			if cerr != nil {
 				t.Fatalf("%s/%s: compile: %v", name, action, cerr)

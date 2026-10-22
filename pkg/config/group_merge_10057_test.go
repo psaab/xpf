@@ -49,7 +49,7 @@ func TestPackedTailProvenance10057(t *testing.T) {
 	t.Run("9855 promoted quoted match preserves quote mask", func(t *testing.T) {
 		text := `groups { G { system { syslog { host 10.0.0.1 port 999; } } } } apply-groups G; ` +
 			`system { syslog { host 10.0.0.1 match "a b"; } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		if err := tree.ExpandGroupsTagged(); err != nil {
 			t.Fatalf("ExpandGroupsTagged: %v", err)
 		}
@@ -72,7 +72,7 @@ func TestPackedTailProvenance10057(t *testing.T) {
 		text := `groups { G { interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { ` +
 			`vrrp-group 1 virtual-address [ 10.0.61.1/24 10.0.61.3/24 ]; } } } } } } } apply-groups G; ` +
 			`interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.61.2/24 { vrrp-group 1 { } } } } } }`
-		tree := parseHierarchical(t, text)
+		tree := parseHierText(t, text)
 		if err := tree.ExpandGroupsTagged(); err != nil {
 			t.Fatalf("ExpandGroupsTagged: %v", err)
 		}

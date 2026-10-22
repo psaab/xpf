@@ -37,15 +37,6 @@ func embeddedIngest15209FlatTree(t *testing.T, lines ...string) *ConfigTree {
 	return tree
 }
 
-func embeddedIngest15209HierTree(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("NewParser: %v", errs)
-	}
-	return tree
-}
-
 // TestEmbeddedRedactedPlaceholderIngestRefused15209 is the decisive
 // regression: every RedactedClone shape of an embedded credential command,
 // re-ingested, must be refused by checkRedactionPlaceholder with the secret
@@ -100,7 +91,7 @@ func TestEmbeddedRedactedPlaceholderIngestRefused15209(t *testing.T) {
 
 	// Hierarchical quoted, flat-set unquoted, commands-block and bracket
 	// shapes: every shape RedactedClone masks must be refused on ingest.
-	hierQuoted := embeddedIngest15209HierTree(t, `
+	hierQuoted := parseHierText(t, `
 event-options {
     policy p1 {
         events ping_test_failed;
@@ -115,7 +106,7 @@ event-options {
 	// The hierarchical fixture above carries the placeholder literally — but
 	// build it through RedactedClone so the shape is proven to be one the
 	// display path produces, not a hand-invented spelling.
-	hierClear := embeddedIngest15209HierTree(t, `
+	hierClear := parseHierText(t, `
 event-options {
     policy p1 {
         events ping_test_failed;
@@ -133,7 +124,7 @@ event-options {
 	}
 	_ = hierQuoted
 
-	blockClear := embeddedIngest15209HierTree(t, `
+	blockClear := parseHierText(t, `
 event-options {
     policy p1 {
         events ping_test_failed;

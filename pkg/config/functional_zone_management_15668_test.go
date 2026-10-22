@@ -43,8 +43,9 @@ security {
     }
 }
 `
+
 func TestFunctionalZoneManagementSchemaValidates15668(t *testing.T) {
-	tree := parseHierarchical(t, functionalZoneMgmtHier15668)
+	tree := parseHierText(t, functionalZoneMgmtHier15668)
 	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected valid functional-zone management: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestFunctionalZoneManagementSchemaValidates15668(t *testing.T) {
 }
 
 func TestFunctionalZoneManagementCompiles15668(t *testing.T) {
-	tree := parseHierarchical(t, functionalZoneMgmtHier15668)
+	tree := parseHierText(t, functionalZoneMgmtHier15668)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("strict CompileConfig: %v", err)
@@ -157,7 +158,7 @@ security { zones { functional-zone { management { interfaces [ ge-0/0/0.0 host-i
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHierarchical(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			if _, err := CompileConfig(tree); err == nil {
 				t.Fatalf("strict CompileConfig accepted %s; want rejection naming %q", tc.name, tc.want)
 			} else if !strings.Contains(err.Error(), tc.want) {
@@ -178,7 +179,7 @@ func TestFunctionalZoneManagementConflictsAndDuplicates15668(t *testing.T) {
 	// A security-zone literally named management shares the compiled zone:
 	// duplicate blocks merge find-or-create, as duplicate security-zone
 	// blocks already do (#4818).
-	merged := parseHierarchical(t, `
+	merged := parseHierText(t, `
 interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
 security { zones {
     security-zone management { description from-security-zone; }
@@ -194,7 +195,7 @@ security { zones {
 	}
 
 	// Same interface in management and another zone: membership conflict.
-	conflict := parseHierarchical(t, `
+	conflict := parseHierText(t, `
 interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
 security { zones {
     security-zone trust { interfaces { ge-0/0/0.0; } }

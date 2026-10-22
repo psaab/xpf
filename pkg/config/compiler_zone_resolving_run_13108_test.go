@@ -36,7 +36,7 @@ security {
 }
 
 func TestZoneResolvingRun13108StrictRejectsHoistAndEmpty(t *testing.T) {
-	tree := parseHierarchical(t, zoneResolvingRunConfig())
+	tree := parseHierText(t, zoneResolvingRunConfig())
 	_, err := CompileConfig(tree)
 	if err == nil {
 		t.Fatalf("strict CompileConfig accepted resolving-run zones; want rejection (#13108/#6525/#6735)")
@@ -48,7 +48,7 @@ func TestZoneResolvingRun13108StrictRejectsHoistAndEmpty(t *testing.T) {
 }
 
 func TestZoneResolvingRun13108LenientNoZoneHostInboundHoist(t *testing.T) {
-	tree := parseHierarchical(t, zoneResolvingRunConfig())
+	tree := parseHierText(t, zoneResolvingRunConfig())
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
@@ -94,7 +94,7 @@ security {
     }
 }
 `
-	tree := parseHierarchical(t, src)
+	tree := parseHierText(t, src)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("positive control strict compile: %v", err)
@@ -132,7 +132,7 @@ security {
     }
 }
 `
-	tree2 := parseHierarchical(t, src2)
+	tree2 := parseHierText(t, src2)
 	cfg2, err := CompileConfig(tree2)
 	if err != nil {
 		t.Fatalf("leaf-run control strict compile: %v", err)

@@ -45,7 +45,7 @@ func TestRoutingInstanceInterfaceMultiValueFlat(t *testing.T) {
 }
 
 func TestRoutingInstanceInterfaceMultiValueHierarchical(t *testing.T) {
-	tree := mustParse(t, `routing-instances {
+	tree := parseHierText(t, `routing-instances {
     VR1 {
         instance-type virtual-router;
         interface [ ge-0/0/1 ge-0/0/2 ge-0/0/3 ];

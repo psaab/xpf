@@ -67,7 +67,7 @@ firewall {
 }
 `
 	_ = kw
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("ExpandGroups: %v", err)
 	}

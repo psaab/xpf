@@ -20,15 +20,6 @@ apply-groups "${node}";
 system { domain-name example.com; }
 `
 
-func parse15197(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture must parse: %v", perrs)
-	}
-	return tree
-}
-
 // Acceptance: a ${node} config on node 1 shows
 // `inherited from group 'node1'` (and node0's leaf does not leak).
 func TestFormatInheritanceForNodeResolvesNodeGroup15197(t *testing.T) {
@@ -40,7 +31,7 @@ func TestFormatInheritanceForNodeResolvesNodeGroup15197(t *testing.T) {
 		{0, "fw0", "fw1"},
 		{1, "fw1", "fw0"},
 	} {
-		out, err := parse15197(t, nodeInheritText15197).FormatInheritanceForNode(tc.nodeID)
+		out, err := parseHierText(t, nodeInheritText15197).FormatInheritanceForNode(tc.nodeID)
 		if err != nil {
 			t.Fatalf("node %d: FormatInheritanceForNode: %v", tc.nodeID, err)
 		}
@@ -65,7 +56,7 @@ func TestFormatInheritanceForNodeResolvesNodeGroup15197(t *testing.T) {
 
 // Path views must include node-group-inherited leaves under the path.
 func TestFormatPathInheritanceForNodeResolvesNodeGroup15197(t *testing.T) {
-	out, err := parse15197(t, nodeInheritText15197).FormatPathInheritanceForNode([]string{"system"}, 1)
+	out, err := parseHierText(t, nodeInheritText15197).FormatPathInheritanceForNode([]string{"system"}, 1)
 	if err != nil {
 		t.Fatalf("FormatPathInheritanceForNode: %v", err)
 	}
@@ -83,14 +74,14 @@ func TestFormatPathInheritanceForNodeResolvesNodeGroup15197(t *testing.T) {
 // An expansion failure must surface as an error, never a silent raw fallback.
 func TestFormatInheritanceForNodeErrorsOnUndefinedGroup15197(t *testing.T) {
 	text := `groups { G { system { host-name fw0; } } } apply-groups missing; system { domain-name example.com; }`
-	out, err := parse15197(t, text).FormatInheritanceForNode(1)
+	out, err := parseHierText(t, text).FormatInheritanceForNode(1)
 	if err == nil {
 		t.Fatalf("undefined group must error, got output:\n%s", out)
 	}
 	if !strings.Contains(err.Error(), "missing") {
 		t.Errorf("error should name the undefined group: %v", err)
 	}
-	out, err = parse15197(t, text).FormatPathInheritanceForNode([]string{"system"}, 1)
+	out, err = parseHierText(t, text).FormatPathInheritanceForNode([]string{"system"}, 1)
 	if err == nil {
 		t.Fatalf("path: undefined group must error, got output:\n%s", out)
 	}
@@ -99,7 +90,7 @@ func TestFormatInheritanceForNodeErrorsOnUndefinedGroup15197(t *testing.T) {
 // Standalone (nodeID < 0): the generic view resolves ${node} to node0, the
 // same fallback the generic compile uses (#15031), and annotates it.
 func TestFormatInheritanceStandaloneFallsBackToNode015197(t *testing.T) {
-	out, err := parse15197(t, nodeInheritText15197).FormatInheritanceForNode(-1)
+	out, err := parseHierText(t, nodeInheritText15197).FormatInheritanceForNode(-1)
 	if err != nil {
 		t.Fatalf("standalone FormatInheritanceForNode: %v", err)
 	}
@@ -115,8 +106,8 @@ func TestFormatInheritanceStandaloneFallsBackToNode015197(t *testing.T) {
 // the legacy no-arg entry and the node-aware entry.
 func TestFormatInheritancePlainGroupControl15197(t *testing.T) {
 	text := `groups { G { system { host-name fw0; } } } apply-groups G; system { domain-name example.com; }`
-	legacy := parse15197(t, text).FormatInheritance()
-	nodeAware, err := parse15197(t, text).FormatInheritanceForNode(1)
+	legacy := parseHierText(t, text).FormatInheritance()
+	nodeAware, err := parseHierText(t, text).FormatInheritanceForNode(1)
 	if err != nil {
 		t.Fatalf("FormatInheritanceForNode: %v", err)
 	}
@@ -130,7 +121,7 @@ func TestFormatInheritancePlainGroupControl15197(t *testing.T) {
 
 // The display must not mutate the caller's tree.
 func TestFormatInheritanceForNodeDoesNotMutate15197(t *testing.T) {
-	tree := parse15197(t, nodeInheritText15197)
+	tree := parseHierText(t, nodeInheritText15197)
 	before := tree.Format()
 	if _, err := tree.FormatInheritanceForNode(1); err != nil {
 		t.Fatalf("FormatInheritanceForNode: %v", err)

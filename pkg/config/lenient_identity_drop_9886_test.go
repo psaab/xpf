@@ -5,18 +5,10 @@ import (
 	"testing"
 )
 
-// parseHier9886 parses hierarchical config text. The control-byte fixtures
+// Hierarchical config text is parsed via parseHierText (#16139 kit). The control-byte fixtures
 // below must be hierarchical: the lexer decodes \n inside quotes (lexer.go),
 // which is exactly how a persisted or peer-synced identity key carrying a
 // control byte re-enters through the text path.
-func parseHier9886(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs[0])
-	}
-	return tree
-}
 
 func warningsJoin9886(w []string) string { return strings.Join(w, "\n") }
 
@@ -27,7 +19,7 @@ func warningsJoin9886(w []string) string { return strings.Join(w, "\n") }
 // not a whole-compile hard error (which would safe-state Load and alarm-loop
 // SyncApply for one never-usable member).
 func TestLenientDropsControlByteInterfaceMember_9886(t *testing.T) {
-	tree := parseHier9886(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
   "ge\n0" { unit 0 { family inet { address 10.0.0.1/24; } } }
   ge-0-0-0 { unit 0 { family inet { address 10.0.0.2/24; } } }
 }`)
@@ -54,7 +46,7 @@ func TestLenientDropsControlByteInterfaceMember_9886(t *testing.T) {
 // the pre-#6834 population) is dropped the same way. Manufactured-vs-literal
 // tracks no operational difference: the member is unusable either way.
 func TestLenientDropsLiteralSpaceInterfaceMember_9886(t *testing.T) {
-	tree := parseHier9886(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
   "ge 0" { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`)
 	cfg, err := CompileConfigLenient(tree)
@@ -79,7 +71,7 @@ func TestLenientDropsLiteralSpaceInterfaceMember_9886(t *testing.T) {
 // with ValidateInterfaceName's message — pinned below as the no-new-behavior
 // control.
 func TestStrictDirectCompileRejectsMultiPatternMember_9886(t *testing.T) {
-	tree := parseHier9886(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
   "ge 0" { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`)
 	_, err := CompileConfig(tree)
@@ -93,7 +85,7 @@ func TestStrictDirectCompileRejectsMultiPatternMember_9886(t *testing.T) {
 	}
 
 	// Control: the commit path still rejects via the schema gate first.
-	if serr := SchemaValidate(parseHier9886(t, `interfaces {
+	if serr := SchemaValidate(parseHierText(t, `interfaces {
   "ge 0" { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`)); serr == nil || !strings.Contains(serr.Error(), "whitespace") {
 		t.Fatalf("SchemaValidate must still reject the spaced name first, got %v", serr)
@@ -104,7 +96,7 @@ func TestStrictDirectCompileRejectsMultiPatternMember_9886(t *testing.T) {
 // position with the same sink: the dataplane names the bridge "br-"+name, so a
 // whitespace bridge-domain name renders a two-pattern [Match] Name= as well.
 func TestLenientDropsWhitespaceBridgeDomain_9886(t *testing.T) {
-	tree := parseHier9886(t, `bridge-domains {
+	tree := parseHierText(t, `bridge-domains {
   "bd x" { vlan-id-list 10; }
   bd0 { vlan-id-list 20; }
 }`)
@@ -211,7 +203,7 @@ func TestLenientKeepsWorkingSinglePatternNames_9886(t *testing.T) {
 	// NBSP spelled as an escape: it must be a real non-breaking space, which
 	// is invisible in source — a literal would be unreviewable.
 	nbspName := "ge\u00a00"
-	tree := parseHier9886(t, "interfaces {\n"+
+	tree := parseHierText(t, "interfaces {\n"+
 		"  ge-0-0-0 { unit 0 { family inet { address 10.0.0.2/24; } } }\n"+
 		"  \"gé0\" { unit 0 { family inet { address 10.0.0.3/24; } } }\n"+
 		"  \""+nbspName+"\" { unit 0 { family inet { address 10.0.0.4/24; } } }\n"+
@@ -237,7 +229,7 @@ func TestLenientKeepsWorkingSinglePatternNames_9886(t *testing.T) {
 // the tolerant path (where the schema validator only warns) rather than reach
 // the daemon rename.
 func TestLenientDropsUnsafeDeviceMapEntry_9886(t *testing.T) {
-	tree := parseHier9886(t, `chassis {
+	tree := parseHierText(t, `chassis {
   device-map {
     interface "ge 0" { pci 0000:09:00.0; }
     interface ge-0-0-1 { pci 0000:09:00.1; }
@@ -273,7 +265,7 @@ func TestLenientDropsUnsafeDeviceMapEntry_9886(t *testing.T) {
 // device-map: a control-byte logical name is scrubbed to "ge 0" by #1798 and
 // the scrubbed entry is dropped with the breadcrumb warning.
 func TestLenientDropsDeviceMapControlByteEntry_9886(t *testing.T) {
-	tree := parseHier9886(t, `chassis {
+	tree := parseHierText(t, `chassis {
   device-map {
     interface "ge\n0" { pci 0000:09:00.0; }
   }
@@ -306,7 +298,7 @@ func TestLenientDropsDeviceMapControlByteEntry_9886(t *testing.T) {
 // children shape (each child's Keys[0] is an instance).
 func TestLenientDropsDeviceMapFanoutAndFlatShapes_9886(t *testing.T) {
 	t.Run("fanout", func(t *testing.T) {
-		tree := parseHier9886(t, `chassis {
+		tree := parseHierText(t, `chassis {
   device-map {
     interface "ge 0" ge-0-0-1 { pci 0000:09:00.0; }
   }
@@ -354,7 +346,7 @@ func TestLenientDropsDeviceMapFanoutAndFlatShapes_9886(t *testing.T) {
 // for device-map. On the commit path the schema validator rejects first
 // (control below); direct CompileConfig hits this gate instead.
 func TestStrictDirectCompileRejectsUnsafeDeviceMapEntry_9886(t *testing.T) {
-	tree := parseHier9886(t, `chassis {
+	tree := parseHierText(t, `chassis {
   device-map {
     interface "ge 0" { pci 0000:09:00.0; }
   }
@@ -368,7 +360,7 @@ func TestStrictDirectCompileRejectsUnsafeDeviceMapEntry_9886(t *testing.T) {
 			t.Errorf("strict error must mention %q, got %v", want, err)
 		}
 	}
-	if serr := SchemaValidate(parseHier9886(t, `chassis {
+	if serr := SchemaValidate(parseHierText(t, `chassis {
   device-map {
     interface "ge 0" { pci 0000:09:00.0; }
   }
@@ -384,7 +376,7 @@ func TestStrictDirectCompileRejectsUnsafeDeviceMapEntry_9886(t *testing.T) {
 // refused-but-partially-applied row). Bracket-list, repeated-statement, and
 // nested-block spellings are all covered — the strip mirrors plainListValues.
 func TestLenientStripsUnsafeFabricMemberRefs_9886(t *testing.T) {
-	tree := parseHier9886(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
   fab0 {
     fabric-options {
       member-interfaces [ "ge 0" ge-0/0/7 ];
@@ -465,7 +457,7 @@ func TestStrictDirectCompileRejectsUnsafeFabricRef_9886(t *testing.T) {
     unit 0 { family inet { address 10.99.1.1/30; } }
   }
 }`
-	if _, err := CompileConfig(parseHier9886(t, text)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 		t.Fatal("direct strict compile must hard-error on a poisoned fabric ref, got nil")
 	} else {
 		for _, want := range []string{"#9886", "member-interfaces"} {
@@ -477,7 +469,7 @@ func TestStrictDirectCompileRejectsUnsafeFabricRef_9886(t *testing.T) {
 	// The schema has no validator on these values, so it passes — documenting
 	// the hole this gate closes rather than asserting on it would rot; assert
 	// the pass so a future schema validator visibly changes this contract.
-	if err := SchemaValidate(parseHier9886(t, text)); err != nil {
+	if err := SchemaValidate(parseHierText(t, text)); err != nil {
 		t.Fatalf("SchemaValidate unexpectedly rejects member-interfaces values: %v", err)
 	}
 }

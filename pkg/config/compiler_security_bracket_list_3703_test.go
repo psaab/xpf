@@ -135,7 +135,7 @@ func TestHostInbound3703KeepsAllListValues(t *testing.T) {
 // lands every value (the reader reads .Children too), so the multi-leaf change
 // does not regress the block spelling.
 func TestHostInbound3703HierarchicalBlockShape(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {

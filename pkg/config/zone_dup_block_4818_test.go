@@ -23,7 +23,7 @@ import "testing"
 // only expressible via the hierarchical / NewParser (load-override) path.
 // Flat-set ParseSetCommand + SetPath MERGES two lines with an identical
 // key-path into one node, so it is structurally immune and is NOT the
-// reproducer here — parseHierarchical is (see #4818's "Correction to the
+// reproducer here — parseHierText is (see #4818's "Correction to the
 // reviewed trace").
 //
 // zoneDup4818Iface0 pre-defines ge-0/0/0 under the top-level `interfaces {}`
@@ -50,7 +50,7 @@ interfaces {
 // inst.name}` before the find-or-create) makes the second instance replace
 // the first, so Interfaces is empty (block 1's ge-0/0/0 dropped) — RED.
 func TestZoneDupBlock4818InterfacesAndHostInboundMerge(t *testing.T) {
-	tree := parseHierarchical(t, zoneDup4818Iface0+`
+	tree := parseHierText(t, zoneDup4818Iface0+`
 security {
     zones {
         security-zone trust {
@@ -86,7 +86,7 @@ security {
 // and address-book split across three separate top-level instances of the
 // same zone name must all survive in the compiled zone.
 func TestZoneDupBlock4818ThreeInstancesAllPropertiesSurvive(t *testing.T) {
-	tree := parseHierarchical(t, zoneDup4818Iface0+`
+	tree := parseHierText(t, zoneDup4818Iface0+`
 security {
     zones {
         security-zone trust {
@@ -129,7 +129,7 @@ security {
 // #3362 per-interface host-inbound override merging across two duplicate
 // top-level zone instances that BOTH name the same interface.
 func TestZoneDupBlock4818InterfaceHostInboundMergesAcrossInstances(t *testing.T) {
-	tree := parseHierarchical(t, zoneDup4818Iface0+`
+	tree := parseHierText(t, zoneDup4818Iface0+`
 security {
     zones {
         security-zone trust {
@@ -176,7 +176,7 @@ security {
 // control: a single security-zone instance must compile exactly as before
 // the find-or-create change (no dedup, no reordering).
 func TestZoneDupBlock4818SingleBlockUnchanged(t *testing.T) {
-	tree := parseHierarchical(t, zoneDup4818Iface0+`
+	tree := parseHierText(t, zoneDup4818Iface0+`
 security {
     zones {
         security-zone trust {

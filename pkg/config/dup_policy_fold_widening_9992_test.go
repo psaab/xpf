@@ -27,13 +27,13 @@ func TestFoldDefaultedDenyWideningIsPoisoned9992(t *testing.T) {
 			`policy p1 { ` + anyMatch9571 + ` } policy p1 { then { permit; } }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := CompileConfig(parse9571(t, tc.text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil {
 				t.Fatal("strict commit accepted a duplicate/actionless policy; #3473/#3043 must remain strict rejects")
 			} else if !strings.Contains(err.Error(), tc.strictDiagnostic) {
 				t.Fatalf("strict diagnostic = %q, want %q (#3043/#3044 pin)", err, tc.strictDiagnostic)
 			}
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, tc.text))
+				cfg, err := entry.compile(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s must accept the persisted duplicate on the tolerant path (#1960): %v", entry.label, err)
 				}
@@ -72,7 +72,7 @@ func TestFoldTwoDefaultedDeniesAreNotWidened9992(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, tc.text))
+				cfg, err := entry.compile(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s must accept the persisted duplicate on the tolerant path (#1960): %v", entry.label, err)
 				}

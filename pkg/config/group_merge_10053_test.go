@@ -23,18 +23,18 @@ func TestApplyGroupsExceptNestedLeafListPerMember10053(t *testing.T) {
 }
 apply-groups G;
 system { %s }`
-	ctrl := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "domain-name example.com;")))
+	ctrl := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "domain-name example.com;")))
 	if got := ctrl.System.NameServers; !contains9862(got, "1.1.1.1") || !contains9862(got, "2.2.2.2") {
 		t.Fatalf("POSITIVE CONTROL broken: NameServers=%v, want both members", got)
 	}
 	t.Run("except-H2 keeps exactly H1", func(t *testing.T) {
-		got := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except H2;"))).System.NameServers
+		got := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except H2;"))).System.NameServers
 		if !equalStrs9862(got, []string{"1.1.1.1"}) {
 			t.Fatalf("NameServers=%v, want [1.1.1.1] (H2's member must drop)", got)
 		}
 	})
 	t.Run("except-H1 keeps exactly H2", func(t *testing.T) {
-		got := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
+		got := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
 		if !equalStrs9862(got, []string{"2.2.2.2"}) {
 			t.Fatalf("NameServers=%v, want [2.2.2.2] (H1's member must drop)", got)
 		}
@@ -52,11 +52,11 @@ func TestApplyGroupsExceptNestedLeafListCollapsedPerMember10053(t *testing.T) {
 }
 apply-groups G;
 system { %s }`
-	ctrl := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "domain-name example.com;")))
+	ctrl := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "domain-name example.com;")))
 	if got := ctrl.System.NameServers; !contains9862(got, "1.1.1.1") || !contains9862(got, "2.2.2.2") {
 		t.Fatalf("POSITIVE CONTROL broken: NameServers=%v, want both members", got)
 	}
-	got := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except H2;"))).System.NameServers
+	got := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except H2;"))).System.NameServers
 	if !equalStrs9862(got, []string{"1.1.1.1"}) {
 		t.Fatalf("NameServers=%v, want [1.1.1.1] (collapsed shape must match block)", got)
 	}
@@ -65,7 +65,7 @@ system { %s }`
 // Direct-shape control: applied without nesting the same exclusion already
 // filters per group (outer veto, no union collapse). Must not move.
 func TestApplyGroupsExceptDirectLeafListControl10053(t *testing.T) {
-	got := compile9422(t, parseTree9422(t, `groups {
+	got := compile9422(t, parseHierText(t, `groups {
   H1 { system { name-server { 1.1.1.1; } } }
   H2 { system { name-server { 2.2.2.2; } } }
 }
@@ -87,11 +87,11 @@ func TestApplyGroupsExceptNestedLeafListSharedMember10053(t *testing.T) {
 }
 apply-groups G;
 system { %s }`
-	got1 := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
+	got1 := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
 	if !contains9862(got1, "1.1.1.1") || !contains9862(got1, "2.2.2.2") {
 		t.Fatalf("except-H1 over-excluded H2's members: NameServers=%v", got1)
 	}
-	gotBoth := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except [ H1 H2 ];"))).System.NameServers
+	gotBoth := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except [ H1 H2 ];"))).System.NameServers
 	if len(gotBoth) != 0 {
 		t.Fatalf("except-[H1 H2] kept members: NameServers=%v, want none", gotBoth)
 	}
@@ -108,7 +108,7 @@ func TestApplyGroupsExceptNestedLeafListQuote10053(t *testing.T) {
 }
 apply-groups G;
 system { apply-groups-except H2; }`
-	tree := parseTree9422(t, text)
+	tree := parseHierText(t, text)
 	if err := tree.ExpandGroups(); err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestApplyGroupsExceptNestedLeafListInlineDuplicateKeeps10053(t *testing.T) 
 }
 apply-groups G;
 system { name-server 1.1.1.1; apply-groups-except H2; }`
-	got := compile9422(t, parseTree9422(t, text)).System.NameServers
+	got := compile9422(t, parseHierText(t, text)).System.NameServers
 	if !equalStrs9862(got, []string{"1.1.1.1"}) {
 		t.Fatalf("inline duplicate was over-excluded: NameServers=%v, want [1.1.1.1]", got)
 	}
