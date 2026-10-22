@@ -97,18 +97,63 @@ Guard (acceptance — locally-active unchanged):
 
 - `cached_forward_candidate_egress_rg_departed_supersedes_16270`
   (`forwarding/tests.rs`): fresh ForwardCandidate egress reth0.80/12
-  RG1; active -> None (valid), inactive -> ForwardCandidateEgressDeparted,
-  RG1 absent from a clustered map -> departed, empty map
-  (standalone) -> None; per-flow entry point agrees. RED-on-revert.
+  RG1; active -> None (valid); departed/absent -> superseded
+  (EnforceChanged where the egress row is present for enforce to
+  demote — measured, see below — ForwardCandidateEgressDeparted
+  where enforce compares equal, the live fw0 shape); empty map
+  never reads the new arm; per-flow entry point agrees.
 - `forward_candidate_egress_departed_falls_through_16270`
   (`poll_descriptor/flow_cache_hit_tests.rs`): live hit stage —
-  departed egress RG1 evicts with the new arm and falls through
-  (tallies (0,1,1)); locally-active control is Consumed with the arm
-  at 0.
+  departed egress RG1 evicts once (EnforceChanged + new-arm sum = 1)
+  and falls through (tallies (0,1,1)); locally-active control is
+  Consumed with the new arm at 0.
 
-## Live aged verdict
+Validation: `cargo test 16270` 4/4; `forwarding::tests` 216 passed;
+`flow_cache_hit` 71 passed with 2 failures identical on unmodified
+`78bc60d98c` (pre-existing); Go metrics tests pass, go vet clean,
+status golden tests pass (format/api full-suite failures identical
+on base).
 
-Recorded below after the uninstrumented homogeneous-build cell
-(aged 30 s P4, single RG1 failover fw0->fw1, all-node0 posture).
-Cluster restored afterwards: clean master `2c8575b70e` on both
-nodes, RG0/1/2 node0, forwarding verified.
+## Live aged verdict (fix build 9b9321a2c1, deb 99.16270.2+g9b9321a2c1)
+
+Homogeneous build hash-proved before traffic: helper sha256
+`40077b55...7156` identical via `/proc/<pid>/exe` on both nodes.
+All-node0 posture, P4 60 s, RG1 fw0->fw1 at 30 s age, uninstrumented.
+Evidence: `/var/worktrees/fzfix16270c/cell/`.
+
+| Arm | Build | SUM zero intervals | snat_revoked | Verdict |
+|---|---|---|---|---|
+| Clean master (FZDiag8) | 2c8575b70e | 130 | — | FAIL |
+| #16269 seed preservation | 99.16269.4.dirty | 125 | — | FAIL |
+| #16270 FIB (a)+(b) | 72e77aed37 | 46 (pre-FO zeros) | — | FAIL |
+| PR head (FZDiag10) | 2549682f12+DISC | 25 (revoked ~28 s pre-FO) | fw0 0->4 | FAIL |
+| #16215 third shape | ca91c55e5a / 99.16215.1 | 25 (all from FO+1 s) | 0 both, all samples | FAIL |
+| This fix | 9b9321a2c1 / 99.16270.2 | **25 (all from FO+1 s, 31 s)** | **0 both, all samples** | **FAIL — acceptance NOT met** |
+
+This fix does NOT close the aged-failover blackhole live. The
+signature is unchanged from the #16215-third-shape arm: no
+pre-failover zeros (6.3-7.0 Gbit/s through 30 s), 25 zero SUM
+intervals from failover+1 s, sessions still present post-run. The
+decisive counter evidence: on fw0 the new arm
+`post_hit_forward_candidate_egress_departed` is **0** at FO+1 s and
+post-run, and `post_hit_enforce_changed` is also **0** — the cached
+ForwardCandidate entries were removed earlier by the pre-existing
+lookup fences (`lookup_rg_epoch` 4 + `lookup_lease` 2 on fw0), so
+no ForwardCandidate cache hit ever reached decision revalidation
+post-failover. The eviction happened, but the flows still died:
+after re-resolve the traffic does not move to fw1 (fw1 post-run
+rows for the 4 streams show forward `Pkts: 0` with only 16-packet
+WAN-return trickles). The remaining blackhole is therefore NOT
+fw0 flow-cache retention of the ForwardCandidate — that leg is
+evicted by the lookup fences and, where it survives them, by this
+fix — but the post-re-resolve forward path for these aged
+established sessions (the same residual the #16215 and #16223
+lanes named). This commit is a correct, guarded supersession for
+the enforce-equal cache shape FZDiag11 proved in the DISC build
+(where the lookup fences did not fire first); it is necessary
+hygiene for that shape and must not merge as the aged-failover
+cure until the post-re-resolve leg is fixed.
+
+Cluster restored: clean master 2c8575b70e, helper `2f2f5cbf...b04`
+both nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
+12.7 Gbit/s verified.
