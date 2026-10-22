@@ -281,7 +281,7 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 		if resp.Error == "" {
 			resp.Error = "unknown helper error"
 		}
-		return ControlResponse{}, newHelperRejection(resp.Error)
+		return ControlResponse{}, newHelperRejectionWithCode(resp.Error, resp.ErrorCode, resp.ErrorRetryClass)
 	}
 	return resp, nil
 }
@@ -307,6 +307,20 @@ var (
 // teardown. It deliberately does not match errHelperRejected: outcome handling
 // must retain retry debt and disable ctrl, never roll classifier maps back.
 const snapshotPostTeardownPrefix = "snapshot post-teardown refusal:"
+
+// #16133: additive structured boundary classification for the ONE prefix
+// site converted in this change (post-teardown above). The Rust side emits
+// these beside the prose prefix in ControlResponse; Go test constants are
+// bound to the Rust constants by reading control.rs, as for the prefix.
+// Classification rule: a recognized code wins; an empty or UNRECOGNIZED
+// code falls back to the legacy prefix arm. That fallback is load-bearing
+// — an unknown future code may coexist with a known legacy prefix, and the
+// refutation preserved on #16133 forbids any blanket unknown=>never-retry
+// rule. Sites not converted here ignore the fields entirely.
+const (
+	errorCodeSnapshotPostTeardown = "snapshot_post_teardown"
+	errorRetryClassRetryDebt      = "retry_debt"
+)
 
 // Deterministic-local control failures: the request provably never reached the
 // helper (pre-transmission), so retry is futile and the failure must never adopt
@@ -364,6 +378,19 @@ func isKnownUnsentFailure(err error) bool {
 type helperRejectedError struct{ msg string }
 
 func newHelperRejection(msg string) error {
+	return newHelperRejectionWithCode(msg, "", "")
+}
+
+// newHelperRejectionWithCode is the #16133 differential classifier for the
+// converted post-teardown site: the error's message is carried VERBATIM
+// (operator text unchanged) while classification rides beside it. A
+// recognized (code, retry class) pair classifies as post-teardown even
+// without the prose prefix; empty or unrecognized structured fields fall
+// back to the legacy prefix arm — never to a blanket non-retry default.
+func newHelperRejectionWithCode(msg, errorCode, errorRetryClass string) error {
+	if errorCode == errorCodeSnapshotPostTeardown && errorRetryClass == errorRetryClassRetryDebt {
+		return &helperPostTeardownError{msg: msg}
+	}
 	if strings.HasPrefix(msg, snapshotPostTeardownPrefix) {
 		return &helperPostTeardownError{msg: msg}
 	}

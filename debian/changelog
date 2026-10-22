@@ -1,5 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Add additive structured boundary errors for one prefix site
+    (#16133): ControlResponse gains error_code/error_retry_class beside
+    the prose error on both Go and Rust sides, and the #10702
+    post-teardown refusal (both apply legs) now stamps
+    snapshot_post_teardown/retry_debt while keeping the legacy prose
+    prefix verbatim, so old binaries classify exactly as before. New Go
+    prefers a recognized (code, class) pair but falls back to the prefix
+    when the code is empty or unrecognized — no blanket
+    unknown=>never-retry rule, and every other prefix site is untouched.
+    A wire-level differential matrix (success, false-positive prefix,
+    missing fields, prefix-only, code-only, unknown code with/without
+    known prefix, mismatched class) pins old/new equivalence. No
+    hot-path change; the fields are stamped only on the cold
+    post-teardown refusal path.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Split pkg/feeds/feeds.go mechanically into parse.go (parseFeed,
     fetchResult, canonicalize/hashPrefixes and the parse caps/guards)
     and fetch.go (fetchFeed/readFeed, SSRF destination validation,

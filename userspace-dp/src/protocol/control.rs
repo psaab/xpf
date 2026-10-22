@@ -325,12 +325,22 @@ pub(crate) const SNAPSHOT_CONTENT_CONFLICT_PREFIX: &str =
 /// this constant from this file, so rename both sides together.
 pub(crate) const SNAPSHOT_POST_TEARDOWN_PREFIX: &str = "snapshot post-teardown refusal:";
 
+/// #16133: additive structured boundary classification beside the prose
+/// `error` above. Old readers ignore these fields and keep classifying on
+/// the prose prefix; new readers prefer a recognized code but MUST fall
+/// back to the prefix when the code is empty or a future unrecognized
+/// value, because an unknown code may coexist with a known legacy prefix
+/// on skewed pairs. No blanket unknown=>never-retry rule exists.
+pub(crate) const ERROR_CODE_SNAPSHOT_POST_TEARDOWN: &str = "snapshot_post_teardown";
+pub(crate) const ERROR_RETRY_CLASS_RETRY_DEBT: &str = "retry_debt";
+
 /// #10702: format post-teardown worker-bring-up refusals on both `apply` legs.
 pub(crate) fn snapshot_post_teardown_refusal(verb: &str, stage: &impl std::fmt::Display) -> String {
     format!(
         "{SNAPSHOT_POST_TEARDOWN_PREFIX} {verb} after teardown ({stage}); dataplane down — snapshot not persisted"
     )
 }
+
 
 /// #9344/#9856: the owner-RG session export paging contract this helper
 /// implements.
@@ -978,6 +988,14 @@ pub(crate) struct ControlResponse {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// #16133: additive structured code beside `error` (empty on success
+    /// and on refusals not yet converted; one prefix site per change).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_code: String,
+    /// #16133: retry classification for `error_code` (`retry_debt` for the
+    /// post-teardown site converted here). Empty when no code is carried.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_retry_class: String,
     /// #7919: one row per worker for the `session_counters` verb. Empty for
     /// every other verb, and empty from a helper that does not implement it —
     /// the Go caller distinguishes those by the `unknown request type` error,

@@ -730,8 +730,15 @@ type ControlRequest struct {
 }
 
 type ControlResponse struct {
-	OK                           bool                 `json:"ok"`
-	Error                        string               `json:"error,omitempty"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+	// #16133: additive structured boundary classification beside Error.
+	// Empty from older helpers; Go ignores them entirely for every site
+	// not yet converted, and for the converted post-teardown site it
+	// prefers a recognized code but falls back to the prose prefix when
+	// the code is empty or unrecognized (no blanket unknown rule).
+	ErrorCode                    string               `json:"error_code,omitempty"`
+	ErrorRetryClass              string               `json:"error_retry_class,omitempty"`
 	Status                       *ProcessStatus       `json:"status,omitempty"`
 	SessionPolicyMatches         []SessionPolicyMatch `json:"session_policy_matches,omitempty"`
 	SessionPolicyComplete        bool                 `json:"session_policy_complete,omitempty"`

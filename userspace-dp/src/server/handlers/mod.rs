@@ -201,6 +201,8 @@ pub(crate) fn handle_stream(
     let mut response = ControlResponse {
         ok: true,
         error: String::new(),
+        error_code: String::new(),
+        error_retry_class: String::new(),
         status: None,
         session_counters: Vec::new(),
         session_policy_matches: Vec::new(),
