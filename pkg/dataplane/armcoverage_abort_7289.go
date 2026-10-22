@@ -44,12 +44,12 @@ package dataplane
 //
 // SCOPE. This covers the aborts that happen with a CompileResult in hand — the
 // two bpffs cleanups and runPostMutationSteps (preflightCheckIfindexCaps and
-// attachUserspaceShimXDP). A failure inside CompileConfig's own later phases
-// returns `nil` for the result (compiler.go returns `nil, err` on every phase
-// error), so there is no pendingXDP to prove coverage against and this cannot
-// help there; #7289's body classes those as "effectively unreachable
-// post-#6894 on the live shim path", and closing them needs CompileConfig to
-// return a partial result, which is a separate change.
+// attachUserspaceShimXDP). #15943 (H11-01) closed the remaining gap: a failure
+// inside CompileConfig at or after Phase 2 now returns the partial result, and
+// CompileUserspaceShim routes it through this same helper, so a post-Phase-2
+// phase failure gets the live proof and retained divergence too. Only
+// pre-mutation failures (the #4960 pre-pass) still arrive with no result, and
+// those mutated nothing.
 //
 // This is deliberately NOT an undo. Nothing here restores the host state Phase
 // 2 already moved — PR #7288 makes that divergence VISIBLE and this makes the
