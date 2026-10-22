@@ -351,18 +351,23 @@ fn ranges_merge_covered_and_adjacent_15091() {
 }
 
 // -----------------------------------------------------------------
-// #16189: generic family machinery. Two distinct claims, two cells:
-// (a) `host_mask_guards_boundaries_16189` pins the required trait
-//     method's guarded values directly — it catches a broken
-//     `host_mask` impl, but NOT a builder that bypasses it.
-// (b) `builder_uses_guarded_host_mask_16189` exercises the public
-//     Ranges builder at the lengths where an unguarded inline
-//     `(1 << (BITS - len)) - 1` at the call site breaks: len==BITS
-//     (/32, /128 — shift by BITS) and the shortest non-zero lens.
-//     A call-site bypass replacing `F::host_mask(..)` with an
-//     unguarded shift panics in debug / yields a wrong mask in
-//     release at those lens, so this cell fails on that revert
-//     even though the direct host_mask cell still passes.
+// #16189: generic family machinery. The `host_mask` guard is an
+// IMPL-LEVEL contract, and this must be stated plainly:
+// `merged_ranges` has NO observable bypass shape. Constructors
+// funnel len==0 to MatchAny before the builder runs, and
+// PrefixV4/PrefixV6 lengths cannot exceed BITS, so the builder
+// only ever sees len in 1..=BITS — where the raw
+// `(1 << (BITS - len)) - 1` shifts by 0..BITS-1 and yields
+// exactly the guarded result. No test through the builder can
+// distinguish `F::host_mask(..)` from an unguarded inline shift.
+// What the required trait method buys is that the guards live
+// with each family impl (verified directly by
+// `host_mask_guards_boundaries_16189`, including the
+// out-of-range lens the builder never passes), not that a
+// call-site bypass would be caught here.
+// `builder_ranges_at_boundary_lens_16189` below is therefore a
+// RANGE-CORRECTNESS cell only: it pins the builder's exact
+// retained ranges at len==BITS and BITS-1 for both families.
 // -----------------------------------------------------------------
 
 #[test]
@@ -485,14 +490,15 @@ fn generic_set_boundary_membership_16189() {
 }
 
 #[test]
-fn builder_uses_guarded_host_mask_16189() {
-    // Call-site cell (see header): drive the public Ranges builder
-    // (>16 prefixes) at len==BITS and near-BITS lens for BOTH
-    // families and assert the exact retained ranges. If
-    // `merged_ranges` ever bypasses `F::host_mask` with an
-    // unguarded `(1 << (BITS - len)) - 1`, the /32 (resp. /128)
-    // entries shift by 32 (resp. 128): debug panics, release
-    // produces a full-space mask and these ranges collapse wrong.
+fn builder_ranges_at_boundary_lens_16189() {
+    // Range-correctness ONLY (see header): pins the builder's exact
+    // retained ranges at len==BITS (/32, /128) and BITS-1 (/31, /127)
+    // for both families. It cannot — and does not claim to — detect
+    // a builder that bypasses `F::host_mask`, because for every len
+    // the builder can actually receive (1..=BITS; len==0 is funneled
+    // to MatchAny by the constructors and prefix lens cannot exceed
+    // BITS) the raw `(1 << (BITS - len)) - 1` shifts by 0..BITS-1 and
+    // yields the same mask as the guarded method.
     // v4: sixteen /32 hosts inside 10.0.0.0/24 plus the /24 itself
     // and a disjoint /31 (len == BITS-1) at the top of the space.
     let mut v4: Vec<PrefixV4> = (0..16).map(|i| p4(&format!("10.0.0.{i}/32"))).collect();
@@ -511,7 +517,7 @@ fn builder_uses_guarded_host_mask_16189() {
                     u32::from(Ipv4Addr::new(255, 255, 255, 255)),
                 ),
             ];
-            assert_eq!(*r, expected, "builder must use guarded host_mask (v4)");
+            assert_eq!(*r, expected, "builder ranges at boundary lens (v4)");
             assert_eq!(*n, 18);
         }
         other => panic!("expected Ranges, got {other:?}"),
@@ -530,7 +536,7 @@ fn builder_uses_guarded_host_mask_16189() {
             let lo127 = u128::from("2001:db8:ffff::fffe".parse::<Ipv6Addr>().expect("ip"));
             let expected: Vec<(u128, u128)> =
                 vec![(lo112, lo112 + (1u128 << 16) - 1), (lo127, lo127 + 1)];
-            assert_eq!(*r, expected, "builder must use guarded host_mask (v6)");
+            assert_eq!(*r, expected, "builder ranges at boundary lens (v6)");
             assert_eq!(*n, 18);
         }
         other => panic!("expected Ranges, got {other:?}"),

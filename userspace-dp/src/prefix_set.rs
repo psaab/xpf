@@ -123,6 +123,17 @@ pub(crate) trait PrefixFamily: Sized {
     /// `len >= BITS` yields zero; only between them is
     /// `(1 << (BITS - len)) - 1` evaluated, where the shift count
     /// is in `1..BITS` and cannot overflow.
+    ///
+    /// This is an IMPL-LEVEL contract: `merged_ranges` has no
+    /// observable bypass shape, because its callers funnel
+    /// `len == 0` to `MatchAny` and prefix lens cannot exceed
+    /// `BITS`, so the builder only sees `1..=BITS` — where the
+    /// raw formula shifts by `0..BITS-1` and agrees with the
+    /// guarded result. The value of keeping the guards here is
+    /// that each family impl carries them (pinned directly by
+    /// the `host_mask` tests, including out-of-range lens the
+    /// builder never passes), so no future call site needs to
+    /// re-derive them safely.
     fn host_mask(prefix_len: u8) -> Self::Key;
 }
 
