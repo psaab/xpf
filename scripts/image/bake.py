@@ -164,33 +164,17 @@ def die(m):
 # #5992: the version is interpolated into artifact WRITE paths — qcow_out /
 # meta_out / the SHA256SUMS manifest, all `os.path.join(a.out, "xpf-<ver>.…")`.
 # A path separator / `..` / absolute path / leading dash in `--version` would
-# escape `--out` or be read as a CLI flag. Validate it against a version-safe
-# allowlist BEFORE it names any file (fail closed). Charset MIRRORS
-# scripts/deploy/xpf-deploy.py:validate_version and pkg/upgrade.ValidateVersion
-# Segment (minus the Debian epoch `:`, never part of an artifact filename).
-_SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*\Z")
-
-
+# escape `--out` or be read as a CLI flag. Validate it against the shared
+# filename-sink allowlist in scripts/dist/sign.py BEFORE it names any file
+# (fail closed); this adapter only maps SignError onto bake's die() channel
+# (#16190). Per-sink divergence from Go ValidateVersionSegment is pinned in
+# scripts/dist/version_fixture_16190.json.
 def validate_version(value, field):
-    """Reject a version that could escape the artifact output directory when
-    substituted into `xpf-<ver>.qcow2` (and siblings). Fail-closed on a path
-    separator, `..`, absolute path, leading `.`/`-`, whitespace, `%`, or any
-    char outside [A-Za-z0-9._+~-]. Accepts git-describe / semver versions."""
-    if not isinstance(value, str) or not value:
-        die(f"{field} is required and must be a non-empty string")
-    if os.path.isabs(value):
-        die(f"{field} '{value}' must not be an absolute path")
-    if "/" in value or "\\" in value or os.sep in value \
-            or (os.altsep and os.altsep in value):
-        die(f"{field} '{value}' must not contain a path separator")
-    if value.startswith("-"):
-        die(f"{field} '{value}' must not start with '-' (would be read as a CLI flag)")
-    if not _SAFE_VERSION.match(value):
-        die(f"{field} '{value}' is not a safe version — allow only "
-            "[A-Za-z0-9][A-Za-z0-9._+~-]* (no separators, '..', '%', spaces, or "
-            "shell metacharacters), so it cannot escape the artifact output "
-            "directory (#5992)")
-    return value
+    """Reject a version unsafe for `xpf-<ver>.*` artifact names (#5992)."""
+    try:
+        return sign.validate_version(value, field)
+    except sign.SignError as e:
+        die(str(e))
 
 
 def validate_image_keyring_text(keyring, source):

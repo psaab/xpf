@@ -354,13 +354,16 @@ def is_bake_manifest(manifest_path):
     return base.startswith("xpf-") and base.endswith(".SHA256SUMS")
 
 
-# Version allowlist MIRRORS scripts/image/bake.py:validate_version (#5992),
-# which itself mirrors scripts/deploy/xpf-deploy.py:validate_version and
-# pkg/upgrade.ValidateVersion. Mirrored (not imported: bake imports THIS
-# module, so importing bake would cycle) with charset parity asserted in
-# scripts/dist/test_dist_resign_9920.py. Raises SignError instead of dying —
-# the strict gate needs a catchable refusal, and this module never exits
-# outside _main.
+# Single source for the Python filename-sink version allowlist (#5992,
+# unified #16190): bake.py and xpf-deploy.py import this validator and
+# adapt its SignError to their die() channel, instead of carrying copies.
+# Raises SignError instead of dying — the strict gate needs a catchable
+# refusal, and this module never exits outside _main. The charset
+# deliberately differs from pkg/upgrade.ValidateVersionSegment (the
+# systemd ExecStart sink): Go allows the Debian epoch `:` and leading
+# `-+_~:`, this sink requires an initial alphanumeric and drops `:` because
+# the value names `xpf-<ver>.*` artifacts. The per-sink outcomes are pinned
+# in version_fixture_16190.json; do not normalise either policy to match.
 _SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*\Z")
 
 
