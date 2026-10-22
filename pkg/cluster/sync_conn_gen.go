@@ -1816,7 +1816,8 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		stampPolicyIdentityLocked(s.policyIdentityRecvV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
 	}
 	s.recvGenMu.Unlock()
-	if err := s.sessions.PutClusterSyncedV4(key, val); err == nil {
+	err := s.sessions.PutClusterSyncedV4(key, val)
+	if err == nil {
 		// #6368: re-read the threshold after the write (see the shared
 		// core's contract via logInstallOutcome's rollback arm).
 		if s.configEpochStale(val.ConfigEpoch) {
@@ -1825,14 +1826,9 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		}
 		s.recordInstalledGenV4(key, record)
 		s.recordInstalledGenScopedV4(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
-		return logInstallOutcome(s, "v4", nil, val.IsReverse, func(k dataplane.SessionKey, retry bool) {
-			s.noteBulkInstallOutcomeV4(k, retry)
-		}, key, &s.sessionMirrorWarnedV4)
-	} else {
-		return logInstallOutcome(s, "v4", err, val.IsReverse, func(k dataplane.SessionKey, retry bool) {
-			s.noteBulkInstallOutcomeV4(k, retry)
-		}, key, &s.sessionMirrorWarnedV4)
+		return logInstallOutcome(s, "v4", nil, val.IsReverse, &s.bulkInstallFailedV4, key, &s.sessionMirrorWarnedV4)
 	}
+	return logInstallOutcome(s, "v4", err, val.IsReverse, &s.bulkInstallFailedV4, key, &s.sessionMirrorWarnedV4)
 }
 
 // installClusterSyncedV6 applies a received v6 install through the ordering
@@ -1882,7 +1878,8 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		stampPolicyIdentityLocked(s.policyIdentityRecvV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
 	}
 	s.recvGenMu.Unlock()
-	if err := s.sessions.PutClusterSyncedV6(key, val); err == nil {
+	err := s.sessions.PutClusterSyncedV6(key, val)
+	if err == nil {
 		// #6368: see the v4 twin — re-read the threshold after the write.
 		if s.configEpochStale(val.ConfigEpoch) {
 			s.rollBackStaleConfigInstallV6(key, val.ConfigEpoch)
@@ -1890,14 +1887,9 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		}
 		s.recordInstalledGenV6(key, record)
 		s.recordInstalledGenScopedV6(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
-		return logInstallOutcome(s, "v6", nil, val.IsReverse, func(k dataplane.SessionKeyV6, retry bool) {
-			s.noteBulkInstallOutcomeV6(k, retry)
-		}, key, &s.sessionMirrorWarnedV6)
-	} else {
-		return logInstallOutcome(s, "v6", err, val.IsReverse, func(k dataplane.SessionKeyV6, retry bool) {
-			s.noteBulkInstallOutcomeV6(k, retry)
-		}, key, &s.sessionMirrorWarnedV6)
+		return logInstallOutcome(s, "v6", nil, val.IsReverse, &s.bulkInstallFailedV6, key, &s.sessionMirrorWarnedV6)
 	}
+	return logInstallOutcome(s, "v6", err, val.IsReverse, &s.bulkInstallFailedV6, key, &s.sessionMirrorWarnedV6)
 }
 
 // logInstallOutcome is the shared post-write outcome tail behind
@@ -1908,10 +1900,10 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 // mirror health; otherwise it records the transient mirror failure.
 // The dataplane write itself stays in the family wrappers above —
 // PutClusterSyncedV4/V6 are genuinely different stores.
-func logInstallOutcome[K comparable](s *SessionSync, af string, err error, isReverse uint8, noteBulk func(K, bool), key K, warned *atomic.Bool) bool {
+func logInstallOutcome[K comparable](s *SessionSync, af string, err error, isReverse uint8, bulkFailed *map[K]struct{}, key K, warned *atomic.Bool) bool {
 	if err == nil {
 		s.stats.SessionsInstalled.Add(1)
-		noteBulk(key, false)
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, false)
 		s.noteHelperMirrorResult(af, warned, nil)
 		if isReverse == 0 && s.OnForwardSessionInstalled != nil {
 			s.OnForwardSessionInstalled()
@@ -1926,7 +1918,7 @@ func logInstallOutcome[K comparable](s *SessionSync, af string, err error, isRev
 		slog.Debug("cluster sync: helper refused a synced-session import; the "+
 			"local mirror was rolled back and the peer holds a session this node does not",
 			"af", af, "err", err)
-		noteBulk(key, false)
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, false)
 	} else if definitiveBulkInstallOutcome(err) {
 		// A committed worker-repair result or deterministic helper
 		// rejection cannot be repaired by re-sending the identical row.
@@ -1935,10 +1927,10 @@ func logInstallOutcome[K comparable](s *SessionSync, af string, err error, isRev
 		}
 		slog.Debug("cluster sync: helper returned a committed or deterministic synced-session outcome",
 			"af", af, "err", err)
-		noteBulk(key, false)
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, false)
 	} else {
 		s.noteHelperMirrorResult(af, warned, err)
-		noteBulk(key, true)
+		noteBulkInstallOutcomeCore(s, bulkFailed, key, true)
 	}
 	return false
 }
