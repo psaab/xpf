@@ -4,12 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
-	"github.com/psaab/xpf/pkg/peerclient"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -40,25 +38,17 @@ func failoverCLI15081(t *testing.T) *CLI {
 	return &CLI{cluster: mgr}
 }
 
-func TestCLIFailoverProxyDeadlineSizedFromClusterBudget15081(t *testing.T) {
-	c := failoverCLI15081(t)
-	// The sizing now lives in the shared peerclient table (#16154); this
-	// pins the CLI surface's view of it. peerclient's own golden test
-	// byte-pins TimeoutFor/Reconcile/IsDeadline.
-	if got := peerclient.TimeoutFor("cluster-failover:1:node1"); got < 40*time.Second {
-		t.Fatalf("TimeoutFor(targeted) = %v, want ~46s cluster budget (was 5s pre-fix)", got)
-	}
-	if got := peerclient.TimeoutFor("cluster-failover-data:node1"); got < 40*time.Second {
-		t.Fatalf("TimeoutFor(data) = %v, want ~46s cluster budget", got)
-	}
-	if got := peerclient.TimeoutFor("clear-persistent-nat"); got != 5*time.Second {
-		t.Fatalf("TimeoutFor(clear-persistent-nat) = %v, want 5s control", got)
-	}
-	if got := peerclient.TimeoutFor("cluster-failover:1"); got != 5*time.Second {
-		t.Fatalf("TimeoutFor(untargeted) = %v, want 5s (never proxied)", got)
-	}
-	_ = c
-}
+// #16154 fold: the CLI timeout sizing is NOT pinned here by calling
+// the shared peerclient.TimeoutFor helper directly — that would pass
+// even if the CLI's own context site stopped consulting it. The
+// decisive cells are the dial-path goldens in
+// peerclient_frontend_golden_16154_test.go, which observe the
+// deadline the real loopback peer server receives through
+// dialPeer + context.WithTimeout(ctx, peerclient.TimeoutFor(action)).
+// This cell is retained only as the fast seam-level control that the
+// reconciled wording still flows through handleRequestChassis-
+// ClusterFailover; byte-exact wording is pinned there and in
+// pkg/peerclient.
 
 func TestCLIFailoverTimeoutAfterPeerCommitReportsSuccess15081(t *testing.T) {
 	c := failoverCLI15081(t)

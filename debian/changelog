@@ -8,7 +8,11 @@ xpf (0.0.0) unstable; urgency=medium
     (pkg/grpcapi failoverProxyTimeoutOutcome) twins, whose verbatim
     templates are now byte-pinned by peerclient_16154_test.go
     (timeout, committed, partially-completed data-RG, peer-down, and
-    response-wording cases). Both frontends keep their own dialers
+    response-wording cases), and the fold adds frontend-driven
+    byte-goldens: the CLI through its real dialPeer + WithTimeout
+    context site against a loopback peer (server-observed ~46s, not
+    5s), and the gRPC SystemAction path, peer-down included. Both
+    frontends keep their own dialers
     (CLI background TCP probe / nil-on-fail vs gRPC ctx-bound
     GetStatus probe), their own RPC deadline construction, and
     their own fabric-auth credential/token construction — no
