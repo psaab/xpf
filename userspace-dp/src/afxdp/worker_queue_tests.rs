@@ -432,7 +432,7 @@ fn call_argument(src: &str, open: usize) -> &str {
 /// Production files can also contain test-only modules. The source walk excludes
 /// test-only files, but scanning those inline modules would report fixture
 /// queue setup as a production producer.
-fn blank_cfg_test_modules(src: &str) -> String {
+pub(crate) fn blank_cfg_test_modules(src: &str) -> String {
     let mut out = src.as_bytes().to_vec();
     let mut search = 0;
     while let Some(relative) = src[search..].find("#[cfg(test)]") {

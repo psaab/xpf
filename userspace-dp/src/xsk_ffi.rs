@@ -49,6 +49,11 @@ pub(crate) struct XskSocketOpaque {
     _opaque: [u8; 0],
 }
 
+// SAFETY: plain-old-data ring headers (integers plus raw pointers into
+// the mmap'd UMEM / libxdp-owned ring storage). The pointers are not
+// dereferenced from Rust except through the libxdp bridge under the
+// owning queue's single-writer discipline; moving the header to the
+// worker thread that owns the ring transfers that discipline with it.
 unsafe impl Send for XskRingProd {}
 unsafe impl Send for XskRingCons {}
 
@@ -409,8 +414,10 @@ pub struct Umem {
     umem_area: NonNull<[u8]>,
 }
 
-// Umem is not actually thread-safe (single-writer rings), but the
-// previous xdpilone code used it as Send-able. We preserve that.
+// SAFETY: `Umem` is not actually thread-safe (single-writer rings), but
+// the previous xdpilone code used it as Send-able. We preserve that:
+// the value is moved once to the worker that owns its queues, and the
+// fill/completion rings are only driven from that owner thereafter.
 unsafe impl Send for Umem {}
 
 impl Umem {
@@ -706,6 +713,9 @@ pub struct DeviceQueue {
     fd: c_int,
 }
 
+// SAFETY: owns the libxdp socket handle and its fill/completion rings.
+// Moved once to the owning worker; the fd and rings are only driven
+// from that owner thereafter (single-writer ring discipline).
 unsafe impl Send for DeviceQueue {}
 
 impl DeviceQueue {
@@ -855,6 +865,8 @@ pub struct RingRx {
     fd: c_int,
 }
 
+// SAFETY: owns a boxed consumer-ring header and the socket fd. Moved
+// once to the owning worker, which is the sole consumer thereafter.
 unsafe impl Send for RingRx {}
 
 impl RingRx {
@@ -938,6 +950,8 @@ pub struct RingTx {
     fd: c_int,
 }
 
+// SAFETY: owns a boxed producer-ring header and the socket fd. Moved
+// once to the owning worker, which is the sole producer thereafter.
 unsafe impl Send for RingTx {}
 
 impl RingTx {

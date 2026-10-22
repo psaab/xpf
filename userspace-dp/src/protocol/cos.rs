@@ -545,3 +545,6 @@ pub(crate) struct CoSActiveFlowCountStatus {
 #[cfg(test)]
 #[path = "cos_literal_guard_7689.rs"]
 mod cos_literal_guard_7689;
+#[cfg(test)]
+#[path = "unsafe_ratchet_16187.rs"]
+mod unsafe_ratchet_16187;
