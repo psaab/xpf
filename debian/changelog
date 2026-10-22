@@ -1,5 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Share only the transport-neutral peer-proxy reconciliation table
+    in new pkg/peerclient (#16154): TimeoutFor (proxy deadline
+    sizing), IsDeadline (deadline classification), and Reconcile
+    (post-deadline RG-ownership reconciliation, #15081) move out of
+    the CLI (pkg/cli/peer.go failoverProxyTimeoutMessage) and gRPC
+    (pkg/grpcapi failoverProxyTimeoutOutcome) twins, whose verbatim
+    templates are now byte-pinned by peerclient_16154_test.go
+    (timeout, committed, partially-completed data-RG, peer-down, and
+    response-wording cases). Both frontends keep their own dialers
+    (CLI background TCP probe / nil-on-fail vs gRPC ctx-bound
+    GetStatus probe), their own RPC deadline construction, and
+    their own fabric-auth credential/token construction — no
+    unified Dialer or forwarder, so wedged-server reachability
+    (#8597 ResourceExhausted liveness) and signed-request metadata
+    behaviour are unchanged.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Share FlowRecord enrichment between NetFlow v9 and IPFIX behind an
     embedded exporterCore (new exporter_core.go), keeping the two
     stateful encoders separate (#16126): buildFlowRecord is now the
@@ -1196,4 +1214,5 @@ xpf (0.0.0) unstable; urgency=medium
     explicit next hops to their route's routing instance, and scope/recheck
     transit martians on neighbor replay and final transmit (#11074).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
+
 

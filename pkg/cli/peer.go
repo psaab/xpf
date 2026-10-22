@@ -6,7 +6,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,12 +16,11 @@ import (
 	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/grpcapi"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/peerclient"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 // fabricAuthKey resolves the #4107 control-link PSK the CLI attaches to peer
@@ -129,80 +127,25 @@ func (c *CLI) dialPeer() *grpc.ClientConn {
 	return nil
 }
 
-// peerSystemActionTimeout sizes the deadline for a CLI-forwarded
-// SystemAction. Ordinary actions keep the historical 5s budget; a
-// forwarded node-targeted cluster failover (#15081) runs the peer's
-// full RequestPeerFailover sequence (ACK + settle + commit, each
-// bounded well above 5s), so it uses the cluster-budget sizing
-// (clusterfailover.ProxyFailoverTimeout).
-func peerSystemActionTimeout(action string) time.Duration {
-	if clusterfailover.IsFailoverActionString(action) {
-		return clusterfailover.ProxyFailoverTimeout
-	}
-	return 5 * time.Second
-}
-
 // failoverProxyTimeoutMessage reconciles a CLI-forwarded failover whose
-// proxy leg hit a deadline against current RG ownership (#15081): the
-// peer may have committed after the proxy gave up, so a bare
-// DeadlineExceeded must never reach the operator for this path. It
-// returns (message, true) for deadline outcomes on targeted failovers
-// and ("", false) otherwise (the caller relays the original error).
+// proxy leg hit a deadline against current RG ownership (#15081) via the
+// shared peerclient reconciliation table (#16154): the peer may have
+// committed after the proxy gave up, so a bare DeadlineExceeded must
+// never reach the operator for this path. It returns (message, true)
+// for deadline outcomes on targeted failovers and ("", false)
+// otherwise (the caller relays the original error). The CLI dialer,
+// its RPC deadline construction, and its fabric-auth credentials stay
+// in this package; only the pure reconciliation is shared.
 func (c *CLI) failoverProxyTimeoutMessage(action string, err error) (string, bool) {
-	if err == nil || c.cluster == nil {
-		return "", false
-	}
-	if !isDeadlineErr(err) {
-		return "", false
-	}
 	op, perr := clusterfailover.ParseAction(action)
-	if perr != nil || !op.Targeted() {
+	if perr != nil {
 		return "", false
 	}
-	switch op.Kind {
-	case clusterfailover.KindRGFailoverNode:
-		if c.cluster.IsPeerPrimary(op.RG) {
-			return fmt.Sprintf("Manual failover completed for redundancy group %d (transfer committed on node %d; proxy response timed out after the peer committed)", op.RG, op.Node), true
-		}
-		if !c.cluster.PeerAlive() {
-			return fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group %d ownership before retrying", op.RG, op.Node, op.RG), true
-		}
-		return fmt.Sprintf("Cluster failover outcome unknown for redundancy group %d: forwarded request to node %d timed out; redundancy group %d is not primary on node %d — verify ownership before retrying", op.RG, op.Node, op.RG, op.Node), true
-	case clusterfailover.KindDataFailover:
-		peerRGs, peerAlive := c.cluster.PeerPrimaryRGs()
-		if !peerAlive {
-			return fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out and the peer is unreachable; verify redundancy group ownership before retrying", op.Node), true
-		}
-		if dataRGs := c.cluster.DataGroupIDs(); len(dataRGs) > 0 && len(peerRGs) == len(dataRGs) {
-			committed := true
-			for _, rgID := range dataRGs {
-				found := false
-				for _, prg := range peerRGs {
-					if prg == rgID {
-						found = true
-						break
-					}
-				}
-				if !found {
-					committed = false
-					break
-				}
-			}
-			if committed {
-				return fmt.Sprintf("Manual failover completed for data redundancy groups %v (transfer committed on node %d; proxy response timed out after the peer committed)", dataRGs, op.Node), true
-			}
-		}
-		return fmt.Sprintf("Data failover outcome unknown: forwarded request to node %d timed out; data redundancy groups now primary on node %d: %v — verify ownership before retrying", op.Node, op.Node, peerRGs), true
+	var view peerclient.Ownership
+	if c.cluster != nil {
+		view = c.cluster
 	}
-	return "", false
-}
-
-// isDeadlineErr reports whether err is a context/gRPC deadline outcome.
-func isDeadlineErr(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	return status.Code(err) == codes.DeadlineExceeded
+	return peerclient.Reconcile(view, op, err)
 }
 
 // requestPeerSystemAction asks the peer to perform a system-level action
@@ -239,7 +182,7 @@ func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Con
 	}
 	defer conn.Close()
 
-	peerCtx, cancel := context.WithTimeout(ctx, peerSystemActionTimeout(action))
+	peerCtx, cancel := context.WithTimeout(ctx, peerclient.TimeoutFor(action))
 	defer cancel()
 	resp, err := pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, req)
 	if err != nil {
