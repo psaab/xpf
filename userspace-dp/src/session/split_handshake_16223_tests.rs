@@ -881,6 +881,102 @@ fn split_serving_established_replica_pending_completes_and_announces_16217() {
     assert_eq!(updates[0].tcp_close_class, 0, "#16217: close class unchanged");
 }
 
+/// #16217 Wire8 (backup-origin publication): on the BACKUP node a
+/// canonical row held as a local serving row (`WorkerLocalImport` —
+/// this node's own session replicated across its workers — or
+/// `SharedPromote`) that is Established must be collected by
+/// `node_served_forward_slice` so the ct-slice restamps the shared
+/// canonical + forward-wire alias to Established; the fabric-ingress
+/// gate's shared lookup then hits regardless of which worker later
+/// receives the retransmit. Pre-fix `node_served_forward_slice` and
+/// `node_served_evidence` excluded every `is_peer_synced()` origin
+/// (which includes `WorkerLocalImport`), so fw1's Backup canonical
+/// rows never published and stayed `Timeout: 20`.
+/// A pure HA-peer replica (`SyncImport`/`SharedMaterialize`) is NOT
+/// a local serving row and must never publish from its own flags,
+/// even when Established — its completion is announced via the HA
+/// Update carve-out instead. Fail-closed arms: reverse, pending,
+/// and closing rows never collect.
+///
+/// FAIL-ON-REVERT: dropping `WorkerLocalImport` from the serving
+/// predicate leaves the WorkerLocalImport arm uncollected.
+#[test]
+fn backup_origin_row_publishes_to_shared_16217() {
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let established = TcpHandshakeState::Established.to_wire();
+
+    let mk = |origin: SessionOrigin, wire: u8| -> SessionTable {
+        let mut table = SessionTable::new();
+        assert!(table.upsert_synced_with_origin(
+            SessionInstall {
+                key: forward.clone(),
+                decision: decision(),
+                metadata: metadata(),
+                origin,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 99,
+                tcp_close_class: 0,
+                tcp_handshake_state: wire,
+                source_nat_static: None,
+            },
+            false,
+        ));
+        table
+    };
+    let collect = |table: &SessionTable| -> Vec<(SessionKey, crate::nat::NatDecision)> {
+        let mut out = Vec::new();
+        table.node_served_forward_slice(
+            0,
+            usize::MAX,
+            &|_| NodeServedEvidence::default(),
+            &mut out,
+        );
+        out
+    };
+
+    // Positive: backup-origin local serving rows publish.
+    for origin in [
+        SessionOrigin::WorkerLocalImport,
+        SessionOrigin::SharedPromote,
+    ] {
+        let table = mk(origin, established);
+        let e = table.entry_by_key(&forward).expect("row");
+        assert!(
+            e.established && !e.handshake_pending && !e.closing && !e.metadata.is_reverse,
+            "premise {origin:?}: Established non-reverse serving row"
+        );
+        assert!(
+            collect(&table).iter().any(|(k, _)| k == &forward),
+            "#16217 Wire8: {origin:?} Established backup row must publish to shared"
+        );
+    }
+
+    // Negative: pure SyncImport replica does not publish, even Established.
+    let replica = mk(SessionOrigin::SyncImport, established);
+    assert!(
+        !collect(&replica).iter().any(|(k, _)| k == &forward),
+        "#16217 Wire8: SyncImport replica must not publish from its own flags"
+    );
+    let materialized = mk(SessionOrigin::SharedMaterialize, established);
+    assert!(
+        !collect(&materialized).iter().any(|(k, _)| k == &forward),
+        "#16217 Wire8: SharedMaterialize replica must not publish"
+    );
+
+    // Fail-closed: pending WorkerLocalImport never collects.
+    let pending = mk(
+        SessionOrigin::WorkerLocalImport,
+        TcpHandshakeState::HandshakePending.to_wire(),
+    );
+    assert!(
+        !collect(&pending).iter().any(|(k, _)| k == &forward),
+        "#16217 Wire8: pending backup row must fail closed"
+    );
+}
+
 /// #16217 guard: a peer-synced row whose CLOSE class transitions
 /// (server RST) must stay silent — the carve-out is stage-only.
 #[test]

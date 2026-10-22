@@ -2246,9 +2246,13 @@ impl SessionTable {
     }
     /// #16217: like `established_forward_slice`, but assembling
     /// completion evidence NODE-WIDE for split-path rows no single
-    /// worker table can satisfy alone. A forward entry (any origin
-    /// except a peer-synced replica — serving rows only; closing
-    /// rows never qualify) is collected when the aggregated
+    /// worker table can satisfy alone. A forward entry whose origin
+    /// is a local serving row — locally-authored origins,
+    /// `SharedPromote`, or `WorkerLocalImport` (a replica of a
+    /// session authored by THIS node's other worker, i.e. a local
+    /// serving row, not a peer replica); pure HA-peer replicas
+    /// (`SyncImport`/`SharedMaterialize`) never qualify; closing
+    /// rows never qualify — is collected when the aggregated
     /// evidence proves the tuple completed: (a) any worker's local
     /// row Established (`served_and_completed` via the shared-map
     /// aggregator), (b) reverse traffic observed for the canonical
@@ -2278,11 +2282,17 @@ impl SessionTable {
                 if entry.metadata.is_reverse || entry.closing {
                     continue;
                 }
-                // Serving rows only: a peer-synced replica's own
+                // Serving rows only: a pure HA-peer replica's own
                 // flags are not node-level proof (its completion is
                 // announced via the HA Update carve-out instead).
+                // `WorkerLocalImport` IS a local serving row (this
+                // node's own session replicated across its workers),
+                // so its Established status is node-local proof on
+                // the BACKUP node too — excluding it left fw1's
+                // heavy canonical rows unpublished (#16217 Wire8).
                 let serving_origin = !entry.origin.is_peer_synced()
-                    || entry.origin == SessionOrigin::SharedPromote;
+                    || entry.origin == SessionOrigin::SharedPromote
+                    || entry.origin == SessionOrigin::WorkerLocalImport;
                 if !serving_origin {
                     continue;
                 }
