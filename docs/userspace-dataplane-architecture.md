@@ -3189,16 +3189,21 @@ stopped.
 
   **The appliance image ships the reservation (#16243).** `scripts/image/bake.py`
   writes `/etc/sysctl.d/99-xpf-hugepages.conf` verbatim from the repo file
-  (`hugepages_conf()`; pinned by `scripts/image/test_bake_hugepages_16243.py`),
-  and `debian/rules` installs the same file into the `.deb` for foreign-host
-  installs. Before #16243 NO provisioning path installed it — the file existed
-  in the repo only — so a ring-16384 rig booted with `HugePages_Total=0` and
-  reported `Hugepage-backed bindings: 0/30` despite the bind code being correct.
+  (`hugepages_conf()`, which parses the effective `vm.nr_hugepages` — last
+  uncommented exact-key assignment — and refuses to bake below 1440; pinned by
+  `scripts/image/test_bake_hugepages_16243.py`), and `debian/rules` installs the
+  same file into the `.deb` under `/usr/lib/sysctl.d/` (package-owned rather
+  than an `/etc` conffile, so unattended adoption never prompts; an operator's
+  `/etc/sysctl.d` copy still wins by sysctl.d precedence). Before #16243 NO
+  provisioning path installed it — the file existed in the repo only — so a
+  ring-16384 rig booted with `HugePages_Total=0` and reported
+  `Hugepage-backed bindings: 0/30` despite the bind code being correct.
   The shipped pool (1440) is the reference-topology size above; a topology with
-  more bindings still needs the operator to raise that one file, because a pool
-  is withheld from ordinary memory for the whole boot and the appliance's RAM
-  and binding count are not known at bake time. At the default `ring-entries`
-  (a binding is ~10 MiB at 1024) the pool is simply unused.
+  more bindings (30 needs 2400) still needs the operator to raise the `/etc`
+  file, because a pool is withheld from ordinary memory for the whole boot and
+  the appliance's RAM and binding count are not known at bake time. At the
+  default `ring-entries` most of the pool stays unallocated (small UMEMs still
+  try `MAP_HUGETLB` first, so a few pages are used).
 
   Apply with `sysctl --system` (or reboot). Verify with `grep HugePages_ /proc/meminfo`.
   If the pool cannot back a UMEM, `MAP_HUGETLB` fails and the daemon falls back to

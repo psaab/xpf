@@ -129,22 +129,51 @@ SYSCTL_CONF = (
 # blindly on small appliances -- see the conf header.
 HUGEPAGES_CONF_PATH = os.path.join(ROOT, "etc", "sysctl.d", "99-xpf-hugepages.conf")
 
-def hugepages_conf() -> str:
+def hugepages_conf(conf_text=None) -> str:
     """Return the shipped UMEM hugepage reservation, verbatim.
 
     Single source of truth is etc/sysctl.d/99-xpf-hugepages.conf in the
     repo (also the file an operator installs on a foreign host). Reading
     it here -- rather than duplicating the value -- keeps the bake, the
     on-box file, and the 80-pages-per-binding formula pinned by
-    userspace-dp's umem_sizing_contract_tests from drifting apart. Fail
-    the bake if it is missing or stops reserving the pool.
+    userspace-dp's umem_sizing_contract_tests from drifting apart.
+
+    Fail-closed (review 16260): parse the EFFECTIVE reservation, not a
+    substring. sysctl applies assignments in order, so the last
+    uncommented exact-key `vm.nr_hugepages` line wins; a commented-out
+    line, a zero value, a wrong key (`vm.nr_hugepages_mempolicy`), or a
+    trailing override to zero must all stop the bake, never ship an
+    image whose status will report 0/N backed. The effective value must
+    cover the reference topology: 80 pages x 18 bindings = 1440.
     """
-    with open(HUGEPAGES_CONF_PATH) as f:
-        conf = f.read()
-    if "vm.nr_hugepages" not in conf:
-        die(f"{HUGEPAGES_CONF_PATH} no longer sets vm.nr_hugepages; "
-            "refusing to bake an image without the UMEM hugepage knob (#16243)")
-    return conf
+    if conf_text is None:
+        with open(HUGEPAGES_CONF_PATH) as f:
+            conf_text = f.read()
+    effective = None
+    for line in conf_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, sep, value = stripped.partition("=")
+        if not sep or key.strip() != "vm.nr_hugepages":
+            continue
+        try:
+            effective = int(value.strip())
+        except ValueError:
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value "
+                f"{value.strip()!r} is not an integer; refusing to bake "
+                "an image without a valid UMEM hugepage pool (#16243)")
+    if effective is None:
+        die(f"{HUGEPAGES_CONF_PATH} has no active vm.nr_hugepages "
+            "assignment; refusing to bake an image without the UMEM "
+            "hugepage knob (#16243)")
+    if effective < 1440:
+        die(f"{HUGEPAGES_CONF_PATH} effectively reserves "
+            f"vm.nr_hugepages={effective}, below the 1440 pages "
+            "(80 x 18 bindings) the reference ring-entries 16384 "
+            "topology needs; refusing to bake an under-provisioned "
+            "image (#16243)")
+    return conf_text
 
 
 # apt-get update exits 0 even when an index fetch fails; --error-on=any

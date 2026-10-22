@@ -42,6 +42,13 @@ xpf (0.0.0) unstable; urgency=medium
     `Hugepage-backed bindings: 0/N`. New bake regression tests pin the
     verbatim install and the 1440-page reference-topology pool;
     docs/deploy-quickstart.md documents the knob and the remedy.
+  * Fold (review 16260): the bake loader now parses the EFFECTIVE
+    vm.nr_hugepages (last uncommented exact-key assignment wins) and
+    dies below 1440 instead of substring-matching the key; the .deb
+    installs the file under /usr/lib/sysctl.d instead of /etc so first
+    adoption by a host with a hand-installed /etc copy never prompts
+    under unattended dpkg (operator /etc/sysctl.d file still wins by
+    sysctl.d precedence).
 
 xpf (0.0.0) unstable; urgency=medium
 

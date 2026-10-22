@@ -17,7 +17,6 @@ must still cover the reference topology at the pinned 80 pages/binding.
 from __future__ import annotations
 
 import importlib.util
-import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -53,26 +52,48 @@ class BakeHugepagesTests(unittest.TestCase):
             "a divergent copy would drift from the operator-edited file",
         )
 
-    def test_shipped_pool_covers_reference_topology(self):
-        conf = bake.hugepages_conf()
-        m = re.search(r"^vm\.nr_hugepages\s*=\s*(\d+)\s*$", conf, re.M)
-        self.assertIsNotNone(m, "conf must set vm.nr_hugepages")
-        pages = int(m.group(1))
-        # Pinned by umem_sizing_contract_tests: 80 pages per binding at
-        # ring-entries 16384; reference topology 3 candidates x 6 queues.
-        self.assertGreaterEqual(
-            pages, 80 * 18,
-            "pool must cover the 18-binding reference topology; "
-            "the old one-NIC value (600) is exactly the #16243 failure",
-        )
+    def test_effective_pool_covers_reference_topology(self):
+        # hugepages_conf() itself must reject anything whose EFFECTIVE
+        # (last uncommented exact-key) value is short -- the parse is the
+        # guard, not a search for any positive line (review 16260).
+        self.assertIn("vm.nr_hugepages = 1440", bake.hugepages_conf())
 
-    def test_hugepages_conf_refuses_a_pool_less_file(self):
-        with patch("builtins.open", create=True) as mock_open:
-            mock_open.return_value.__enter__.return_value.read.return_value = (
-                "# no reservation here\n"
-            )
-            with self.assertRaises(SystemExit):
-                bake.hugepages_conf()
+    def test_hugepages_conf_rejects_ineffective_reservations(self):
+        cases = {
+            "no assignment": "# no reservation here\n",
+            "comment only": "# vm.nr_hugepages = 1440\n",
+            "zero": "vm.nr_hugepages = 0\n",
+            "wrong key": "vm.nr_hugepages_mempolicy = 1440\n",
+            "trailing zero override":
+                "vm.nr_hugepages = 1440\nvm.nr_hugepages = 0\n",
+            "trailing short override":
+                "vm.nr_hugepages = 1440\nvm.nr_hugepages = 600\n",
+            "under reference pool": "vm.nr_hugepages = 600\n",
+            "non-integer": "vm.nr_hugepages = lots\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(SystemExit, msg=name):
+                    bake.hugepages_conf(text)
+
+    def test_hugepages_conf_accepts_effective_pool_despite_noise(self):
+        text = ("# vm.nr_hugepages = 0\n"
+                "vm.nr_hugepages_mempolicy = 0\n"
+                "vm.nr_hugepages = 2400\n")
+        self.assertEqual(bake.hugepages_conf(text), text)
+
+    def test_invalid_conf_stops_virt_customize_before_run(self):
+        # The write argument is built through hugepages_conf(); a bad
+        # repo conf must abort argument construction, before any
+        # virt-customize invocation reaches run().
+        calls = []
+        with patch.object(bake, "hugepages_conf",
+                          side_effect=SystemExit("bad pool")):
+            with patch.object(bake, "run",
+                              side_effect=lambda argv: calls.append(argv)):
+                with self.assertRaises(SystemExit):
+                    bake.virt_customize("appliance.qcow2", "xpf.deb")
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
