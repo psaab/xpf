@@ -4,6 +4,10 @@
 // `#[path = "ha_tests.rs"]` from ha.rs.
 
 use super::*;
+use crate::afxdp::testfx::{
+    test_forwarding_state_split_rgs, test_forwarding_state_with_fabric, test_key,
+    test_metadata_for_ha as test_metadata, test_resolution,
+};
 use crate::test_zone_ids::*;
 use std::time::{Duration, Instant};
 
@@ -273,22 +277,13 @@ fn immediate_synced_bpf_programming_allows_inactive_owner_rg() {
     assert!(synced_entry_allows_local_replace(&state, 1, now_secs));
 }
 
-fn test_resolution() -> ForwardingResolution {
-    ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: Some([6, 7, 8, 9, 10, 11]),
-        tx_vlan_id: 0,
-        source_ifindex: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }
-}
+// #16137: `test_resolution`, `test_key`, `test_metadata`, and the
+// `test_forwarding_state_with_fabric` / `test_forwarding_state_split_rgs`
+// builders now live once in `crate::afxdp::testfx` (imported above).
+// `test_metadata` is imported as the HA variant (`fabric_ingress: true`),
+// which is what the copy formerly here built; the forwarding builders
+// now use the canonical zone ids (the former copy mapped sfmix->2,
+// colliding with wan).
 
 fn test_decision() -> SessionDecision {
     SessionDecision {
@@ -297,113 +292,6 @@ fn test_decision() -> SessionDecision {
         install_table_domain: 0,
         install_table_check: 0,
     }
-}
-
-fn test_key() -> SessionKey {
-    SessionKey {
-        addr_family: libc::AF_INET as u8,
-        protocol: PROTO_TCP,
-        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
-        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        src_port: 55068,
-        dst_port: 5201,
-        discriminator: Default::default(),
-        routing_domain: 0,
-    }
-}
-
-fn test_metadata() -> SessionMetadata {
-    SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID,
-    egress_zone: TEST_WAN_ZONE_ID,
-    ingress_zone_check: 0,
-    egress_zone_check: 0,
-    ingress_ifindex: 0,
-    ingress_vlan_id: 0,
-    forward_ingress_vlan_id: None,
-    owner_rg_id: 1,
-    fabric_ingress: true,
-    is_reverse: false,
-    nat64_reverse: None,
-    log_session_init: false,
-    log_session_close: false,
-    policy_id: 0,
-    inactivity_timeout_ns: None,
-    policy_counter_idx: 0,
-    policy_counter: None,
-    nat_scope_ifindex: None }
-}
-
-fn test_forwarding_state_with_fabric() -> ForwardingState {
-    let mut forwarding = ForwardingState::default();
-    forwarding.connected_v4.push(ConnectedRouteV4 {
-        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(10, 0, 61, 0), 24).unwrap()),
-        host: Ipv4Addr::new(10, 0, 61, 0),
-        ifindex: 6,
-        tunnel_endpoint_id: 0,
-        table: "inet.0".to_string(),
-    });
-    forwarding.neighbors.insert(
-        (6, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-        NeighborEntry {
-            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
-        },
-    );
-    forwarding.egress.insert(
-        6,
-        EgressInterface {
-            bind_ifindex: 6,
-            vlan_id: 0,
-            mtu: 1500,
-            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01],
-            zone_id: TEST_LAN_ZONE_ID,
-            redundancy_group: 1,
-            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
-            primary_v6: None,
-        },
-    );
-    forwarding.egress.insert(
-        12,
-        EgressInterface {
-            bind_ifindex: 11,
-            vlan_id: 80,
-            mtu: 1500,
-            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08],
-            zone_id: TEST_WAN_ZONE_ID,
-            redundancy_group: 1,
-            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
-            primary_v6: None,
-        },
-    );
-    forwarding.zone_name_to_id.insert("lan".to_string(), 1);
-    forwarding.zone_name_to_id.insert("sfmix".to_string(), 2);
-    forwarding.zone_name_to_id.insert("wan".to_string(), 3);
-    forwarding.fabrics.push(FabricLink {
-        parent_ifindex: 21,
-        overlay_ifindex: 101,
-        peer_addr: IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2)),
-        peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
-        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
-        up: true,
-    });
-    forwarding
-}
-
-fn test_forwarding_state_split_rgs() -> ForwardingState {
-    let mut forwarding = test_forwarding_state_with_fabric();
-    forwarding.egress.insert(
-        6,
-        EgressInterface {
-            bind_ifindex: 6,
-            vlan_id: 0,
-            mtu: 1500,
-            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x61, 0x01],
-            zone_id: TEST_LAN_ZONE_ID,
-            redundancy_group: 2,
-            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
-            primary_v6: None,
-        },
-    );
-    forwarding
 }
 
 fn test_worker_handle(commands: Arc<Mutex<VecDeque<WorkerCommand>>>) -> WorkerHandle {

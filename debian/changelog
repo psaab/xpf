@@ -23,6 +23,19 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * Deduplicate the four Rust test-fixture builder families
+    (`test_resolution`, `test_metadata`, `test_key`,
+    `test_forwarding_state*`) shared by `session_glue/tests.rs` and
+    `ha_tests.rs` into one `afxdp::testfx` module (#16137). The copies
+    had drifted: HA metadata rode `fabric_ingress: true` (now the
+    explicit `test_metadata_for_ha` variant) and the HA forwarding
+    fixture mapped zone sfmix to id 2, colliding with wan (now the
+    canonical TEST_* zone ids). Permanent field-level equivalence
+    tests pin every builder so future drift reds. Test-only change;
+    no dataplane behaviour change.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Type FirewallFilterTerm.Action/TerminalActions as the
     string-underlying FilterAction enum {Unset,Accept,Reject,Discard}
     (#16140); NextTerm stays bool so the co-authored terminal +
