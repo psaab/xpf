@@ -26,6 +26,26 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * Table-drive the pkg/logging syslog category/severity vocabularies
+    (#16179): the four parallel switches (ParseCategory,
+    ParseCategoryStrict, ParseSeverity, ParseSeverityStrict) now look up
+    explicit tables — one shared categoryVocabulary (the lenient/strict
+    category sets are identical; only unknown-name handling differs) and
+    two SEPARATE severity tables, keeping the strict SSE vocabulary
+    ("" + error/warning/notice/info, case-sensitive) narrower than the
+    lenient one (all ten Junos severities, case-insensitive). Sentinel
+    rows are explicit: "all"/"" -> 0 for categories, "any"/"" -> 0,
+    "none" -> SeverityNone, "emergency" -> SeverityEmergency for
+    severities. No behavior change: an exhaustive old-vs-new
+    differential test pins every spelling, alias, case variant, and
+    invalid token, and the strict parsers keep rejecting every formerly
+    rejected name. Config-schema admission vocabulary ownership
+    (junosSyslogSeverities in pkg/config/schema_system.go) is unchanged.
+    Perf: config/query-time string parsing only, no dataplane hot path;
+    the lenient parsers replace a switch with one map lookup.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Share the completion value provider and hint-roots table across the
     local CLI and the gRPC Complete RPC: pkg/config gains
     ProvideValues(cfg, hint, path, catalogueSuppressed) and HintRoots
