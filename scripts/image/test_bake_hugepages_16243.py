@@ -102,6 +102,27 @@ class BakeHugepagesTests(unittest.TestCase):
                 "vm.nr_hugepages = 1440\nvm.* = 0\n",
             "trailing inline comment is part of the value":
                 "vm.nr_hugepages = 1440 # pages\n",
+            # path_simplify PRESERVES internal '..' (systemd then
+            # rejects the write); it must not alias the knob.
+            "internal dotdot alone is not the knob":
+                "vm/../vm/nr_hugepages = 2400\n",
+            "internal dotdot cannot rescue a zero":
+                "vm.nr_hugepages = 0\nvm/../vm/nr_hugepages = 2400\n",
+            # parse_file consumes ONE '-'; '--key' keys on '-key'.
+            "double-minus alone is not the knob":
+                "--vm.nr_hugepages = 2400\n",
+            "double-minus cannot rescue a zero":
+                "vm.nr_hugepages = 0\n--vm.nr_hugepages = 2400\n",
+            # Kernel base-0 integers (proc_doulongvec_minmax):
+            # 01440 is octal 800; the rest the kernel rejects outright
+            # while Python's int() would have accepted them.
+            "zero-padded octal is 800 not 1440":
+                "vm.nr_hugepages = 01440\n",
+            "underscore separator": "vm.nr_hugepages = 1_440\n",
+            "leading plus": "vm.nr_hugepages = +1440\n",
+            "full-width digits": "vm.nr_hugepages = １４４０\n",
+            "negative": "vm.nr_hugepages = -1440\n",
+            "hex below pool": "vm.nr_hugepages = 0x100\n",
         }
         for name, text in cases.items():
             with self.subTest(name=name):
@@ -127,6 +148,15 @@ class BakeHugepagesTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(bake.hugepages_conf(text), text)
 
+    def test_hugepages_conf_accepts_kernel_integer_forms(self):
+        # Base-0 forms the KERNEL accepts at/above the pool: hex and
+        # octal spellings of sufficient values are real reservations.
+        for text in ("vm.nr_hugepages = 0x5A0\n",      # 1440 hex
+                     "vm.nr_hugepages = 02640\n",      # 1440 octal
+                     "vm.nr_hugepages = 2400\n"):
+            with self.subTest(text=text):
+                self.assertEqual(bake.hugepages_conf(text), text)
+
     def test_hugepages_conf_accepts_leading_slash_and_resumed_forms(self):
         for text in ("/vm/nr_hugepages = 2400\n",
                      # First-separator rule, other direction: a leading
@@ -143,6 +173,26 @@ class BakeHugepagesTests(unittest.TestCase):
                      "vm.nr_hugepages = 1440\n-net.ipv4.ip_forward\n"):
             with self.subTest(text=text):
                 self.assertEqual(bake.hugepages_conf(text), text)
+
+    def test_kernel_forms_stop_virt_customize_before_run(self):
+        # Real-loader boundary (review 16260): ineffective spellings
+        # must abort virt_customize before run() is ever called — not
+        # via a mocked hugepages_conf.
+        bad = ("vm.nr_hugepages = 01440\n",
+               "vm/../vm/nr_hugepages = 2400\n",
+               "--vm.nr_hugepages = 2400\n")
+        for text in bad:
+            with self.subTest(text=text):
+                calls = []
+                with patch.object(bake, "open",
+                                  unittest.mock.mock_open(read_data=text),
+                                  create=True):
+                    with patch.object(
+                            bake, "run",
+                            side_effect=lambda argv: calls.append(argv)):
+                        with self.assertRaises(SystemExit):
+                            bake.virt_customize("appliance.qcow2", "xpf.deb")
+                self.assertEqual(calls, [])
 
     def test_invalid_conf_stops_virt_customize_before_run(self):
         # The write argument is built through hugepages_conf(); a bad

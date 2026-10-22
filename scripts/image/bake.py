@@ -150,15 +150,28 @@ def hugepages_conf(conf_text=None) -> str:
       as-is, so `/vm.nr_hugepages` names a literal dotted filename
       under /proc/sys — a DIFFERENT key that never touches
       vm.nr_hugepages. Normalization finishes with path_simplify
-      (collapse redundant separators, resolve `.`/`..` textually) and
-      removal of one leading `/`. The table key is the resulting /proc
-      path with `/` as separator; the guarded key is `vm/nr_hugepages`.
+      (collapse redundant separators and `.` components; internal `..`
+      components are PRESERVED — systemd later rejects such paths at
+      write time, so they are stored but can never alias the guarded
+      key) and removal of one leading `/`. The table key is the
+      resulting /proc path with `/` as separator; the guarded key is
+      `vm/nr_hugepages`. The ignore-failure marker is exactly ONE
+      leading `-`, consumed by the parser before normalization.
     - A later line for the same normalized key REPLACES the earlier
       entry — including a bare negative-match directive (`-key` with no
       `=`), which systemd stores as a NULL value and then skips at
       apply time, suppressing the key entirely.
     - Inline comments do not exist in this format: everything after
       `=` is the value.
+
+    The surviving value is parsed with KERNEL semantics, not Python's:
+    the hugepage handler is `proc_doulongvec_minmax`, whose
+    `proc_get_long` uses base 0 — a leading `0` is octal (`01440`
+    requests 800 pages, not 1440) and `0x` is hex. Anything the kernel
+    would reject (a leading `+`, underscores, non-ASCII digits) is
+    rejected here; never let Python's `int()` (decimal, `+`- and
+    underscore- and Unicode-digit-friendly) vouch for bytes the kernel
+    interprets differently.
 
     The bake dies unless the surviving entry for `vm.nr_hugepages` is an
     integer >= 1440 (80 pages x 18 bindings, the reference ring-entries
@@ -174,29 +187,29 @@ def hugepages_conf(conf_text=None) -> str:
     # path -> value string, or None for a bare negative-match directive
     # (stored by systemd as NULL and skipped at apply time).
     def normalize(key: str) -> str:
-        # sysctl_normalize (systemd src/basic/sysctl-util.c), in order:
-        k = key.strip().lstrip("-").strip()
+        # sysctl_normalize + parse_file (systemd sysctl-util.c/sysctl.c),
+        # in consumer order. parse_file consumes ONE leading '-' itself
+        # (the caller has already removed it), then strstrip, then
+        # sysctl_normalize:
+        k = key.strip()
         # 1. first-separator rule: swap separators only when the FIRST
         #    separator is a dot.
         first = next((i for i, c in enumerate(k) if c in "/."), None)
         if first is not None and k[first] == ".":
             k = k.translate(str.maketrans({".": "/", "/": "."}))
-        # 2. path_simplify: collapse repeated '/', resolve '.' and '..'
-        #    textually; a leading '..' that escapes the root makes the
-        #    write path non-normalized (systemd rejects it) — refuse.
+        # 2. path_simplify_full: drop empty and '.' components; skip
+        #    LEADING '..' only on an absolute path ('/../foo' -> '/foo');
+        #    PRESERVE internal '..' ('/foo/bar/..' stays) — the write
+        #    path then fails path_is_safe (accept_dot_dot=false) and
+        #    systemd rejects it. Preserve, never pop()-resolve.
         absolute = k.startswith("/")
         parts = []
         for seg in k.split("/"):
             if seg in ("", "."):
                 continue
-            if seg == "..":
-                if not parts:
-                    die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} "
-                        "escapes /proc/sys after normalization; refusing "
-                        "to bake a key that cannot be evaluated (#16243)")
-                parts.pop()
-            else:
-                parts.append(seg)
+            if seg == ".." and absolute and not parts:
+                continue  # leading '..' of an absolute path: skipped
+            parts.append(seg)
         # 3. kill one leading slash (after simplification).
         return "/".join(parts)
 
@@ -205,7 +218,12 @@ def hugepages_conf(conf_text=None) -> str:
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith(";"):
             continue
-        key, sep, value = stripped.partition("=")
+        # parse_file: the ignore-failure marker is exactly ONE leading
+        # '-', consumed before strstrip+normalize — whether or not the
+        # line carries '='. '--key' therefore keys on '-key'.
+        ignore_failure = stripped.startswith("-")
+        body = stripped[1:] if ignore_failure else stripped
+        key, sep, value = body.partition("=")
         normalized = normalize(key)
         if "*" in normalized or "?" in normalized or "[" in normalized:
             die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} is a glob "
@@ -214,24 +232,49 @@ def hugepages_conf(conf_text=None) -> str:
                 "time — refusing to ship it in the hugepage conf (#16243)")
         if sep:
             entries[normalized] = value.strip()
-        elif stripped.startswith("-"):
+        elif ignore_failure:
             # Bare negative-match directive ('-key', no '='): systemd
             # stores it as a NULL entry replacing any earlier assignment
             # for the key, then skips it at apply time.
             entries[normalized] = None
         # Any other bare line is ignored by systemd's parser as well.
+
+    def kernel_ulong(text: str) -> int:
+        # proc_get_long/strtoul_lenient base-0 grammar behind
+        # proc_doulongvec_minmax: optional single '-', then a digit;
+        # '0x'/'0X' hex, leading '0' octal, else decimal; every byte
+        # must be an ASCII digit of that base (no '+', '_', spaces, or
+        # non-ASCII digits); negatives and unsigned-long overflow make
+        # the kernel write fail, so both are refused here.
+        if not text or text[0] == "-":
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "is negative or empty; the kernel rejects it — refusing "
+                "to bake (#16243)")
+        if text[:2] in ("0x", "0X"):
+            digits, alphabet, base = text[2:], "0123456789abcdefABCDEF", 16
+        elif len(text) > 1 and text[0] == "0":
+            digits, alphabet, base = text[1:], "01234567", 8
+        else:
+            digits, alphabet, base = text, "0123456789", 10
+        if not digits or any(c not in alphabet for c in digits):
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "is not a kernel-parseable unsigned value; refusing "
+                "to bake an image without a valid UMEM hugepage pool "
+                "(#16243)")
+        parsed = int(digits, base)
+        if parsed >= 2**64:
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "overflows the kernel's unsigned long; refusing to "
+                "bake (#16243)")
+        return parsed
+
     if "vm/nr_hugepages" not in entries or entries["vm/nr_hugepages"] is None:
         die(f"{HUGEPAGES_CONF_PATH} has no effective vm.nr_hugepages "
             "assignment (absent, or suppressed by a bare negative-match "
             "directive); refusing to bake an image without the UMEM "
             "hugepage knob (#16243)")
     raw_value = entries["vm/nr_hugepages"]
-    try:
-        effective = int(raw_value)
-    except ValueError:
-        die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value "
-            f"{raw_value!r} is not an integer; refusing to bake "
-            "an image without a valid UMEM hugepage pool (#16243)")
+    effective = kernel_ulong(raw_value)
     if effective < 1440:
         die(f"{HUGEPAGES_CONF_PATH} effectively reserves "
             f"vm.nr_hugepages={effective}, below the 1440 pages "
