@@ -36,6 +36,50 @@ func setVLANSubAddrGenMode(iface string) {
 	os.WriteFile(subAddrGen, []byte("1"), 0644)
 }
 
+// stampActiveAppliedIfConvergedUnderSem stamps the CURRENT active config
+// applied (#4957) only when the apply the caller just drove under applySem
+// fully converged: no apply error, no outstanding policy-invalidation debt,
+// and the snapshot publication landed. The caller MUST hold d.applySem; the
+// …UnderSem suffix is the contract — stamping outside the semaphore would
+// let a competing promotion inherit this apply's success (the #6296 TOCTOU
+// and the #9175 re-promotion fail-open). The helper owns the nil-store
+// check so no shape-(a) call site can forget it. Returns whether it stamped.
+func (d *Daemon) stampActiveAppliedIfConvergedUnderSem(err error) bool {
+	if err != nil || d.store == nil || d.policyInvalidationDebt != nil ||
+		!d.policyInvalidationPublishLanded {
+		return false
+	}
+	d.store.MarkActiveApplied()
+	return true
+}
+
+// stampDigestIfConvergedUnderSem is the captured-digest sibling of
+// stampActiveAppliedIfConvergedUnderSem (#6296): it stamps the digest the
+// caller captured under applySem for the exact tree it applied, gated on
+// the same convergence formula (no apply error, no outstanding
+// policy-invalidation debt, publication landed). The caller MUST hold
+// d.applySem. An empty digest is a no-op (nothing was captured/applied),
+// mirroring Store.MarkAppliedDigest. Returns whether it stamped.
+//
+// Deliberately NOT used by the policy-debt discharge sites
+// (dischargePolicyInvalidationDebtLocked, completeDeferredSnapshotApply,
+// resolveDeferredSnapshotApplyAfterSynchronousPublish,
+// retirePolicyInvalidationScanDebtAfterFullClearLocked) or the #9811
+// digest-retry site: those callers nil / settle the debt themselves (or,
+// for the retry, deliberately omit the PublishLanded term because
+// applyConfigLocked has already settled publication) immediately before
+// stamping, so folding them into this PublishLanded gate would change
+// debt-discharge semantics. They keep their own explicitly-gated
+// MarkAppliedDigest calls, allowlisted by name in the stamp canary.
+func (d *Daemon) stampDigestIfConvergedUnderSem(err error, digest string) bool {
+	if err != nil || digest == "" || d.store == nil ||
+		d.policyInvalidationDebt != nil || !d.policyInvalidationPublishLanded {
+		return false
+	}
+	d.store.MarkAppliedDigest(digest)
+	return true
+}
+
 // applyConfig applies a compiled config to the dataplane / kernel.
 // Wraps applyConfigLocked under the apply semaphore for non-context
 // callers (DHCP callbacks, config-poll, dynamic feeds, event engine,
@@ -221,11 +265,9 @@ func (d *Daemon) applyActiveConfigResult() error {
 		return nil
 	}
 	err := d.applyConfigLocked(context.Background(), cfg)
-	if err == nil && d.policyInvalidationDebt == nil && d.policyInvalidationPublishLanded {
-		// Stamp before releasing applySem so a competing promotion cannot
-		// inherit this successful apply result.
-		d.store.MarkActiveApplied()
-	}
+	// Stamp before releasing applySem so a competing promotion cannot
+	// inherit this successful apply result.
+	d.stampActiveAppliedIfConvergedUnderSem(err)
 	return err
 }
 
@@ -250,9 +292,7 @@ func (d *Daemon) applyConfigUnderSem(cfg *config.Config) {
 	// generation even when nothing changed). A FAILED apply above returns
 	// early and leaves the prior digest, so a config that never converged is
 	// never marked applied — the same #4957 invariant handleConfigSync relies on.
-	if d.store != nil && d.policyInvalidationDebt == nil && d.policyInvalidationPublishLanded {
-		d.store.MarkActiveApplied()
-	}
+	d.stampActiveAppliedIfConvergedUnderSem(nil)
 }
 
 // applyCancelCtx returns the context whose cancellation aborts the heavy apply

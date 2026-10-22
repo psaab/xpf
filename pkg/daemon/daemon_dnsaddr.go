@@ -244,9 +244,10 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 		d.applyBodyForTest(refreshed)
 		d.policyInvalidationPublishLanded = true
 		d.recordDNSBaselineForce(base, snapshotDNSAnswers(refreshed))
-		if d.store != nil && d.policyInvalidationDebt == nil {
-			d.store.MarkActiveApplied()
-		}
+		// Test hook: PublishLanded was forced true just above, so this
+		// stamps exactly when the pre-helper hook gate did (store is
+		// already known non-nil here; the helper re-checks it).
+		d.stampActiveAppliedIfConvergedUnderSem(nil)
 		return true, nil
 	}
 	err := d.applyConfigLocked(context.Background(), refreshed)
@@ -254,9 +255,7 @@ func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, 
 		return false, err
 	}
 	d.recordDNSBaselineForce(base, snapshotDNSAnswers(refreshed))
-	if d.policyInvalidationDebt == nil && d.policyInvalidationPublishLanded {
-		d.store.MarkActiveApplied()
-	}
+	d.stampActiveAppliedIfConvergedUnderSem(nil)
 	return true, nil
 }
 
