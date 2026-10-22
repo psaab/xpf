@@ -64,8 +64,7 @@ const (
 // cmdtree Nodes can carry validators declared in pkg/config directly. The
 // config-mode typed-leaf gate (config.SchemaValidate, #1319 PR 1) lives in
 // pkg/config and validates config.setSchema; this alias only serves the
-// operational tree's own typed leaves and the retained `set system
-// dataplane` overlay.
+// operational tree's own typed leaves.
 type LeafValidator = config.LeafValidator
 
 // Node defines a completion tree node with description, children, and optional dynamic values.
@@ -1415,34 +1414,17 @@ var OperationalTree = map[string]*Node{
 	"exit": {Desc: "Exit CLI"},
 }
 
-// ConfigSetDataplaneKnobs is the `?` help surface for `set system
-// dataplane <knob>`. Codex M3 / Go F1: the schema in pkg/config/schema.go
-// already backs tab completion for these knobs, but `?` help and the
-// explicit per-knob description live in cmdtree. Keeping this map tiny
-// and focused lets us grow it without restating the full config
-// schema here — tab-completion for siblings still falls through to
-// the schema walker.
-var ConfigSetDataplaneKnobs = map[string]*Node{
-	"rss-indirection":     {Desc: "RSS indirection reshaping (enable|disable)"},
-	"claim-host-tunables": {Desc: "Allow xpfd to write host-scope tunables (true|false; default false)"},
-	"cpu-governor":        {Desc: "Host cpufreq governor (performance|schedutil|default)"},
-	"netdev-budget":       {Desc: "net.core.netdev_budget value"},
-	"coalescence": {Desc: "NIC interrupt-coalescence tuning (mlx5)", Children: map[string]*Node{
-		"adaptive": {Desc: "Adaptive coalescing (enable|disable)"},
-		"rx-usecs": {Desc: "RX coalescing microseconds"},
-		"tx-usecs": {Desc: "TX coalescing microseconds"},
-	}},
-}
-
-// #1319 PR 1 retired the cmdtree config-mode typed-leaf overlay
-// (formerly ConfigClassOfServiceSchedulers + cmdtree.SchemaValidate).
-// Config-mode typed leaves now live on pkg/config's setSchema, which is
-// the tree the live `set`/`delete`/`show`/`edit` completer AND the
-// commit-check SchemaValidate gate both read. cmdtree remains the SSOT
-// for the operational ("run") tree; its Node still carries the typed-leaf
-// fields (ValueType/ValueDesc/ValueExamples/Validator) for operational
-// leaves and the retained `set system dataplane` description overlay. See
-// pkg/cmdtree/README.md and docs/config-schema.md for the two-SSOT split.
+// #1319 retired the cmdtree config-mode overlays (typed leaves in PR 1;
+// the retained `set system dataplane` description overlay in #16161).
+// Config-mode grammar below the top-level keywords lives on
+// pkg/config's setSchema, which the live `set`/`delete`/`show`/`edit`
+// completer, the commit-check SchemaValidate gate, and — via
+// config.DescribeSetPath — LookupDesc's config-mode fallback all read.
+// cmdtree remains the SSOT for the operational ("run") tree only.
+// ConfigTopLevel therefore carries description-only top-level
+// keywords: `set` MUST NOT grow Children again (pinned by
+// TestConfigTopLevelSetIsDescriptionOnly16161). See
+// pkg/cmdtree/README.md and docs/config-schema.md.
 
 // ConfigTopLevel defines tab completion for config mode top-level commands.
 var ConfigTopLevel = map[string]*Node{
@@ -1452,20 +1434,9 @@ var ConfigTopLevel = map[string]*Node{
 	"deactivate": {Desc: "Add the inactive tag to a statement"},
 	"insert":     {Desc: "Insert a new ordered configuration statement"},
 	"rename":     {Desc: "Rename a configuration statement"},
-	"set": {Desc: "Set a configuration parameter", Children: map[string]*Node{
-		"system": {Desc: "System configuration", Children: map[string]*Node{
-			// Codex M3: surface the #785/#801 dataplane knobs so `?`
-			// help and tab completion show descriptions for
-			// rss-indirection / claim-host-tunables / cpu-governor /
-			// netdev-budget / coalescence without the operator having
-			// to guess at the spelling from the issue body. The schema
-			// walker handles completion for every other `set system`
-			// path; this hierarchy only supplies extra descriptions.
-			"dataplane": {Desc: "Userspace dataplane tunables", Children: ConfigSetDataplaneKnobs},
-		}},
-	}},
-	"delete": {Desc: "Delete a configuration statement"},
-	"show":   {Desc: "Show configuration"},
+	"set":        {Desc: "Set a configuration parameter"},
+	"delete":     {Desc: "Delete a configuration statement"},
+	"show":       {Desc: "Show configuration"},
 	"commit": {Desc: "Commit current set of changes", Children: map[string]*Node{
 		"check":     {Desc: "Check correctness of syntax; do not apply changes"},
 		"comment":   {Desc: "Add comment to commit"},
@@ -2106,6 +2077,18 @@ func LookupDesc(words []string, name string, configMode bool) string {
 			tree = OperationalTree
 			words = words[1:]
 		} else {
+			switch resolvedTop {
+			case "set", "delete", "activate", "deactivate", "show", "edit":
+				// #16161: everything below these keywords is
+				// config grammar owned by pkg/config's setSchema.
+				// Describe it from the schema, never from a
+				// cmdtree overlay (the deleted `set system
+				// dataplane` map was the last one).
+				if desc, ok := config.DescribeSetPath(words[1:], name); ok {
+					return desc
+				}
+				return ""
+			}
 			// Walk config top-level children (e.g. "commit" → "check")
 			node, ok := ConfigTopLevel[resolvedTop]
 			if !ok {
