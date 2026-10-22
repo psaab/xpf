@@ -17,13 +17,13 @@ func TestProxyNDP15677StanzaCompiles(t *testing.T) {
 		tree *ConfigTree
 		want []string
 	}{
-		{"hier single v6", hierTree6659(t, `
+		{"hier single v6", parseHierText(t, `
 security { nat { proxy-ndp { interface ge-0/0/0.0 { address 2001:db8::1; } } } }`),
 			[]string{"2001:db8::1/128"}},
-		{"hier v6 range", hierTree6659(t, `
+		{"hier v6 range", parseHierText(t, `
 security { nat { proxy-ndp { interface ge-0/0/0.0 { address 2001:db8::1 to 2001:db8::3; } } } }`),
 			[]string{"2001:db8::1/128", "2001:db8::2/128", "2001:db8::3/128"}},
-		{"hier v6 range under proxy-arp", hierTree6659(t, `
+		{"hier v6 range under proxy-arp", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0.0 { address 2001:db8::1 to 2001:db8::3; } } } }`),
 			[]string{"2001:db8::1/128", "2001:db8::2/128", "2001:db8::3/128"}},
 		{"flat v6 range", setTree6659(t,
@@ -32,7 +32,7 @@ security { nat { proxy-arp { interface ge-0/0/0.0 { address 2001:db8::1 to 2001:
 		{"flat v6 single", setTree6659(t,
 			"set security nat proxy-ndp interface ge-0/0/0.0 address 2001:db8::5"),
 			[]string{"2001:db8::5/128"}},
-		{"both stanzas merge", hierTree6659(t, `
+		{"both stanzas merge", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0.0 { address 192.0.2.1; } } proxy-ndp { interface ge-0/0/1.0 { address 2001:db8::1; } } } }`),
 			nil}, // checked separately below
 	} {
@@ -106,7 +106,7 @@ func TestExpandAddressRangeIPv6_15677(t *testing.T) {
 }
 
 func TestProxyNDP15677BadAddressStrictRejectsLenientWarns(t *testing.T) {
-	tree := hierTree6659(t, `
+	tree := parseHierText(t, `
 security { nat { proxy-ndp { interface ge-0/0/0.0 { address bogus; } } } }`)
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("strict must reject bogus proxy-ndp address")

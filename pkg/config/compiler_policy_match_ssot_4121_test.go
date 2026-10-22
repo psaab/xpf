@@ -115,7 +115,7 @@ func TestPolicyMatchSSOT_4121(t *testing.T) {
 
 	// Hierarchical bracket list — parser collapses onto Keys (Keys[1:] arm).
 	t.Run("hier_bracket", func(t *testing.T) {
-		tree := mustParse(t, `security {
+		tree := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     address-book { global {
         address a1 10.0.1.0/24; address a2 10.0.2.0/24; address a3 10.0.3.0/24;
@@ -143,7 +143,7 @@ func TestPolicyMatchSSOT_4121(t *testing.T) {
 	// Hierarchical block shape `source-address { a1; a2; a3; }` — a child node
 	// per member (Keys=["source-address"], len 1 → the old Children arm).
 	t.Run("hier_block", func(t *testing.T) {
-		tree := mustParse(t, `security {
+		tree := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     address-book { global {
         address a1 10.0.1.0/24; address a2 10.0.2.0/24; address a3 10.0.3.0/24;
@@ -174,7 +174,7 @@ func TestPolicyMatchSSOT_4121(t *testing.T) {
 	// both. No canonical Junos emits this, but the tolerant load / group-merge
 	// paths must not silently narrow a policy when it appears.
 	t.Run("both_slots", func(t *testing.T) {
-		tree := mustParse(t, `security {
+		tree := parseHierText(t, `security {
     zones { security-zone trust; security-zone untrust; }
     address-book { global {
         address a1 10.0.1.0/24; address a2 10.0.2.0/24;

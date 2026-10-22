@@ -20,18 +20,9 @@ func policyText9525(apps, ref, action, def string) string {
 		`then { ` + action + `; } } } } }`
 }
 
-func parse9525(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 func lenient9525(t *testing.T, text string) *Config {
 	t.Helper()
-	cfg, err := CompileConfigLenient(parse9525(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("the tolerant compile must still accept the fixture (#1960 no-brick): %v", err)
 	}
@@ -87,7 +78,7 @@ func TestApplicationReferenceMatchDropsNamesEachMember9525(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			text := policyText9525(c.apps, "a", "deny", "permit-all")
-			if _, err := CompileConfig(parse9525(t, text)); err == nil {
+			if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 				t.Fatalf("fixture is not a member of the downgrade: strict CompileConfig accepted it")
 			}
 			cfg := lenient9525(t, text)
@@ -130,7 +121,7 @@ func TestApplicationReferenceMatchDropsControls9525(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			text := policyText9525(c.apps, c.ref, "permit", "deny-all")
-			_, serr := CompileConfig(parse9525(t, text))
+			_, serr := CompileConfig(parseHierText(t, text))
 			if c.strictAccepts && serr != nil {
 				t.Fatalf("control must commit: %v", serr)
 			}
@@ -192,12 +183,12 @@ func TestPredefinedApplicationsCarryNoMatchDrops9525(t *testing.T) {
 // old text said a non-port protocol presents ports of 0; for icmp/icmpv6 the
 // source side carries the query Identifier, which the sender chooses.
 func TestPortOnNonPortProtocolStrictText9525(t *testing.T) {
-	_, serr := CompileConfig(parse9525(t, policyText9525(
+	_, serr := CompileConfig(parseHierText(t, policyText9525(
 		`application a { protocol icmp; source-port 80; }`, "a", "deny", "permit-all")))
 	if serr == nil || !strings.Contains(serr.Error(), "ICMP query Identifier, a value the sender chooses") {
 		t.Fatalf("source-port on icmp must name the sender-chosen Identifier; got %v", serr)
 	}
-	_, derr := CompileConfig(parse9525(t, policyText9525(
+	_, derr := CompileConfig(parseHierText(t, policyText9525(
 		`application a { protocol icmp; destination-port 80; }`, "a", "deny", "permit-all")))
 	if derr == nil || !strings.Contains(derr.Error(), "presents no destination port") {
 		t.Fatalf("destination-port on icmp must say the protocol presents no destination port; got %v", derr)

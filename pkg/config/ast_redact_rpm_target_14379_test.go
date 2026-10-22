@@ -33,15 +33,6 @@ func rpmTargetTree14379(t *testing.T, lines []string) *ConfigTree {
 	return tree
 }
 
-func rpmTargetHierTree14379(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("NewParser: %v", errs)
-	}
-	return tree
-}
-
 // TestRPMTargetBareAndAddressSpellingsRedacted14379 is the decisive
 // regression: bare, address (flat / block / grandchild) and url spellings
 // of the RPM probe target, each across every RedactedClone format.
@@ -64,10 +55,10 @@ func TestRPMTargetBareAndAddressSpellingsRedacted14379(t *testing.T) {
 			})
 		}},
 		{"target address block", func(t *testing.T) *ConfigTree {
-			return rpmTargetHierTree14379(t, `services { rpm { probe p1 { test t1 { probe-type http-get; target { address "`+planted+`"; } } } } }`)
+			return parseHierText(t, `services { rpm { probe p1 { test t1 { probe-type http-get; target { address "`+planted+`"; } } } } }`)
 		}},
 		{"target address grandchild", func(t *testing.T) *ConfigTree {
-			return rpmTargetHierTree14379(t, `services { rpm { probe p1 { test t1 { probe-type http-get; target { address { "`+planted+`"; } } } } } }`)
+			return parseHierText(t, `services { rpm { probe p1 { test t1 { probe-type http-get; target { address { "`+planted+`"; } } } } } }`)
 		}},
 		{"target url flat-set (pre-existing control)", func(t *testing.T) *ConfigTree {
 			return rpmTargetTree14379(t, []string{
@@ -75,7 +66,7 @@ func TestRPMTargetBareAndAddressSpellingsRedacted14379(t *testing.T) {
 			})
 		}},
 		{"target url block (pre-existing control)", func(t *testing.T) *ConfigTree {
-			return rpmTargetHierTree14379(t, `services { rpm { probe p1 { test t1 { probe-type http-get; target { url "`+planted+`"; } } } } }`)
+			return parseHierText(t, `services { rpm { probe p1 { test t1 { probe-type http-get; target { url "`+planted+`"; } } } } }`)
 		}},
 	}
 

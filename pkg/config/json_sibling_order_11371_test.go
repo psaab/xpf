@@ -6,15 +6,6 @@ import (
 	"testing"
 )
 
-func parseJSON11371(t *testing.T, source string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(source).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("parse configuration: %v", errs)
-	}
-	return tree
-}
-
 func assertJSONEqual11371(t *testing.T, gotJSON, wantJSON string) {
 	t.Helper()
 	var got, want interface{}
@@ -34,27 +25,27 @@ func policyJSON11371(name, terminal string) string {
 }
 
 func TestFormatJSONZonePolicySiblingOrder11371(t *testing.T) {
-	tree := parseJSON11371(t, `security { policies { from-zone trust to-zone untrust { `+
+	tree := parseHierText(t, `security { policies { from-zone trust to-zone untrust { `+
 		policyJSON11371("z-deny", "deny")+` `+policyJSON11371("a-permit", "permit")+
 		` } } }`)
 	assertJSONEqual11371(t, tree.FormatJSON(), `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":[{"z-deny":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true}}},{"a-permit":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"permit":true}}}]}}}}}`)
 }
 
 func TestFormatJSONGlobalPolicySiblingOrder11371(t *testing.T) {
-	tree := parseJSON11371(t, `security { policies { global { `+
+	tree := parseHierText(t, `security { policies { global { `+
 		policyJSON11371("z-global", "deny")+` `+policyJSON11371("a-global", "permit")+
 		` } } }`)
 	assertJSONEqual11371(t, tree.FormatJSON(), `{"security":{"policies":{"global":{"policy":[{"z-global":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true}}},{"a-global":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"permit":true}}}]}}}}`)
 }
 
 func TestFormatJSONSingletonPolicyArray11371(t *testing.T) {
-	tree := parseJSON11371(t, `security { policies { from-zone trust to-zone untrust { `+
+	tree := parseHierText(t, `security { policies { from-zone trust to-zone untrust { `+
 		policyJSON11371("only-policy", "deny")+` } } }`)
 	assertJSONEqual11371(t, tree.FormatJSON(), `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":[{"only-policy":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true}}}]}}}}}`)
 }
 
 func TestFormatPathJSONPolicySiblingOrder11371(t *testing.T) {
-	tree := parseJSON11371(t, `security { policies { from-zone trust to-zone untrust { `+
+	tree := parseHierText(t, `security { policies { from-zone trust to-zone untrust { `+
 		policyJSON11371("z-deny", "deny")+` `+policyJSON11371("a-permit", "permit")+
 		` } } }`)
 	got := tree.FormatPathJSON([]string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy"})
@@ -62,7 +53,7 @@ func TestFormatPathJSONPolicySiblingOrder11371(t *testing.T) {
 }
 
 func TestFormatJSONRepeatedZonePolicyContextKeepsOrder11371(t *testing.T) {
-	tree := parseJSON11371(t, `security { policies {
+	tree := parseHierText(t, `security { policies {
 		from-zone trust to-zone untrust { `+policyJSON11371("z-deny", "deny")+` }
 		from-zone trust to-zone untrust { `+policyJSON11371("a-permit", "permit")+` }
 	} }`)

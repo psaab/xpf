@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-func tree12825(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 // Duplicate pre-id-default-policy blocks must merge log bits (#12825).
 func TestDuplicatePreIDDefaultPolicyMerges12825(t *testing.T) {
 	cases := []struct{ name, text string }{
@@ -30,7 +21,7 @@ func TestDuplicatePreIDDefaultPolicyMerges12825(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(tree12825(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("compile: %v", err)
 			}
@@ -47,12 +38,12 @@ func TestDuplicatePreIDDefaultPolicyMerges12825(t *testing.T) {
 		})
 	}
 	// Single block control
-	cfg, err := CompileConfig(tree12825(t, `security { pre-id-default-policy { then { log { session-init; } } } }`))
+	cfg, err := CompileConfig(parseHierText(t, `security { pre-id-default-policy { then { log { session-init; } } } }`))
 	if err != nil || cfg.Security.PreIDDefaultPolicy == nil || !cfg.Security.PreIDDefaultPolicy.LogSessionInit || cfg.Security.PreIDDefaultPolicy.LogSessionClose {
 		t.Fatalf("single control: cfg=%+v err=%v", cfg.Security.PreIDDefaultPolicy, err)
 	}
 	// Absent control stays nil
-	cfg, err = CompileConfig(tree12825(t, `security { }`))
+	cfg, err = CompileConfig(parseHierText(t, `security { }`))
 	if err != nil || cfg.Security.PreIDDefaultPolicy != nil {
 		t.Fatalf("absent control: %+v err=%v", cfg.Security.PreIDDefaultPolicy, err)
 	}
@@ -81,17 +72,17 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 	// Invalid value cases.
 	for _, val := range []string{"enabledd", "banana"} {
 		text := `security { policy-stats { system-wide ` + val + `; } }`
-		if err := SchemaValidate(tree12825(t, text)); err == nil {
+		if err := SchemaValidate(parseHierText(t, text)); err == nil {
 			t.Errorf("%q: SchemaValidate accepted", val)
 		} else if !strings.Contains(err.Error(), "system-wide") {
 			t.Errorf("%q: schema error must name system-wide: %v", val, err)
 		}
-		if _, err := CompileConfig(tree12825(t, text)); err == nil {
+		if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 			t.Errorf("%q: strict CompileConfig accepted", val)
 		} else if !strings.Contains(err.Error(), "system-wide") {
 			t.Errorf("%q: strict error must name system-wide: %v", val, err)
 		}
-		cfg, err := CompileConfigLenient(tree12825(t, text))
+		cfg, err := CompileConfigLenient(parseHierText(t, text))
 		if err != nil {
 			t.Errorf("%q: lenient must boot: %v", val, err)
 		} else {
@@ -117,12 +108,12 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 		`security { policy-stats { system-wide enable; } } security { policy-stats { system-wide disable; } }`,
 		`security { policy-stats { system-wide disable; } } security { policy-stats { system-wide enable; } }`,
 	} {
-		if _, err := CompileConfig(tree12825(t, text)); err == nil {
+		if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 			t.Errorf("conflict strict accepted: %s", text)
 		} else if !strings.Contains(err.Error(), "#12825") {
 			t.Errorf("conflict strict error missing #12825: %v", err)
 		}
-		cfg, err := CompileConfigLenient(tree12825(t, text))
+		cfg, err := CompileConfigLenient(parseHierText(t, text))
 		if err != nil {
 			t.Errorf("conflict lenient: %v", err)
 		} else if cfg.Security.PolicyStatsEnabled {
@@ -143,16 +134,16 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 		{`security { policy-stats { system-wide enable; } policy-stats { system-wide enable; } }`, true},
 	}
 	for _, tc := range controls {
-		if err := SchemaValidate(tree12825(t, tc.text)); err != nil {
+		if err := SchemaValidate(parseHierText(t, tc.text)); err != nil {
 			t.Errorf("control schema rejected %q: %v", tc.text, err)
 		}
-		cfg, err := CompileConfig(tree12825(t, tc.text))
+		cfg, err := CompileConfig(parseHierText(t, tc.text))
 		if err != nil {
 			t.Errorf("control strict rejected %q: %v", tc.text, err)
 		} else if cfg.Security.PolicyStatsEnabled != tc.want {
 			t.Errorf("control %q got %v want %v", tc.text, cfg.Security.PolicyStatsEnabled, tc.want)
 		}
-		cfg, err = CompileConfigLenient(tree12825(t, tc.text))
+		cfg, err = CompileConfigLenient(parseHierText(t, tc.text))
 		if err != nil || cfg.Security.PolicyStatsEnabled != tc.want {
 			t.Errorf("lenient control %q got %+v err=%v", tc.text, cfg, err)
 		}
@@ -193,13 +184,13 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 	}
 	// Value-less leaves are invalid too.
 	text := `security { policy-stats { system-wide; } }`
-	if err := SchemaValidate(tree12825(t, text)); err == nil {
+	if err := SchemaValidate(parseHierText(t, text)); err == nil {
 		t.Errorf("value-less SchemaValidate accepted")
 	}
-	if _, err := CompileConfig(tree12825(t, text)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 		t.Errorf("value-less strict accepted")
 	}
-	cfg, err := CompileConfigLenient(tree12825(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil || cfg.Security.PolicyStatsEnabled {
 		t.Errorf("value-less lenient: cfg=%+v err=%v", cfg, err)
 	}

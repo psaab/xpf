@@ -364,7 +364,7 @@ func TestApplicationSetShadowDoesNotDuplicatePredefinedCollisionWarning(t *testi
 	}
 }
 
-// parseHier (shared with vrrp_track_test.go) parses a hierarchical (braced)
+// parseHierText (#16139 kit) parses a hierarchical (braced)
 // config string. A hierarchical parse can emit MULTIPLE top-level sibling
 // `applications {}` nodes; the compiler compiles every one, so the collision
 // gate must aggregate across all of them.
@@ -374,7 +374,7 @@ func TestApplicationSetShadowDoesNotDuplicatePredefinedCollisionWarning(t *testi
 // compiler compiles both blocks, so this must be rejected — a walker that
 // stopped at the first `applications` node missed it.
 func TestApplicationVsApplicationSetCollisionSplitAcrossBlocks(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 applications {
     application web {
         protocol tcp;
@@ -400,7 +400,7 @@ applications {
 
 // Duplicate application definition split across two `applications {}` blocks.
 func TestDuplicateApplicationDefinitionSplitAcrossBlocks(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 applications {
     application dup {
         protocol tcp;
@@ -427,7 +427,7 @@ applications {
 
 // Duplicate application-set definition split across two `applications {}` blocks.
 func TestDuplicateApplicationSetDefinitionSplitAcrossBlocks(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 applications {
     application a1 {
         protocol tcp;
@@ -457,7 +457,7 @@ applications {
 // Two distinct `applications {}` blocks with non-colliding names commit cleanly
 // — the aggregation must not over-reject legitimately split definitions.
 func TestDistinctApplicationNamesSplitAcrossBlocksCommit(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 applications {
     application web {
         protocol tcp;
@@ -651,7 +651,7 @@ func TestGeneratedTermNamesNoCollisionCommit(t *testing.T) {
 // iterate-all aggregation against a future first-match regression. Uses NewParser
 // (hierarchical) — ParseSetCommand would merge the blocks into one node.
 func TestCrossParentGeneratedNameCollisionSplitAcrossBlocks(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 applications {
     application a-b {
         term c {

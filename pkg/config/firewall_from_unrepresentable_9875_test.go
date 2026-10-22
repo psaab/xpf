@@ -40,17 +40,9 @@ func fwSplitTree9875(t *testing.T, filterBody string) *ConfigTree {
 	return tree
 }
 
-// fwRawTree9875 parses a complete config source (for shapes the filter-body
-// wrappers cannot express: nested instance names, policy-options siblings,
-// non-inet families).
-func fwRawTree9875(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(src).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture did not parse: %v", perrs)
-	}
-	return tree
-}
+// Complete config sources are parsed via parseHierText (#16139 kit) for
+// shapes the filter-body wrappers cannot express: nested instance names,
+// policy-options siblings, non-inet families.
 
 // TestFilterValuelessFromRecordedLenient9875 pins the ValuelessFrom record:
 // every valueless spelling the #8480 strict gate rejects must leave the
@@ -267,20 +259,20 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 		{"from-packed valued prefix-list control (#10073)", func(t *testing.T) *ConfigTree {
 			// Defining the referenced list keeps this boundary focused on
 			// strict-gate/marker parity rather than #3307 dangling refs.
-			return fwRawTree9875(t, `policy-options { prefix-list AAA { 10.0.0.0/8; } }
+			return parseHierText(t, `policy-options { prefix-list AAA { 10.0.0.0/8; } }
 				firewall { family inet { filter F { term T { from source-prefix-list AAA; then { discard; } } } } }`)
 		}, false, "", ""},
 		{"nested filter-name valueless (GPT-F1)", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall { family inet { filter { F { term T { from { source-prefix-list; } then { discard; } } } } } }`)
+			return parseHierText(t, `firewall { family inet { filter { F { term T { from { source-prefix-list; } then { discard; } } } } } }`)
 		}, true, "source-prefix-list", "ValuelessFrom"},
 		{"nested term-name valueless (GPT-F1)", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall { family inet { filter F { term { T { from { source-prefix-list; } then { discard; } } } } } }`)
+			return parseHierText(t, `firewall { family inet { filter F { term { T { from { source-prefix-list; } then { discard; } } } } } }`)
 		}, true, "source-prefix-list", "ValuelessFrom"},
 		{"nested filter+term-name valueless (GPT-F1)", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall { family inet { filter { F { term { T { from { source-prefix-list; } then { discard; } } } } } } }`)
+			return parseHierText(t, `firewall { family inet { filter { F { term { T { from { source-prefix-list; } then { discard; } } } } } } }`)
 		}, true, "source-prefix-list", "ValuelessFrom"},
 		{"nested filter+term-name valued control (GPT-F1)", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall { family inet { filter { F { term { T { from { protocol tcp; } then { accept; } } } } } } }`)
+			return parseHierText(t, `firewall { family inet { filter { F { term { T { from { protocol tcp; } then { accept; } } } } } } }`)
 		}, false, "", ""},
 		{"packed self-named valued commits (GPT-F2)", func(t *testing.T) *ConfigTree {
 			// A resolving list legitimately named like the leaf (quoted
@@ -289,7 +281,7 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 			// not, keyword-shaped or not — so #8480 must NOT fire:
 			// packedBody's reinterpretation of it as another statement
 			// (#10081) must not leak into the gate/mark pair.
-			return fwRawTree9875(t, `policy-options { prefix-list "source-prefix-list" { 10.0.0.0/8; } }
+			return parseHierText(t, `policy-options { prefix-list "source-prefix-list" { 10.0.0.0/8; } }
 				firewall { family inet { filter F { term T { from source-prefix-list "source-prefix-list"; then { accept; } } } } }`)
 		}, false, "", ""},
 		{"packed unquoted self-named rejects (GPT-F2)", func(t *testing.T) *ConfigTree {
@@ -303,7 +295,7 @@ func TestFilterFromMarkerGateEquivalence9875(t *testing.T) {
 			return fwTree9875(t, `term T { from source-prefix-list source-prefix-list; then { discard; } }`)
 		}, true, "source-prefix-list", "ValuelessFrom"},
 		{"any packed valueless (Spark-F2)", func(t *testing.T) *ConfigTree {
-			return fwRawTree9875(t, `firewall { family any { filter F { term T { from protocol; then { discard; } } } } }`)
+			return parseHierText(t, `firewall { family any { filter F { term T { from protocol; then { discard; } } } } }`)
 		}, true, "protocol", "ValuelessFrom"},
 	}
 	for _, row := range rows {
@@ -401,7 +393,7 @@ func TestFilterFromPackedSeenWithoutNormalizer9875(t *testing.T) {
 func TestFilterNoFamilyPackedValuelessRejected9875(t *testing.T) {
 	mk := func(t *testing.T) *ConfigTree {
 		t.Helper()
-		return fwRawTree9875(t, `firewall { filter F { term T { from protocol; then { discard; } } } }`)
+		return parseHierText(t, `firewall { filter F { term T { from protocol; then { discard; } } } }`)
 	}
 	if _, err := CompileConfig(mk(t)); err == nil {
 		t.Fatal("strict must reject implicit-inet from-packed valueless `protocol`")

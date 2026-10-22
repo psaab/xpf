@@ -224,7 +224,7 @@ security {
     }
 }
 `
-	tree := mustParse(t, cfgText)
+	tree := parseHierText(t, cfgText)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
@@ -289,7 +289,7 @@ security {
     }
 }
 `
-		tree := mustParse(t, cfgText)
+		tree := parseHierText(t, cfgText)
 		cfg, err := CompileConfigLenient(tree)
 		if err != nil {
 			t.Fatalf("CompileConfigLenient: %v", err)
@@ -685,12 +685,12 @@ func TestNATMatchLeafKnown9877(t *testing.T) {
 // fully braced — and requires identical record, warning and verdict.
 func compactVsBraced9877(t *testing.T, compactText, bracedText string, check func(t *testing.T, cfg *Config)) {
 	t.Helper()
-	compactTree := mustParse(t, compactText)
+	compactTree := parseHierText(t, compactText)
 	compactCfg, err := CompileConfigLenient(compactTree)
 	if err != nil {
 		t.Fatalf("compact CompileConfigLenient: %v", err)
 	}
-	bracedTree := mustParse(t, bracedText)
+	bracedTree := parseHierText(t, bracedText)
 	bracedCfg, err := CompileConfigLenient(bracedTree)
 	if err != nil {
 		t.Fatalf("braced CompileConfigLenient: %v", err)
@@ -829,7 +829,7 @@ security {
     }
 }
 `
-	tree := mustParse(t, cfgText)
+	tree := parseHierText(t, cfgText)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)

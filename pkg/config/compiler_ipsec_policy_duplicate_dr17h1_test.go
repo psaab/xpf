@@ -12,15 +12,6 @@ import (
 // assigned it, while the #9023 duplicate fold only spans a single parent.
 // The merged policy must preserve STRONG + PFS.
 
-func parseHier14430(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 const proposals14430 = `
         proposal STRONG {
             protocol esp;
@@ -74,14 +65,14 @@ func TestIPsecPolicyCrossContainerDuplicateMerges14430(t *testing.T) {
         }
     }
 }`
-	cfg, err := CompileConfig(parseHier14430(t, src))
+	cfg, err := CompileConfig(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfig (strict, cross-container duplicate policy): %v", err)
 	}
 	assertMerged14430(t, cfg)
 
 	// Lenient path shares compileIPsec; it must merge identically.
-	cfgL, err := CompileConfigLenient(parseHier14430(t, src))
+	cfgL, err := CompileConfigLenient(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient (cross-container duplicate policy): %v", err)
 	}
@@ -106,7 +97,7 @@ security {
         }
     }
 }`
-	cfg, err := CompileConfig(parseHier14430(t, src))
+	cfg, err := CompileConfig(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfig (strict, two security roots): %v", err)
 	}
@@ -129,7 +120,7 @@ func TestIPsecPolicySameParentDuplicateStillMerges14430(t *testing.T) {
         }
     }
 }`
-	cfg, err := CompileConfig(parseHier14430(t, src))
+	cfg, err := CompileConfig(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfig (strict, same-parent duplicate policy): %v", err)
 	}
@@ -147,7 +138,7 @@ func TestIPsecPolicySingleContainerUnchanged14430(t *testing.T) {
         }
     }
 }`
-	cfg, err := CompileConfig(parseHier14430(t, src))
+	cfg, err := CompileConfig(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfig (strict, single policy): %v", err)
 	}
@@ -181,7 +172,7 @@ func TestIPsecPolicyCrossContainerDuplicateProposalNotDuplicated14430(t *testing
         }
     }
 }`
-	cfg, err := CompileConfig(parseHier14430(t, src))
+	cfg, err := CompileConfig(parseHierText(t, src))
 	if err != nil {
 		t.Fatalf("CompileConfig (strict, repeated proposal across containers): %v", err)
 	}

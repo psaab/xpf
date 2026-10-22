@@ -6,15 +6,6 @@ import (
 	"testing"
 )
 
-func groupTree9799(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 const zoneGroup9799 = "security { zones { security-zone [ zga zgb ] { tcp-rst; } } }"
 
 func zonePath9799(name string) []string {
@@ -24,7 +15,7 @@ func zonePath9799(name string) []string {
 // TestShowOfALaterGroupMemberShowsTheGroup9799: `show ... security-zone zgb`
 // printed nothing while `... zga` printed the group.
 func TestShowOfALaterGroupMemberShowsTheGroup9799(t *testing.T) {
-	tree := groupTree9799(t, zoneGroup9799)
+	tree := parseHierText(t, zoneGroup9799)
 	first := tree.FormatPath(zonePath9799("zga"))
 	later := tree.FormatPath(zonePath9799("zgb"))
 	if first == "" || !strings.Contains(first, "zgb") {
@@ -42,7 +33,7 @@ func TestShowOfALaterGroupMemberShowsTheGroup9799(t *testing.T) {
 // past a name without being a group: a packed body, and a node with no
 // provenance at all.
 func TestLaterMemberNeedsBracketProvenance9799(t *testing.T) {
-	packed := groupTree9799(t, "security { zones { security-zone trust screen edge; } }")
+	packed := parseHierText(t, "security { zones { security-zone trust screen edge; } }")
 	if got := packed.FormatPath(zonePath9799("edge")); got != "" {
 		t.Fatalf("a packed body is not a member list: show of `edge` printed %q", got)
 	}
@@ -91,7 +82,7 @@ func TestEditsOfALaterGroupMemberAreRefused9799(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := groupTree9799(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			before := tree.Format()
 			err := tc.edit(tree)
 			if err == nil || !strings.Contains(err.Error(), "#9799") || !strings.Contains(err.Error(), "security-zone zga zgb") {

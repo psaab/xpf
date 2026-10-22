@@ -12,15 +12,6 @@ import (
 // and repeated port-mirroring blocks dropped the first.
 // RED-on-base, GREEN after find-or-create merging + FindChildren iteration.
 
-func hierTree15650(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("parse %q: %v", text, perrs)
-	}
-	return tree
-}
-
 func strictCompile15650(t *testing.T, tree *ConfigTree) *Config {
 	t.Helper()
 	if err := SchemaValidate(tree); err != nil {
@@ -77,7 +68,7 @@ forwarding-options {
         }
     }
 }`
-	cfg := strictCompile15650(t, hierTree15650(t, text))
+	cfg := strictCompile15650(t, parseHierText(t, text))
 	pm := cfg.ForwardingOptions.PortMirroring
 	if pm == nil {
 		t.Fatal("PortMirroring nil")
@@ -112,7 +103,7 @@ func TestPortMirroringSplitInputOutputChildren15650(t *testing.T) {
         }
     }
 }`
-	cfg := strictCompile15650(t, hierTree15650(t, text))
+	cfg := strictCompile15650(t, parseHierText(t, text))
 	inst := cfg.ForwardingOptions.PortMirroring.Instances["span1"]
 	if inst == nil {
 		t.Fatal("span1 missing")
@@ -132,7 +123,7 @@ func TestPortMirroringSplitLenientMerges15650(t *testing.T) {
         instance span1 { output { interface ge-0/0/1.0; } }
     }
 }`
-	tree := hierTree15650(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient: %v", err)
@@ -162,7 +153,7 @@ forwarding-options {
         instance span1 { input { ingress { interface ge-0/0/0.0; } } }
     }
 }`
-	cfg := strictCompile15650(t, hierTree15650(t, text))
+	cfg := strictCompile15650(t, parseHierText(t, text))
 	inst := cfg.ForwardingOptions.PortMirroring.Instances["span1"]
 	if inst == nil || len(inst.Input) != 1 || inst.Output != "ge-0/0/1.0" {
 		t.Fatalf("inst=%+v want input+output merged", inst)
@@ -177,7 +168,7 @@ func TestPortMirroringDuplicateIngressAcrossSplitStillRejected15650(t *testing.T
         instance span1 { input { ingress { interface ge-0/0/0.0; } } }
     }
 }`
-	tree := hierTree15650(t, text)
+	tree := parseHierText(t, text)
 	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}

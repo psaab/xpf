@@ -45,7 +45,7 @@ const policiesClose12628 = ` }
 }`
 
 func TestPoliciesWithoutUnknownChildrenDoNotPoison12628(t *testing.T) {
-	tree := parseUnknownSecurityPoliciesChildren12217(t, policiesBase12628+policiesClose12628)
+	tree := parseHierText(t, policiesBase12628+policiesClose12628)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
@@ -69,14 +69,14 @@ func TestPoliciesJunosValidNonEnforcementChildrenDoNotPoison12628(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text := policiesBase12628 + "  " + tc.child + "\n" + policiesClose12628
-			tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree := parseHierText(t, text)
 			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("strict schema rejected Junos-valid child %s: %v", tc.name, err)
 			}
 			if _, err := CompileConfig(tree); err != nil {
 				t.Fatalf("strict compile rejected Junos-valid child %s: %v", tc.name, err)
 			}
-			tree2 := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree2 := parseHierText(t, text)
 			cfg, err := CompileConfigLenient(tree2)
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
@@ -114,7 +114,7 @@ func TestPoliciesEnforcementBearingUnknownChildrenStillPoison12628(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text := policiesBase12628 + "  " + tc.child + "\n" + policiesClose12628
-			tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree := parseHierText(t, text)
 			cfg, err := CompileConfigLenient(tree)
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
@@ -125,7 +125,7 @@ func TestPoliciesEnforcementBearingUnknownChildrenStillPoison12628(t *testing.T)
 			if policiesCarrierCount12628(cfg) != 1 {
 				t.Fatalf("poison carriers = %d, want 1", policiesCarrierCount12628(cfg))
 			}
-			tree2 := parseUnknownSecurityPoliciesChildren12217(t, text)
+			tree2 := parseHierText(t, text)
 			if _, err := CompileConfig(tree2); err == nil {
 				t.Fatal("strict compile accepted enforcement-bearing unknown child")
 			}
@@ -137,7 +137,7 @@ func TestPoliciesEnforcementBearingUnknownChildrenStillPoison12628(t *testing.T)
 // rulebase tail; must poison (like #11575 packed-slot logic).
 func TestPoliciesPackedEnforcementTailPoisons12628(t *testing.T) {
 	text := policiesBase12628 + "  unknown global policy deny-bad;\n" + policiesClose12628
-	tree := parseUnknownSecurityPoliciesChildren12217(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)

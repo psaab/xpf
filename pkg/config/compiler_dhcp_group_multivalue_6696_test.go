@@ -91,15 +91,6 @@ func setTree6696(t *testing.T, lines ...string) *ConfigTree {
 	return tree
 }
 
-func braceTree6696(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if errs != nil {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 // TestDHCPGroup6696InterfaceSpellingsAgree asserts that every spelling of a
 // two-interface group compiles to BOTH interfaces, and that the spellings
 // agree with each other.
@@ -123,11 +114,11 @@ func TestDHCPGroup6696InterfaceSpellingsAgree(t *testing.T) {
 				`set system services dhcp-local-server group g1 interface ge-0/0/1.0`)
 		}},
 		{"brace bracketed", func() *ConfigTree {
-			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
+			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
 				"    interface [ ge-0/0/0.0 ge-0/0/1.0 ];\n   }\n  }\n }\n}\n")
 		}},
 		{"brace repeated", func() *ConfigTree {
-			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
+			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
 				"    interface ge-0/0/0.0;\n    interface ge-0/0/1.0;\n   }\n  }\n }\n}\n")
 		}},
 	}
@@ -167,15 +158,15 @@ func TestDHCPPool6696DNSServerSpellingsAgree(t *testing.T) {
 				`set system services dhcp-local-server group g1 pool p1 dns-server 198.51.100.53`)
 		}},
 		{"brace bracketed", func() *ConfigTree {
-			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
+			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
 				"     subnet 192.0.2.0/24;\n     dns-server [ 192.0.2.53 198.51.100.53 ];\n    }\n   }\n  }\n }\n}\n")
 		}},
 		{"brace repeated", func() *ConfigTree {
-			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
+			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
 				"     subnet 192.0.2.0/24;\n     dns-server 192.0.2.53;\n     dns-server 198.51.100.53;\n    }\n   }\n  }\n }\n}\n")
 		}},
 		{"brace value block", func() *ConfigTree {
-			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
+			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n    pool p1 {\n"+
 				"     subnet 192.0.2.0/24;\n     dns-server {\n      192.0.2.53;\n      198.51.100.53;\n     }\n    }\n   }\n  }\n }\n}\n")
 		}},
 	}
@@ -255,7 +246,7 @@ func TestDHCPGroup6696PerInterfaceModifierIsNotAnInterface(t *testing.T) {
 			return setTree6696(t, `set system services dhcp-local-server group g1 interface ge-0/0/0.0 upgrade-server 192.0.2.9`)
 		}},
 		{"brace modifier body", func() *ConfigTree {
-			return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
+			return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
 				"    interface ge-0/0/0.0 {\n     exclude;\n    }\n   }\n  }\n }\n}\n")
 		}},
 	}
@@ -283,7 +274,7 @@ func TestDHCPGroup6696PerInterfaceModifierIsNotAnInterface(t *testing.T) {
 // regressed the group to serving NOTHING.
 func TestDHCPGroup6696BareValueBlockStillReadsEveryValue(t *testing.T) {
 	groups := dhcpGroups6696(t, func() *ConfigTree {
-		return braceTree6696(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
+		return parseHierText(t, "system {\n services {\n  dhcp-local-server {\n   group g1 {\n"+
 			"    interface {\n     ge-0/0/0.0;\n     ge-0/0/1.0;\n    }\n   }\n  }\n }\n}\n")
 	})
 	g := groups["g1"]

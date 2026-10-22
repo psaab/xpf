@@ -26,23 +26,14 @@ const (
 		`apply-groups G; routing-instances { blue { interface ge-0/0/0.0; } }`
 )
 
-func parse9743(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture must parse: %v", perrs)
-	}
-	return tree
-}
-
 // The claim is EQUALITY between the two spellings' displays, not merely that the
 // properties appear. The two group bodies are the same configuration written two
 // ways; a display that renders them differently is the defect, whatever the
 // difference happens to be. Measured: identical after this change, and the
 // elided one is missing two statements before it.
 func TestInheritanceDisplayIsTheSameForBothSpellings9743(t *testing.T) {
-	elided := parse9743(t, elidedGroupBody9743).FormatInheritance()
-	braced := parse9743(t, bracedGroupBody9743).FormatInheritance()
+	elided := parseHierText(t, elidedGroupBody9743).FormatInheritance()
+	braced := parseHierText(t, bracedGroupBody9743).FormatInheritance()
 	if elided != braced {
 		t.Fatalf("the two spellings of one config must display alike\n--- elided ---\n%s\n--- braced ---\n%s", elided, braced)
 	}
@@ -59,8 +50,8 @@ func TestInheritanceDisplayIsTheSameForBothSpellings9743(t *testing.T) {
 // FormatInheritance was fixed.
 func TestFormatPathInheritanceIsTheSameForBothSpellings9743(t *testing.T) {
 	path := []string{"routing-instances"}
-	elided := parse9743(t, elidedGroupBody9743).FormatPathInheritance(path)
-	braced := parse9743(t, bracedGroupBody9743).FormatPathInheritance(path)
+	elided := parseHierText(t, elidedGroupBody9743).FormatPathInheritance(path)
+	braced := parseHierText(t, bracedGroupBody9743).FormatPathInheritance(path)
 	if elided != braced {
 		t.Fatalf("the two spellings must display alike under a path\n--- elided ---\n%s\n--- braced ---\n%s", elided, braced)
 	}
@@ -78,8 +69,8 @@ func TestInheritanceDisplayAgreesWithTheCompiledConfig9743(t *testing.T) {
 		{"group body braced", bracedGroupBody9743},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			display := parse9743(t, tc.text).FormatInheritance()
-			cfg, err := CompileConfigLenient(parse9743(t, tc.text))
+			display := parseHierText(t, tc.text).FormatInheritance()
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -124,7 +115,7 @@ func TestInheritanceDisplayDoesNotMutateTheTree9743(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parse9743(t, elidedGroupBody9743)
+			tree := parseHierText(t, elidedGroupBody9743)
 			before := tree.Format()
 			_ = tc.render(tree)
 			if after := tree.Format(); after != before {
@@ -139,7 +130,7 @@ func TestInheritanceDisplayDoesNotMutateTheTree9743(t *testing.T) {
 // disturb the ordinary path.
 func TestInheritanceDisplayUnchangedWithoutGroups9743(t *testing.T) {
 	const plain = `routing-instances { blue { instance-type virtual-router; interface ge-0/0/0.0; } }`
-	got := parse9743(t, plain).FormatInheritance()
+	got := parseHierText(t, plain).FormatInheritance()
 	for _, want := range []string{"routing-instances", "blue", "instance-type virtual-router", "interface ge-0/0/0.0"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("plain display must still contain %q\n%s", want, got)

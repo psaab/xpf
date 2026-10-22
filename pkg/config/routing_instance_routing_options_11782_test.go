@@ -15,7 +15,7 @@ func TestRoutingInstanceRoutingOptionsCarryAllCompiledFields11782(t *testing.T) 
 		{
 			name: "hierarchical",
 			tree: func(t *testing.T) *ConfigTree {
-				return parseHierarchical(t, `policy-options {
+				return parseHierText(t, `policy-options {
 					policy-statement export-policy { term t { then accept; } }
 				}
 				routing-instances {

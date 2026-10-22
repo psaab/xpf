@@ -39,7 +39,7 @@ func TestThenSyslogIsDistinctFromThenLog_6853(t *testing.T) {
 	// arm; deleting `term.Syslog = true` from that arm left the whole file
 	// GREEN. The compact cell below is the one that binds it.
 	t.Run("compact leaf `then syslog;` (the LEAF switch)", func(t *testing.T) {
-		tree := parseHier(t, `
+		tree := parseHierText(t, `
 firewall {
     family inet {
         filter f {
@@ -54,7 +54,7 @@ firewall {
 	})
 
 	t.Run("block `then { syslog; }` (the hierarchical switch)", func(t *testing.T) {
-		tree := parseHier(t, `
+		tree := parseHierText(t, `
 firewall {
     family inet {
         filter f {

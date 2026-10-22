@@ -43,7 +43,7 @@ func TestExcludedOperandRejectedStrict15200(t *testing.T) {
 		{
 			name: "zone-pair source hierarchical operand",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; source-address-excluded bad-value; destination-address any; application any;`))
 			},
 			leaf: "source-address-excluded",
@@ -51,7 +51,7 @@ func TestExcludedOperandRejectedStrict15200(t *testing.T) {
 		{
 			name: "zone-pair destination hierarchical operand",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; destination-address any; destination-address-excluded bad-value; application any;`))
 			},
 			leaf: "destination-address-excluded",
@@ -89,7 +89,7 @@ func TestExcludedOperandRejectedStrict15200(t *testing.T) {
 		{
 			name: "zone-pair block child operand",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; source-address-excluded { bad-value; } destination-address any; application any;`))
 			},
 			leaf: "source-address-excluded",
@@ -97,7 +97,7 @@ func TestExcludedOperandRejectedStrict15200(t *testing.T) {
 		{
 			name: "global destination hierarchical operand",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, globalHier(
+				return parseHierText(t, globalHier(
 					`source-address any; destination-address any; destination-address-excluded bad-value; application any;`))
 			},
 			leaf: "destination-address-excluded",
@@ -145,7 +145,7 @@ func TestExcludedOperandLenientWarnsAndPoisons15200(t *testing.T) {
 		{
 			name: "zone-pair source hierarchical",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; source-address-excluded bad-value; destination-address any; application any;`))
 			},
 			pol: "p", leaf: "source-address-excluded",
@@ -168,7 +168,7 @@ func TestExcludedOperandLenientWarnsAndPoisons15200(t *testing.T) {
 		{
 			name: "global source hierarchical",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, globalHier(
+				return parseHierText(t, globalHier(
 					`source-address any; source-address-excluded bad-value; destination-address any; application any;`))
 			},
 			pol: "g", leaf: "source-address-excluded",
@@ -196,7 +196,7 @@ func TestExcludedOperandLenientWarnsAndPoisons15200(t *testing.T) {
 // `*-address-excluded` with no operand is valid Junos and must stay
 // unpoisoned with the flag set, on both strict and lenient paths.
 func TestExcludedOperandBareModifierStaysClean15200(t *testing.T) {
-	tree := buildValuelessMatchHierTree(t, zonePairHier(
+	tree := parseHierText(t, zonePairHier(
 		`source-address any; source-address-excluded; destination-address any; destination-address-excluded; application any;`))
 	for _, compile := range []struct {
 		name string

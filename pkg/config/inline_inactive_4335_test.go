@@ -33,7 +33,7 @@ import (
 // stays active as the pool member, and the deactivated port is absent
 // (PortRaw == "" == preserve destination port).
 func TestInlineInactive_DNATPoolPortDeactivated(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     nat {
         destination {
             pool p1 {
@@ -82,12 +82,12 @@ func TestInlineInactive_DNATPoolPortDeactivated(t *testing.T) {
 // compiles to exactly the same DNAT pool as authoring the address with no port
 // leaf at all — the deactivated modifier truly behaves as if it were absent.
 func TestInlineInactive_EquivalentToPortAbsent(t *testing.T) {
-	withInline := mustParse(t, `security {
+	withInline := parseHierText(t, `security {
     nat { destination { pool p1 {
         address 192.0.2.7/32 inactive: port 32400;
     } } }
 }`)
-	portAbsent := mustParse(t, `security {
+	portAbsent := parseHierText(t, `security {
     nat { destination { pool p1 {
         address 192.0.2.7/32;
     } } }
@@ -110,7 +110,7 @@ func TestInlineInactive_EquivalentToPortAbsent(t *testing.T) {
 // inactive: marker the port modifier is honored (the fix must not swallow a
 // legitimate inline port).
 func TestInlineInactive_ActivePortStillCompiles(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     nat { destination { pool p1 {
         address 192.0.2.7/32 port 32400;
     } } }
@@ -132,7 +132,7 @@ func TestInlineInactive_ActivePortStillCompiles(t *testing.T) {
 // LEADING `inactive:` handling is unchanged — the whole statement is
 // deactivated and its real identity survives in Keys.
 func TestInlineInactive_LeadingMarkerStillLifted(t *testing.T) {
-	tree := mustParse(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     ge-0/0/0 {
         unit 0 {
             family inet {
@@ -158,7 +158,7 @@ func TestInlineInactive_LeadingMarkerStillLifted(t *testing.T) {
 // behavior directly on a generic leaf (not DNAT-specific): the inline marker
 // and everything it governs are dropped, leaving the active identity intact.
 func TestInlineInactive_ParserDropsMarkerGenerically(t *testing.T) {
-	tree := mustParse(t, "system {\n    host-name keep inactive: extra token;\n}")
+	tree := parseHierText(t, "system {\n    host-name keep inactive: extra token;\n}")
 	hn := tree.FindChild("system").FindChild("host-name")
 	if hn == nil {
 		t.Fatalf("host-name not found; children=%v", tree.FindChild("system").Children)

@@ -166,14 +166,6 @@ func TestSecureTunnelBindIfaceCollisionLenientWarns(t *testing.T) {
 // #14451: hierarchical helper — flat `set` cannot express duplicate
 // bind-interface leaves (SetPath collapses to last value), so these
 // fixtures must be hierarchical text via NewParser.
-func buildBindIfaceHierTree14451(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse hierarchical bind-interface fixture: %v", errs)
-	}
-	return tree
-}
 
 // TestSecureTunnelBindIfaceDuplicateOccurrenceCollision14451 proves the
 // admission gate validates EVERY bind-interface occurrence, not only the
@@ -194,7 +186,7 @@ security {
     }
 }
 `
-	tree := buildBindIfaceHierTree14451(t, src)
+	tree := parseHierText(t, src)
 	_, err := CompileConfig(tree)
 	if err == nil {
 		t.Fatalf("CompileConfig accepted duplicate bind-interface collision (installed st0 vs st0.0); want reject")
@@ -205,7 +197,7 @@ security {
 		}
 	}
 	// Lenient path warns on the same installed-value collision.
-	tree2 := buildBindIfaceHierTree14451(t, src)
+	tree2 := parseHierText(t, src)
 	cfg, err := CompileConfigLenient(tree2)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient rejected duplicate collision (want warn): %v", err)
@@ -236,7 +228,7 @@ security {
     }
 }
 `
-	tree := buildBindIfaceHierTree14451(t, src)
+	tree := parseHierText(t, src)
 	_, err := CompileConfig(tree)
 	if err == nil {
 		t.Fatalf("CompileConfig accepted second invalid bind-interface ge-0/0/0; want reject")
@@ -261,7 +253,7 @@ func TestSecureTunnelBindIfaceDuplicateControls14451(t *testing.T) {
 		// compile exercises the bind-interface gate's own verdict: a
 		// same-value repeat must produce NO #2933 collision warning and
 		// the installed bind-interface stays st0.1.
-		tree := buildBindIfaceHierTree14451(t, `
+		tree := parseHierText(t, `
 security {
     ipsec {
         vpn V1 {
@@ -291,7 +283,7 @@ security {
 		}
 	})
 	t.Run("first invalid second valid still rejects naming invalid", func(t *testing.T) {
-		tree := buildBindIfaceHierTree14451(t, `
+		tree := parseHierText(t, `
 security {
     ipsec {
         vpn V1 {

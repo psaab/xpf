@@ -39,15 +39,7 @@ func buildFlat9881(t *testing.T, line string) *ConfigTree {
 	return tree
 }
 
-// buildHier9881 builds a tree through the hierarchical parser.
-func buildHier9881(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse %q: %v", src, errs[0])
-	}
-	return tree
-}
+// Hierarchical trees are built via parseHierText (#16139 kit).
 
 // strictRejects9881 asserts the strict commit path rejects with a diagnostic
 // naming the as-path and prescribing quoting.
@@ -74,7 +66,7 @@ func strictRejects9881(t *testing.T, label, aspath string, tree *ConfigTree) {
 // gate makes every leg return nil and reds.
 func TestLeadingBracketUnquotedRejectedStrict_9881(t *testing.T) {
 	flat := func(line string) *ConfigTree { return buildFlat9881(t, line) }
-	hier := func(src string) *ConfigTree { return buildHier9881(t, src) }
+	hier := func(src string) *ConfigTree { return parseHierText(t, src) }
 	for _, tc := range []struct {
 		name  string
 		build func() *ConfigTree
@@ -113,7 +105,7 @@ func TestLeadingBracketUnquotedRejectedStrict_9881(t *testing.T) {
 // TestLeadingBracketLenientWarns_9881 is the #1960 no-brick half: the tolerant
 // load / peer-sync path must WARN (naming the as-path) and still boot.
 func TestLeadingBracketLenientWarns_9881(t *testing.T) {
-	tree := buildHier9881(t, `policy-options { as-path AP1 [0-9]+; }`)
+	tree := parseHierText(t, `policy-options { as-path AP1 [0-9]+; }`)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("tolerant load REJECTED an already-persisted config (#1960 brick): %v", err)
@@ -135,7 +127,7 @@ func TestLeadingBracketQuotedCommits_9881(t *testing.T) {
 			return buildFlat9881(t, `set policy-options as-path AP1 "[123-125]"`)
 		}},
 		{"hierarchical", func() *ConfigTree {
-			return buildHier9881(t, `policy-options { as-path AP1 "[123-125]"; }`)
+			return parseHierText(t, `policy-options { as-path AP1 "[123-125]"; }`)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -191,7 +183,7 @@ func TestMidTokenAndMultitokenUnaffected_9881(t *testing.T) {
 			tree *ConfigTree
 		}{
 			{"set flat", buildFlat9881(t, tc.line)},
-			{"hierarchical", buildHier9881(t, tc.hier)},
+			{"hierarchical", parseHierText(t, tc.hier)},
 		} {
 			cfg, err := CompileConfig(built.tree)
 			if err != nil {
@@ -217,7 +209,7 @@ func TestQuotedInsideBracketsAccepted_9881(t *testing.T) {
 			return buildFlat9881(t, `set policy-options as-path AP1 [ "[123-125]" ]`)
 		}},
 		{"hierarchical", func() *ConfigTree {
-			return buildHier9881(t, `policy-options { as-path AP1 [ "[123-125]" ]; }`)
+			return parseHierText(t, `policy-options { as-path AP1 [ "[123-125]" ]; }`)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -678,7 +670,7 @@ func TestTokenlessBracketsRejectAtCommit_9881(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			strictRejects9881(t, tc.name+" flat", "AP1", buildFlat9881(t, tc.flat))
-			strictRejects9881(t, tc.name+" hier", "AP1", buildHier9881(t, tc.hier))
+			strictRejects9881(t, tc.name+" hier", "AP1", parseHierText(t, tc.hier))
 		})
 	}
 }
@@ -688,7 +680,7 @@ func TestTokenlessBracketsRejectAtCommit_9881(t *testing.T) {
 // the quotes delimit complete text and the empty brackets carry none — so
 // the quoted-defeats-bracketed carve-out extends to the trailing taint.
 func TestQuotedValueWithTrailingDebrisAccepted_9881(t *testing.T) {
-	tree := buildHier9881(t, `policy-options { as-path AP1 "65000" []; }`)
+	tree := parseHierText(t, `policy-options { as-path AP1 "65000" []; }`)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("a QUOTED value with trailing debris was refused: %v", err)

@@ -163,7 +163,7 @@ func TestStaticNATMappedPortModifierOnlySibling6479(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			assertMappedPortReject(t, func() *ConfigTree {
-				return buildHier(t, hierRuleV4AB(c.inner))
+				return parseHierText(t, hierRuleV4AB(c.inner))
 			}, `"notaport"`)
 		})
 	}
@@ -206,7 +206,7 @@ func TestStaticNATMappedPortModifierOnlySibling6479(t *testing.T) {
         }
     }
 }`
-				return buildHier(t, body)
+				return parseHierText(t, body)
 			})
 		})
 	}
@@ -216,7 +216,7 @@ func TestStaticNATMappedPortModifierOnlySibling6479(t *testing.T) {
 // for the modifier-only sibling: a VALID mapped-port on a modifier-only sibling
 // applies to the merged action and is recovered (with a matching match-port).
 func TestStaticNATMappedPortModifierOnlySiblingAccept6479(t *testing.T) {
-	tree := buildHier(t, `security {
+	tree := parseHierText(t, `security {
     zones { security-zone untrust; }
     nat {
         static {

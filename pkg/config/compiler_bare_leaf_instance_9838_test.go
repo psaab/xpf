@@ -15,7 +15,7 @@ func TestBareLeafInterfaceRefused9838(t *testing.T) {
   ge-0/0/0;
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	if _, err := CompileConfig(mustParse(t, leaf)); err == nil ||
+	if _, err := CompileConfig(parseHierText(t, leaf)); err == nil ||
 		!strings.Contains(err.Error(), "interfaces ge-0/0/0") ||
 		!strings.Contains(err.Error(), "#9838") {
 		t.Fatalf("leaf: want the #9838 refusal naming interfaces ge-0/0/0, got %v", err)
@@ -25,7 +25,7 @@ func TestBareLeafInterfaceRefused9838(t *testing.T) {
   ge-0/0/0 { }
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	cfg, err := CompileConfig(mustParse(t, braced))
+	cfg, err := CompileConfig(parseHierText(t, braced))
 	if err != nil {
 		t.Fatalf("braced: want a commit, got %v", err)
 	}
@@ -41,7 +41,7 @@ func TestBareLeafInterfaceRefused9838(t *testing.T) {
 interfaces {
   ge-0/0/0;
 }`
-	if _, err := CompileConfig(mustParse(t, secondRoot)); err == nil ||
+	if _, err := CompileConfig(parseHierText(t, secondRoot)); err == nil ||
 		!strings.Contains(err.Error(), "interfaces ge-0/0/0") {
 		t.Fatalf("second root: want the #9838 refusal naming interfaces ge-0/0/0, got %v", err)
 	}
@@ -54,7 +54,7 @@ func TestBareLeafRoutingInstanceRefused9838(t *testing.T) {
 interfaces {
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	if _, err := CompileConfig(mustParse(t, leaf)); err == nil ||
+	if _, err := CompileConfig(parseHierText(t, leaf)); err == nil ||
 		!strings.Contains(err.Error(), "routing-instances ri1") ||
 		!strings.Contains(err.Error(), "#9838") {
 		t.Fatalf("leaf: want the #9838 refusal naming routing-instances ri1, got %v", err)
@@ -66,7 +66,7 @@ interfaces {
 interfaces {
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	cfg, err := CompileConfig(mustParse(t, braced))
+	cfg, err := CompileConfig(parseHierText(t, braced))
 	if err != nil {
 		t.Fatalf("braced: want a commit, got %v", err)
 	}
@@ -89,7 +89,7 @@ routing-instances {
 interfaces {
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	if _, err := CompileConfig(mustParse(t, secondRoot)); err == nil ||
+	if _, err := CompileConfig(parseHierText(t, secondRoot)); err == nil ||
 		!strings.Contains(err.Error(), "routing-instances ri2") {
 		t.Fatalf("second root: want the #9838 refusal naming routing-instances ri2, got %v", err)
 	}
@@ -98,7 +98,7 @@ interfaces {
 func TestBareLeafZoneStillCompiles9838(t *testing.T) {
 	for _, spelling := range []string{"security-zone trust;", "security-zone trust { }"} {
 		text := "security {\n zones {\n  " + spelling + "\n }\n}\ninterfaces {\n ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }\n}\n"
-		cfg, err := CompileConfig(mustParse(t, text))
+		cfg, err := CompileConfig(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("%s: want a commit, got %v", spelling, err)
 		}
@@ -116,7 +116,7 @@ apply-groups G;
   ge-0/0/0;
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	if _, err := CompileConfig(mustParse(t, ifaceLeaf)); err == nil ||
+	if _, err := CompileConfig(parseHierText(t, ifaceLeaf)); err == nil ||
 		!strings.Contains(err.Error(), "interfaces ge-0/0/0") {
 		t.Fatalf("iface leaf + wildcard group: want the #9838 refusal, got %v", err)
 	}
@@ -125,7 +125,7 @@ apply-groups G;
   ge-0/0/0 { }
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	cfg, err := CompileConfig(mustParse(t, ifaceBraced))
+	cfg, err := CompileConfig(parseHierText(t, ifaceBraced))
 	if err != nil {
 		t.Fatalf("iface braced + wildcard group: want a commit, got %v", err)
 	}
@@ -142,7 +142,7 @@ apply-groups G;
 interfaces {
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	if _, err := CompileConfig(mustParse(t, riLeaf)); err == nil ||
+	if _, err := CompileConfig(parseHierText(t, riLeaf)); err == nil ||
 		!strings.Contains(err.Error(), "routing-instances ri1") {
 		t.Fatalf("RI leaf + wildcard group: want the #9838 refusal, got %v", err)
 	}
@@ -153,7 +153,7 @@ interfaces {
 interfaces {
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	cfg, err = CompileConfig(mustParse(t, riBraced))
+	cfg, err = CompileConfig(parseHierText(t, riBraced))
 	if err != nil {
 		t.Fatalf("RI braced + wildcard group: want a commit, got %v", err)
 	}
@@ -192,7 +192,7 @@ interfaces {
 }`,
 	}
 	for name, text := range clean {
-		if _, err := CompileConfig(mustParse(t, text)); err != nil {
+		if _, err := CompileConfig(parseHierText(t, text)); err != nil {
 			t.Errorf("%s: want a commit, got %v", name, err)
 		}
 	}
@@ -209,12 +209,12 @@ interfaces {
 		"routing-instances except":   "routing-instances {\n apply-groups-except;\n}\n",
 	}
 	for name, text := range bare {
-		if _, err := validateBareLeafInstance9838(mustParse(t, text).Children, false); err != nil {
+		if _, err := validateBareLeafInstance9838(parseHierText(t, text).Children, false); err != nil {
 			t.Errorf("%s: want the gate silent, got %v", name, err)
 		}
 	}
 	if _, err := validateBareLeafInstance9838(
-		mustParse(t, "interfaces {\n ge-0/0/0;\n}\n").Children, false); err == nil {
+		parseHierText(t, "interfaces {\n ge-0/0/0;\n}\n").Children, false); err == nil {
 		t.Errorf("gate: want the refusal for a bare interface leaf, got nil")
 	}
 }
@@ -224,7 +224,7 @@ func TestBareLeafLenientWarns9838(t *testing.T) {
   ge-0/0/0;
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	cfg, err := CompileConfigLenient(mustParse(t, ifaceLeaf))
+	cfg, err := CompileConfigLenient(parseHierText(t, ifaceLeaf))
 	if err != nil {
 		t.Fatalf("lenient iface leaf: want a boot, got %v", err)
 	}
@@ -242,7 +242,7 @@ func TestBareLeafLenientWarns9838(t *testing.T) {
 interfaces {
   ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }
 }`
-	cfg, err = CompileConfigLenient(mustParse(t, riLeaf))
+	cfg, err = CompileConfigLenient(parseHierText(t, riLeaf))
 	if err != nil {
 		t.Fatalf("lenient RI leaf: want a boot, got %v", err)
 	}
@@ -281,7 +281,7 @@ func TestBareLeafQuotedAndComment9838(t *testing.T) {
 		},
 	}
 	for name, c := range refused {
-		if _, err := CompileConfig(mustParse(t, c.text)); err == nil ||
+		if _, err := CompileConfig(parseHierText(t, c.text)); err == nil ||
 			!strings.Contains(err.Error(), c.want) ||
 			!strings.Contains(err.Error(), "#9838") {
 			t.Errorf("%s: want the #9838 refusal naming %s, got %v", name, c.want, err)
@@ -293,7 +293,7 @@ func TestBareLeafQuotedAndComment9838(t *testing.T) {
 		"quoted braced RI":        "routing-instances {\n \"ri1\" { }\n}\ninterfaces {\n ge-0/0/1 { unit 0 { family inet { address 10.0.0.1/24; } } }\n}\n",
 	}
 	for name, text := range controls {
-		cfg, err := CompileConfig(mustParse(t, text))
+		cfg, err := CompileConfig(parseHierText(t, text))
 		if err != nil {
 			t.Errorf("%s: want a commit, got %v", name, err)
 			continue

@@ -9,16 +9,6 @@ import (
 // inet6 DHCPv6-client, forwarding-options sampling, group-body precedence,
 // and the no-twin behavior when setting an existing DHCP container.
 
-func tree12714(t *testing.T, input string) *ConfigTree {
-	t.Helper()
-	p := NewParser(input)
-	tree, errs := p.Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors: %v", errs)
-	}
-	return tree
-}
-
 func compileTree12714(t *testing.T, tree *ConfigTree) *Config {
 	t.Helper()
 	cfg, err := CompileConfig(tree)
@@ -52,7 +42,7 @@ func TestEditorParityDHCP12714(t *testing.T) {
 	} } } }`
 	path := []string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet", "dhcp"}
 
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := dhcpOptions12714(compileTree12714(t, tree)); got == nil || got.LeaseTime != 7200 {
 		t.Fatalf("precondition lease-time = %+v, want last-wins 7200", got)
 	}
@@ -61,19 +51,19 @@ func TestEditorParityDHCP12714(t *testing.T) {
 		t.Errorf("after set lease-time = %+v, want 1800 (edit must land on last sibling)", got)
 	}
 
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	must12714(t, tree.DeletePath(append(append([]string(nil), path...), "lease-time")))
 	if got := dhcpOptions12714(compileTree12714(t, tree)); got == nil || got.LeaseTime != 0 {
 		t.Errorf("after delete lease-time = %+v, want no remaining lease-time", got)
 	}
 
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	must12714(t, tree.DeletePath(path))
 	if got := dhcpOptions12714(compileTree12714(t, tree)); got != nil {
 		t.Errorf("after bare delete dhcp options = %+v, want nil (all siblings removed)", got)
 	}
 
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	must12714(t, tree.DeactivatePath(path))
 	if got := dhcpOptions12714(compileTree12714(t, tree)); got != nil {
 		t.Errorf("after deactivate dhcp options = %+v, want nil (all siblings inactive)", got)
@@ -101,7 +91,7 @@ func TestEditorParityDHCPv6Client12714(t *testing.T) {
 	} } } }`
 	path := []string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet6", "dhcpv6-client"}
 
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := dhcpv6Client12714(compileTree12714(t, tree)); got == nil || got.ClientType != "stateless" {
 		t.Fatalf("precondition client-type = %+v, want last-wins stateless", got)
 	}
@@ -110,13 +100,13 @@ func TestEditorParityDHCPv6Client12714(t *testing.T) {
 		t.Errorf("after set client-type = %+v, want autoconfig", got)
 	}
 
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	must12714(t, tree.DeletePath(append(append([]string(nil), path...), "client-type")))
 	if got := dhcpv6Client12714(compileTree12714(t, tree)); got == nil || got.ClientType != "" {
 		t.Errorf("after delete client-type = %+v, want no remaining client-type", got)
 	}
 
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	if err := tree.DeletePath(path); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +155,7 @@ func TestEditorParitySampling12714(t *testing.T) {
 	}`
 	sampPath := []string{"forwarding-options", "sampling"}
 
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.InputRate != 300 {
 		t.Fatalf("precondition i2 = %+v, want last-container rate 300", got)
 	}
@@ -191,14 +181,14 @@ func TestEditorParitySampling12714(t *testing.T) {
 	}
 
 	// Bare delete of the sampling container removes every sibling.
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	must12714(t, tree.DeletePath(sampPath))
 	if cfg := compileTree12714(t, tree); cfg.ForwardingOptions.Sampling != nil && len(cfg.ForwardingOptions.Sampling.Instances) != 0 {
 		t.Errorf("after bare delete sampling instances remain: %+v", cfg.ForwardingOptions.Sampling)
 	}
 
 	// Deactivate/activate toggle every sibling.
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	must12714(t, tree.DeactivatePath(sampPath))
 	if cfg := compileTree12714(t, tree); cfg.ForwardingOptions.Sampling != nil && len(cfg.ForwardingOptions.Sampling.Instances) != 0 {
 		t.Errorf("after deactivate sampling instances remain: %+v", cfg.ForwardingOptions.Sampling)
@@ -208,7 +198,7 @@ func TestEditorParitySampling12714(t *testing.T) {
 		t.Errorf("after activate i3 = %+v, want rate 400", got)
 	}
 	// Deep delete descends through instance/input across both sampling siblings.
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	must12714(t, tree.DeletePath([]string{
 		"forwarding-options", "sampling", "instance", "i2", "input", "rate",
 	}))
@@ -223,7 +213,7 @@ func TestEditorParitySampling12714(t *testing.T) {
 	}
 
 	// Deep deactivate/activate traverses the same nested path across siblings.
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	deepRate := []string{"forwarding-options", "sampling", "instance", "i2", "input", "rate"}
 	must12714(t, tree.DeactivatePath(deepRate))
 	if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.InputRate != 0 {
@@ -242,7 +232,7 @@ func TestEditorParitySampling12714(t *testing.T) {
 		t.Errorf("deep activate rate nodes = %+v, want both siblings active", rates)
 	}
 
-	tree = tree12714(t, input)
+	tree = parseHierText(t, input)
 	if err := tree.DeletePath([]string{
 		"forwarding-options", "sampling", "instance", "i2", "input", "rate", "999",
 	}); err == nil {
@@ -285,7 +275,7 @@ func TestEditorDeepSamplingElidedChildren12714(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, operation := range []string{"delete", "deactivate"} {
 				t.Run(operation, func(t *testing.T) {
-					tree := tree12714(t, tc.input)
+					tree := parseHierText(t, tc.input)
 					before := tree.Format()
 					if tc.wantRate != 0 {
 						if got := samplingInstance12714(compileTree12714(t, tree.Clone()), "i2"); got == nil || got.InputRate != tc.wantRate {
@@ -323,7 +313,7 @@ func TestEditorParityGroupsDHCP12714(t *testing.T) {
 	interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
 	apply-groups G;`
 	path := []string{"groups", "G", "interfaces", "ge-0/0/0", "unit", "0", "family", "inet", "dhcp", "lease-time", "1800"}
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := dhcpOptions12714(compileTree12714(t, tree)); got == nil || got.LeaseTime != 3600 {
 		t.Fatalf("precondition group-expanded lease-time = %+v, want first-wins 3600", got)
 	}
@@ -340,7 +330,7 @@ func TestEditorParityContainerSetNoTwin12714(t *testing.T) {
 		dhcp { lease-time 3600; }
 		dhcp { lease-time 7200; }
 	} } } }`
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	// Setting a new leaf under the repeated container must edit the last
 	// sibling, not create a third dhcp block.
 	must12714(t, tree.SetPath([]string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet", "dhcp", "force-discover"}))
@@ -397,19 +387,19 @@ func TestEditorDeepSamplingFlowServer12761(t *testing.T) {
 		otherAddrs []string
 	}{
 		{
-			name: "braced family inet",
+			name:  "braced family inet",
 			input: `forwarding-options { sampling { instance i2 { family inet { output { flow-server 1.1.1.1; } } } } }`,
-			af: "inet", ip: "1.1.1.1",
+			af:    "inet", ip: "1.1.1.1",
 		},
 		{
-			name: "braced family inet6",
+			name:  "braced family inet6",
 			input: `forwarding-options { sampling { instance i2 { family inet6 { output { flow-server 2001:db8::1; } } } } }`,
-			af: "inet6", ip: "2001:db8::1", v6: true,
+			af:    "inet6", ip: "2001:db8::1", v6: true,
 		},
 		{
-			name: "elided output under braced family",
+			name:  "elided output under braced family",
 			input: `forwarding-options { sampling { instance i2 { family inet { output flow-server 3.3.3.3; } } } }`,
-			af: "inet", ip: "3.3.3.3",
+			af:    "inet", ip: "3.3.3.3",
 		},
 		{
 			name: "distinct IP across repeated containers, later wins",
@@ -432,7 +422,7 @@ func TestEditorDeepSamplingFlowServer12761(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, operation := range []string{"delete", "deactivate"} {
 				t.Run(operation, func(t *testing.T) {
-					tree := tree12714(t, tc.input)
+					tree := parseHierText(t, tc.input)
 					if got := flowServerAddrs12714(t, tree, tc.v6); len(got) != 1+len(tc.otherAddrs) {
 						t.Fatalf("precondition flow-servers = %v, want %v plus target", got, tc.otherAddrs)
 					}
@@ -486,7 +476,7 @@ func TestEditorDeepDHCPv6PrefixDelegating12761(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, operation := range []string{"delete", "deactivate"} {
 				t.Run(operation, func(t *testing.T) {
-					tree := tree12714(t, tc.input)
+					tree := parseHierText(t, tc.input)
 					if got := dhcpv6Client12714(compileTree12714(t, tree.Clone())); got == nil || got.PrefixDelegatingSubPrefLen == 0 {
 						t.Fatalf("precondition dhcpv6-client = %+v, want non-zero sub-prefix-length", got)
 					}
@@ -513,7 +503,7 @@ func TestEditorDeepDHCPv6PrefixDelegating12761(t *testing.T) {
 }
 
 func TestEditorDeepSamplingPackedRunRefused12761(t *testing.T) {
-	tree := tree12714(t, `forwarding-options { sampling { instance i2 { family inet { output flow-server 1.1.1.1 inline-jflow; } } } }`)
+	tree := parseHierText(t, `forwarding-options { sampling { instance i2 { family inet { output flow-server 1.1.1.1 inline-jflow; } } } }`)
 	before := tree.Format()
 	err := tree.DeletePath([]string{"forwarding-options", "sampling", "instance", "i2", "family", "inet", "output", "flow-server", "1.1.1.1"})
 	if err == nil {
@@ -527,7 +517,7 @@ func TestEditorDeepSamplingPackedRunRefused12761(t *testing.T) {
 	}
 
 	t.Run("winning packed later sibling refuses atomically", func(t *testing.T) {
-		tree := tree12714(t, `forwarding-options {
+		tree := parseHierText(t, `forwarding-options {
 			sampling { instance i2 { family inet { output { flow-server 1.1.1.1 { version 9; } } } } }
 			sampling { instance i2 { family inet { output { flow-server 1.1.1.1 inline-jflow; } } } }
 		}`)
@@ -550,7 +540,7 @@ func TestEditorDeepSamplingPackedRunRefused12761(t *testing.T) {
 
 func TestEditorDeepSamplingRemainingVerdictProbes12761(t *testing.T) {
 	t.Run("source-address under braced output", func(t *testing.T) {
-		tree := tree12714(t, `forwarding-options { sampling { instance i2 { family inet { output { source-address 10.0.0.1; } } } } }`)
+		tree := parseHierText(t, `forwarding-options { sampling { instance i2 { family inet { output { source-address 10.0.0.1; } } } } }`)
 		if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.FamilyInet == nil || got.FamilyInet.SourceAddress != "10.0.0.1" {
 			t.Fatalf("precondition sampling instance = %+v, want source-address 10.0.0.1", got)
 		}
@@ -568,7 +558,7 @@ func TestEditorDeepSamplingRemainingVerdictProbes12761(t *testing.T) {
 	})
 
 	t.Run("whole elided family statement", func(t *testing.T) {
-		tree := tree12714(t, `forwarding-options { sampling { instance i2 family inet output flow-server 4.4.4.4; } }`)
+		tree := parseHierText(t, `forwarding-options { sampling { instance i2 family inet output flow-server 4.4.4.4; } }`)
 		before := tree.Format()
 		err := tree.DeletePath([]string{"forwarding-options", "sampling", "instance", "i2", "family", "inet", "output", "flow-server", "4.4.4.4"})
 		if err != nil {
@@ -583,7 +573,7 @@ func TestEditorDeepSamplingRemainingVerdictProbes12761(t *testing.T) {
 	})
 
 	t.Run("elided instance bare delete", func(t *testing.T) {
-		tree := tree12714(t, `forwarding-options {
+		tree := parseHierText(t, `forwarding-options {
 			sampling { instance i2 { input { rate 100; } } }
 			sampling { instance i3 input rate 200; }
 		}`)
@@ -604,7 +594,7 @@ func TestEditorParityGroupsSampling12761(t *testing.T) {
 	} } } }
 	apply-groups G;`
 	path := []string{"groups", "G", "forwarding-options", "sampling", "instance", "i2", "input", "rate", "150"}
-	tree := tree12714(t, input)
+	tree := parseHierText(t, input)
 	if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.InputRate != 100 {
 		t.Fatalf("precondition group-expanded rate = %+v, want first-wins 100", got)
 	}

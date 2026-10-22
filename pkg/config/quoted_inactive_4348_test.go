@@ -31,7 +31,7 @@ import (
 // sits at an INLINE position (index 1). It must be preserved as the leaf's
 // value; the statement must stay active.
 func TestQuotedInactive_InlineQuotedValuePreserved(t *testing.T) {
-	tree := mustParse(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     ge-0/0/0 {
         description "inactive:";
     }
@@ -56,7 +56,7 @@ func TestQuotedInactive_InlineQuotedValuePreserved(t *testing.T) {
 // losing the value and wrongly deactivating the statement. With the token-kind
 // gate the quoted value stays the statement's identity key.
 func TestQuotedInactive_LeadingQuotedValuePreserved(t *testing.T) {
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     "inactive:" host-name h;
 }`)
 	sys := tree.FindChild("system")
@@ -77,7 +77,7 @@ func TestQuotedInactive_LeadingQuotedValuePreserved(t *testing.T) {
 // (identifier) leading `inactive:` still lifts into Node.Inactive and strips
 // off the keys — unchanged behavior.
 func TestQuotedInactive_BareLeadingMarkerStillDeactivates(t *testing.T) {
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     inactive: host-name h;
 }`)
 	hn := tree.FindChild("system").FindChild("host-name")
@@ -97,7 +97,7 @@ func TestQuotedInactive_BareLeadingMarkerStillDeactivates(t *testing.T) {
 // (identifier) inline `inactive:` still drops the marker and every token it
 // governs — the #4347 behavior is unchanged.
 func TestQuotedInactive_BareInlineMarkerStillDeactivates(t *testing.T) {
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     host-name keep inactive: extra;
 }`)
 	hn := tree.FindChild("system").FindChild("host-name")
@@ -116,7 +116,7 @@ func TestQuotedInactive_BareInlineMarkerStillDeactivates(t *testing.T) {
 // TestQuotedInactive_NormalQuotedValueUnaffected guards case (4): an ordinary
 // quoted value (not equal to the marker text) is preserved exactly.
 func TestQuotedInactive_NormalQuotedValueUnaffected(t *testing.T) {
-	tree := mustParse(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     ge-0/0/0 {
         description "up link";
     }

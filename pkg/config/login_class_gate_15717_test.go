@@ -22,15 +22,6 @@ import (
 // collectSchemaRefs so a class defined in a second sibling `system` /
 // `class-of-service` block of an applied group is actually seen.
 
-func mustParse15717(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(src).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 const loginClassGateSrcA15717 = `groups {
     staged-rbac {
         system {
@@ -71,7 +62,7 @@ func TestLoginUserUndefinedClassRejectedStrict15717(t *testing.T) {
 // sees the effective config — ExpandGroups discarded the group — and
 // rejects. RED on pre-fix code.
 func TestLoginUserUnappliedGroupClassRejectedStrict15717(t *testing.T) {
-	tree := mustParse15717(t, loginClassGateSrcA15717)
+	tree := parseHierText(t, loginClassGateSrcA15717)
 	cfg, err := CompileConfig(tree)
 	if err == nil {
 		t.Fatalf("CompileConfig accepted alice with class ops-admin defined only in un-applied group; cfg=%+v", cfg)
@@ -107,7 +98,7 @@ func TestLoginUserUndefinedClassLenientWarns15717(t *testing.T) {
 }
 
 func TestLoginUserUnappliedGroupClassLenientWarns15717(t *testing.T) {
-	tree := mustParse15717(t, loginClassGateSrcA15717)
+	tree := parseHierText(t, loginClassGateSrcA15717)
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
@@ -165,7 +156,7 @@ system {
     }
 }
 `
-		if _, err := CompileConfig(mustParse15717(t, src)); err != nil {
+		if _, err := CompileConfig(parseHierText(t, src)); err != nil {
 			t.Fatalf("CompileConfig rejected class inherited from applied group: %v", err)
 		}
 	})
@@ -208,12 +199,12 @@ system {
     }
 }
 `
-	tree := mustParse15717(t, src)
+	tree := parseHierText(t, src)
 	if _, ok := collectSchemaRefs(tree).loginClasses["second-sys-class"]; !ok {
 		t.Fatalf("collectSchemaRefs missed class in second sibling system block of group g1")
 	}
 	// And the full compile of the applied-group config is accepted.
-	if _, err := CompileConfig(mustParse15717(t, src)); err != nil {
+	if _, err := CompileConfig(parseHierText(t, src)); err != nil {
 		t.Fatalf("CompileConfig rejected second-system-block class: %v", err)
 	}
 }
@@ -236,7 +227,7 @@ func TestCollectSchemaRefsSecondCoSBlock15717(t *testing.T) {
     }
 }
 `
-	tree := mustParse15717(t, src)
+	tree := parseHierText(t, src)
 	refs := collectSchemaRefs(tree)
 	if _, ok := refs.forwardingClasses["first-fc"]; !ok {
 		t.Fatalf("collectSchemaRefs missed first-fc")

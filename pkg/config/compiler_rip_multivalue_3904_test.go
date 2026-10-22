@@ -48,7 +48,7 @@ func TestRIPMultiValueFlat(t *testing.T) {
 }
 
 func TestRIPMultiValueHierarchical(t *testing.T) {
-	tree := mustParse(t, `policy-options {
+	tree := parseHierText(t, `policy-options {
     policy-statement pa {
         term t1 {
             then accept;

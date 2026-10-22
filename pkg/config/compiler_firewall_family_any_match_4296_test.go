@@ -17,14 +17,14 @@ import (
 //
 // These configs are non-Junos and reach compileFirewall's structured path only
 // via a HIERARCHICAL config-file / peer-synced AST (the flat `set` schema does
-// not model `family any`), so the fixtures use parseHier.
+// not model `family any`), so the fixtures use parseHierText.
 
 // RED-on-revert: a `family any` filter carrying a v4 source-address literal must
 // be REJECTED at strict commit. On revert of the #4296 gate this goes RED — the
 // term is silently dual-compiled into the v6 pool where the v4 literal never
 // matches (fail-open v6 under-block).
 func TestFirewallFilterFamilyAnySourceAddressRejected(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family any {
         filter blockNet {
@@ -56,7 +56,7 @@ firewall {
 // A symbolic icmp-type under `family any` resolves via the ICMPv4 table
 // (af=="any" is not inet6) and is therefore family-specific — rejected.
 func TestFirewallFilterFamilyAnyICMPTypeRejected(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family any {
         filter noPing {
@@ -86,7 +86,7 @@ firewall {
 // warning so an already-persisted or peer-synced config still boots — the
 // dual-compile behavior is preserved (the v6 arm merely never matches).
 func TestFirewallFilterFamilyAnySpecificMatchLenientWarns(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family any {
         filter blockNet {
@@ -125,7 +125,7 @@ firewall {
 // maps to a family-independent L4 protocol number) commits cleanly — the gate
 // must not over-reject the legitimate #4287 dual-family case.
 func TestFirewallFilterFamilyAnyAgnosticMatchCommits(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family any {
         filter dropTCP {
@@ -160,7 +160,7 @@ firewall {
 // a v4 source-address, family inet6 with a v6 source-address) is legitimate and
 // must NOT be flagged — the gate is scoped to `family any` only.
 func TestFirewallFilterSingleFamilyAddressNotFlagged(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter v4 {

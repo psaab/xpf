@@ -20,7 +20,7 @@ func TestDuplicateRootLoginConflictingStrictReject14447(t *testing.T) {
 		{"packed", "system { services { ssh root-login allow root-login deny; } }"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(parseHierarchical(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if err == nil {
 				t.Fatalf("strict accepted conflicting duplicate root-login; want reject")
 			}
@@ -34,7 +34,7 @@ func TestDuplicateRootLoginConflictingStrictReject14447(t *testing.T) {
 }
 
 func TestDuplicateRootLoginLenientLastWins14447(t *testing.T) {
-	cfg, err := CompileConfigLenient(parseHierarchical(t, "system { services { ssh { root-login allow; root-login deny; } } }"))
+	cfg, err := CompileConfigLenient(parseHierText(t, "system { services { ssh { root-login allow; root-login deny; } } }"))
 	if err != nil {
 		t.Fatalf("lenient: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestDuplicateRootLoginLenientLastWins14447(t *testing.T) {
 		t.Fatalf("lenient warnings missing root-login/14447: %v", cfg.Warnings)
 	}
 	// Reverse order lenient -> allow
-	cfg2, err := CompileConfigLenient(parseHierarchical(t, "system { services { ssh { root-login deny; root-login allow; } } }"))
+	cfg2, err := CompileConfigLenient(parseHierText(t, "system { services { ssh { root-login deny; root-login allow; } } }"))
 	if err != nil {
 		t.Fatalf("lenient reverse: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestDuplicateRootLoginControls14447(t *testing.T) {
 		{"no root-login", "system { services { ssh { protocol-version v2; } } }", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(parseHierarchical(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("strict control: %v", err)
 			}
@@ -83,10 +83,10 @@ func TestDuplicateRootLoginControls14447(t *testing.T) {
 		})
 	}
 	const grouped = "groups { G1 { system { services { ssh { root-login allow; } } } } G2 { system { services { ssh { root-login deny; } } } } } system { services { ssh { protocol-version v2; } } apply-groups G1; apply-groups G2; }"
-	if _, err := CompileConfig(parseHierarchical(t, grouped)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, grouped)); err == nil {
 		t.Fatalf("group conflicting duplicate must strict-reject")
 	}
-	cfg, err := CompileConfigLenient(parseHierarchical(t, grouped))
+	cfg, err := CompileConfigLenient(parseHierText(t, grouped))
 	if err != nil {
 		t.Fatalf("group lenient: %v", err)
 	}
@@ -103,10 +103,10 @@ func TestDuplicateRootLoginControls14447(t *testing.T) {
 		t.Fatalf("group lenient missing warning: %v", cfg.Warnings)
 	}
 	// ForNode parity
-	if _, err := CompileConfigForNode(parseHierarchical(t, "system { services { ssh { root-login allow; root-login deny; } } }"), 0); err == nil {
+	if _, err := CompileConfigForNode(parseHierText(t, "system { services { ssh { root-login allow; root-login deny; } } }"), 0); err == nil {
 		t.Fatalf("ForNode strict must reject")
 	}
-	cfgN, err := CompileConfigForNodeLenient(parseHierarchical(t, "system { services { ssh { root-login allow; root-login deny; } } }"), 0)
+	cfgN, err := CompileConfigForNodeLenient(parseHierText(t, "system { services { ssh { root-login allow; root-login deny; } } }"), 0)
 	if err != nil {
 		t.Fatalf("ForNode lenient: %v", err)
 	}

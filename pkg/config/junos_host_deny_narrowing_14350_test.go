@@ -21,15 +21,6 @@ import (
 // Fixtures use hierarchical syntax via NewParser (flat-set SetPath collapses
 // duplicate sibling leaves before the compiler can record them).
 
-func junosHost14350Parse(t *testing.T, body string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(body).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 func junosHost14350Program(t *testing.T, proj JunosHostDenyProjection) *JunosHostDenyProgram {
 	t.Helper()
 	for i := range proj.Programs {
@@ -166,14 +157,14 @@ security {
     }
 }
 `
-			tree := junosHost14350Parse(t, body)
+			tree := parseHierText(t, body)
 			// Strict must reject every fixture (the drops are a tolerant-load
 			// phenomenon); if strict accepts, the lenient assertions below do
 			// not measure the issue's path.
 			if _, err := CompileConfig(tree); err == nil {
 				t.Fatal("fixture is not a tolerant-downgrade member: strict CompileConfig accepted it")
 			}
-			cfg, err := CompileConfigLenient(junosHost14350Parse(t, body))
+			cfg, err := CompileConfigLenient(parseHierText(t, body))
 			if err != nil {
 				t.Fatalf("CompileConfigLenient must still accept the fixture (#1960 no-brick): %v", err)
 			}
@@ -224,7 +215,7 @@ security {
     }
 }
 `
-	cfg, err := CompileConfigLenient(junosHost14350Parse(t, body))
+	cfg, err := CompileConfigLenient(parseHierText(t, body))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
@@ -290,7 +281,7 @@ security {
     }
 }
 `
-	cfg, err := CompileConfigLenient(junosHost14350Parse(t, body))
+	cfg, err := CompileConfigLenient(parseHierText(t, body))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}

@@ -32,7 +32,7 @@ func TestVRRPPreemptDefault15047_FlatSetNoPreemptKeyword(t *testing.T) {
 }
 
 func TestVRRPPreemptDefault15047_HierarchicalNoPreemptKeyword(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {
@@ -78,7 +78,7 @@ func TestVRRPPreemptDefault15047_NoPreemptFlatSet(t *testing.T) {
 }
 
 func TestVRRPPreemptDefault15047_NoPreemptHierarchical(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {
@@ -109,7 +109,7 @@ func TestVRRPPreemptDefault15047_NoPreemptHierarchical(t *testing.T) {
 // packed hierarchical one-liner honours `no-preempt` as a delimiter
 // (a following property must still parse).
 func TestVRRPPreemptDefault15047_ExplicitPreemptAndPackedControl(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {

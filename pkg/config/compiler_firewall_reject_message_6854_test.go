@@ -22,7 +22,7 @@ func TestRejectMessageTypeSurvivesEverySpelling_6854(t *testing.T) {
 		{
 			"compact leaf `then reject host-unreachable;`",
 			func(t *testing.T) *ConfigTree {
-				return parseHier(t, `
+				return parseHierText(t, `
 firewall { family inet { filter f { term t { then reject host-unreachable; } } } }
 `)
 			},
@@ -30,7 +30,7 @@ firewall { family inet { filter f { term t { then reject host-unreachable; } } }
 		{
 			"block `then { reject host-unreachable; }`",
 			func(t *testing.T) *ConfigTree {
-				return parseHier(t, `
+				return parseHierText(t, `
 firewall { family inet { filter f { term t { then { reject host-unreachable; } } } } }
 `)
 			},
@@ -72,7 +72,7 @@ firewall { family inet { filter f { term t { then { reject host-unreachable; } }
 // to a concrete token would pass every cell above while altering the wire for
 // configs that never asked for a message-type.
 func TestBareRejectCarriesNoMessageType_6854(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `
+	cfg, err := CompileConfig(parseHierText(t, `
 firewall { family inet { filter f { term t { then reject; } } } }
 `))
 	if err != nil {

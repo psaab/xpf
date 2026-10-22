@@ -74,10 +74,10 @@ func TestContradictoryDefaultPolicyWithinNode12821(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := SchemaValidate(defaultPolicyTree11821(t, tc.text)); err == nil {
+			if err := SchemaValidate(parseHierText(t, tc.text)); err == nil {
 				t.Errorf("SchemaValidate accepted contradictory default-policy within one node")
 			}
-			_, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if err == nil {
 				t.Fatalf("strict compile accepted contradictory default-policy within one node")
 			}
@@ -86,7 +86,7 @@ func TestContradictoryDefaultPolicyWithinNode12821(t *testing.T) {
 					t.Errorf("strict error %q does not name %q", err, want)
 				}
 			}
-			cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -129,11 +129,11 @@ func TestSingleDefaultPolicyWithinNodeControls12821(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.schema {
-				if err := SchemaValidate(defaultPolicyTree11821(t, tc.text)); err != nil {
+				if err := SchemaValidate(parseHierText(t, tc.text)); err != nil {
 					t.Fatalf("SchemaValidate rejected control: %v", err)
 				}
 			}
-			cfg, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("strict compile rejected control: %v", err)
 			}

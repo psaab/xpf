@@ -70,7 +70,7 @@ interfaces {
     }
 }
 ` + filters15033
-	cfg, err := CompileConfig(parseTree9422(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -95,7 +95,7 @@ system {
     domain-name example.com;
 }
 `
-	cfg, err := CompileConfig(parseTree9422(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -140,7 +140,7 @@ firewall {
     }
 }
 `
-	cfg, err := CompileConfig(parseTree9422(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -164,7 +164,7 @@ interfaces {
     }
 }
 ` + filters15033
-	cfg, err := CompileConfig(parseTree9422(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}

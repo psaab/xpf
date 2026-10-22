@@ -18,7 +18,7 @@ import "testing"
 //     earlier fields.
 func compileSystem13532Hier(t *testing.T, text string) *Config {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -30,7 +30,7 @@ func compileSystem13532Roots(t *testing.T, blocks ...string) *Config {
 	t.Helper()
 	tree := &ConfigTree{}
 	for _, block := range blocks {
-		parsed := parseHierarchical(t, block)
+		parsed := parseHierText(t, block)
 		tree.Children = append(tree.Children, parsed.Children...)
 	}
 	cfg, err := CompileConfig(tree)
@@ -131,7 +131,7 @@ func TestSystemPackedServicesAndSNMP13532(t *testing.T) {
 		t.Fatalf("packed services compiled as %#v, want SSH root-login allow", services.System.Services)
 	}
 
-	tree := parseHierarchical(t, `system snmp location lab;`)
+	tree := parseHierText(t, `system snmp location lab;`)
 	snmp, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -201,7 +201,7 @@ func TestSystemRepeatedSNMPQuarantineStaysFailClosed13532(t *testing.T) {
 		`system { snmp { community mon { clients { 10.0.0.0/8 restric; } } } }`,
 		`system { snmp { community mon { clients { 0.0.0.0/0; } } } }`,
 	} {
-		parsed := parseHierarchical(t, block)
+		parsed := parseHierText(t, block)
 		tree.Children = append(tree.Children, parsed.Children...)
 	}
 	cfg, err := CompileConfigLenient(tree)

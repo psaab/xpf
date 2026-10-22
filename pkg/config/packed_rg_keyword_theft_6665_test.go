@@ -19,7 +19,7 @@ func packedRG6665(t *testing.T, body string) *RedundancyGroup {
     }
 }
 `, body)
-	cfg, err := CompileConfig(mustParse6665(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("compile %q: %v", body, err)
 	}
@@ -41,15 +41,6 @@ func packedRG6665(t *testing.T, body string) *RedundancyGroup {
 func containerRG6665(t *testing.T, body string) *RedundancyGroup {
 	t.Helper()
 	return packedRG6665(t, "{ "+body+" }")
-}
-
-func mustParse6665(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, err := NewParser(text).Parse()
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	return tree
 }
 
 // TestPackedRGDoesNotStealAKeywordFromTheValueSlot_6665 is the fail-on-revert

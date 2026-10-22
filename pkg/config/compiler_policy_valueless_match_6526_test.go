@@ -66,17 +66,9 @@ func buildValuelessMatchFlatTree(t *testing.T, cmds []string) *ConfigTree {
 	return tree
 }
 
-// buildValuelessMatchHierTree builds a config tree through the HIERARCHICAL
-// parser (a `load override` / on-disk config), the other AST shape the
-// compiler must handle.
-func buildValuelessMatchHierTree(t *testing.T, body string) *ConfigTree {
-	t.Helper()
-	tree, err := NewParser(body).Parse()
-	if err != nil {
-		t.Fatalf("hierarchical parse of %q: %v", body, err)
-	}
-	return tree
-}
+// Hierarchical trees are built via parseHierText (#16139 kit) through the
+// HIERARCHICAL parser (a `load override` / on-disk config), the other AST
+// shape the compiler must handle.
 
 // zonePairHier wraps a `match { ... }` body in a complete zone-pair policy
 // with the referenced zones defined, so the zone-reference gate does not
@@ -272,7 +264,7 @@ func TestPolicyValuelessMatchDimensionRejectedHierarchical(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(buildValuelessMatchHierTree(t, tc.body))
+			_, err := CompileConfig(parseHierText(t, tc.body))
 			assertRejectedBy6526(t, err, tc.wantDims)
 		})
 	}
@@ -322,7 +314,7 @@ func TestPolicyMatchDimensionThreeOutcomesAreDistinct(t *testing.T) {
 
 	t.Run("hierarchical", func(t *testing.T) {
 		t.Run("normal value accepted", func(t *testing.T) {
-			cfg, err := CompileConfig(buildValuelessMatchHierTree(t, zonePairHier(
+			cfg, err := CompileConfig(parseHierText(t, zonePairHier(
 				`source-address 10.0.0.0/8; destination-address any; application any;`)))
 			if err != nil {
 				t.Fatalf("strict commit rejected a policy with a real source-address value: %v", err)
@@ -330,12 +322,12 @@ func TestPolicyMatchDimensionThreeOutcomesAreDistinct(t *testing.T) {
 			assertOnlyPolicySources(t, cfg, []string{"10.0.0.0/8"})
 		})
 		t.Run("no operand rejected by 6526", func(t *testing.T) {
-			_, err := CompileConfig(buildValuelessMatchHierTree(t, zonePairHier(
+			_, err := CompileConfig(parseHierText(t, zonePairHier(
 				`source-address; destination-address any; application any;`)))
 			assertRejectedBy6526(t, err, `"source-address"`)
 		})
 		t.Run("omitted rejected by 3044", func(t *testing.T) {
-			_, err := CompileConfig(buildValuelessMatchHierTree(t, zonePairHier(
+			_, err := CompileConfig(parseHierText(t, zonePairHier(
 				`destination-address any; application any;`)))
 			assertRejectedBy3044(t, err, `"source-address"`)
 		})
@@ -405,7 +397,7 @@ func TestPolicyValuelessMatchLenientWarnsAndPoisons(t *testing.T) {
 		{
 			name: "hierarchical application",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; destination-address any; application;`))
 			},
 			wantDims: `"application"`,
@@ -413,7 +405,7 @@ func TestPolicyValuelessMatchLenientWarnsAndPoisons(t *testing.T) {
 		{
 			name: "global from-zone",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, globalHier(
+				return parseHierText(t, globalHier(
 					`source-address any; destination-address any; application any; from-zone;`))
 			},
 			wantDims: `"from-zone"`,
@@ -465,7 +457,7 @@ func TestPolicyValuelessMatchLenientWarnsAndPoisons(t *testing.T) {
 func TestPolicyValuelessMatchCompilesToSameEmptySetAsOmitted(t *testing.T) {
 	srcOf := func(t *testing.T, body string) []string {
 		t.Helper()
-		cfg, err := CompileConfigLenient(buildValuelessMatchHierTree(t, body))
+		cfg, err := CompileConfigLenient(parseHierText(t, body))
 		if err != nil {
 			t.Fatalf("lenient compile: %v", err)
 		}
@@ -498,7 +490,7 @@ func TestPolicyValuelessMatchDoesNotOverReject(t *testing.T) {
 			// Flagging them would reject valid Junos.
 			name: "address-excluded modifiers carry no operand by design",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; source-address-excluded; destination-address any; `+
 						`destination-address-excluded; application any;`))
 			},
@@ -508,7 +500,7 @@ func TestPolicyValuelessMatchDoesNotOverReject(t *testing.T) {
 			// firewallMatchValues sees all three, so the dimension is valued.
 			name: "bracketed list is a valued dimension",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address [ 10.0.0.0/8 192.168.0.0/16 ]; destination-address any; application any;`))
 			},
 		},
@@ -518,7 +510,7 @@ func TestPolicyValuelessMatchDoesNotOverReject(t *testing.T) {
 			// not widened — the gate must not fire.
 			name: "duplicate match block supplies the value",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, `security {
+				return parseHierText(t, `security {
 	zones { security-zone trust; security-zone untrust; }
 	policies { from-zone trust to-zone untrust { policy p {
 		match { source-address; destination-address any; application any; }
@@ -532,7 +524,7 @@ func TestPolicyValuelessMatchDoesNotOverReject(t *testing.T) {
 			// The explicit wildcard is a VALUE, not an absence — Junos parity.
 			name: "explicit any is a value",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, zonePairHier(
+				return parseHierText(t, zonePairHier(
 					`source-address any; destination-address any; application any;`))
 			},
 		},
@@ -541,7 +533,7 @@ func TestPolicyValuelessMatchDoesNotOverReject(t *testing.T) {
 			// documented all-zones form and must keep committing.
 			name: "global policy without from-zone/to-zone",
 			tree: func(t *testing.T) *ConfigTree {
-				return buildValuelessMatchHierTree(t, globalHier(
+				return parseHierText(t, globalHier(
 					`source-address any; destination-address any; application any;`))
 			},
 		},
@@ -560,7 +552,7 @@ func TestPolicyValuelessMatchDoesNotOverReject(t *testing.T) {
 // more fundamental authoring error and is reported first, so the operator sees
 // a stable, deterministic message rather than one that depends on walk order.
 func TestPolicyValuelessAndMissingTogetherReportsMissingFirst(t *testing.T) {
-	_, err := CompileConfig(buildValuelessMatchHierTree(t, zonePairHier(
+	_, err := CompileConfig(parseHierText(t, zonePairHier(
 		`source-address; destination-address any;`)))
 	assertRejectedBy3044(t, err, `"application"`)
 }
@@ -573,7 +565,7 @@ func TestPolicyValuelessAndMissingTogetherReportsMissingFirst(t *testing.T) {
 func TestPolicyValuelessMatchZonePairFromZoneStaysUnsupported(t *testing.T) {
 	body := zonePairHier(`source-address any; destination-address any; application any; from-zone;`)
 
-	_, err := CompileConfig(buildValuelessMatchHierTree(t, body))
+	_, err := CompileConfig(parseHierText(t, body))
 	if err == nil {
 		t.Fatalf("strict commit accepted `match from-zone` under a zone-pair policy")
 	}
@@ -588,7 +580,7 @@ func TestPolicyValuelessMatchZonePairFromZoneStaysUnsupported(t *testing.T) {
 	// the #3044/#6526 walk — so the assertion above cannot by itself prove the
 	// global-only scoping. The LENIENT path collects EVERY finding, so it can:
 	// exactly one warning (the #3113 one) must mention this leaf.
-	cfg, lerr := CompileConfigLenient(buildValuelessMatchHierTree(t, body))
+	cfg, lerr := CompileConfigLenient(parseHierText(t, body))
 	if lerr != nil {
 		t.Fatalf("lenient compile must not brick: %v", lerr)
 	}

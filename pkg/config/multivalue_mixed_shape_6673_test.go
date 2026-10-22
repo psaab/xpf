@@ -66,7 +66,7 @@ func TestEventAttributesMatch6673MixedShapeStillCommits(t *testing.T) {
     attributes-match bogus { "ping_test_failed.test-owner matches ^alice$"; }
   }
 }`
-	tree := hierTree6659(t, cfgText)
+	tree := parseHierText(t, cfgText)
 	want := masterAMExprs6673(amNode6673(t, tree))
 	if len(want) != 1 {
 		t.Fatalf("oracle premise broken: origin/master's reader produced %q, "+
@@ -101,7 +101,7 @@ func TestEventAttributesMatch6673MixedShapeStillCommits(t *testing.T) {
 // exactly the child command. (pkg/eventengine carries the runtime half, which
 // asserts the batch still classifies into an executable plan.)
 func TestEventChangeConfigCommands6673MixedShapeStillCommits(t *testing.T) {
-	tree := hierTree6659(t, `event-options {
+	tree := parseHierText(t, `event-options {
   policy p {
     events ping_test_failed;
     then { change-configuration { commands bogus { "set system host-name fired"; } } }
@@ -126,7 +126,7 @@ func TestEventChangeConfigCommands6673MixedShapeStillCommits(t *testing.T) {
 // conversion applies there and a malformed packed expression must still be
 // rejected at strict commit.
 func TestEventAttributesMatch6673PackedMalformedStillRejected(t *testing.T) {
-	tree := hierTree6659(t, `event-options {
+	tree := parseHierText(t, `event-options {
   policy p {
     events ping_test_failed;
     attributes-match bogus;
@@ -152,7 +152,7 @@ func TestEventAttributesMatch6673PackedMalformedStillRejected(t *testing.T) {
 // core of #6659, not a shape-specific invention.
 func TestMixedShape6673IsOnlyAnIssueForChildrenOnlyReaders(t *testing.T) {
 	t.Run("proxy-arp address a { b; } still commits", func(t *testing.T) {
-		if _, err := CompileConfig(hierTree6659(t, `
+		if _, err := CompileConfig(parseHierText(t, `
 security { nat { proxy-arp { interface ge-0-0-0 { address 192.0.2.1 { 192.0.2.2; } } } } }`)); err != nil {
 			t.Fatalf("a mixed-shape proxy-ARP address list must still commit: %v", err)
 		}
@@ -182,8 +182,8 @@ routing-options { forwarding-table { export [ p1 p2 ]; } }`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, mixedErr := CompileConfig(hierTree6659(t, tc.mixed))
-			_, bracketErr := CompileConfig(hierTree6659(t, tc.bracket))
+			_, mixedErr := CompileConfig(parseHierText(t, tc.mixed))
+			_, bracketErr := CompileConfig(parseHierText(t, tc.bracket))
 			if mixedErr == nil || bracketErr == nil {
 				t.Fatalf("both spellings authored TWO values and must be "+
 					"rejected: mixed=%v bracket=%v", mixedErr, bracketErr)
@@ -209,7 +209,7 @@ routing-options { forwarding-table { export [ p1 p2 ]; } }`,
 // loss is silent, so it is written down here and in docs/config-schema.md rather
 // than left for someone to discover.
 func TestEventOptions6673IdentifierSlotValueIsDropped(t *testing.T) {
-	tree := hierTree6659(t, `event-options {
+	tree := parseHierText(t, `event-options {
   policy p {
     events ping_test_failed;
     attributes-match "ping_test_failed.test-owner matches ^alice$" { "ping_test_failed.test-name matches ^wan$"; }
@@ -249,7 +249,7 @@ func TestEventOptions6673IdentifierSlotValueIsDropped(t *testing.T) {
 // validated". The dedupe key is the defect: masking is the right identity for
 // plain static NAT (whose Rust consumer masks too) and the WRONG one for NPTv6.
 func TestNPTv6MatchAddr6673HostBitsTailIsNotCollapsed(t *testing.T) {
-	tree := hierTree6659(t, `
+	tree := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 2001:db8:1::/48 2001:db8:1:2::/48 ]; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
@@ -292,7 +292,7 @@ func TestNPTv6MatchAddr6673IdenticalRepeatStillCollapses(t *testing.T) {
 		{"same prefix, leading-zero spelling", `[ 2001:db8:1::/48 2001:0db8:0001::/48 ]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := hierTree6659(t, `
+			tree := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address `+tc.list+`; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
@@ -311,7 +311,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // gate above, every widened NPTv6 value is covered — a value distinct from the
 // selected one by cardinality, a value identical to it by this gate.
 func TestNPTv6MatchAddr6673HostBitsAloneStillRejected(t *testing.T) {
-	tree := hierTree6659(t, `
+	tree := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 2001:db8:1:2::/48; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
@@ -336,7 +336,7 @@ func CompileConfig6673MustFail(t *testing.T, tree *ConfigTree) error {
 // (`base = addr & !host_mask(len)` in parse_nat_prefix), so two spellings of the
 // same host route still lower to one row and must still count once.
 func TestStaticNATMatchAddr6673PlainRuleStillMasks(t *testing.T) {
-	tree := hierTree6659(t, `
+	tree := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 192.0.2.1 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)

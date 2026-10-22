@@ -22,15 +22,6 @@ import (
 // prefix derivation in FormatPathSet and these round-trip assertions fail — the
 // ancestor "interfaces"/"trust" token disappears from the emitted set line.
 
-func mustParse5717(t *testing.T, src string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(src).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("parse errors: %v", perrs)
-	}
-	return tree
-}
-
 func TestFormatPathSetAncestorEqualsKey_5717(t *testing.T) {
 	// A security zone whose NAME equals the child keyword `interfaces`.
 	src := `security {
@@ -42,7 +33,7 @@ func TestFormatPathSetAncestorEqualsKey_5717(t *testing.T) {
         }
     }
 }`
-	tree := mustParse5717(t, src)
+	tree := parseHierText(t, src)
 	path := []string{"security", "zones", "security-zone", "interfaces", "interfaces"}
 	got := strings.TrimSpace(tree.FormatPathSet(path))
 
@@ -119,7 +110,7 @@ func TestFormatPathSetPolicyNameEqualsKey_5717(t *testing.T) {
         }
     }
 }`
-	tree := mustParse5717(t, src)
+	tree := parseHierText(t, src)
 	path := []string{
 		"security", "policies", "from-zone", "trust", "to-zone", "untrust",
 		"policy", "then", "then",

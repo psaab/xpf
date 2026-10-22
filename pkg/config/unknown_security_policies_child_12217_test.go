@@ -12,17 +12,8 @@ const unknownSecurityPoliciesChildrenConfig12217 = `security {
  }
 }`
 
-func parseUnknownSecurityPoliciesChildren12217(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("parse config: %v", errs[0])
-	}
-	return tree
-}
-
 func TestUnknownSecurityPoliciesChildrenStrictAndLenient12217(t *testing.T) {
-	tree := parseUnknownSecurityPoliciesChildren12217(t, unknownSecurityPoliciesChildrenConfig12217)
+	tree := parseHierText(t, unknownSecurityPoliciesChildrenConfig12217)
 	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), `"globel"`) {
 		t.Fatalf("strict CompileConfig error = %v, want rejection naming globel", err)
 	}
@@ -54,7 +45,7 @@ func TestUnknownSecurityPoliciesChildrenStrictAndLenient12217(t *testing.T) {
 }
 
 func TestUnknownSecurityPoliciesApplyMacroIsNotRecorded12217(t *testing.T) {
-	tree := parseUnknownSecurityPoliciesChildren12217(t,
+	tree := parseHierText(t,
 		`security { policies { apply-macro M { k v; } } }`)
 	cfg, err := CompileConfig(tree)
 	if err != nil {

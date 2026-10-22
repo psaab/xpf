@@ -117,7 +117,7 @@ func TestZoneInterfaces6735PackedTailRejectedAndPositiveControl(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				tree := parseHierarchical(t, zonePackedTailConfig(tc.stanza))
+				tree := parseHierText(t, zonePackedTailConfig(tc.stanza))
 				_, err := CompileConfig(tree)
 				if err == nil {
 					t.Fatalf("CompileConfig ACCEPTED the ambiguous stanza %q; the truncator silently keeps only the names before `host-inbound-traffic`, so %q is dropped (#6735)",
@@ -257,7 +257,7 @@ func TestZoneInterfaces6735PackedTailRejectedAndPositiveControl(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				tree := parseHierarchical(t, zonePackedTailConfig(tc.stanza))
+				tree := parseHierText(t, zonePackedTailConfig(tc.stanza))
 				cfg, err := CompileConfig(tree)
 				if err != nil {
 					t.Fatalf("CompileConfig REJECTED the unambiguous stanza %q: %v — the packed-tail gate must fire only when a body keyword has tokens AFTER it (#6735/#4191)",
@@ -443,7 +443,7 @@ security {
 // downgrades to a cfg.Warnings entry, so a config an older binary accepted still
 // boots — with the loss named rather than silent.
 func TestZoneInterfaces6735LenientPathWarnsInsteadOfRejecting(t *testing.T) {
-	tree := parseHierarchical(t, zonePackedTailConfig(
+	tree := parseHierText(t, zonePackedTailConfig(
 		`interfaces [ ge-0/0/0.0 host-inbound-traffic ge-0/0/1.0 ];`))
 
 	if _, err := CompileConfig(tree); err == nil {
@@ -580,7 +580,7 @@ func TestZoneInterfaces6735FlatSetBracketNestsRatherThanFanning(t *testing.T) {
 // that tries to — it would convert a behavioural contract into a structural one.
 func TestZoneInterfaces6735OverlapShapeReportsThePackedTailGate(t *testing.T) {
 	t.Run("overlap shape reports the packed tail, not the empty stanza", func(t *testing.T) {
-		tree := parseHierarchical(t, zonePackedTailConfig(`interfaces host-inbound-traffic ge-0/0/1.0;`))
+		tree := parseHierText(t, zonePackedTailConfig(`interfaces host-inbound-traffic ge-0/0/1.0;`))
 		_, err := CompileConfig(tree)
 		if err == nil {
 			t.Fatalf("CompileConfig accepted the overlap shape; both gates should reject it")
@@ -603,7 +603,7 @@ func TestZoneInterfaces6735OverlapShapeReportsThePackedTailGate(t *testing.T) {
 			`interfaces { host-inbound-traffic { system-services ssh; } }`,
 		} {
 			t.Run(stanza, func(t *testing.T) {
-				tree := parseHierarchical(t, zonePackedTailConfig(stanza))
+				tree := parseHierText(t, zonePackedTailConfig(stanza))
 				_, err := CompileConfig(tree)
 				if err == nil {
 					t.Fatalf("CompileConfig accepted %q, which names no interface", stanza)
@@ -866,7 +866,7 @@ func TestZoneInterfaces6735StrayTokenTableAcrossBothIngests(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				var tree *ConfigTree
 				if tc.hier != "" {
-					tree = parseHierarchical(t, zonePackedTailConfig(tc.hier))
+					tree = parseHierText(t, zonePackedTailConfig(tc.hier))
 				} else {
 					tree = zonePackedTailSetTree(t, tc.set...)
 				}
@@ -953,7 +953,7 @@ func TestZoneInterfaces6735StrayTokenTableAcrossBothIngests(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				var tree *ConfigTree
 				if tc.hier != "" {
-					tree = parseHierarchical(t, zonePackedTailConfig(tc.hier))
+					tree = parseHierText(t, zonePackedTailConfig(tc.hier))
 				} else {
 					tree = zonePackedTailSetTree(t, tc.set...)
 				}

@@ -34,15 +34,7 @@ func trackTestVRRPGroup(t *testing.T, cfg *Config) *VRRPGroup {
 	return nil
 }
 
-// parseHier parses hierarchical config text, failing the test on errors.
-func parseHier(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors: %v", errs)
-	}
-	return tree
-}
+// Hierarchical config text is parsed via parseHierText (#16139 kit).
 
 // replaySetLines builds a tree by replaying flat-set lines through
 // ParseSetCommand + SetPath (the only valid way to test set syntax).
@@ -110,7 +102,7 @@ const trackNestedHier = `interfaces {
 }`
 
 func TestVRRPTrackInterface_NestedHierarchical(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, trackNestedHier))
+	cfg, err := CompileConfig(parseHierText(t, trackNestedHier))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -149,7 +141,7 @@ func TestVRRPTrackInterface_NestedFlatSet(t *testing.T) {
 }
 
 func TestVRRPTrackInterface_LegacySiblingHierarchical(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     ge-0/0/1 {
         unit 0 {
             family inet {
@@ -306,7 +298,7 @@ func TestVRRPTrackInterface_NestedWinsOverSibling_BothOrders(t *testing.T) {
 	}
 	for name, text := range cases {
 		t.Run(name, func(t *testing.T) {
-			cfg, err := CompileConfig(parseHier(t, text))
+			cfg, err := CompileConfig(parseHierText(t, text))
 			if err != nil {
 				t.Fatalf("CompileConfig: %v", err)
 			}
@@ -364,7 +356,7 @@ const trackDuplicateHier = `interfaces {
 }`
 
 func TestVRRPTrackInterface_MultipleStrictError(t *testing.T) {
-	_, err := CompileConfig(parseHier(t, trackDuplicateHier))
+	_, err := CompileConfig(parseHierText(t, trackDuplicateHier))
 	if err == nil {
 		t.Fatal("expected strict compile error for duplicate track-interface")
 	}
@@ -374,7 +366,7 @@ func TestVRRPTrackInterface_MultipleStrictError(t *testing.T) {
 }
 
 func TestVRRPTrackInterface_MultipleLenientFirstWins(t *testing.T) {
-	cfg, err := CompileConfigLenient(parseHier(t, trackDuplicateHier))
+	cfg, err := CompileConfigLenient(parseHierText(t, trackDuplicateHier))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
@@ -391,7 +383,7 @@ func TestVRRPTrackInterface_MultipleLenientFirstWins(t *testing.T) {
 }
 
 func TestVRRPTrackInterface_MissingCostWarning(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     ge-0/0/1 {
         unit 0 {
             family inet {
@@ -440,7 +432,7 @@ func TestVRRPTrackInterface_MissingCostWarning(t *testing.T) {
 }
 
 func TestVRRPTrackInterface_OrphanSiblingCostWarning(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     reth1 {
         unit 0 {
             family inet {
@@ -464,7 +456,7 @@ func TestVRRPTrackInterface_OrphanSiblingCostWarning(t *testing.T) {
 }
 
 func TestVRRPTrackInterface_OrphanPriorityCostChildWarning(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     reth1 {
         unit 0 {
             family inet {
@@ -488,7 +480,7 @@ func TestVRRPTrackInterface_OrphanPriorityCostChildWarning(t *testing.T) {
 }
 
 func TestVRRPTrackInterface_OwnerPriority255Warning(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, `interfaces {
+	cfg, err := CompileConfig(parseHierText(t, `interfaces {
     ge-0/0/1 {
         unit 0 {
             family inet {
@@ -537,7 +529,7 @@ func TestVRRPTrackInterface_OwnerPriority255Warning(t *testing.T) {
 // FormatSet must render the nested child as a flat-set line that
 // replays back into an identically-compiling tree.
 func TestVRRPTrackInterface_FormatSetRoundTrip(t *testing.T) {
-	hierTree := parseHier(t, trackNestedHier)
+	hierTree := parseHierText(t, trackNestedHier)
 	setText := hierTree.FormatSet()
 	if !strings.Contains(setText, "track-interface ge-0/0/1 priority-cost 20") {
 		t.Fatalf("FormatSet did not render the nested priority-cost:\n%s", setText)
@@ -599,10 +591,10 @@ func TestVRRPTrackInterface_KeysPackedDuplicateStrictReject(t *testing.T) {
         }
     }
 }`
-	if _, err := CompileConfig(parseHier(t, text)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 		t.Fatal("strict compile should reject Keys-packed duplicate track-interface")
 	}
-	cfg, err := CompileConfigLenient(parseHier(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
@@ -659,10 +651,10 @@ func TestVRRPTrackInterface_CostRangeValidation(t *testing.T) {
         }
     }
 }`
-		if _, err := CompileConfig(parseHier(t, text)); err == nil {
+		if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 			t.Fatalf("strict compile should reject priority-cost %s", val)
 		}
-		cfg, err := CompileConfigLenient(parseHier(t, text))
+		cfg, err := CompileConfigLenient(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("lenient compile (%s): %v", val, err)
 		}
@@ -681,7 +673,7 @@ func TestVRRPTrackInterface_CostRangeValidation(t *testing.T) {
 // where only the SECOND is invalid must still strict-reject (FindChild
 // validated only the first occurrence).
 func TestVRRPTrackInterface_DuplicateCostChildValidated(t *testing.T) {
-	tree := parseHier(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     ge-0/0/1 {
         unit 0 {
             family inet {

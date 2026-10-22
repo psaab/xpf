@@ -9,7 +9,7 @@ import (
 // same-name coalescing enjoyed by host (#6684/#9854).
 
 func TestSyslogFileUserPacked15708(t *testing.T) {
-	tree := parseHierarchical(t, `system { syslog { file authlog authorization info; user * any emergency; } }`)
+	tree := parseHierText(t, `system { syslog { file authlog authorization info; user * any emergency; } }`)
 	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate packed: %v", err)
 	}
@@ -32,18 +32,18 @@ func TestSyslogFileUserPacked15708(t *testing.T) {
 }
 
 func TestSyslogFileUserPackedInvalidSeverity15708(t *testing.T) {
-	tree := parseHierarchical(t, `system { syslog { file authlog authorization bogus; } }`)
+	tree := parseHierText(t, `system { syslog { file authlog authorization bogus; } }`)
 	if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("SchemaValidate packed bogus severity = %v, want rejection naming bogus", err)
 	}
-	tree2 := parseHierarchical(t, `system { syslog { user bob daemon bogus; } }`)
+	tree2 := parseHierText(t, `system { syslog { user bob daemon bogus; } }`)
 	if err := SchemaValidate(tree2); err == nil {
 		t.Fatalf("SchemaValidate user packed bogus severity accepted")
 	}
 }
 
 func TestSyslogFileUserCoalesce15708(t *testing.T) {
-	tree := parseHierarchical(t, `system { syslog {
+	tree := parseHierText(t, `system { syslog {
 		file messages { any notice; }
 		file messages { auth info; any notice; archive { size 10m; } }
 		user bob { daemon info; }
@@ -81,7 +81,7 @@ func TestSyslogFileUserCoalesce15708(t *testing.T) {
 }
 
 func TestSyslogFileModifierOnlyNoSelectors15708(t *testing.T) {
-	tree := parseHierarchical(t, `system { syslog { file messages { archive { size 10m; } } } }`)
+	tree := parseHierText(t, `system { syslog { file messages { archive { size 10m; } } } }`)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)

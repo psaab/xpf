@@ -122,15 +122,6 @@ func countReservedWarnings9622(warnings []string) int {
 	return n
 }
 
-func parseText9622(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture must parse: %v\n%s", perrs, text)
-	}
-	return tree
-}
-
 // The hierarchical spellings, parsed from text the way a loaded, peer-synced or
 // day-0 config file is. The brace-elided form is a LEAF whose Keys tail carries
 // the body (#8787). compileRoutingInstances builds an instance from it, so the
@@ -147,7 +138,7 @@ func TestReservedRoutingInstanceNameIsRejectedHierarchical_9622(t *testing.T) {
 			// Positive control: the lenient compile builds the instance and
 			// quarantines it, so the strict reject below is about a real
 			// instance and not a stanza that never compiled.
-			lcfg, err := CompileConfigLenient(parseText9622(t, tc.text))
+			lcfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
@@ -155,7 +146,7 @@ func TestReservedRoutingInstanceNameIsRejectedHierarchical_9622(t *testing.T) {
 				t.Fatalf("fixture: the lenient compile did not quarantine %q exactly once, so this spelling "+
 					"may never have become an instance: %v", ManagementVRFInstanceName, lcfg.Warnings)
 			}
-			if _, err := CompileConfig(parseText9622(t, tc.text)); err == nil || !strings.Contains(err.Error(), "reserved for") {
+			if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil || !strings.Contains(err.Error(), "reserved for") {
 				t.Fatalf("#9622: the %s spelling of routing instance %q must be rejected on the strict path, got %v",
 					tc.name, ManagementVRFInstanceName, err)
 			}
@@ -248,7 +239,7 @@ func TestPackedLeafInstancesJoinTheTableIDCollisionGate_9622(t *testing.T) {
 		b + " {\n        instance-type virtual-router;\n    }\n}\n"
 	packed := "routing-instances {\n    " + a + " instance-type virtual-router;\n    " + b + " instance-type virtual-router;\n}\n"
 	for _, tc := range []struct{ name, text string }{{"braced control", braced}, {"brace-elided", packed}} {
-		if _, err := CompileConfig(parseText9622(t, tc.text)); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+		if _, err := CompileConfig(parseHierText(t, tc.text)); err == nil || !strings.Contains(err.Error(), "table-id collision") {
 			t.Errorf("#3855/#9622 %s: instances %q and %q fold to one kernel table and must be rejected on the strict "+
 				"path, got %v", tc.name, a, b, err)
 		}

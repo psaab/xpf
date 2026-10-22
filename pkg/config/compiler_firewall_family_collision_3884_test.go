@@ -21,7 +21,7 @@ import (
 // load / peer-sync path, and confirm the legitimate single-family and
 // inet/inet6 dual-stack cases are unaffected.
 //
-// Note on parse shape: the reproduction uses parseHier (how a config file
+// Note on parse shape: the reproduction uses parseHierText (how a config file
 // loads) and directly-built ASTs (how a peer-synced tree arrives) — the paths
 // where structured multi-family filter subtrees reach the gate. (An undeclared
 // token like `mpls` reaches a structured subtree the same way, but it is
@@ -32,7 +32,7 @@ import (
 // the second definition silently overwrites the first (discard → accept-all)
 // and CompileConfig returns no error.
 func TestFirewallFilterCrossFamilyNameCollisionRejected(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -69,7 +69,7 @@ firewall {
 // compiler compiles every top-level firewall node into the same fw.FiltersInet
 // map, so a walker that stopped at the first block would miss it.
 func TestFirewallFilterCrossFamilyCollisionSplitAcrossBlocks(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockZ {
@@ -109,7 +109,7 @@ firewall {
 // quarantines the colliding name out of BOTH pools — neither the discard
 // nor the accept winner stays enforceable.
 func TestFirewallFilterCrossFamilyNameCollisionLenientWarns(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -160,7 +160,7 @@ firewall {
 // #15997: identical-body duplicates are unaffected — one unambiguous meaning,
 // so the name stays enforceable on the tolerant path.
 func TestFirewallFilterIdenticalDuplicateUnaffected15997(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -200,7 +200,7 @@ firewall {
 // The dedupe key is the family-resolved compiled form, so this name stays
 // quarantined and FiltersInet6 must not silently carry type 8.
 func TestFirewallFilterInet6AnyEchoRequestNotIdentical15997(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet6 {
         filter F {
@@ -257,7 +257,7 @@ firewall {
 // Control: same-family identical effective duplicates stay enforceable and
 // their warning must not claim they were quarantined/omitted.
 func TestFirewallFilterIdenticalWarningTruthful15997(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -298,7 +298,7 @@ firewall {
 // conflict. Cell A: one body carries an unknown term child (#10294), the
 // other is a clean accept with identical exported fields.
 func TestFirewallFilterUnknownChildrenDifferNotIdentical15997(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -335,7 +335,7 @@ firewall {
 // (#11814, routingInstanceTargetConflict set), the other to one target,
 // with identical exported RoutingInstance/Action.
 func TestFirewallFilterRIConflictDifferNotIdentical15997(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -372,7 +372,7 @@ firewall {
 // *FlexMatchConfig pointers live at different addresses, so an address-
 // printing comparator falsely quarantined them. Key must be by value.
 func TestFirewallFilterIdenticalFlexMatchPruned15997(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {

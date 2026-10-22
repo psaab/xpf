@@ -41,7 +41,7 @@ func TestRoutingInstanceFixedArityRejectsPackedTails9736(t *testing.T) {
 				`routing-instances { ri1 { ` + tc.statement + ` } }`,
 			}
 			for _, text := range spellings {
-				tree := parse9323(t, text)
+				tree := parseHierText(t, text)
 				if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), tc.want) {
 					t.Errorf("SchemaValidate accepted %q or named the wrong leaf: %v", text, err)
 				}
@@ -61,7 +61,7 @@ func TestRoutingInstanceVRFTargetBlockHeaderRejectsPackedPrefix9736(t *testing.T
 		`routing-instances { ri1 vrf-target junk { target:65000:1; } }`,
 		`routing-instances { ri1 { vrf-target junk { target:65000:1; } } }`,
 	} {
-		tree := parse9323(t, text)
+		tree := parseHierText(t, text)
 		if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "vrf-target") {
 			t.Errorf("SchemaValidate accepted malformed block header %q: %v", text, err)
 		}
@@ -97,7 +97,7 @@ func TestRoutingInstanceBodyBoundaryRemainsOpenWorld9736(t *testing.T) {
 		`routing-instances { ri1 routing-options bogus-kw foo; }`,
 		`routing-instances { ri1 { routing-options bogus-kw foo; } }`,
 	} {
-		if _, err := CompileConfig(parse9323(t, text)); err != nil {
+		if _, err := CompileConfig(parseHierText(t, text)); err != nil {
 			t.Errorf("routing-options body was incorrectly closed: %q: %v", text, err)
 		}
 	}
@@ -113,7 +113,7 @@ func TestRoutingInstanceVRFTargetFormsRemainValid9736(t *testing.T) {
 		`routing-instances { ri1 { vrf-target [ target:65000:1 target:65000:2 ]; } }`,
 		`routing-instances { ri1 { vrf-target target:65000:1; vrf-target target:65000:2; } }`,
 	} {
-		tree := parse9323(t, text)
+		tree := parseHierText(t, text)
 		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("valid vrf-target form rejected by schema: %q: %v", text, err)
 		}
@@ -141,7 +141,7 @@ func TestRoutingInstanceVRFTargetBracketMissingTarget9736(t *testing.T) {
 		`routing-instances { ri1 { vrf-target [ export ]; } }`,
 		`routing-instances { ri1 { vrf-target [ import export ]; } }`,
 	} {
-		if err := SchemaValidate(parse9323(t, text)); err == nil {
+		if err := SchemaValidate(parseHierText(t, text)); err == nil {
 			t.Errorf("SchemaValidate accepted bracketed VRF target without target: %q", text)
 		}
 	}

@@ -64,7 +64,7 @@ func vrrpGroupText15046(body string) string {
 }
 
 func TestVRRPJunosTrackHier15046(t *testing.T) {
-	cfg, err := CompileConfig(parseHier(t, junosTrackHier15046))
+	cfg, err := CompileConfig(parseHierText(t, junosTrackHier15046))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestVRRPJunosTrackInet6_15046(t *testing.T) {
         }
     }
 }`
-	cfg, err := CompileConfig(parseHier(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig inet6: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestVRRPJunosTrackKeysPacked15046(t *testing.T) {
 	text := vrrpGroupText15046(`                        track interface reth1 priority-cost 150;`)
 	// Replace the braced body form: vrrpGroupText already wraps in braces,
 	// so the line above is a single statement inside the group — valid.
-	cfg, err := CompileConfig(parseHier(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestVRRPJunosTrackKeysPacked15046(t *testing.T) {
 
 func TestVRRPNoPreempt15046(t *testing.T) {
 	t.Run("hierarchical", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier(t, vrrpGroupText15046(`                        no-preempt;`)))
+		cfg, err := CompileConfig(parseHierText(t, vrrpGroupText15046(`                        no-preempt;`)))
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
 		}
@@ -164,7 +164,7 @@ func TestVRRPNoPreempt15046(t *testing.T) {
 		}
 	})
 	t.Run("preempt-still-works", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier(t, vrrpGroupText15046(`                        preempt;`)))
+		cfg, err := CompileConfig(parseHierText(t, vrrpGroupText15046(`                        preempt;`)))
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
 		}
@@ -174,7 +174,7 @@ func TestVRRPNoPreempt15046(t *testing.T) {
 		}
 	})
 	t.Run("last-statement-wins", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier(t, vrrpGroupText15046("                        preempt;\n                        no-preempt;")))
+		cfg, err := CompileConfig(parseHierText(t, vrrpGroupText15046("                        preempt;\n                        no-preempt;")))
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestVRRPNoPreempt15046(t *testing.T) {
 		}
 	})
 	t.Run("unset-is-default-not-explicit", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier(t, vrrpGroupText15046(``)))
+		cfg, err := CompileConfig(parseHierText(t, vrrpGroupText15046(``)))
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
 		}
@@ -206,14 +206,14 @@ func TestVRRPUnknownChild15046(t *testing.T) {
 	}
 	for name, text := range cells {
 		t.Run(name, func(t *testing.T) {
-			_, err := CompileConfig(parseHier(t, text))
+			_, err := CompileConfig(parseHierText(t, text))
 			if err == nil {
 				t.Fatal("strict must reject zzbogus")
 			}
 			if !strings.Contains(err.Error(), "zzbogus") {
 				t.Fatalf("err must name zzbogus: %v", err)
 			}
-			cfg, err := CompileConfigLenient(parseHier(t, text))
+			cfg, err := CompileConfigLenient(parseHierText(t, text))
 			if err != nil {
 				t.Fatalf("lenient must boot (#1960): %v", err)
 			}
@@ -249,10 +249,10 @@ func TestVRRPJunosTrackDuplicate15046(t *testing.T) {
                                 priority-cost 150;
                             }
                         }`)
-	if _, err := CompileConfig(parseHier(t, text)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 		t.Fatal("strict must reject track-interface + track duplicate")
 	}
-	cfg, err := CompileConfigLenient(parseHier(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("lenient: %v", err)
 	}
@@ -272,10 +272,10 @@ func TestVRRPJunosTrackCostRange15046(t *testing.T) {
                                 priority-cost 999;
                             }
                         }`)
-	if _, err := CompileConfig(parseHier(t, text)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, text)); err == nil {
 		t.Fatal("strict must reject priority-cost 999 under track interface")
 	}
-	cfg, err := CompileConfigLenient(parseHier(t, text))
+	cfg, err := CompileConfigLenient(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("lenient: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestVRRPKnownChildrenControl15046(t *testing.T) {
                         track-interface reth1 {
                             priority-cost 20;
                         }`)
-	cfg, err := CompileConfig(parseHier(t, text))
+	cfg, err := CompileConfig(parseHierText(t, text))
 	if err != nil {
 		t.Fatalf("CompileConfig control: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestVRRPJunosSpellingsSchemaValidate15046(t *testing.T) {
 		"no-preempt":  noPreemptCIDR,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := SchemaValidate(parseHier(t, text)); err != nil {
+			if err := SchemaValidate(parseHierText(t, text)); err != nil {
 				t.Fatalf("SchemaValidate must accept %s: %v", name, err)
 			}
 		})
@@ -333,7 +333,7 @@ func TestVRRPJunosSpellingsSchemaValidate15046(t *testing.T) {
 
 // The Junos braced form must survive a FormatSet round-trip.
 func TestVRRPJunosTrackFormatSetRoundTrip15046(t *testing.T) {
-	hierTree := parseHier(t, junosTrackHier15046)
+	hierTree := parseHierText(t, junosTrackHier15046)
 	setText := hierTree.FormatSet()
 	var lines []string
 	for _, line := range strings.Split(setText, "\n") {

@@ -49,7 +49,7 @@ import (
 //
 // IMPORTANT (per CLAUDE.md): flat-set syntax is built with ParseSetCommand +
 // tree.SetPath in a loop, never NewParser; the hierarchical shape uses
-// parseHierarchical.
+// parseHierText (#16139 kit).
 
 // zoneMembership6525 compiles just the zones subtree of a hierarchical config
 // and returns the compiled membership for zone Z, plus the per-interface
@@ -58,7 +58,7 @@ import (
 // strict gates.
 func zoneMembership6525(t *testing.T, cfgText string) ([]string, map[string]*HostInboundTraffic) {
 	t.Helper()
-	tree := parseHierarchical(t, cfgText)
+	tree := parseHierText(t, cfgText)
 	sec := tree.FindChild("security")
 	if sec == nil {
 		t.Fatalf("no security node in tree for:\n%s", cfgText)
@@ -351,7 +351,7 @@ func TestZoneInterfaces6525EmptyStanzaRejected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHierarchical(t, `
+			tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -394,7 +394,7 @@ security {
 			`interfaces [ ge-0/0/0.0 ge-0/0/1.0 ];`,
 		} {
 			t.Run(stanza, func(t *testing.T) {
-				tree := parseHierarchical(t, `
+				tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -484,7 +484,7 @@ func TestZoneInterfaces6525VacuousStanzaAccepted(t *testing.T) {
 	})
 
 	t.Run("bare hierarchical interfaces stanza", func(t *testing.T) {
-		tree := parseHierarchical(t, `
+		tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -513,7 +513,7 @@ security {
 // never reached zone.Interfaces at all.
 func TestZoneInterfaces6525StrictGatesNoLongerVacuous(t *testing.T) {
 	t.Run("undefined member reaches the defined gate", func(t *testing.T) {
-		tree := parseHierarchical(t, `
+		tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -540,7 +540,7 @@ security {
 	})
 
 	t.Run("duplicate assignment reaches the membership gate", func(t *testing.T) {
-		tree := parseHierarchical(t, `
+		tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -570,7 +570,7 @@ security {
 	})
 
 	t.Run("member survives end to end", func(t *testing.T) {
-		tree := parseHierarchical(t, `
+		tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -610,7 +610,7 @@ security {
 // path the non-empty gate must DOWNGRADE to a cfg.Warnings entry so an
 // already-persisted or peer-synced config an older binary accepted still BOOTS.
 func TestZoneInterfaces6525LenientPathWarnsInsteadOfRejecting(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {

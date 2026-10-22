@@ -61,7 +61,7 @@ func TestIKEIPsecProposalsMultiValueFlat(t *testing.T) {
 }
 
 func TestIKEIPsecProposalsMultiValueHierarchical(t *testing.T) {
-	tree := mustParse(t, `security {
+	tree := parseHierText(t, `security {
     ike {
         proposal ike-a {
             authentication-method pre-shared-keys;

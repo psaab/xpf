@@ -12,18 +12,9 @@ import (
 // surface, while the compiler still installs it (key-id stays 1).
 const md5NonAdjacentSecret14389 = "LIVE-OSPF-MD5-SECRET-14389"
 
-func parseMD5Tree14389(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("NewParser: %v", errs)
-	}
-	return tree
-}
-
 func hierarchicalMD5Tree14389(t *testing.T, secret string) *ConfigTree {
 	t.Helper()
-	return parseMD5Tree14389(t, `protocols {
+	return parseHierText(t, `protocols {
     ospf {
         area 0.0.0.0 {
             interface ge-0/0/0 {
@@ -115,7 +106,7 @@ func TestRedactedCloneMasksNonAdjacentMD5Key14389(t *testing.T) {
 // values (GRE tunnel, NTP, api-auth identity, chassis device-map) visible.
 func TestRedactedCloneMD5KeyControls14389(t *testing.T) {
 	t.Run("canonical md5 1 key still masked", func(t *testing.T) {
-		tree := parseMD5Tree14389(t, `protocols {
+		tree := parseHierText(t, `protocols {
     ospf {
         area 0.0.0.0 {
             interface ge-0/0/0 {
@@ -138,7 +129,7 @@ func TestRedactedCloneMD5KeyControls14389(t *testing.T) {
 	})
 
 	t.Run("md5 1 key with nested key still masked", func(t *testing.T) {
-		tree := parseMD5Tree14389(t, `protocols {
+		tree := parseHierText(t, `protocols {
     ospf {
         area 0.0.0.0 {
             interface ge-0/0/0 {

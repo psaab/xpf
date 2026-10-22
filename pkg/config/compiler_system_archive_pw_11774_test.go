@@ -29,7 +29,7 @@ func TestURLHasPassword11774(t *testing.T) {
 
 func TestCompileConfigRejectsArchivalURLPassword11774(t *testing.T) {
 	const password = "ARCHIVE-PW-SENTINEL"
-	tree := mustParse(t, `system {
+	tree := parseHierText(t, `system {
     archival {
         configuration {
             archive-sites { "scp://alice:`+password+`@archive.example/configs"; }

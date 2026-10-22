@@ -19,15 +19,6 @@ import (
 // All tests drive the PUBLIC compile entry points (CompileConfig /
 // CompileConfigLenient), not the private validators.
 
-func parseHier6455(t *testing.T, input string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(input).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 // TestDup6455QuotedEmptyNameRejected is the Finding 2 RED-on-revert proof: a
 // single quoted-empty name for each of the family's containers is hard-rejected at
 // strict commit as an authoring error (an empty name is not a valid operational
@@ -68,7 +59,7 @@ func TestDup6455QuotedEmptyNameRejected(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(parseHier6455(t, tc.cfg))
+			_, err := CompileConfig(parseHierText(t, tc.cfg))
 			if err == nil {
 				t.Fatalf("CompileConfig must reject an empty %s name", tc.kind)
 			}
@@ -89,11 +80,11 @@ func TestDup6455QuotedEmptyNameRejected(t *testing.T) {
 func TestDup6455QuotedEmptyLenientWarnsOnce(t *testing.T) {
 	const cfg = `security { nat { source { rule-set "" { rule R1 { then { source-nat { interface; } } } } } } }`
 
-	if _, err := CompileConfig(parseHier6455(t, cfg)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, cfg)); err == nil {
 		t.Fatal("strict CompileConfig must reject the empty rule-set name")
 	}
 
-	lenientCfg, err := CompileConfigLenient(parseHier6455(t, cfg))
+	lenientCfg, err := CompileConfigLenient(parseHierText(t, cfg))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient must not hard-fail on an empty name, got: %v", err)
 	}
@@ -119,7 +110,7 @@ func TestDup6455GroupFragmentCoalescingAccepted(t *testing.T) {
 	// C1: an interface split across two group `interfaces` roots coalesces to ONE
 	// ge-0/0/0 carrying both units.
 	t.Run("interface fragments across two group roots", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier6455(t, `groups { G {
+		cfg, err := CompileConfig(parseHierText(t, `groups { G {
     interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
     interfaces { ge-0/0/0 { unit 1 { family inet { address 10.0.1.1/24; } } } }
 } }
@@ -136,7 +127,7 @@ apply-groups G;`))
 	// C2: a screen profile split into an ICMP fragment + a TCP fragment across two
 	// group `security` roots coalesces to ONE profile carrying both checks.
 	t.Run("screen profile fragments across two group roots", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier6455(t, `groups { G {
+		cfg, err := CompileConfig(parseHierText(t, `groups { G {
     security { screen { ids-option P { icmp { ping-death; } } } }
     security { screen { ids-option P { tcp { syn-fin; } } } }
 } }
@@ -153,7 +144,7 @@ apply-groups G;`))
 	// C3: one NAT rule split into complementary match/then fragments across
 	// repeated group roots coalesces to ONE rule.
 	t.Run("nat rule match/then fragments across two group roots", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier6455(t, `groups { G {
+		cfg, err := CompileConfig(parseHierText(t, `groups { G {
     security { nat { source { rule-set RS { rule R { match { source-address 10.0.0.0/24; } } } } } }
     security { nat { source { rule-set RS { rule R { then { source-nat { interface; } } } } } } }
 } }
@@ -177,7 +168,7 @@ apply-groups G;`))
 	// C4: two group-local same-name rule siblings + an inline same-name rule-set
 	// peer — expansion coalesces the group siblings into the inline rule-set.
 	t.Run("group rule siblings + inline peer coalesce", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier6455(t, `security { nat { source { rule-set RS { rule Ri { then { source-nat { off; } } } } } } }
+		cfg, err := CompileConfig(parseHierText(t, `security { nat { source { rule-set RS { rule Ri { then { source-nat { off; } } } } } } }
 groups { G {
     security { nat { source { rule-set RS { rule R { match { source-address 10.0.0.0/24; } } rule R { then { source-nat { interface; } } } } } } }
 } }
@@ -209,7 +200,7 @@ func TestDup6455NoFalsePositive(t *testing.T) {
 	// apply-groups deep-merge: inline `rule-set RS { rule R1 }` + group-authored
 	// `rule-set RS { rule R2 }` coalesce into ONE rule-set carrying BOTH rules.
 	t.Run("apply-groups deep-merge carries both rules", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier6455(t, `security {
+		cfg, err := CompileConfig(parseHierText(t, `security {
     nat { source { rule-set RS { rule R1 { then { source-nat { interface; } } } } } }
 }
 groups { G {
@@ -234,7 +225,7 @@ apply-groups G;`))
 
 	// Two different groups authoring the SAME rule (identical action) coalesce.
 	t.Run("cross-group same name coalesces", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier6455(t, `groups {
+		cfg, err := CompileConfig(parseHierText(t, `groups {
     G1 { security { nat { source { rule-set RS { rule R { then { source-nat { off; } } } } } } } }
     G2 { security { nat { source { rule-set RS { rule R { then { source-nat { off; } } } } } } } }
 }
@@ -257,7 +248,7 @@ apply-groups [ G1 G2 ];`))
 	// Cartesian-expands into TWO same-named NATRuleSet objects at compile time —
 	// one AST instance, not a duplicate.
 	t.Run("bracket-list from-scope expansion (#3096)", func(t *testing.T) {
-		cfg, err := CompileConfig(parseHier6455(t, `security {
+		cfg, err := CompileConfig(parseHierText(t, `security {
     nat { source { rule-set RS {
         from zone [ trust dmz ];
         to zone untrust;

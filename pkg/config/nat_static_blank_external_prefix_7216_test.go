@@ -163,7 +163,7 @@ func TestStaticNATBlankExternalPrefix7216PreservesTheCardinalityContract(t *test
 	//     blank is authored FIRST inside the bracket so nodeVal selects the
 	//     prefix, not the blank.
 	t.Run("blank slot, non-blank selection, still commits", func(t *testing.T) {
-		tree := hierTree6659(t, `
+		tree := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 "" ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
@@ -183,7 +183,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 	// (b) A repeated identical prefix is ONE prefix, not a cardinality
 	//     violation (#6673 fold) — still true with #7216 in place.
 	t.Run("repeated identical prefix still commits", func(t *testing.T) {
-		tree := hierTree6659(t, `
+		tree := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 192.0.2.1/32; destination-address 192.0.2.1/32; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)

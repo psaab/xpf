@@ -35,7 +35,7 @@ func TestIdentityBindPasswordIsRedacted10948(t *testing.T) {
 	}{
 		{
 			name: "hierarchical user-identification",
-			tree: parseRedactTree10948(t, `services {
+			tree: parseHierText(t, `services {
     user-identification {
         active-directory-access {
             domain-name corp.example;
@@ -52,7 +52,7 @@ func TestIdentityBindPasswordIsRedacted10948(t *testing.T) {
 		},
 		{
 			name: "hierarchical access",
-			tree: parseRedactTree10948(t, `access {
+			tree: parseHierText(t, `access {
     profile ldap-bind {
         ldap-server ldap.example {
             password `+leak+`;
@@ -84,15 +84,6 @@ func TestIdentityBindPasswordIsRedacted10948(t *testing.T) {
 			}
 		})
 	}
-}
-
-func parseRedactTree10948(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) != 0 {
-		t.Fatalf("NewParser: %v", errs)
-	}
-	return tree
 }
 
 // redactionSecretSet mirrors the #2053 secret-bearing leaves (the same set the

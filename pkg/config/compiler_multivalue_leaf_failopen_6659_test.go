@@ -66,15 +66,6 @@ func setTree6659(t *testing.T, cmds ...string) *ConfigTree {
 	return tree
 }
 
-func hierTree6659(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse errors: %v", errs)
-	}
-	return tree
-}
-
 func mustCompile6659(t *testing.T, tree *ConfigTree) *Config {
 	t.Helper()
 	cfg, err := CompileConfig(tree)
@@ -96,7 +87,7 @@ func mustCompile6659(t *testing.T, tree *ConfigTree) *Config {
 // as GREEN CONTROLS so a regression in the packed path is distinguishable from
 // a regression in the reader as a whole.
 func TestEventAttributesMatch6659PackedLeaf(t *testing.T) {
-	cfg := mustCompile6659(t, hierTree6659(t, `
+	cfg := mustCompile6659(t, parseHierText(t, `
 event-options {
     policy p1 {
         events ping_test_failed;
@@ -118,7 +109,7 @@ func TestEventAttributesMatch6659BlockAndFlatSetControls(t *testing.T) {
 		"ping_test_failed.test-owner matches Comcast",
 		"ping_test_failed.test-name matches wan",
 	}
-	block := mustCompile6659(t, hierTree6659(t, `
+	block := mustCompile6659(t, parseHierText(t, `
 event-options {
     policy p1 {
         events ping_test_failed;
@@ -147,7 +138,7 @@ event-options {
 // UNKNOWN attribute field committed CLEAN. Restoring the value must also restore
 // the gate's reach.
 func TestEventAttributesMatch6659PackedLeafReachesValidator(t *testing.T) {
-	_, err := CompileConfig(hierTree6659(t, `
+	_, err := CompileConfig(parseHierText(t, `
 event-options {
     policy p1 {
         events ping_test_failed;
@@ -192,14 +183,14 @@ func TestEventChangeConfigCommands6659(t *testing.T) {
 	}{
 		{
 			"hier packed single quoted",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands "set system host-name foo";
             } } } }`),
 			[]string{cmd1},
 		},
 		{
 			"hier packed bracket list",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands [ "set system host-name foo" "delete interfaces ge-0/0/0" ];
             } } } }`),
 			[]string{cmd1, cmd2},
@@ -209,21 +200,21 @@ func TestEventChangeConfigCommands6659(t *testing.T) {
 			// read PER TOKEN unconditionally — so one command became four
 			// bare words, none of which carries a `set `/`delete ` prefix.
 			"hier packed unquoted (four bare words pre-fold)",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands set system host-name foo;
             } } } }`),
 			[]string{cmd1},
 		},
 		{
 			"hier block unquoted (truncated to `set` pre-#6659)",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration { commands {
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration { commands {
                 set system host-name foo;
             } } } } }`),
 			[]string{cmd1},
 		},
 		{
 			"hier block quoted (GREEN CONTROL — worked pre-#6659)",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration { commands {
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration { commands {
                 "set system host-name foo";
                 "delete interfaces ge-0/0/0";
             } } } } }`),
@@ -323,14 +314,14 @@ func TestEventMultiValueLeaf6673TokenBoundaryBothParsers(t *testing.T) {
 		},
 		{
 			"am/hier bracket splits per member (GREEN CONTROL)",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed;
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed;
                 attributes-match [ "ping_test_failed.test-owner matches Comcast" "ping_test_failed.test-name matches wan" ]; } }`),
 			amOf,
 			[]string{"ping_test_failed.test-owner matches Comcast", "ping_test_failed.test-name matches wan"},
 		},
 		{
 			"am/hier block (GREEN CONTROL)",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; attributes-match {
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed; attributes-match {
                 ping_test_failed.test-owner matches Comcast; ping_test_failed.test-name matches wan; } } }`),
 			amOf,
 			[]string{"ping_test_failed.test-owner matches Comcast", "ping_test_failed.test-name matches wan"},
@@ -343,7 +334,7 @@ func TestEventMultiValueLeaf6673TokenBoundaryBothParsers(t *testing.T) {
 		// narrows the policy to the literal owner "Comcast Business" only.
 		{
 			"am/hier quoted VALUE stays one expression",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed;
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed;
                 attributes-match ping_test_failed.test-owner matches "Comcast Business"; } }`),
 			amOf,
 			[]string{"ping_test_failed.test-owner matches Comcast Business"},
@@ -358,7 +349,7 @@ func TestEventMultiValueLeaf6673TokenBoundaryBothParsers(t *testing.T) {
 		},
 		{
 			"cmd/hier quoted VALUE stays one command",
-			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
+			parseHierText(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands set system host-name "foo bar"; } } } }`),
 			cmdsOf,
 			[]string{"set system host-name foo bar"},
@@ -404,9 +395,9 @@ func TestFlowTraceFlags6659BothShapes(t *testing.T) {
 	}{
 		{"flat-set bracket", setTree6659(t,
 			"set security flow traceoptions flag [ basic-datapath session ]")},
-		{"hier block", hierTree6659(t, `
+		{"hier block", parseHierText(t, `
 security { flow { traceoptions { flag { basic-datapath; session; } } } }`)},
-		{"hier one-per-line (GREEN CONTROL)", hierTree6659(t, `
+		{"hier one-per-line (GREEN CONTROL)", parseHierText(t, `
 security { flow { traceoptions { flag basic-datapath; flag session; } } }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -573,7 +564,7 @@ func staticNAT6659Trees(t *testing.T, match, then string) map[string]*ConfigTree
 			"set security nat static rule-set rs1 rule r1 match destination-address "+match,
 			"set security nat static rule-set rs1 rule r1 then static-nat prefix "+then,
 		),
-		"hier block": hierTree6659(t, `
+		"hier block": parseHierText(t, `
 security { nat { static { rule-set rs1 {
     from zone untrust;
     rule r1 {
@@ -803,7 +794,7 @@ func TestForwardingTableExport6659SingleUnchanged(t *testing.T) {
 		{"flat-set", setTree6659(t,
 			"set policy-options policy-statement p1 then accept",
 			"set routing-options forwarding-table export p1")},
-		{"hier block", hierTree6659(t, `
+		{"hier block", parseHierText(t, `
 policy-options { policy-statement p1 { then accept; } }
 routing-options { forwarding-table { export p1; } }`)},
 	} {
@@ -842,7 +833,7 @@ func TestProxyARPAddresses6659BothShapes(t *testing.T) {
 	}{
 		{"flat-set bracket", setTree6659(t,
 			"set security nat proxy-arp interface ge-0/0/0 address [ 192.0.2.1 192.0.2.2 ]")},
-		{"hier block", hierTree6659(t, `
+		{"hier block", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address { 192.0.2.1; 192.0.2.2; } } } } }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -869,7 +860,7 @@ func proxyARP6659Trees(t *testing.T, addrs ...string) map[string]*ConfigTree {
 	return map[string]*ConfigTree{
 		"flat-set bracket": setTree6659(t,
 			"set security nat proxy-arp interface ge-0/0/0 address "+bracket),
-		"hier block": hierTree6659(t,
+		"hier block": parseHierText(t,
 			"security { nat { proxy-arp { interface ge-0/0/0 { address { "+block.String()+"} } } } }"),
 	}
 }
@@ -1012,7 +1003,7 @@ func TestProxyARPAddresses6659MalformedRejected(t *testing.T) {
 // each author their own values stay independent, with no value bleeding across.
 func TestMultiValueLeaf6659NoSharedBackingStore(t *testing.T) {
 	t.Run("two event policies stay independent", func(t *testing.T) {
-		cfg := mustCompile6659(t, hierTree6659(t, `
+		cfg := mustCompile6659(t, parseHierText(t, `
 event-options {
     policy pA { events ping_test_failed; attributes-match ping_test_failed.test-owner matches Comcast; }
     policy pB { events ping_test_completed; attributes-match ping_test_completed.test-name matches wan; }
@@ -1094,7 +1085,7 @@ func TestProxyARPAddresses6659RangeStillExpands(t *testing.T) {
 	}{
 		{"flat-set range", setTree6659(t,
 			"set security nat proxy-arp interface ge-0/0/0 address 192.0.2.1 to 192.0.2.3")},
-		{"hier range", hierTree6659(t, `
+		{"hier range", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address 192.0.2.1 to 192.0.2.3; } } } }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

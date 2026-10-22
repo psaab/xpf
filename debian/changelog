@@ -1,5 +1,21 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Add in-package per-channel test kit for pkg/config (#16139):
+    helpers_test.go provides one helper per compile channel
+    (parseHierText, parseSetCommands, compileHierStrict/Lenient,
+    compileSetStrict/Lenient, compileTreeStrictKit/LenientKit,
+    compileTreeForNodeKit) with no lenient bool flag, so a test
+    cannot silently exercise the tolerant channel while claiming
+    the strict one. Migrates the 73 pure hierarchical-parse clones
+    (554 in-file and 670 cross-file call sites) onto parseHierText
+    and deletes every clone; helpers that wrap text, inject
+    fixtures, expand groups, or assert extra premises are not
+    clones and stay. Permanent equivalence is pinned against
+    independent expected fixtures in helpers_equivalence_test.go,
+    including a strict-vs-lenient divergence fixture (keyless
+    cluster, #6611) proving the channels are not flattened.
+xpf (0.0.0) unstable; urgency=medium
+
   * Introduce typed static SchemaRefs for pkg/config (#16147): no-arg
     schema resolvers and literal schemaForPath call sites now resolve
     through registered refXxx handles in schema_refs.go, audited by

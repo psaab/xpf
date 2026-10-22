@@ -24,7 +24,7 @@ import (
 
 func ospfAuth14388Helper(t *testing.T, text string) *OSPFInterface {
 	t.Helper()
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -198,7 +198,7 @@ groups { G { protocols { rip { authentication-key GROUPKEY; authentication-type 
 protocols { rip; }
 apply-groups G;
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -228,7 +228,7 @@ policy-options {
 }
 apply-groups G;
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -265,7 +265,7 @@ firewall { family inet { filter F { term T {
 } } } }
 apply-groups G;
 `
-	tree := parseHierarchical(t, text)
+	tree := parseHierText(t, text)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)

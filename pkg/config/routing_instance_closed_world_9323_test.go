@@ -356,7 +356,7 @@ func TestInstancePolicyLeakKeywordsHaveSpecificDiagnostics9323(t *testing.T) {
 				if tc.flatSet {
 					return tree9323(t, strings.Split(tc.config, "\n")...)
 				}
-				return parse9323(t, tc.config)
+				return parseHierText(t, tc.config)
 			}
 			checkDiagnostic := func(where, diagnostic string) {
 				t.Helper()
@@ -412,15 +412,6 @@ func TestInstancePolicyLeakKeywordsHaveSpecificDiagnostics9323(t *testing.T) {
 // silent drop #9323 fixes. "Consistency" is satisfiable by rejecting
 // everything; these arms are what makes it not.
 
-func parse9323(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse %q: %v", text, errs)
-	}
-	return tree
-}
-
 func TestTheGateCoversAllThreeSpellings9323(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -474,7 +465,7 @@ func TestTheGateCoversAllThreeSpellings9323(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(parse9323(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if tc.wantTok == "" {
 				if err != nil {
 					t.Fatalf("VALID configuration was REJECTED: %v\n%s\n"+
@@ -520,7 +511,7 @@ func TestTheGateDeclinesToJudgeWhenTheSchemaCannotBeRead9323(t *testing.T) {
 		t.Fatalf("fixture: the permitted set is %v after the swap, not empty", got)
 	}
 
-	nodes := parse9323(t, "routing-instances {\n  VRF-A totally-bogus-keyword foo bar;\n}\n").Children
+	nodes := parseHierText(t, "routing-instances {\n  VRF-A totally-bogus-keyword foo bar;\n}\n").Children
 	warns, err := validateRoutingInstanceChildTokensAST(nodes, false)
 	if err != nil {
 		t.Errorf("the gate REJECTED with an unreadable schema: %v.\nA lookup failure "+

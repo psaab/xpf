@@ -18,7 +18,7 @@ import "testing"
 // SHAPE NOTE (per CLAUDE.md): duplicate same-key blocks are only expressible via
 // the hierarchical / NewParser (load-override) path. Flat-set ParseSetCommand +
 // SetPath MERGES two lines with an identical key-path into one node, so it is
-// structurally immune and is NOT the reproducer here — parseHierarchical is.
+// structurally immune and is NOT the reproducer here — parseHierText is.
 //
 // #6525: the configs below gained a top-level `interfaces ge-0/0/0 { ... }`
 // definition. They use the compact-leaf zone-membership spelling
@@ -34,7 +34,7 @@ import "testing"
 // parseHostInboundNode(prop)` overwrites with the last block (only ospf, ssh
 // lost) and this goes RED.
 func TestHostInboundDupBlock4544ZoneMerges(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -80,7 +80,7 @@ security {
 // lost) and this goes RED.
 func TestHostInboundDupBlock4544InterfaceMerges(t *testing.T) {
 	// Junos / load-override interface block spelling (`interfaces { ifN { ... } }`).
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -127,7 +127,7 @@ security {
 // deduplicated: two blocks that both list ssh yield a SINGLE ssh, and the
 // distinct tokens across blocks all survive.
 func TestHostInboundDupBlock4544MergeDedups(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -181,7 +181,7 @@ security {
 // the first parse unchanged when there is nothing to merge into).
 func TestHostInboundDupBlock4544SingleBlockUnchanged(t *testing.T) {
 	// Zone-level single block.
-	ztree := parseHierarchical(t, `
+	ztree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {
@@ -216,7 +216,7 @@ security {
 	}
 
 	// Interface-level single block (Junos block spelling).
-	itree := parseHierarchical(t, `
+	itree := parseHierText(t, `
 interfaces {
     ge-0/0/0 {
         unit 0 {

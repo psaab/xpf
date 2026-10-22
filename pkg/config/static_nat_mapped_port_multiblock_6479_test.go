@@ -33,7 +33,7 @@ import (
 //   INVARIANT B (no regression): a VALID mapped-port on one sibling is NOT
 //     silently cleared by a clean sibling, and among valid siblings last-wins.
 //
-// The sibling shapes below are authored hierarchically (buildHier): the flat-set
+// The sibling shapes below are authored hierarchically (parseHierText): the flat-set
 // `set` form of the same lines collapses onto ONE static-nat node whose children
 // staticNATMappedPortForNode already folds (covered by the shapes-matrix file);
 // the multi-static-nat-sibling AST only arises from a hierarchical `then` block.
@@ -143,7 +143,7 @@ func TestStaticNATMappedPortMultiBlockNPTv6Sibling6479(t *testing.T) {
         }
     }
 }`
-				return buildHier(t, body)
+				return parseHierText(t, body)
 			})
 		})
 	}
@@ -183,7 +183,7 @@ func TestStaticNATMappedPortMultiBlockPrefixSibling6479(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			assertMappedPortReject(t, func() *ConfigTree {
-				return buildHier(t, hierRuleV4AB(c.inner))
+				return parseHierText(t, hierRuleV4AB(c.inner))
 			}, `"notaport"`)
 		})
 	}
@@ -204,7 +204,7 @@ func TestStaticNATMappedPortMultiBlockBareThenValidProvenance6479(t *testing.T) 
 	// bare sibling latches fail-closed; the valid sibling must not rewrite the
 	// provenance token. hierRuleV4AB carries NO match destination-port, so the
 	// present-but-malformed gate (MappedPort==0) is the only defect that fires.
-	tree := buildHier(t, hierRuleV4AB(
+	tree := parseHierText(t, hierRuleV4AB(
 		`                        static-nat { prefix 10.0.0.5/32 { mapped-port; } }
                         static-nat { prefix 10.0.0.6/32 { mapped-port 9090; } }`))
 	_, err := CompileConfig(tree)
@@ -245,7 +245,7 @@ func TestStaticNATMappedPortMultiBlockBareThenValidProvenance6479(t *testing.T) 
 func TestStaticNATMappedPortMultiBlockAccept6479(t *testing.T) {
 	// A valid mapped-port on the first sibling survives a clean second sibling.
 	t.Run("valid-then-clean-sibling-keeps-port", func(t *testing.T) {
-		tree := buildHier(t, `security {
+		tree := parseHierText(t, `security {
     zones { security-zone untrust; }
     nat {
         static {
@@ -268,7 +268,7 @@ func TestStaticNATMappedPortMultiBlockAccept6479(t *testing.T) {
 	// Two valid siblings: last-valid-wins (9090), matching combineMappedPort-
 	// Operands' duplicate-stanza last-wins across sibling targets.
 	t.Run("two-valid-siblings-last-wins", func(t *testing.T) {
-		tree := buildHier(t, `security {
+		tree := parseHierText(t, `security {
     zones { security-zone untrust; }
     nat {
         static {
@@ -301,7 +301,7 @@ func TestStaticNATMappedPortMultiThenBlockBoundary6479(t *testing.T) {
 	// second is a clean prefix target. Last-then-block-wins → the effective rule
 	// is the clean prefix; the superseded nptv6 block (and its mapped-port) is
 	// dead config. Compiles clean.
-	tree := buildHier(t, `security {
+	tree := parseHierText(t, `security {
     zones { security-zone untrust; }
     nat {
         static {

@@ -152,7 +152,7 @@ func TestVRRPMisplacedAuthRejected14403(t *testing.T) {
 	for _, cell := range vrrpMisplacedCells {
 		for _, leaf := range vrrpMisplacedLeaves {
 			t.Run(cell+"/"+leaf.name, func(t *testing.T) {
-				tree := parseHier(t, vrrpMisplacedHier(cell, leaf.text))
+				tree := parseHierText(t, vrrpMisplacedHier(cell, leaf.text))
 				_, err := CompileConfig(tree)
 				if err == nil {
 					t.Fatalf("CompileConfig: expected rejection of misplaced VRRP %s at %s, got nil (group would activate unauthenticated)", leaf.name, cell)
@@ -175,7 +175,7 @@ func TestVRRPMisplacedAuthLenientDropsGroup14403(t *testing.T) {
 	for _, cell := range vrrpMisplacedCells {
 		for _, leaf := range vrrpMisplacedLeaves {
 			t.Run(cell+"/"+leaf.name, func(t *testing.T) {
-				tree := parseHier(t, vrrpMisplacedHier(cell, leaf.text))
+				tree := parseHierText(t, vrrpMisplacedHier(cell, leaf.text))
 				cfg, err := CompileConfigLenient(tree)
 				if err != nil {
 					t.Fatalf("CompileConfigLenient: %v", err)
@@ -257,7 +257,7 @@ func TestVRRPMisplacedAuthAncestorKeysPackedNoLeak14403(t *testing.T) {
     }
 }`,
 	} {
-		_, err := CompileConfig(parseHier(t, hier))
+		_, err := CompileConfig(parseHierText(t, hier))
 		if err == nil {
 			t.Fatal("expected rejection")
 		}
@@ -267,7 +267,7 @@ func TestVRRPMisplacedAuthAncestorKeysPackedNoLeak14403(t *testing.T) {
 		if !strings.Contains(err.Error(), "authentication-key") {
 			t.Fatalf("error must name keyword: %v", err)
 		}
-		cfg, err := CompileConfigLenient(parseHier(t, hier))
+		cfg, err := CompileConfigLenient(parseHierText(t, hier))
 		if err != nil {
 			t.Fatalf("lenient: %v", err)
 		}
@@ -284,7 +284,7 @@ func TestVRRPMisplacedAuthAncestorKeysPackedNoLeak14403(t *testing.T) {
 
 func TestVRRPNoAuthNearbyStillCommits14403(t *testing.T) {
 	// group with NO auth anywhere must still compile+activate
-	tree := parseHier(t, `interfaces {
+	tree := parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {
@@ -310,7 +310,7 @@ func TestVRRPNoAuthNearbyStillCommits14403(t *testing.T) {
 	// (which have no other gate), it must compile clean. (The address-node
 	// placement is already hard-rejected by the pre-existing #9424 address-list
 	// gate, so it is not used as the no-group control here.)
-	tree2 := parseHier(t, `interfaces {
+	tree2 := parseHierText(t, `interfaces {
     reth0 {
         unit 0 {
             family inet {

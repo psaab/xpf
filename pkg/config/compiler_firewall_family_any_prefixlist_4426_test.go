@@ -17,7 +17,7 @@ import (
 //
 // These configs are non-Junos and reach compileFirewall's structured path only
 // via a HIERARCHICAL config-file / peer-synced AST (the flat `set` schema does
-// not model `family any`), so the fixtures use parseHier.
+// not model `family any`), so the fixtures use parseHierText.
 
 // RED-on-revert: a `family any` filter whose source-prefix-list resolves to
 // IPv4-only prefixes must be REJECTED at strict commit. On revert of the #4426
@@ -25,7 +25,7 @@ import (
 // constrained by a v4-only list, matches no v6 packet, and falls through to
 // ACCEPT (fail-open v6 under-block).
 func TestFirewallFilterFamilyAnyV4OnlyPrefixListRejected(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list v4-blocks {
         10.0.0.0/8;
@@ -65,7 +65,7 @@ firewall {
 // The mirror case: a v6-only destination-prefix-list under family any
 // under-blocks the inet (v4) arm and is rejected.
 func TestFirewallFilterFamilyAnyV6OnlyPrefixListRejected(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list v6-blocks {
         2001:db8::/32;
@@ -106,7 +106,7 @@ firewall {
 // matching prefixes". The reject is kept (a real commit-time surprise), but the
 // message must describe the OVER-match, not an under-block.
 func TestFirewallFilterFamilyAnyExceptV4OnlyOverMatch(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list mgmt-v4 {
         10.0.0.0/8;
@@ -151,7 +151,7 @@ firewall {
 // except; then accept` under family any → the v6 arm accepts EVERY v6 packet (a
 // security fail-OPEN). The gate must catch it and describe the over-accept.
 func TestFirewallFilterFamilyAnyExceptAcceptFailOpenCaught(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list mgmt-v4 {
         10.0.0.0/8;
@@ -188,7 +188,7 @@ firewall {
 // The positive case must STILL produce the under-block message (regression guard
 // that the except branch did not change the positive wording).
 func TestFirewallFilterFamilyAnyPositiveKeepsUnderBlockMessage(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list v4-blocks {
         10.0.0.0/8;
@@ -227,7 +227,7 @@ firewall {
 // A MIXED-family `except` list under family any is symmetric (each arm excludes
 // its own family's prefixes and matches the rest) — must NOT be flagged.
 func TestFirewallFilterFamilyAnyExceptMixedCommits(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list dual {
         10.0.0.0/8;
@@ -265,7 +265,7 @@ firewall {
 // A MIXED-family prefix-list (v4 AND v6 prefixes in one list) under family any
 // is legitimate — both arms have matching prefixes — and must NOT be flagged.
 func TestFirewallFilterFamilyAnyMixedPrefixListCommits(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list dual {
         10.0.0.0/8;
@@ -306,7 +306,7 @@ firewall {
 // Two SEPARATE single-family prefix-lists in ONE direction together cover both
 // families — the term is correct for both arms and must NOT be flagged.
 func TestFirewallFilterFamilyAnyTwoSingleFamilyListsCommit(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list v4-blocks {
         10.0.0.0/8;
@@ -348,7 +348,7 @@ firewall {
 // to a warning so an already-persisted or peer-synced config still boots — the
 // dual-compile behavior is preserved (the v6 arm merely never matches).
 func TestFirewallFilterFamilyAnyV4OnlyPrefixListLenientWarns(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list v4-blocks {
         10.0.0.0/8;
@@ -395,7 +395,7 @@ firewall {
 // with a v4-only list) is legitimate and must NOT be flagged — the gate is
 // scoped to `family any` only.
 func TestFirewallFilterSingleFamilyPrefixListNotFlagged(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list v4-blocks {
         10.0.0.0/8;
@@ -462,7 +462,7 @@ func TestFirewallFilterSingleFamilyWrongFamilyPrefixListRejected14446(t *testing
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(parseHier(t, tc.tree))
+			_, err := CompileConfig(parseHierText(t, tc.tree))
 			if err == nil {
 				t.Fatal("CompileConfig: expected strict rejection of wrong-family-only prefix-list under single-family filter, got nil")
 			}
@@ -476,7 +476,7 @@ func TestFirewallFilterSingleFamilyWrongFamilyPrefixListRejected14446(t *testing
 }
 
 func TestFirewallFilterSingleFamilyWrongFamilyPrefixListLenientWarns14446(t *testing.T) {
-	tree := parseHier(t, "\npolicy-options { prefix-list v4-only { 10.0.0.0/8; } }\nfirewall { family inet6 { filter f { term t { from { source-prefix-list v4-only; } then discard; } } } }\n")
+	tree := parseHierText(t, "\npolicy-options { prefix-list v4-only { 10.0.0.0/8; } }\nfirewall { family inet6 { filter f { term t { from { source-prefix-list v4-only; } then discard; } } } }\n")
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: wrong-family single-family prefix-list must downgrade to warning, got: %v", err)
@@ -496,7 +496,7 @@ func TestFirewallFilterSingleFamilyWrongFamilyPrefixListLenientWarns14446(t *tes
 }
 
 func TestFirewallFilterSingleFamilyMatchedAndMixedPrefixListCommits14446(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 policy-options {
     prefix-list v4-only { 10.0.0.0/8; }
     prefix-list v6-only { 2001:db8::/32; }

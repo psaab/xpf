@@ -26,16 +26,6 @@ import (
 // repeated trigger values under ONE trigger node as children, which the old
 // validator already saw whole — that shape does not exercise this defect).
 
-func buildEventWithinHier15205(t *testing.T, body string) *ConfigTree {
-	t.Helper()
-	p := NewParser(body)
-	tree, errs := p.Parse()
-	if errs != nil {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 func hierWithin15205(triggerStmts string) string {
 	return "event-options {\n    policy P {\n        events ping_test_failed;\n        within 60 {\n" +
 		triggerStmts +
@@ -96,7 +86,7 @@ func TestEventWithinSecondTriggerSiblingRejected15205(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := buildEventWithinHier15205(t, hierWithin15205(tc.trig))
+			tree := parseHierText(t, hierWithin15205(tc.trig))
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig accepted a malformed second trigger sibling (%q); want a strict reject", tc.trig)
@@ -115,7 +105,7 @@ func TestEventWithinSecondTriggerSiblingRejected15205(t *testing.T) {
 // keyword with valid counts are ordinary Junos re-sets — the compiler takes
 // the last value (#6771) and the widened validator must not reject them.
 func TestEventWithinDuplicateTriggerLastWinsControl15205(t *testing.T) {
-	tree := buildEventWithinHier15205(t, hierWithin15205(
+	tree := parseHierText(t, hierWithin15205(
 		"            trigger on 3;\n            trigger on 9;"))
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -130,7 +120,7 @@ func TestEventWithinDuplicateTriggerLastWinsControl15205(t *testing.T) {
 			w.Seconds, w.TriggerOn, w.TriggerUntil)
 	}
 
-	tree = buildEventWithinHier15205(t, hierWithin15205(
+	tree = parseHierText(t, hierWithin15205(
 		"            trigger until 4;\n            trigger until 11;"))
 	cfg, err = CompileConfig(tree)
 	if err != nil {
@@ -147,7 +137,7 @@ func TestEventWithinDuplicateTriggerLastWinsControl15205(t *testing.T) {
 // peer-sync split for the widened gate: a malformed second sibling downgrades
 // to a warning, not a hard error, exactly like a malformed first sibling.
 func TestEventWithinSecondTriggerSiblingLenient15205(t *testing.T) {
-	tree := buildEventWithinHier15205(t, hierWithin15205(
+	tree := parseHierText(t, hierWithin15205(
 		"            trigger on 3;\n            trigger on typo;"))
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {

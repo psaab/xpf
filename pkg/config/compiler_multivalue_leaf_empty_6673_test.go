@@ -160,23 +160,23 @@ func TestForwardingTableExport6673EmptyValueDoesNotChangeSelection(t *testing.T)
 		tree *ConfigTree
 		want string
 	}{
-		{"bracket, empty in FIRST slot", hierTree6659(t, ftPolicies6673+`
+		{"bracket, empty in FIRST slot", parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export [ "" p1 ]; } }`), ""},
-		{"empty bracket then a policy", hierTree6659(t, ftPolicies6673+`
+		{"empty bracket then a policy", parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export [ ]; export p1; } }`), ""},
-		{"bare empty value", hierTree6659(t, ftPolicies6673+`
+		{"bare empty value", parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export ""; } }`), ""},
-		{"block, empty in FIRST slot", hierTree6659(t, ftPolicies6673+`
+		{"block, empty in FIRST slot", parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export { ""; p1; } } }`), ""},
 		// Empty in a NON-first slot: the selected value is unaffected, which is
 		// the control that says the guard above is about SELECTION and not
 		// about empty values being rejected wholesale.
-		{"bracket, empty in a NON-FIRST slot", hierTree6659(t, ftPolicies6673+`
+		{"bracket, empty in a NON-FIRST slot", parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export [ p1 "" ]; } }`), "p1"},
-		{"policy then a bare empty sibling", hierTree6659(t, ftPolicies6673+`
+		{"policy then a bare empty sibling", parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export p1; export ""; } }`), "p1"},
 		// GREEN CONTROL.
-		{"single policy, no empty value", hierTree6659(t, ftPolicies6673+`
+		{"single policy, no empty value", parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export p1; } }`), "p1"},
 		// Flat set: two `set` lines, the first blanking the export.
 		{"flat set, empty then a policy", setTree6659(t,
@@ -223,7 +223,7 @@ routing-options { forwarding-table { export p1; } }`), "p1"},
 // Selecting p1 here would swap consistent-hash for per-packet load balancing on
 // a config that has been loading as p2 since before #6659.
 func TestForwardingTableExport6673RepeatedRootKeepsLastWins(t *testing.T) {
-	tree := hierTree6659(t, ftPolicies6673+`
+	tree := parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export p1; } }
 routing-options { forwarding-table { export p2; } }`)
 
@@ -282,19 +282,19 @@ func TestStaticNATMatch6673EmptyValueStaysInTheList(t *testing.T) {
 			`set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32`,
 			`set security nat static rule-set rs1 rule r1 match destination-address ""`,
 			`set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32`), ""},
-		{"bracket, empty in FIRST slot", hierTree6659(t, `
+		{"bracket, empty in FIRST slot", parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ "" 192.0.2.1/32 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), ""},
-		{"bracket, empty in a NON-FIRST slot", hierTree6659(t, `
+		{"bracket, empty in a NON-FIRST slot", parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 "" ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), "192.0.2.1/32"},
-		{"block, empty in FIRST slot", hierTree6659(t, `
+		{"block, empty in FIRST slot", parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address { ""; 192.0.2.1/32; } }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), ""},
-		{"bare empty value only", hierTree6659(t, `
+		{"bare empty value only", parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address ""; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), ""},
@@ -441,14 +441,14 @@ func TestStaticNATMatch6673EmptySlotIsNotASecondPrefix(t *testing.T) {
 // TestForwardingTableExport6673EmptySlotIsNotASecondPolicy is the export-arm
 // sibling of the test above.
 func TestForwardingTableExport6673EmptySlotIsNotASecondPolicy(t *testing.T) {
-	blanked := hierTree6659(t, ftPolicies6673+`
+	blanked := parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export [ "" p1 ]; } }`)
 	if _, err := CompileConfig(blanked); err != nil {
 		t.Fatalf("strict compile rejected a single policy with a blanked slot: "+
 			"%v — an empty slot is a selection, not a second authored policy", err)
 	}
 
-	twoReal := hierTree6659(t, ftPolicies6673+`
+	twoReal := parseHierText(t, ftPolicies6673+`
 routing-options { forwarding-table { export [ p1 p2 ]; } }`)
 	err := CompileConfigMustFail6673(t, twoReal)
 	if !strings.Contains(err.Error(), `"p1"`) {
@@ -476,17 +476,17 @@ func TestFlowTraceFlags6673EmptyValueIsSkippedNotSuppressing(t *testing.T) {
 		tree *ConfigTree
 		want []string
 	}{
-		{"bracket, empty in FIRST slot", hierTree6659(t, `
+		{"bracket, empty in FIRST slot", parseHierText(t, `
 security { flow { traceoptions { file flow.log; flag [ "" session ]; } } }`), []string{"session"}},
-		{"bracket, empty in a NON-FIRST slot", hierTree6659(t, `
+		{"bracket, empty in a NON-FIRST slot", parseHierText(t, `
 security { flow { traceoptions { file flow.log; flag [ session "" ]; } } }`), []string{"session"}},
-		{"block, empty in FIRST slot", hierTree6659(t, `
+		{"block, empty in FIRST slot", parseHierText(t, `
 security { flow { traceoptions { file flow.log; flag { ""; session; } } } }`), []string{"session"}},
-		{"empty bracket then a flag", hierTree6659(t, `
+		{"empty bracket then a flag", parseHierText(t, `
 security { flow { traceoptions { file flow.log; flag [ ]; flag session; } } }`), []string{"session"}},
-		{"bare empty value only", hierTree6659(t, `
+		{"bare empty value only", parseHierText(t, `
 security { flow { traceoptions { file flow.log; flag ""; } } }`), nil},
-		{"single flag (CONTROL)", hierTree6659(t, `
+		{"single flag (CONTROL)", parseHierText(t, `
 security { flow { traceoptions { file flow.log; flag session; } } }`), []string{"session"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -528,21 +528,21 @@ func TestProxyARPAddresses6673EmptyValueIsSkippedNotSuppressing(t *testing.T) {
 		tree *ConfigTree
 		want []string
 	}{
-		{"bracket, empty in FIRST slot", hierTree6659(t, `
+		{"bracket, empty in FIRST slot", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address [ "" 192.0.2.1 ]; } } } }`),
 			[]string{"192.0.2.1/32"}},
-		{"bracket, empty in a NON-FIRST slot", hierTree6659(t, `
+		{"bracket, empty in a NON-FIRST slot", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address [ 192.0.2.1 "" ]; } } } }`),
 			[]string{"192.0.2.1/32"}},
-		{"block, empty in FIRST slot", hierTree6659(t, `
+		{"block, empty in FIRST slot", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address { ""; 192.0.2.1; } } } } }`),
 			[]string{"192.0.2.1/32"}},
-		{"empty bracket then an address", hierTree6659(t, `
+		{"empty bracket then an address", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address [ ]; address 192.0.2.1; } } } }`),
 			[]string{"192.0.2.1/32"}},
-		{"bare empty value only", hierTree6659(t, `
+		{"bare empty value only", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address ""; } } } }`), nil},
-		{"single address (CONTROL)", hierTree6659(t, `
+		{"single address (CONTROL)", parseHierText(t, `
 security { nat { proxy-arp { interface ge-0/0/0 { address 192.0.2.1; } } } }`),
 			[]string{"192.0.2.1/32"}},
 	} {
@@ -598,11 +598,11 @@ func TestEventAttributesMatch6673EmptyExprStaysRejected(t *testing.T) {
 		name string
 		tree *ConfigTree
 	}{
-		{"block, empty in FIRST slot", hierTree6659(t, `
+		{"block, empty in FIRST slot", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; attributes-match { ""; ping_test_failed.test-owner matches Comcast; } } }`)},
-		{"block, empty in a NON-FIRST slot", hierTree6659(t, `
+		{"block, empty in a NON-FIRST slot", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; attributes-match { ping_test_failed.test-owner matches Comcast; ""; } } }`)},
-		{"packed, bare empty value", hierTree6659(t, `
+		{"packed, bare empty value", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; attributes-match ""; } }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -630,9 +630,9 @@ event-options { policy pA { events ping_test_failed; attributes-match ""; } }`)}
 		name string
 		tree *ConfigTree
 	}{
-		{"no value slot at all", hierTree6659(t, `
+		{"no value slot at all", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; attributes-match; } }`)},
-		{"well-formed expression", hierTree6659(t, `
+		{"well-formed expression", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; attributes-match ping_test_failed.test-owner matches Comcast; } }`)},
 	} {
 		t.Run(tc.name+" (CONTROL)", func(t *testing.T) {
@@ -666,22 +666,22 @@ func TestEventChangeConfigCommands6673EmptyCommandStaysInTheBatch(t *testing.T) 
 		tree *ConfigTree
 		want []string
 	}{
-		{"block, empty in FIRST slot", hierTree6659(t, `
+		{"block, empty in FIRST slot", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands { ""; "set system host-name foo"; } } } } }`),
 			[]string{"", "set system host-name foo"}},
-		{"block, empty in a NON-FIRST slot", hierTree6659(t, `
+		{"block, empty in a NON-FIRST slot", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands { "set system host-name foo"; ""; } } } } }`),
 			[]string{"set system host-name foo", ""}},
-		{"packed bracket, empty in FIRST slot", hierTree6659(t, `
+		{"packed bracket, empty in FIRST slot", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands [ "" "set system host-name foo" ]; } } } }`),
 			[]string{"", "set system host-name foo"}},
-		{"packed, bare empty value", hierTree6659(t, `
+		{"packed, bare empty value", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands ""; } } } }`), []string{""}},
-		{"single command (CONTROL)", hierTree6659(t, `
+		{"single command (CONTROL)", parseHierText(t, `
 event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands "set system host-name foo"; } } } }`),
 			[]string{"set system host-name foo"}},
@@ -729,7 +729,7 @@ func TestStaticNATMatch6673TailWarningDoesNotClaimTheRuleDropped(t *testing.T) {
 	// rule installs on it. Strict rejects the two-value list first, so the tail
 	// complaint is reachable only on the tolerant path, which is exactly where
 	// the operator reads it.
-	tolerant := hierTree6659(t, `
+	tolerant := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 not-an-address ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
@@ -757,7 +757,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 
 	// The mirror case: when the malformed value is the SELECTED one, the rule
 	// really is dropped and the warning must still say so.
-	selected := hierTree6659(t, `
+	selected := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address not-an-address; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
@@ -775,7 +775,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // TestStaticNATMatch6673NonHostTailWarningDoesNotClaimTheRuleDropped is the
 // same guard for the host-mask loop, which shares the suffix helper.
 func TestStaticNATMatch6673NonHostTailWarningDoesNotClaimTheRuleDropped(t *testing.T) {
-	tolerant := hierTree6659(t, `
+	tolerant := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 198.51.100.0/24 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
@@ -798,7 +798,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 
 	// Mirror: when the non-host prefix is the SELECTED value the rule really is
 	// dropped, and the message must still say so.
-	selected := hierTree6659(t, `
+	selected := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
@@ -824,7 +824,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // does not exist. rule.Match == "" lowers ExternalIP: "" and the Rust
 // parse_nat_prefix("") returns None, so from_snapshots drops the whole mapping.
 func TestStaticNATMatch6673EmptySelectionSuffixDoesNotClaimAnActiveRule(t *testing.T) {
-	tolerant := hierTree6659(t, `
+	tolerant := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ "" not-an-address ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
@@ -844,7 +844,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		t.Fatalf("Match = %q, want %q — the premise of this test is that the "+
 			"SELECTED value is the authored blank", got, "")
 	}
-	swapped := hierTree6659(t, `
+	swapped := parseHierText(t, `
 security { nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ not-an-address "" ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
@@ -946,7 +946,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("tolerant compile: %v", err)
 			}
@@ -1029,7 +1029,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CompileConfigMustFail6673(t, hierTree6659(t, tc.cfg))
+			err := CompileConfigMustFail6673(t, parseHierText(t, tc.cfg))
 			got := err.Error()
 			for _, sub := range tc.wantSubs {
 				if !strings.Contains(got, sub) {
@@ -1044,7 +1044,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 				}
 			}
 			// The tolerant wrapper must not re-assert "exactly/only ONE" either.
-			cfg, lerr := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			cfg, lerr := CompileConfigLenient(parseHierText(t, tc.cfg))
 			if lerr != nil {
 				t.Fatalf("tolerant compile: %v", lerr)
 			}
@@ -1068,7 +1068,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // `export p2` the wrapper claimed p1 while the very error it embeds correctly
 // says only "p2" would take effect. One warning, two answers.
 func TestForwardingTableExport6673TolerantWarningDoesNotNameTheWrongSlot(t *testing.T) {
-	tolerant := hierTree6659(t, `
+	tolerant := parseHierText(t, `
 policy-options { policy-statement p1 { then accept; } policy-statement p2 { then accept; } }
 routing-options { forwarding-table { export p1; } }
 routing-options { forwarding-table { export p2; } }`)
@@ -1166,7 +1166,7 @@ routing-options { forwarding-table { export missing-selected; } }`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CompileConfigMustFail6673(t, hierTree6659(t, tc.cfg))
+			err := CompileConfigMustFail6673(t, parseHierText(t, tc.cfg))
 			got := err.Error()
 			for _, sub := range tc.wantSubs {
 				if !strings.Contains(got, sub) {
@@ -1223,7 +1223,7 @@ event-options { policy pA { events ping_test_failed;
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("tolerant compile: %v", err)
 			}
@@ -1433,7 +1433,7 @@ security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; 192.0.2.2
 			//     an address-parse failure on a materialised "to/32". The `to`
 			//     token is grammar, not an address; if it ever reaches
 			//     Addresses the message below changes and this row fails.
-			_, strictErr := CompileConfig(hierTree6659(t, tc.cfg))
+			_, strictErr := CompileConfig(parseHierText(t, tc.cfg))
 			switch {
 			case tc.wantStrictReject && strictErr == nil:
 				t.Fatalf("strict compile ACCEPTED a statement whose `to` fell " +
@@ -1459,7 +1459,7 @@ security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; 192.0.2.2
 			// installed set #6673 measured against origin/master. The compile
 			// stage is shared, so these are the same compiled Addresses the
 			// strict path produced before this gate existed.
-			cfg, err := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("tolerant compile failed: %v", err)
 			}
@@ -1583,7 +1583,7 @@ security { nat { proxy-arp {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfig(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfig(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("strict compile: %v", err)
 			}
@@ -1795,7 +1795,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("tolerant compile: %v", err)
 			}
@@ -1919,7 +1919,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.cfg))
 			if err != nil {
 				t.Fatalf("tolerant compile: %v", err)
 			}
@@ -2042,14 +2042,14 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// Premise: the de-duplicated spelling compiles on the same path, so
 			// a failure below is the repetition and not some unrelated fault in
 			// the fixture.
-			refCfg, refErr := compile(hierTree6659(t, fmt.Sprintf(wrap, tc.single, tc.then)))
+			refCfg, refErr := compile(parseHierText(t, fmt.Sprintf(wrap, tc.single, tc.then)))
 			if refErr != nil {
 				t.Fatalf("premise: %s rejected the DE-DUPLICATED spelling, so the "+
 					"comparison below would be vacuous:\n  %v", pathName, refErr)
 			}
 			refRule := refCfg.Security.NAT.Static[0].Rules[0]
 
-			cfg, err := compile(hierTree6659(t, fmt.Sprintf(wrap, tc.dup, tc.then)))
+			cfg, err := compile(parseHierText(t, fmt.Sprintf(wrap, tc.dup, tc.then)))
 			if err != nil {
 				t.Fatalf("%s REJECTED a repeated identical prefix that origin/master "+
 					"accepts and compiles identically — a repeat authors ONE external "+
@@ -2104,7 +2104,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		{"two distinct malformed masks", `[ 192.0.2.1/33 192.0.2.2/33 ]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CompileConfigMustFail6673(t, hierTree6659(t, fmt.Sprintf(wrap, tc.value)))
+			err := CompileConfigMustFail6673(t, parseHierText(t, fmt.Sprintf(wrap, tc.value)))
 			if !strings.Contains(err.Error(), "`match destination-address` prefixes") {
 				t.Fatalf("rejected, but not by the cardinality gate — deduplication "+
 					"must not let a genuine multi-prefix rule through:\n  %v", err)
@@ -2139,8 +2139,8 @@ routing-options { forwarding-table { %s } }`
 		{"duplicate beside an authored blank", `export [ "" p1 p1 ];`, `export [ "" p1 ];`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ref := mustCompile6659(t, hierTree6659(t, fmt.Sprintf(wrap, tc.single)))
-			cfg, err := CompileConfig(hierTree6659(t, fmt.Sprintf(wrap, tc.dup)))
+			ref := mustCompile6659(t, parseHierText(t, fmt.Sprintf(wrap, tc.single)))
+			cfg, err := CompileConfig(parseHierText(t, fmt.Sprintf(wrap, tc.dup)))
 			if err != nil {
 				t.Fatalf("strict commit REJECTED a repeated identical export policy "+
 					"that origin/master accepts and renders identically — a repeat "+
@@ -2171,7 +2171,7 @@ routing-options { forwarding-table { %s } }`
 		{"distinct policies in separate statements", `export p1; export p2;`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CompileConfigMustFail6673(t, hierTree6659(t, fmt.Sprintf(wrap, tc.export)))
+			err := CompileConfigMustFail6673(t, parseHierText(t, fmt.Sprintf(wrap, tc.export)))
 			if !strings.Contains(err.Error(), "forwarding-table export declares") {
 				t.Fatalf("rejected, but not by the cardinality gate — deduplication "+
 					"must collapse only exact repeats:\n  %v", err)

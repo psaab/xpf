@@ -426,7 +426,7 @@ func compileConfFile7490(t *testing.T, path string) *Config {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	cfg, err := CompileConfig(goldenParseHier(t, string(b)))
+	cfg, err := CompileConfig(parseHierText(t, string(b)))
 	if err != nil {
 		t.Fatalf("compile %s: %v", path, err)
 	}

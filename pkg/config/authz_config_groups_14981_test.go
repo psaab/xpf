@@ -16,21 +16,12 @@ func TestGroupExpandedDirectPremise14981(t *testing.T) {
 	if err := AuthorizeConfigMutation(cfg, "limited", nil, "set system root-authentication plain-text-password hunter2"); err == nil {
 		t.Fatal("premise failed: direct denied set allowed")
 	}
-	if err := AuthorizeExpandedTree(cfg, "limited", mustTree14981(t, "groups { G { system { host-name ok14981; } } } apply-groups G;")); err != nil {
+	if err := AuthorizeExpandedTree(cfg, "limited", parseHierText(t, "groups { G { system { host-name ok14981; } } } apply-groups G;")); err != nil {
 		t.Fatalf("allowed group inheritance refused: %v", err)
 	}
-	if err := AuthorizeExpandedTree(cfg, "limited", mustTree14981(t, "system { host-name ok14981; }")); err != nil {
+	if err := AuthorizeExpandedTree(cfg, "limited", parseHierText(t, "system { host-name ok14981; }")); err != nil {
 		t.Fatalf("group-free tree refused by expanded gate: %v", err)
 	}
-}
-
-func mustTree14981(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse %q: %v", text, errs)
-	}
-	return tree
 }
 
 // Control: merely DEFINING a group whose body names a denied subtree,
@@ -40,7 +31,7 @@ func mustTree14981(t *testing.T, text string) *ConfigTree {
 // under the operator's own deny, as before.)
 func TestUnappliedGroupDefinitionNotExpandedDenied14981(t *testing.T) {
 	cfg := cfg9892(t)
-	tree := mustTree14981(t, "groups { G { system { root-authentication { plain-text-password hunter2; } } } } system { host-name ok14981; }")
+	tree := parseHierText(t, "groups { G { system { root-authentication { plain-text-password hunter2; } } } } system { host-name ok14981; }")
 	if err := AuthorizeExpandedTree(cfg, "limited", tree); err != nil {
 		t.Fatalf("unapplied group definition refused by expanded gate: %v", err)
 	}
@@ -57,7 +48,7 @@ func TestGroupExpandedDeniedInheritanceRefused14981(t *testing.T) {
 		"nested-level": "groups { G { system { root-authentication { plain-text-password hunter2; } } } } system { apply-groups G; host-name h; }",
 	} {
 		t.Run(name, func(t *testing.T) {
-			tree := mustTree14981(t, text)
+			tree := parseHierText(t, text)
 			// Positive control at the expansion layer: the denied leaf
 			// really does materialize, so a refusal measures the gate.
 			lines, err := ExpandedMutationLines(tree)
@@ -91,11 +82,11 @@ func TestGroupWildcardFanoutDenied14981(t *testing.T) {
 	// container via a wildcard interface description is the allowed
 	// control; the denied version contributes it directly under system.
 	text := "groups { G { interfaces { <*> { description evil14981; } } } } apply-groups G; interfaces { ge-0/0/0 { description x; } }"
-	if err := AuthorizeExpandedTree(cfg, "limited", mustTree14981(t, text)); err != nil {
+	if err := AuthorizeExpandedTree(cfg, "limited", parseHierText(t, text)); err != nil {
 		t.Fatalf("allowed wildcard fan-out refused: %v", err)
 	}
 	denied := "groups { G { system { root-authentication { plain-text-password hunter2; } } } } apply-groups G;"
-	if err := AuthorizeExpandedTree(cfg, "limited", mustTree14981(t, denied)); err == nil {
+	if err := AuthorizeExpandedTree(cfg, "limited", parseHierText(t, denied)); err == nil {
 		t.Fatal("denied group body allowed (#14981)")
 	}
 }
@@ -128,7 +119,7 @@ system {
 	if err := AuthorizeConfigMutation(cfg, "limited", nil, "set security zones security-zone trust description evil14981"); err == nil {
 		t.Fatal("premise failed: direct expanded spelling allowed")
 	}
-	candidate := mustTree14981(t, "groups { G { security { zones { security-zone <*> { description evil14981; } } } } } apply-groups G; security { zones { security-zone trust { } } }")
+	candidate := parseHierText(t, "groups { G { security { zones { security-zone <*> { description evil14981; } } } } } apply-groups G; security { zones { security-zone trust { } } }")
 	lines, err := ExpandedMutationLines(candidate)
 	if err != nil {
 		t.Fatalf("ExpandedMutationLines: %v", err)
@@ -188,7 +179,7 @@ func TestLoadUndefinedGroupFailsClosed14981(t *testing.T) {
 func TestGroupNodeVarExpansionDenied14981(t *testing.T) {
 	cfg := cfg9892(t)
 	text := `groups { node0 { system { root-authentication { plain-text-password hunter2; } } } } apply-groups "${node}";`
-	if err := AuthorizeExpandedTree(cfg, "limited", mustTree14981(t, text)); err == nil {
+	if err := AuthorizeExpandedTree(cfg, "limited", parseHierText(t, text)); err == nil {
 		t.Fatal("denied leaf behind apply-groups ${node} was ALLOWED (#14981)")
 	}
 }

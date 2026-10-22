@@ -24,7 +24,7 @@ import (
 // RED-on-revert: strict commit must refuse. Reverting the #8426 gate compiles
 // clean and silently drops the discard.
 func TestDuplicateSameFamilyFilterRejectedStrict8426(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -62,7 +62,7 @@ firewall {
 // (`inet6Names`), which cannot count. Without this cell a fix that guarded only
 // the non-inet6 branch would pass.
 func TestDuplicateSameFamilyFilterRejectedStrictInet6_8426(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet6 {
         filter block6 {
@@ -96,7 +96,7 @@ firewall {
 // BOOT, warning instead of refusing, but #15997 quarantines the colliding
 // name out of both pools so the accept winner is not enforceable.
 func TestDuplicateSameFamilyFilterLenientWarns8426(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -143,7 +143,7 @@ firewall {
 // CONTROL 1: a single filter must still compile. Without this a gate that
 // rejects every filter passes both cells above.
 func TestSingleFilterStillCompiles8426(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {
@@ -170,7 +170,7 @@ firewall {
 // touches `record`'s neighbourhood, and a new early-return there could silence
 // the older gate while every #8426 cell stays green.
 func TestCrossFamilyGateStillFires8426(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family inet {
         filter blockX {

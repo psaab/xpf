@@ -13,7 +13,7 @@ import (
 // each clone with leaf provenance (Node.fromGroups) and filters nested
 // contributors per node, while the outer group keeps its veto exactly.
 //
-// Reuses parseTree9422/compile9422 (strict CompileConfig): the issue notes
+// Reuses parseHierText/compile9422 (strict CompileConfig): the issue notes
 // strict commit accepts every row, so strict is the stronger signal here.
 
 func zoneNames9862(t *testing.T, cfg *Config) []string {
@@ -69,11 +69,11 @@ security { zones { %s security-zone %s } }`
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			ctrl := compile9422(t, parseTree9422(t, fmt.Sprintf(r.tmpl, "", r.zone)))
+			ctrl := compile9422(t, parseHierText(t, fmt.Sprintf(r.tmpl, "", r.zone)))
 			if got := zoneNames9862(t, ctrl); !equalStrs9862(got, []string{"trust", "zgh"}) {
 				t.Fatalf("POSITIVE CONTROL broken: without the exclusion want [trust zgh], got %v", got)
 			}
-			cfg := compile9422(t, parseTree9422(t, fmt.Sprintf(r.tmpl, "apply-groups-except H;", r.zone)))
+			cfg := compile9422(t, parseHierText(t, fmt.Sprintf(r.tmpl, "apply-groups-except H;", r.zone)))
 			if got := zoneNames9862(t, cfg); !equalStrs9862(got, []string{"trust"}) {
 				t.Fatalf("apply-groups-except H did not exclude nested H: zones=%v, want [trust]", got)
 			}
@@ -96,11 +96,11 @@ security { zones { security-zone trust { } } }`
 }
 apply-groups G;
 security { zones { apply-groups-except H; security-zone trust { } } }`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if got := zoneNames9862(t, ctrl); !equalStrs9862(got, []string{"trust", "zg1", "zgh"}) {
 		t.Fatalf("POSITIVE CONTROL broken: want [trust zg1 zgh], got %v", got)
 	}
-	cfg := compile9422(t, parseTree9422(t, excepted))
+	cfg := compile9422(t, parseHierText(t, excepted))
 	if got := zoneNames9862(t, cfg); !equalStrs9862(got, []string{"trust", "zg1"}) {
 		t.Fatalf("except-H over-excluded G's own zone (or kept H's): zones=%v, want [trust zg1]", got)
 	}
@@ -122,11 +122,11 @@ system { time-zone UTC; }`
 }
 apply-groups G;
 system { apply-groups-except G; time-zone UTC; }`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if ctrl.System.HostName != "FROM-H" || ctrl.System.DomainName != "FROM-G" {
 		t.Fatalf("POSITIVE CONTROL broken: HostName=%q DomainName=%q", ctrl.System.HostName, ctrl.System.DomainName)
 	}
-	cfg := compile9422(t, parseTree9422(t, excepted))
+	cfg := compile9422(t, parseHierText(t, excepted))
 	if cfg.System.HostName != "" || cfg.System.DomainName != "" {
 		t.Fatalf("except-G stopped vetoing nested content: HostName=%q DomainName=%q",
 			cfg.System.HostName, cfg.System.DomainName)
@@ -152,10 +152,10 @@ security { zones { security-zone trust { } } }`
 }
 apply-groups G;
 security { zones { apply-groups-except H; security-zone trust { } } }`
-	if _, err := CompileConfig(parseTree9422(t, control)); err == nil {
+	if _, err := CompileConfig(parseHierText(t, control)); err == nil {
 		t.Fatalf("POSITIVE CONTROL broken: the unsuppressed `any` zone must still refuse strict commit")
 	}
-	cfg, err := CompileConfig(parseTree9422(t, excepted))
+	cfg, err := CompileConfig(parseHierText(t, excepted))
 	if err != nil {
 		t.Fatalf("except-H did not suppress the nested reserved zone: strict refused: %v", err)
 	}
@@ -177,21 +177,21 @@ func TestApplyGroupsExceptNestedLeafListUnionKeepsSurvivor9862(t *testing.T) {
 }
 apply-groups G;
 system { %s }`
-	ctrl := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "domain-name example.com;")))
+	ctrl := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "domain-name example.com;")))
 	if got := ctrl.System.NameServers; !contains9862(got, "1.1.1.1") || !contains9862(got, "2.2.2.2") {
 		t.Fatalf("POSITIVE CONTROL broken: NameServers=%v, want both members", got)
 	}
-	got1 := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
+	got1 := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
 	if !contains9862(got1, "2.2.2.2") {
 		t.Fatalf("except-H1 over-excluded H2's unioned member: NameServers=%v", got1)
 	}
-	got2 := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except H2;"))).System.NameServers
+	got2 := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except H2;"))).System.NameServers
 	if !contains9862(got2, "1.1.1.1") {
 		t.Fatalf("except-H2 over-excluded H1's unioned member: NameServers=%v", got2)
 	}
 	// Contrast: applied directly (no union collapse), the same exclusion is
 	// per-group exact.
-	direct := compile9422(t, parseTree9422(t, `groups {
+	direct := compile9422(t, parseHierText(t, `groups {
   H1 { system { name-server { 1.1.1.1; } } }
   H2 { system { name-server { 2.2.2.2; } } }
 }
@@ -208,7 +208,7 @@ system { apply-groups-except H2; }`))
 // wildcards are consumed by the inner wholesale adopt on base too, an
 // independent pre-existing hole with its own follow-up.)
 func TestApplyGroupsExceptNestedPerDestination9862(t *testing.T) {
-	cfg := compile9422(t, parseTree9422(t, `groups {
+	cfg := compile9422(t, parseHierText(t, `groups {
   H { interfaces {
     ge-0/0/0 { description FROM-H; }
     ge-0/0/1 { description FROM-H; }
@@ -250,11 +250,11 @@ groups {
 }
 apply-groups G;
 system { apply-groups-except H; }`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if ctrl.System.DomainName != "FROM-H" || ctrl.System.TimeZone != "UTC" {
 		t.Fatalf("POSITIVE CONTROL broken: DomainName=%q TimeZone=%q", ctrl.System.DomainName, ctrl.System.TimeZone)
 	}
-	cfg := compile9422(t, parseTree9422(t, excepted))
+	cfg := compile9422(t, parseHierText(t, excepted))
 	if cfg.System.DomainName != "" {
 		t.Fatalf("except-H ignored across duplicate blocks: DomainName=%q", cfg.System.DomainName)
 	}
@@ -280,11 +280,11 @@ apply-groups G;`
 }
 apply-groups G;
 apply-groups-except H;`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if ctrl.System.HostName != "FROM-H" || ctrl.System.DomainName != "FROM-G" {
 		t.Fatalf("POSITIVE CONTROL broken: HostName=%q DomainName=%q", ctrl.System.HostName, ctrl.System.DomainName)
 	}
-	cfg := compile9422(t, parseTree9422(t, excepted))
+	cfg := compile9422(t, parseHierText(t, excepted))
 	if cfg.System.HostName != "" {
 		t.Fatalf("top-level except-H ignored through nesting: HostName=%q", cfg.System.HostName)
 	}
@@ -313,11 +313,11 @@ system { time-zone UTC; }`
 }
 apply-groups A;
 system { apply-groups-except B; time-zone UTC; }`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if ctrl.System.HostName != "FROM-C" || ctrl.System.DomainName != "FROM-B" {
 		t.Fatalf("POSITIVE CONTROL broken: HostName=%q DomainName=%q", ctrl.System.HostName, ctrl.System.DomainName)
 	}
-	cfg := compile9422(t, parseTree9422(t, excepted))
+	cfg := compile9422(t, parseHierText(t, excepted))
 	if cfg.System.DomainName != "" {
 		t.Fatalf("except-B did not drop B's own statements: DomainName=%q", cfg.System.DomainName)
 	}
@@ -342,11 +342,11 @@ apply-groups G;`
   G { system { apply-groups-except H; domain-name FROM-G; } apply-groups H; }
 }
 apply-groups G;`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if ctrl.System.HostName != "FROM-H" || ctrl.System.DomainName != "FROM-G" {
 		t.Fatalf("POSITIVE CONTROL broken: HostName=%q DomainName=%q", ctrl.System.HostName, ctrl.System.DomainName)
 	}
-	cfg := compile9422(t, parseTree9422(t, excepted))
+	cfg := compile9422(t, parseHierText(t, excepted))
 	if cfg.System.HostName != "" {
 		t.Fatalf("exclusion inside G's definition no longer filters H: HostName=%q", cfg.System.HostName)
 	}
@@ -373,14 +373,14 @@ security { zones { security-zone trust { } } }`
 }
 apply-groups G;
 security { zones { apply-groups-except H; security-zone trust { } } }`
-	ctrl := compile9422(t, parseTree9422(t, control))
+	ctrl := compile9422(t, parseHierText(t, control))
 	if got := zoneNames9862(t, ctrl); !equalStrs9862(got, []string{"trust", "zg"}) {
 		t.Fatalf("POSITIVE CONTROL broken: zones=%v", got)
 	}
 	if !ctrl.Security.Zones["zg"].TCPRst {
 		t.Fatalf("POSITIVE CONTROL broken: H's tcp-rst did not land without the exclusion")
 	}
-	cfg := compile9422(t, parseTree9422(t, excepted))
+	cfg := compile9422(t, parseHierText(t, excepted))
 	if got := zoneNames9862(t, cfg); !equalStrs9862(got, []string{"trust", "zg"}) {
 		t.Fatalf("except-H deleted G's authored zone with H's child: zones=%v, want [trust zg]", got)
 	}
@@ -402,15 +402,15 @@ func TestApplyGroupsExceptNestedSameMemberWholesale9862(t *testing.T) {
 }
 apply-groups G;
 %s`
-	ctrl := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, ""))).System.NameServers
+	ctrl := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, ""))).System.NameServers
 	if !equalStrs9862(ctrl, []string{"1.1.1.1"}) {
 		t.Fatalf("POSITIVE CONTROL broken: NameServers=%v, want exactly [1.1.1.1]", ctrl)
 	}
-	got1 := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
+	got1 := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except H1;"))).System.NameServers
 	if !equalStrs9862(got1, []string{"1.1.1.1"}) {
 		t.Fatalf("except-H1 dropped H2's same member (over-exclusion): NameServers=%v", got1)
 	}
-	gotBoth := compile9422(t, parseTree9422(t, fmt.Sprintf(tmpl, "apply-groups-except [ H1 H2 ];"))).System.NameServers
+	gotBoth := compile9422(t, parseHierText(t, fmt.Sprintf(tmpl, "apply-groups-except [ H1 H2 ];"))).System.NameServers
 	if len(gotBoth) != 0 {
 		t.Fatalf("excluding both owners must drop the member: NameServers=%v", gotBoth)
 	}
@@ -465,7 +465,7 @@ func TestApplyGroupsExceptPackedTailVetoesDirect9862(t *testing.T) {
 	}
 	expand9862 := func(t *testing.T, text string) *ConfigTree {
 		t.Helper()
-		tree := parseTree9422(t, text)
+		tree := parseHierText(t, text)
 		if err := tree.ExpandGroups(); err != nil {
 			t.Fatalf("ExpandGroups: %v", err)
 		}

@@ -88,7 +88,7 @@ firewall {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseHier(t, tc.tree)
+			tree := parseHierText(t, tc.tree)
 			_, err := CompileConfig(tree)
 			if err == nil {
 				t.Fatalf("CompileConfig: expected rejection under family any, got nil")
@@ -104,7 +104,7 @@ firewall {
 
 // Lenient path must warn (not silently accept) for the compact spelling.
 func TestFirewallFamilyAnyCompactICMPLenientWarns14682(t *testing.T) {
-	tree := parseHier(t, `
+	tree := parseHierText(t, `
 firewall {
     family any {
         filter f1 {
@@ -132,7 +132,7 @@ firewall {
 // under `family any` must still commit and dual-install.
 func TestFirewallFamilyAnyCompactControlsCommit14682(t *testing.T) {
 	t.Run("compact protocol", func(t *testing.T) {
-		tree := parseHier(t, `
+		tree := parseHierText(t, `
 firewall {
     family any {
         filter f1 {
@@ -150,7 +150,7 @@ firewall {
 		}
 	})
 	t.Run("compact mixed prefix-list", func(t *testing.T) {
-		tree := parseHier(t, `
+		tree := parseHierText(t, `
 policy-options {
     prefix-list mixed [ 10.0.0.0/8 2001:db8::/32 ];
 }

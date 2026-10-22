@@ -5,18 +5,9 @@ import (
 	"testing"
 )
 
-// parseHier5180 parses a hierarchical (brace-delimited) config into a
-// ConfigTree via NewParser — the correct tool for hierarchical blocks (flat
-// `set` lines must use ParseSetCommand/SetPath instead; see
-// docs/config-schema.md).
-func parseHier5180(t *testing.T, input string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(input).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
+// Hierarchical trees are built via parseHierText (#16139 kit, NewParser) —
+// the correct tool for hierarchical blocks (flat `set` lines must use
+// ParseSetCommand/SetPath instead; see docs/config-schema.md).
 
 // setTree5180 builds a ConfigTree from flat `set` commands via
 // ParseSetCommand + SetPath (never NewParser).
@@ -49,7 +40,7 @@ func setTree5180(t *testing.T, cmds []string) *ConfigTree {
 func TestDuplicateNamedBlockRejected(t *testing.T) {
 	// --- interfaces ---------------------------------------------------------
 	t.Run("hierarchical duplicate interface rejected", func(t *testing.T) {
-		tree := parseHier5180(t, `interfaces {
+		tree := parseHierText(t, `interfaces {
     eth0 {
         unit 0 {
             family inet {
@@ -102,7 +93,7 @@ func TestDuplicateNamedBlockRejected(t *testing.T) {
 
 	// --- groups -------------------------------------------------------------
 	t.Run("hierarchical duplicate group rejected", func(t *testing.T) {
-		tree := parseHier5180(t, `groups {
+		tree := parseHierText(t, `groups {
     g1 {
         system {
             host-name a;
@@ -125,7 +116,7 @@ func TestDuplicateNamedBlockRejected(t *testing.T) {
 
 	// --- screen ids-option --------------------------------------------------
 	t.Run("hierarchical duplicate ids-option rejected", func(t *testing.T) {
-		tree := parseHier5180(t, `security {
+		tree := parseHierText(t, `security {
     screen {
         ids-option myscreen {
             tcp {
@@ -149,7 +140,7 @@ func TestDuplicateNamedBlockRejected(t *testing.T) {
 	})
 
 	t.Run("hierarchical duplicate screen family within one ids-option rejected", func(t *testing.T) {
-		tree := parseHier5180(t, `security {
+		tree := parseHierText(t, `security {
     screen {
         ids-option myscreen {
             icmp {
@@ -182,7 +173,7 @@ func TestDuplicateNamedBlockRejected(t *testing.T) {
 
 	// --- tolerant load downgrades to a warning (#1960 no-brick) --------------
 	t.Run("tolerant load warns instead of rejecting", func(t *testing.T) {
-		tree := parseHier5180(t, `interfaces {
+		tree := parseHierText(t, `interfaces {
     eth0 {
         unit 0 {
             family inet {
@@ -216,7 +207,7 @@ func TestDuplicateNamedBlockRejected(t *testing.T) {
 
 	// --- no false positive on a normal single block -------------------------
 	t.Run("single interface block compiles clean", func(t *testing.T) {
-		tree := parseHier5180(t, `interfaces {
+		tree := parseHierText(t, `interfaces {
     eth0 {
         unit 0 {
             family inet {

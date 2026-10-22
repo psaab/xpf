@@ -165,7 +165,7 @@ func TestConfigShowCompareRollbackRendered15995(t *testing.T) {
 		t.Errorf("scoped ShowCompare [security zones] must stay admitted: %v", err)
 	}
 	// Denied descendant on EITHER arm refuses (here: second arm only).
-	empty := mustTree14981(t, "security { zones { security-zone trust { description x; } } }")
+	empty := parseHierText(t, "security { zones { security-zone trust { description x; } } }")
 	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", []string{"security"}, empty, tree); err == nil {
 		t.Error("scoped ShowCompare [security] was ALLOWED with denied descendant on one arm (#15995)")
 	}

@@ -49,7 +49,7 @@ apply-groups G;`
 // named only the duplicate would send them looking at a top-level stanza that
 // does not contain it.
 func TestDupExpanded6455GroupAuthoredNATRuleRejected(t *testing.T) {
-	_, err := CompileConfig(parseHier6455(t, dupExpandedGroupNATRule))
+	_, err := CompileConfig(parseHierText(t, dupExpandedGroupNATRule))
 	if err == nil {
 		t.Fatal("a duplicate NAT rule authored entirely inside an applied group compiled clean; " +
 			"both instances survive expansion as separate first-match entries sharing one name")
@@ -104,7 +104,7 @@ apply-groups G;`,
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CompileConfig(parseHier6455(t, tc.cfg))
+			_, err := CompileConfig(parseHierText(t, tc.cfg))
 			if err == nil {
 				t.Fatalf("%s is not reached through the expanded gate: a group-authored duplicate "+
 					"it owns compiled clean", tc.scanner)
@@ -137,7 +137,7 @@ func TestDupExpanded6455PeerOnlyNodeGroupCaught(t *testing.T) {
     }
 }
 apply-groups "${node}";`
-	_, err := CompileConfig(parseHier6455(t, cfg))
+	_, err := CompileConfig(parseHierText(t, cfg))
 	if err == nil {
 		t.Fatal("a duplicate that only the PEER's ${node} expansion selects compiled clean on a " +
 			"generic compile; it would commit green here and only warn on the standby")
@@ -160,7 +160,7 @@ func TestDupExpanded6455InlineDuplicateReportedOnce(t *testing.T) {
     rule R { then { source-nat { interface; } } }
     rule R { then { source-nat { off; } } }
 } } } }`
-	c, err := CompileConfigLenient(parseHier6455(t, cfg))
+	c, err := CompileConfigLenient(parseHierText(t, cfg))
 	if err != nil {
 		t.Fatalf("the tolerant path must not brick on a persisted duplicate (#1960): %v", err)
 	}
@@ -181,7 +181,7 @@ func TestDupExpanded6455InlineDuplicateReportedOnce(t *testing.T) {
 // on some boxes and arrives over peer-sync, so the tolerant path must warn and
 // boot, not refuse.
 func TestDupExpanded6455LenientWarnsNotBricks(t *testing.T) {
-	c, err := CompileConfigLenient(parseHier6455(t, dupExpandedGroupNATRule))
+	c, err := CompileConfigLenient(parseHierText(t, dupExpandedGroupNATRule))
 	if err != nil {
 		t.Fatalf("tolerant load must not brick on a group-authored duplicate (#1960): %v", err)
 	}
@@ -210,7 +210,7 @@ func TestDupExpanded6455InlineAndGroupPeerStillMerges(t *testing.T) {
 	cfg := `interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
 groups { G { interfaces { ge-0/0/0 { description "from group"; } } } }
 apply-groups G;`
-	c, err := CompileConfig(parseHier6455(t, cfg))
+	c, err := CompileConfig(parseHierText(t, cfg))
 	if err != nil {
 		t.Fatalf("an inline interface deep-merged with a group-provided body of the same name is "+
 			"ONE object and must commit: %v", err)

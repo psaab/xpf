@@ -134,7 +134,7 @@ func TestProxyARPOverCapRejectedAtCommit_6559(t *testing.T) {
 security { nat { proxy-arp { interface ge-0-0-0 { address 198.51.100.0/23; } } } }`
 
 	t.Run("strict rejects", func(t *testing.T) {
-		_, err := CompileConfig(hierTree6659(t, cfgText))
+		_, err := CompileConfig(parseHierText(t, cfgText))
 		if err == nil {
 			t.Fatal("an over-cap proxy-arp block committed clean; it installs one entry for the NETWORK address and answers nothing")
 		}
@@ -151,7 +151,7 @@ security { nat { proxy-arp { interface ge-0-0-0 { address 198.51.100.0/23; } } }
 		// path, so the installed set is byte-identical to pre-#6559 (one entry
 		// for the address as authored) — no worse than before the gate, and now
 		// with a diagnostic.
-		cfg, err := CompileConfigLenient(hierTree6659(t, cfgText))
+		cfg, err := CompileConfigLenient(parseHierText(t, cfgText))
 		if err != nil {
 			t.Fatalf("tolerant path must LOAD an over-cap block (no-brick, #1960), got: %v", err)
 		}
@@ -166,7 +166,7 @@ security { nat { proxy-arp { interface ge-0-0-0 { address 198.51.100.0/23; } } }
 	t.Run("in-cap block commits and expands", func(t *testing.T) {
 		// The gate must not reject what the expansion can handle — an
 		// over-broad predicate would brick every legitimate block.
-		cfg, err := CompileConfig(hierTree6659(t,
+		cfg, err := CompileConfig(parseHierText(t,
 			`
 security { nat { proxy-arp { interface ge-0-0-0 { address 198.51.100.0/30; } } } }`))
 		if err != nil {

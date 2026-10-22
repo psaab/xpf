@@ -62,18 +62,9 @@ func goldenPkgDir(t *testing.T) string {
 	return filepath.Dir(file)
 }
 
-// goldenParseHier parses a hierarchical (curly-brace) config into a fresh
-// tree — the LoadOverride / persisted-config builder (NewParser), the
-// correct shape for the groups{node0/node1} cluster fixtures.
-func goldenParseHier(t *testing.T, content string) *ConfigTree {
-	t.Helper()
-	p := NewParser(content)
-	tree, perrs := p.Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("golden: parse hierarchical fixture: %v", perrs)
-	}
-	return tree
-}
+// Hierarchical trees are built via parseHierText (#16139 kit) — the
+// LoadOverride / persisted-config builder (NewParser), the correct
+// shape for the groups{node0/node1} cluster fixtures.
 
 // goldenBuildSet builds a fresh tree from embedded flat `set` lines using the
 // ParseSetVerb + SetPath loop the CLI uses (never NewParser for set syntax,
@@ -147,10 +138,10 @@ func TestCompileGolden4406(t *testing.T) {
 	// generic + node0 + node1 -> invariant #2, the #4329 NodeID stamp before
 	// the fabric-member / FabricInterface derivation).
 	goldenAppendMatrix(t, "ha-cluster-userspace", func() *ConfigTree {
-		return goldenParseHier(t, readFile("../../docs/ha-cluster-userspace.conf"))
+		return parseHierText(t, readFile("../../docs/ha-cluster-userspace.conf"))
 	}, &cases)
 	goldenAppendMatrix(t, "ha-cluster", func() *ConfigTree {
-		return goldenParseHier(t, readFile("../../docs/ha-cluster.conf"))
+		return parseHierText(t, readFile("../../docs/ha-cluster.conf"))
 	}, &cases)
 
 	// (c) broad class-of-service compile output with populated classifiers,

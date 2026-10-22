@@ -37,7 +37,7 @@ const trackDupWithSecretKeysPacked = `interfaces {
 // #4288 auth reject) and must NOT echo the authentication-key secret.
 // RED-on-revert: building the path from n.Keys puts the secret in the error.
 func TestVRRPTrackDuplicateRejectDoesNotLeakSecret_5195(t *testing.T) {
-	_, err := CompileConfig(parseHier(t, trackDupWithSecretKeysPacked))
+	_, err := CompileConfig(parseHierText(t, trackDupWithSecretKeysPacked))
 	if err == nil {
 		t.Fatal("expected strict rejection for duplicate track-interface, got nil")
 	}
@@ -54,7 +54,7 @@ func TestVRRPTrackDuplicateRejectDoesNotLeakSecret_5195(t *testing.T) {
 // first-wins warning; that warning must also be value-free. RED-on-revert: the
 // warning built from n.Keys leaks the secret.
 func TestVRRPTrackDuplicateWarnDoesNotLeakSecret_5195(t *testing.T) {
-	cfg, err := CompileConfigLenient(parseHier(t, trackDupWithSecretKeysPacked))
+	cfg, err := CompileConfigLenient(parseHierText(t, trackDupWithSecretKeysPacked))
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: duplicate track-interface must downgrade to a warning, got: %v", err)
 	}

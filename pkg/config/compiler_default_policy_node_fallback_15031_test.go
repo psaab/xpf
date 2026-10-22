@@ -72,11 +72,11 @@ func TestNodeFallbackDefaultPolicyConflictRejected15031(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// The fresh node0 compile is the oracle: it rejects.
-			if _, err := CompileConfigForNode(defaultPolicyTree11821(t, tc.text), 0); err == nil {
+			if _, err := CompileConfigForNode(parseHierText(t, tc.text), 0); err == nil {
 				t.Fatal("oracle: fresh node0 compile accepted the conflict (test is not exercising the claimed divergence)")
 			}
 			// Strict generic compile must reject identically.
-			_, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
+			_, err := CompileConfig(parseHierText(t, tc.text))
 			if err == nil {
 				t.Fatal("strict generic compile accepted a ${node}-fallback default-policy conflict the node0 compile rejects (#15031)")
 			}
@@ -87,7 +87,7 @@ func TestNodeFallbackDefaultPolicyConflictRejected15031(t *testing.T) {
 			}
 			// The fallback warning contract is preserved.
 			// (Strict compile errors, so check the warning on lenient.)
-			cfg, err := CompileConfigLenient(defaultPolicyTree11821(t, tc.text))
+			cfg, err := CompileConfigLenient(parseHierText(t, tc.text))
 			if err != nil {
 				t.Fatalf("lenient generic compile: %v", err)
 			}
@@ -126,7 +126,7 @@ func TestNodeFallbackDefaultPolicyConflictRejected15031(t *testing.T) {
 func TestNodeFallbackExpansionMatchesFreshNode015031(t *testing.T) {
 	text := nodeFallbackConflict15031("default-policy permit-all;", "default-policy deny-all;")
 
-	fallback := defaultPolicyTree11821(t, text)
+	fallback := parseHierText(t, text)
 	used, err := fallback.ExpandGroupsNodeFallback15031(true)
 	if err != nil {
 		t.Fatalf("fallback expansion: %v", err)
@@ -135,7 +135,7 @@ func TestNodeFallbackExpansionMatchesFreshNode015031(t *testing.T) {
 		t.Fatal("fallback expansion did not report the node0 vars expansion")
 	}
 
-	fresh := defaultPolicyTree11821(t, text)
+	fresh := parseHierText(t, text)
 	if err := fresh.ExpandGroupsWithVarsTagged(map[string]string{"node": "node0"}); err != nil {
 		t.Fatalf("fresh node0 expansion: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestNodeFallbackExpansionMatchesFreshNode015031(t *testing.T) {
 	}
 
 	// Without a ${node} reference the helper is a plain single pass.
-	plain := defaultPolicyTree11821(t, twoGroupsDefaultPolicyConfig12923(
+	plain := parseHierText(t, twoGroupsDefaultPolicyConfig12923(
 		"default-policy permit-all;", "default-policy deny-all;", "security { policies { } }\n"))
 	used, err = plain.ExpandGroupsNodeFallback15031(true)
 	if err != nil {
@@ -181,7 +181,7 @@ func TestNodeFallbackExpansionMatchesFreshNode015031(t *testing.T) {
 func TestNodeFallbackLegitimateConfigsStayGreen15031(t *testing.T) {
 	t.Run("identical actions via node var", func(t *testing.T) {
 		text := nodeFallbackConflict15031("default-policy deny-all;", "default-policy { deny-all; }")
-		cfg, err := CompileConfig(defaultPolicyTree11821(t, text))
+		cfg, err := CompileConfig(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("strict generic compile rejected identical group actions: %v", err)
 		}
@@ -197,7 +197,7 @@ func TestNodeFallbackLegitimateConfigsStayGreen15031(t *testing.T) {
 			"}\n" +
 			"apply-groups [ GA \"${node}\" ];\n" +
 			"security { policies { default-policy reject-all; } }\n"
-		cfg, err := CompileConfig(defaultPolicyTree11821(t, text))
+		cfg, err := CompileConfig(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("strict generic compile rejected inline override: %v", err)
 		}
@@ -213,7 +213,7 @@ func TestNodeFallbackLegitimateConfigsStayGreen15031(t *testing.T) {
 			"}\n" +
 			"apply-groups \"${node}\";\n" +
 			"security { policies { } }\n"
-		cfg, err := CompileConfig(defaultPolicyTree11821(t, text))
+		cfg, err := CompileConfig(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("strict generic compile rejected benign ${node} config: %v", err)
 		}
@@ -230,7 +230,7 @@ func TestNodeFallbackLegitimateConfigsStayGreen15031(t *testing.T) {
 			t.Fatalf("generic compile omitted the ${node} fallback warning: %v", cfg.Warnings)
 		}
 		// The node-aware compile of the same text agrees.
-		cfg0, err := CompileConfigForNode(defaultPolicyTree11821(t, text), 0)
+		cfg0, err := CompileConfigForNode(parseHierText(t, text), 0)
 		if err != nil {
 			t.Fatalf("node0 compile: %v", err)
 		}
@@ -245,7 +245,7 @@ func TestNodeFallbackLegitimateConfigsStayGreen15031(t *testing.T) {
 			"}\n" +
 			"apply-groups [ GA MISSING \"${node}\" ];\n" +
 			"security { policies { } }\n"
-		_, err := CompileConfig(defaultPolicyTree11821(t, text))
+		_, err := CompileConfig(parseHierText(t, text))
 		if err == nil || !strings.Contains(err.Error(), `undefined group "MISSING"`) {
 			t.Fatalf("generic compile = %v, want undefined group MISSING rejection", err)
 		}

@@ -22,7 +22,7 @@ import "testing"
 // expressible via the hierarchical / NewParser (load-override) path.
 // Flat-set ParseSetCommand + SetPath merges two lines with an identical
 // key-path into one node, so it is structurally immune and is NOT the
-// reproducer here — parseHierarchical is.
+// reproducer here — parseHierText is.
 
 // TestSSHKnownHostsDupBlock4821KeysMerge is the primary RED-on-revert guard:
 // two `host h1 { ... }` top-level instances, each declaring a different key
@@ -30,7 +30,7 @@ import "testing"
 // `sec.SSHKnownHosts[hostInst.name] = keys` overwrite makes the second
 // instance replace the first, so the ecdsa key is dropped — RED.
 func TestSSHKnownHostsDupBlock4821KeysMerge(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     ssh-known-hosts {
         host h1 {
@@ -76,7 +76,7 @@ security {
 // over-broad fix: two DIFFERENT host names must remain independent entries,
 // each with its own single key.
 func TestSSHKnownHostsDupBlock4821DifferentHostsUnaffected(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     ssh-known-hosts {
         host h1 {
@@ -104,7 +104,7 @@ security {
 // negative control: a single host block with one key must compile exactly
 // as before the append change.
 func TestSSHKnownHostsDupBlock4821SingleBlockUnchanged(t *testing.T) {
-	tree := parseHierarchical(t, `
+	tree := parseHierText(t, `
 security {
     ssh-known-hosts {
         host 192.168.0.253 {

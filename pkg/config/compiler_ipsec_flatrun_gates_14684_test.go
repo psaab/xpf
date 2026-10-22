@@ -65,15 +65,7 @@ func buildTree14684(t *testing.T, cmds ...string) *ConfigTree {
 	return tree
 }
 
-// buildBraced14684 parses a self-contained braced config.
-func buildBraced14684(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, perrs := NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("parse braced control: %v", perrs)
-	}
-	return tree
-}
+// Braced configs are parsed via parseHierText (#16139 kit).
 
 // TestIPsecVPNFlatRunTrafficSelectorAndPlaintextWarn9088 is the decisive
 // regression: the chained flat form must match the braced/split verdict
@@ -207,7 +199,7 @@ func TestIPsecVPNFlatRunTrafficSelectorAndPlaintextWarn9088(t *testing.T) {
 		// Over-reject / over-warn control: valid CIDR identities in a
 		// braced block must commit with no #8003/#12507 warning, and the
 		// #5619 advisory must still fire exactly as before the fix.
-		tree := buildBraced14684(t, `security {
+		tree := parseHierText(t, `security {
   ike {
     proposal p1 { authentication-method pre-shared-keys; encryption-algorithm aes-256-cbc; authentication-algorithm sha-256; dh-group group14; }
     policy ike-pol { proposals p1; pre-shared-key ascii-text secret123; }

@@ -32,7 +32,7 @@ protocols { bgp { local-as 65001; group EXT { ` + exceptStmt + `neighbor 192.0.2
 
 func bgpAuth14422(t *testing.T, text string) string {
 	t.Helper()
-	cfg := compile9422(t, parseTree9422(t, text))
+	cfg := compile9422(t, parseHierText(t, text))
 	if cfg.Protocols.BGP == nil {
 		t.Fatal("BGP config is nil")
 	}
@@ -88,7 +88,7 @@ func TestDR15H7NestedPackedOSPFExcept14422(t *testing.T) {
 		{name: "OSPF packed except H", except: "H", want: ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := compile9422(t, parseTree9422(t, ospfNestedExceptText14422(c.except)))
+			cfg := compile9422(t, parseHierText(t, ospfNestedExceptText14422(c.except)))
 			if cfg.Protocols.OSPF == nil || len(cfg.Protocols.OSPF.Areas) != 1 || len(cfg.Protocols.OSPF.Areas[0].Interfaces) != 1 {
 				t.Fatalf("OSPF shape: %+v", cfg.Protocols.OSPF)
 			}

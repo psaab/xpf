@@ -40,7 +40,7 @@ func TestFoldCrossProductPermitIsRefused14968(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, tc.text))
+				cfg, err := entry.compile(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s must accept the persisted duplicate (#1960): %v", entry.label, err)
 				}
@@ -68,7 +68,7 @@ func TestFoldExcludedSetDenyDisarmingIsRefused14968(t *testing.T) {
 		`policy p1 { match { source-address 10.0.99.0/24; source-address-excluded; destination-address any; application any; } then { permit; } } ` +
 			`policy p1 { match { source-address any; destination-address any; application any; } then { deny; } }`)
 	for _, entry := range lenientEntries9571 {
-		cfg, err := entry.compile(parse9571(t, text))
+		cfg, err := entry.compile(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("%s must accept the persisted duplicate (#1960): %v", entry.label, err)
 		}
@@ -94,7 +94,7 @@ func TestFoldSchedulerNarrowedDenyIsRefused14968(t *testing.T) {
 		`policy p1 { `+anyMatch9571+` then { permit; } scheduler-name narrow; } `+
 			`policy p1 { `+anyMatch9571+` then { deny; } }`)
 	for _, entry := range lenientEntries9571 {
-		cfg, err := entry.compile(parse9571(t, text))
+		cfg, err := entry.compile(parseHierText(t, text))
 		if err != nil {
 			t.Fatalf("%s must accept the persisted duplicate (#1960): %v", entry.label, err)
 		}
@@ -135,7 +135,7 @@ func TestFoldCrossProductControlsStayUnpoisoned14968(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, entry := range lenientEntries9571 {
-				cfg, err := entry.compile(parse9571(t, tc.text))
+				cfg, err := entry.compile(parseHierText(t, tc.text))
 				if err != nil {
 					t.Fatalf("%s: %v", entry.label, err)
 				}

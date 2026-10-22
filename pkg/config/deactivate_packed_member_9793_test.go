@@ -5,15 +5,6 @@ import (
 	"testing"
 )
 
-func parseTree9793(t *testing.T, text string) *ConfigTree {
-	t.Helper()
-	tree, errs := NewParser(text).Parse()
-	if len(errs) > 0 {
-		t.Fatalf("parse: %v", errs)
-	}
-	return tree
-}
-
 // toggle9793 applies one deactivate/activate line the way configstore does
 // (ParseSetVerbGrouped, then the grouped tree verb).
 func toggle9793(t *testing.T, tree *ConfigTree, line string) error {
@@ -76,7 +67,7 @@ func TestToggleOfOneGroupMemberIsRefused9793(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseTree9793(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			err := toggle9793(t, tree, tc.line)
 			if err == nil {
 				t.Fatalf("%q: want a refusal, got nil; zones now %v", tc.line, zoneStatements9793(t, tree))
@@ -112,7 +103,7 @@ func TestToggleOfAWholeStatementStillWorks9793(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tree := parseTree9793(t, tc.text)
+			tree := parseHierText(t, tc.text)
 			if err := toggle9793(t, tree, tc.line); err != nil {
 				t.Fatalf("CONTROL BROKE: %q must toggle the whole statement, got %v", tc.line, err)
 			}
