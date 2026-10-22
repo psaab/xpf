@@ -2,22 +2,25 @@ package cli
 
 import (
 	"path/filepath"
+	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/grpcapi"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
-// #16160 (schema R1): CLI and gRPC completion now share
-// config.ProvideValues + config.HintRoots. This parity test drives BOTH
-// frontend valueProviders over one committed store — plus the
-// never-committed (catalogueSuppressed=true) candidate — and asserts
-// identical slices for every hint, including the present-but-nil
-// fixture (#3494 shape). It deletes the need for mirrored provider
-// tables: any future divergence between the local and remote surfaces
-// fails here. Slices are canonicalized (sorted by Name, then Desc)
-// before comparison because the providers iterate maps.
+// #16160 (schema R1): CLI and gRPC completion share
+// config.ProvideValues + config.HintRoots. The parity contract is
+// anchored on the shared function: each frontend's valueProvider must
+// return exactly ProvideValues(completionConfig()) for the same store.
+// This test pins the CLI side over a committed store with
+// present-but-nil slots injected (#3494 shape) plus the never-committed
+// candidate (catalogueSuppressed=true); pkg/grpcapi pins the gRPC side
+// the same way, and its Complete RPC test proves the RPC surface (not
+// just the provider) serves those values to an admitted principal.
+// Slices are canonicalized (sorted by Name, then Desc) because the
+// provider iterates maps. No production test helper is introduced.
 
 const parityBody16160 = `
 security {
@@ -59,7 +62,7 @@ applications {
 }
 `
 
-func parityStore16160(t *testing.T, committed bool) (cli *CLI, srv *grpcapi.Server, committedCfg *config.Config) {
+func parityStore16160(t *testing.T, committed bool) (*CLI, *configstore.Store) {
 	t.Helper()
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	if err := store.EnterConfigure(); err != nil {
@@ -69,16 +72,12 @@ func parityStore16160(t *testing.T, committed bool) (cli *CLI, srv *grpcapi.Serv
 		t.Fatalf("LoadOverride: %v", err)
 	}
 	if committed {
-		cfg, err := store.Commit()
-		if err != nil {
+		if _, err := store.Commit(); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		store.ExitConfigure()
-		return &CLI{store: store}, grpcapi.NewServer("", grpcapi.Config{Store: store}), cfg
 	}
-	// Never committed: still in config mode, so completionConfig draws
-	// the candidate with catalogueSuppressed=true on both frontends.
-	return &CLI{store: store}, grpcapi.NewServer("", grpcapi.Config{Store: store}), nil
+	return &CLI{store: store}, store
 }
 
 func canonicalParity16160(in []config.SchemaCompletion) []config.SchemaCompletion {
@@ -120,19 +119,20 @@ func parityCells16160() []struct {
 	}
 }
 
-func assertParity16160(t *testing.T, cli *CLI, srv *grpcapi.Server, suppressed bool) {
+func assertCLIParity16160(t *testing.T, c *CLI, suppressed bool) {
 	t.Helper()
+	cfg, gotSuppressed := c.completionConfig()
+	if gotSuppressed != suppressed {
+		t.Fatalf("completionConfig suppressed = %v, want %v", gotSuppressed, suppressed)
+	}
+	if cfg == nil {
+		t.Fatal("completionConfig returned nil config")
+	}
 	for _, cell := range parityCells16160() {
-		cliGot := canonicalParity16160(cli.valueProvider(cell.hint, cell.path))
-		grpcGot := canonicalParity16160(grpcapi.CompletionValuesForTest16160(srv, cell.hint, cell.path))
-		if len(cliGot) != len(grpcGot) {
-			t.Errorf("[suppressed=%v] %s: CLI %v != gRPC %v", suppressed, cell.name, cliGot, grpcGot)
-			continue
-		}
-		for i := range cliGot {
-			if cliGot[i] != grpcGot[i] {
-				t.Errorf("[suppressed=%v] %s[%d]: CLI %v != gRPC %v", suppressed, cell.name, i, cliGot[i], grpcGot[i])
-			}
+		want := canonicalParity16160(config.ProvideValues(cfg, cell.hint, cell.path, suppressed))
+		got := canonicalParity16160(c.valueProvider(cell.hint, cell.path))
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("[suppressed=%v] %s: CLI valueProvider %v != ProvideValues %v", suppressed, cell.name, got, want)
 		}
 	}
 }
@@ -146,14 +146,24 @@ func hasName16160(in []config.SchemaCompletion, name string) bool {
 	return false
 }
 
+func namesOf16160(in []config.SchemaCompletion) []string {
+	out := make([]string, 0, len(in))
+	for _, c := range in {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
 func TestCompletionProvideValuesParity16160(t *testing.T) {
-	// Committed (catalogueSuppressed=false): full catalogue on both.
-	cli, srv, cfg := parityStore16160(t, true)
+	// Committed (catalogueSuppressed=false): full catalogue.
+	c, store := parityStore16160(t, true)
+	cfg := store.ActiveConfig()
 	if cfg == nil {
 		t.Fatal("committed fixture returned nil config")
 	}
 	// Present-but-nil fixture (#3494): injected into the committed
-	// config both frontends complete from (the store's active pointer).
+	// config the frontend completes from (the store's active pointer,
+	// the same object completionConfig returns).
 	cfg.Security.Zones["nilzone"] = nil
 	cfg.Interfaces.Interfaces["ge-0/0/9"] = nil
 	if iface := cfg.Interfaces.Interfaces["ge-0/0/0"]; iface != nil {
@@ -165,30 +175,25 @@ func TestCompletionProvideValuesParity16160(t *testing.T) {
 			zpp.Policies = append([]*config.Policy{nil}, zpp.Policies...)
 		}
 	}
-	assertParity16160(t, cli, srv, false)
-	// Non-vacuous control: configured names really are offered.
-	if got := cli.valueProvider(config.ValueHintZoneName, nil); !hasName16160(got, "trust") || hasName16160(got, "nilzone") {
-		t.Errorf("committed zones = %v, want trust present and nilzone skipped", got)
+	assertCLIParity16160(t, c, false)
+	// Non-vacuous controls.
+	if got := c.valueProvider(config.ValueHintZoneName, nil); !hasName16160(got, "trust") || hasName16160(got, "nilzone") {
+		t.Errorf("committed zones = %v, want trust present and nilzone skipped", namesOf16160(got))
 	}
-	if got := cli.valueProvider(config.ValueHintAppName, nil); !hasName16160(got, "junos-ssh") {
-		t.Errorf("committed apps missing predefined catalogue: %v", got)
+	if got := c.valueProvider(config.ValueHintAppName, nil); !hasName16160(got, "junos-ssh") {
+		t.Errorf("committed apps missing predefined catalogue")
 	}
 
 	// Never committed (catalogueSuppressed=true): the suppression cell —
 	// authz-adjacent, since the predefined catalogue is gated on the
-	// first commit (#5763). Both frontends must suppress identically.
-	cli2, srv2, _ := parityStore16160(t, false)
-	assertParity16160(t, cli2, srv2, true)
-	if got := cli2.valueProvider(config.ValueHintAppName, nil); hasName16160(got, "junos-ssh") || !hasName16160(got, "custom-app") {
-		t.Errorf("suppressed apps = %v, want custom-app only (no predefined)", got)
+	// first commit (#5763). The frontend must suppress identically to
+	// the shared function called with suppressed=true.
+	c2, _ := parityStore16160(t, false)
+	assertCLIParity16160(t, c2, true)
+	if got := c2.valueProvider(config.ValueHintAppName, nil); hasName16160(got, "junos-ssh") || !hasName16160(got, "custom-app") {
+		t.Errorf("suppressed apps = %v, want custom-app only (no predefined)", namesOf16160(got))
 	}
-	if got := cli2.valueProvider(config.ValueHintPolicyApp, nil); hasName16160(got, "any") {
-		t.Errorf("suppressed policy-apps must omit \"any\": %v", got)
-	}
-	// Cross-check the shared function directly against the same
-	// candidate snapshot semantics: suppressed ProvideValues equals the
-	// frontend result for the app hints.
-	if _, suppressed := cli2.completionConfig(); !suppressed {
-		t.Fatal("never-committed fixture: completionConfig suppressed = false, want true")
+	if got := c2.valueProvider(config.ValueHintPolicyApp, nil); hasName16160(got, "any") {
+		t.Errorf("suppressed policy-apps must omit \"any\"")
 	}
 }
