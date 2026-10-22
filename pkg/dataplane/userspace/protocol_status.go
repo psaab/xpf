@@ -311,6 +311,12 @@ type ProcessStatus struct {
 	SnapshotRetryDebtGeneration uint64            `json:"snapshot_retry_debt_generation,omitempty"`
 	EntryPrograms               map[int]string    `json:"entry_programs,omitempty"`         // ifindex -> attached XDP program name
 	DegradedPathCounters        map[string]uint64 `json:"degraded_path_counters,omitempty"` // reason_name -> count
+	// #16241: per-arm XDP dispatch hit counters (arm_name -> count),
+	// stamped by the manager from the pinned userspace_branch_stats map
+	// like DegradedPathCounters above. Skew-safe additive omitempty:
+	// old readers ignore it. Counting is TRACE-gated in the shim, so an
+	// absent field means tracing was off or no arm fired.
+	XDPBranchCounters map[string]uint64 `json:"xdp_branch_counters,omitempty"`
 	// #1636 option C: proactive-neighbor-warm telemetry. WarmDrops counts
 	// warm requests dropped because the bounded warmer queue was full
 	// (transient); WarmDisconnected counts requests dropped because the

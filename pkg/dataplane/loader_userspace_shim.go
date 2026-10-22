@@ -99,6 +99,10 @@ const (
 	// PerCpuArray; it is a collection-pinned map, so a stale incompatible pin
 	// must be reconciled on upgrade (see reconcileDisposableCollectionPin).
 	userspaceFallbackStatsMapName = "userspace_fallback_stats"
+	// userspaceBranchStatsMapName (#16241): per-arm XDP dispatch hit
+	// counters; a new disposable counter map, never part of the
+	// degraded-path ABI above.
+	userspaceBranchStatsMapName = "userspace_branch_stats"
 	// userspaceIngressDomainsMapName (#14842): the ingress-domain map was
 	// re-keyed per (ifindex, VLAN) under a new pin name. It is config-derived
 	// and repopulated from the snapshot on every apply, so the legacy
@@ -177,6 +181,14 @@ func (m *Manager) loadUserspaceShimObjectsOnce() (err error) {
 	// (resets on every reload); DATA maps are never reset here.
 	if spec, ok := userspaceSpec.Maps[userspaceFallbackStatsMapName]; ok {
 		pinPath := filepath.Join(bpfPinPath, userspaceFallbackStatsMapName)
+		if err := reconcileDisposableCollectionPin(pinPath, spec); err != nil {
+			return err
+		}
+	}
+	// #16241: same reconcile for the new branch-stats counter map, so a
+	// shape change there can never brick the shim load either.
+	if spec, ok := userspaceSpec.Maps[userspaceBranchStatsMapName]; ok {
+		pinPath := filepath.Join(bpfPinPath, userspaceBranchStatsMapName)
 		if err := reconcileDisposableCollectionPin(pinPath, spec); err != nil {
 			return err
 		}
@@ -495,7 +507,7 @@ func userspaceABICheckedPinnedMaps() []string {
 	seen := make(map[string]bool)
 	out := make([]string, 0, len(userspacePinnedShimMaps())+len(userspaceShimSharedMapSpecs()))
 	add := func(n string) {
-		if n == userspaceFallbackStatsMapName || n == userspaceIngressDomainsMapName || seen[n] {
+		if n == userspaceFallbackStatsMapName || n == userspaceBranchStatsMapName || n == userspaceIngressDomainsMapName || seen[n] {
 			return
 		}
 		seen[n] = true
@@ -670,6 +682,9 @@ func userspacePinnedShimMaps() []string {
 		"userspace_sessions",
 		"userspace_trace",
 		"userspace_fallback_stats",
+		// #16241: per-arm dispatch hit counters; disposable like the
+		// degraded map above (counters, not dataplane state).
+		"userspace_branch_stats",
 		"userspace_cpumap",
 	}
 }

@@ -267,6 +267,14 @@ pub(super) fn emit_periodic_report(
             eprintln!("DBG w{}: XDP_DEGRADED: {}", worker_id, s.join(" "));
         }
     }
+    // #16241: per-arm dispatch hits — which XDP arms plain traffic
+    // actually takes (TRACE-gated in the shim; empty means off).
+    if let Some(stats) = read_xdp_branch_stats() {
+        if !stats.is_empty() {
+            let s: Vec<String> = stats.iter().map(|(n, v)| format!("{n}={v}")).collect();
+            eprintln!("DBG w{}: XDP_BRANCH: {}", worker_id, s.join(" "));
+        }
+    }
 }
 
 /// Stall detector + per-binding stall dump (moved verbatim from the

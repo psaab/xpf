@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Add per-arm XDP branch hit counters (#16241): a new per-CPU
+    userspace_branch_stats map counts every try_xdp_userspace dispatch
+    arm (TRACE-gated inside one outlined callee, so the hot path pays
+    no map cost with tracing off), projected as xdp_branch_counters in
+    the userspace status and as an XDP_BRANCH debug dump. Includes the
+    per-arm fail-closed analysis (docs/log/16241.md) proving no arm is
+    disposition-identical to another, so no arm is removed; the
+    regenerated shim object measures 856646 processed insns (14.34%
+    headroom) and is installed under the recorded #4555 override
+    exception.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Share only the transport-neutral peer-proxy reconciliation table
     in new pkg/peerclient (#16154): TimeoutFor (proxy deadline
     sizing), IsDeadline (deadline classification), and Reconcile

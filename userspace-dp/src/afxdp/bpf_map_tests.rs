@@ -416,6 +416,60 @@ fn degraded_path_reason_names_agree_with_the_shim_9888() {
     );
 }
 
+#[test]
+fn xdp_branch_arm_names_agree_with_the_shim_16241() {
+    // #16241: the Rust debug reader agrees with the shim index-for-index.
+    // Same shape as the #9888 degraded agreement above: read the shim's
+    // USERSPACE_BRANCH_ARM_* constants and require XDP_BRANCH_ARM_NAMES
+    // to match, so adding an arm in Rust enrols it here automatically.
+    let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("userspace-xdp/src/lib.rs");
+    let src = std::fs::read_to_string(&lib).expect("read shim lib.rs");
+    let mut max: Option<usize> = None;
+    let mut seen = 0usize;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("const USERSPACE_BRANCH_ARM_") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once(": u32 = ") else {
+            continue;
+        };
+        let value: usize = value
+            .strip_suffix(';')
+            .expect("branch arm value ends with ';'")
+            .parse()
+            .expect("branch arm value is numeric");
+        if name == "MAX" {
+            max = Some(value);
+            continue;
+        }
+        seen += 1;
+        let want = name.to_ascii_lowercase();
+        let got = XDP_BRANCH_ARM_NAMES
+            .get(value)
+            .copied()
+            .unwrap_or("<missing>");
+        assert_eq!(
+            got,
+            want.as_str(),
+            "index {value}: the shim calls this {want:?}, the Rust table renders {got:?}"
+        );
+    }
+    let max = max.expect("USERSPACE_BRANCH_ARM_MAX not found in the shim source");
+    assert!(
+        seen > 0,
+        "no USERSPACE_BRANCH_ARM_* constants parsed — the scan is broken, not the table"
+    );
+    assert_eq!(
+        XDP_BRANCH_ARM_NAMES.len(),
+        max,
+        "Rust table has {} slots but the shim MAX is {max}",
+        XDP_BRANCH_ARM_NAMES.len()
+    );
+}
+
 // --- #2332: monotonic HA-liveness freshness (Rust sibling of #1792) ---
 //
 // `heartbeat_fresh_mono` MUST decide worker liveness purely from two

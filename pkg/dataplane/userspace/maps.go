@@ -63,4 +63,9 @@ const (
 	// canary alias retires. The cap test in maps_sync_cap_test.go
 	// pins this string value verbatim.
 	mapNameUserspaceShimDegradedStats = "userspace_fallback_stats"
+	// #16241: per-arm XDP dispatch hit counters. A new pinned map name,
+	// not a widening of the degraded map above: the degraded indices are
+	// a pinned operator ABI and a hit-forward is not a degraded
+	// disposition.
+	mapNameUserspaceShimBranchStats = "userspace_branch_stats"
 )
