@@ -199,9 +199,9 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // published size/offsets are now 2624/2432/2561 in both builds.
 // #14668 adds one unconditional DNS illegal-reply counter before them.
 // #15941 adds six unconditional transit-drop counters before them;
-// offsets are now 2544/2673, size unchanged (2688).
+// offsets are now 2736/2865, size 2880 (#16242 batch histograms grow the owner profile).
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
-    assert_eq!(std::mem::size_of::<BindingLiveState>(), 2688,);
+    assert_eq!(std::mem::size_of::<BindingLiveState>(), 2880,);
     assert_eq!(
         std::mem::align_of::<BindingLiveState>(),
         64,
@@ -209,12 +209,12 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2544,
+        2736,
         "#14668 must keep pinned admission-counter layout consistent"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2673,
+        2865,
         "#14668 must keep pinned final-field offset consistent"
     );
 }

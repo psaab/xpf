@@ -80,6 +80,29 @@ const _ASSERT_TX_SUBMIT_BUCKET_COUNT_MATCHES_DRAIN: () =
     assert!(TX_SUBMIT_LAT_BUCKETS == DRAIN_HIST_BUCKETS);
 const _ASSERT_TX_SUBMIT_BUCKET_COUNT_IS_16: () = assert!(TX_SUBMIT_LAT_BUCKETS == 16);
 
+/// #16242: descriptors-per-commit histogram bucket count. Bucket `i`
+/// covers commit size `i + 1` for `i < 7`; bucket 7 covers `[8, 16)`;
+/// bucket 8 `[16, 32)`; bucket 9 `[32, 64)`; bucket 10 saturates at
+/// `>= TX_BATCH_SIZE` (64). Zero-insert commits are not samples (see
+/// `record_tx_commit` in tx/stats.rs) — they carry no batch-depth
+/// information and are already counted by `dbg_tx_ring_full`.
+pub(in crate::afxdp) const TX_BATCH_BUCKETS: usize = 11;
+const _: () = assert!(TX_BATCH_BUCKETS == 11);
+
+/// #16242: branchless bucket select for a TX commit size in
+/// `[1, TX_BATCH_SIZE]`. Sizes 1..=7 map to buckets 0..=6; larger sizes
+/// use `31 - leading_zeros(n)` so 8..=15 → 7, 16..=31 → 8,
+/// 32..=63 → 9, 64 → 10 (clamped). One `leading_zeros`, no loop.
+#[inline]
+pub(in crate::afxdp) fn tx_batch_bucket(inserted: u32) -> usize {
+    debug_assert!(inserted >= 1);
+    if inserted < 8 {
+        (inserted - 1) as usize
+    } else {
+        ((31 - inserted.leading_zeros() + 4) as usize).min(TX_BATCH_BUCKETS - 1)
+    }
+}
+
 /// #812: sentinel for unstamped sidecar slots. A completion seen
 /// against this value means the submit stamp was never written (e.g.
 /// a surviving offset across a restart, or a `monotonic_nanos() == 0`

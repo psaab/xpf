@@ -234,7 +234,11 @@ fn cos_scheduler_snapshot_literals_carry_an_update_tail_7689() {
 // been holding room for a miscount, which is the specific way a ratchet decays
 // into permission.
 const ADDITIVE_WIRE_EXHAUSTIVE_CEILING: &[(&str, usize)] = &[
-    ("BindingCountersSnapshot", 2),
+    // #16242: tightened 2 -> 0. The two exhaustive main_tests literals
+    // gained `..Default::default()` tails when the tx_batch_*/
+    // tx_kick_batch_* fields landed, so no exhaustive literal remains;
+    // the ceiling holds that ground instead of decaying into permission.
+    ("BindingCountersSnapshot", 0),
     ("ConfigSnapshot", 0),
     ("DestinationNATRuleSnapshot", 3),
     ("ExceptionStatus", 1),

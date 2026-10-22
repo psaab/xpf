@@ -36,4 +36,5 @@ mod latency_buckets;
 mod snapshot_propagation;
 mod tx_submit_latency;
 mod tx_kick_latency;
+mod tx_batch_hist;
 mod debug_state;

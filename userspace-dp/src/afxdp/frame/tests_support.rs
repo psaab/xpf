@@ -213,6 +213,7 @@ pub(super) fn pbr_reject_tx_pipeline(max_pending_tx: usize) -> crate::afxdp::wor
         in_flight_prepared_recycles: FastMap::default(),
         in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
     }
 }
 

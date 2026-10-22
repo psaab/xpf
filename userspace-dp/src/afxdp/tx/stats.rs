@@ -4,9 +4,10 @@
 use std::sync::atomic::Ordering;
 
 use crate::afxdp::binding_state::{
-    bucket_index_for_ns, OwnerProfileOwnerWrites,
+    bucket_index_for_ns, tx_batch_bucket, OwnerProfileOwnerWrites,
     TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
 };
+use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::UMEM_FRAME_SHIFT;
 
 /// #812 Codex round-1 MED + Rust round-1 MED-2: replaced the former
@@ -118,6 +119,52 @@ pub(in crate::afxdp) fn record_kick_latency(owner: &OwnerProfileOwnerWrites, del
     owner
         .tx_kick_latency_sum_ns
         .fetch_add(delta_ns, Ordering::Relaxed);
+}
+
+
+/// #16242: record one TX-ring commit of `inserted` descriptors into
+/// the per-commit histogram and accumulate the descriptors toward the
+/// next kick. Called once per `writer.commit()` at every TX submit
+/// site (next to the existing `stamp_submits` call). `inserted == 0`
+/// (ring full) is not a batch-depth sample and records nothing.
+/// Cost: one bucket `fetch_add` + two scalar `fetch_add`s + one plain
+/// add on the worker-local accumulator — no allocation, no clock read.
+#[inline]
+pub(in crate::afxdp) fn record_tx_commit(binding: &mut BindingWorker, inserted: u32) {
+    if inserted == 0 {
+        return;
+    }
+    let owner = &binding.live.owner_profile_owner;
+    owner.tx_batch_hist[tx_batch_bucket(inserted)].fetch_add(1, Ordering::Relaxed);
+    owner.tx_batch_commits.fetch_add(1, Ordering::Relaxed);
+    owner
+        .tx_batch_descriptors
+        .fetch_add(u64::from(inserted), Ordering::Relaxed);
+    binding.tx_pipeline.tx_pending_kick_descriptors = binding
+        .tx_pipeline
+        .tx_pending_kick_descriptors
+        .saturating_add(inserted);
+}
+
+/// #16242: record the descriptors-per-kick sample at an actual
+/// `sendto` kick: drains the pending accumulator into the per-kick
+/// histogram. A kick with nothing newly committed records nothing.
+/// The pending count can exceed `TX_BATCH_SIZE` when several commits
+/// precede one kick; `tx_batch_bucket` saturates it into the top
+/// bucket, which is the correct "at least a full batch per kick"
+/// signal.
+#[inline]
+pub(in crate::afxdp) fn record_tx_kick_batch(binding: &mut BindingWorker) {
+    let pending = core::mem::take(&mut binding.tx_pipeline.tx_pending_kick_descriptors);
+    if pending == 0 {
+        return;
+    }
+    let owner = &binding.live.owner_profile_owner;
+    owner.tx_kick_batch_hist[tx_batch_bucket(pending)].fetch_add(1, Ordering::Relaxed);
+    owner.tx_kick_batch_kicks.fetch_add(1, Ordering::Relaxed);
+    owner
+        .tx_kick_batch_descriptors
+        .fetch_add(u64::from(pending), Ordering::Relaxed);
 }
 
 /// #812 test hook / decomposition aid: the pure per-offset fold from

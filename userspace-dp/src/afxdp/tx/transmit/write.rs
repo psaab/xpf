@@ -56,5 +56,7 @@ pub(super) fn reserve_and_write_descriptors(binding: &mut BindingWorker) -> u32 
             .map(|req| req.offset),
         ts_submit,
     );
+    // #16242: descriptors-per-commit sample for this ring commit.
+    crate::afxdp::tx::record_tx_commit(binding, inserted);
     inserted
 }

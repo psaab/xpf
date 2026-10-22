@@ -593,6 +593,7 @@ impl BindingWorker {
                 // grow. `vec![...].into_boxed_slice()` produces an
                 // exactly-sized heap allocation with no spare capacity.
                 tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; tx_submit_sidecar_len].into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
             },
             cos: WorkerCos {
                 cos_fast_interfaces: FastMap::default(),
@@ -753,6 +754,7 @@ impl BindingWorker {
                 in_flight_prepared_recycles: FastMap::default(),
                 in_flight_untracked_tx: FastSet::default(),
                 tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; total_frames as usize].into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
             },
             cos: WorkerCos {
                 cos_fast_interfaces,
@@ -879,6 +881,7 @@ impl BindingWorker {
                 in_flight_prepared_recycles: FastMap::default(),
                 in_flight_untracked_tx: FastSet::default(),
                 tx_submit_ns: vec![TX_SIDECAR_UNSTAMPED; total_frames as usize].into_boxed_slice(),
+                tx_pending_kick_descriptors: 0,
             },
             cos: WorkerCos {
                 cos_fast_interfaces: FastMap::default(),
@@ -1810,6 +1813,15 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) tx_kick_latency_count: u64,
     pub(crate) tx_kick_latency_sum_ns: u64,
     pub(crate) tx_kick_retry_count: u64,
+    /// #16242: descriptors-per-commit / per-kick histograms + scalars.
+    /// Fixed-size arrays like the latency histograms; materialized
+    /// into `Vec<u64>` only at the protocol boundary.
+    pub(crate) tx_batch_hist: [u64; crate::afxdp::binding_state::TX_BATCH_BUCKETS],
+    pub(crate) tx_batch_commits: u64,
+    pub(crate) tx_batch_descriptors: u64,
+    pub(crate) tx_kick_batch_hist: [u64; crate::afxdp::binding_state::TX_BATCH_BUCKETS],
+    pub(crate) tx_kick_batch_kicks: u64,
+    pub(crate) tx_kick_batch_descriptors: u64,
 }
 
 #[cfg(test)]

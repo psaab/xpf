@@ -1664,6 +1664,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         v_min_throttle_hard_cap_overrides: 28,
         v_min_throttles: 29,
         v_min_suspended_batches: 30,
+        ..Default::default()
     };
     let value: serde_json::Value =
         serde_json::to_value(&snap).expect("serialize snapshot to Value");
@@ -1710,6 +1711,13 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         "tx_kick_latency_count",
         "tx_kick_latency_sum_ns",
         "tx_kick_retry_count",
+        // #16242: batch histogram wire keys.
+        "tx_batch_hist",
+        "tx_batch_commits",
+        "tx_batch_descriptors",
+        "tx_kick_batch_hist",
+        "tx_kick_batch_kicks",
+        "tx_kick_batch_descriptors",
         // #878: UMEM / TX-ring utilization wire keys (Copilot
         // A.1: must be in the asserted list since the comment
         // above claims wire-key assertions cover them).
@@ -2485,6 +2493,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         v_min_throttle_hard_cap_overrides: 18,
         v_min_throttles: 19,
         v_min_suspended_batches: 20,
+        ..Default::default()
     };
     let json = serde_json::to_string(&snap).expect("serialize snapshot");
     let back: BindingCountersSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");

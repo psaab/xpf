@@ -56,6 +56,44 @@ normally. Pinned by
 `tx_status_drop_error_outranks_retry_hint_until_rebind_6145`
 (`umem/tests/snapshot_propagation.rs`).
 
+## Reading the TX batch-depth histograms (#16242)
+
+`TX_BATCH_SIZE = 64` is a deliberate #920 L1d / mouse-latency choice,
+const-asserted in `afxdp/mod.rs`. Before anyone re-opens that assert,
+measure whether batches actually fill. Two per-binding histograms are
+exported on `BindingStatus` / `BindingCountersSnapshot` (and the Go
+`protocol_binding.go` mirrors):
+
+- `tx_batch_hist` / `tx_batch_commits` / `tx_batch_descriptors` —
+  descriptors per TX-ring `writer.commit()` (`inserted > 0` only;
+  zero-insert ring-full commits are counted by `dbg_tx_ring_full`).
+- `tx_kick_batch_hist` / `tx_kick_batch_kicks` /
+  `tx_kick_batch_descriptors` — descriptors committed since the
+  previous actual `sendto` kick, attributed to that kick in
+  `maybe_wake_tx`. A kick with nothing new committed records nothing.
+
+Buckets (index → descriptors): `0..=6` → `1..=7`, `7` → `[8,16)`,
+`8` → `[16,32)`, `9` → `[32,64)`, `10` → `>=64` (a full batch; per-kick
+values above 64 from several commits before one kick also land here).
+
+How to read it under load (e.g. `iperf3 -P32` through the queue):
+
+- Mean batch = `tx_batch_descriptors / tx_batch_commits`.
+- Full-batch share = `tx_batch_hist[10] / tx_batch_commits`.
+- If the mean is near 64 and bucket 10 dominates, batches already fill:
+  raising the cap cannot amortise more per commit — close the batch-depth
+  question as dead. If the mass sits in buckets 0–6, batches are partial
+  and the lever (if any) is whatever starves the drain, not the cap.
+- Per-kick: `tx_kick_batch_descriptors / tx_kick_batch_kicks` is the
+  descriptors-per-`sendto` actually presented to the kernel.
+
+Mouse-latency note: the cap exists to bound per-poll work / L1d
+footprint for the #920 latency goal, so any future proposal to raise it
+must pair this histogram (before/after, same `-P32` load) with the
+existing mouse-latency matrix (`test-mouse-latency-matrix.sh`) — the
+histogram alone cannot show the latency cost the cap was bought with.
+This instrumentation changes no batch size and no assert.
+
 ## Where it sits
 
 - Driven from `worker/lifecycle.rs::poll_binding`.

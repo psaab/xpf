@@ -472,6 +472,29 @@ impl BindingLiveState {
                 .owner_profile_owner
                 .tx_kick_retry_count
                 .load(Ordering::Relaxed),
+            // #16242: descriptors-per-commit / per-kick histograms.
+            // Same Relaxed bounded-skew discipline as the latency
+            // histograms above.
+            tx_batch_hist: Self::snapshot_batch_hist(&self.owner_profile_owner.tx_batch_hist),
+            tx_batch_commits: self
+                .owner_profile_owner
+                .tx_batch_commits
+                .load(Ordering::Relaxed),
+            tx_batch_descriptors: self
+                .owner_profile_owner
+                .tx_batch_descriptors
+                .load(Ordering::Relaxed),
+            tx_kick_batch_hist: Self::snapshot_batch_hist(
+                &self.owner_profile_owner.tx_kick_batch_hist,
+            ),
+            tx_kick_batch_kicks: self
+                .owner_profile_owner
+                .tx_kick_batch_kicks
+                .load(Ordering::Relaxed),
+            tx_kick_batch_descriptors: self
+                .owner_profile_owner
+                .tx_kick_batch_descriptors
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -479,6 +502,14 @@ impl BindingLiveState {
     /// keep the fixed-size array on the caller's stack — no `Vec`.
     #[inline]
     fn snapshot_hist(hist: &[AtomicU64; DRAIN_HIST_BUCKETS]) -> [u64; DRAIN_HIST_BUCKETS] {
+        std::array::from_fn(|i| hist[i].load(Ordering::Relaxed))
+    }
+
+    /// #16242: copy a batch histogram bucket array under `Relaxed`.
+    #[inline]
+    fn snapshot_batch_hist(
+        hist: &[AtomicU64; TX_BATCH_BUCKETS],
+    ) -> [u64; TX_BATCH_BUCKETS] {
         std::array::from_fn(|i| hist[i].load(Ordering::Relaxed))
     }
 }

@@ -19,13 +19,13 @@ orderings and `#[inline]` attributes moved byte-identical, and the
 |------|---------|
 | `mod.rs` | `BindingLiveState` — the per-binding atomics cluster + constructor + setter/counter impl block. `SharedUmemLiveStatus`, `FlowWorkerMapSnapshot`. Re-exports the submodule items at `pub(in crate::afxdp)` (E0364 precedent per `tx/mod.rs`). |
 | `tx_inbox.rs` | The bounded lock-free MPSC redirect inbox (`pending_tx`) and its linearizable admission counter: `enqueue_tx` / `enqueue_tx_owned` / `try_enqueue_tx_owned` / `take_pending_tx_into`, plus the `PendingTxAdmission` RAII single-release token (mirror reservation path). |
-| `latency.rs` | `bucket_index_for_ns` + the histogram bucket-count wire-contract constants (`DRAIN_HIST_BUCKETS`, `TX_SUBMIT_LAT_BUCKETS`), the producer-local redirect-sample TLS (`REDIRECT_SAMPLE_SEQ` + `REDIRECT_SAMPLE_MASK`), and `TX_SIDECAR_UNSTAMPED`. |
+| `latency.rs` | `bucket_index_for_ns` + the histogram bucket-count wire-contract constants (`DRAIN_HIST_BUCKETS`, `TX_SUBMIT_LAT_BUCKETS`), the #16242 batch-depth bucket select (`tx_batch_bucket` + `TX_BATCH_BUCKETS`), the producer-local redirect-sample TLS (`REDIRECT_SAMPLE_SEQ` + `REDIRECT_SAMPLE_MASK`), and `TX_SIDECAR_UNSTAMPED`. |
 | `session_delta.rs` | The HA session-delta RPC-fallback buffer (`pending_session_deltas`) + the #5290 `delta_loss_pending` loss-of-sync latch that drives the full owner-RG resync. |
 | `snapshot.rs` | `BindingLiveState::snapshot()` — the operator-facing `BindingLiveSnapshot` render (~120 Relaxed loads, bounded read-skew contract). |
 | `kernel_stats.rs` | `BindingLiveState::publish_kernel_xdp_statistics` — the ONE site that turns a `statistics_v2()` sample into per-binding atomics. Destructures `XdpStatisticsV2` exhaustively, so a new kernel counter is a compile error here rather than a field that reaches the wire unwritten (#9168). `UNPLUMBED_KERNEL_STAT_FIELDS` names the counters deliberately not carried. |
 | `debug_state.rs` | The ~65ms debug-state publish cadence (`update_binding_debug_state` / idle variant) that flushes worker-local scratches into the binding atomics. |
 | `profile.rs` | `OwnerProfileOwnerWrites` / `OwnerProfilePeerWrites` — cacheline-isolated (`#[repr(align(64))]`) telemetry blocks, split by writer. |
-| `tests/` | Co-located unit tests, per-concern split (#4667, relocated from `umem/tests/` in #6436): `mod.rs` (shared `use` header + the cross-concern `test_tx_request_for_inbox` fixture), `tx_inbox.rs`, `latency_buckets.rs`, `snapshot_propagation.rs`, `tx_submit_latency.rs`, `tx_kick_latency.rs`, `debug_state.rs`. |
+| `tests/` | Co-located unit tests, per-concern split (#4667, relocated from `umem/tests/` in #6436): `mod.rs` (shared `use` header + the cross-concern `test_tx_request_for_inbox` fixture), `tx_inbox.rs`, `latency_buckets.rs`, `snapshot_propagation.rs`, `tx_submit_latency.rs`, `tx_kick_latency.rs`, `tx_batch_hist.rs`, `debug_state.rs`. |
 
 ## Notable invariants
 

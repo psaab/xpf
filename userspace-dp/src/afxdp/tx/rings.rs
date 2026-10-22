@@ -13,7 +13,7 @@ use crate::afxdp::{
     TX_WAKE_MIN_INTERVAL_NS, UMEM_FRAME_SIZE, XskBindMode,
 };
 
-use super::stats::{record_kick_latency, record_tx_completions_with_stamp};
+use super::stats::{record_kick_latency, record_tx_completions_with_stamp, record_tx_kick_batch};
 use super::update_binding_debug_state;
 // #14641: test-only seam that runs after `drain_pending_fill` has published a
 // batch to the kernel FILL ring but before it returns. A test can scribble
@@ -430,6 +430,11 @@ pub(in crate::afxdp) fn maybe_wake_tx(binding: &mut BindingWorker, force: bool, 
             )
         };
         let kick_end = monotonic_nanos();
+        // #16242: attribute descriptors committed since the previous
+        // kick to THIS kick (per-kick batch histogram). Drained
+        // unconditionally on an actual sendto so a failed kick still
+        // consumes the sample exactly once.
+        record_tx_kick_batch(binding);
         binding.telemetry.dbg_sendto_calls += 1;
         // #825 plan §3.3 LOW-3 R1 sentinel, code-review R1 HIGH-1 hardening:
         // skip record unless (a) `kick_start != 0` AND (b) `kick_end >=

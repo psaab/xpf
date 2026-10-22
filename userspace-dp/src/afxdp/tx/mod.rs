@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) mod stats;
-pub(in crate::afxdp) use stats::stamp_submits;
+pub(in crate::afxdp) use stats::{record_tx_commit, stamp_submits};
 #[cfg(test)]
 pub(in crate::afxdp) use stats::{record_kick_latency, record_tx_completions_with_stamp};
 

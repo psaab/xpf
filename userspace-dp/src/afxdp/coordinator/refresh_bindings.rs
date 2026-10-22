@@ -330,6 +330,19 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.tx_kick_latency_count = snap.tx_kick_latency_count;
     binding.tx_kick_latency_sum_ns = snap.tx_kick_latency_sum_ns;
     binding.tx_kick_retry_count = snap.tx_kick_retry_count;
+    // #16242: descriptors-per-commit / per-kick histograms.
+    binding.tx_batch_hist.resize(snap.tx_batch_hist.len(), 0);
+    binding.tx_batch_hist.copy_from_slice(&snap.tx_batch_hist);
+    binding.tx_batch_commits = snap.tx_batch_commits;
+    binding.tx_batch_descriptors = snap.tx_batch_descriptors;
+    binding
+        .tx_kick_batch_hist
+        .resize(snap.tx_kick_batch_hist.len(), 0);
+    binding
+        .tx_kick_batch_hist
+        .copy_from_slice(&snap.tx_kick_batch_hist);
+    binding.tx_kick_batch_kicks = snap.tx_kick_batch_kicks;
+    binding.tx_kick_batch_descriptors = snap.tx_kick_batch_descriptors;
     binding.last_heartbeat = snap.last_heartbeat;
     binding.last_error = snap.last_error;
     // #2332: gate readiness on the monotonic-clock freshness verdict
@@ -575,6 +588,13 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.tx_kick_latency_count = 0;
     binding.tx_kick_latency_sum_ns = 0;
     binding.tx_kick_retry_count = 0;
+    // #16242: zero the batch histograms on an unbound slot.
+    binding.tx_batch_hist.clear();
+    binding.tx_batch_commits = 0;
+    binding.tx_batch_descriptors = 0;
+    binding.tx_kick_batch_hist.clear();
+    binding.tx_kick_batch_kicks = 0;
+    binding.tx_kick_batch_descriptors = 0;
     binding.last_heartbeat = None;
     binding.last_error.clear();
     binding.ready = false;

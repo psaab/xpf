@@ -56,7 +56,8 @@ pub(in crate::afxdp) use debug_state::{
     IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
 };
 pub(in crate::afxdp) use latency::{
-    bucket_index_for_ns, DRAIN_HIST_BUCKETS, TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
+    bucket_index_for_ns, tx_batch_bucket, DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS,
+    TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
 };
 // Only `binding_state/tests/latency_buckets.rs` consumes this
 // re-export (via the `use super::*;` chain); gate on `cfg(test)` so
@@ -1069,9 +1070,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // alignment unit (the previous unit was full).
 // #15941 adds six unconditional u64 transit-drop counters before both
 // sentinels; offsets advance by 48 bytes, size unchanged.
-const _: [(); 2688] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2544] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2673] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #16242 adds the batch histograms to the owner profile before both
+// sentinels; offsets advance by 192 bytes, size grows by 192 bytes.
+const _: [(); 2880] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2736] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2865] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {

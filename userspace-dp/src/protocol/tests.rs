@@ -1585,6 +1585,45 @@ fn tx_kick_latency_from_binding_status_propagates() {
     assert_eq!(snap.tx_kick_retry_count, status.tx_kick_retry_count);
 }
 
+// #16242: wire round-trip + projection for the batch histograms.
+#[test]
+fn tx_batch_hist_binding_status_wire_roundtrip_and_projection() {
+    let status = BindingStatus {
+        tx_batch_hist: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        tx_batch_commits: 66,
+        tx_batch_descriptors: 999,
+        tx_kick_batch_hist: vec![0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 3],
+        tx_kick_batch_kicks: 6,
+        tx_kick_batch_descriptors: 400,
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&status).expect("serialize BindingStatus");
+    let back: BindingStatus = serde_json::from_str(&json).expect("deserialize BindingStatus");
+    assert_eq!(back.tx_batch_hist, status.tx_batch_hist);
+    assert_eq!(back.tx_batch_commits, status.tx_batch_commits);
+    assert_eq!(back.tx_batch_descriptors, status.tx_batch_descriptors);
+    assert_eq!(back.tx_kick_batch_hist, status.tx_kick_batch_hist);
+    assert_eq!(back.tx_kick_batch_kicks, status.tx_kick_batch_kicks);
+    assert_eq!(back.tx_kick_batch_descriptors, status.tx_kick_batch_descriptors);
+
+    let snap: BindingCountersSnapshot = (&status).into();
+    assert_eq!(snap.tx_batch_hist, status.tx_batch_hist);
+    assert_eq!(snap.tx_batch_commits, status.tx_batch_commits);
+    assert_eq!(snap.tx_kick_batch_hist, status.tx_kick_batch_hist);
+    assert_eq!(snap.tx_kick_batch_descriptors, status.tx_kick_batch_descriptors);
+}
+
+#[test]
+fn tx_batch_hist_binding_status_backward_compat() {
+    let legacy_json = r#"{"worker_id": 1, "slot": 0, "ifindex": 0, "queue_id": 0}"#;
+    let status: BindingStatus =
+        serde_json::from_str(legacy_json).expect("pre-#16242 payload decodes");
+    assert!(status.tx_batch_hist.is_empty());
+    assert_eq!(status.tx_batch_commits, 0);
+    assert!(status.tx_kick_batch_hist.is_empty());
+    assert_eq!(status.tx_kick_batch_kicks, 0);
+}
+
 // #1241: pin the TX completion-ring availability wire keys at the
 // rich BindingStatus layer and the lean BindingCountersSnapshot
 // projection. Missing keys would decode as zeros on the Go side,
