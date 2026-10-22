@@ -1046,6 +1046,17 @@ func (e *Engine) nudgePending() {
 	}
 }
 
+// policyByNameLocked returns the live policy with the given name, or nil.
+// Caller holds e.mu.
+func (e *Engine) policyByNameLocked(name string) *config.EventPolicy {
+	for _, pol := range e.policies {
+		if pol != nil && pol.Name == name {
+			return pol
+		}
+	}
+	return nil
+}
+
 func (e *Engine) drainDeferred() {
 	for {
 		drained := false
@@ -1065,16 +1076,45 @@ func (e *Engine) drainDeferred() {
 					delete(rt.suppressedDirection, de.evName)
 				}
 				e.counters.pendingDeferred.Add(-1)
+				// #15945 (H22-01): re-evaluate the within gate at drain
+				// time before replaying. The parked edge crossed when it
+				// was parked, but its window may have decayed below the
+				// threshold, crossed the trigger-until ceiling, or the
+				// policy may have been removed/redefined (semRev no
+				// longer matches) while it waited. A policy that no
+				// longer matches must not fire, and must not latch.
+				// staleReason in the worker remains the commit-time
+				// backstop for removed/redefined policies.
+				replay := false
+				if rt != nil && e.semRev[de.action.policyName] == de.action.semRev {
+					if pol := e.policyByNameLocked(de.action.policyName); pol != nil {
+						// The parked event is already in the window (it
+						// was appended at evaluate time); withinMatches
+						// counts it. A latched sustained level also
+						// returns false here, which is correct: that
+						// crossing already fired before the cooldown.
+						replay = e.withinMatches(pol, rt, de.evName, now)
+					}
+				}
 				e.mu.Unlock()
 				drained = true
-				if !e.enqueue(de.action) {
-					e.releaseEdgeLatch(de.action.policyName, de.action.event, de.action.semRev)
-				} else if de.triggers {
-					e.mu.Lock()
-					if rt2 := e.runtime[de.action.policyName]; rt2 != nil {
-						rt2.onLatched[de.evName] = true
+				if replay {
+					if !e.enqueue(de.action) {
+						e.releaseEdgeLatch(de.action.policyName, de.action.event, de.action.semRev)
+					} else if de.triggers {
+						e.mu.Lock()
+						// Only latch the generation that authorized the
+						// action; a redefined successor owns its own latch.
+						if e.semRev[de.action.policyName] == de.action.semRev {
+							if rt2 := e.runtime[de.action.policyName]; rt2 != nil {
+								if rt2.onLatched == nil {
+									rt2.onLatched = make(map[string]bool)
+								}
+								rt2.onLatched[de.evName] = true
+							}
+						}
+						e.mu.Unlock()
 					}
-					e.mu.Unlock()
 				}
 				e.mu.Lock()
 			}
