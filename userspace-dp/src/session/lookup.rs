@@ -750,6 +750,64 @@ impl SessionTable {
         }
     }
 
+    /// #16217 (local adoption evidence): does this worker's table hold a
+    /// local SERVING row for the canonical key behind `wire_key` that is
+    /// fully Established? Serving origins are exactly the local serving
+    /// set the evidence collectors use: `WorkerLocalImport` and
+    /// `SharedPromote` (plus other locally-authored origins such as
+    /// ForwardFlow). NOTE: `WorkerLocalImport::is_peer_synced()` is true
+    /// (it participates in peer-synced control gates), so the serving
+    /// test must NOT be `!is_peer_synced()` — that would exclude the very
+    /// fw1 rows this arm exists for. The peer-synced REPLICAS that must
+    /// never qualify are `SyncImport`/`SharedMaterialize` (imports of
+    /// the peer's authoritative row). Pending (`handshake_pending`,
+    /// incl. syn_ack_first) and closing rows fail closed. The canonical
+    /// key is derived two ways, mirroring the resolver's own probes:
+    /// (1) forward-wire alias — `find_forward_wire_match_with_origin_at`
+    /// validates `forward_wire_key(canonical, nat) == wire_key` and
+    /// fails closed on ambiguity; (2) direct probe of `wire_key` itself
+    /// (the no-NAT / wire-keyed local row). Read-only and expiry-aware:
+    /// an idle-crossed row never adopts. Returns the canonical key so
+    /// the caller can re-resolve through the ordinary session-hit path.
+    pub(crate) fn local_established_for_wire_at(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<SessionKey> {
+        // (1) Forward-wire alias: canonical (pre-NAT) row whose wire
+        // form is this packet's tuple. Ambiguity fails closed inside
+        // `find_forward_wire_match_with_origin_at`.
+        if let Some((matched, origin)) =
+            self.find_forward_wire_match_with_origin_at(wire_key, now_ns)
+            && !matches!(origin, SessionOrigin::SyncImport | SessionOrigin::SharedMaterialize)
+            && !matched.metadata.is_reverse
+        {
+            if let Some(entry) = self.entry_by_key(&matched.key)
+                && !entry.metadata.is_reverse
+                && !entry.closing
+                && entry.established
+                && !entry.handshake_pending
+            {
+                return Some(matched.key);
+            }
+        }
+        // (2) Direct probe: local row stored under the wire key itself
+        // (no-NAT, or a wire-keyed serving row). The alias arm of
+        // `probe_record_with_origin` returns reverse records, rejected
+        // by the non-reverse checks.
+        if let Some(record) = self.probe_record_with_origin(wire_key)
+            && now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+            && !matches!(record.entry.origin, SessionOrigin::SyncImport | SessionOrigin::SharedMaterialize)
+            && !record.entry.metadata.is_reverse
+            && !record.entry.closing
+            && record.entry.established
+            && !record.entry.handshake_pending
+        {
+            return Some(record.key.clone());
+        }
+        None
+    }
+
     pub fn lookup_with_origin(
         &mut self,
         key: &SessionKey,
