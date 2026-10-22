@@ -32,6 +32,26 @@ genuinely the branch's.
 
 A test suite tells you what your change does to the code that is present. It
 cannot tell you what your change removes.
+**Deleting a test requires mutation inheritance.** A test may be deleted
+only when the change names the instrument that subsumes it and shows that
+instrument red on the mutation the deleted test existed to kill — not
+merely green on the new tree, and not merely named as the replacement.
+Naming a killer test by name alone is insufficient, because one mutation
+may exercise only one of several assertions the deleted test carried.
+Under the `scripts/mutate-lib.sh` convention this is the attribution
+rule already enforced for a cell: a count of failures is not a kill, the
+NAMED target must be among the failing tests
+(`mutation_verdict_for_target` over the `go test -json` names), and
+where the reason matters its own output must carry the expected message
+(`mutation_verdict_for_message`), or the verdict is not `KILLED`.
+Worked example: a deleted test asserted both that an out-of-range port
+is rejected and that the error names the field. A mutation that accepts
+the port exercises only the first assertion, so the subsuming test going
+red on it inherits that half and no more; it must also be shown red on a
+second mutation that still rejects the port but drops the field name
+from the error. If it stays green on the second, it does not subsume
+the deleted test — however convincingly it kills the first — and the
+deletion does not land.
 
 `git diff --stat` alone also **understates** a change: a new file that is not
 yet `git add`ed is invisible to it. A lane landing #8993 had two new files and
