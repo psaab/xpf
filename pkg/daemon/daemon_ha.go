@@ -54,6 +54,29 @@ func (d *Daemon) getOrCreateRGState(rgID int) *rgStateMachine {
 	return s
 }
 
+// forEachRGState visits every rgStateMachine registered at call time
+// (#16124). It snapshots the state pointers under rgStatesMu, releases the
+// lock, and only then invokes fn — so fn may safely call back into Daemon
+// methods that take rgStatesMu (e.g. getOrCreateRGState) without
+// self-deadlocking, and states created during the visit are not visited
+// until the next call. Callers are periodic reconcile/hold mirrors, not
+// the packet path, so the one snapshot slice per call is not hot.
+func (d *Daemon) forEachRGState(fn func(rgID int, s *rgStateMachine)) {
+	type entry struct {
+		id int
+		s  *rgStateMachine
+	}
+	d.rgStatesMu.RLock()
+	entries := make([]entry, 0, len(d.rgStates))
+	for id, s := range d.rgStates {
+		entries = append(entries, entry{id, s})
+	}
+	d.rgStatesMu.RUnlock()
+	for _, e := range entries {
+		fn(e.id, e.s)
+	}
+}
+
 // syncRGKernelUpgradeHold mirrors the cluster kernel-upgrade hold onto
 // every rgStateMachine and the VRRP manager (#14404). Callers: daemon
 // bringup (after holdSecondaryIfKernelCandidateArmed, before instances are
@@ -75,15 +98,9 @@ func (d *Daemon) getOrCreateRGState(rgID int) *rgStateMachine {
 // is a no-op there. Nil-safe for minimal daemon constructions.
 func (d *Daemon) syncRGSyncHold() {
 	held := d.vrrpMgr != nil && d.vrrpMgr.InSyncHold()
-	d.rgStatesMu.RLock()
-	states := make([]*rgStateMachine, 0, len(d.rgStates))
-	for _, s := range d.rgStates {
-		states = append(states, s)
-	}
-	d.rgStatesMu.RUnlock()
-	for _, s := range states {
+	d.forEachRGState(func(_ int, s *rgStateMachine) {
 		s.SetSyncHold(held)
-	}
+	})
 }
 
 func (d *Daemon) syncRGKernelUpgradeHold() {
@@ -91,15 +108,9 @@ func (d *Daemon) syncRGKernelUpgradeHold() {
 	if d.vrrpMgr != nil {
 		d.vrrpMgr.SetKernelUpgradeHold(held)
 	}
-	d.rgStatesMu.RLock()
-	states := make([]*rgStateMachine, 0, len(d.rgStates))
-	for _, s := range d.rgStates {
-		states = append(states, s)
-	}
-	d.rgStatesMu.RUnlock()
-	for _, s := range states {
+	d.forEachRGState(func(_ int, s *rgStateMachine) {
 		s.SetKernelUpgradeHold(held)
-	}
+	})
 }
 
 func (d *Daemon) syncRGStrictVIPOwnershipMode(cc *config.ClusterConfig) {
@@ -292,71 +303,19 @@ func (d *Daemon) waitLocalFailoverCommitReady(rgIDs []int) error {
 	}
 }
 
-// failoverActuation is the fence-completion barrier armed before a
-// remote-requested transfer-out. done is closed exactly once, when the local
-// demotion has been RESOLVED; err is the verdict (nil = the demotion actually
-// actuated, non-nil = it did not) and is written under failoverActuateMu before
-// done is closed, so every observer of the close also observes the verdict.
-type failoverActuation struct {
-	done     chan struct{}
-	resolved bool
-	err      error
-}
+// Daemon failover-actuation wrappers (#16124). The barriers themselves live
+// in failoverActuationRegistry (daemon_ha_actuation_registry.go); these keep
+// the call sites handleClusterEvent, awaitRethVIPRelease, and the session-sync
+// closures name while delegating to the one registry the Daemon owns. VIP
+// resign (resignRethRG / awaitRethVIPRelease) deliberately stays on Daemon:
+// it reaches resignRethRGFn/vrrpMgr, which are not actuation-registry state.
 
-// failoverActuationKey identifies ONE transfer-out request: the redundancy
-// group plus the request id the peer minted for it (SessionSync.failoverSeq).
-// Keying the barrier map on the REQUEST rather than on the RG alone is what
-// makes a stale cycle harmless — an older request's disarm, or the disarm its
-// expired wait performs, can only ever remove its own entry and never the
-// barrier a newer request for the same RG is about to block on (#6177).
-// A peer that sends no request id supplies 0, which degrades to exactly the
-// pre-#6177 one-slot-per-RG behaviour rather than failing.
-type failoverActuationKey struct {
-	rgID  int
-	reqID uint64
-}
-
-// armFailoverActuation registers a fence-completion barrier for (rgID, reqID)
-// before a remote-requested transfer-out enqueues its async demotion event. It
-// MUST be called before cluster.ManualFailover so the demotion actuation
-// (watchClusterEvents -> signalFailoverActuated) cannot close-and-forget the
-// barrier before waitFailoverActuated observes it. It returns the barrier so
-// the caller can hand the same instance back to disarmFailoverActuation: the
-// map slot is the request's, but the identity check is what keeps a superseded
-// handle from evicting a live one (#6177).
 func (d *Daemon) armFailoverActuation(rgID int, reqID uint64) *failoverActuation {
-	b := &failoverActuation{done: make(chan struct{})}
-	d.failoverActuateMu.Lock()
-	if d.failoverActuateWait == nil {
-		d.failoverActuateWait = make(map[failoverActuationKey]*failoverActuation)
-	}
-	d.failoverActuateWait[failoverActuationKey{rgID: rgID, reqID: reqID}] = b
-	d.failoverActuateMu.Unlock()
-	return b
+	return d.failoverActuations.arm(rgID, reqID)
 }
 
-// disarmFailoverActuation drops a barrier that will never be actuated — used
-// when ManualFailover fails to enqueue the demotion (no event will ever fire),
-// and by waitFailoverActuated when its bounded wait expires. It does NOT close
-// the channel: on the ManualFailover-error path no waiter can be blocked on it
-// because the applied-ack path is not reached, and on the timeout path the
-// waiter has already given up.
-//
-// b is the barrier the caller armed. The entry is removed only when it is
-// still THAT barrier: a handle that has already been superseded by a re-arm
-// must not evict the live one, which would leave the newer request's wait
-// reading an empty slot and reporting the fence as actuated when it was not
-// (#6177). A nil handle disarms nothing.
 func (d *Daemon) disarmFailoverActuation(rgID int, reqID uint64, b *failoverActuation) {
-	if b == nil {
-		return
-	}
-	key := failoverActuationKey{rgID: rgID, reqID: reqID}
-	d.failoverActuateMu.Lock()
-	if d.failoverActuateWait[key] == b {
-		delete(d.failoverActuateWait, key)
-	}
-	d.failoverActuateMu.Unlock()
+	d.failoverActuations.disarm(rgID, reqID, b)
 }
 
 // signalFailoverActuated marks rgID's demotion as actuated (VRRP resigned /
@@ -364,7 +323,7 @@ func (d *Daemon) disarmFailoverActuation(rgID int, reqID uint64, b *failoverActu
 // call for every non-primary cluster event — an unarmed RG simply has no
 // barrier to resolve.
 func (d *Daemon) signalFailoverActuated(rgID int) {
-	d.resolveFailoverActuation(rgID, nil)
+	d.failoverActuations.resolveRG(rgID, nil)
 }
 
 // signalFailoverActuationFailed releases rgID's barrier with a FAILURE verdict:
@@ -377,197 +336,23 @@ func (d *Daemon) signalFailoverActuationFailed(rgID int, cause error) {
 	if cause == nil {
 		cause = fmt.Errorf("redundancy group %d demotion not actuated", rgID)
 	}
-	d.resolveFailoverActuation(rgID, cause)
+	d.failoverActuations.resolveRG(rgID, cause)
 }
 
-// resolveFailoverActuation completes every armed barrier for rgID exactly once
-// with verdict cause (nil = actuated). The demotion event carries no request
-// id, and the fact it reports — this node finished demoting rgID — answers the
-// question every in-flight request for that RG is asking, so the verdict fans
-// out across the RG's entries. It is idempotent: the resolved flag is set under
-// the lock, so a second demotion event for the same RG is a no-op and never
-// double-closes. The verdict is written BEFORE the close, so any goroutine that
-// observes the close also observes the verdict.
-//
-// A resolved barrier is left in the map rather than deleted — waitFailoverActuated
-// consumes it. Deleting here would make a resolution that lands before the
-// waiter arrives read as "never armed", i.e. success, which would throw away
-// exactly the failure verdict this path exists to deliver (#6371).
 func (d *Daemon) resolveFailoverActuation(rgID int, cause error) {
-	d.failoverActuateMu.Lock()
-	var resolved []*failoverActuation
-	for key, b := range d.failoverActuateWait {
-		if key.rgID != rgID || b == nil || b.resolved {
-			continue
-		}
-		b.resolved = true
-		b.err = cause
-		resolved = append(resolved, b)
-	}
-	d.failoverActuateMu.Unlock()
-	for _, b := range resolved {
-		close(b.done)
-	}
+	d.failoverActuations.resolveRG(rgID, cause)
 }
 
-// failFailoverActuation resolves ONE request's barrier with a failure verdict
-// and LEAVES IT IN THE MAP for waitFailoverActuated to consume (#9036).
-//
-// It is the supersede path's replacement for disarmFailoverActuation. Both
-// stop the misleading fence timeout #8000 was fixing; only this one keeps the
-// distinction between "fenced" and "never happened" on the wire, because
-// disarming makes waitFailoverActuated take its `b == nil` arm and return nil,
-// which the ack path cannot tell from a real fence.
-//
-// Per-REQUEST, not per-RG, and that is the difference from
-// resolveFailoverActuation. A demotion EVENT answers a question every in-flight
-// request for the RG is asking, so its verdict fans out. A supersede is a fact
-// about ONE request's generation check; failing a sibling request's barrier
-// with it would discard the identity discipline #6177 exists to enforce.
-//
-// cause must be non-nil — a nil cause is indistinguishable from success, which
-// is the defect this function exists to prevent.
 func (d *Daemon) failFailoverActuation(rgID int, reqID uint64, b *failoverActuation, cause error) {
-	if b == nil || cause == nil {
-		return
-	}
-	key := failoverActuationKey{rgID: rgID, reqID: reqID}
-	d.failoverActuateMu.Lock()
-	fire := d.failoverActuateWait[key] == b && !b.resolved
-	if fire {
-		b.resolved = true
-		b.err = cause
-	}
-	d.failoverActuateMu.Unlock()
-	if fire {
-		close(b.done)
-	}
+	d.failoverActuations.fail(rgID, reqID, b, cause)
 }
 
-// #9259: the two remaining routes into #9036's collapse.
-//
-// #9036's chain was: the barrier is gone -> the wait returns nil -> nil means
-// applied. PR #9247 removed ONE way for the barrier to be gone (supersede, now
-// resolved with ErrFailoverSuperseded). The FINAL link — **absence of a barrier
-// is read as proof of fencing** — was untouched, and two more ways reach it:
-//
-//  1. NEVER ARMED: a (rgID, reqID) for which no barrier was ever registered
-//     here — a duplicate or stale failover request, or a retry across a fabric
-//     blip.
-//  2. VERDICT ALREADY CONSUMED: the first waiter deletes the entry after
-//     reading it, deliberately, so a later wait cannot re-read a stale verdict
-//     (#6177). A second wait for the same request then found an empty slot.
-//
-// Both returned nil, and sync_failover.go sends failoverAckApplied EXACTLY when
-// this returns nil. So the peer promoted on no evidence that this node fenced.
-//
-// Both are now errors, so the ack downgrades to `failed` and the peer HOLDS.
-// The trade is deliberate and asymmetric: holding costs a failover attempt,
-// while the previous default cost the one-owner-per-RG property (#5640).
-//
-// SAFE FOR THE NORMAL PATH, checked rather than assumed. handleRemoteFailover
-// calls WaitFailoverApplied only after OnRemoteFailover returned nil, and that
-// handler arms the barrier BEFORE ManualFailover and disarms it only on the
-// error path — where it returns the error and no wait ever runs. On every path
-// that reaches the wait for a live request, a barrier is armed. The supersede
-// path deliberately leaves a FAILED barrier rather than none, so it is
-// unaffected.
-var (
-	// ErrFailoverNeverArmed: no barrier was ever registered for this request.
-	ErrFailoverNeverArmed = errors.New(
-		"no fence barrier was ever armed for this failover request; nothing here " +
-			"demoted anything, so this node cannot confirm it fenced")
-	// ErrFailoverVerdictConsumed: an earlier waiter already took the verdict.
-	ErrFailoverVerdictConsumed = errors.New(
-		"the fence verdict for this failover request was already consumed by an " +
-			"earlier waiter; a second wait has no evidence of its own")
-)
-
-// failoverConsumedCap bounds the consumed-request ledger.
-//
-// The ledger exists ONLY to tell ErrFailoverVerdictConsumed from
-// ErrFailoverNeverArmed. Both are errors and both downgrade the ack
-// identically, so an eviction degrades the DIAGNOSTIC and never the safety
-// property — a key that has fallen out is reported as never-armed, which is
-// the more conservative of the two readings. Stated because a bounded ledger
-// silently changing an operator-facing reason is the kind of thing that gets
-// discovered during an outage.
-const failoverConsumedCap = 1024
-
-// noteFailoverVerdictConsumed records that this request's verdict was taken.
-// The caller holds failoverActuateMu.
-func (d *Daemon) noteFailoverVerdictConsumedLocked(key failoverActuationKey) {
-	if d.failoverActuateConsumed == nil {
-		d.failoverActuateConsumed = make(map[failoverActuationKey]struct{})
-	}
-	if _, dup := d.failoverActuateConsumed[key]; dup {
-		return
-	}
-	if len(d.failoverActuateConsumedOrder) >= failoverConsumedCap {
-		oldest := d.failoverActuateConsumedOrder[0]
-		d.failoverActuateConsumedOrder = d.failoverActuateConsumedOrder[1:]
-		delete(d.failoverActuateConsumed, oldest)
-	}
-	d.failoverActuateConsumed[key] = struct{}{}
-	d.failoverActuateConsumedOrder = append(d.failoverActuateConsumedOrder, key)
-}
-
-// waitFailoverActuated blocks until the local demotion for the (rgID, reqID)
-// transfer-out has been resolved (barrier closed by signalFailoverActuated /
-// -Failed) or the bounded timeout elapses. A nil barrier means the request was
-// never armed (or an earlier waiter already consumed the verdict) — return
-// immediately. It returns nil only when the demotion actually actuated: a
-// failed actuation surfaces its cause (#6371) and a barrier that never resolves
-// surfaces a timeout. This gates the remote-failover applied-ack so the peer
-// never promotes into a two-owner window (#5640).
 func (d *Daemon) waitFailoverActuated(rgID int, reqID uint64) error {
-	key := failoverActuationKey{rgID: rgID, reqID: reqID}
-	d.failoverActuateMu.Lock()
-	b := d.failoverActuateWait[key]
-	d.failoverActuateMu.Unlock()
-	if b == nil {
-		// #9259: absence of a barrier is NOT proof of fencing. Distinguish the
-		// two ways to get here so the operator-facing reason is the true one;
-		// both downgrade the ack identically.
-		d.failoverActuateMu.Lock()
-		_, consumed := d.failoverActuateConsumed[key]
-		d.failoverActuateMu.Unlock()
-		if consumed {
-			return fmt.Errorf("redundancy group %d request %d: %w", rgID, reqID,
-				ErrFailoverVerdictConsumed)
-		}
-		return fmt.Errorf("redundancy group %d request %d: %w", rgID, reqID,
-			ErrFailoverNeverArmed)
-	}
-	timeout := d.failoverActuateTimeout
-	if timeout <= 0 {
-		timeout = 3 * time.Second
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-b.done:
-		// Consume the resolved barrier: this waiter owns the verdict, and
-		// leaving it behind would let a later wait re-read a stale one.
-		d.failoverActuateMu.Lock()
-		err := b.err
-		if d.failoverActuateWait[key] == b {
-			delete(d.failoverActuateWait, key)
-			// #9259: remember that this request's verdict was taken, so a
-			// second wait reports "already consumed" rather than the
-			// indistinguishable "never armed" — and, before this change,
-			// rather than nil.
-			d.noteFailoverVerdictConsumedLocked(key)
-		}
-		d.failoverActuateMu.Unlock()
-		return err
-	case <-timer.C:
-		// Drop the stranded barrier so a later actuation event does not
-		// close an orphaned channel that no one reads. Identity-checked, so
-		// this expiry cannot disturb another request's live barrier (#6177).
-		d.disarmFailoverActuation(rgID, reqID, b)
-		return fmt.Errorf("timed out waiting for local fence actuation of redundancy group %d", rgID)
-	}
+	return d.failoverActuations.wait(rgID, reqID)
+}
+
+func (d *Daemon) waitFailoverActuatedBatch(rgIDs []int, reqID uint64) error {
+	return d.failoverActuations.waitBatch(rgIDs, reqID)
 }
 
 // vipReleaseBarrier is the completion surface awaitRethVIPRelease waits on:
@@ -602,7 +387,7 @@ func (d *Daemon) resignRethRG(rgID int) vipReleaseBarrier {
 // netlink deletes on the VRRP instance goroutine — sub-millisecond in practice,
 // and the whole RETH failover budget is ~60ms — so anything approaching this
 // bound means the run loop is not making progress (wedged, or retired between
-// the arm and the release). It is deliberately far BELOW failoverActuateTimeout
+// the arm and the release). It is deliberately far BELOW the actuation registry timeout
 // (3s) so the peer-facing verdict names the VIP release as the thing that did
 // not happen instead of surfacing as a generic barrier timeout, and far below
 // the initiator's 20s ack timeout so the ack is a decision, not a hang.
@@ -650,27 +435,6 @@ func (d *Daemon) awaitRethVIPRelease(rgID int, barrier vipReleaseBarrier) {
 			"timed out after %s waiting for redundancy group %d RETH virtual addresses to be released",
 			timeout, rgID))
 	}
-}
-
-// waitFailoverActuatedBatch blocks until every RG in the batch transfer-out
-// reqID has been fenced, or returns the first RG's failure verdict (#5640).
-func (d *Daemon) waitFailoverActuatedBatch(rgIDs []int, reqID uint64) error {
-	for i, rgID := range rgIDs {
-		if err := d.waitFailoverActuated(rgID, reqID); err != nil {
-			// A failure makes the batch unacknowledgeable. Do not wait for
-			// siblings after that point, but release their barriers so a
-			// partially failed batch cannot strand entries in the map.
-			for _, siblingRGID := range rgIDs[i+1:] {
-				key := failoverActuationKey{rgID: siblingRGID, reqID: reqID}
-				d.failoverActuateMu.Lock()
-				b := d.failoverActuateWait[key]
-				d.failoverActuateMu.Unlock()
-				d.disarmFailoverActuation(siblingRGID, reqID, b)
-			}
-			return err
-		}
-	}
-	return nil
 }
 
 // isRethMasterState returns true when ALL VRRP instances for rgID are MASTER.

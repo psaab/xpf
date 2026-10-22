@@ -1679,33 +1679,20 @@ type Daemon struct {
 	// readiness bit flips so the VRRP/direct-ownership side effects that set
 	// the bit have a chance to propagate before the peer finalizes demotion.
 	localFailoverCommitDelay time.Duration
-	// failoverActuateMu guards failoverActuateWait. The map holds, per RG, a
-	// barrier that watchClusterEvents resolves once it has finished ACTUATING
-	// a demotion (VRRP resign to priority-0 / rg_active clear).
+	// failoverActuations owns the failover fence barriers (#16124): the
+	// wait map watchClusterEvents resolves once it has finished ACTUATING
+	// a demotion (VRRP resign to priority-0 / rg_active clear), the
+	// consumed-verdict ledger, and the wait timeout, under one mutex.
 	// armFailoverActuation registers a fresh barrier BEFORE ManualFailover
 	// enqueues the demotion event, so the resolution can never be missed;
-	// waitFailoverActuated blocks the remote-failover applied-ack on it. This
-	// closes the #5640 two-owner window where the peer promoted off an ack
-	// sent before this (old-owner) node had actually resigned. The barrier
-	// carries a verdict, not just a completion: a demotion whose rg_active
-	// clear was REJECTED by the dataplane resolves with that error so the ack
-	// is downgraded rather than reported applied (#6371).
-	failoverActuateMu sync.Mutex
-	// The map is keyed by (RG, peer request id) so a stale request's disarm
-	// or expired wait can never evict a newer request's barrier (#6177).
-	failoverActuateWait map[failoverActuationKey]*failoverActuation
-	// #9259: requests whose verdict a waiter already consumed. Consulted only
-	// to tell ErrFailoverVerdictConsumed from ErrFailoverNeverArmed — both are
-	// errors and downgrade the ack identically, so this ledger affects the
-	// operator-facing REASON and never the safety property. Bounded by
-	// failoverConsumedCap with oldest-out eviction; an evicted key reports as
-	// never-armed, the more conservative reading.
-	failoverActuateConsumed      map[failoverActuationKey]struct{}
-	failoverActuateConsumedOrder []failoverActuationKey
-	// failoverActuateTimeout bounds waitFailoverActuated so a demotion event
-	// that is never actuated (superseded reset, event-channel drop) downgrades
-	// the ack to failed instead of hanging the peer's failover request.
-	failoverActuateTimeout time.Duration
+	// waitFailoverActuated blocks the remote-failover applied-ack on it.
+	// This closes the #5640 two-owner window where the peer promoted off
+	// an ack sent before this (old-owner) node had actually resigned.
+	// The barrier carries a verdict, not just a completion: a demotion
+	// whose rg_active clear was REJECTED by the dataplane resolves with
+	// that error so the ack is downgraded rather than reported applied
+	// (#6371). See daemon_ha_actuation_registry.go.
+	failoverActuations failoverActuationRegistry
 	// rethVIPReleaseTimeout bounds awaitRethVIPRelease — the #6177 item 1 wait
 	// for the RETH VRRP instances to physically remove their virtual addresses
 	// before the remote-failover applied-ack releases. Zero ⇒ the package
@@ -2209,8 +2196,7 @@ func New(opts Options) (*Daemon, error) {
 		localFailoverCommitReady:   make(map[int]bool),
 		localFailoverCommitTimeout: 3 * time.Second,
 		localFailoverCommitDelay:   200 * time.Millisecond,
-		failoverActuateWait:        make(map[failoverActuationKey]*failoverActuation),
-		failoverActuateTimeout:     3 * time.Second,
+		failoverActuations:         *newFailoverActuationRegistry(),
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
 		applySem:                   semaphore.NewWeighted(1),
 	}
