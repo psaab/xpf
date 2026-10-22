@@ -773,3 +773,56 @@ func TestRecvMapResetRace16173(t *testing.T) {
 	}
 	<-done
 }
+
+// Fold-2 explicit expectations: the differential test above proves the
+// families AGREE; this test proves WHAT they agree on at tiny caps, so
+// a family-symmetric regression (both cores wrong the same way) still
+// fails. Expected values captured from the production cores at
+// ceilings 2/3: the sender map holds exactly `ceiling` of ceiling+3
+// stamped keys, each skip (bare + scoped space) counts one overflow,
+// a skip-recorded key's take draws fresh, and a zero-identity resend
+// restores the stamped memo identity verbatim.
+func TestTinyCapExpectedOutcomes16173(t *testing.T) {
+	for _, ceiling := range []int{2, 3} {
+		wantCap := fmt.Sprintf("cap sent:%d recv:%d", ceiling, ceiling)
+
+		got4 := overflowTranscriptV4_16173(tinyCapSync_16173(ceiling), ceiling)
+		got6 := overflowTranscriptV6_16173(tinyCapSync_16173(ceiling), ceiling)
+		want := []string{
+			wantCap,
+			fmt.Sprintf("senderOverflowDelta:6 sentLen:%d", ceiling), // 6 = 3 keys past cap x 2 spaces (bare+scoped) skip-recorded
+			"skipTakeFresh:true",
+			"restore table:7/8 snat:true rule:rule-x",
+		}
+		if len(got4) != len(want) || len(got6) != len(want) {
+			t.Fatalf("ceiling %d: transcript len v4=%d v6=%d want %d", ceiling, len(got4), len(got6), len(want))
+		}
+		for i := range want {
+			if got4[i] != want[i] {
+				t.Errorf("ceiling %d v4 line %d = %q, want %q", ceiling, i, got4[i], want[i])
+			}
+			if got6[i] != want[i] {
+				t.Errorf("ceiling %d v6 line %d = %q, want %q", ceiling, i, got6[i], want[i])
+			}
+		}
+
+		// Receiver-side absolute outcomes from the shared op sequence:
+		// at ceiling 2 exactly one tombstone survives with 9 evictions;
+		// at ceiling 3 two survive with 4. (Measured from the cores;
+		// any cap-accounting change must re-derive and justify these.)
+		v4 := runGuardOpsV4_16173(ceiling)
+		wantTombs := map[int]string{2: "tombs:1 evicted:9 overflow:37", 3: "tombs:2 evicted:4 overflow:7"}[ceiling]
+		found := false
+		for _, line := range v4 {
+			if line == wantTombs {
+				found = true
+			}
+			if len(line) >= 5 && (line[:5] == "BADIX" || line[:6] == "MISSIX") {
+				t.Errorf("ceiling %d: index invariant violated: %s", ceiling, line)
+			}
+		}
+		if !found {
+			t.Errorf("ceiling %d: expected receiver line %q in transcript", ceiling, wantTombs)
+		}
+	}
+}
