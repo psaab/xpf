@@ -24,7 +24,7 @@ func compile15709(t *testing.T, cmds []string) *Config {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected #15709 config: %v", err)
 	}
 	return cfg

@@ -74,7 +74,7 @@ func TestContradictoryDefaultPolicyWithinNode12821(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := SchemaValidate(defaultPolicyTree11821(t, tc.text), nil); err == nil {
+			if err := SchemaValidate(defaultPolicyTree11821(t, tc.text)); err == nil {
 				t.Errorf("SchemaValidate accepted contradictory default-policy within one node")
 			}
 			_, err := CompileConfig(defaultPolicyTree11821(t, tc.text))
@@ -129,7 +129,7 @@ func TestSingleDefaultPolicyWithinNodeControls12821(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.schema {
-				if err := SchemaValidate(defaultPolicyTree11821(t, tc.text), nil); err != nil {
+				if err := SchemaValidate(defaultPolicyTree11821(t, tc.text)); err != nil {
 					t.Fatalf("SchemaValidate rejected control: %v", err)
 				}
 			}

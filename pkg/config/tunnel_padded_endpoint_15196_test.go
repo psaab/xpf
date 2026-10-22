@@ -56,14 +56,14 @@ func TestTunnelPaddedEndpointSchemaGate_15196(t *testing.T) {
 		for _, tc := range padded {
 			sets := tunnelPaddedSets15196(pfx, tc.src, tc.dst)
 			tree := flatTreeFromSets(t, sets...)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Errorf("prefix %q %s (%v): expected SchemaValidate to reject padded endpoint, got nil", pfx, tc.name, sets)
 			}
 		}
 	}
 	// Direct validator cells.
 	for _, v := range []string{" 192.0.2.1 ", " 192.0.2.1", "192.0.2.1 ", "\t192.0.2.1\t", " 2001:db8::1 "} {
-		if err := ValidateTunnelEndpoint(v, nil); err == nil {
+		if err := ValidateTunnelEndpoint(v); err == nil {
 			t.Errorf("ValidateTunnelEndpoint(%q) = nil, want padded rejection", v)
 		}
 	}
@@ -73,14 +73,14 @@ func TestTunnelPaddedEndpointSchemaGate_15196(t *testing.T) {
 		{"2001:db8::1", "2001:db8::2"},
 	} {
 		for _, v := range []string{tc.src, tc.dst} {
-			if err := ValidateTunnelEndpoint(v, nil); err != nil {
+			if err := ValidateTunnelEndpoint(v); err != nil {
 				t.Errorf("control ValidateTunnelEndpoint(%q) = %v, want nil", v, err)
 			}
 		}
 		for _, pfx := range prefixes {
 			sets := tunnelPaddedSets15196(pfx, tc.src, tc.dst)
 			tree := flatTreeFromSets(t, sets...)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Errorf("control prefix %q %v: expected accept, got %v", pfx, sets, err)
 			}
 			if _, err := CompileConfig(tree); err != nil {
@@ -90,19 +90,19 @@ func TestTunnelPaddedEndpointSchemaGate_15196(t *testing.T) {
 	}
 	// Non-IP garbage and prefix forms still rejected by the wrapped validator.
 	for _, v := range []string{"not.an.ip", "192.0.2.1/24", ""} {
-		if err := ValidateTunnelEndpoint(v, nil); err == nil {
+		if err := ValidateTunnelEndpoint(v); err == nil {
 			t.Errorf("ValidateTunnelEndpoint(%q) = nil, want error", v)
 		}
 	}
 	// Error names the padded value so the operator sees what to fix.
 	tree := flatTreeFromSets(t, tunnelPaddedSets15196("", " 192.0.2.1 ", "192.0.2.2")...)
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), " 192.0.2.1 ") {
 		t.Errorf("padded tunnel source error must name the value, got %v", err)
 	}
 	// The generic ValidateIPAddress keeps its prior trimmed leniency for
 	// its many non-tunnel leaves: this fix is scoped to the tunnel leaves.
-	if err := ValidateIPAddress(" 192.0.2.1 ", nil); err != nil {
+	if err := ValidateIPAddress(" 192.0.2.1 "); err != nil {
 		t.Errorf("ValidateIPAddress padded = %v, want nil (scoped fix; other leaves unchanged)", err)
 	}
 }
@@ -112,12 +112,12 @@ func TestTunnelPaddedEndpointSchemaGate_15196(t *testing.T) {
 func TestTunnelPaddedEndpointHierarchical_15196(t *testing.T) {
 	bad := "interfaces { gr-0/0/0 { tunnel { source \" 192.0.2.1 \"; destination 192.0.2.2; mode gre; } unit 0 { family { inet { address 10.1.0.1/30; } } } } }"
 	tree := hierTree(t, bad)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("hierarchical padded tunnel source: expected SchemaValidate rejection, got nil")
 	}
 	good := "interfaces { gr-0/0/0 { tunnel { source 192.0.2.1; destination 192.0.2.2; mode gre; } unit 0 { family { inet { address 10.1.0.1/30; } } } } }"
 	tree = hierTree(t, good)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("hierarchical bare tunnel control: expected accept, got %v", err)
 	}
 }

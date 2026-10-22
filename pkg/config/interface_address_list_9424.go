@@ -126,7 +126,7 @@ func unitAddressInstances(afNode *Node, family string) (addrs []addressListInsta
 		if schema == nil || schema.keyValidator == nil {
 			return false
 		}
-		return schema.keyValidator(tok, nil) == nil
+		return schema.keyValidator(tok) == nil
 	}
 	isSubStatement := func(tok string) bool {
 		if schema == nil {

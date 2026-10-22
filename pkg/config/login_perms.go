@@ -87,7 +87,7 @@ func LoginUserClass(cfg *Config, name string) (string, bool) {
 	if cfg == nil || cfg.System.Login == nil || name == "" {
 		return "", false
 	}
-	if err := ValidateLoginUsername(name, nil); err != nil {
+	if err := ValidateLoginUsername(name); err != nil {
 		return "", false
 	}
 	for _, u := range cfg.System.Login.Users {

@@ -26,7 +26,7 @@ import (
 // "base.unit"-shaped name) and returns "" — the exact silent audit-source-IP
 // loss #3349 set out to close, just reached via an out-of-range unit instead
 // of a non-numeric one.
-func ValidateSyslogSourceInterface(raw string, _ *Config) error {
+func ValidateSyslogSourceInterface(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an interface name, e.g. ge-0-0-0 or reth1.100)")

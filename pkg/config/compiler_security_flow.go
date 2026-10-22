@@ -14,7 +14,7 @@ import (
 // (pkg/config cannot import pkg/appid), and additionally rejects "0": HOPOPT
 // is resolvable in the SSOT but proto 0 cannot be distinguished from "any" by
 // the trace writer's presence-based selector, so accepting it would widen.
-func validateFlowTraceProtocol15679(raw string, _ *Config) error {
+func validateFlowTraceProtocol15679(raw string) error {
 	if raw == "" || raw == "0" || !filterProtocolResolvable(raw) {
 		return fmt.Errorf("invalid protocol %q (expected a protocol name like tcp/udp/icmp/ospf/gre or a number 1..255)", raw)
 	}
@@ -607,7 +607,7 @@ func checkTCPMSSKind(node *Node, nodePath string, lenient bool) ([]string, error
 	} else if len(w) > 0 {
 		return w, nil
 	}
-	if err := ValidateInteger(MinTCPMSS, maxWireU16)(tok, nil); err != nil {
+	if err := ValidateInteger(MinTCPMSS, maxWireU16)(tok); err != nil {
 		msg := fmt.Sprintf("%s: invalid tcp-mss value: %v", nodePath, err)
 		if !lenient {
 			return nil, fmt.Errorf("%s", msg)

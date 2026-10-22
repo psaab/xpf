@@ -157,7 +157,7 @@ func slotEscapeCommitSet(cmds []string) error {
 			return err
 		}
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		return err
 	}
 	_, err := CompileConfig(tree)
@@ -181,7 +181,7 @@ func slotEscapeCommitBrace(body string) error {
 			return err
 		}
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		return err
 	}
 	_, err := CompileConfig(tree)

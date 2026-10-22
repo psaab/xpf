@@ -113,7 +113,7 @@ func TestRipGroupRefusesUndeclaredStatements9151(t *testing.T) {
 					t.Fatalf("SetPath: %v", err)
 				}
 			}
-			err := SchemaValidateWithDefinitions(tr, tr, nil)
+			err := SchemaValidateWithDefinitions(tr, tr)
 			if (err == nil) != tc.accept {
 				t.Fatalf("commit gate accepted=%v, want %v (err=%v)", err == nil, tc.accept, err)
 			}
@@ -166,7 +166,7 @@ func TestRipGroupMultiLeafStillAbsorbs9151(t *testing.T) {
 	if err := tr.SetPath(toks); err != nil {
 		t.Fatal(err)
 	}
-	if err := SchemaValidateWithDefinitions(tr, tr, nil); err != nil {
+	if err := SchemaValidateWithDefinitions(tr, tr); err != nil {
 		t.Skipf("the multi-leaf absorption residual is now REFUSED (%v) — good news. "+
 			"Delete this cell and the note on the issue it pins.", err)
 	}

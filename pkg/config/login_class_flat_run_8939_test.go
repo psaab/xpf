@@ -181,14 +181,12 @@ func TestLoginClassRegexpsRefusalStillBypassed8939(t *testing.T) {
 
 	// The refusal exists and fires on its own line. If THIS stops rejecting,
 	// #7971 has regressed and the comparison below means nothing.
-	if err := SchemaValidateWithDefinitions(
-		mk(b+`allow-commands-regexps "b"`), nil, nil); err == nil {
+	if err := SchemaValidateWithDefinitions(mk(b+`allow-commands-regexps "b"`), nil); err == nil {
 		t.Fatal("#7971 no longer refuses a bare `allow-commands-regexps`; the " +
 			"bypass measurement below has lost its reference arm")
 	}
 
-	if err := SchemaValidateWithDefinitions(
-		mk(b+`allow-commands "a" allow-commands-regexps "b"`), nil, nil); err != nil {
+	if err := SchemaValidateWithDefinitions(mk(b+`allow-commands "a" allow-commands-regexps "b"`), nil); err != nil {
 		t.Logf("the #7971 refusal now fires on the PACKED spelling too (%v). "+
 			"That is a FIX: delete this cell and the note in docs/log/8939.md.", err)
 	}

@@ -88,7 +88,7 @@ func TestDynamicAddressFeedServerPackedFlatRunStrict10337(t *testing.T) {
 			if err := tree.SetPath(path); err != nil {
 				t.Fatalf("SetPath(%q): %v", tc.line, err)
 			}
-			err = SchemaValidate(tree, nil)
+			err = SchemaValidate(tree)
 			if tc.wantOK {
 				if err != nil {
 					t.Fatalf("declared feed-server flat run was rejected: %v", err)

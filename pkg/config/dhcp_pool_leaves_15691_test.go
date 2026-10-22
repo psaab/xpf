@@ -295,7 +295,7 @@ func TestDHCPPoolLeavesSchemaValidated15691(t *testing.T) {
 			tree := flatTreeFromSets(t,
 				"set system services dhcp-local-server group g1 interface ge-0/0/1.0",
 				p+" subnet 10.0.1.0/24", tc.line)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Errorf("%s: SchemaValidate accepted %q", tc.name, tc.line)
 			}
 		})
@@ -308,7 +308,7 @@ func TestDHCPPoolLeavesSchemaValidated15691(t *testing.T) {
 		p+" router 10.0.1.1",
 		p+" lease-time 3600",
 		p+" domain-name example.local")
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Errorf("control: SchemaValidate rejected valid pool leaves: %v", err)
 	}
 }

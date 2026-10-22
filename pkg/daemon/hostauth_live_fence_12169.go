@@ -134,7 +134,7 @@ func (d *Daemon) settleStaleRootPassword12169() error {
 // xpf-<user> sudo grant: a declared super-user with a committable name,
 // mirroring reconcileSudoers' own desire rule.
 func (d *Daemon) liveDesiredSudoersGrant12169(user string) bool {
-	if err := config.ValidateLoginUsername(user, nil); err != nil {
+	if err := config.ValidateLoginUsername(user); err != nil {
 		return false
 	}
 	u, ok := d.liveDesiredLoginUser12169(user)

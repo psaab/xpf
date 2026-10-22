@@ -109,5 +109,5 @@ func strictAdmitsLeafRun9156(runText string) bool {
 	if len(errs) > 0 {
 		return false
 	}
-	return SchemaValidateWithDefinitions(tree, tree, nil) == nil
+	return SchemaValidateWithDefinitions(tree, tree) == nil
 }

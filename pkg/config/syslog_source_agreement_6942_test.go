@@ -101,7 +101,7 @@ func TestResolverAndValidatorAgree6942(t *testing.T) {
 	}
 	rejected := 0
 	for _, in := range cases {
-		verr := ValidateSyslogSourceInterface(in, cfg)
+		verr := ValidateSyslogSourceInterface(in)
 		got := ResolveSyslogSourceAddr(cfg, in)
 		if verr == nil {
 			continue

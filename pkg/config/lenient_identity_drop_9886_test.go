@@ -95,7 +95,7 @@ func TestStrictDirectCompileRejectsMultiPatternMember_9886(t *testing.T) {
 	// Control: the commit path still rejects via the schema gate first.
 	if serr := SchemaValidate(parseHier9886(t, `interfaces {
   "ge 0" { unit 0 { family inet { address 10.0.0.1/24; } } }
-}`), nil); serr == nil || !strings.Contains(serr.Error(), "whitespace") {
+}`)); serr == nil || !strings.Contains(serr.Error(), "whitespace") {
 		t.Fatalf("SchemaValidate must still reject the spaced name first, got %v", serr)
 	}
 }
@@ -372,7 +372,7 @@ func TestStrictDirectCompileRejectsUnsafeDeviceMapEntry_9886(t *testing.T) {
   device-map {
     interface "ge 0" { pci 0000:09:00.0; }
   }
-}`), nil); serr == nil {
+}`)); serr == nil {
 		t.Fatal("SchemaValidate must still reject the spaced logical name first (control)")
 	}
 }
@@ -477,7 +477,7 @@ func TestStrictDirectCompileRejectsUnsafeFabricRef_9886(t *testing.T) {
 	// The schema has no validator on these values, so it passes — documenting
 	// the hole this gate closes rather than asserting on it would rot; assert
 	// the pass so a future schema validator visibly changes this contract.
-	if err := SchemaValidate(parseHier9886(t, text), nil); err != nil {
+	if err := SchemaValidate(parseHier9886(t, text)); err != nil {
 		t.Fatalf("SchemaValidate unexpectedly rejects member-interfaces values: %v", err)
 	}
 }

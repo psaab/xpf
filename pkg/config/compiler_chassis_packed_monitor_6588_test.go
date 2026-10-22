@@ -447,7 +447,7 @@ func TestChassisPackedShapeBypassesSchemaWalk_6588(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate unexpectedly saw the packed statement (%v) — if the typed "+
 			"leaf now reaches it, the compiled-int gate's rationale needs revisiting", err)
 	}
@@ -1095,7 +1095,7 @@ func TestChassisRGNoArgStatementTrailingTokensRejected_6588(t *testing.T) {
 	// runs on the AST rather than as a typed leaf.
 	t.Run("SchemaValidateCannotSeeIt", func(t *testing.T) {
 		tree := flatMonitorTree(t, "set chassis cluster redundancy-group 1 preempt delay 5")
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate unexpectedly rejected it (%v) — if the schema now covers "+
 				"this, the AST gate's rationale needs revisiting", err)
 		}

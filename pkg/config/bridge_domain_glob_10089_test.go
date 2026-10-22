@@ -23,7 +23,7 @@ func TestBridgeDomainNameRejectsGlobMetacharacters_10089(t *testing.T) {
 			if err := tr.SetPath(path); err != nil {
 				t.Fatalf("setpath: %v", err)
 			}
-			err = SchemaValidate(tr, nil)
+			err = SchemaValidate(tr)
 			if err == nil {
 				t.Fatal("#10089: bridge-domain glob must be rejected at strict validation")
 			}
@@ -43,7 +43,7 @@ func TestBridgeDomainNameRejectsGlobMetacharacters_10089(t *testing.T) {
 	if err := plainTree.SetPath(plain); err != nil {
 		t.Fatalf("plain setpath: %v", err)
 	}
-	if err := SchemaValidate(plainTree, nil); err != nil {
+	if err := SchemaValidate(plainTree); err != nil {
 		t.Fatalf("#10089: valid bridge-domain name must remain accepted: %v", err)
 	}
 }
@@ -57,7 +57,7 @@ func TestBridgeDomainNameWhitespaceStays9494_10089(t *testing.T) {
 	if err := tr.SetPath(path); err != nil {
 		t.Fatalf("setpath: %v", err)
 	}
-	err = SchemaValidate(tr, nil)
+	err = SchemaValidate(tr)
 	if err == nil || !strings.Contains(err.Error(), "whitespace") {
 		t.Fatalf("#9494: whitespace bridge-domain name must remain rejected as whitespace, got %v", err)
 	}

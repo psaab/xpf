@@ -26,7 +26,7 @@ func FRRSingleToken(s string) bool {
 // community name that FRR can render as a single token. Only whitespace and
 // control bytes are refused: FRR's WORD token takes any other character, and
 // narrowing it further would refuse names this product already accepts.
-func ValidateFRRObjectName(raw string, _ *Config) error {
+func ValidateFRRObjectName(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing name")
 	}
@@ -41,7 +41,7 @@ func ValidateFRRObjectName(raw string, _ *Config) error {
 // ValidateOSPFVirtualLinkNeighbor accepts an OSPF virtual-link neighbor router
 // ID: an IPv4 dotted-quad, which is the only form FRR's `area A virtual-link
 // A.B.C.D` accepts.
-func ValidateOSPFVirtualLinkNeighbor(raw string, _ *Config) error {
+func ValidateOSPFVirtualLinkNeighbor(raw string) error {
 	if ip := net.ParseIP(raw); ip == nil || ip.To4() == nil {
 		return fmt.Errorf("virtual-link neighbor %q is not an IPv4 router ID (a dotted-quad such as 10.0.0.1)", raw)
 	}
@@ -73,7 +73,7 @@ func ValidISISNET(s string) bool {
 }
 
 // ValidateISISNET is the commit-time form of ValidISISNET.
-func ValidateISISNET(raw string, _ *Config) error {
+func ValidateISISNET(raw string) error {
 	if !ValidISISNET(raw) {
 		return fmt.Errorf("IS-IS NET %q is not a valid NET (hex octets in dot-separated groups, "+
 			"8 to 20 octets, e.g. 49.0001.1921.6800.1001.00)", raw)
@@ -85,9 +85,9 @@ func ValidateISISNET(raw string, _ *Config) error {
 // position: the name (arg 0) is rendered as an FRR access-list name and must be
 // one token. The regex (arg 1) is a rest-of-line operand FRR accepts with
 // spaces, and the Junos translation gate already covers it, so it is not re-checked here.
-func ValidateASPathNameArg(argIdx int, raw string, cfg *Config) error {
+func ValidateASPathNameArg(argIdx int, raw string) error {
 	if argIdx == 0 {
-		return ValidateFRRObjectName(raw, cfg)
+		return ValidateFRRObjectName(raw)
 	}
 	return nil
 }

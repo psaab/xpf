@@ -31,7 +31,7 @@ func compileTreeFromSet(t *testing.T, lines []string) *Config {
 		t.Fatalf("CompileConfig: %v", err)
 	}
 	// The knobs must also pass strict schema validation (typed leaves).
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the interface parity knobs: %v", err)
 	}
 	return cfg

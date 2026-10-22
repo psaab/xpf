@@ -131,7 +131,7 @@ var schemaSchedulers = &schemaNode{
 
 func validateSchedulerTimePair12637(tokens []string, _ [][]string) error {
 	if len(tokens) == 1 {
-		return ValidateTimeOfDay(tokens[0], nil)
+		return ValidateTimeOfDay(tokens[0])
 	}
 	if len(tokens) < 2 || tokens[1] != "stop-time" {
 		if len(tokens) > 1 {
@@ -142,10 +142,10 @@ func validateSchedulerTimePair12637(tokens []string, _ [][]string) error {
 	if len(tokens) == 2 {
 		return fmt.Errorf("stop-time: missing value")
 	}
-	if err := ValidateTimeOfDay(tokens[0], nil); err != nil {
+	if err := ValidateTimeOfDay(tokens[0]); err != nil {
 		return err
 	}
-	if err := ValidateTimeOfDay(tokens[2], nil); err != nil {
+	if err := ValidateTimeOfDay(tokens[2]); err != nil {
 		return fmt.Errorf("stop-time: %w", err)
 	}
 	if len(tokens) > 3 {
@@ -156,7 +156,7 @@ func validateSchedulerTimePair12637(tokens []string, _ [][]string) error {
 
 func validateSchedulerDatePair12637(tokens []string, _ [][]string) error {
 	if len(tokens) == 1 {
-		return ValidateDate(tokens[0], nil)
+		return ValidateDate(tokens[0])
 	}
 	if len(tokens) < 2 || tokens[1] != "stop-date" {
 		if len(tokens) > 1 {
@@ -167,10 +167,10 @@ func validateSchedulerDatePair12637(tokens []string, _ [][]string) error {
 	if len(tokens) == 2 {
 		return fmt.Errorf("stop-date: missing value")
 	}
-	if err := ValidateDate(tokens[0], nil); err != nil {
+	if err := ValidateDate(tokens[0]); err != nil {
 		return err
 	}
-	if err := ValidateDate(tokens[2], nil); err != nil {
+	if err := ValidateDate(tokens[2]); err != nil {
 		return fmt.Errorf("stop-date: %w", err)
 	}
 	if len(tokens) > 3 {

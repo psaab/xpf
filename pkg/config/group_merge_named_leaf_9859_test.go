@@ -14,7 +14,7 @@ func compileSchedulers9859(t *testing.T, text string) map[string]*CoSScheduler {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	if cfg.ClassOfService == nil {
@@ -740,7 +740,7 @@ func TestGroupBracketedAddressUnion9859(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CompileConfig: %v", err)
 		}
-		if err := SchemaValidate(tree, cfg); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate: %v", err)
 		}
 		unit := cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0]

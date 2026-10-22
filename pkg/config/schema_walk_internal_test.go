@@ -112,7 +112,7 @@ func runMultiValueNoRange(t *testing.T, leafKeys []string) error {
 		args:      1,
 		multi:     true,
 		valueType: ValueIdentifier,
-		validator: func(raw string, _ *Config) error {
+		validator: func(raw string) error {
 			if raw == "" {
 				return fmt.Errorf("empty value")
 			}

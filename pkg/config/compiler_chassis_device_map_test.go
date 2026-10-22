@@ -220,7 +220,7 @@ func TestDeviceMapPCIAddrValidatorRejectsGarbage(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set chassis device-map interface ge-0/0/3 pci not-a-pci-addr",
 	})
-	if err := SchemaValidate(treeToConfigTree(t, tree), nil); err == nil {
+	if err := SchemaValidate(treeToConfigTree(t, tree)); err == nil {
 		t.Fatalf("want PCI-format schema validation error")
 	}
 }

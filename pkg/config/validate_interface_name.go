@@ -75,7 +75,7 @@ func interfaceNameAllowed(c byte) bool {
 // this repo; the legal shape of an interface name is narrow and known, so
 // stating it positively is both shorter and closed against a consumer nobody
 // has thought of yet.
-func ValidateInterfaceName(raw string, _ *Config) error {
+func ValidateInterfaceName(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("interface name must not be empty")
 	}

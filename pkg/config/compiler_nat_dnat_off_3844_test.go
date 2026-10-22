@@ -27,7 +27,7 @@ func TestDNATDestinationOffCompilesExemption(t *testing.T) {
 	}
 	// The token is a valid config leaf (it was already accepted at commit; the
 	// bug was that it compiled to nothing, not that it was rejected).
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected `then destination-nat off`: %v", err)
 	}
 	if len(cfg.Security.NAT.Destination.RuleSets) != 1 {

@@ -35,7 +35,7 @@ func parse15270(t *testing.T, text string) *config.ConfigTree {
 
 func TestReferenceStanza15270(t *testing.T) {
 	tree := parse15270(t, reference15270)
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate(reference): %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -74,7 +74,7 @@ func TestReferenceStanza15270(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", line, err)
 		}
 	}
-	if err := config.SchemaValidate(tree2, nil); err != nil {
+	if err := config.SchemaValidate(tree2); err != nil {
 		t.Fatalf("SchemaValidate(round-trip): %v\n%s", err, out)
 	}
 	cfg2, err := config.CompileConfig(tree2)
@@ -104,7 +104,7 @@ func TestInvalid15270(t *testing.T) {
 	for name, text := range cases {
 		t.Run(name, func(t *testing.T) {
 			tree := parse15270(t, text)
-			schemaErr := config.SchemaValidate(tree, nil)
+			schemaErr := config.SchemaValidate(tree)
 			_, compileErr := config.CompileConfig(tree)
 			if schemaErr == nil && compileErr == nil {
 				t.Fatalf("expected rejection, got nil (schema & compile)")
@@ -118,7 +118,7 @@ func TestInvalid15270(t *testing.T) {
 		path, _ := config.ParseSetCommand(cmd)
 		_ = tree.SetPath(path)
 	}
-	if err := config.SchemaValidate(tree, nil); err == nil {
+	if err := config.SchemaValidate(tree); err == nil {
 		t.Fatalf("flat bad global source-address accepted")
 	}
 }
@@ -126,7 +126,7 @@ func TestInvalid15270(t *testing.T) {
 func TestControls15270(t *testing.T) {
 	// flat host, direct port, per-stream source-address unchanged
 	tree := parse15270(t, `security { log { stream s { host 192.0.2.1; port 5514; source-address 10.0.0.5; } } }`)
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("flat control schema: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -142,7 +142,7 @@ func TestControls15270(t *testing.T) {
 	}
 	// hostname braced host
 	tree = parse15270(t, `security { log { stream s { host { logs.example.net; port 5514; } } } }`)
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("hostname braced schema: %v", err)
 	}
 	cfg, err = config.CompileConfig(tree)

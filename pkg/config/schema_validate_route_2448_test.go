@@ -137,16 +137,16 @@ func TestSchema2448_NextHop_RejectsBadV6(t *testing.T) {
 func TestSchema2448_ValidateStaticNextHop_AtSpec(t *testing.T) {
 	// Bad IP before '@' must be rejected (would silently degrade to
 	// interface-only in the FIB); a valid ip@iface / @iface is accepted.
-	if err := config.ValidateStaticNextHop("notanip@eth0", nil); err == nil {
+	if err := config.ValidateStaticNextHop("notanip@eth0"); err == nil {
 		t.Fatal("expected error for notanip@eth0, got nil")
 	}
-	if err := config.ValidateStaticNextHop("10.0.0.1@ge-0-0-0.0", nil); err != nil {
+	if err := config.ValidateStaticNextHop("10.0.0.1@ge-0-0-0.0"); err != nil {
 		t.Fatalf("unexpected error for 10.0.0.1@ge-0-0-0.0: %v", err)
 	}
-	if err := config.ValidateStaticNextHop("@reth0.50", nil); err != nil {
+	if err := config.ValidateStaticNextHop("@reth0.50"); err != nil {
 		t.Fatalf("unexpected error for @reth0.50: %v", err)
 	}
-	if err := config.ValidateStaticNextHop("10.0.0.1@", nil); err == nil {
+	if err := config.ValidateStaticNextHop("10.0.0.1@"); err == nil {
 		t.Fatal("expected error for trailing '@' with no interface, got nil")
 	}
 }
@@ -172,7 +172,7 @@ func TestStaticNextHop_ZoneIDPercentRejected_4423(t *testing.T) {
 		"fe80::1%reth0.50",     // sub-interface zone-id
 		"192.168.1.1%ge-0-0-0", // v4 with a stray '%' — also not a real form
 	} {
-		if err := config.ValidateStaticNextHop(nh, nil); err == nil {
+		if err := config.ValidateStaticNextHop(nh); err == nil {
 			t.Fatalf("ValidateStaticNextHop(%q) accepted an RFC-4007 zone-id form; "+
 				"xpf is Junos-syntax and expects `next-hop <ll> interface <if>`, "+
 				"not the Linux %%iface convention", nh)
@@ -180,7 +180,7 @@ func TestStaticNextHop_ZoneIDPercentRejected_4423(t *testing.T) {
 	}
 	// The correct Junos link-local spelling and the internal @iface encoding
 	// stay accepted — the rejection above must not over-reach.
-	if err := config.ValidateStaticNextHop("fe80::1@reth0.50", nil); err != nil {
+	if err := config.ValidateStaticNextHop("fe80::1@reth0.50"); err != nil {
 		t.Fatalf("Junos-encoded link-local next-hop fe80::1@reth0.50 must be accepted: %v", err)
 	}
 }

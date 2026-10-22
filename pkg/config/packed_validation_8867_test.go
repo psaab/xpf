@@ -61,9 +61,9 @@ func TestPackedSpellingIsValidated8867(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("fixture does not parse (%q): %v", text, perrs[0])
 		}
-		cfg, _ := CompileConfigLenient(tree)
+		_, _ = CompileConfigLenient(tree)
 		tree2, _ := NewParser(text).Parse()
-		return SchemaValidate(tree2, cfg)
+		return SchemaValidate(tree2)
 	}
 
 	for _, c := range packedValidationCases8867() {
@@ -100,7 +100,7 @@ func TestValidationDoesNotMutateCallerTree8867(t *testing.T) {
 	if !strings.Contains(before, "schedulers be transmit-rate") {
 		t.Fatalf("fixture is not packed as intended: %q", before)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("valid packed statement rejected: %v", err)
 	}
 	if after := tree.Format(); after != before {
@@ -158,9 +158,9 @@ func TestCrossReferenceValidatorUnaffectedByFolding8867(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("fixture does not parse: %v", perrs[0])
 		}
-		cfg, _ := CompileConfigLenient(tree)
+		_, _ = CompileConfigLenient(tree)
 		tree2, _ := NewParser(text).Parse()
-		return SchemaValidate(tree2, cfg) != nil
+		return SchemaValidate(tree2) != nil
 	}
 
 	// LIVE CONTROL: with no definition anywhere, the reference MUST reject.

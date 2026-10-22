@@ -216,15 +216,15 @@ func TestApplicationSymbolicICMPRejectedControls_15198(t *testing.T) {
 // used because the typed-leaf walk reaches sibling leaves there.
 func TestApplicationSymbolicICMPSchema_15198(t *testing.T) {
 	good := hierTree(t, "applications {\n    application a {\n        protocol icmp; icmp-type echo-request; icmp-code 0;\n    }\n}\n")
-	if err := SchemaValidate(good, nil); err != nil {
+	if err := SchemaValidate(good); err != nil {
 		t.Fatalf("SchemaValidate must accept symbolic icmp-type: %v", err)
 	}
 	badType := hierTree(t, "applications {\n    application a {\n        protocol icmp; icmp-type frobnicate;\n    }\n}\n")
-	if err := SchemaValidate(badType, nil); err == nil {
+	if err := SchemaValidate(badType); err == nil {
 		t.Fatal("SchemaValidate must reject unknown icmp-type frobnicate")
 	}
 	badCode := hierTree(t, "applications {\n    application a {\n        protocol icmp; icmp-type 8; icmp-code frobnicate;\n    }\n}\n")
-	if err := SchemaValidate(badCode, nil); err == nil {
+	if err := SchemaValidate(badCode); err == nil {
 		t.Fatal("SchemaValidate must reject symbolic icmp-code frobnicate")
 	}
 }

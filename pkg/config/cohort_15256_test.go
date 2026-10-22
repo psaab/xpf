@@ -17,7 +17,7 @@ import (
 
 func strict15256(t *testing.T, tree *ConfigTree) (*Config, error) {
 	t.Helper()
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		return nil, err
 	}
 	return CompileConfig(tree)

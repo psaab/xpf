@@ -426,7 +426,7 @@ func schemaValidateSrc6672(t *testing.T, src string) error {
 	if len(errs) > 0 {
 		t.Fatalf("fixture parse errors: %v\n%s", errs, src)
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 // TestPackedRedundancyGroupKeepsItsOwnNode_6672 is the nesting rule, and the

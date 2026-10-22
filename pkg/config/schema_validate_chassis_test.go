@@ -339,7 +339,7 @@ func TestSchemaValidate_ChassisCluster_AcceptedValuesCompileAsWritten(t *testing
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -364,12 +364,12 @@ func TestSchemaValidate_ChassisCluster_AcceptedValuesCompileAsWritten(t *testing
 func TestValidateIntegerMin(t *testing.T) {
 	v := config.ValidateIntegerMin(1)
 	for _, ok := range []string{"1", "17", "1000", "9223372036854775807"} {
-		if err := v(ok, nil); err != nil {
+		if err := v(ok); err != nil {
 			t.Errorf("ValidateIntegerMin(1)(%q): unexpected error: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{"0", "-1", "asd", "", "9223372036854775808"} {
-		if err := v(bad, nil); err == nil {
+		if err := v(bad); err == nil {
 			t.Errorf("ValidateIntegerMin(1)(%q): expected error, got nil", bad)
 		}
 	}

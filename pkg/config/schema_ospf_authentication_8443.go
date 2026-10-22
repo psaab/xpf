@@ -65,7 +65,7 @@ func unmodeledOSPFAuthTypeLeaf() *schemaNode {
 // grammar that does work. An operator reaching this has almost certainly
 // carried the IS-IS or RIP spelling across, so the message says which protocols
 // that spelling belongs to rather than only that this one is wrong.
-func rejectOSPFAuthType(_ string, _ *Config) error {
+func rejectOSPFAuthType(_ string) error {
 	return fmt.Errorf(
 		"protocols ospf ... interface ... authentication-type: OSPF has no " +
 			"`authentication-type` leaf — that spelling belongs to IS-IS and RIP. " +
@@ -100,7 +100,7 @@ func unmodeledOSPFAuthKeyLeaf() *schemaNode {
 	}
 }
 
-func rejectOSPFAuthKey(_ string, _ *Config) error {
+func rejectOSPFAuthKey(_ string) error {
 	return fmt.Errorf(
 		"protocols ospf ... interface ... authentication-key: OSPF has no " +
 			"`authentication-key` leaf — that spelling belongs to RIP, IS-IS, and BGP. " +
@@ -151,7 +151,7 @@ func unmodeledOSPFIPsecSALeaf() *schemaNode {
 	}
 }
 
-func rejectOSPFIPsecSA(_ string, _ *Config) error {
+func rejectOSPFIPsecSA(_ string) error {
 	return fmt.Errorf(
 		"ipsec-sa: OSPF/OSPFv3 IPsec authentication is not implemented by " +
 			"xpf — no manual SA is rendered to FRR, so the adjacency would " +
@@ -179,7 +179,7 @@ func unmodeledOSPFKeychainLeaf() *schemaNode {
 	}
 }
 
-func rejectOSPFKeychain(_ string, _ *Config) error {
+func rejectOSPFKeychain(_ string) error {
 	return fmt.Errorf(
 		"keychain: OSPF keychain authentication is not implemented by xpf " +
 			"— no keychain is rendered to FRR, so the adjacency would form " +
@@ -206,7 +206,7 @@ func unmodeledOSPFv3AuthTypeLeaf() *schemaNode {
 	}
 }
 
-func rejectOSPFv3AuthType(_ string, _ *Config) error {
+func rejectOSPFv3AuthType(_ string) error {
 	return fmt.Errorf(
 		"protocols ospf3 ... interface ... authentication-type: OSPFv3 has " +
 			"no `authentication-type` leaf — that spelling belongs to IS-IS " +
@@ -234,7 +234,7 @@ func unmodeledOSPFv3AuthKeyLeaf() *schemaNode {
 	}
 }
 
-func rejectOSPFv3AuthKey(_ string, _ *Config) error {
+func rejectOSPFv3AuthKey(_ string) error {
 	return fmt.Errorf(
 		"protocols ospf3 ... interface ... authentication-key: OSPFv3 has " +
 			"no `authentication-key` leaf — that spelling belongs to RIP, " +
@@ -262,7 +262,7 @@ func unmodeledVLAuthTypeLeaf() *schemaNode {
 	}
 }
 
-func rejectVLAuthType(_ string, _ *Config) error {
+func rejectVLAuthType(_ string) error {
 	return fmt.Errorf(
 		"authentication-type: OSPF virtual-link authentication is not " +
 			"implemented by xpf — that spelling belongs to IS-IS and RIP, " +
@@ -289,7 +289,7 @@ func unmodeledVLAuthKeyLeaf() *schemaNode {
 	}
 }
 
-func rejectVLAuthKey(_ string, _ *Config) error {
+func rejectVLAuthKey(_ string) error {
 	return fmt.Errorf(
 		"authentication-key: OSPF virtual-link authentication is not " +
 			"implemented by xpf — that spelling belongs to RIP, IS-IS, and " +
@@ -352,7 +352,7 @@ func unmodeledOSPFAuthContainerChild(name string) *schemaNode {
 	}
 }
 
-func rejectOSPFAuthContainerChild(_ string, _ *Config) error {
+func rejectOSPFAuthContainerChild(_ string) error {
 	return fmt.Errorf(
 		"authentication: authentication at this hierarchy is not " +
 			"implemented by xpf — nothing is rendered to FRR, so the " +

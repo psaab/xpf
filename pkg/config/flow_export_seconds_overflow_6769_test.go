@@ -167,7 +167,7 @@ func TestFlowExportCeilingBoundaryIsExact_6769(t *testing.T) {
 	}
 	if err := SchemaValidate(buildTreeFromSet(t, []string{
 		"set services flow-monitoring version9 template t template-refresh-rate seconds " + reject,
-	}), nil); err == nil {
+	})); err == nil {
 		t.Errorf("SchemaValidate accepted %s — the typed leaf's ceiling must be exact too", reject)
 	}
 }
@@ -183,14 +183,14 @@ func TestFlowExportRefreshSecondsIsTypedInSchema_6769(t *testing.T) {
 		bad := buildTreeFromSet(t, []string{
 			"set services flow-monitoring " + family + " template t template-refresh-rate seconds " + overflowRefreshSeconds,
 		})
-		if err := SchemaValidate(bad, nil); err == nil {
+		if err := SchemaValidate(bad); err == nil {
 			t.Errorf("%s: SchemaValidate accepted an overflowing template-refresh-rate seconds; "+
 				"the leaf must be typed so strict operator commit rejects before the compiler runs", family)
 		}
 		good := buildTreeFromSet(t, []string{
 			"set services flow-monitoring " + family + " template t template-refresh-rate seconds 60",
 		})
-		if err := SchemaValidate(good, nil); err != nil {
+		if err := SchemaValidate(good); err != nil {
 			t.Errorf("%s: SchemaValidate rejected an ordinary 60s refresh rate: %v", family, err)
 		}
 	}

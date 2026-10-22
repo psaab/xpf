@@ -102,12 +102,12 @@ func TestKeepaliveRetryIsRangeValidated9157(t *testing.T) {
 	// POSITIVE CONTROL FIRST, both directions. A range gate that rejects
 	// everything and one that rejects nothing are both satisfiable by a
 	// one-directional table.
-	if err := SchemaValidate(keepaliveTree9157(t, "99999999999"), nil); err == nil {
+	if err := SchemaValidate(keepaliveTree9157(t, "99999999999")); err == nil {
 		t.Fatal("CONTROL: the sibling `keepalive` must REJECT an out-of-range value at " +
 			"this layer. If it does not, the fixture never reached the tunnel walk and " +
 			"nothing below can be read as being about keepalive-retry")
 	}
-	if err := SchemaValidate(keepaliveTree9157(t, "30"), nil); err != nil {
+	if err := SchemaValidate(keepaliveTree9157(t, "30")); err != nil {
 		t.Fatalf("CONTROL: the sibling `keepalive` must ACCEPT an in-range value; got %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestKeepaliveRetryIsRangeValidated9157(t *testing.T) {
 		{"255", false, "the Junos ceiling"},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
-			err := SchemaValidate(keepaliveRetryTree9157(t, tc.value), nil)
+			err := SchemaValidate(keepaliveRetryTree9157(t, tc.value))
 			switch {
 			case tc.reject && err == nil:
 				t.Errorf("#9157: `keepalive-retry %s` was ACCEPTED at the commit gate (%s). "+
@@ -251,7 +251,7 @@ func TestKeepaliveRetryHeadIsRejectedOnceTyped9157(t *testing.T) {
 	if err := tree.SetPath(p); err != nil {
 		t.Fatalf("setpath: %v", err)
 	}
-	err = SchemaValidateWithDefinitions(tree, tree, nil)
+	err = SchemaValidateWithDefinitions(tree, tree)
 	if err == nil {
 		t.Fatal("#9157: a flat run headed by `keepalive-retry` is ACCEPTED again. The leaf " +
 			"has lost its valueType or its validator, which also removes the range bound " +
@@ -274,7 +274,7 @@ func TestKeepaliveRetryHeadIsRejectedOnceTyped9157(t *testing.T) {
 	if err := riTree.SetPath(rp); err != nil {
 		t.Fatalf("setpath: %v", err)
 	}
-	if err := SchemaValidateWithDefinitions(riTree, riTree, nil); err != nil {
+	if err := SchemaValidateWithDefinitions(riTree, riTree); err != nil {
 		t.Fatalf("CONTROL: `routing-instance` is still an untyped admission head and its "+
 			"run must still be admitted; got %v", err)
 	}

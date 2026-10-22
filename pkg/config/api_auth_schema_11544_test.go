@@ -17,7 +17,7 @@ func TestAPIAuthCredentialSchemaRejectsInvalidClassesAndUnknownFields11544(t *te
 		"set system services web-management api-auth key automation expires 2099-01-01",
 	}
 	validTree := buildTreeFromSets(t, valid...)
-	if err := SchemaValidate(validTree, nil); err != nil {
+	if err := SchemaValidate(validTree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid API-auth credential shape: %v", err)
 	}
 	if _, err := CompileConfig(validTree); err != nil {
@@ -58,7 +58,7 @@ func TestAPIAuthCredentialSchemaRejectsInvalidClassesAndUnknownFields11544(t *te
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			commands := append(append([]string(nil), valid...), tc.command)
-			err := SchemaValidate(buildTreeFromSets(t, commands...), nil)
+			err := SchemaValidate(buildTreeFromSets(t, commands...))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("SchemaValidate error = %v, want an error containing %q", err, tc.want)
 			}

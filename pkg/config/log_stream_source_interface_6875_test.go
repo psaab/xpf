@@ -50,7 +50,7 @@ func TestStreamSourceInterfaceIsValidated_6875(t *testing.T) {
 				"set security log stream s host 192.0.2.1",
 				bad.cmd,
 			)
-			if err := config.SchemaValidate(tree, nil); err == nil {
+			if err := config.SchemaValidate(tree); err == nil {
 				t.Errorf("%q must be REJECTED at commit — the same validator the "+
 					"top-level source-interface uses now applies per stream (#6875)", bad.cmd)
 			}

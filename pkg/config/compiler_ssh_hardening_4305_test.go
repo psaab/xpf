@@ -24,7 +24,7 @@ func TestSSHHardeningKnobsCompiled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected valid SSH hardening config: %v", err)
 	}
 	if c.System.Services == nil || c.System.Services.SSH == nil {
@@ -59,7 +59,7 @@ func TestSSHProtocolVersionAdvisory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("protocol-version v1 should commit (accept-with-advisory): %v", err)
 	}
 	found := false

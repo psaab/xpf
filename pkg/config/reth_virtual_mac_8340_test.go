@@ -39,12 +39,12 @@ func TestRethVirtualMACWidthAgreesWithCommitBounds_8340(t *testing.T) {
 		t.Fatal("PREMISE: the cluster-id leaf must carry a validator, or this agreement is " +
 			"unanchored and the assertions below pass vacuously")
 	}
-	if err := node.validator("255", nil); err != nil {
+	if err := node.validator("255"); err != nil {
 		t.Errorf("#8340: cluster-id 255 must COMMIT — it is the widest value the MAC octet "+
 			"holds, and rejecting it would mean the schema and the MAC disagree in the other "+
 			"direction: %v", err)
 	}
-	if err := node.validator("256", nil); err == nil {
+	if err := node.validator("256"); err == nil {
 		t.Error("#8340: cluster-id 256 must be REJECTED at commit. The RETH virtual MAC " +
 			"carries the cluster id in one octet, so 256 aliases onto 0 — a different " +
 			"cluster's MAC on the same L2 segment.")

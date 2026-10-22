@@ -160,7 +160,7 @@ func TestCompactTransportBogusProtocolIsRejected6821(t *testing.T) {
 		{"compact", "transport protocol tpc;"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := SchemaValidate(parseCfg6821(t, tc.body), nil)
+			err := SchemaValidate(parseCfg6821(t, tc.body))
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted `%s`. A container's packed tail is "+
 					"ignored by the gate BY DESIGN (compiler-faithful), so a site "+
@@ -267,8 +267,8 @@ func TestPackedTailContainersValidateBothSpellings6821(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		blockErr := SchemaValidate(parseCfg6821(t, c.blockBody), nil)
-		compactErr := SchemaValidate(parseCfg6821(t, c.compactBody), nil)
+		blockErr := SchemaValidate(parseCfg6821(t, c.blockBody))
+		compactErr := SchemaValidate(parseCfg6821(t, c.compactBody))
 		if (blockErr != nil) != (compactErr != nil) {
 			t.Errorf("%s: the two spellings DISAGREE at the gate.\n  block   %q -> %v\n"+
 				"  compact %q -> %v\nA packedTail container must validate its tail the "+

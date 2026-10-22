@@ -27,7 +27,7 @@ func TestALGDuplicateProtoBlocks12833(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := alg12833Tree(t, tc.text)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate must accept valid duplicate ALG blocks: %v", err)
 			}
 			cfg, err := CompileConfig(tree)
@@ -74,7 +74,7 @@ func TestALGPackedTypoRejected12833(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := alg12833Tree(t, tc.text)
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted packed typo %q", tc.text)
 			}
@@ -86,7 +86,7 @@ func TestALGPackedTypoRejected12833(t *testing.T) {
 	// Braced typo control: existing closed-world rejection remains active.
 	t.Run("braced typo control", func(t *testing.T) {
 		tree := alg12833Tree(t, `security { alg { ftp { desable; } } }`)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatal("braced typo should be rejected (existing closed-world)")
 		}
 	})
@@ -100,7 +100,7 @@ func TestALGPackedTypoRejected12833(t *testing.T) {
 		`security { alg { h323 gatekeeper; } }`,
 	} {
 		t.Run("valid/"+text, func(t *testing.T) {
-			if err := SchemaValidate(alg12833Tree(t, text), nil); err != nil {
+			if err := SchemaValidate(alg12833Tree(t, text)); err != nil {
 				t.Errorf("valid spelling rejected: %v", err)
 			}
 		})

@@ -45,7 +45,7 @@ func TestRouteFilterUnknownMatchTypeRejected_12538(t *testing.T) {
 			if len(errs) > 0 {
 				t.Fatalf("parse error: %v", errs)
 			}
-			err := config.SchemaValidate(tree, nil)
+			err := config.SchemaValidate(tree)
 			if err == nil {
 				t.Fatal("expected SchemaValidate to reject unknown route-filter match-type, got nil")
 			}

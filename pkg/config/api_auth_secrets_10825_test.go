@@ -233,7 +233,7 @@ func TestHashAPIAuthSecretsKeepsDeniedShortLegacyVerifierStable10825(t *testing.
 	if _, err := CompileConfigLenient(tree); err != nil {
 		t.Fatalf("lenient compile rejected denied legacy markers before repair: %v", err)
 	}
-	if err := SchemaValidate(tree, nil); err == nil ||
+	if err := SchemaValidate(tree); err == nil ||
 		!strings.Contains(err.Error(), "invalid stored verifier") {
 		t.Fatalf("strict schema validation error = %v, want denied-marker rejection", err)
 	}
@@ -319,7 +319,7 @@ func TestHashAPIAuthSecretsDoesNotLaunderTaggedVerifier10825(t *testing.T) {
 			if VerifyAPIAuthSecret(tc.value, "not-a-bcrypt-verifier") {
 				t.Fatal("malformed or invalid tagged verifier unexpectedly verified")
 			}
-			if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+			if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("strict schema validation error = %v, want distinct %q diagnosis", err, tc.wantError)
 			}
 		})
@@ -356,7 +356,7 @@ func TestAPIAuthStrictSchemaValidationRunsCredentialValidators10825(t *testing.T
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := parseAPIAuthSecretsConfig10825(t, tc.text)
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("SchemaValidate error = %v, want %q", err, tc.want)
 			}
@@ -369,7 +369,7 @@ func TestAPIAuthStrictSchemaValidationRunsCredentialValidators10825(t *testing.T
 		api-key "machine-generated-key-alpha";
 		key automation { secret "automation-key-secret-012345"; }
 	} } } }`)
-	if err := SchemaValidate(valid, nil); err != nil {
+	if err := SchemaValidate(valid); err != nil {
 		t.Fatalf("SchemaValidate rejected API-auth credentials at their minimum lengths: %v", err)
 	}
 }

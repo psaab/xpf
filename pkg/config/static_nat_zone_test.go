@@ -163,11 +163,11 @@ func TestStaticNATSchemaAcceptsFromZone(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", line, err)
 		}
 	}
-	cfg, err := CompileConfig(good)
+	_, err := CompileConfig(good)
 	if err != nil {
 		t.Fatalf("CompileConfig(good): %v", err)
 	}
-	if err := SchemaValidate(good, cfg); err != nil {
+	if err := SchemaValidate(good); err != nil {
 		t.Fatalf("SchemaValidate(good) rejected a valid static-nat from-zone: %v", err)
 	}
 }

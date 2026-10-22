@@ -122,7 +122,7 @@ func TestBGPMaximumPrefixFromConfigSpelling15010(t *testing.T) {
 				t.Fatalf("SetPath(%q): %v", cmd, err)
 			}
 		}
-		if err := config.SchemaValidate(tree, nil); err != nil {
+		if err := config.SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate: %v", err)
 		}
 		cfg, err := config.CompileConfig(tree)

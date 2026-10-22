@@ -61,7 +61,7 @@ func TestClosedWorldSecurity14577_AcceptsCompilerReadLeaves(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := buildTree(t, tc.lines)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate(%q) = %v, want nil (compiler-read leaf must be schema-reachable)", tc.lines, err)
 			}
 			cfg, err := CompileConfig(tree)
@@ -92,7 +92,7 @@ func TestClosedWorldSecurity14577_HierarchicalShapes(t *testing.T) {
 			if len(perrs) > 0 {
 				t.Fatalf("parse: %v", perrs)
 			}
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate hierarchical = %v, want nil", err)
 			}
 			cfg, err := CompileConfig(tree)
@@ -140,7 +140,7 @@ func TestClosedWorldSecurity14577_RejectsInvalidValues(t *testing.T) {
 			// Strict commit = SchemaValidate then CompileConfig (the
 			// compileTreeStrict composition). Either stage rejecting
 			// naming the token is a pass; both accepting is the defect.
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				if !strings.Contains(err.Error(), tc.want) {
 					t.Fatalf("SchemaValidate error %q does not name %q", err.Error(), tc.want)
 				}
@@ -254,7 +254,7 @@ func TestClosedWorldSecurity14577_ControlsStillPass(t *testing.T) {
 		"set security log mode stream",
 	} {
 		tree := buildTree(t, []string{line})
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("control %q SchemaValidate = %v, want nil", line, err)
 		}
 		if _, err := CompileConfig(tree); err != nil {

@@ -41,7 +41,7 @@ func TestFusedMetricSwallowsTailRejectedStrict15936(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := hierTree(t, tc.src)
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("strict admission must reject fused metric tail (%s): %s", tc.name, tc.src)
 			}

@@ -23,7 +23,7 @@ func TestCustomLoginClassCommitsWithAdvisory(t *testing.T) {
 		t.Fatalf("compile: %v", err)
 	}
 	// RED-on-revert: the fixed enum rejected the custom class name here.
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate hard-rejected a valid custom-RBAC config: %v", err)
 	}
 	if c.System.Login == nil || len(c.System.Login.Classes) != 1 {
@@ -65,7 +65,7 @@ func TestCustomLoginClassPermissionMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected ops class: %v", err)
 	}
 	lc := c.System.Login.Classes[0]
@@ -97,11 +97,10 @@ func TestUndefinedLoginClassStillRejected(t *testing.T) {
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatalf("CompileConfig accepted an undefined login class (fail-open regression, #15717 gate)")
 	}
-	c, err := CompileConfigLenient(tree)
-	if err != nil {
+	if _, err := CompileConfigLenient(tree); err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatalf("SchemaValidate accepted an undefined login class (fail-open regression)")
 	}
 }

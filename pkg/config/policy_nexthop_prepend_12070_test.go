@@ -21,13 +21,13 @@ func TestPolicyThenNextHop_SchemaGate_12070(t *testing.T) {
 
 	for _, v := range bad {
 		tree := flatTreeFromSets(t, base+"then next-hop "+v)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("then next-hop %q: expected SchemaValidate to reject, got nil", v)
 		}
 	}
 	for _, v := range good {
 		tree := flatTreeFromSets(t, base+"then next-hop "+v)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("then next-hop %q: expected SchemaValidate to accept, got %v", v, err)
 		}
 	}
@@ -47,7 +47,7 @@ func TestPolicyThenNextHop_ExclusionErrorNamesReason_12070(t *testing.T) {
 	} {
 		t.Run(tc.address, func(t *testing.T) {
 			tree := flatTreeFromSets(t, base+tc.address)
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil || !strings.Contains(err.Error(), tc.reason) {
 				t.Fatalf("SchemaValidate error = %v, want reason %q", err, tc.reason)
 			}
@@ -84,13 +84,13 @@ func TestPolicyThenASPathPrepend_SchemaGate_12070(t *testing.T) {
 
 	for _, c := range bad {
 		tree := flatTreeFromSets(t, base+c)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("%q: expected SchemaValidate to reject, got nil", c)
 		}
 	}
 	for _, c := range good {
 		tree := flatTreeFromSets(t, base+c)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("%q: expected SchemaValidate to accept, got %v", c, err)
 		}
 	}
@@ -105,7 +105,7 @@ func TestPolicyThenNextHopPrepend_RejectionNamesValue_12070(t *testing.T) {
 		{base + "then next-hop 10.0.0.300", "next-hop", "10.0.0.300"},
 		{base + "then as-path-prepend 65001 abc", "as-path-prepend", "abc"},
 	} {
-		err := SchemaValidate(buildTreeFromSet(t, []string{tc.set}), nil)
+		err := SchemaValidate(buildTreeFromSet(t, []string{tc.set}))
 		if err == nil {
 			t.Fatalf("%q: expected SchemaValidate to reject, got nil", tc.set)
 		}
@@ -151,7 +151,7 @@ func TestPolicyThenASPathPrepend_QuotedMultiASN_12070(t *testing.T) {
 	if len(parseErrs) > 0 {
 		t.Fatalf("parse: %v", parseErrs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the documented quoted multi-ASN form: %v", err)
 	}
 	compiled, err := CompileConfig(tree)
@@ -178,7 +178,7 @@ func TestPolicyThenASPathPrepend_BlockChildChecksEveryOperand_12070(t *testing.T
 	if len(parseErrs) > 0 {
 		t.Fatalf("parse: %v", parseErrs)
 	}
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), "bad") {
 		t.Fatalf("SchemaValidate error = %v, want rejection naming second compiler-consumed operand %q", err, "bad")
 	}

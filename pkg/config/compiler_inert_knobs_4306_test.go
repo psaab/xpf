@@ -22,7 +22,7 @@ func TestSNMPInertKnobAdvisories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected an accepted-inert SNMP config: %v", err)
 	}
 	all := strings.Join(c.Warnings, "\n")
@@ -62,7 +62,7 @@ func TestSystemInertKnobAdvisories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected an accepted-inert system config: %v", err)
 	}
 	all := strings.Join(c.Warnings, "\n")

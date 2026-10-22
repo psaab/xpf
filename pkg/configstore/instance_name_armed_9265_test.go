@@ -388,7 +388,7 @@ func packedVerdict9265(line string) string {
 			return "SETPATH ERROR: " + err.Error()
 		}
 	}
-	if err := config.SchemaValidateWithDefinitions(tr, tr, nil); err != nil {
+	if err := config.SchemaValidateWithDefinitions(tr, tr); err != nil {
 		return err.Error()
 	}
 	return ""

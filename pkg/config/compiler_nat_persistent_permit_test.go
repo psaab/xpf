@@ -73,7 +73,7 @@ func TestPersistentNATPermitDefaultIsTargetHostPort(t *testing.T) {
 func TestPersistentNATPermitSchemaValidates(t *testing.T) {
 	for _, permit := range []string{"any-remote-host", "target-host", "target-host-port"} {
 		tree := buildTree(t, persistentNATSet(permit))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("SchemaValidate rejected valid permit %q: %v", permit, err)
 		}
 	}
@@ -93,7 +93,7 @@ func TestPersistentNATPermitSchemaCompletes(t *testing.T) {
 
 func TestPersistentNATPermitSchemaRejectsInvalid(t *testing.T) {
 	tree := buildTree(t, persistentNATSet("bogus-scope"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("SchemaValidate must reject an invalid persistent-nat permit value")
 	}

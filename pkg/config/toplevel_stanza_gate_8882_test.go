@@ -35,9 +35,9 @@ func schemaCheck8882(t *testing.T, text string) error {
 	if len(perrs) > 0 {
 		t.Fatalf("fixture does not parse (%q): %v", text, perrs[0])
 	}
-	cfg, _ := CompileConfigLenient(tree)
+	_, _ = CompileConfigLenient(tree)
 	tree2, _ := NewParser(text).Parse()
-	return SchemaValidate(tree2, cfg)
+	return SchemaValidate(tree2)
 }
 
 func TestUnknownTopLevelStanzaIsRejected8882(t *testing.T) {
@@ -113,9 +113,9 @@ func TestShippedConfigsPassTopLevelGate8882(t *testing.T) {
 		if len(perrs) > 0 {
 			continue
 		}
-		cfg, _ := CompileConfigLenient(tree)
+		_, _ = CompileConfigLenient(tree)
 		tree2, _ := NewParser(string(b)).Parse()
-		if err := SchemaValidate(tree2, cfg); err != nil {
+		if err := SchemaValidate(tree2); err != nil {
 			t.Errorf("%s no longer validates: %v", filepath.Base(f), err)
 		}
 	}
@@ -126,9 +126,9 @@ func TestShippedConfigsPassTopLevelGate8882(t *testing.T) {
 	}
 	b, _ := os.ReadFile(ctl)
 	tree, _ := NewParser(string(b)).Parse()
-	cfg, _ := CompileConfigLenient(tree)
+	_, _ = CompileConfigLenient(tree)
 	tree2, _ := NewParser(string(b)).Parse()
-	if err := SchemaValidate(tree2, cfg); err == nil {
+	if err := SchemaValidate(tree2); err == nil {
 		t.Fatal("the control config was accepted — this sweep cannot report a rejection, " +
 			"so the shipped results above mean nothing")
 	}

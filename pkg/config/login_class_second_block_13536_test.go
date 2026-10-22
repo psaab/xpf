@@ -49,7 +49,7 @@ func TestLoginClassInSecondLoginBlockValidates13536(t *testing.T) {
 			t.Fatalf("compiled classes %v missing %q — premise broken, compiler no longer merges blocks", classNames, want)
 		}
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a class defined in the second login block: %v", err)
 	}
 }
@@ -72,11 +72,10 @@ func TestLoginClassUndefinedAcrossLoginBlocksStillRejected13536(t *testing.T) {
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("CompileConfig accepted an undefined login class (fail-open regression, #15717 gate)")
 	}
-	c, err := CompileConfigLenient(tree)
-	if err != nil {
+	if _, err := CompileConfigLenient(tree); err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	err = SchemaValidate(tree, c)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("SchemaValidate accepted an undefined login class (fail-open regression)")
 	}

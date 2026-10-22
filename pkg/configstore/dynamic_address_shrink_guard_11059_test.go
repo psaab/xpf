@@ -42,7 +42,7 @@ func TestShrinkGuardInvalidCompactTailsFailStrictValidation11059(t *testing.T) {
 					if len(parseErrs) != 0 {
 						t.Fatalf("invalid-threshold fixture failed to parse: %v", parseErrs)
 					}
-					if err := config.SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), tc.leaf) {
+					if err := config.SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), tc.leaf) {
 						t.Errorf("SchemaValidate error = %v, want rejection naming %s", err, tc.leaf)
 					}
 					if _, err := configstore.CheckText(text, -1); err == nil || !strings.Contains(err.Error(), tc.leaf) {

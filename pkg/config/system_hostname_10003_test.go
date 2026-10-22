@@ -84,18 +84,18 @@ func validHostNames10003() []string {
 
 func TestValidateSystemHostname_10003(t *testing.T) {
 	for _, h := range validHostNames10003() {
-		if err := config.ValidateSystemHostname(h, nil); err != nil {
+		if err := config.ValidateSystemHostname(h); err != nil {
 			t.Errorf("accept %q: unexpected error: %v", h, err)
 		}
 	}
 	// Empty is unset, not invalid: the compiler skips it and applyHostname
 	// early-returns. Rejecting "" here would brick tolerant loads of a
 	// config that simply names no host-name.
-	if err := config.ValidateSystemHostname("", nil); err != nil {
+	if err := config.ValidateSystemHostname(""); err != nil {
 		t.Errorf("accept %q: empty must stay valid (unset leaf): %v", "", err)
 	}
 	for _, h := range invalidHostNames10003() {
-		if err := config.ValidateSystemHostname(h, nil); err == nil {
+		if err := config.ValidateSystemHostname(h); err == nil {
 			t.Errorf("reject %q: expected an error, got nil", h)
 			continue
 		} else if !strings.Contains(err.Error(), "host-name") {
@@ -150,7 +150,7 @@ func TestSchemaValidate_SystemHostnameElidedStaysSilent_10003(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("parse errors: %v", perrs)
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("gate must stay silent on the elided spelling (compiler jurisdiction): %v", err)
 	}
 }

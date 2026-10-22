@@ -121,7 +121,7 @@ func TestVRRPPreemptHoldTime_SchemaRange(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			t.Fatalf("SetPath(%q): %v", c.val, err)
 		}
-		verr := SchemaValidate(tree, nil)
+		verr := SchemaValidate(tree)
 		if c.wantErr && verr == nil {
 			t.Errorf("hold-time %q: want validation error, got nil", c.val)
 		}

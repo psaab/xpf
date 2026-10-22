@@ -112,18 +112,13 @@ func schemaPathErrorf(fullPath []string, format string, args ...interface{}) err
 // leaf's validator on its value. It returns the FIRST error encountered
 // (matching how the existing compiler surfaces commit-check failures).
 //
-// cfg is ALWAYS nil in production: both call sites
-// (configstore.compileTree / compileTreeLenient via
-// schemaValidateExpandedTree, pkg/configstore/store.go) run the gate
-// BEFORE the compiler, so no *Config exists yet. Validators must not
-// depend on it. Cross-reference validation is TREE-based instead: the
-// walk pre-collects referenceable definitions from the candidate tree
-// itself into schemaRefs (collectSchemaRefs below) and hands them to
-// treeValidator leaves — atomicity-correct, because a definition and its
-// reference added in the same commit validate against the same tree.
-// Removing the cfg parameter outright is a possible follow-up once we
-// are confident no post-compile consumer will ever appear; it is kept
-// for now because the LeafValidator signature is mirrored in cmdtree.
+// Validation runs BEFORE the compiler, so no *Config exists yet and
+// validators take only the raw token (#16162). Cross-reference validation
+// is TREE-based instead: the walk pre-collects referenceable definitions
+// from the candidate tree itself into schemaRefs (collectSchemaRefs
+// below) and hands them to treeValidator leaves — atomicity-correct,
+// because a definition and its reference added in the same commit
+// validate against the same tree.
 //
 // The tree passed in MUST already be apply-groups-expanded (configstore
 // expands before calling), so group bodies are inlined before the walk.
@@ -131,8 +126,8 @@ func schemaPathErrorf(fullPath []string, format string, args ...interface{}) err
 // that still hold the PRE-expansion candidate should prefer
 // SchemaValidateWithDefinitions so definitions living only in un-applied
 // groups survive (expansion removes the groups stanza outright).
-func SchemaValidate(tree *ConfigTree, cfg *Config) error {
-	return SchemaValidateWithDefinitions(tree, nil, cfg)
+func SchemaValidate(tree *ConfigTree) error {
+	return SchemaValidateWithDefinitions(tree, nil)
 }
 
 // SchemaValidateWithDefinitions is SchemaValidate with a separate
@@ -146,7 +141,7 @@ func SchemaValidate(tree *ConfigTree, cfg *Config) error {
 // for the peer. Passing the PRE-expansion candidate as defsSource keeps
 // the permissive union the schemaRefs contract documents. defsSource
 // may be nil (refs come from tree alone).
-func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) error {
+func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree) error {
 	if tree == nil {
 		return nil
 	}
@@ -234,7 +229,7 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) er
 	if err := checkUnknownTopLevelStanza(tree); err != nil {
 		return scrubSchemaErrorSecrets(tree, err)
 	}
-	vc := &walkContext{cfg: cfg, refs: refs}
+	vc := &walkContext{refs: refs}
 	// closed=false: the top-level walk is open-world. The per-subtree
 	// closed-world flag (#4313) is inherited from schemaNode.closedWorld as
 	// the walker descends. No count here — see the keyword-resolution gate
@@ -495,24 +490,15 @@ func extractLocName(err error) string {
 	return strings.TrimSuffix(msg[i+len(marker):], ")")
 }
 
-// walkContext carries the per-walk validation inputs: the (always-nil in
-// production) cfg pointer for the legacy LeafValidator signature, and
-// the tree-derived cross-reference sets for treeValidator leaves.
+// walkContext carries the per-walk validation inputs: the tree-derived
+// cross-reference sets for treeValidator leaves (#16162: the former
+// always-nil cfg ferry is retired; LeafValidator takes only the token).
 type walkContext struct {
-	cfg  *Config
 	refs *schemaRefs
 }
 
-// config / collectedRefs are nil-receiver-safe accessors: the white-box
-// walker tests drive walkSchemaNode with a nil context, matching the
-// production reality that cfg is nil anyway.
-func (vc *walkContext) config() *Config {
-	if vc == nil {
-		return nil
-	}
-	return vc.cfg
-}
-
+// collectedRefs is a nil-receiver-safe accessor: the white-box walker
+// tests drive walkSchemaNode with a nil context.
 func (vc *walkContext) collectedRefs() *schemaRefs {
 	if vc == nil {
 		return nil
@@ -521,10 +507,9 @@ func (vc *walkContext) collectedRefs() *schemaRefs {
 }
 
 // treeLeafValidator is the TREE-based counterpart of LeafValidator for
-// cross-reference leaves: instead of the (always-nil in production)
-// *Config it receives the definitions collected from the candidate tree
-// by collectSchemaRefs, so a definition and its reference added in the
-// same commit validate atomically.
+// cross-reference leaves: it receives the definitions collected from
+// the candidate tree by collectSchemaRefs, so a definition and its
+// reference added in the same commit validate atomically.
 type treeLeafValidator func(raw string, refs *schemaRefs) error
 
 // leafNodeValidator validates a complete leaf node, retaining AST provenance
@@ -540,18 +525,18 @@ type leafNodeValidator func(node *Node, parent *schemaNode) error
 // sibling that supplies the value). See schemaNode.tailValidator.
 type leafTailValidator func(tokens []string, siblingTails [][]string) error
 
-// checkValue returns the per-token validation function for a typed
-// leaf: the scalar validator when set, else the tree-based
-// cross-reference validator bound to the walk's collected refs. A typed
-// leaf sets exactly one of the two (walkSchemaNode gates on either).
-func (n *schemaNode) checkValue(vc *walkContext) func(string) error {
+// checkToken validates one token against a typed leaf directly: the
+// scalar LeafValidator when set, else the tree-based cross-reference
+// validator bound to the walk's collected refs. A typed leaf sets
+// exactly one of the two (walkSchemaNode gates on either).
+func (n *schemaNode) checkToken(vc *walkContext, tok string) error {
 	if n.validator != nil {
-		return func(tok string) error { return n.validator(tok, vc.config()) }
+		return n.validator(tok)
 	}
 	if n.treeValidator != nil {
-		return func(tok string) error { return n.treeValidator(tok, vc.collectedRefs()) }
+		return n.treeValidator(tok, vc.collectedRefs())
 	}
-	return func(string) error { return nil }
+	return nil
 }
 
 // schemaRefs holds the referenceable definitions collected from the
@@ -1343,9 +1328,9 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 // callers invoke this only when at least one is non-nil.
 func validateKeySlot(schema *schemaNode, argIdx int, tok string, vc *walkContext) error {
 	if schema.keyValidatorPos != nil {
-		return schema.keyValidatorPos(argIdx, tok, vc.config())
+		return schema.keyValidatorPos(argIdx, tok)
 	}
-	return schema.keyValidator(tok, vc.config())
+	return schema.keyValidator(tok)
 }
 
 // validateModifierChild validates one AST child of a typed leaf (e.g.
@@ -1355,7 +1340,7 @@ func validateKeySlot(schema *schemaNode, argIdx int, tok string, vc *walkContext
 // extra tokens in its Keys (`exact bogus` → leftover `bogus` is unknown);
 // a VALUED modifier (#9880) carries exactly its declared args as value
 // tokens (`key 5`), each validated against the modifier's own
-// validator/treeValidator — the same checkValue the leaf's own value
+// validator/treeValidator — the same checkToken the leaf's own value
 // goes through. Untyped modifiers (no validator) accept any token in
 // the value slot; the arity check still rejects a missing or trailing
 // one. Before #9880 every trailing token was refused as `unknown
@@ -1390,9 +1375,8 @@ func validateModifierChild(node *Node, leafSchema *schemaNode, leafPath []string
 	}
 	modPath := append(append([]string(nil), leafPath...), mod)
 	if modSchema != nil && nargs > 0 {
-		check := modSchema.checkValue(vc)
 		for _, tok := range trailing {
-			if err := check(tok); err != nil {
+			if err := modSchema.checkToken(vc, tok); err != nil {
 				return typedLeafInvalidErrorf(modPath, tok, err)
 			}
 		}
@@ -1585,7 +1569,7 @@ func validateSecurityLogHostNode15270(node *Node, _ *schemaNode) error {
 			if len(c.Keys) != 2 || len(c.Children) != 0 {
 				return schemaErrorf(nil, "host port requires exactly one value")
 			}
-			if err := ValidateInteger(1, 65535)(c.Keys[1], nil); err != nil {
+			if err := ValidateInteger(1, 65535)(c.Keys[1]); err != nil {
 				return schemaErrorf(nil, "host port: %v", err)
 			}
 		default:
@@ -1601,7 +1585,7 @@ func validateSecurityLogHostNode15270(node *Node, _ *schemaNode) error {
 	if len(addrs) > 1 {
 		return schemaErrorf(nil, "host requires exactly one address, found %d", len(addrs))
 	}
-	if err := ValidateSyslogHost(addrs[0], nil); err != nil {
+	if err := ValidateSyslogHost(addrs[0]); err != nil {
 		return err
 	}
 	return nil
@@ -1642,7 +1626,7 @@ func siblingSuppliesHostPort15270(siblings []*Node) bool {
 		if s == nil || len(s.Keys) != 3 || s.Keys[0] != "host" || s.Keys[1] != "port" {
 			continue
 		}
-		if ValidateInteger(1, 65535)(s.Keys[2], nil) == nil {
+		if ValidateInteger(1, 65535)(s.Keys[2]) == nil {
 			return true
 		}
 	}
@@ -1653,8 +1637,6 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 	leafName := node.Keys[0]
 	path := append(append([]string(nil), parentPath...), leafName)
 	values := node.Keys[1:]
-	check := leafSchema.checkValue(vc)
-
 	// #6774: the hierarchical BLOCK spelling `keyword { value; }`, for the
 	// leaves that opt in via blockValue. Junos displays a choice container
 	// (`default-policy`) that way, and the compiler reads it deliberately, so
@@ -1711,7 +1693,7 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 					portTok = node.Children[0].Keys[0]
 				}
 				if portTok != "" {
-					if err := ValidateInteger(1, 65535)(portTok, nil); err != nil {
+					if err := ValidateInteger(1, 65535)(portTok); err != nil {
 						return typedLeafInvalidErrorf(append(append([]string(nil), path...), "port"), portTok, err)
 					}
 					if siblingSuppliesTypedValue(siblings, leafName, leafSchema, vc) {
@@ -1734,7 +1716,7 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 	}
 
 	// Standard typed leaf: first token is the value.
-	if err := check(first); err != nil {
+	if err := leafSchema.checkToken(vc, first); err != nil {
 		return typedLeafInvalidErrorf(path, first, err)
 	}
 	// Remaining tokens must be known child-keyword modifiers (e.g. `exact`).
@@ -1760,10 +1742,9 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 			return typedLeafErrorf(path, "modifier %q requires a value", tok)
 		}
 		if modSchema != nil && nargs > 0 {
-			mcheck := modSchema.checkValue(vc)
 			modPath := append(append([]string(nil), path...), tok)
 			for _, vtok := range values[i+1 : i+1+nargs] {
-				if err := mcheck(vtok); err != nil {
+				if err := modSchema.checkToken(vc, vtok); err != nil {
 					return typedLeafInvalidErrorf(modPath, vtok, err)
 				}
 			}
@@ -1794,7 +1775,6 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []string, vc *walkContext) error {
 	leafName := node.Keys[0]
 	path := append(append([]string(nil), parentPath...), leafName)
-	check := leafSchema.checkValue(vc)
 
 	validatedAny := false
 	lastWasSeparator := false
@@ -1812,7 +1792,7 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 			lastWasSeparator = true
 			continue
 		}
-		if err := check(tok); err != nil {
+		if err := leafSchema.checkToken(vc, tok); err != nil {
 			return typedLeafInvalidErrorf(path, tok, err)
 		}
 		validatedAny = true
@@ -1833,7 +1813,7 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 			keys = c.Keys
 		}
 		for _, tok := range keys {
-			if err := check(tok); err != nil {
+			if err := leafSchema.checkToken(vc, tok); err != nil {
 				return typedLeafInvalidErrorf(path, tok, err)
 			}
 			validatedAny = true
@@ -1905,7 +1885,6 @@ func gatherLeafTailTokens(node *Node) []string {
 // Used to allow a flat-set modifier-only line (`transmit-rate exact`) when
 // the rate is set on a separate sibling node.
 func siblingSuppliesTypedValue(siblings []*Node, leafName string, leafSchema *schemaNode, vc *walkContext) bool {
-	check := leafSchema.checkValue(vc)
 	for _, s := range siblings {
 		if s == nil || len(s.Keys) == 0 || s.Keys[0] != leafName {
 			continue
@@ -1917,7 +1896,7 @@ func siblingSuppliesTypedValue(siblings []*Node, leafName string, leafSchema *sc
 					continue
 				}
 			}
-			if check(tok) == nil {
+			if leafSchema.checkToken(vc, tok) == nil {
 				return true
 			}
 		}
@@ -1929,7 +1908,7 @@ func siblingSuppliesTypedValue(siblings []*Node, leafName string, leafSchema *sc
 			if _, isMod := leafSchema.children[c.Keys[0]]; isMod {
 				continue
 			}
-			if check(c.Keys[0]) == nil {
+			if leafSchema.checkToken(vc, c.Keys[0]) == nil {
 				return true
 			}
 		}

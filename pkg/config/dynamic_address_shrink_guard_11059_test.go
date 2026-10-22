@@ -37,13 +37,13 @@ func TestDynamicAddressShrinkGuardThresholdsAreValidatedAndCompiled11059(t *test
 		t.Run(tc.leaf, func(t *testing.T) {
 			for _, value := range tc.bad {
 				tree := flatTreeFromSets(t, prefix+" "+tc.leaf+" "+value)
-				if err := SchemaValidate(tree, nil); err == nil {
+				if err := SchemaValidate(tree); err == nil {
 					t.Errorf("SchemaValidate accepted invalid %s %q", tc.leaf, value)
 				}
 			}
 			for _, value := range tc.good {
 				tree := flatTreeFromSets(t, prefix+" "+tc.leaf+" "+value)
-				if err := SchemaValidate(tree, nil); err != nil {
+				if err := SchemaValidate(tree); err != nil {
 					t.Errorf("SchemaValidate rejected valid %s %q: %v", tc.leaf, value, err)
 				}
 			}
@@ -85,7 +85,7 @@ func TestDynamicAddressShrinkGuardInvalidConfigRejected11059(t *testing.T) {
 			"set security dynamic-address feed-server threat url https://feeds.example/list",
 			command,
 		)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("SchemaValidate accepted invalid threshold: %s", command)
 		} else if !strings.Contains(err.Error(), strings.Fields(command)[6]) {
 			t.Errorf("validation error %q does not identify offending value in %q", err, command)
@@ -107,7 +107,7 @@ func TestDynamicAddressShrinkGuardCompactTailMatchesBlock11059(t *testing.T) {
 	compile := func(t *testing.T, text string) *FeedServer {
 		t.Helper()
 		tree := parse(t, text)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate rejected valid config: %v", err)
 		}
 		cfg, err := CompileConfig(tree)
@@ -140,7 +140,7 @@ func TestDynamicAddressShrinkGuardCompactTailMatchesBlock11059(t *testing.T) {
 		`security { dynamic-address { feed-server threat shrink-guard-min-drop 1048576; } }`,
 	} {
 		tree := parse(t, invalid)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("SchemaValidate accepted invalid compact feed-server tail: %s", invalid)
 		}
 	}

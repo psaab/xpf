@@ -29,7 +29,7 @@ func ospfAuth14388Helper(t *testing.T, text string) *OSPFInterface {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	return ospfIface6818(t, cfg, "group ospf auth")
@@ -233,7 +233,7 @@ apply-groups G;
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	ps := cfg.PolicyOptions.PolicyStatements["P"]
@@ -270,7 +270,7 @@ apply-groups G;
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	term := firstInetTerm(t, cfg, "F")

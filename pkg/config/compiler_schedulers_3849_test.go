@@ -187,7 +187,7 @@ func TestSchemaRejectsBadSchedulerTime(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	if err := config.SchemaValidate(tree, nil); err == nil {
+	if err := config.SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted an invalid start-time (9am); expected commit rejection")
 	}
 }
@@ -207,7 +207,7 @@ func TestSchemaAcceptsValidScheduler(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid scheduler: %v", err)
 	}
 }

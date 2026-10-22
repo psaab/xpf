@@ -203,7 +203,7 @@ func TestApplicationExcludedSchemaRecognizesSibling15662(t *testing.T) {
 		},
 	} {
 		tree := buildValuelessMatchFlatTree(t, cmds)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate rejected application-excluded as unknown: %v", err)
 		}
 	}

@@ -39,7 +39,7 @@ func policer5299SchemaCheck(t *testing.T, cmds ...string) error {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 func policer5299Tree(t *testing.T, cmds ...string) *ConfigTree {
@@ -207,7 +207,7 @@ func TestPolicer5299_TolerantLoad_WarnsNotHardFail(t *testing.T) {
 		"set firewall policer p-legacy if-exceeding bandwidth-limit 10mm",
 		"set firewall policer p-legacy if-exceeding burst-size-limit 15kk",
 	)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatalf("strict gate should reject the malformed values (this is the error configstore downgrades to a warning)")
 	}
 	cfg, err := CompileConfigLenient(tree)

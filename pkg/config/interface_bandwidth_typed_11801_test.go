@@ -9,7 +9,7 @@ func TestInterfaceBandwidthStrict11801(t *testing.T) {
 	for _, token := range []string{"", "asd", "10mm", "-5", "0"} {
 		t.Run("reject_"+token, func(t *testing.T) {
 			tree := flatTreeFromSets(t, "set interfaces wan0 bandwidth "+token)
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil || !strings.Contains(err.Error(), "interfaces wan0 bandwidth") {
 				t.Fatalf("SchemaValidate error = %v, want leaf-naming rejection", err)
 			}
@@ -52,7 +52,7 @@ func TestInterfaceBandwidthBracedAndCompactParity11801(t *testing.T) {
 		{name: "compact", tree: hierTree(t, `interfaces { wan0 bandwidth 1g; }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := SchemaValidate(tc.tree, nil); err != nil {
+			if err := SchemaValidate(tc.tree); err != nil {
 				t.Fatalf("SchemaValidate rejected valid interface bandwidth: %v", err)
 			}
 			cfg, err := CompileConfig(tc.tree)
@@ -80,7 +80,7 @@ func TestInterfaceBandwidthValidValuesUnchanged11801(t *testing.T) {
 	} {
 		t.Run(tc.token, func(t *testing.T) {
 			tree := flatTreeFromSets(t, "set interfaces wan0 bandwidth "+tc.token)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected valid bandwidth %q: %v", tc.token, err)
 			}
 			cfg, err := CompileConfig(tree)

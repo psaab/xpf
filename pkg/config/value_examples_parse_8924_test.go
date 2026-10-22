@@ -99,7 +99,7 @@ func TestQuotedExamplesCompileUnquoted8924(t *testing.T) {
 				"gets an algorithm name sshd cannot match and the completion is "+
 				"offering a broken value again (#8924).", v)
 		}
-		if err := ValidateSSHAlgorithm(v, nil); err != nil {
+		if err := ValidateSSHAlgorithm(v); err != nil {
 			t.Errorf("%q does not satisfy ValidateSSHAlgorithm (%v) — the "+
 				"example the schema offers must be a value its own validator "+
 				"accepts.", v, err)

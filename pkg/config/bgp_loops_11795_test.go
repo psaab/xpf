@@ -52,7 +52,7 @@ func TestBGPLoopsSchemaGate11795(t *testing.T) {
 					bgpLoopsTree11795(t, scope, tok),
 					bgpLoopsHierarchical11795(t, scope, tok),
 				} {
-					if err := SchemaValidate(tree, nil); err == nil {
+					if err := SchemaValidate(tree); err == nil {
 						t.Fatalf("SchemaValidate accepted %s loops %q; want commit rejection", scope, tok)
 					} else if !strings.Contains(err.Error(), "loops") {
 						t.Fatalf("%s loops rejection must name the leaf: %v", scope, err)
@@ -62,7 +62,7 @@ func TestBGPLoopsSchemaGate11795(t *testing.T) {
 		}
 		for _, tok := range []string{"1", "3", "10"} {
 			t.Run(scope+"/accept-"+tok, func(t *testing.T) {
-				if err := SchemaValidate(bgpLoopsTree11795(t, scope, tok), nil); err != nil {
+				if err := SchemaValidate(bgpLoopsTree11795(t, scope, tok)); err != nil {
 					t.Fatalf("SchemaValidate rejected valid %s loops %q: %v", scope, tok, err)
 				}
 			})
@@ -146,7 +146,7 @@ func bgpLoopsRoutingInstanceTree11795(t *testing.T, value string) *ConfigTree {
 
 func TestBGPLoopsRoutingInstanceGate11795(t *testing.T) {
 	invalid := bgpLoopsRoutingInstanceTree11795(t, "11")
-	if err := SchemaValidate(invalid, nil); err == nil || !strings.Contains(err.Error(), "loops") {
+	if err := SchemaValidate(invalid); err == nil || !strings.Contains(err.Error(), "loops") {
 		t.Fatalf("routing-instance schema accepted loops 11 or omitted leaf diagnostic: %v", err)
 	}
 	if _, err := CompileConfig(invalid); err == nil {

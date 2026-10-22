@@ -115,7 +115,7 @@ func writeBGPMaximumPrefix15010(b *strings.Builder, address, family string, p bg
 // ospfAreaIdentity11400 compares FRR's two valid spellings of a 32-bit area
 // ID as the same area. Invalid tolerant-path values stay keyed by raw spelling.
 func ospfAreaIdentity11400(id string) string {
-	if config.ValidateOSPFArea(id, nil) == nil {
+	if config.ValidateOSPFArea(id) == nil {
 		if ip := net.ParseIP(id); ip != nil && ip.To4() != nil {
 			return strconv.FormatUint(uint64(binary.BigEndian.Uint32(ip.To4())), 10)
 		}
@@ -147,7 +147,7 @@ func warnOSPFInterfaceConflict12186(protocol, name string, fields []string) {
 // check is defense-in-depth against validating-normalized/emitting-raw
 // drift (the #9493 virtual-link belt carries the same pair).
 func validFRROSPFArea(id string) bool {
-	return config.ValidateOSPFArea(id, nil) == nil && config.FRRSingleToken(id)
+	return config.ValidateOSPFArea(id) == nil && config.FRRSingleToken(id)
 }
 
 // generateProtocols generates FRR CLI config for OSPF, BGP, RIP, and IS-IS.
@@ -272,7 +272,7 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 			for _, vl := range area.VirtualLinks {
 				// #9493: both operands are raw config strings. Omit a link the
 				// commit gate would refuse rather than emit a line FRR rejects.
-				if !validRouterID(vl.NeighborID) || config.ValidateOSPFArea(vl.TransitArea, nil) != nil ||
+				if !validRouterID(vl.NeighborID) || config.ValidateOSPFArea(vl.TransitArea) != nil ||
 					!frrOperandOrOmit("ospf virtual-link transit-area", vl.TransitArea) {
 					slog.Warn("frr: omitting an OSPF virtual-link with a malformed neighbor or transit area (#9493)",
 						"neighbor", sanitizeFRRValue(vl.NeighborID), "transit_area", sanitizeFRRValue(vl.TransitArea))

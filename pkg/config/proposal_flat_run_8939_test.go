@@ -173,16 +173,12 @@ func TestProposalFlatRunIsLenientOnly8939(t *testing.T) {
 
 	// REFERENCE ARM: the split spelling must ADMIT. Without it a rejection
 	// below would be evidence about the fixture, not about the spelling.
-	if err := SchemaValidateWithDefinitions(
-		mk(b+"authentication-algorithm hmac-sha1-96", b+"encryption-algorithm aes-128-cbc"),
-		nil, nil); err != nil {
+	if err := SchemaValidateWithDefinitions(mk(b+"authentication-algorithm hmac-sha1-96", b+"encryption-algorithm aes-128-cbc"), nil); err != nil {
 		t.Fatalf("the SPLIT spelling is rejected (%v); the packed-vs-split "+
 			"comparison below is about the fixture, not the spelling (#8939)", err)
 	}
 
-	if err := SchemaValidateWithDefinitions(
-		mk(b+"authentication-algorithm hmac-sha1-96 encryption-algorithm aes-128-cbc"),
-		nil, nil); err == nil {
+	if err := SchemaValidateWithDefinitions(mk(b+"authentication-algorithm hmac-sha1-96 encryption-algorithm aes-128-cbc"), nil); err == nil {
 		t.Log("NOTE: the packed spelling is now ADMITTED on the operator commit " +
 			"path. This container has become operator-reachable and its severity " +
 			"framing needs re-deriving (#8939).")

@@ -39,7 +39,7 @@ func schemaVerdict(t *testing.T, cmd string) error {
 	if err := tree.SetPath(path); err != nil {
 		t.Fatalf("SetPath(%q): %v", cmd, err)
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 // TestValuelessLeafIsRejected_8597 is the RED-on-revert core. Each of these
@@ -135,7 +135,7 @@ func TestValuelessLeafGateIsScopedToLEAVES_8597(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("parse: %v", perr)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("the gate rejected a hierarchical container whose missing name level "+
 			"arrives as an AST child — that is the shape the branch it guards exists "+
 			"for: %v", err)

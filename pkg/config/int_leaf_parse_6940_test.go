@@ -67,12 +67,12 @@ func TestBareIntegerLeavesRejectMalformedAtCommit_6940(t *testing.T) {
 			// cannot be told apart from a path the schema walk never reached —
 			// which is exactly how a probe of mine read `ring-entries` as
 			// protected when the control value itself was invalid.
-			if err := SchemaValidate(buildTree6940(t, tc.path+" "+tc.okValue), nil); err != nil {
+			if err := SchemaValidate(buildTree6940(t, tc.path+" "+tc.okValue)); err != nil {
 				t.Fatalf("PATH CONTROL FAILED: the VALID value %q was rejected (%v). "+
 					"A rejection of the malformed value below would prove nothing.",
 					tc.okValue, err)
 			}
-			err := SchemaValidate(buildTree6940(t, tc.path+" "+tc.badValue), nil)
+			err := SchemaValidate(buildTree6940(t, tc.path+" "+tc.badValue))
 			if err == nil {
 				t.Fatalf("`%s %s` was ACCEPTED at commit-check. `strconv.Atoi` "+
 					"discards its error, so this compiles to 0 — and for this leaf "+

@@ -43,7 +43,7 @@ type layerBField struct {
 
 func intValidator(min, max int64) func(int64) error {
 	v := config.ValidateInteger(min, max)
-	return func(n int64) error { return v(strconv.FormatInt(n, 10), nil) }
+	return func(n int64) error { return v(strconv.FormatInt(n, 10)) }
 }
 
 func numwidthFields() []layerBField {

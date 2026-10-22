@@ -50,7 +50,7 @@ func schemaErr6564(t *testing.T, cmds ...string) error {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 // --- Member 2: a malformed autonomous-system silently disables BGP ----------
@@ -175,7 +175,7 @@ func TestStrictRejectFamilyIsWarnOnlyOnTolerantPath6564(t *testing.T) {
 			}
 
 			// Strict gate refuses...
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("setup: the strict typed-leaf gate must reject %s", tc.name)
 			}
 

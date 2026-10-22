@@ -16,7 +16,7 @@ import (
 // DHGroup > 0), so an invalid value commits and then quietly weakens the
 // negotiated proposal. This validator closes that silent-drop while staying
 // faithful to the two spellings the compiler already accepts.
-func ValidateDHGroup(raw string, _ *Config) error {
+func ValidateDHGroup(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a DH group, e.g. 14 or group14)")

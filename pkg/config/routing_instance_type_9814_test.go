@@ -58,14 +58,14 @@ func TestRoutingInstanceTypeStrictRejectsUnknown9814(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setTree := tree9814(t, "set routing-instances V9814 instance-type "+tc.typ)
-			if err := SchemaValidate(setTree, nil); err == nil || !strings.Contains(err.Error(), tc.typ) {
+			if err := SchemaValidate(setTree); err == nil || !strings.Contains(err.Error(), tc.typ) {
 				t.Errorf("SchemaValidate(set) accepted instance-type %q; want rejection naming the value, got: %v", tc.typ, err)
 			}
 			if _, err := CompileConfig(setTree); err == nil || !strings.Contains(err.Error(), tc.typ) {
 				t.Errorf("CompileConfig(set) accepted instance-type %q; want rejection naming the value, got: %v", tc.typ, err)
 			}
 			bracedTree := braced9814(t, "instance-type "+tc.typ+";")
-			if err := SchemaValidate(bracedTree, nil); err == nil || !strings.Contains(err.Error(), tc.typ) {
+			if err := SchemaValidate(bracedTree); err == nil || !strings.Contains(err.Error(), tc.typ) {
 				t.Errorf("SchemaValidate(braced) accepted instance-type %q; want rejection naming the value, got: %v", tc.typ, err)
 			}
 			if _, err := CompileConfig(bracedTree); err == nil || !strings.Contains(err.Error(), tc.typ) {
@@ -88,7 +88,7 @@ func TestRoutingInstanceTypeSupportedAndOmittedAccepted9814(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := braced9814(t, tc.body)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Errorf("SchemaValidate rejected %s instance: %v", tc.name, err)
 			}
 			cfg, err := CompileConfig(tree)
@@ -105,7 +105,7 @@ func TestRoutingInstanceTypeSupportedAndOmittedAccepted9814(t *testing.T) {
 	}
 	for _, typ := range []string{"forwarding", "virtual-router", "vrf"} {
 		tree := tree9814(t, "set routing-instances V9814 instance-type "+typ)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("SchemaValidate(set) rejected instance-type %q: %v", typ, err)
 		}
 		if _, err := CompileConfig(tree); err != nil {
@@ -246,7 +246,7 @@ func TestRoutingInstanceTypeExplicitEmptyRejected9814(t *testing.T) {
 	})
 	t.Run("direct-empty", func(t *testing.T) {
 		text := `routing-instances { V9814 { instance-type ""; } }`
-		if err := SchemaValidate(parse(t, text), nil); err == nil {
+		if err := SchemaValidate(parse(t, text)); err == nil {
 			t.Errorf("SchemaValidate accepted direct instance-type \"\"; want rejection")
 		}
 		if _, err := CompileConfig(parse(t, text)); err == nil {
@@ -262,7 +262,7 @@ func TestRoutingInstanceTypeExplicitEmptyRejected9814(t *testing.T) {
 	})
 	t.Run("valueless", func(t *testing.T) {
 		text := `routing-instances { V9814 { instance-type; } }`
-		if err := SchemaValidate(parse(t, text), nil); err == nil {
+		if err := SchemaValidate(parse(t, text)); err == nil {
 			t.Errorf("SchemaValidate accepted valueless instance-type; want rejection")
 		}
 		if _, err := CompileConfig(parse(t, text)); err == nil {
@@ -293,7 +293,7 @@ func TestRoutingInstanceTypeShapes9814(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("fixture must parse: %v", perrs)
 		}
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("SchemaValidate accepted elided instance-type bogus; want rejection")
 		} else if !strings.Contains(err.Error(), "bogus") || !strings.Contains(err.Error(), "#9814") {
 			t.Errorf("elided SchemaValidate rejection lacks the value, the #9814 marker, or both: %v", err)

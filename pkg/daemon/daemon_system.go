@@ -909,7 +909,7 @@ func (d *Daemon) applyHostname(cfg *config.Config) {
 	// this belt keeps tolerant boot from attempting an impossible or
 	// identity-changing hostname. Keep this after the unchanged guard so an
 	// unchanged tolerated value remains the documented no-op.
-	if err := config.ValidateSystemHostname(cfg.System.HostName, nil); err != nil {
+	if err := config.ValidateSystemHostname(cfg.System.HostName); err != nil {
 		slog.Warn("refusing invalid hostname", "hostname", cfg.System.HostName, "err", err)
 		return
 	}
@@ -987,7 +987,7 @@ func renderChronySources(servers []string, opts map[string]config.NTPServerOptio
 		// second chrony directive token, or a malformed value) is skipped so it
 		// cannot inject an extra source-line token or fail the chrony reload. The
 		// strict commit gate (config.ValidateNTPServer) rejects it at commit.
-		if err := config.ValidateNTPServer(server, nil); err != nil {
+		if err := config.ValidateNTPServer(server); err != nil {
 			slog.Warn("skipping invalid NTP server", "server", server, "err", err)
 			continue
 		}
@@ -1025,7 +1025,7 @@ func renderChronySources(servers []string, opts map[string]config.NTPServerOptio
 func renderChronyPeers(peers []string, opts map[string]config.NTPServerOption) string {
 	var b strings.Builder
 	for _, peer := range peers {
-		if err := config.ValidateNTPServer(peer, nil); err != nil {
+		if err := config.ValidateNTPServer(peer); err != nil {
 			slog.Warn("skipping invalid NTP peer", "peer", peer, "err", err)
 			continue
 		}
@@ -1939,7 +1939,7 @@ func syslogDropinContents(cfg *config.Config, prefix string) map[string]string {
 			// control char so it cannot escape /var/log or inject an rsyslog
 			// directive. The strict commit gate (config.ValidateSyslogFileName)
 			// rejects it at commit.
-			if err := config.ValidateSyslogFileName(f.Name, nil); err != nil {
+			if err := config.ValidateSyslogFileName(f.Name); err != nil {
 				slog.Warn("skipping invalid syslog file destination", "name", f.Name, "err", err)
 				continue
 			}
@@ -1997,7 +1997,7 @@ func syslogDropinContents(cfg *config.Config, prefix string) map[string]string {
 			// leniently-loaded / peer-synced value that is not '*' or a safe
 			// account name. The strict commit gate (config.ValidateSyslogUser)
 			// rejects it at commit.
-			if err := config.ValidateSyslogUser(u.User, nil); err != nil {
+			if err := config.ValidateSyslogUser(u.User); err != nil {
 				slog.Warn("skipping invalid syslog user destination", "user", u.User, "err", err)
 				continue
 			}

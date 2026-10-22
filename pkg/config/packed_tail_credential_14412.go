@@ -41,7 +41,7 @@ func packedTailCredentialRefused14412(child *schemaNode) bool {
 	// values outside its (here empty) example set but its validator may
 	// still accept. Probe with a sentinel: refusal stubs ignore the
 	// value and always error.
-	return child.validator("xpf-probe-16108", nil) != nil
+	return child.validator("xpf-probe-16108") != nil
 }
 
 // packedTailCredential14412 returns the first dropped credential token in

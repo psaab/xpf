@@ -213,14 +213,14 @@ func TestProposalSetYieldsToExplicitProposals_4297(t *testing.T) {
 // returns nil.
 func TestProposalSetUnknownRejected_4297(t *testing.T) {
 	tree := flatTreeFromSets(t, "set security ike policy ike-pol proposal-set standrd")
-	if err := SchemaValidate(tree, nil); err == nil ||
+	if err := SchemaValidate(tree); err == nil ||
 		!strings.Contains(err.Error(), "standrd") {
 		t.Fatalf("unknown proposal-set must be rejected naming the typo, got: %v", err)
 	}
 	// every supported keyword still commits
 	for _, s := range ProposalSetNames() {
 		ok := flatTreeFromSets(t, "set security ipsec policy p proposal-set "+s)
-		if err := SchemaValidate(ok, nil); err != nil {
+		if err := SchemaValidate(ok); err != nil {
 			t.Errorf("proposal-set %q rejected: %v", s, err)
 		}
 	}
@@ -321,12 +321,12 @@ func TestManualKeyRejected_4300(t *testing.T) {
 // returns nil for the typo.
 func TestEstablishTunnelsEnum_4301(t *testing.T) {
 	bad := flatTreeFromSets(t, "set security ipsec vpn tun1 establish-tunnels on-tarffic")
-	if err := SchemaValidate(bad, nil); err == nil || !strings.Contains(err.Error(), "on-tarffic") {
+	if err := SchemaValidate(bad); err == nil || !strings.Contains(err.Error(), "on-tarffic") {
 		t.Fatalf("establish-tunnels typo must be rejected naming the value, got: %v", err)
 	}
 	for _, m := range []string{"immediately", "on-traffic", "responder-only"} {
 		ok := flatTreeFromSets(t, "set security ipsec vpn tun1 establish-tunnels "+m)
-		if err := SchemaValidate(ok, nil); err != nil {
+		if err := SchemaValidate(ok); err != nil {
 			t.Errorf("establish-tunnels %q rejected: %v", m, err)
 		}
 	}

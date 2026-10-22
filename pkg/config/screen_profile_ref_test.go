@@ -111,7 +111,7 @@ func TestZoneQuotedEmptyScreenProfileFailsCommit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := tc.tree(t)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("the quoted empty value is present and satisfies scalar arity: %v", err)
 			}
 			if _, err := CompileConfig(tree); err == nil {

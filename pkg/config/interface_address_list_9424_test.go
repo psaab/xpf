@@ -394,10 +394,10 @@ func TestInterfaceAddressSchemaDiscriminator9424(t *testing.T) {
 			}
 		}
 	}
-	if err := interfaceAddressSchema("inet").keyValidator("10.0.0.1/24", nil); err != nil {
+	if err := interfaceAddressSchema("inet").keyValidator("10.0.0.1/24"); err != nil {
 		t.Errorf("inet validator rejects a valid IPv4 CIDR: %v", err)
 	}
-	if err := interfaceAddressSchema("inet").keyValidator("2001:db8::1/64", nil); err == nil {
+	if err := interfaceAddressSchema("inet").keyValidator("2001:db8::1/64"); err == nil {
 		t.Error("inet validator accepts an IPv6 address; the family discriminator is not family-aware")
 	}
 }

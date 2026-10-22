@@ -1087,7 +1087,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 		// definitions source: expansion removes the groups stanza, and
 		// definitions living only in un-applied peer-node groups must
 		// keep satisfying shared-section references (#1319 PR 3).
-		return config.SchemaValidateWithDefinitions(expanded, stripped, nil)
+		return config.SchemaValidateWithDefinitions(expanded, stripped)
 	}
 	// #15031: expand exactly once — a failed plain pass has already
 	// partially merged `expanded`, and retrying with node0 vars on that
@@ -1096,7 +1096,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	if _, err := expanded.ExpandGroupsNodeFallback15031(false); err != nil {
 		return fmt.Errorf("apply-groups: %w", err)
 	}
-	return config.SchemaValidateWithDefinitions(expanded, stripped, nil)
+	return config.SchemaValidateWithDefinitions(expanded, stripped)
 }
 
 // SyncApply applies a config received from the cluster primary.

@@ -85,7 +85,7 @@ func TestCoSInertRewriteRulesRejectInvalidCodePoints11811(t *testing.T) {
 	for _, family := range []string{"inet-precedence", "exp"} {
 		t.Run(family, func(t *testing.T) {
 			tree := inertRewriteTree11811(t, family, "rw", "low", "9")
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected the recognized rewrite grammar: %v", err)
 			}
 			_, err := CompileConfig(tree)
@@ -103,7 +103,7 @@ func TestCoSInertRewriteRulesRejectLossPriorityTypos11811(t *testing.T) {
 	for _, family := range []string{"inet-precedence", "exp"} {
 		t.Run(family, func(t *testing.T) {
 			tree := inertRewriteTree11811(t, family, "rw", "hgih", "5")
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected the recognized rewrite grammar: %v", err)
 			}
 			_, err := CompileConfig(tree)

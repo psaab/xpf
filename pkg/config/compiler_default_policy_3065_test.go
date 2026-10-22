@@ -99,11 +99,11 @@ func TestDefaultPolicySchemaValidation(t *testing.T) {
 		return tree
 	}
 	for _, ok := range []string{"permit-all", "deny-all", "reject-all"} {
-		if err := SchemaValidate(build(ok), nil); err != nil {
+		if err := SchemaValidate(build(ok)); err != nil {
 			t.Errorf("SchemaValidate rejected valid default-policy %q: %v", ok, err)
 		}
 	}
-	if err := SchemaValidate(build("allow-everything"), nil); err == nil {
+	if err := SchemaValidate(build("allow-everything")); err == nil {
 		t.Errorf("SchemaValidate accepted bogus default-policy value")
 	}
 }

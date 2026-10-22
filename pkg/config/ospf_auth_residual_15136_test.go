@@ -35,7 +35,7 @@ func ospf3AuthTreeSet15136(t *testing.T, tail string) *ConfigTree {
 
 func check15136(t *testing.T, tree *ConfigTree, wantErr string) {
 	t.Helper()
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if wantErr == "" {
 		if err != nil {
 			t.Fatalf("must commit, got: %v", err)
@@ -96,14 +96,14 @@ func TestOSPFv3AuthRoutingInstance15136(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("RI ospf3 %q must be refused", inner)
 		}
 	}
 	// Control: RI ospf3 hello-interval commits.
 	src := `routing-instances { VRF-A { protocols { ospf3 { area 0.0.0.0 { interface ge-0/0/0.0 { hello-interval 5; } } } } } }`
 	tree, _ := NewParser(src).Parse()
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("RI ospf3 control must commit: %v", err)
 	}
 }
@@ -182,13 +182,13 @@ func TestOSPFVirtualLinkAuthRoutingInstance15136(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("RI virtual-link %q must be refused", inner)
 		}
 	}
 	src := `routing-instances { VRF-A { protocols { ospf { area 0.0.0.1 { virtual-link 10.0.0.2 { transit-area 0.0.0.1; } } } } } }`
 	tree, _ := NewParser(src).Parse()
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("RI VL control must commit: %v", err)
 	}
 }
@@ -198,7 +198,7 @@ func TestOSPFVirtualLinkAuthRoutingInstance15136(t *testing.T) {
 // refused spellings compile to no auth (schema is the gate).
 func TestOSPFv2InterfaceMD5Control15136(t *testing.T) {
 	tree := ospfAuthTreeHier8443(t, `authentication { md5 1 { key "SEKRIT"; } }`)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("OSPFv2 md5 control must commit: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

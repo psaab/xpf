@@ -19,7 +19,7 @@ func TestValidateStateFilePath_10769(t *testing.T) {
 		"/srv/xpf-dp/state.json",
 	}
 	for _, raw := range good {
-		if err := ValidateStateFilePath(raw, nil); err != nil {
+		if err := ValidateStateFilePath(raw); err != nil {
 			t.Errorf("ValidateStateFilePath(%q) = %v, want accepted", raw, err)
 		}
 	}
@@ -54,7 +54,7 @@ func TestValidateStateFilePath_10769(t *testing.T) {
 		{"/srv/xpf/.reset-handoff", "reserved"},
 	}
 	for _, tc := range bad {
-		err := ValidateStateFilePath(tc.raw, nil)
+		err := ValidateStateFilePath(tc.raw)
 		if err == nil {
 			t.Errorf("ValidateStateFilePath(%q) = nil, want rejection", tc.raw)
 			continue
@@ -68,10 +68,10 @@ func TestValidateStateFilePath_10769(t *testing.T) {
 	if got := len(atLimit); got != maxStateFilePathLen {
 		t.Fatalf("fixture length = %d, want %d", got, maxStateFilePathLen)
 	}
-	if err := ValidateStateFilePath(atLimit, nil); err != nil {
+	if err := ValidateStateFilePath(atLimit); err != nil {
 		t.Errorf("ValidateStateFilePath(at-limit) = %v, want accepted", err)
 	}
-	if err := ValidateStateFilePath(atLimit+"a", nil); err == nil {
+	if err := ValidateStateFilePath(atLimit+"a"); err == nil {
 		t.Error("ValidateStateFilePath(over-limit) = nil, want rejection")
 	}
 }
@@ -90,7 +90,7 @@ func TestStateFileTypedLeafGate_10769(t *testing.T) {
 
 	t.Run("valid path commits and compiles", func(t *testing.T) {
 		tree := build(t, "/var/lib/xpf/userspace-dp.json")
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate: %v", err)
 		}
 		cfg, err := CompileConfig(tree)
@@ -108,7 +108,7 @@ func TestStateFileTypedLeafGate_10769(t *testing.T) {
 	for _, bad := range []string{"dp.json", "/etc/machine-id", "/etc/xpf/.reset-handoff"} {
 		t.Run("rejected: "+bad, func(t *testing.T) {
 			tree := build(t, bad)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted state-file %q, want a commit-check error", bad)
 			}
 		})

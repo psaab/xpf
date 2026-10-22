@@ -97,11 +97,11 @@ func TestWildcardTypedLeafKeyValidatorRuleIsWired_6844(t *testing.T) {
 			if len(errs) > 0 {
 				t.Fatalf("parse: %v", errs)
 			}
-			cfg, err := CompileConfig(tree)
+			_, err := CompileConfig(tree)
 			if err != nil {
 				t.Fatalf("compile: %v", err)
 			}
-			err = SchemaValidate(tree, cfg)
+			err = SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("the %s destination ACCEPTED an injectable facility. The typed-leaf "+
 					"identity rule in walkSchemaNode is not running for this destination, "+

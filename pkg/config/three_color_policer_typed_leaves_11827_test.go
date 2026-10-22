@@ -50,7 +50,7 @@ func TestThreeColorPolicerTypedLeafDiagnostics11827(t *testing.T) {
 			for _, tc := range invalid {
 				t.Run(tc.name, func(t *testing.T) {
 					tree := flatTreeFromSets(t, threeColorPolicerSet11827(leaf.mode, leaf.name, tc.value))
-					err := SchemaValidate(tree, nil)
+					err := SchemaValidate(tree)
 					if err == nil {
 						t.Fatalf("SchemaValidate accepted %s %q", leaf.name, tc.value)
 					}
@@ -80,7 +80,7 @@ func TestThreeColorPolicerTypedLeavesAcceptValidValues11827(t *testing.T) {
 	for _, leaf := range threeColorPolicerLeaves11827 {
 		t.Run(leaf.mode+"/"+leaf.name, func(t *testing.T) {
 			tree := flatTreeFromSets(t, threeColorPolicerSet11827(leaf.mode, leaf.name, leaf.validValue))
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected valid %s value %q: %v", leaf.name, leaf.validValue, err)
 			}
 		})
@@ -98,7 +98,7 @@ func TestThreeColorPolicerTypedLeavesPreserveJunosForms11827(t *testing.T) {
 		"set firewall three-color-policer dual two-rate peak-burst-size 15k",
 	}
 	tree := flatTreeFromSets(t, sets...)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected Junos decimal-rate or bare-byte forms: %v", err)
 	}
 	if _, err := CompileConfig(tree); err != nil {

@@ -28,7 +28,7 @@ func TestNTPServerRoutingInstanceAdvisory_11444(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict flat-set compile: %v", err)
 	}
-	if err := SchemaValidate(flatTree, flat); err != nil {
+	if err := SchemaValidate(flatTree); err != nil {
 		t.Fatalf("SchemaValidate rejected accepted-inert flat-set NTP config: %v", err)
 	}
 	assertNTPRoutingInstanceWarns(t, "flat-set", flat, "10.0.0.1", "mgmt")
@@ -47,7 +47,7 @@ func TestNTPServerRoutingInstanceAdvisory_11444(t *testing.T) {
 			if err != nil {
 				t.Fatalf("strict compile %q: %v", tc.text, err)
 			}
-			if err := SchemaValidate(tree, cfg); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected accepted-inert NTP config: %v", err)
 			}
 			assertNTPRoutingInstanceWarns(t, tc.name, cfg, tc.server, "mgmt")

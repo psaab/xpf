@@ -44,11 +44,11 @@ func defaultPolicyFlat(action string) string {
 func TestDefaultPolicyBlockFormCommits_6774(t *testing.T) {
 	for _, action := range []string{"permit-all", "deny-all", "reject-all"} {
 		blkTree := mustParseTree6774(t, defaultPolicyBlock(action))
-		blkCfg, err := CompileConfig(blkTree)
+		_, err := CompileConfig(blkTree)
 		if err != nil {
 			t.Fatalf("%s: block form failed to compile: %v", action, err)
 		}
-		if verr := SchemaValidate(blkTree, blkCfg); verr != nil {
+		if verr := SchemaValidate(blkTree); verr != nil {
 			t.Fatalf("%s: strict validation REJECTED the canonical Junos block "+
 				"spelling `default-policy { %s; }`: %v", action, action, verr)
 		}
@@ -108,8 +108,8 @@ func TestDefaultPolicyBlockRejectsAmbiguousAndInvalid_6774(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := mustParseTree6774(t, tc.cfg)
-			cfg, _ := CompileConfig(tree)
-			err := SchemaValidate(tree, cfg)
+			_, _ = CompileConfig(tree)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("strict validation ACCEPTED %s; malformed block form must be rejected",
 					tc.name)
@@ -204,8 +204,8 @@ security {
 func TestBlockValueIsOptInNotBlanketRelaxation_6774(t *testing.T) {
 	cfg := "interfaces {\n    ge-0/0/0 {\n        mtu {\n            1500;\n        }\n    }\n}"
 	tree := mustParseTree6774(t, cfg)
-	compiled, _ := CompileConfig(tree)
-	if err := SchemaValidate(tree, compiled); err == nil {
+	_, _ = CompileConfig(tree)
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("strict validation accepted `mtu { 1500; }`: the block-form " +
 			"allowance leaked from the opted-in leaf to every typed leaf, which " +
 			"relaxes the gate on ~42 leaves where the block spelling is not Junos")
@@ -213,11 +213,11 @@ func TestBlockValueIsOptInNotBlanketRelaxation_6774(t *testing.T) {
 	// Control: the same leaf in its real spelling must still commit, so the
 	// test above cannot pass merely because everything about mtu is broken.
 	okTree := mustParseTree6774(t, "interfaces {\n    ge-0/0/0 {\n        mtu 1500;\n    }\n}")
-	okCfg, err := CompileConfig(okTree)
+	_, err := CompileConfig(okTree)
 	if err != nil {
 		t.Fatalf("control: `mtu 1500` failed to compile: %v", err)
 	}
-	if verr := SchemaValidate(okTree, okCfg); verr != nil {
+	if verr := SchemaValidate(okTree); verr != nil {
 		t.Fatalf("control: `mtu 1500` was rejected: %v", verr)
 	}
 }
@@ -284,7 +284,7 @@ func TestDefaultPolicySchemaAcceptanceMatchesCompilerSupport_6774(t *testing.T) 
 				t.Fatalf("%s/%s: compile: %v", name, action, cerr)
 			}
 			compilerHonours := cfg.Security.DefaultPolicy != baseline
-			schemaAccepts := SchemaValidate(tree, cfg) == nil
+			schemaAccepts := SchemaValidate(tree) == nil
 
 			if compilerHonours != schemaAccepts {
 				t.Fatalf("%s spelling of %q: compiler honours it = %v, but strict "+

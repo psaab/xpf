@@ -16,7 +16,7 @@ import (
 // merely the error.
 func TestValidateInterfaceNameRejectsNegated_15079(t *testing.T) {
 	for _, name := range []string{"!eth0", "!!eth0", "!x", "!"} {
-		err := ValidateInterfaceName(name, nil)
+		err := ValidateInterfaceName(name)
 		if err == nil {
 			t.Errorf("ValidateInterfaceName(%q) must REJECT — it would claim every interface except the named one", name)
 			continue
@@ -33,12 +33,12 @@ func TestValidateInterfaceNameRejectsNegated_15079(t *testing.T) {
 	// Controls: a '!' anywhere but the lead is still refused (it is not in
 	// the allowlist), and ordinary names still commit.
 	for _, name := range []string{"eth0!", "e!th0"} {
-		if err := ValidateInterfaceName(name, nil); err == nil {
+		if err := ValidateInterfaceName(name); err == nil {
 			t.Errorf("ValidateInterfaceName(%q) must still REJECT (not allowlisted)", name)
 		}
 	}
 	for _, name := range []string{"ge-0/0/0", "ge-0-0-0", "reth0.50", "fxp0"} {
-		if err := ValidateInterfaceName(name, nil); err != nil {
+		if err := ValidateInterfaceName(name); err != nil {
 			t.Errorf("ValidateInterfaceName(%q) control must ACCEPT, got %v", name, err)
 		}
 	}

@@ -24,7 +24,7 @@ func plainTextPasswordLeaf15053(leaf string) *schemaNode {
 }
 
 func rejectPlainTextPassword15053(leaf string) LeafValidator {
-	return func(_ string, _ *Config) error {
+	return func(_ string) error {
 		return fmt.Errorf("%s: plain-text passwords are not supported by xpf and are refused rather than silently ignored (#15053); use encrypted-password with a $6$ crypt hash (for example from `openssl passwd -6`)", leaf)
 	}
 }

@@ -13,7 +13,7 @@ import (
 // 8 bps are rejected because the compiler stores scheduler rates in
 // bytes/sec; accepting 1..7 bps would round-trip as 0 and silently
 // disable the configured rate.
-func ValidateRate(raw string, _ *Config) error {
+func ValidateRate(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected bandwidth, e.g. 100k, 10m, 1g)")
 	}
@@ -31,7 +31,7 @@ func ValidateRate(raw string, _ *Config) error {
 // values, which otherwise compile to the unset sentinel and silently disable
 // CoS line-rate percent resolution, ipmon's bandwidth base, and FRR's input.
 // The schema walker prefixes errors with the complete leaf path.
-func ValidateInterfaceBandwidth(raw string, _ *Config) error {
+func ValidateInterfaceBandwidth(raw string) error {
 	_, err := parseBandwidthBpsStrict(raw)
 	return err
 }
@@ -39,7 +39,7 @@ func ValidateInterfaceBandwidth(raw string, _ *Config) error {
 // validateByteSize accepts the byte-size form the current CoS compiler
 // consumes. Reject bare integers here so `buffer-size 50` cannot pass
 // validation and compile as a 50-byte queue.
-func ValidateByteSize(raw string, _ *Config) error {
+func ValidateByteSize(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected byte-size with k/m/g suffix, e.g. 16m)")
@@ -66,7 +66,7 @@ func ValidateByteSize(raw string, _ *Config) error {
 // packet.
 const minPolicerBurstBytes uint64 = 1500
 
-func ValidatePolicerBurstSize(raw string, _ *Config) error {
+func ValidatePolicerBurstSize(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 15k, 100000, 1m)")
@@ -89,7 +89,7 @@ func ValidatePolicerBurstSize(raw string, _ *Config) error {
 // compiler contract for three-color buckets: any positive, representable
 // byte count is accepted. The legacy firewall policer validator also adds
 // a 1500-byte minimum, which is outside this diagnostic-only change.
-func validateThreeColorPolicerBurstSize11827(raw string, _ *Config) error {
+func validateThreeColorPolicerBurstSize11827(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a positive burst size in bytes, e.g. 1k, 1500, 15k)")
@@ -156,7 +156,7 @@ func validateCoSRateTail(tokens []string, siblingTails [][]string, allowRemainde
 		}
 		return fmt.Errorf("exact requires a rate (e.g. a sibling transmit-rate <value>)")
 	default:
-		if err := ValidateRate(head, nil); err != nil {
+		if err := ValidateRate(head); err != nil {
 			return fmt.Errorf("not a valid rate (expected %s): %w", forms, err)
 		}
 	}
@@ -206,7 +206,7 @@ func coSRateSiblingSuppliesValue(siblingTails [][]string, allowRemainder bool) b
 		if allowRemainder && head == "remainder" {
 			return true
 		}
-		if ValidateRate(head, nil) == nil {
+		if ValidateRate(head) == nil {
 			return true
 		}
 	}
@@ -218,7 +218,7 @@ func coSRateSiblingSuppliesValue(siblingTails [][]string, allowRemainder bool) b
 // suffixes, or Junos percent values with a trailing percent sign. Bare
 // integers stay rejected because they are ambiguous between bytes and
 // percent.
-func ValidateByteSizeOrPercent(raw string, _ *Config) error {
+func ValidateByteSizeOrPercent(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if strings.HasSuffix(trimmed, "%") {
 		if _, err := parsePercentWithSuffixStrict(trimmed); err != nil {
@@ -226,7 +226,7 @@ func ValidateByteSizeOrPercent(raw string, _ *Config) error {
 		}
 		return nil
 	}
-	return ValidateByteSize(raw, nil)
+	return ValidateByteSize(raw)
 }
 
 // ValidateCoSBufferSizeTail validates the whole tail of a CoS scheduler
@@ -257,7 +257,7 @@ func ValidateCoSBufferSizeTail(tokens []string, siblingTails [][]string) error {
 			return fmt.Errorf("unknown modifier %q after temporal", t)
 		}
 	} else {
-		if err := ValidateByteSizeOrPercent(tokens[0], nil); err != nil {
+		if err := ValidateByteSizeOrPercent(tokens[0]); err != nil {
 			return fmt.Errorf("not a valid buffer-size (expected %s): %w", forms, err)
 		}
 		for _, t := range tokens[1:] {
@@ -321,7 +321,7 @@ func coSBufferSizeForm(tokens []string) string {
 		}
 		return ""
 	}
-	if len(tokens) != 1 || ValidateByteSizeOrPercent(tokens[0], nil) != nil {
+	if len(tokens) != 1 || ValidateByteSizeOrPercent(tokens[0]) != nil {
 		return ""
 	}
 	if strings.HasSuffix(strings.TrimSpace(tokens[0]), "%") {
@@ -451,7 +451,7 @@ func validateForwardingClassRef(raw string, refs *schemaRefs) error {
 // `forwarding-class <name>` reference. That registry cannot see it, so
 // extending it would have meant reshaping the scanner around a different
 // grammar. The typed-leaf validators are where value slots are gated.
-func ValidateForwardingClassName(raw string, _ *Config) error {
+func ValidateForwardingClassName(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf(
 			"empty forwarding-class name — a forwarding class is an identity the " +
@@ -475,11 +475,11 @@ func ValidateForwardingClassName(raw string, _ *Config) error {
 // clamped to `len(node.Keys)`, so arg 1 is only ever visited when the operator
 // actually wrote a second token — a bare `queue 5` never reaches this at index
 // 1. Only a present-but-empty token (`queue 5 ""`) is rejected.
-func ValidateForwardingClassQueueArg(argIdx int, raw string, cfg *Config) error {
+func ValidateForwardingClassQueueArg(argIdx int, raw string) error {
 	if argIdx != 1 {
 		// The queue-id slot keeps its existing compiler-side handling; this gate
 		// deliberately adds no new grammar there.
 		return nil
 	}
-	return ValidateForwardingClassName(raw, cfg)
+	return ValidateForwardingClassName(raw)
 }

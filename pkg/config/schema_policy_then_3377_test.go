@@ -134,7 +134,7 @@ func TestSchema3377_ThenActions_FlatSchemaAccepts(t *testing.T) {
 			t.Fatalf("SetPath(%q) failed: %v", cmd, err)
 		}
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("expected then permit/deny/reject/count leaves to pass schema validation, got: %v", err)
 	}
 }

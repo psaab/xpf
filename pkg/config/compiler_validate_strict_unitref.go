@@ -73,7 +73,7 @@ func validateInterfaceUnitReferencesStrict(cfg *Config) error {
 		if unitTok == "" {
 			return nil // trailing-dot bare form — no unit slot
 		}
-		if err := ValidateLogicalUnit(unitTok, cfg); err != nil {
+		if err := ValidateLogicalUnit(unitTok); err != nil {
 			return fmt.Errorf("%s interface reference %q has invalid logical unit %q: %w",
 				ctx, ref, unitTok, err)
 		}

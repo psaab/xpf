@@ -236,7 +236,7 @@ func TestCoSBufferSizeMixedSiblingFormsRejected11789(t *testing.T) {
 			if len(parseErrs) != 0 {
 				t.Fatalf("parse error: %v", parseErrs[0])
 			}
-			err := config.SchemaValidate(tree, nil)
+			err := config.SchemaValidate(tree)
 			if err == nil {
 				t.Fatal("SchemaValidate accepted sibling buffer-size forms")
 			}
@@ -278,7 +278,7 @@ func TestCoSBufferSizeSameSiblingFormRemainsAllowed11789(t *testing.T) {
 			if len(parseErrs) != 0 {
 				t.Fatalf("parse error: %v", parseErrs[0])
 			}
-			if err := config.SchemaValidate(tree, nil); err != nil {
+			if err := config.SchemaValidate(tree); err != nil {
 				t.Fatalf("same-arm sibling buffer-size values must remain accepted: %v", err)
 			}
 		})

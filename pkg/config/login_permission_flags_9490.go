@@ -48,7 +48,7 @@ func LoginPermissionFlags() []string {
 }
 
 // ValidateLoginPermission accepts one `permissions` token.
-func ValidateLoginPermission(raw string, _ *Config) error {
+func ValidateLoginPermission(raw string) error {
 	if _, ok := junosLoginPermissionFlags[raw]; ok || raw == loginPermissionSuperUserAlias {
 		return nil
 	}

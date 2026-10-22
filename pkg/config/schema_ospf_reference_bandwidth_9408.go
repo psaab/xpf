@@ -108,7 +108,7 @@ func ospfReferenceBandwidthMbps(raw string) (int, error) {
 // downgraded to a warning on the tolerant Store.Load / Store.SyncApply paths,
 // which is why `compileProtocols` must ALSO fail safe: see the compiler's own
 // comment at the `reference-bandwidth` case.
-func ValidateOSPFReferenceBandwidth(raw string, _ *Config) error {
+func ValidateOSPFReferenceBandwidth(raw string) error {
 	_, err := ospfReferenceBandwidthMbps(raw)
 	return err
 }

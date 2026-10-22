@@ -37,7 +37,7 @@ func TestIPsecProposalLifetimeUpperBound10882(t *testing.T) {
 	for _, phase := range phases {
 		t.Run(phase.name, func(t *testing.T) {
 			valid := ipsecLifetimeTree9008(t, phase.stanza, phase.body, maxLifetime)
-			if err := SchemaValidate(valid, nil); err != nil {
+			if err := SchemaValidate(valid); err != nil {
 				t.Fatalf("Junos maximum lifetime %s must pass schema validation: %v", maxLifetime, err)
 			}
 			if _, err := CompileConfig(valid); err != nil {
@@ -45,7 +45,7 @@ func TestIPsecProposalLifetimeUpperBound10882(t *testing.T) {
 			}
 
 			tooLong := ipsecLifetimeTree9008(t, phase.stanza, phase.body, overLimit)
-			if err := SchemaValidate(tooLong, nil); err == nil || !strings.Contains(err.Error(), overLimit) {
+			if err := SchemaValidate(tooLong); err == nil || !strings.Contains(err.Error(), overLimit) {
 				t.Fatalf("schema must reject and name over-limit lifetime %s, got %v", overLimit, err)
 			}
 			if _, err := CompileConfig(tooLong); err == nil || !strings.Contains(err.Error(), "lifetime-seconds") {

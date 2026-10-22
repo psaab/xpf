@@ -31,7 +31,7 @@ import (
 func TestValidateLoginUsername_Table(t *testing.T) {
 	valid := []string{"admin", "netadmin", "user1", "read_only", "a", "_svc", "op-2", strings.Repeat("a", 32)}
 	for _, name := range valid {
-		if err := config.ValidateLoginUsername(name, nil); err != nil {
+		if err := config.ValidateLoginUsername(name); err != nil {
 			t.Errorf("ValidateLoginUsername(%q) = %v, want nil", name, err)
 		}
 	}
@@ -52,7 +52,7 @@ func TestValidateLoginUsername_Table(t *testing.T) {
 		strings.Repeat("a", 33),             // over the length cap
 	}
 	for _, name := range invalid {
-		if err := config.ValidateLoginUsername(name, nil); err == nil {
+		if err := config.ValidateLoginUsername(name); err == nil {
 			t.Errorf("ValidateLoginUsername(%q) = nil, want error", name)
 		}
 	}

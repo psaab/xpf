@@ -138,7 +138,7 @@ func TestAppTimeoutNever15207(t *testing.T) {
 	if _, err := CompileConfig(tree); err == nil {
 		t.Fatal("thirty must still reject")
 	}
-	if err := SchemaValidate(flatTreeFromSets(t, referencedTimeoutApp("inactivity-timeout", "never")...), nil); err != nil {
+	if err := SchemaValidate(flatTreeFromSets(t, referencedTimeoutApp("inactivity-timeout", "never")...)); err != nil {
 		t.Fatalf("SchemaValidate never: %v", err)
 	}
 }

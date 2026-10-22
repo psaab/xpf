@@ -55,12 +55,12 @@ func TestCanonicalISISLevelTable_8446(t *testing.T) {
 
 func TestValidateISISLevelRejectsNonCanonical_8446(t *testing.T) {
 	for _, good := range ISISLevelSpellings() {
-		if err := ValidateISISLevel(good, nil); err != nil {
+		if err := ValidateISISLevel(good); err != nil {
 			t.Errorf("ValidateISISLevel(%q) rejected an accepted spelling: %v", good, err)
 		}
 	}
 	for _, bad := range []string{"1", "2", "level 2", "LEVEL-2", "level-3", "garbage", "", "   "} {
-		if err := ValidateISISLevel(bad, nil); err == nil {
+		if err := ValidateISISLevel(bad); err == nil {
 			t.Errorf("ValidateISISLevel(%q) accepted a value the renderer cannot express", bad)
 		}
 	}

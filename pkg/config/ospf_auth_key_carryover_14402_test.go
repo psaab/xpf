@@ -67,7 +67,7 @@ func TestOSPFAuthKeyCarryoverRefused14402(t *testing.T) {
 	}
 	check := func(t *testing.T, tree *ConfigTree, wantErr string) {
 		t.Helper()
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if wantErr == "" {
 			if err != nil {
 				t.Fatalf("must commit, got: %v", err)
@@ -102,14 +102,14 @@ func TestOSPFAuthKeyRoutingInstance14402(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), "authentication-key") {
 		t.Fatalf("RI copy must refuse, got %v", err)
 	}
 	// Control RI md5
 	src2 := `routing-instances { VRF-A { protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { authentication { md5 1 { key "SEKRIT"; } } } } } } } }`
 	tree2, _ := NewParser(src2).Parse()
-	if err := SchemaValidate(tree2, nil); err != nil {
+	if err := SchemaValidate(tree2); err != nil {
 		t.Fatalf("RI md5 must commit: %v", err)
 	}
 }
@@ -124,7 +124,7 @@ func TestOSPFAuthKeyCompileAndOtherProtocols14402(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse %v", perrs)
 		}
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("legal leaf rejected %q: %v", src, err)
 		}
 	}
@@ -160,7 +160,7 @@ func TestOSPFAuthKeyCompileAndOtherProtocols14402(t *testing.T) {
 	}
 	// Interface world stays open
 	tree4 := ospfAuthKeyTreeHier14402(t, `frobnicate 7;`)
-	if err := SchemaValidate(tree4, nil); err != nil {
+	if err := SchemaValidate(tree4); err != nil {
 		t.Fatalf("interface world must stay open: %v", err)
 	}
 }

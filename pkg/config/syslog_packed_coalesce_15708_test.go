@@ -10,7 +10,7 @@ import (
 
 func TestSyslogFileUserPacked15708(t *testing.T) {
 	tree := parseHierarchical(t, `system { syslog { file authlog authorization info; user * any emergency; } }`)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate packed: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -33,11 +33,11 @@ func TestSyslogFileUserPacked15708(t *testing.T) {
 
 func TestSyslogFileUserPackedInvalidSeverity15708(t *testing.T) {
 	tree := parseHierarchical(t, `system { syslog { file authlog authorization bogus; } }`)
-	if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "bogus") {
+	if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("SchemaValidate packed bogus severity = %v, want rejection naming bogus", err)
 	}
 	tree2 := parseHierarchical(t, `system { syslog { user bob daemon bogus; } }`)
-	if err := SchemaValidate(tree2, nil); err == nil {
+	if err := SchemaValidate(tree2); err == nil {
 		t.Fatalf("SchemaValidate user packed bogus severity accepted")
 	}
 }

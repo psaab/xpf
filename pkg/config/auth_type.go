@@ -80,7 +80,7 @@ func AuthTypeSpellings() []string {
 // `authentication-type`. Shared by all five schema copies (RIP, IS-IS
 // router-level, IS-IS per-interface, and both routing-instance copies) so a
 // spelling cannot be accepted in one context and rejected in another.
-func ValidateAuthType(raw string, _ *Config) error {
+func ValidateAuthType(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected one of %s)",
 			strings.Join(AuthTypeSpellings(), ", "))

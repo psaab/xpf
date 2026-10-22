@@ -26,7 +26,7 @@ func TestBGPPeerASRangeRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := buildTreeFromSet(t, []string{tc.set})
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted out-of-range ASN %q; expected rejection", tc.set)
 			}
 		})
@@ -44,7 +44,7 @@ func TestBGPPeerASRangeAccepted(t *testing.T) {
 	}
 	for _, set := range cases {
 		tree := buildTreeFromSet(t, []string{set})
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate rejected valid ASN %q: %v", set, err)
 		}
 	}

@@ -456,7 +456,7 @@ func TestSyslogRenderUnsafeFacilityIsLoadReachable_5797(t *testing.T) {
 	// assumed: if that gate is ever removed, this fails and says so, and the
 	// tripwire the original test installed keeps working in the other
 	// direction.
-	if err := config.SchemaValidate(tree, nil); err == nil {
+	if err := config.SchemaValidate(tree); err == nil {
 		t.Fatalf("SchemaValidate ACCEPTED %q. The #6844 facility key gate is gone, so an "+
 			"ORDINARY commit can once again land an injecting selector -- the render belt "+
 			"below is then the only thing standing between it and a written drop-in.",

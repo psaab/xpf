@@ -12,7 +12,7 @@ func TestSchedulerRejectsWeekdayPackedOnSchedulerLine12636(t *testing.T) {
 			if len(parseErrs) != 0 {
 				t.Fatalf("parse errors: %v", parseErrs)
 			}
-			if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), day) {
+			if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), day) {
 				t.Fatalf("SchemaValidate error = %v, want rejection naming %q", err, day)
 			}
 		})
@@ -24,7 +24,7 @@ func TestSchedulerWeekdayInsideBlockRemainsAccepted12636(t *testing.T) {
 	if len(parseErrs) != 0 {
 		t.Fatalf("parse errors: %v", parseErrs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected canonical weekday block: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

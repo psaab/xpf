@@ -300,7 +300,7 @@ func TestSSHKeyExchangeValidatorCoversEverySlot_6692(t *testing.T) {
 	}
 	for _, cmds := range reject {
 		tree := buildTreeFromSet(t, cmds)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("SchemaValidate accepted %v; a malformed algorithm name in a "+
 				"non-zero slot must be rejected", cmds)
 		}
@@ -309,7 +309,7 @@ func TestSSHKeyExchangeValidatorCoversEverySlot_6692(t *testing.T) {
 	ok := buildTreeFromSet(t, []string{
 		`set system services ssh key-exchange [ curve25519-sha256 diffie-hellman-group-exchange-sha256 ]`,
 	})
-	if err := SchemaValidate(ok, nil); err != nil {
+	if err := SchemaValidate(ok); err != nil {
 		t.Errorf("SchemaValidate rejected a well-formed key-exchange list: %v", err)
 	}
 }

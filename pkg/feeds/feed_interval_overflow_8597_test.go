@@ -103,7 +103,7 @@ func TestLenientLoadKeepsAnOutOfRangeFeedInterval_8597(t *testing.T) {
 	// typed-leaf SchemaValidate gate is STRICT only on the operator-driven
 	// commit / commit-check path ... Here — the tolerant Store.Load /
 	// Store.SyncApply ingress — a violation downgrades to a warning."
-	if serr := config.SchemaValidate(tree, nil); serr == nil {
+	if serr := config.SchemaValidate(tree); serr == nil {
 		t.Error("SchemaValidate accepted an out-of-range update-interval; the schema bound " +
 			"is gone, and the lenient/strict split this finding describes no longer exists")
 	}

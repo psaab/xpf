@@ -88,7 +88,7 @@ func TestNestedHostInboundExceptRejected13106(t *testing.T) {
 			tree := nestedExcept13106(t, tc.inner, tc.interfaceScope)
 
 			// Schema gate must not stay silent on the nested shape.
-			if err := SchemaValidate(tree, nil); err == nil ||
+			if err := SchemaValidate(tree); err == nil ||
 				!strings.Contains(err.Error(), tc.wantStrict) {
 				t.Fatalf("SchemaValidate = %v, want error naming %q", err, tc.wantStrict)
 			}
@@ -127,7 +127,7 @@ func TestNestedHostInboundExceptRejected13106(t *testing.T) {
 // the sibling flat-tail exclusion, and a plain list.
 func TestHostInboundNestedSubblockShapesStillBind13106(t *testing.T) {
 	hier := nestedExcept13106(t, `system-services { all; ssh { except; } }`, false)
-	if err := SchemaValidate(hier, nil); err != nil {
+	if err := SchemaValidate(hier); err != nil {
 		t.Fatalf("SchemaValidate rejected supported subblock: %v", err)
 	}
 	cfg, err := CompileConfig(hier)

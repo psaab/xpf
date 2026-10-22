@@ -35,7 +35,7 @@ func schemaCheck6773(t *testing.T, sets ...string) error {
 			t.Fatalf("SetPath(%q): %v", c, err)
 		}
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 func compile6772(t *testing.T, sets ...string) error {

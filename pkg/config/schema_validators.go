@@ -16,16 +16,16 @@ import (
 // parseBurstSizeLimit, ...) keep their zero-return-on-error contract so
 // downstream callers don't need to learn new error paths.
 //
-// Validators take a (raw string, cfg *Config) pair so future validators
-// can cross-reference compiled state (e.g. "scheduler X must exist").
-// Today the schedulers leaves don't need cfg, so they ignore it.
+// Validators take only the raw token: validation runs before compile,
+// so no compiled *Config exists to cross-reference. A validator that
+// needs tree context uses treeValidator (schemaRefs) instead (#16162).
 
 // LeafValidator is the function signature for typed-leaf validators.
 // The mirrored cmdtree.LeafValidator alias has the same shape so
 // cmdtree Nodes can hold one of these directly. We define it here too
 // (rather than importing cmdtree) to avoid a config→cmdtree→config
 // import cycle.
-type LeafValidator func(raw string, cfg *Config) error
+type LeafValidator func(raw string) error
 
 // InterfaceSpeedMbps maps canonical interface `speed` tokens to Mbps. This
 // is the single conversion table shared by commit validation and all
@@ -45,7 +45,7 @@ func InterfaceSpeedMbps(raw string) (uint64, bool) {
 
 // ValidateInterfaceSpeed rejects values that none of the speed consumers can
 // interpret (#11797), while preserving their existing case/space tolerance.
-func ValidateInterfaceSpeed(raw string, _ *Config) error {
+func ValidateInterfaceSpeed(raw string) error {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	if s == "auto" {
 		return nil
@@ -64,7 +64,7 @@ func ValidateInterfaceSpeed(raw string, _ *Config) error {
 // union in every slot. route-filter (`from route-filter <prefix>
 // <match-type>`) is the motivating case: arg 0 must be a CIDR and arg 1
 // must be a supported match-type keyword.
-type PositionalKeyValidator func(argIdx int, raw string, cfg *Config) error
+type PositionalKeyValidator func(argIdx int, raw string) error
 
 // validateEnum returns a closure that accepts only one of the listed
 // names (case-sensitive, exact match).
@@ -75,7 +75,7 @@ func ValidateEnum(allowed []string) LeafValidator {
 	for _, a := range sorted {
 		set[a] = struct{}{}
 	}
-	return func(raw string, _ *Config) error {
+	return func(raw string) error {
 		if _, ok := set[raw]; ok {
 			return nil
 		}
@@ -116,7 +116,7 @@ var MasterPasswordPRFNames = []string{
 // closedWorld flag on the master-password subtree (schema_system.go), which
 // catches a typo in the KEYWORD (`pseudo-random-fnuction`) rather than the
 // value.
-func ValidateMasterPasswordPRF(raw string, _ *Config) error {
+func ValidateMasterPasswordPRF(raw string) error {
 	lower := strings.ToLower(strings.TrimSpace(raw))
 	for _, name := range MasterPasswordPRFNames {
 		if lower == name {
@@ -150,7 +150,7 @@ func ValidateMasterPasswordPRF(raw string, _ *Config) error {
 // duplicating them here would add a second source of truth for the same rule.
 // Only the non-numeric case was unguarded, and it is the one that fails
 // silently rather than loudly.
-func ValidateVRRPGroupID(raw string, _ *Config) error {
+func ValidateVRRPGroupID(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing VRRP group id (expected an integer)")
 	}
@@ -163,7 +163,7 @@ func ValidateVRRPGroupID(raw string, _ *Config) error {
 }
 
 func ValidateIntegerMin(min int64) LeafValidator {
-	return func(raw string, _ *Config) error {
+	return func(raw string) error {
 		if strings.TrimSpace(raw) == "" {
 			return fmt.Errorf("missing value (expected integer)")
 		}
@@ -206,7 +206,7 @@ func ValidateInteger(min, max int64) LeafValidator {
 				"with no ceiling, or order the arguments (min, max).",
 			min, max, min))
 	}
-	return func(raw string, _ *Config) error {
+	return func(raw string) error {
 		if strings.TrimSpace(raw) == "" {
 			return fmt.Errorf("missing value (expected integer)")
 		}
@@ -233,7 +233,7 @@ func ValidateInteger(min, max int64) LeafValidator {
 // other family passes here and is then recorded on UnknownICMP when the
 // compiler cannot resolve it for the application's protocol, so the
 // strict spec gate still fails closed.
-func ValidateICMPTypeValue(raw string, _ *Config) error {
+func ValidateICMPTypeValue(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected integer 0..255 or a Junos icmp-type name such as echo-request)")
 	}
@@ -249,7 +249,7 @@ func ValidateICMPTypeValue(raw string, _ *Config) error {
 // ValidateICMPCodeValue accepts an application `icmp-code` value (#15198):
 // numeric 0..255 only, mirroring resolveICMPCodeToken — Junos application
 // icmp-code is numeric and symbolic codes fail closed on both paths.
-func ValidateICMPCodeValue(raw string, _ *Config) error {
+func ValidateICMPCodeValue(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected integer 0..255)")
 	}
@@ -260,11 +260,11 @@ func ValidateICMPCodeValue(raw string, _ *Config) error {
 }
 
 // validateAppTimeoutLeaf accepts Junos seconds in [0,86400] or `never` (#15207).
-func validateAppTimeoutLeaf(raw string, _ *Config) error {
+func validateAppTimeoutLeaf(raw string) error {
 	if strings.EqualFold(strings.TrimSpace(raw), "never") {
 		return nil
 	}
-	return ValidateInteger(appTimeoutMin, appTimeoutMax)(raw, nil)
+	return ValidateInteger(appTimeoutMin, appTimeoutMax)(raw)
 }
 
 // MaxLogicalUnit is the logical `unit <n>` ceiling: Junos accepts a logical
@@ -290,9 +290,8 @@ const MaxLogicalUnit = 16385
 func CanonicalLogicalUnit(raw string) (int, string, error) {
 	// Delegate the acceptance/range check to ValidateInteger so the error
 	// text is byte-identical to ValidateLogicalUnit's historical output
-	// (the #5829 tests and operator diagnostics depend on it). ValidateInteger
-	// ignores the *Config argument, so nil is safe here.
-	if err := ValidateInteger(0, MaxLogicalUnit)(raw, nil); err != nil {
+	// (the #5829 tests and operator diagnostics depend on it).
+	if err := ValidateInteger(0, MaxLogicalUnit)(raw); err != nil {
 		return 0, "", err
 	}
 	// ParseInt with the same base/bitsize accepts exactly what ValidateInteger
@@ -461,7 +460,7 @@ func makeInterfaceRefSplit(base, unitTok string, hasUnit bool) InterfaceRefSplit
 //
 // It now delegates the validation half to CanonicalLogicalUnit (#5878) — the
 // shared normalizer — so validation and canonicalization can never diverge.
-func ValidateLogicalUnit(raw string, cfg *Config) error {
+func ValidateLogicalUnit(raw string) error {
 	_, _, err := CanonicalLogicalUnit(raw)
 	return err
 }
@@ -469,7 +468,7 @@ func ValidateLogicalUnit(raw string, cfg *Config) error {
 // validatePercent returns a closure that accepts a real number in
 // [min, max] inclusive. The input must parse as a float.
 func ValidatePercent(min, max float64) LeafValidator {
-	return func(raw string, _ *Config) error {
+	return func(raw string) error {
 		if strings.TrimSpace(raw) == "" {
 			return fmt.Errorf("missing value (expected percent %.0f..%.0f)", min, max)
 		}
@@ -594,9 +593,8 @@ var loginUsernameRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 // (compileTreeLenient), the same #1960 doctrine as the other typed-leaf gates;
 // the daemon's writeSudoersGrant/reconcileSudoers apply the SAME check
 // defensively so a leniently-loaded or peer-synced bad name still never reaches
-// the sudoers writer. The *Config arg is unused (part of the LeafValidator
-// contract); daemon callers pass nil.
-func ValidateLoginUsername(raw string, _ *Config) error {
+// the sudoers writer.
+func ValidateLoginUsername(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("login user name must not be empty")
 	}

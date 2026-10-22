@@ -58,7 +58,7 @@ func parseInterfaceNumeric9899(raw string, min, max uint64) (uint64, error) {
 // schema and compile can never drift on form or bounds; the missing-value
 // check mirrors ValidateInteger.
 func validateInterfaceNumeric9899(min, max uint64) LeafValidator {
-	return func(raw string, _ *Config) error {
+	return func(raw string) error {
 		if strings.TrimSpace(raw) == "" {
 			return fmt.Errorf("missing value %q (expected integer)", raw)
 		}
@@ -194,7 +194,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			} else if _, ok := InterfaceSpeedMbps(speed); ok {
 				ifc.Speed = speed
 			} else {
-				msg := fmt.Sprintf("interfaces %s speed %q: %v", ifName, raw, ValidateInterfaceSpeed(raw, nil))
+				msg := fmt.Sprintf("interfaces %s speed %q: %v", ifName, raw, ValidateInterfaceSpeed(raw))
 				if !opts.lenientInterfaceSpeed {
 					return fmt.Errorf("%s", msg)
 				}

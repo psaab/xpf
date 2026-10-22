@@ -26,7 +26,7 @@ func TestZoneTCPRstMalformedRejectedStrict13119(t *testing.T) {
 		if len(perrs) != 0 {
 			t.Fatalf("parse %q: %v", text, perrs)
 		}
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("%q: SchemaValidate must reject malformed tcp-rst at commit", text)
 		} else if !strings.Contains(err.Error(), "tcp-rst") {
 			t.Fatalf("%q: SchemaValidate error must name tcp-rst, got %v", text, err)
@@ -54,7 +54,7 @@ func TestZoneTCPRstMalformedRejectedStrict13119(t *testing.T) {
 			t.Fatalf("SetPath: %v", err)
 		}
 	}
-	if err := SchemaValidate(flat, nil); err == nil {
+	if err := SchemaValidate(flat); err == nil {
 		t.Fatal("flat-set `tcp-rst disable` must be rejected by SchemaValidate")
 	}
 	if _, err := CompileConfig(flat); err == nil {
@@ -66,7 +66,7 @@ func TestZoneTCPRstMalformedRejectedStrict13119(t *testing.T) {
 	if len(perrs) != 0 {
 		t.Fatalf("parse control: %v", perrs)
 	}
-	if err := SchemaValidate(good, nil); err != nil {
+	if err := SchemaValidate(good); err != nil {
 		t.Fatalf("bare tcp-rst must pass SchemaValidate: %v", err)
 	}
 	cfg, err := CompileConfig(good)

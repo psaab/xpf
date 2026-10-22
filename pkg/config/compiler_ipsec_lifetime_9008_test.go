@@ -74,7 +74,7 @@ func TestIPsecProposalLifetimeChannels9008(t *testing.T) {
 			name := ph.name + "/" + tc.value
 			t.Run(name, func(t *testing.T) {
 				// --- CHANNEL: SchemaValidate (Store.Commit runs this first) ---
-				schemaErr := SchemaValidate(ipsecLifetimeTree9008(t, ph.stanza, ph.body, tc.value), nil)
+				schemaErr := SchemaValidate(ipsecLifetimeTree9008(t, ph.stanza, ph.body, tc.value))
 				if tc.valid && schemaErr != nil {
 					t.Fatalf("SchemaValidate rejected the valid value %q: %v", tc.value, schemaErr)
 				}

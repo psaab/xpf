@@ -28,7 +28,7 @@ func TestStaticRouteInterfaceQualifiedNextHopTail12790(t *testing.T) {
 			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("strict compile error = %v, want %q rejection", err, tc.want)
 			}
-			if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("strict schema validation error = %v, want %q rejection", err, tc.want)
 			}
 
@@ -51,7 +51,7 @@ func TestStaticRouteInterfaceQualifiedNextHopTail12790(t *testing.T) {
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}
-		if err := SchemaValidate(hierTree(t, src), nil); err != nil {
+		if err := SchemaValidate(hierTree(t, src)); err != nil {
 			t.Fatalf("strict schema validation rejected complete qualified-next-hop: %v", err)
 		}
 		for _, warning := range cfg.Warnings {

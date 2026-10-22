@@ -335,7 +335,7 @@ func TestDHCPGroup6696EveryElementIsValidated(t *testing.T) {
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := setTree6696(t, tc.lines...)
-			cfg, err := CompileConfig(tree)
+			_, err := CompileConfig(tree)
 			if err != nil {
 				// #14601: the compiled pool gate refuses a malformed
 				// dns-server before the schema walk runs. That is the
@@ -346,7 +346,7 @@ func TestDHCPGroup6696EveryElementIsValidated(t *testing.T) {
 				}
 				return
 			}
-			verr := SchemaValidate(tree, cfg)
+			verr := SchemaValidate(tree)
 			if verr == nil {
 				t.Fatalf("commit ACCEPTED a malformed element %q — a widened read needs a "+
 					"widened validator (#6696)", tc.want)
@@ -380,7 +380,7 @@ func TestDHCPGroup6696RealValuesStillCommitClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict compile REJECTED a legitimate group: %v", err)
 	}
-	if verr := SchemaValidate(tree, cfg); verr != nil {
+	if verr := SchemaValidate(tree); verr != nil {
 		t.Fatalf("commit-check REJECTED legitimate interface / resolver values: %v", verr)
 	}
 	g := dhcpV4Groups6696(cfg)["g1"]

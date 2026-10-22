@@ -329,7 +329,7 @@ func TestSchemaValidate_Interfaces_AcceptedValuesCompileAsWritten(t *testing.T) 
 			t.Fatalf("SetPath(%q): %v", line, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)

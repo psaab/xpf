@@ -325,7 +325,7 @@ func TestUnknownEnforcementSecurityPolicyChildrenPoisonLenientCompile12234(t *te
 			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "#12234") {
 				t.Fatalf("strict compiler must reject unknown enforcement child %q, got %v", tc.keyword, err)
 			}
-			if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), tc.keyword) {
+			if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), tc.keyword) {
 				t.Fatalf("strict schema must reject unknown enforcement child %q, got %v", tc.keyword, err)
 			}
 		})
@@ -478,7 +478,7 @@ func TestKnownScalarLeafUnresolvedTailPoisons12634(t *testing.T) {
 				t.Fatalf("strict compiler must reject known scalar leaf tail %q, got %v", tc.child, err)
 			}
 			if tc.leaf == "description" {
-				if err := SchemaValidate(tree, nil); err == nil {
+				if err := SchemaValidate(tree); err == nil {
 					t.Fatalf("strict schema must reject known scalar leaf tail %q", tc.child)
 				}
 			}
@@ -683,7 +683,7 @@ func TestPolicyScalarLeafNestedThenOrMatchRejected12634(t *testing.T) {
 			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "#12634") {
 				t.Fatalf("strict compiler must reject nested container tail under %q, got %v", tc.leaf, err)
 			}
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("strict schema must reject nested container tail under %q", tc.leaf)
 			}
 		})

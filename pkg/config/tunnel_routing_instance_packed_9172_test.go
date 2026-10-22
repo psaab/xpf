@@ -93,7 +93,7 @@ func TestPackedBareTunnelRoutingInstanceBindsNothing9172(t *testing.T) {
 					}
 				}
 				tree, _ := NewParser(text).Parse()
-				verr := SchemaValidate(tree, nil)
+				verr := SchemaValidate(tree)
 				switch {
 				case c.wantReject && (verr == nil || !strings.Contains(verr.Error(), "declares a value and none was given")):
 					t.Errorf("commit gate: want the valueless-destination refusal, got %v", verr)

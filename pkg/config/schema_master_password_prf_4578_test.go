@@ -35,7 +35,7 @@ func TestMasterPasswordPRF_RejectsKeywordTypo(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set system master-password pseudo-random-fnuction juniper-prf1",
 	})
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("a typo'd master-password keyword must be rejected at commit " +
 			"(RED on revert: silently accepted → at-rest encryption silently OFF)")
@@ -53,7 +53,7 @@ func TestMasterPasswordPRF_RejectsBadValue(t *testing.T) {
 		tree := buildTree(t, []string{
 			"set system master-password pseudorandom-function " + bad,
 		})
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("an unknown pseudorandom-function %q must be rejected at commit "+
 				"(RED on revert: silently accepted → wrong/absent encryption)", bad)
@@ -75,7 +75,7 @@ func TestMasterPasswordPRF_AcceptsValidSelectors(t *testing.T) {
 		tree := buildTree(t, []string{
 			"set system master-password pseudorandom-function " + sel,
 		})
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid pseudorandom-function %q must commit clean, got: %v", sel, err)
 		}
 		cfg, err := CompileConfig(tree)
@@ -97,7 +97,7 @@ func TestMasterPasswordPRF_DefaultUnsetStillCommits(t *testing.T) {
 	noStanza := buildTree(t, []string{
 		"set system host-name fw0",
 	})
-	if err := SchemaValidate(noStanza, nil); err != nil {
+	if err := SchemaValidate(noStanza); err != nil {
 		t.Fatalf("a config with no master-password must commit clean (encryption off by default), got: %v", err)
 	}
 
@@ -105,7 +105,7 @@ func TestMasterPasswordPRF_DefaultUnsetStillCommits(t *testing.T) {
 	withPRF := buildTree(t, []string{
 		"set system master-password pseudorandom-function juniper-prf1",
 	})
-	if err := SchemaValidate(withPRF, nil); err != nil {
+	if err := SchemaValidate(withPRF); err != nil {
 		t.Fatalf("a valid master-password config must commit clean, got: %v", err)
 	}
 }
@@ -114,12 +114,12 @@ func TestMasterPasswordPRF_DefaultUnsetStillCommits(t *testing.T) {
 // the unit level (independent of the schema wiring).
 func TestValidateMasterPasswordPRF_Unit(t *testing.T) {
 	for _, name := range MasterPasswordPRFNames {
-		if err := ValidateMasterPasswordPRF(name, nil); err != nil {
+		if err := ValidateMasterPasswordPRF(name); err != nil {
 			t.Errorf("ValidateMasterPasswordPRF(%q) = %v, want nil", name, err)
 		}
 	}
 	for _, bad := range []string{"", "hmac-sha256", "bogus", "prf1"} {
-		if err := ValidateMasterPasswordPRF(bad, nil); err == nil {
+		if err := ValidateMasterPasswordPRF(bad); err == nil {
 			t.Errorf("ValidateMasterPasswordPRF(%q) = nil, want error", bad)
 		}
 	}

@@ -149,7 +149,7 @@ func TestTunnelModeRejectsUnknownValues_6924(t *testing.T) {
 		{mode: "gre6", wantReject: true},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
-			err := SchemaValidate(build(t, tc.mode), nil)
+			err := SchemaValidate(build(t, tc.mode))
 			if tc.wantReject {
 				if err == nil {
 					t.Fatalf("`tunnel mode %s` was ACCEPTED. It builds a kernel GRE device "+

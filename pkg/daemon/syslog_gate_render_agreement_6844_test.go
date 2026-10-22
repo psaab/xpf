@@ -89,7 +89,7 @@ func TestCommitGateAndRenderBeltAcceptTheSameFacilities_6844(t *testing.T) {
 	// only one branch of each predicate.
 	accepted, rejected := 0, 0
 	for _, tok := range corpus {
-		gateOK := config.ValidateSyslogFacility(tok, nil) == nil
+		gateOK := config.ValidateSyslogFacility(tok) == nil
 		beltOK := syslogSelectorFacilitySafe(tok)
 
 		// The gate additionally rejects the empty token (a schema KEY always
@@ -134,7 +134,7 @@ func TestCommitGateAndRenderBeltAcceptTheSameFacilities_6844(t *testing.T) {
 // committing under the first cut of the gate.
 func TestRenderAssertedFormsCommit_6844(t *testing.T) {
 	for _, tok := range []string{"auth,authpriv", "auth,authpriv,daemon", "*"} {
-		if err := config.ValidateSyslogFacility(tok, nil); err != nil {
+		if err := config.ValidateSyslogFacility(tok); err != nil {
 			t.Errorf("the commit gate rejects %q: %v\n"+
 				"This form is documented in pkg/logging/README.md and asserted to render "+
 				"as a working drop-in. Rejecting it warns a strict-commit-clean, "+

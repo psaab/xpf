@@ -21,7 +21,7 @@ func TestPlainTextPasswordStrictRejects15053(t *testing.T) {
 	}
 	for _, line := range cases {
 		tree := buildTree(t, []string{line})
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Errorf("%q: SchemaValidate accepted plain-text-password (RED pre-fix)", line)
 			continue
@@ -66,7 +66,7 @@ func TestPlainTextPasswordControls15053(t *testing.T) {
 		"set system login user alice uid 1000",
 	} {
 		tree := buildTree(t, []string{line})
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("control %q rejected: %v", line, err)
 		}
 	}

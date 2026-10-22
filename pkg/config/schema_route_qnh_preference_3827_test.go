@@ -16,7 +16,7 @@ func TestStaticRouteQualifiedNextHopPreference_SchemaGate(t *testing.T) {
 		t.Helper()
 		tree := flatTreeFromSets(t,
 			"set routing-options static route 0.0.0.0/0 qualified-next-hop 192.168.1.1 preference "+val)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("qualified-next-hop preference %q: expected SchemaValidate to reject, got nil", val)
 		}
 	}
@@ -24,7 +24,7 @@ func TestStaticRouteQualifiedNextHopPreference_SchemaGate(t *testing.T) {
 		t.Helper()
 		tree := flatTreeFromSets(t,
 			"set routing-options static route 0.0.0.0/0 qualified-next-hop 192.168.1.1 preference "+val)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("qualified-next-hop preference %q: expected SchemaValidate to accept, got %v", val, err)
 		}
 	}
@@ -44,7 +44,7 @@ func TestStaticRouteQualifiedNextHopPreference_SchemaGate(t *testing.T) {
 func TestStaticRouteQualifiedNextHopPreference_NegativeErrorMentionsValue(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set routing-options static route ::/0 qualified-next-hop 2001:db8::1 preference -7")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected a negative qualified-next-hop preference to be rejected at commit")
 	}
@@ -56,7 +56,7 @@ func TestStaticRouteQualifiedNextHopPreference_NegativeErrorMentionsValue(t *tes
 func TestStaticRouteQualifiedNextHopPreference_AboveFRRMaximumNamesLeaf12060(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set routing-options static route 0.0.0.0/0 qualified-next-hop 192.168.1.1 preference 256")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected qualified-next-hop preference 256 to be rejected at commit")
 	}
@@ -73,7 +73,7 @@ func TestStaticRouteQualifiedNextHopPreference_ValidCommits(t *testing.T) {
 		"set routing-options static route 10.0.0.0/24 qualified-next-hop 192.168.1.1 preference 10",
 		"set routing-options static route 10.0.0.0/24 qualified-next-hop 192.168.1.1 metric 20",
 		"set routing-options static route 10.0.0.0/24 qualified-next-hop 192.168.1.1 interface ge-0-0-0")
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("valid qualified-next-hop preference/metric/interface: SchemaValidate rejected: %v", err)
 	}
 }

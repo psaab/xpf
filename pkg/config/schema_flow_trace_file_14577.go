@@ -27,9 +27,9 @@ func validateFlowTraceFileTail14577(tokens []string, _ [][]string) error {
 		v := rest[i+1]
 		var err error
 		if kw == "size" {
-			err = ValidateInteger(FlowTraceMinFileSize, FlowTraceMaxFileSize)(v, nil)
+			err = ValidateInteger(FlowTraceMinFileSize, FlowTraceMaxFileSize)(v)
 		} else {
-			err = ValidateInteger(FlowTraceMinFileCount, FlowTraceMaxFileCount)(v, nil)
+			err = ValidateInteger(FlowTraceMinFileCount, FlowTraceMaxFileCount)(v)
 		}
 		if err != nil {
 			return fmt.Errorf("invalid value %q for %q: %v", v, kw, err)

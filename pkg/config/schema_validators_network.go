@@ -19,7 +19,7 @@ import (
 // length. Used for leaves the runtime feeds to net.ParseIP (e.g. GRE
 // tunnel source/destination, pkg/routing/tunnel.go:194), where garbage
 // silently disables the feature today.
-func ValidateIPAddress(raw string, _ *Config) error {
+func ValidateIPAddress(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an IP address, e.g. 10.0.1.10 or 2001:db8::1)")
@@ -42,11 +42,11 @@ func ValidateIPAddress(raw string, _ *Config) error {
 // and then rendered nothing — the BGP session sources from the wrong
 // address. Refuse padding at commit so the operator fixes the spelling.
 // Migration: remove quotes/padding and use the bare address.
-func ValidateBGPLocalAddress(raw string, _ *Config) error {
+func ValidateBGPLocalAddress(raw string) error {
 	if raw != strings.TrimSpace(raw) {
 		return fmt.Errorf("invalid local-address %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
 	}
-	return ValidateIPAddress(raw, nil)
+	return ValidateIPAddress(raw)
 }
 
 // ValidateTunnelEndpoint accepts a GRE/IPIP tunnel `source`/`destination`
@@ -62,11 +62,11 @@ func ValidateBGPLocalAddress(raw string, _ *Config) error {
 // ValidateIPAddress keeps its trimmed leniency for its other leaves
 // (mirrors ValidateBGPLocalAddress / #14377). Migration: remove
 // quotes/padding and use the bare address.
-func ValidateTunnelEndpoint(raw string, _ *Config) error {
+func ValidateTunnelEndpoint(raw string) error {
 	if raw != strings.TrimSpace(raw) {
 		return fmt.Errorf("invalid tunnel endpoint %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
 	}
-	return ValidateIPAddress(raw, nil)
+	return ValidateIPAddress(raw)
 }
 
 // ValidateBGPClusterID accepts a BGP route-reflector cluster-id in exactly the
@@ -88,7 +88,7 @@ func ValidateTunnelEndpoint(raw string, _ *Config) error {
 // Strict at commit-check (SchemaValidate); the tolerant load / peer-sync path
 // keeps booting (#1960) and the render belt (validClusterID + sanitizeFRRValue,
 // pkg/frr) keeps a leniently-loaded bad value out of frr.conf.
-func ValidateBGPClusterID(raw string, _ *Config) error {
+func ValidateBGPClusterID(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a BGP cluster-id: an IPv4 dotted-quad like 10.0.0.1, or an integer 1..4294967295)")
@@ -130,7 +130,7 @@ func ValidateBGPClusterID(raw string, _ *Config) error {
 // NOT family-gate, so a bare IPv4 literal (8.8.8.8) parses and is
 // advertised on the wire inside an IPv6 RDNSS option — a malformed RA.
 // The family rule mirrors the runtime's ip.To4()==nil classification.
-func ValidateIPv6Address(raw string, _ *Config) error {
+func ValidateIPv6Address(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an IPv6 address, e.g. 2001:db8::1)")
@@ -163,8 +163,8 @@ var pref64PrefixLengths = map[int]struct{}{
 // field can only encode those six lengths. An out-of-set length committed
 // today reaches netip.ParsePrefix cleanly, so the runtime accepts it and
 // then either omits the option or mis-encodes the length.
-func ValidatePREF64CIDR(raw string, cfg *Config) error {
-	if err := ValidateIPv6CIDR(raw, cfg); err != nil {
+func ValidatePREF64CIDR(raw string) error {
+	if err := ValidateIPv6CIDR(raw); err != nil {
 		return err
 	}
 	_, ipnet, err := net.ParseCIDR(strings.TrimSpace(raw))
@@ -187,7 +187,7 @@ func ValidatePREF64CIDR(raw string, cfg *Config) error {
 // pkg/daemon/daemon_reth.go:308), so a bare IP would commit and then
 // silently not exist. The v4/v6 family split mirrors the runtime
 // classification ip.To4() != nil.
-func ValidateIPv4CIDR(raw string, _ *Config) error {
+func ValidateIPv4CIDR(raw string) error {
 	ip, err := parseCIDRStrict(raw, "10.0.1.10/24")
 	if err != nil {
 		return err
@@ -203,7 +203,7 @@ func ValidateIPv4CIDR(raw string, _ *Config) error {
 // is required; the family rule mirrors the runtime's ip.To4() == nil
 // classification, so 4-in-6 forms like ::ffff:10.0.1.1/96 — which the
 // runtime classifies as inet — are rejected under family inet6.
-func ValidateIPv6CIDR(raw string, _ *Config) error {
+func ValidateIPv6CIDR(raw string) error {
 	ip, err := parseCIDRStrict(raw, "2001:db8::1/64")
 	if err != nil {
 		return err
@@ -244,7 +244,7 @@ func parseCIDRStrict(raw, example string) (net.IP, error) {
 // ` ip ospf area %s`), so a malformed id reached the routing daemon's config
 // file unexamined. Unlike a BGP cluster-id, area 0 is the BACKBONE and must be
 // accepted — the integer arm therefore has no >= 1 floor.
-func ValidateOSPFArea(raw string, _ *Config) error {
+func ValidateOSPFArea(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an OSPF area id: an IPv4 dotted-quad like 0.0.0.0, or an integer 0..4294967295)")

@@ -38,7 +38,7 @@ func TestLoginUserUIDSchemaAndStrictCompile11826(t *testing.T) {
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			tree := loginUIDTree11826(t, tc.value)
-			validateErr := SchemaValidate(tree, nil)
+			validateErr := SchemaValidate(tree)
 			_, compileErr := CompileConfig(tree)
 			if tc.valid {
 				if validateErr != nil || compileErr != nil {
@@ -115,7 +115,7 @@ func TestLoginUserUIDTypedLeafRejectsPackedTail11826(t *testing.T) {
 	if err := tree.SetPath(path); err != nil {
 		t.Fatalf("SetPath: %v", err)
 	}
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("typed login UID accepted a packed class tail; author UID and class as separate set statements")
 	}
 }

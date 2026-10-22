@@ -20,7 +20,7 @@ import (
 // via its `> 0` gate (no `timers` line), an accepted documented tradeoff, so
 // 0 is permitted here; 1 and 2 are the values that must be rejected at commit
 // before they can reach frr-reload. Upper bound is the 16-bit on-wire max.
-func ValidateBGPHoldTime(raw string, _ *Config) error {
+func ValidateBGPHoldTime(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected integer)")
 	}
@@ -41,7 +41,7 @@ func ValidateBGPHoldTime(raw string, _ *Config) error {
 // verbatim; bgpd refuses them and frr-reload fails on every reload.
 // A scoped (zoned) address, e.g. fe80::1%ge-0-0-1, is explicitly
 // unsupported: FRR's neighbor grammar has no zone syntax here.
-func ValidateBGPNeighborAddress(raw string, _ *Config) error {
+func ValidateBGPNeighborAddress(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected a BGP neighbor IP address, e.g. 192.0.2.1 or 2001:db8::1)")
 	}
@@ -66,7 +66,7 @@ func ValidateBGPNeighborAddress(raw string, _ *Config) error {
 
 // ValidBGPNeighborAddress is the boolean twin used by the strict compiler gate.
 func ValidBGPNeighborAddress(raw string) bool {
-	return ValidateBGPNeighborAddress(raw, nil) == nil
+	return ValidateBGPNeighborAddress(raw) == nil
 }
 
 // routeFilterMatchTypes are the match-type keywords accepted in the
@@ -128,7 +128,7 @@ var routeFilterMatchTypes = map[string]bool{
 // prefix persisted by an older binary never blackouts boot. The renderer
 // carries a belt-and-suspenders skip for any malformed prefix that
 // reaches it via that lenient path.
-func ValidateRouteFilterArgPositional(argIdx int, raw string, _ *Config) error {
+func ValidateRouteFilterArgPositional(argIdx int, raw string) error {
 	tok := strings.TrimSpace(raw)
 	if argIdx == 0 {
 		// Prefix slot — a CIDR, never a match-type keyword.
@@ -415,7 +415,7 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 // default routes 0.0.0.0/0 and ::/0 parse via net.ParseCIDR and are
 // accepted; a bare IP without a length, or outright garbage, is rejected
 // with a targeted message. route is family-agnostic so both families pass.
-func ValidateRouteDestination(raw string, _ *Config) error {
+func ValidateRouteDestination(raw string) error {
 	// #9820: validate what is emitted. The compiler stores the RAW
 	// destination and the renderer drops a padded one silently (netip
 	// shape belt), while parseCIDRStrict validates the TRIMMED form —
@@ -464,7 +464,7 @@ func ValidateRouteDestination(raw string, _ *Config) error {
 // dotted value (a botched IPv4) cannot masquerade as an interface, and uses
 // the [A-Za-z0-9._-] charset interface names actually use — which excludes
 // ':' so a botched IPv6 literal is rejected rather than mistaken for a name.
-func ValidateStaticNextHop(raw string, _ *Config) error {
+func ValidateStaticNextHop(raw string) error {
 	tok := strings.TrimSpace(raw)
 	if tok == "" {
 		return fmt.Errorf("missing next-hop (expected an IP address, e.g. 192.168.1.1 or 2001:db8::1, or an interface name)")
@@ -572,7 +572,7 @@ func ValidPolicyThenNextHop(raw string) bool {
 // ValidatePolicyThenNextHop is the commit-check validator for
 // `policy-options policy-statement ... then next-hop`. It reports the reason
 // for excluded address classes as well as unsupported Junos-only actions.
-func ValidatePolicyThenNextHop(raw string, _ *Config) error {
+func ValidatePolicyThenNextHop(raw string) error {
 	if reason := policyThenNextHopUnsupportedReason(raw); reason != "" {
 		return fmt.Errorf("unsupported next-hop %q: %s", raw, reason)
 	}
@@ -636,7 +636,7 @@ func ValidPolicyASPathPrependASN(raw string) bool {
 // member of a multi-valued `then as-path-prepend` leaf. A quoted Junos
 // value may contain multiple ASNs, so split it before applying the
 // single-operand validator.
-func ValidatePolicyASPathPrependASN(raw string, _ *Config) error {
+func ValidatePolicyASPathPrependASN(raw string) error {
 	if strings.IndexFunc(raw, unicode.IsSpace) < 0 {
 		if !ValidPolicyASPathPrependASN(raw) {
 			return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)", raw)

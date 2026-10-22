@@ -14,7 +14,7 @@ func TestClosedWorldCoSSchedulersRejectUnknownChildren11800(t *testing.T) {
 			tree := buildTree(t, []string{
 				"set class-of-service schedulers be " + keyword + " high",
 			})
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("unknown scheduler child %q was accepted and would be silently dropped (RED on revert of scheduler closedWorld)", keyword)
 			}
@@ -28,13 +28,13 @@ func TestClosedWorldCoSSchedulersRejectUnknownChildren11800(t *testing.T) {
 	if len(parseErrs) != 0 {
 		t.Fatalf("parse hierarchical typo: %v", parseErrs[0])
 	}
-	if err := SchemaValidate(hier, nil); err == nil || !strings.Contains(err.Error(), "priorty") {
+	if err := SchemaValidate(hier); err == nil || !strings.Contains(err.Error(), "priorty") {
 		t.Fatalf("hierarchical scheduler typo must be rejected and named, got %v", err)
 	}
 	grouped := buildTree(t, []string{
 		"set groups g1 class-of-service schedulers be priorty high",
 	})
-	if err := SchemaValidate(grouped, nil); err == nil || !strings.Contains(err.Error(), "priorty") {
+	if err := SchemaValidate(grouped); err == nil || !strings.Contains(err.Error(), "priorty") {
 		t.Fatalf("scheduler typo under a configuration group must be rejected, got %v", err)
 	}
 }
@@ -46,7 +46,7 @@ func TestClosedWorldCoSSchedulersRejectUnsupportedDropProfileMap11800(t *testing
 	tree := buildTree(t, []string{
 		"set class-of-service schedulers be drop-profile-map low protocol any drop-profile RED",
 	})
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), "drop-profile-map") {
 		t.Fatalf("unsupported Junos scheduler child must be rejected and named, got %v", err)
 	}
@@ -70,7 +70,7 @@ func TestClosedWorldCoSSchedulersAcceptSupportedChildren11800(t *testing.T) {
 		"set class-of-service schedulers buffer-percent buffer-size 10%",
 		"set class-of-service schedulers buffer-temporal buffer-size temporal 10000",
 	})
-	if err := SchemaValidate(flat, nil); err != nil {
+	if err := SchemaValidate(flat); err != nil {
 		t.Fatalf("supported flat-set scheduler children must pass closed-world validation: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestClosedWorldCoSSchedulersAcceptSupportedChildren11800(t *testing.T) {
 	if len(parseErrs) != 0 {
 		t.Fatalf("parse hierarchical scheduler: %v", parseErrs[0])
 	}
-	if err := SchemaValidate(hier, nil); err != nil {
+	if err := SchemaValidate(hier); err != nil {
 		t.Fatalf("supported hierarchical scheduler children must pass closed-world validation: %v", err)
 	}
 }
@@ -100,7 +100,7 @@ func TestClosedWorldCoSSchedulersLenientLoadDoesNotBrick11800(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set class-of-service schedulers be priorty high",
 	})
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("strict schema validation must reject the scheduler typo")
 	}
 	cfg, err := CompileConfigLenient(tree)

@@ -41,7 +41,7 @@ func warnings9414(t *testing.T, s spelling9414) (strict, lenient []string, c *Co
 	if err != nil {
 		t.Fatalf("%s: strict CompileConfig REJECTED an operator-valid config: %v", s.label, err)
 	}
-	if err := SchemaValidate(tree, sc); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("%s: SchemaValidate REJECTED an operator-valid config: %v", s.label, err)
 	}
 	lc, err := CompileConfigLenient(s.tree(t))

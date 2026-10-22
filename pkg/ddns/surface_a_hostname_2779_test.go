@@ -51,7 +51,7 @@ func TestSurfaceAHostname_2779_ValidatorAgreesWithSanitizer(t *testing.T) {
 	}
 
 	for _, h := range accepted {
-		if err := config.ValidateDDNSHostname(h, nil); err != nil {
+		if err := config.ValidateDDNSHostname(h); err != nil {
 			t.Errorf("validator rejected accepted name %q: %v", h, err)
 			continue
 		}
@@ -67,7 +67,7 @@ func TestSurfaceAHostname_2779_ValidatorAgreesWithSanitizer(t *testing.T) {
 
 	for _, h := range rewritten {
 		// The validator must reject every name the sanitizer would change.
-		if err := config.ValidateDDNSHostname(h, nil); err == nil {
+		if err := config.ValidateDDNSHostname(h); err == nil {
 			t.Errorf("validator accepted name %q that the publish path rewrites", h)
 		}
 		// And confirm the publish path really does change it (so the reject is

@@ -45,7 +45,7 @@ security {
 `
 func TestFunctionalZoneManagementSchemaValidates15668(t *testing.T) {
 	tree := parseHierarchical(t, functionalZoneMgmtHier15668)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected valid functional-zone management: %v", err)
 	}
 	// Flat-set spelling reaches the same schema node.
@@ -55,7 +55,7 @@ func TestFunctionalZoneManagementSchemaValidates15668(t *testing.T) {
 		"set security zones functional-zone management host-inbound-traffic system-services ssh",
 		"set security zones functional-zone management description mgmt",
 	})
-	if err := SchemaValidate(flat, nil); err != nil {
+	if err := SchemaValidate(flat); err != nil {
 		t.Fatalf("SchemaValidate rejected flat-set functional-zone management: %v", err)
 	}
 }

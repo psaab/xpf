@@ -1181,7 +1181,7 @@ func TestValidateCoSOversubscriptionWarningResolvesTransmitRateForms11810(t *tes
 					t.Fatalf("SetPath(%q): %v", line, err)
 				}
 			}
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate: %v", err)
 			}
 			cfg, err := CompileConfig(tree)
@@ -2098,7 +2098,7 @@ func TestCompileClassOfServiceInterfaceLevelBinding4021(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile error: %v", err)
 	}
-	if serr := SchemaValidate(tree, cfg); serr != nil {
+	if serr := SchemaValidate(tree); serr != nil {
 		t.Fatalf("SchemaValidate error: %v", serr)
 	}
 	ci := cfg.ClassOfService.Interfaces["ge-0/0/2"]

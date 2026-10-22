@@ -435,7 +435,7 @@ func TestInactive_SchemaValidateSkipsInactiveLeaf(t *testing.T) {
 	active := mustParse(t, `class-of-service {
     schedulers { s { transmit-rate garbage; } }
 }`)
-	if err := SchemaValidate(active, nil); err == nil {
+	if err := SchemaValidate(active); err == nil {
 		t.Fatal("expected schema rejection for active bad transmit-rate")
 	}
 
@@ -443,7 +443,7 @@ func TestInactive_SchemaValidateSkipsInactiveLeaf(t *testing.T) {
 	inactive := mustParse(t, `class-of-service {
     schedulers { s { inactive: transmit-rate garbage; } }
 }`)
-	if err := SchemaValidate(inactive, nil); err != nil {
+	if err := SchemaValidate(inactive); err != nil {
 		t.Fatalf("deactivated bad transmit-rate should commit clean, got: %v", err)
 	}
 }

@@ -14,7 +14,7 @@ import (
 // directory as root while the commit reported success. Bridge-domain names are
 // plain identifiers; separators, NUL and whitespace never belong in one.
 // Glob metacharacters are a separate [Match] Name= claim hazard (#10089).
-func ValidateBridgeDomainName(raw string, _ *Config) error {
+func ValidateBridgeDomainName(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing bridge-domain name")
 	}

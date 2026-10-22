@@ -323,7 +323,7 @@ func TestPolicyConstantsAreCommittable7147(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			t.Fatalf("SetPath(%q): %v", value, err)
 		}
-		return config.SchemaValidate(tree, nil)
+		return config.SchemaValidate(tree)
 	}
 
 	for _, v := range []string{PeerFencingDisableRG, PeerFencingDisableRGConfirmed} {

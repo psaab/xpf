@@ -84,7 +84,7 @@ func TestInterfaceFilterScalarArityGate12093(t *testing.T) {
 						fmt.Sprintf("set interfaces ge-0/0/0 unit 0 family %s filter %s DROP EXTRA", tt.family, tt.direction),
 					)
 				}
-				err := SchemaValidate(tree, nil)
+				err := SchemaValidate(tree)
 				if err == nil || !strings.Contains(err.Error(), "trailing token") {
 					t.Fatalf("expected scalar arity rejection for trailing filter value, got %v", err)
 				}

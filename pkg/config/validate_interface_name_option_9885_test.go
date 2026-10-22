@@ -21,7 +21,7 @@ import (
 
 func TestLeadingDashInterfaceNameIsRefused9885(t *testing.T) {
 	for _, name := range []string{"--help", "--version", "-x", "-", "--"} {
-		err := ValidateInterfaceName(name, nil)
+		err := ValidateInterfaceName(name)
 		if err == nil {
 			t.Errorf("ValidateInterfaceName(%q) = nil, want an error — this name reaches "+
 				"`networkctl reconfigure` as an argv element and is read as an OPTION (#9885)", name)
@@ -40,7 +40,7 @@ func TestLeadingDashInterfaceNameIsRefused9885(t *testing.T) {
 // interface spelling, which is a worse outage than the one being prevented.
 func TestDashIsStillAllowedEverywhereElse9885(t *testing.T) {
 	for _, name := range []string{"ge-0-0-0", "ge-0/0/0", "reth0", "fxp0", "em0", "fab0", "a-b-c", "x-"} {
-		if err := ValidateInterfaceName(name, nil); err != nil {
+		if err := ValidateInterfaceName(name); err != nil {
 			t.Errorf("ValidateInterfaceName(%q) = %v, want nil — '-' is legitimate everywhere "+
 				"except the first byte, and refusing these would reject the documented syntax", name, err)
 		}
@@ -54,7 +54,7 @@ func TestDashIsStillAllowedEverywhereElse9885(t *testing.T) {
 func TestEveryAcceptedNameIsAnOperandNotAnOption9885(t *testing.T) {
 	accepted := []string{"ge-0-0-0", "ge-0/0/0", "reth0.50", "fab0", "em0", "a_b", "x.y", "z-"}
 	for _, name := range accepted {
-		if err := ValidateInterfaceName(name, nil); err != nil {
+		if err := ValidateInterfaceName(name); err != nil {
 			t.Fatalf("fixture %q is not accepted, so this cell proves nothing about it: %v", name, err)
 		}
 		if !interfaceNameIsNotAnOptionWord(name) {

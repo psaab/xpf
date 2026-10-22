@@ -29,7 +29,7 @@ func TestAtSignRulingsAreOppositeOnPurpose8934(t *testing.T) {
 		"hmac-sha2-256-etm@openssh.com",
 		"curve25519-sha256@libssh.org",
 	} {
-		if err := ValidateSSHAlgorithm(alg, nil); err != nil {
+		if err := ValidateSSHAlgorithm(alg); err != nil {
 			t.Errorf("ValidateSSHAlgorithm rejects %q (%v). OpenSSH algorithm "+
 				"names legitimately carry `@`, the schema OFFERS these as "+
 				"completions, and #8924 exists because the tool used to refuse "+

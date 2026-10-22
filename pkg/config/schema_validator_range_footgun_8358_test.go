@@ -52,12 +52,12 @@ func TestAWellOrderedRangeStillValidates8358(t *testing.T) {
 	// satisfy the cell above while disabling every numeric leaf in the schema.
 	v := ValidateInteger(1, 10)
 	for _, ok := range []string{"1", "5", "10"} {
-		if err := v(ok, nil); err != nil {
+		if err := v(ok); err != nil {
 			t.Errorf("ValidateInteger(1, 10)(%q): unexpected error: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{"0", "11", "-1"} {
-		if err := v(bad, nil); err == nil {
+		if err := v(bad); err == nil {
 			t.Errorf("ValidateInteger(1, 10)(%q): expected an out-of-range error", bad)
 		}
 	}
@@ -68,10 +68,10 @@ func TestAnEqualRangeIsAllowedAndExact8358(t *testing.T) {
 	// value. Panicking on it would be an off-by-one in the guard itself, and
 	// the guard is the thing this file adds.
 	v := ValidateInteger(7, 7)
-	if err := v("7", nil); err != nil {
+	if err := v("7"); err != nil {
 		t.Errorf("ValidateInteger(7, 7)(\"7\"): unexpected error: %v", err)
 	}
-	if err := v("8", nil); err == nil {
+	if err := v("8"); err == nil {
 		t.Error("ValidateInteger(7, 7)(\"8\"): expected an out-of-range error")
 	}
 }

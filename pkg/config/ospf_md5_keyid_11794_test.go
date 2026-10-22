@@ -34,7 +34,7 @@ func TestOSPFMD5KeyIDSchemaGate11794(t *testing.T) {
 	bad := []string{"banana", "0", "-5", "256", "999", "99999999999999999999"}
 	for _, tok := range bad {
 		t.Run("reject-"+tok, func(t *testing.T) {
-			if err := SchemaValidate(ospfMD5KeyIDTree11794(t, tok), nil); err == nil {
+			if err := SchemaValidate(ospfMD5KeyIDTree11794(t, tok)); err == nil {
 				t.Fatalf("SchemaValidate accepted md5 key-id %q; want commit rejection", tok)
 			} else if !strings.Contains(err.Error(), "md5") {
 				t.Fatalf("rejection for key-id %q must name the md5 slot: %v", tok, err)
@@ -44,7 +44,7 @@ func TestOSPFMD5KeyIDSchemaGate11794(t *testing.T) {
 			if len(perrs) > 0 {
 				t.Fatalf("fixture did not parse: %v", perrs)
 			}
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("hierarchical: SchemaValidate accepted md5 key-id %q; want commit rejection", tok)
 			} else if !strings.Contains(err.Error(), "md5") {
 				t.Fatalf("hierarchical: rejection for key-id %q must name the md5 slot: %v", tok, err)
@@ -53,7 +53,7 @@ func TestOSPFMD5KeyIDSchemaGate11794(t *testing.T) {
 	}
 	for _, tok := range []string{"1", "7", "255"} {
 		t.Run("accept-"+tok, func(t *testing.T) {
-			if err := SchemaValidate(ospfMD5KeyIDTree11794(t, tok), nil); err != nil {
+			if err := SchemaValidate(ospfMD5KeyIDTree11794(t, tok)); err != nil {
 				t.Fatalf("SchemaValidate rejected in-range md5 key-id %q: %v", tok, err)
 			}
 		})
@@ -135,7 +135,7 @@ func TestOSPFMD5KeyIDReachesTheRoutingInstanceCopy11794(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("fixture did not parse: %v", perrs)
 	}
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted an RI md5 key-id banana; want commit rejection")
 	} else if !strings.Contains(err.Error(), "md5") {
 		t.Fatalf("RI rejection must name the md5 slot: %v", err)

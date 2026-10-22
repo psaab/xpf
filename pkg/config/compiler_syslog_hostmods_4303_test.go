@@ -39,7 +39,7 @@ func TestSyslogHostSubstatementsNotMisparsed(t *testing.T) {
 	}
 	// Strict commit-check must ACCEPT the config (source-address/port are now
 	// modelled and no longer validated against the severity enum).
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid syslog host config: %v", err)
 	}
 	if c.System.Syslog == nil || len(c.System.Syslog.Hosts) != 1 {
@@ -75,7 +75,7 @@ func TestSyslogFileArchiveNotMisparsed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid syslog file config: %v", err)
 	}
 	if c.System.Syslog == nil || len(c.System.Syslog.Files) != 1 {

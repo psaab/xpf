@@ -30,7 +30,7 @@ func gate9012(t *testing.T, line string) bool {
 		t.Fatalf("ParseSetCommand(%q): %v", line, err)
 	}
 	tr.SetPath(p)
-	return SchemaValidateWithDefinitions(tr, tr, nil) == nil
+	return SchemaValidateWithDefinitions(tr, tr) == nil
 }
 
 func TestBFDNumericsAreTyped9012(t *testing.T) {

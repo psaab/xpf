@@ -70,7 +70,7 @@ func ISISLevelSpellings() []string {
 // `is-type`. It is shared by both schema copies (the top-level `protocols` one
 // and the `routing-instances` one) so a spelling cannot be accepted in one
 // context and rejected in the other.
-func ValidateISISLevel(raw string, _ *Config) error {
+func ValidateISISLevel(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected one of %s)",
 			strings.Join(ISISLevelSpellings(), ", "))
@@ -138,7 +138,7 @@ func ISISCircuitTypeSpellings() []string {
 
 // ValidateISISCircuitType is the setSchema typed-leaf validator for
 // `protocols isis interface <if> level`. Shared by both schema copies.
-func ValidateISISCircuitType(raw string, _ *Config) error {
+func ValidateISISCircuitType(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected one of %s)",
 			strings.Join(ISISCircuitTypeSpellings(), ", "))

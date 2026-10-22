@@ -29,7 +29,7 @@ func compileSyslogHosts9855(t *testing.T, text string) []*SyslogHostConfig {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	if cfg.System.Syslog == nil {
@@ -45,7 +45,7 @@ func vrrpGroup9855(t *testing.T, text string) *VRRPGroup {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	unit := cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0]
@@ -237,7 +237,7 @@ func TestPackedGroupLeafVRRP9855(t *testing.T) {
 				if err != nil {
 					t.Fatalf("CompileConfig: %v", err)
 				}
-				if err := SchemaValidate(tree, cfg); err != nil {
+				if err := SchemaValidate(tree); err != nil {
 					t.Fatalf("SchemaValidate: %v", err)
 				}
 				unit := cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0]

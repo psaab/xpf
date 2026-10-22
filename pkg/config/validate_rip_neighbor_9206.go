@@ -38,11 +38,11 @@ import "fmt"
 // first without rejecting the second. Those still absorb, and
 // TestRIPNeighborBareKeywordStillAbsorbs9206 pins that they do, so this fix
 // cannot be mistaken for a complete one.
-func ValidateRIPNeighborInterface(raw string, cfg *Config) error {
+func ValidateRIPNeighborInterface(raw string) error {
 	// The character allowlist first: it is the SECURITY half (the name is
 	// rendered into a systemd [Match] Name=, where whitespace and globs claim
 	// other devices) and this slot had none at all.
-	if err := ValidateInterfaceName(raw, cfg); err != nil {
+	if err := ValidateInterfaceName(raw); err != nil {
 		return err
 	}
 	for i := 0; i < len(raw)-1; i++ {

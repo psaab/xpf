@@ -37,7 +37,7 @@ func compileSet4228IEEE(t *testing.T, cmds ...string) (*config.Config, error) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate (leaf must be accepted grammar): %v", err)
 	}
 	return config.CompileConfig(tree)

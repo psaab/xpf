@@ -33,7 +33,7 @@ security { zones { security-zone Z { interfaces { ge-0/0/0.0 apply-macro M { hos
 	if len(errs) != 0 {
 		t.Fatalf("parse: %v", errs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected in-key apply-macro: %v", err)
 	}
 	for _, compile := range []struct {

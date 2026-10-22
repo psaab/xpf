@@ -28,12 +28,12 @@ func TestDynamicAddressFailModeRejectsUnknownValue9689(t *testing.T) {
 	}
 	for _, v := range []string{"retain", "drop"} {
 		tree := buildTreeFromSet(t, append(append([]string(nil), base...), "set security dynamic-address address-name allow-partners profile fail-mode "+v))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("fail-mode %s rejected: %v", v, err)
 		}
 	}
 	tree := buildTreeFromSet(t, append(append([]string(nil), base...), "set security dynamic-address address-name allow-partners profile fail-mode sometimes"))
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("fail-mode sometimes was accepted; the commit gate must refuse it")
 	}
 }

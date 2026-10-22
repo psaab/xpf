@@ -260,8 +260,8 @@ func TestDHCPExpiredLeasesSchemaRejectsTimerZero(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
-		cfg, _ := CompileConfig(tree)
-		err = SchemaValidate(tree, cfg)
+		_, _ = CompileConfig(tree)
+		err = SchemaValidate(tree)
 		if err == nil || !strings.Contains(err.Error(), timer) {
 			t.Fatalf("%s 0 must be rejected (Min(1)), got %v", timer, err)
 		}
@@ -289,8 +289,8 @@ func TestDHCPExpiredLeasesSchemaAcceptsCapZero(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	cfg, _ := CompileConfig(tree)
-	if err := SchemaValidate(tree, cfg); err != nil {
+	_, _ = CompileConfig(tree)
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("cap knobs at 0 (unlimited) must pass commit-check, got %v", err)
 	}
 }
@@ -307,8 +307,8 @@ func TestDHCPExpiredLeasesSchemaRejectsNonInteger(t *testing.T) {
 	if err := tree.SetPath(path); err != nil {
 		t.Fatalf("SetPath(%q): %v", cmd, err)
 	}
-	cfg, _ := CompileConfig(tree)
-	err = SchemaValidate(tree, cfg)
+	_, _ = CompileConfig(tree)
+	err = SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), "reclaim-timer") {
 		t.Fatalf("non-integer reclaim-timer must be rejected, got %v", err)
 	}

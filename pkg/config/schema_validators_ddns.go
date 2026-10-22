@@ -31,7 +31,7 @@ import (
 //     characters) — sanitizeFQDN drops the whole label,
 //   - a label that begins or ends with '-' — sanitizeLabel trims it,
 //   - a label over 63 octets or a total name over 253 octets — capped.
-func ValidateDDNSHostname(raw string, _ *Config) error {
+func ValidateDDNSHostname(raw string) error {
 	name := strings.TrimSpace(raw)
 	if name == "" {
 		// An unset/blank hostname is handled by the binding-completeness

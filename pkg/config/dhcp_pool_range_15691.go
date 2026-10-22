@@ -78,7 +78,7 @@ func parseDHCPAddressRangeTokens15691(tokens []string) (low, high string, err er
 		if kw != "low" && kw != "high" {
 			return "", "", fmt.Errorf("address-range: unexpected token %q (expected `low` or `high`)", kw)
 		}
-		if err := ValidateIPAddress(val, nil); err != nil {
+		if err := ValidateIPAddress(val); err != nil {
 			return "", "", fmt.Errorf("address-range %s: %v", kw, err)
 		}
 		if kw == "low" {
