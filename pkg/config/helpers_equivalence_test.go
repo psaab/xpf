@@ -10,6 +10,8 @@ package config
 // another and no lenient flag was smuggled in.
 
 import (
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -105,6 +107,57 @@ func TestKitParseSetCommandsEquivalence16139(t *testing.T) {
 	}
 }
 
+// kitClusterNoKey is the strict-vs-lenient divergence fixture: a cluster
+// config without an auth key is hard-rejected strictly (#6611) but
+// downgraded to a warning leniently.
+const kitClusterNoKey = `chassis {
+    cluster {
+        cluster-id 1;
+        node 0;
+        reth-count 2;
+        redundancy-group 1 {
+            node 0 priority 200;
+        }
+    }
+}
+`
+
+// kitNodeFixture is node-distinguishing (#4329): ge-0/0/0 is node 0's FPC-0
+// member and ge-7/0/0 is node 1's FPC-7 member, both redundant-parent of
+// reth0, in a leaf-less cluster (no `chassis cluster node` leaf). Compiled
+// for node 0 it must bind reth0 to ge-0/0/0; for node 1, to ge-7/0/0. On a
+// node-indistinguishable fixture compileTreeForNodeKit could route to plain
+// CompileConfig and still pass — here it cannot.
+const kitNodeFixture = `chassis {
+    cluster {
+        cluster-id 1;
+        authentication-key test-cluster-psk-6611;
+        reth-count 2;
+        redundancy-group 1 {
+            node 0 priority 200;
+            node 1 priority 100;
+        }
+    }
+}
+interfaces {
+    ge-0/0/0 {
+        gigether-options {
+            redundant-parent reth0;
+        }
+    }
+    ge-7/0/0 {
+        gigether-options {
+            redundant-parent reth0;
+        }
+    }
+    reth0 {
+        redundant-ether-options {
+            redundancy-group 1;
+        }
+    }
+}
+`
+
 func TestKitCompileChannelsAgreeOnValid16139(t *testing.T) {
 	strict := compileHierStrict(t, kitFixtureHier)
 	lenient := compileHierLenient(t, kitFixtureHier)
@@ -121,33 +174,83 @@ func TestKitCompileChannelsAgreeOnValid16139(t *testing.T) {
 	if len(setStrict.Interfaces.Interfaces) != 1 {
 		t.Fatalf("set strict interfaces=%d, want 1", len(setStrict.Interfaces.Interfaces))
 	}
+	// The tolerant set channel must produce the same compiled shape on a
+	// valid fixture (compileSetLenient previously had no caller).
+	setLenient := compileSetLenient(t,
+		"set system host-name kit-fw",
+		"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24",
+	)
+	if setLenient.System.HostName != "kit-fw" {
+		t.Fatalf("set lenient host-name=%q", setLenient.System.HostName)
+	}
+	if len(setLenient.Interfaces.Interfaces) != 1 {
+		t.Fatalf("set lenient interfaces=%d, want 1", len(setLenient.Interfaces.Interfaces))
+	}
+	// Tree channels on an already-parsed tree agree on a valid fixture.
+	if got := compileTreeStrictKit(t, parseHierText(t, kitFixtureHier)).System.HostName; got != "kit-fw" {
+		t.Fatalf("tree strict host-name=%q", got)
+	}
+	if got := compileTreeLenientKit(t, parseHierText(t, kitFixtureHier)).System.HostName; got != "kit-fw" {
+		t.Fatalf("tree lenient host-name=%q", got)
+	}
+	// Node channel on the plain fixture still compiles (node 0).
 	nodeCfg := compileTreeForNodeKit(t, parseHierText(t, kitFixtureHier), 0)
 	if nodeCfg.System.HostName != "kit-fw" {
 		t.Fatalf("for-node host-name=%q", nodeCfg.System.HostName)
 	}
 }
 
-// TestKitChannelsNotFlattened16139 pins a fixture where strict and
-// lenient are known to diverge: a cluster config without an auth key is
-// hard-rejected strictly (#6611) but downgraded to a warning leniently.
-// If compileHierLenient ever routed to CompileConfig (or vice versa),
-// this test fails.
-func TestKitChannelsNotFlattened16139(t *testing.T) {
-	const clusterNoKey = `chassis {
-    cluster {
-        cluster-id 1;
-        node 0;
-        reth-count 2;
-        redundancy-group 1 {
-            node 0 priority 200;
-        }
-    }
-}
-`
-	if _, err := CompileConfig(parseHierText(t, clusterNoKey)); err == nil {
-		t.Skip("strict channel no longer rejects keyless cluster; pick a new divergence fixture")
+// TestKitForNodeDistinguishesNodes16139 proves compileTreeForNodeKit really
+// routes through CompileConfigForNode: the same fixture compiled for node 0
+// and node 1 binds reth0 to different physical members (ge-0/0/0 vs
+// ge-7/0/0). If the helper ignored nodeID (e.g. routed to CompileConfig),
+// both would bind ge-0/0/0 and this test fails.
+func TestKitForNodeDistinguishesNodes16139(t *testing.T) {
+	cfg0 := compileTreeForNodeKit(t, parseHierText(t, kitNodeFixture), 0)
+	if got := cfg0.RethToPhysical()["reth0"]; got != "ge-0/0/0" {
+		t.Fatalf("node 0: reth0 -> %q, want ge-0/0/0", got)
 	}
-	cfg := compileHierLenient(t, clusterNoKey)
+	if cfg0.Chassis.Cluster == nil || cfg0.Chassis.Cluster.NodeID != 0 {
+		t.Fatalf("node 0: stamped NodeID = %+v, want 0", cfg0.Chassis.Cluster)
+	}
+	cfg1 := compileTreeForNodeKit(t, parseHierText(t, kitNodeFixture), 1)
+	if got := cfg1.RethToPhysical()["reth0"]; got != "ge-7/0/0" {
+		t.Fatalf("node 1: reth0 -> %q, want ge-7/0/0 (helper must not ignore nodeID)", got)
+	}
+	if cfg1.Chassis.Cluster == nil || cfg1.Chassis.Cluster.NodeID != 1 {
+		t.Fatalf("node 1: stamped NodeID = %+v, want 1", cfg1.Chassis.Cluster)
+	}
+}
+
+// TestKitChannelsNotFlattened16139 pins a fixture where strict and lenient
+// are known to diverge: a cluster config without an auth key is
+// hard-rejected strictly (#6611) but downgraded to a warning leniently.
+// The strict leg goes through the compileHierStrict kit helper itself:
+// because the helper reports failure via t.Fatalf, the strict leg runs in
+// a child copy of this test (env-gated) and the parent requires the child
+// to FAIL with the helper's own "CompileConfig:" fatal. If
+// compileHierStrict ever routed to CompileConfigLenient, the child would
+// succeed and this test fails; if compileHierLenient ever routed to
+// CompileConfig, the lenient leg below fatals in-process.
+func TestKitChannelsNotFlattened16139(t *testing.T) {
+	if os.Getenv("XPF_KIT_STRICT_CHILD_16139") == "1" {
+		// Child: must not return. compileHierStrict fatals on the strict
+		// CompileConfig rejection; returning here means the helper
+		// accepted (flattened) and the child test passes, which the
+		// parent treats as failure.
+		_ = compileHierStrict(t, kitClusterNoKey)
+		return
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestKitChannelsNotFlattened16139$", "-test.v")
+	child.Env = append(os.Environ(), "XPF_KIT_STRICT_CHILD_16139=1")
+	out, err := child.CombinedOutput()
+	if err == nil {
+		t.Fatalf("compileHierStrict child unexpectedly succeeded (strict channel flattened?):\n%s", out)
+	}
+	if !strings.Contains(string(out), "CompileConfig:") {
+		t.Fatalf("compileHierStrict child failed without the helper's CompileConfig fatal:\n%s", out)
+	}
+	cfg := compileHierLenient(t, kitClusterNoKey)
 	if cfg == nil {
 		t.Fatal("lenient channel returned nil config for keyless cluster")
 	}
@@ -159,5 +262,27 @@ func TestKitChannelsNotFlattened16139(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("lenient keyless cluster produced no cluster warning; warnings=%v", cfg.Warnings)
+	}
+	// The set channel is not flattened either: flat `set` forms of the
+	// same keyless cluster compile leniently through compileSetLenient
+	// (the strict set leg, compileSetStrict, wraps the same CompileConfig
+	// rejected above, so its premise is already pinned per-tree).
+	setCfg := compileSetLenient(t,
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster reth-count 2",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+	)
+	if setCfg == nil {
+		t.Fatal("set lenient channel returned nil config for keyless cluster")
+	}
+	found = false
+	for _, w := range setCfg.Warnings {
+		if strings.Contains(w, "authentication-key") || strings.Contains(w, "cluster") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("set lenient keyless cluster produced no cluster warning; warnings=%v", setCfg.Warnings)
 	}
 }
