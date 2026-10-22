@@ -779,21 +779,30 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	appendDPDThresholdIKEv2AdvisoryLocked(cfg, opts)
 	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)
 	appendWgUnitFilterShadowAdvisory16059Locked(cfg, opts)
-	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
-	appendUserspaceMgmtZoneAdvisoryLocked(cfg, opts)
 	// Warning ORDER is operator-visible and differed between the former
-	// twins (#16167 review fold): the generic body appends the Rx-MTU
-	// advisory BEFORE the #10105 fabric advisories, the node body
-	// appended it AFTER. Preserve each branch's historical order.
+	// twins at exactly this suffix (#16167 review folds). Site-by-site,
+	// the parent orders were:
+	//   generic: ... Wg, SharedDeviceUnzoned, MgmtZone(#10308),
+	//            RxMTU(#9727), Fabric(#10105/#13967), loginShadow
+	//   node:    ... Wg, Fabric(#10105/#13967), SharedDeviceUnzoned,
+	//            MgmtZone(#10308), RxMTU(#9727), loginShadow
+	// i.e. the node body hoisted the fabric block above the
+	// SharedDeviceUnzoned/MgmtZone/RxMTU advisory trio. Emit the node's
+	// exact sequence when nodeID != nil, the generic sequence when nil.
+	fabricAdvisories := func() {
+		if !opts.suppressFabricStampAdvisory {
+			cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
+		}
+	}
 	if nodeID == nil {
+		appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
+		appendUserspaceMgmtZoneAdvisoryLocked(cfg, opts)
 		appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
-		if !opts.suppressFabricStampAdvisory {
-			cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
-		}
+		fabricAdvisories()
 	} else {
-		if !opts.suppressFabricStampAdvisory {
-			cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
-		}
+		fabricAdvisories()
+		appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
+		appendUserspaceMgmtZoneAdvisoryLocked(cfg, opts)
 		appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
 	}
 	cfg.Warnings = append(cfg.Warnings, loginShadowWarnings...)
