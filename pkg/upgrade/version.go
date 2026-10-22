@@ -49,6 +49,13 @@ import (
 //     versa).
 //   - any other character outside the [A-Za-z0-9._+~:-] allowlist (the
 //     systemd-metacharacter class above).
+//
+// Per-sink divergence from the Python filename sink
+// (scripts/dist/sign.py:validate_version, #16190): this ExecStart sink
+// allows the epoch ':' and leading '-+_~:' (allowlist-only, no first-char
+// rule); the filename sink requires an initial alphanumeric and drops ':'.
+// Both outcomes are pinned per sink in
+// scripts/dist/version_fixture_16190.json — do not normalise either policy.
 func ValidateVersionSegment(ver string) error {
 	if ver == "" {
 		return fmt.Errorf("version is empty")

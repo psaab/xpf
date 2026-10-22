@@ -271,7 +271,9 @@ class StrictSignManifestTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
 
     def test_version_parity_with_bake(self):
-        # kill: widen/narrow sign's charset vs bake's (#5992 mirror idiom).
+        # kill: widen/narrow sign's charset, or re-add a divergent bake copy
+        # (#5992; unified in sign.py #16190 — bake is a die()-adapter, and
+        # the per-sink Go fixture lives in test_version_fixture_16190.py).
         bad = ["../../../../etc/cron.d/x", "1.0/../x", "..", ".", "a/b",
                "a\\b", "/abs/1.2.3", "-rf", ".hidden", "1.0%n", "1.0 2.0",
                "a;rm -rf /", "a$(whoami)", "1:2.3.4", ""]

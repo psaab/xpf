@@ -197,44 +197,29 @@ def validate_identifier(value, field):
 # component, an absolute path, or a leading dash would escape the out-dir or be
 # read as a CLI flag (the #4905-B / #5713 path-escape class), so `--version
 # '../../../etc/cron.d/x'` would write outside `--out`. `_SAFE_IDENT` is too
-# strict for a version (it forbids `+`/`~`), so validate the version against a
-# version-appropriate allowlist instead (#5992).
-_SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*\Z")
+# strict for a version (it forbids `+`/`~`), so validate against the shared
+# filename-sink allowlist in scripts/dist/sign.py (#5992, unified #16190);
+# this adapter only maps SignError onto deploy's die() channel. The charset
+# deliberately drops the Debian epoch `:` that Go ValidateVersionSegment
+# (the systemd ExecStart sink) allows — an epoch is never part of an artifact
+# FILENAME. Per-sink outcomes are pinned in
+# scripts/dist/version_fixture_16190.json; do not normalise either policy.
+def _load_sign():
+    here_d = os.path.dirname(os.path.abspath(__file__))
+    dist = os.path.join(os.path.dirname(here_d), "dist")
+    if dist not in sys.path:
+        sys.path.insert(0, dist)
+    import sign
+    return sign
 
 
 def validate_version(value, field):
-    """Reject a version that could escape the artifact output directory when
-    substituted into `xpf-<ver>.qcow2` (and siblings).
-
-    Same fail-closed discipline as validate_identifier, with a
-    version-appropriate charset: alnum start, then `[A-Za-z0-9._+~-]` — so no
-    `/`, `\\`, `..`, absolute path, leading `.`/`-`, whitespace, `%`, or shell
-    metacharacter. Accepts git-describe (`1.2.3-5-gabcdef`) and semver
-    (`1.0.0+build.7`, `1.0.0~rc1`).
-
-    The charset MIRRORS pkg/upgrade.ValidateVersionSegment (the #5713
-    systemd-ExecStart sink) EXCEPT it drops the Debian epoch `:`: an epoch is
-    never part of an artifact FILENAME (dpkg itself encodes `:` as `%3a`), and a
-    `:` in `xpf-<ver>.qcow2` would confuse the incus image alias / tooling. This
-    is the filename sink's need, which differs from the systemd exec-path sink.
-
-    Returns value on success; die()s with a clear message otherwise (#5992)."""
-    if not isinstance(value, str) or not value:
-        die(f"{field} is required and must be a non-empty string")
-    if os.path.isabs(value):
-        die(f"{field} '{value}' must not be an absolute path")
-    if "/" in value or "\\" in value or os.sep in value \
-            or (os.altsep and os.altsep in value):
-        die(f"{field} '{value}' must not contain a path separator")
-    if value.startswith("-"):
-        die(f"{field} '{value}' must not start with '-' (would be read as a "
-            "CLI flag)")
-    if not _SAFE_VERSION.match(value):
-        die(f"{field} '{value}' is not a safe version — allow only "
-            "[A-Za-z0-9][A-Za-z0-9._+~-]* (no separators, '..', '%', spaces, "
-            "or shell metacharacters), so it cannot escape the artifact output "
-            "directory (#5992)")
-    return value
+    """Reject a version unsafe for `xpf-<ver>.*` artifact names (#5992)."""
+    sign = _load_sign()
+    try:
+        return sign.validate_version(value, field)
+    except sign.SignError as e:
+        die(str(e))
 
 
 def contained_join(dirpath, basename, field):
@@ -1780,12 +1765,7 @@ def _resolve_channel_version(base, channel, sign_mod, dry_run=False,
 
 def _download_sign():
     """Load the distribution helper that owns bounded curl policy (#10853)."""
-    here_d = os.path.dirname(os.path.abspath(__file__))
-    dist = os.path.join(os.path.dirname(here_d), "dist")
-    if dist not in sys.path:
-        sys.path.insert(0, dist)
-    import sign  # noqa: E402
-    return sign
+    return _load_sign()
 
 
 def _download_to(url, dst, workdir, max_bytes=None, max_time=None):
