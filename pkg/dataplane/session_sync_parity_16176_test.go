@@ -244,6 +244,18 @@ var sessionCodecFuncs16176 = map[string]bool{
 	// TCPHandshakeState, EgressIfaceFold, NatScopeFold carrier).
 	"appendSessionSyncMetadataTail": true,
 	"appendPptpCallIDs":             true,
+	// #16173: the shared sessionTail ladder both codec families delegate
+	// the length-gated trailing fields to. Its fields arrive as the
+	// sessionTail struct (built by the per-family views below), so its
+	// contribution is recovered from the tail struct's field names —
+	// see collectTailRefs16176.
+	"encodeSessionTailPreNat64":  true,
+	"encodeSessionTailPostNat64": true,
+	"decodeSessionTailPreNat64":  true,
+	"decodeSessionTailPostNat64": true,
+	// Per-family views adapting SessionValue/V6 to sessionTail.
+	"sessionTail":    true,
+	"setSessionTail": true,
 }
 
 // codecFieldRefs16176 is the AST-discovered codec membership for one family:
@@ -304,6 +316,23 @@ func sessionCodecFieldRefs16176(t *testing.T) (v4, v6 codecFieldRefs16176) {
 			collectDecodeRefs16176(fn, v4.decode)
 		case "decodeSessionV6Payload":
 			collectDecodeRefs16176(fn, v6.decode)
+		case "sessionTail":
+			// #16173 view getters: val.<Field> reads feeding the shared
+			// tail belong to BOTH families' encode sets (each view is
+			// per-family, but the tail fields are symmetric by census).
+			if recv := fn.Recv; recv != nil && len(recv.List) > 0 {
+				collectEncodeRefs16176(fn, v4.encode)
+				collectEncodeRefs16176(fn, v6.encode)
+			}
+		case "setSessionTail":
+			if recv := fn.Recv; recv != nil && len(recv.List) > 0 {
+				collectDecodeRefs16176(fn, v4.decode)
+				collectDecodeRefs16176(fn, v6.decode)
+			}
+		case "encodeSessionTailPreNat64", "encodeSessionTailPostNat64":
+			collectTailRefs16176(fn, v4.encode, v6.encode)
+		case "decodeSessionTailPreNat64", "decodeSessionTailPostNat64":
+			collectTailRefs16176(fn, v4.decode, v6.decode)
 		}
 	}
 	if len(v4.encode) == 0 || len(v4.decode) == 0 || len(v6.encode) == 0 || len(v6.decode) == 0 {
@@ -380,6 +409,30 @@ func collectDecodeRefs16176(fn *ast.FuncDecl, out map[string]bool) {
 			}
 			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "copy" {
 				record(call.Args[0])
+			}
+		}
+		return true
+	})
+}
+
+// collectTailRefs16176 recovers the #16173 shared-tail membership: the
+// tail helpers select fields on a sessionTail value (receiver/param
+// named t), whose field names are exactly the session-value field
+// names, plus FlagsHigh which the views expand into Flags. Every such
+// selector counts for both families, encode or decode per helper.
+func collectTailRefs16176(fn *ast.FuncDecl, outs ...map[string]bool) {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && (id.Name == "t" || id.Name == "tail") {
+			name := sel.Sel.Name
+			if name == "FlagsHigh" {
+				name = "Flags"
+			}
+			for _, out := range outs {
+				out[name] = true
 			}
 		}
 		return true
@@ -497,10 +550,14 @@ func TestSessionFieldClassificationIsExhaustive16176(t *testing.T) {
 	abiV6 := sessionFieldTypes(reflect.TypeOf(bpfSessionValueV6{}))
 	codecV4, codecV6 := sessionCodecFieldRefs16176(t)
 
-	// The shared tail must still be wired into both encoders.
+	// The shared tail must still be wired into both encoders. Since
+	// #16173 the fields reach the metadata tail through the shared
+	// sessionTail (per-family views -> encodeSessionTailPostNat64 ->
+	// appendSessionSyncMetadataTail); encode-set membership in both
+	// families is the wired proof.
 	for _, name := range codecTailFields16176 {
 		if !codecV4.encode[name] || !codecV6.encode[name] {
-			t.Errorf("codec tail field %s is no longer passed to the shared metadata tail by both encoders — "+
+			t.Errorf("codec tail field %s is no longer carried by the shared session tail in both encoders — "+
 				"the tail delegation changed; re-derive the codec census (#16176)", name)
 		}
 	}
