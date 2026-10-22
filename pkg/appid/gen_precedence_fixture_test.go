@@ -52,7 +52,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 		},
 		{
 			name: "same_tier_lowest_stable_id_wins",
-			note: "Both matches are port-constrained (a range aaa-range in the scan list AND an exact-port zzz-exact in the O(1) map). Within a tier the LOWEST app_id wins in BOTH paths. #5296: app_id is a stable name-hash, so 'lowest id' means lowest StableAppID, not alphabetically-first. Here StableAppID(aaa-range) < StableAppID(zzz-exact) so aaa-range still wins; the point is both paths key the tiebreak on the SAME stable id.",
+			note: "Both matches are port-constrained (a range aaa-range in the scan list AND an exact-port zzz-exact in the O(1) map). Within a tier the LOWEST app_id wins in BOTH paths. #5296: app_id is a stable name-hash, so 'lowest id' means lowest NaturalAppIDCandidate, not alphabetically-first. Here NaturalAppIDCandidate(aaa-range) < NaturalAppIDCandidate(zzz-exact) so aaa-range still wins; the point is both paths key the tiebreak on the SAME stable id.",
 			apps: []precedenceParityApp{
 				{Name: "aaa-range", Protocol: "tcp", DestinationPort: "8000-8100"},
 				{Name: "zzz-exact", Protocol: "tcp", DestinationPort: "8050"},
@@ -61,7 +61,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 		},
 		{
 			name: "exact_port_tie_breaks_by_stable_id_not_alphabetical",
-			note: "#5296 BINDING case: two apps with the IDENTICAL exact dst-port (tcp/8080) collide in the Rust exact_dst O(1) map, whose first-writer-wins dedup keeps the LOWEST app_id only because BuildCatalog now emits entries in ascending-id order. aaa-svc sorts BEFORE ccc-svc but StableAppID(aaa-svc)=45553 > StableAppID(ccc-svc)=38751, so the stable-id tiebreak resolves to ccc-svc on BOTH the AppID-enabled (Rust) and disabled (Go) paths. RED-on-revert: an alphabetical tiebreak on EITHER side (or reverting the ascending-id emit order) flips the winner to aaa-svc, so this case FAILS the parity fixture — it binds the on/off agreement.",
+			note: "#5296 BINDING case: two apps with the IDENTICAL exact dst-port (tcp/8080) collide in the Rust exact_dst O(1) map, whose first-writer-wins dedup keeps the LOWEST app_id only because BuildCatalog now emits entries in ascending-id order. aaa-svc sorts BEFORE ccc-svc but NaturalAppIDCandidate(aaa-svc)=45553 > NaturalAppIDCandidate(ccc-svc)=38751, so the stable-id tiebreak resolves to ccc-svc on BOTH the AppID-enabled (Rust) and disabled (Go) paths. RED-on-revert: an alphabetical tiebreak on EITHER side (or reverting the ascending-id emit order) flips the winner to aaa-svc, so this case FAILS the parity fixture — it binds the on/off agreement.",
 			apps: []precedenceParityApp{
 				{Name: "aaa-svc", Protocol: "tcp", DestinationPort: "8080"},
 				{Name: "ccc-svc", Protocol: "tcp", DestinationPort: "8080"},
@@ -70,7 +70,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 		},
 		{
 			name: "collision_displacement_uses_assigned_id",
-			note: "The #10722 binding case: svc-217 and svc-396 share natural StableAppID 49397; AssignStableAppIDs keeps svc-217 at 49397 and displaces svc-396 to 1. mmm-middle has id 22100. Rust resolves the exact-port overlap by lowest assigned app_id (svc-396), while the old Go natural-hash fallback chose mmm-middle. This pins the actual assigned-ID parity path.",
+			note: "The #10722 binding case: svc-217 and svc-396 share natural NaturalAppIDCandidate 49397; AssignStableAppIDs keeps svc-217 at 49397 and displaces svc-396 to 1. mmm-middle has id 22100. Rust resolves the exact-port overlap by lowest assigned app_id (svc-396), while the old Go natural-hash fallback chose mmm-middle. This pins the actual assigned-ID parity path.",
 			apps: []precedenceParityApp{
 				{Name: "mmm-middle", Protocol: "tcp", DestinationPort: "8080"},
 				{Name: "svc-217", Protocol: "tcp", DestinationPort: "8080"},
@@ -108,7 +108,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 
 	fx := precedenceFixture{
 		Version:     1,
-		Description: "Cross-language AppID application-label precedence parity fixture (#3612). Each case is resolved by BOTH the AppID-ENABLED Rust catalog (AppCatalog::lookup_directional in userspace-dp/src/policy.rs) and the AppID-DISABLED Go fallback (resolveTupleFallback in pkg/appid/runtime.go); both MUST agree on the resolved application NAME so the same 5-tuple is labeled identically regardless of the services.application-identification knob. `apps` is the operator config (user apps only, #3612 scope S1); `catalog` is the (app_id, protocol, port-range) rows appid.BuildCatalog assigns; `tuple` is a FORWARD-keyed session. #5296: app_id is assigned from a STABLE name-hash (config.StableAppID), NOT the sorted position; rare hash collisions are deterministically displaced by config.AssignStableAppIDs, and same-tier overlaps resolve by LOWEST assigned app_id on both paths. BuildCatalog emits entries in ascending-id order so the Rust exact_dst first-writer dedup also keeps the lowest id. GENERATED programmatically from BuildCatalog + resolveTupleFallback by pkg/appid TestRegeneratePrecedenceFixture (BPFRX_REGEN_APPID_FIXTURE=1); do not hand-edit ids/expected. expected_app_id 0 / expected_name \"\" means UNKNOWN.",
+		Description: "Cross-language AppID application-label precedence parity fixture (#3612). Each case is resolved by BOTH the AppID-ENABLED Rust catalog (AppCatalog::lookup_directional in userspace-dp/src/policy.rs) and the AppID-DISABLED Go fallback (resolveTupleFallback in pkg/appid/runtime.go); both MUST agree on the resolved application NAME so the same 5-tuple is labeled identically regardless of the services.application-identification knob. `apps` is the operator config (user apps only, #3612 scope S1); `catalog` is the (app_id, protocol, port-range) rows appid.BuildCatalog assigns; `tuple` is a FORWARD-keyed session. #5296: app_id is assigned from a STABLE name-hash (config.NaturalAppIDCandidate), NOT the sorted position; rare hash collisions are deterministically displaced by config.AssignStableAppIDs, and same-tier overlaps resolve by LOWEST assigned app_id on both paths. BuildCatalog emits entries in ascending-id order so the Rust exact_dst first-writer dedup also keeps the lowest id. GENERATED programmatically from BuildCatalog + resolveTupleFallback by pkg/appid TestRegeneratePrecedenceFixture (BPFRX_REGEN_APPID_FIXTURE=1); do not hand-edit ids/expected. expected_app_id 0 / expected_name \"\" means UNKNOWN.",
 	}
 
 	for _, gc := range cases {
@@ -137,7 +137,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 		for _, e := range cat.Entries {
 			catRows = append(catRows, precedenceParityCatalog{
 				Name:        e.Name,
-				AppID:       e.AppID,
+				AppID:       uint16(e.AppID),
 				Protocol:    e.Protocol,
 				DstPortLow:  e.DstPortLow,
 				DstPortHigh: e.DstPortHigh,
@@ -150,7 +150,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 		if wantName != "" {
 			for _, e := range cat.Entries {
 				if e.Name == wantName {
-					wantID = e.AppID
+					wantID = uint16(e.AppID)
 					break
 				}
 			}

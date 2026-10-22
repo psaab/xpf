@@ -30,7 +30,7 @@ func mkAppIDCfg(names []string, ports map[string]string) *config.Config {
 	return cfg
 }
 
-func idOfName(cat Catalog, name string) uint16 {
+func idOfName(cat Catalog, name string) config.AssignedAppID {
 	for id, n := range cat.AppNames {
 		if n == name {
 			return id
@@ -63,8 +63,8 @@ func TestStableIDResolvesRetainedSessionAfterCatalogEdit(t *testing.T) {
 	if frozen == 0 {
 		t.Fatal("svc-bravo was not assigned an app_id under C1")
 	}
-	if frozen != config.StableAppID("svc-bravo") {
-		t.Fatalf("svc-bravo id = %d, want its StableAppID %d", frozen, config.StableAppID("svc-bravo"))
+	if frozen != config.NaturalAppIDCandidate("svc-bravo") {
+		t.Fatalf("svc-bravo id = %d, want its NaturalAppIDCandidate %d", frozen, config.NaturalAppIDCandidate("svc-bravo"))
 	}
 
 	// C2 adds aaa-early, which sorts before every svc-* name.
@@ -95,8 +95,8 @@ func TestStableIDResolvesRetainedSessionAfterCatalogEdit(t *testing.T) {
 // aaa-svc sorts before ccc-svc but has a higher assigned ID, so the catalog id
 // map makes ccc-svc the winner.
 func TestResolveTupleFallbackTieBreakByAssignedID(t *testing.T) {
-	if !(config.StableAppID("aaa-svc") > config.StableAppID("ccc-svc")) {
-		t.Skipf("fixture stale: StableAppID no longer orders aaa-svc after ccc-svc")
+	if !(config.NaturalAppIDCandidate("aaa-svc") > config.NaturalAppIDCandidate("ccc-svc")) {
+		t.Skipf("fixture stale: NaturalAppIDCandidate no longer orders aaa-svc after ccc-svc")
 	}
 	// Both apps match tcp/8080 in the same (port-constrained) specificity tier.
 	cfg := mkAppIDCfg([]string{"aaa-svc", "ccc-svc"}, map[string]string{
@@ -116,7 +116,7 @@ func TestResolveTupleFallbackTieBreakByAssignedID(t *testing.T) {
 
 // TestResolveTupleFallbackUsesDisplacedAssignedID_10722 is the fail-on-revert
 // guard for collision-aware fallback ordering. svc-217 and svc-396 have the
-// same natural StableAppID; config.AssignStableAppIDs keeps svc-217 at that id
+// same natural NaturalAppIDCandidate; config.AssignStableAppIDs keeps svc-217 at that id
 // and displaces svc-396 to id 1. mmm-middle's natural and assigned id is 22100,
 // so the old natural-hash comparator deterministically picks mmm-middle while
 // the Rust catalog's lowest-assigned-id lookup picks svc-396.
@@ -124,14 +124,14 @@ func TestResolveTupleFallbackUsesDisplacedAssignedID_10722(t *testing.T) {
 	const displaced = "svc-396"
 	const naturalOwner = "svc-217"
 	const middle = "mmm-middle"
-	naturalID := config.StableAppID(displaced)
-	if naturalID != config.StableAppID(naturalOwner) {
-		t.Fatalf("collision fixture stale: StableAppID(%s)=%d, StableAppID(%s)=%d",
-			displaced, naturalID, naturalOwner, config.StableAppID(naturalOwner))
+	naturalID := config.NaturalAppIDCandidate(displaced)
+	if naturalID != config.NaturalAppIDCandidate(naturalOwner) {
+		t.Fatalf("collision fixture stale: NaturalAppIDCandidate(%s)=%d, NaturalAppIDCandidate(%s)=%d",
+			displaced, naturalID, naturalOwner, config.NaturalAppIDCandidate(naturalOwner))
 	}
-	if config.StableAppID(middle) >= naturalID {
-		t.Fatalf("collision fixture stale: StableAppID(%s)=%d must be below colliding id %d",
-			middle, config.StableAppID(middle), naturalID)
+	if config.NaturalAppIDCandidate(middle) >= naturalID {
+		t.Fatalf("collision fixture stale: NaturalAppIDCandidate(%s)=%d must be below colliding id %d",
+			middle, config.NaturalAppIDCandidate(middle), naturalID)
 	}
 	cfg := mkAppIDCfg([]string{displaced, naturalOwner, middle}, map[string]string{
 		displaced:    "8080",

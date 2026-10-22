@@ -36,7 +36,7 @@ type sessionFilter struct {
 	appName     string         // application name filter
 	sortBy      string         // "bytes" or "packets" for top-talkers
 	cfg         *config.Config // for application resolution
-	appNames    map[uint16]string
+	appNames    map[config.AssignedAppID]string
 	appFallback *appid.FallbackIndex
 
 	// parseErr records an operator-input error detected while

@@ -32,7 +32,7 @@ func TestSessionMatchesCaseSensitive5820(t *testing.T) {
 
 	// Distinct-case apps get distinct AppIDs; the map mirrors what BuildCatalog
 	// stamps for a config that legitimately defines both "Foo" and "foo".
-	appNames := map[uint16]string{
+	appNames := map[config.AssignedAppID]string{
 		1: "Foo",
 		2: "foo",
 		3: "http",
@@ -41,7 +41,7 @@ func TestSessionMatchesCaseSensitive5820(t *testing.T) {
 	}
 
 	// Helper: a TCP/80 session carrying the given app_id.
-	match := func(filter string, appID uint16) bool {
+	match := func(filter string, appID config.AssignedAppID) bool {
 		return SessionMatches(filter, appNames, cfg, 6, 40000, 80, appID)
 	}
 

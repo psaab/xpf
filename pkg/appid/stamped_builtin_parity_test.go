@@ -9,7 +9,7 @@ import (
 func stampedWinner(t *testing.T, cat Catalog, proto uint8, srcPort, dstPort uint16) string {
 	t.Helper()
 	inRange := func(lo, hi, p uint16) bool { return (lo == 0 && hi == 0) || (lo <= p && p <= hi) }
-	var winID uint16
+	var winID config.AssignedAppID
 	winConstrained := false
 	for _, e := range cat.Entries {
 		if e.Protocol != proto || !inRange(e.DstPortLow, e.DstPortHigh, dstPort) || !inRange(e.SrcPortLow, e.SrcPortHigh, srcPort) {

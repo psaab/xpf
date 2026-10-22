@@ -71,7 +71,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	if _, ok := config.ZoneQuarantineExclusionsForConfig(cfg)[colliding]; !ok {
 		t.Fatalf("premise: %q not quarantined: %v", colliding, config.ZoneQuarantineExclusionsForConfig(cfg))
 	}
-	res := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]uint32)}
+	res := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res, cfg)
 	dp := &quarantinePolicyDP14336{}
 	if err := compilePolicies(dp, cfg, res); err != nil {
@@ -123,7 +123,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 		{FromZone: "any", ToZone: "untrust", Policies: []*config.Policy{mkPol("wild")}},
 		{FromZone: "trust", ToZone: "junos-host", Policies: []*config.Policy{mkPol("host")}},
 	}
-	res2 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]uint32)}
+	res2 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res2, cfg2)
 	dp2 := &quarantinePolicyDP14336{}
 	if err := compilePolicies(dp2, cfg2, res2); err != nil {
@@ -136,7 +136,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	cfg3 := &config.Config{}
 	cfg3.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}, "untrust": {Name: "untrust"}}
 	cfg3.Security.Policies = []*config.ZonePairPolicies{{FromZone: "trust", ToZone: "nope", Policies: []*config.Policy{mkPol("x")}}}
-	res3 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]uint32)}
+	res3 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res3, cfg3)
 	if err := compilePolicies(&quarantinePolicyDP14336{}, cfg3, res3); err == nil {
 		t.Fatal("unknown zone must still fail closed")
@@ -145,7 +145,7 @@ func TestCompilePolicies_SkipsQuarantinedZoneStanzas(t *testing.T) {
 	cfg4 := &config.Config{}
 	cfg4.Security.Zones = map[string]*config.ZoneConfig{"trust": {Name: "trust"}, "untrust": {Name: "untrust"}}
 	cfg4.Security.Policies = []*config.ZonePairPolicies{{FromZone: "trust", ToZone: "untrust", Policies: big}}
-	res4 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]uint32)}
+	res4 := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res4, cfg4)
 	if err := compilePolicies(&quarantinePolicyDP14336{}, cfg4, res4); err == nil {
 		t.Fatal("non-quarantined >256 must still fail closed")

@@ -35,7 +35,7 @@ func mk13101(t *testing.T, from, to string) (*d13101DP, *CompileResult, error) {
 			Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"}, Applications: []string{"any"}},
 		}},
 	}}
-	res := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]uint32)}
+	res := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(res, cfg)
 	dp := &d13101DP{}
 	err := compilePolicies(dp, cfg, res)
@@ -96,7 +96,7 @@ func TestCompilePoliciesDefinedAnyUsesConfiguredZoneID13101(t *testing.T) {
 		FromZone: "any", ToZone: "untrust",
 		Policies: []*config.Policy{{Name: "p1", Action: config.PolicyPermit}},
 	}}
-	result := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]uint32)}
+	result := &CompileResult{ZoneIDs: make(map[string]uint16), AddrIDs: make(map[string]uint32), AppIDs: make(map[string]config.AssignedAppID)}
 	assignZoneIDs(result, cfg)
 	dp := &d13101DP{}
 	if err := compilePolicies(dp, cfg, result); err != nil {

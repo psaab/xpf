@@ -41,7 +41,8 @@ upfront what they're getting and not getting.
    predefined junos-* application list + user-defined
    applications. Each name is assigned a **STABLE, name-derived**
    `u16 app_id` (#5296) — a FNV-1a fold of the application NAME into
-   `[1, 65535]` (`config.StableAppID`), assigned through the shared
+   `[1, 65535]` (`config.NaturalAppIDCandidate`, whose collision-resolved
+   assigned form is `config.AssignedAppID`, #16142), assigned through the shared
    `config.AssignStableAppIDs` SSOT called by BOTH
    `pkg/dataplane/compiler.go:compileApplications`
    (`CompileResult.AppNames`, the `app_id → name` map the show
@@ -64,7 +65,7 @@ upfront what they're getting and not getting.
    the same name-hash pattern zone ids use (`config.StableZoneID`,
    #3075). Predefined applications are a FIXED, mutually
    collision-free set (frozen by `TestPredefinedAppIDsCollisionFree`)
-   and always own their `StableAppID` slot; a rare USER-app hash
+   and always own their `NaturalAppIDCandidate` slot; a rare USER-app hash
    collision is resolved by a deterministic displaced-slot fill, so
    only the colliding user apps can renumber — never the whole
    catalog. **Honest residual (#5296):** stability is NOT absolute —
@@ -72,7 +73,7 @@ upfront what they're getting and not getting.
    renumber that small colliding set. Because this is the one case that
    warrants operator attention, `AssignStableAppIDs` emits a
    `slog.Warn` at catalog build (config compile, never per-packet)
-   whenever a user app is displaced off its natural `StableAppID` slot —
+   whenever a user app is displaced off its natural `NaturalAppIDCandidate` slot —
    naming the `application`, the `natural_app_id` slot it wanted, and
    the `assigned_app_id` it was displaced to (#5988). An operator who
    sees this log knows a displacement (and thus a possible
@@ -105,7 +106,7 @@ upfront what they're getting and not getting.
    winner is the more SPECIFIC one — a port-constrained entry
    (destination and/or source port set) beats a bare protocol-only
    entry — with ties broken by the lowest `app_id` within a tier.
-   Since #5296, an assigned `app_id` is derived from `config.StableAppID`
+   Since #5296, an assigned `app_id` is derived from `config.NaturalAppIDCandidate`
    unless a hash collision displaces that name. "Lowest assigned `app_id"`
    therefore means the value from the active catalog's assignment, including
    collision-displaced IDs — not simply the lowest natural hash. The

@@ -23,7 +23,7 @@ func TestAppCatalogParityOnPortZero_5194(t *testing.T) {
 		"nnn-srczero": {Name: "nnn-srczero", Protocol: "udp", DestinationPort: "53", SourcePort: "0-0"},
 	}
 
-	result := &CompileResult{AppIDs: make(map[string]uint32)}
+	result := &CompileResult{AppIDs: make(map[string]config.AssignedAppID)}
 	if err := compileApplications(appCatalogParityDP{}, cfg, result); err != nil {
 		t.Fatalf("compileApplications: %v", err)
 	}

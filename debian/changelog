@@ -1,5 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Give the application ID space typed Go returns (#16142, one ID
+    space per PR): config.AssignedAppID (uint16 underlying) is now the
+    collision-resolved id returned by AssignStableAppIDs /
+    AssignStableAppIDsQuiet and carried by catalog entries, AppNames,
+    CompileResult.AppIDs/AppNames, SessionValue{,V6}.AppID, the event
+    AppID, and the snapshot AppCatalogEntrySnapshot.AppID. The hash
+    producer is renamed StableAppID -> NaturalAppIDCandidate (it is a
+    candidate, not the assigned id, per the Codex naming restriction).
+    Explicit uint16/uint32 conversion remains at BPF/FFI, policy-rule,
+    and SetApplication ABI edges; JSON app_id bytes are unchanged
+    (same numeric encoding), so ProtocolVersion stays at 66 and only
+    the reflection shape golden moves. StableZoneID,
+    StableRoutingInstanceTableID, StableIfaceID, and
+    StableTunnelEndpointID are separate ID spaces, out of scope here.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Split nat/allocator.rs into allocator/ (mod.rs facade +
     deterministic.rs + occupancy.rs) as pure code motion (#16135):
     the pre-split file reconstructs byte-for-byte after un-applying

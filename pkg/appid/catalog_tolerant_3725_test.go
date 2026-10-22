@@ -36,7 +36,7 @@ func entriesForName(cat Catalog, name string) []CatalogEntry {
 	return out
 }
 
-func appIDForName(cat Catalog, name string) (uint16, bool) {
+func appIDForName(cat Catalog, name string) (config.AssignedAppID, bool) {
 	for id, n := range cat.AppNames {
 		if n == name {
 			return id, true
@@ -143,7 +143,7 @@ func TestBuildCatalogNoDanglingAppName(t *testing.T) {
 		t.Fatalf("malformed last app zzz-bad left a dangling AppNames entry %v; an unemittable app must not hold an id (M04)", cat.AppNames)
 	}
 	// Every AppNames id must have at least one CatalogEntry that can stamp it.
-	stamped := map[uint16]bool{}
+	stamped := map[config.AssignedAppID]bool{}
 	for _, e := range cat.Entries {
 		stamped[e.AppID] = true
 	}

@@ -43,7 +43,7 @@ func TestAppCatalogIDsMatchCompileResultAppNames(t *testing.T) {
 
 	// Real compiler -> AppNames (the SSOT the show path uses). AppIDs is
 	// normally allocated by CompileConfig; compileApplications writes into it.
-	result := &CompileResult{AppIDs: make(map[string]uint32)}
+	result := &CompileResult{AppIDs: make(map[string]config.AssignedAppID)}
 	if err := compileApplications(appCatalogParityDP{}, cfg, result); err != nil {
 		t.Fatalf("compileApplications: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestAppCatalogIDsMatchCompileResultAppNames(t *testing.T) {
 	// Spot-check that a known app's catalog entry round-trips through
 	// ResolveSessionName: lookup the id the catalog assigned to my-udp-app and
 	// confirm ResolveSessionName(appNames, ..., id) returns its name.
-	var udpID uint16
+	var udpID config.AssignedAppID
 	for id, name := range cat.AppNames {
 		if name == "my-udp-app" {
 			udpID = id
@@ -103,7 +103,7 @@ func TestAppCatalogIDsMatchOnMalformedDestPort(t *testing.T) {
 		"zzz-good": {Name: "zzz-good", Protocol: "tcp", DestinationPort: "8443"},
 	}
 
-	result := &CompileResult{AppIDs: make(map[string]uint32)}
+	result := &CompileResult{AppIDs: make(map[string]config.AssignedAppID)}
 	if err := compileApplications(appCatalogParityDP{}, cfg, result); err != nil {
 		t.Fatalf("compileApplications: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAppCatalogIDsMatchOnMalformedDestPort(t *testing.T) {
 		}
 	}
 	// zzz-good must resolve through the id the catalog assigned it.
-	var goodID uint16
+	var goodID config.AssignedAppID
 	for id, name := range cat.AppNames {
 		if name == "zzz-good" {
 			goodID = id
@@ -159,7 +159,7 @@ func TestAppCatalogParityOnTolerantLoadPortEdges(t *testing.T) {
 		"zzz-nope": {Name: "zzz-nope", Protocol: "tcp", DestinationPort: "nope"},
 	}
 
-	result := &CompileResult{AppIDs: make(map[string]uint32)}
+	result := &CompileResult{AppIDs: make(map[string]config.AssignedAppID)}
 	if err := compileApplications(appCatalogParityDP{}, cfg, result); err != nil {
 		t.Fatalf("compileApplications: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestAppCatalogParityOnTolerantLoadPortEdges(t *testing.T) {
 	// unlike a malformed app, whose dangling name is a genuine mislabel risk.
 	// Skip type-constrained ICMP apps here; every other dangling id is still a
 	// bug.
-	stamped := map[uint16]bool{}
+	stamped := map[config.AssignedAppID]bool{}
 	for _, e := range cat.Entries {
 		stamped[e.AppID] = true
 	}
@@ -240,7 +240,7 @@ func TestAppCatalogParityOnDroppedConstraintApps14355(t *testing.T) {
 		"hopopt":     {Name: "hopopt", Protocol: "0", DestinationPort: "80"},
 	}
 
-	result := &CompileResult{AppIDs: make(map[string]uint32)}
+	result := &CompileResult{AppIDs: make(map[string]config.AssignedAppID)}
 	if err := compileApplications(appCatalogParityDP{}, cfg, result); err != nil {
 		t.Fatalf("compileApplications: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestAppCatalogParityOnDroppedConstraintApps14355(t *testing.T) {
 	}
 }
 
-func appNameID(names map[uint16]string, want string) (uint16, bool) {
+func appNameID(names map[config.AssignedAppID]string, want string) (config.AssignedAppID, bool) {
 	for id, name := range names {
 		if name == want {
 			return id, true
@@ -311,7 +311,7 @@ func TestAppCatalogEntryPortsAndProtos(t *testing.T) {
 
 	var rangeEntry *appid.CatalogEntry
 	var anyL4Protos []uint8
-	var anyL4ID uint16
+	var anyL4ID config.AssignedAppID
 	for i := range cat.Entries {
 		e := &cat.Entries[i]
 		switch e.Name {
@@ -366,13 +366,13 @@ func TestAppCatalogEntryPortsAndProtos(t *testing.T) {
 // failing this test. The boundary sibling proves exactly 65535 is accepted.
 func TestCompileApplicationsRejectsAppIDOverflow(t *testing.T) {
 	// Reject: 65536 referenced applications.
-	result := &CompileResult{AppIDs: make(map[string]uint32)}
+	result := &CompileResult{AppIDs: make(map[string]config.AssignedAppID)}
 	if err := compileApplications(appCatalogParityDP{}, compileOverflowConfig(65536), result); err == nil {
 		t.Fatal("compileApplications(65536 apps) returned no error; the uint16 app_id space must be rejected, not wrapped to 0")
 	}
 
 	// Accept: exactly 65535 applications; no id 0 assigned to a real app.
-	okResult := &CompileResult{AppIDs: make(map[string]uint32)}
+	okResult := &CompileResult{AppIDs: make(map[string]config.AssignedAppID)}
 	if err := compileApplications(appCatalogParityDP{}, compileOverflowConfig(65535), okResult); err != nil {
 		t.Fatalf("compileApplications(65535 apps) error = %v; the boundary must be accepted", err)
 	}

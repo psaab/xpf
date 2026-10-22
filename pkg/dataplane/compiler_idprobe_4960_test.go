@@ -544,7 +544,7 @@ func TestPrePassDoesNotPerturbIDAssignment_4960(t *testing.T) {
 				want, sortedKeys(zones))
 		}
 	}
-	apps := first["AppIDs"].(map[string]uint32)
+	apps := first["AppIDs"].(map[string]config.AssignedAppID)
 	for _, want := range []string{"app-ssh", "app-http", "app-dns"} {
 		if _, ok := apps[want]; !ok {
 			t.Errorf("application %q is absent from AppIDs. The fixture's own "+
@@ -622,16 +622,16 @@ func TestPrePassDoesNotPerturbIDAssignment_4960(t *testing.T) {
 	// (the previous floor) could not see the two indexes disagreeing, which is
 	// the failure that matters — a lookup by id is how the operator surfaces
 	// resolve an app (#6894 r9 F3).
-	appNames := first["AppNames"].(map[uint16]string)
+	appNames := first["AppNames"].(map[config.AssignedAppID]string)
 	for _, want := range []string{"app-ssh", "app-http", "app-dns"} {
 		id, ok := apps[want]
 		if !ok {
 			continue // already reported by the AppIDs floor above
 		}
-		if got := appNames[uint16(id)]; got != want {
+		if got := appNames[id]; got != want {
 			t.Errorf("AppNames[%d] is %q but AppIDs[%q] is %d — the forward and "+
 				"reverse application indexes disagree (#6894 r9 F3)",
-				uint16(id), got, want, id)
+				id, got, want, id)
 		}
 	}
 

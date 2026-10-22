@@ -469,7 +469,7 @@ type sessionFilter struct {
 	zoneIfaces   map[uint16][]string
 	egressIfaces map[sessionEgressKey]string
 	policyNames  map[uint32]string
-	appNames     map[uint16]string
+	appNames     map[config.AssignedAppID]string
 	hasFilters   bool // true if any filter narrows results
 }
 

@@ -87,7 +87,7 @@ func TestOmittedProtocolLabelsParityAcrossAppIDKnob11816(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("omitted-protocol catalog entries = %v, want TCP and UDP rows", entries)
 	}
-	appIDByProtocol := make(map[uint8]uint16, 2)
+	appIDByProtocol := make(map[uint8]config.AssignedAppID, 2)
 	for _, entry := range entries {
 		if entry.DstPortLow != dstPort || entry.DstPortHigh != dstPort {
 			t.Fatalf("omitted-protocol entry has unexpected port range: %+v", entry)

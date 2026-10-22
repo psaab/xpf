@@ -67,7 +67,7 @@ func TestCompilePoliciesRecordsExpandedPolicyScheduleSlots(t *testing.T) {
 			"trust":   1,
 			"untrust": 2,
 		},
-		AppIDs: map[string]uint32{
+		AppIDs: map[string]config.AssignedAppID{
 			"app-a": 1,
 			"app-b": 2,
 			"app-c": 3,

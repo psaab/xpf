@@ -73,7 +73,7 @@ func TestSessionMatchesMultiTermAndSets_14725(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCatalog: %v", err)
 	}
-	idOf := func(name string) uint16 {
+	idOf := func(name string) config.AssignedAppID {
 		t.Helper()
 		for id, n := range cat.AppNames {
 			if n == name {
@@ -84,7 +84,7 @@ func TestSessionMatchesMultiTermAndSets_14725(t *testing.T) {
 		return 0
 	}
 	idx := NewFallbackIndex(cfg)
-	match := func(filter string, appID uint16, proto uint8, src, dst uint16) bool {
+	match := func(filter string, appID config.AssignedAppID, proto uint8, src, dst uint16) bool {
 		return SessionMatchesWithIndex(filter, cat.AppNames, cfg, idx, proto, src, dst, appID)
 	}
 
@@ -217,7 +217,7 @@ func TestTupleFallbackPredefinedCatalog_14725(t *testing.T) {
 // uncatalogued collider under the full-universe re-rank; fully uncatalogued
 // ties keep the #12225 full-universe (AppID-on) winner.
 func TestTupleFallbackCataloguedBeatsUncataloguedCollider_14725(t *testing.T) {
-	if config.StableAppID("svc-217") != config.StableAppID("svc-396") {
+	if config.NaturalAppIDCandidate("svc-217") != config.NaturalAppIDCandidate("svc-396") {
 		t.Skip("fixture stale: svc-217/svc-396 no longer collide")
 	}
 	mkCfg := func(names ...string) *config.Config {
@@ -229,12 +229,12 @@ func TestTupleFallbackCataloguedBeatsUncataloguedCollider_14725(t *testing.T) {
 		cfg.Services.ApplicationIdentification = false
 		return cfg
 	}
-	offNames := func(refs ...string) map[uint16]string {
+	offNames := func(refs ...string) map[config.AssignedAppID]string {
 		ids, err := config.AssignStableAppIDsQuiet(refs)
 		if err != nil {
 			t.Fatalf("AssignStableAppIDsQuiet: %v", err)
 		}
-		out := make(map[uint16]string, len(ids))
+		out := make(map[config.AssignedAppID]string, len(ids))
 		for n, id := range ids {
 			out[id] = n
 		}
