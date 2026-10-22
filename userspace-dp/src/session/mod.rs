@@ -4846,10 +4846,14 @@ impl SessionTable {
                 // handshake_pending`, the #6752 SYN-ACK-seen shape) is
                 // NOT served proof — only a fully completed pair
                 // (pending cleared) may stand as evidence, and only
-                // when it is a SERVING row distinct from the candidate
-                // replica itself (serving origins, not worker replicas).
+                // when it is a local SERVING row distinct from a pure
+                // HA-peer replica: locally-authored, `SharedPromote`,
+                // or `WorkerLocalImport` (this node's own replica
+                // across workers). `SyncImport`/`SharedMaterialize`
+                // peer replicas never stand as evidence.
                 let serving_origin = !entry.origin.is_peer_synced()
-                    || entry.origin == SessionOrigin::SharedPromote;
+                    || entry.origin == SessionOrigin::SharedPromote
+                    || entry.origin == SessionOrigin::WorkerLocalImport;
                 if serving_origin
                     && entry.established
                     && !entry.handshake_pending
