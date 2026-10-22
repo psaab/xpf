@@ -385,6 +385,26 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
+                    // #16223: a never-established (Opening / pending)
+                    // half whose companion proves handshake progress
+                    // (served reverse counters / promoted companion —
+                    // see `cache_hit_handshake_progress`) must not reap
+                    // while the flow is active: in split posture the
+                    // serving workers never re-stamp these replica rows
+                    // (`last_seen == created` at expiry in the live
+                    // capture), so the classic `companion_keeps_alive`
+                    // refusal (`!companion.established`) reaps both
+                    // halves at 20 s under continuous cache service.
+                    // Require the companion itself to be within its
+                    // window (the probe inside
+                    // `opening_companion_keeps_alive` checks that), so
+                    // a genuinely idle pair still reaps.
+                    if companion_eligible
+                        && self.opening_companion_keeps_alive(&key, e_nat, now_ns)
+                    {
+                        self.last_pop_stats.kept_alive_by_companion += 1;
+                        continue;
+                    }
                     if let Some(removed) = self.remove_entry(&key, RemovalKind::Terminal) {
                         self.last_pop_stats.expired += 1;
                         let decision = removed.decision;
@@ -703,6 +723,86 @@ impl SessionTable {
         true
     }
 
+
+    /// #16223: GC retention for a never-established (Opening /
+    /// handshake-pending) half. `companion_keeps_alive` refuses these
+    /// pairs by design (#6752/#13679: a SYN-ACK the client never ACKed
+    /// must not hold the pair), but in split posture the completing
+    /// segment is consumed on the fabric peer / sibling workers, so
+    /// the local pair stays Opening/pending while BOTH nodes serve it
+    /// continuously — and the replica rows are never re-stamped
+    /// (`last_seen == created` at expiry in the live capture). The
+    /// retention therefore keys on the same served-evidence proof as
+    /// the hit paths (`cache_hit_handshake_progress`: promoted
+    /// companion, refreshed half, or nonzero reverse counters folded
+    /// only on admitted hits) PLUS the companion being within its own
+    /// idle window right now. A handshake that never completes (no
+    /// reverse service at all) fails the proof and still reaps on
+    /// the opening window; a flow that goes quiet fails the window
+    /// check once the companion crosses, so both halves then reap
+    /// within one window of last activity (bounded, terminating).
+    fn opening_companion_keeps_alive(
+        &mut self,
+        key: &SessionKey,
+        entry_nat: NatDecision,
+        now_ns: u64,
+    ) -> bool {
+        // Only classic-pending TCP halves take this arm: pairs the
+        // state machine already promoted past SYN-ACK-observed
+        // (`handshake_pending`) but whose completing segment was
+        // consumed on another worker/node. Pure Opening pairs
+        // (`handshake_pending=false`) keep the #6752/#13679 refusal —
+        // a retransmitted SYN-ACK alone must not hold them — and
+        // closing pairs keep their fixed fuse (#10885). SYN-ACK-first
+        // pairs still wait for their reverse ACK (#4109).
+        let Some(entry) = self.entry_by_key(key) else {
+            return false;
+        };
+        if key.protocol != PROTO_TCP
+            || entry.closing
+            || entry.syn_ack_first
+            || !entry.handshake_pending
+        {
+            return false;
+        }
+        let companion_key = reverse_session_key(key, entry_nat);
+        let Some(companion) = self.entry_by_key(&companion_key) else {
+            return false;
+        };
+        if companion.closing || companion.syn_ack_first {
+            return false;
+        }
+        // Companion must be within ITS idle window now (complement of
+        // the Case-3 strict-`>` test), exactly as
+        // `companion_keeps_alive` requires of established companions.
+        if now_ns.saturating_sub(companion.last_seen_ns) > companion.expires_after_ns {
+            return false;
+        }
+        if self.cache_hit_handshake_progress(key).is_none() {
+            return false;
+        }
+        // #6752: freshness from the install / a SYN-ACK retransmit
+        // alone must not hold the pair — additionally require admitted
+        // reverse counters (the server direction was actually
+        // forwarded on this table; a lookup SYN-ACK retransmit folds
+        // none).
+        let fwd = if companion.metadata.is_reverse {
+            self.entry_by_key(key)
+        } else {
+            Some(companion)
+        };
+        let served_reverse = fwd.is_some_and(|f| f.counters.rev_packets > 0);
+        if !served_reverse {
+            return false;
+        }
+        let companion_last_seen = companion.last_seen_ns;
+        let Some(em) = self.entry_by_key_mut(key) else {
+            return false;
+        };
+        em.last_seen_ns = companion_last_seen;
+        self.rebucket_alive_entry(key, now_ns);
+        true
+    }
     /// #2120: the standby retention decision for an idle-crossed entry.
     /// Pure (reads only the passed snapshot + the HA context closures),
     /// so it can be unit-tested in isolation and called from the expire
