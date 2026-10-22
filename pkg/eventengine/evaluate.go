@@ -204,7 +204,15 @@ func (e *Engine) evaluateEventMode(ev rpm.Event, live bool) []triggeredPolicy {
 				// of parking an empty edge.
 				continue
 			}
-			_ = matched
+			if !matched {
+				// #15945 (H22-01): a non-crossing event during cooldown is
+				// not a deferred edge. Parking it unconditionally replayed
+				// the remediation at cooldown expiry even though the
+				// within threshold was never met (sub-threshold, over the
+				// trigger-until ceiling, or an already-latched sustained
+				// level). Only a genuine crossing is deferred.
+				continue
+			}
 			e.maybeDeferCooldownLocked(pol, rt, ev, now)
 			continue
 		}
