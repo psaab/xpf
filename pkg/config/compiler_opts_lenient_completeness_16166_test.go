@@ -159,20 +159,54 @@ func walkBoolFieldsByType16166(t reflect.Type, path string, visit func(path stri
 	}
 }
 
+// classifyLenientBool16166 classifies one walked bool field: downgrade
+// detection is by LEAF name (a lenient*/sanitize* bool is a downgrade
+// wherever it nests); the allowlist exemption is by FULL dotted path,
+// so a nested bool sharing an allowlisted leaf name (e.g. a future
+// nested "skipCompactNormalize") does NOT inherit the exemption.
+// Both the completeness test and the full-path test call this func —
+// mutating the allowlist lookup to leaf-name matching must turn the
+// full-path test RED.
+type lenientBoolClass16166 int
+
+const (
+	lenientClassDowngrade16166 lenientBoolClass16166 = iota
+	lenientClassAllowlisted16166
+	lenientClassUnclassified16166
+)
+
+func classifyLenientBool16166(path string) lenientBoolClass16166 {
+	leaf := path[strings.LastIndex(path, ".")+1:]
+	switch {
+	case strings.HasPrefix(leaf, "lenient"), strings.HasPrefix(leaf, "sanitize"):
+		return lenientClassDowngrade16166
+	case lenientCompletenessAllowlist16166[path] != "":
+		return lenientClassAllowlisted16166
+	default:
+		return lenientClassUnclassified16166
+	}
+}
+
+func (c lenientBoolClass16166) String() string {
+	switch c {
+	case lenientClassDowngrade16166:
+		return "downgrade"
+	case lenientClassAllowlisted16166:
+		return "allowlisted"
+	default:
+		return "unclassified"
+	}
+}
+
 func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 	opts := lenientCompileOpts()
 	v := reflect.ValueOf(opts)
 
 	var downgrades, others int
 	walkBoolFields16166(v, "", func(path string, fv reflect.Value) {
-		// Downgrade detection is by LEAF name (a lenient* bool is a
-		// downgrade wherever it nests); the allowlist exemption is by
-		// FULL dotted path, so a nested bool sharing an allowlisted
-		// leaf name (e.g. a future nested "skipCompactNormalize") does
-		// NOT inherit the root field's exemption.
 		leaf := path[strings.LastIndex(path, ".")+1:]
-		switch {
-		case strings.HasPrefix(leaf, "lenient"), strings.HasPrefix(leaf, "sanitize"):
+		switch classifyLenientBool16166(path) {
+		case lenientClassDowngrade16166:
 			downgrades++
 			if !fv.Bool() {
 				t.Errorf("%s is false in lenientCompileOpts(): the field exists but its "+
@@ -181,7 +215,7 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 					"older binary accepted would fail to boot (#1960). Add `%s: true` to "+
 					"lenientCompileOpts() in compiler_opts.go", path, leaf)
 			}
-		case lenientCompletenessAllowlist16166[path] != "":
+		case lenientClassAllowlisted16166:
 			others++
 		default:
 			t.Errorf("%s is a bool in compileOpts that is neither a lenient*/sanitize* "+
@@ -385,11 +419,14 @@ func TestLenientCompletenessWalkPointerEmbedded16166(t *testing.T) {
 	}
 }
 
-// TestLenientCompletenessAllowlistFullPath16166 proves classification
-// is by full dotted path, not leaf name: a nested bool whose leaf name
-// collides with an allowlisted root field ("skipCompactNormalize")
-// must NOT be exempted — with leaf-name matching it would be silently
-// classified as the allowlisted test seam.
+// TestLenientCompletenessAllowlistFullPath16166 proves — through the
+// shared classifyLenientBool16166 used by the completeness test, not a
+// re-implementation — that classification is by full dotted path: a
+// nested bool whose leaf name collides with an allowlisted root field
+// ("skipCompactNormalize") must classify unclassified, while the root
+// field classifies allowlisted. Mutating classifyLenientBool16166's
+// allowlist lookup to leaf-name matching turns this test RED (the
+// nested path would classify allowlisted).
 func TestLenientCompletenessAllowlistFullPath16166(t *testing.T) {
 	type plantedNested struct {
 		skipCompactNormalize bool
@@ -399,22 +436,19 @@ func TestLenientCompletenessAllowlistFullPath16166(t *testing.T) {
 	}
 	var classified []string
 	walkBoolFields16166(reflect.ValueOf(plantedRoot{}), "", func(path string, fv reflect.Value) {
-		leaf := path[strings.LastIndex(path, ".")+1:]
-		switch {
-		case strings.HasPrefix(leaf, "lenient"), strings.HasPrefix(leaf, "sanitize"):
-			classified = append(classified, "downgrade:"+path)
-		case lenientCompletenessAllowlist16166[path] != "":
-			classified = append(classified, "allowlisted:"+path)
-		default:
-			classified = append(classified, "unclassified:"+path)
-		}
+		classified = append(classified, classifyLenientBool16166(path).String()+":"+path)
 	})
 	want := "unclassified:plantedNested.skipCompactNormalize"
 	if len(classified) != 1 || classified[0] != want {
-		t.Errorf("nested leaf-name collision classified as %v, want [%s] (full-path allowlist)", classified, want)
+		t.Errorf("nested leaf-name collision classified as %v, want [%s] (full-path allowlist via classifyLenientBool16166)", classified, want)
 	}
-	// The genuine root field IS allowlisted by its full path.
-	if lenientCompletenessAllowlist16166["skipCompactNormalize"] == "" {
-		t.Error("root skipCompactNormalize missing from full-path allowlist")
+	// The genuine root field IS allowlisted through the same func.
+	if got := classifyLenientBool16166("skipCompactNormalize"); got != lenientClassAllowlisted16166 {
+		t.Errorf("classifyLenientBool16166(%q) = %s, want allowlisted", "skipCompactNormalize", got)
+	}
+	// And a nested lenient* leaf still classifies as a downgrade
+	// wherever it nests (leaf detection through the same func).
+	if got := classifyLenientBool16166("plantedNested.lenientPlanted16166"); got != lenientClassDowngrade16166 {
+		t.Errorf("classifyLenientBool16166(%q) = %s, want downgrade", "plantedNested.lenientPlanted16166", got)
 	}
 }
