@@ -156,12 +156,19 @@ pub(super) enum JunosHostLocalPolicy {
 /// service port, while the emitted tuple remains the original wire tuple.
 /// Kept emit-only (evaluation is `junos_host_policy_eval`) so the enqueue can run
 /// BEFORE the emit on the flow-backed path.
+/// #15951: `nat` is the packet's destination translation: the policy was
+/// judged against the POST-translation destination (`host_bound_policy_dst`),
+/// so the deny record must carry that translated tuple in its `nat_dst_*`
+/// fields — passing a default decision zeroed them and hid the tuple that
+/// actually matched the deny. Direct-to-local traffic passes the default
+/// decision (no translation), byte-identical to before.
 pub(super) fn emit_junos_host_deny(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     policy_dst_port: u16,
+    nat: &crate::nat::NatDecision,
     from_zone_id: u16,
     policy_id: u32,
     action: PolicyAction,
@@ -174,6 +181,7 @@ pub(super) fn emit_junos_host_deny(
         flow,
         meta,
         policy_dst_port,
+        nat,
         from_zone_id,
         policy_id,
         action,
@@ -193,6 +201,7 @@ pub(super) fn emit_junos_host_deny_l4(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     policy_dst_port: u16,
+    nat: &crate::nat::NatDecision,
     from_zone_id: u16,
     policy_id: u32,
     action: PolicyAction,
@@ -203,9 +212,7 @@ pub(super) fn emit_junos_host_deny_l4(
     emit_policy_deny_event(
         event_stream,
         flow,
-        // LocalDelivery applies no NAT — the deny record carries no nat_*
-        // translation (byte-identical to a non-NAT transit deny).
-        &crate::nat::NatDecision::default(),
+        nat,
         meta,
         from_zone_id,
         // The egress "zone" is the firewall host itself. The reserved
@@ -363,6 +370,9 @@ pub(super) fn junos_host_local_policy(
     // below still use `flow` — the client is talking to the pre-translation
     // address, and the reply must come back from it.
     policy_dst: (IpAddr, u16),
+    // #15951: the destination translation behind `policy_dst`, carried into
+    // the deny record's `nat_dst_*` fields. Default for untranslated traffic.
+    nat: crate::nat::NatDecision,
     from_zone_id: u16,
     packet_len: u64,
     now_ns: u64,
@@ -402,6 +412,13 @@ pub(super) fn junos_host_local_policy(
             {
                 crate::policy::record_policy_hit_counter(counter, packet_len);
             }
+            // #15951: credit the global policy-deny counter here, inside the
+            // one helper every flow-backed deny (Stage-11, session-hit,
+            // session-miss) funnels through, so each denied packet counts
+            // exactly once. The per-rule hit counter is already credited by
+            // the policy evaluation itself and is not touched.
+            counters.touched = true;
+            counters.policy_denied_packets += 1;
             // #3615: enqueue an explicit reject reply FIRST, then emit the
             // junos-host deny with the ACTUAL reply outcome so a suppressed
             // reject logs the truthful DENY; plain `deny` stays silent.
@@ -422,6 +439,7 @@ pub(super) fn junos_host_local_policy(
                 flow,
                 meta,
                 policy_dst.1,
+                &nat,
                 from_zone_id,
                 result.policy_id,
                 action,

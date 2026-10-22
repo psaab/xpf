@@ -2227,6 +2227,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     flow,
                                     meta,
                                     policy_dst,
+                                    // Stage-11 passthrough carries no translation.
+                                    crate::nat::NatDecision::default(),
                                     from_zone_id,
                                     meta.pkt_len as u64,
                                     now_ns,
@@ -3952,6 +3954,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         resolved.key.dst_port,
                                         resolved.decision,
                                     ),
+                                    resolved.decision.nat,
                                     authority_zone,
                                     meta.pkt_len as u64,
                                     now_ns,
@@ -5739,6 +5742,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         Some(policy_dst_ip),
                                         Some(policy_dst_port),
                                     ),
+                                    decision.nat,
                                     from_zone_id,
                                     meta.pkt_len as u64,
                                     now_ns,
@@ -5886,11 +5890,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // tag. Recorded ONCE here and never re-derived from the zone, which is
                                 // the approximation `show/clear security flow session interface <name>`
                                 // is being freed from.
-                                ingress_ifindex: meta.ingress_ifindex,
-                                ingress_vlan_id: meta.ingress_vlan_id,
+                                // #15951: fabric arrivals stamp the (0,0) identity
+                                // like the transit install (#7096), instead of
+                                // claiming the local fabric NIC as the peer's
+                                // ingress interface.
+                                ingress_ifindex: crate::session::stamped_ingress_identity(
+                                    meta.ingress_ifindex,
+                                    meta.ingress_vlan_id,
+                                    packet_fabric_ingress,
+                                )
+                                .0,
+                                ingress_vlan_id: crate::session::stamped_ingress_identity(
+                                    meta.ingress_ifindex,
+                                    meta.ingress_vlan_id,
+                                    packet_fabric_ingress,
+                                )
+                                .1,
                                 forward_ingress_vlan_id: None,
                                 owner_rg_id: 0,
-                                fabric_ingress: false,
+                                fabric_ingress: packet_fabric_ingress,
                                 is_reverse: false,
                                 // Keep firewall-local sessions in the helper only for HA
                                 // state. Publish only the exact observed key back into the
@@ -5920,7 +5938,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // host-local session).
                                 policy_counter_idx: host_policy_counter_idx,
                                 policy_counter: host_policy_counter,
-                                nat_scope_ifindex: None,
+                                // #15951 rebase: stamp the validated NAT scope
+                                // like the transit install (#15176), using the
+                                // gated fabric scope or the locally resolved
+                                // logical unit. LocalDelivery DNAT sessions are
+                                // revalidated by source_nat_revocation_on_session_hit
+                                // (which runs before the #9563 LocalDelivery
+                                // zone-policy decline), so a None here would
+                                // rebuild an empty scope and falsely revoke a
+                                // fabric/scope-specific DNAT-to-local session.
+                                nat_scope_ifindex: if packet_fabric_ingress {
+                                    ingress_nat_scope_ifindex
+                                } else {
+                                    Some(ingress_logical)
+                                },
                             };
                             let local_session_capacity_available =
                                 if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
@@ -5975,6 +6006,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     continue;
                                 }
                             }
+                            // #15951: a cacheable host-bound packet whose session
+                            // cannot be installed must NOT fall through to the
+                            // Trusted slow-path reinject: delivery without an
+                            // installed session has no logging/lease/revalidation
+                            // anchor and no conntrack publication for replies.
+                            // Fail closed — count the refusal and recycle. This
+                            // covers both the capacity-refused arm and an
+                            // install-helper failure after a passing preflight.
                             if local_session_capacity_available
                                 && install_helper_local_session_on_miss(
                                     sessions,
@@ -6094,8 +6133,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     timeout_secs,
                                     SessionOrigin::LocalMiss,
                                 );
-                            }
-                            if !local_session_capacity_available {
+                            } else {
                                 sessions.note_admission_refused();
                                 if persistent_lease_hold_outer.is_some() {
                                     rollback_persistent_inbound_hold(
@@ -6105,6 +6143,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     );
                                     persistent_lease_hold_outer = None;
                                 }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
                             }
                         }
                         // #5690: the generic embedded-ICMP NAT reversal is
@@ -9509,7 +9549,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding,
                             worker_ctx.event_stream,
                             crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta),
+                            // #15951 fold: wire flow for the deny record's tuple,
+                            // post-translation flow + decision for judging/NAT.
+                            l3_ctx.as_ref().unwrap_or(l3_flow),
                             l3_flow,
+                            flowless_nat,
                             meta,
                             // #3609: the host-inbound override map is keyed by
                             // the LOGICAL unit ifindex; pass the resolved value,
@@ -9519,6 +9563,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             meta.pkt_len as u64,
                             now_ns,
+                            telemetry.counters,
                         ) {
                             FlowlessLocalVerdict::Deliver => {
                                 // Flowless Deliver is the shared H2 pass result;
