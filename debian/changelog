@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Snapshot neighbor resolution netlink state once per pass: interface
+    names are fetched once per link and neighbor tables once per
+    (link, family) instead of once per target, preserving the usable-entry
+    skip and probe decisions (#15952).
 
   * Add in-package per-channel test kit for pkg/config (#16139):
     helpers_test.go provides one helper per compile channel
