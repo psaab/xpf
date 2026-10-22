@@ -113,6 +113,221 @@ SYSCTL_CONF = (
     # entries box-oriented after the apply-time flush (#10752).
     "net.netfilter.nf_conntrack_tcp_loose=0\n"
 )
+#
+# #16243: hugepage reservation for AF_XDP UMEM at ring-entries 16384.
+# UMEM tries MAP_HUGETLB first and falls back to 4 KiB pages + an advisory
+# THP hint when the pool is short -- the plan measured
+# `Hugepage-backed bindings: 0/30` on a ring-16384 rig whose only defect
+# was that NO provisioning path installed etc/sysctl.d/99-xpf-hugepages.conf:
+# the file existed in the repo but neither the bake, the .deb, nor any
+# deploy tool copied it to /etc/sysctl.d. Ship it in the image so the knob
+# is live by default. Sizing (80 x SUM min(rx_queues,16) = 1440 for the
+# reference 18-binding topology) is documented in the conf itself and in
+# docs/deploy-quickstart.md / docs/userspace-dataplane-architecture.md;
+# resizing for a larger topology stays an operator edit of that one file.
+# Hugepages are withheld from ordinary allocation, so do not raise this
+# blindly on small appliances -- see the conf header.
+HUGEPAGES_CONF_PATH = os.path.join(ROOT, "etc", "sysctl.d", "99-xpf-hugepages.conf")
+
+def hugepages_conf(conf_text=None) -> str:
+    """Return the shipped UMEM hugepage reservation, verbatim.
+
+    Single source of truth is etc/sysctl.d/99-xpf-hugepages.conf in the
+    repo (also the file an operator installs on a foreign host). Reading
+    it here -- rather than duplicating the value -- keeps the bake, the
+    on-box file, and the 80-pages-per-binding formula pinned by
+    userspace-dp's umem_sizing_contract_tests from drifting apart.
+
+    Fail-closed (review 16260): model the file the way its boot consumer
+    (systemd-sysctl) does, not as a substring. Lines are processed in
+    order against a per-key table:
+
+    - Keys are normalized with systemd's `sysctl_normalize` EXACTLY,
+      including its first-separator rule: find the first `/` or `.`;
+      only if it is a `.` are all separators swapped (`.`<->`/`, so
+      `vm.nr_hugepages`, `vm/nr_hugepages` and `.vm.nr_hugepages` are
+      one key). If the first separator is a `/`, separators are left
+      as-is, so `/vm.nr_hugepages` names a literal dotted filename
+      under /proc/sys — a DIFFERENT key that never touches
+      vm.nr_hugepages. Normalization finishes with path_simplify
+      (collapse redundant separators and `.` components; internal `..`
+      components are PRESERVED — systemd later rejects such paths at
+      write time, so they are stored but can never alias the guarded
+      key) and removal of one leading `/`. The table key is the
+      resulting /proc path with `/` as separator; the guarded key is
+      `vm/nr_hugepages`. The ignore-failure marker is exactly ONE
+      leading `-`, consumed by the parser before normalization.
+    - A later line for the same normalized key REPLACES the earlier
+      entry — including a bare negative-match directive (`-key` with no
+      `=`), which systemd stores as a NULL value and then skips at
+      apply time, suppressing the key entirely.
+    - Inline comments do not exist in this format: everything after
+      `=` is the value.
+
+    The surviving value is parsed with KERNEL semantics, not Python's:
+    the hugepage handler is `proc_doulongvec_minmax`, whose
+    `proc_get_long` uses base 0 — a leading `0` is octal (`01440`
+    requests 800 pages, not 1440) and `0x` is hex. Anything the kernel
+    would reject (a leading `+`, underscores, non-ASCII digits) is
+    rejected here; never let Python's `int()` (decimal, `+`- and
+    underscore- and Unicode-digit-friendly) vouch for bytes the kernel
+    interprets differently.
+
+    The bake dies unless the surviving entry for `vm.nr_hugepages` is an
+    integer >= 1440 (80 pages x 18 bindings, the reference ring-entries
+    16384 topology). A glob pattern (`*`/`?`/`[`) in any key is refused
+    outright: systemd expands globs against live /proc at boot, which a
+    build-time check cannot evaluate, so it must never ship silently in
+    the one file this guard claims to validate.
+    """
+    if conf_text is None:
+        with open(HUGEPAGES_CONF_PATH, encoding="ascii",
+                 errors="strict", newline="") as f:
+            try:
+                conf_text = f.read()
+            except (UnicodeDecodeError, UnicodeError):
+                die(f"{HUGEPAGES_CONF_PATH} is not valid ASCII; "
+                    "systemd-sysctl and the kernel parse bytes, and "
+                    "non-ASCII bytes (e.g. a nonbreaking space pasted "
+                    "into a key or value) would be interpreted "
+                    "differently at boot — refusing to bake (#16243)")
+    # Lexical gate (review 16260): the consumers are byte-oriented.
+    # systemd strstrip trims only " \t\n\r", its line reader splits on
+    # LF/CR/NUL (not U+2028 & friends), and the kernel value grammar is
+    # ASCII digits. Python's Unicode strip/splitlines would invent
+    # keys, values, and line boundaries the boot consumer never sees.
+    # So: no non-ASCII bytes anywhere, and no control bytes outside
+    # tab/LF/CR. Ordinary ASCII spacing and CRLF stay valid.
+    for ch in conf_text:
+        if ord(ch) > 0x7F or (ord(ch) < 0x20 and ch not in "\t\n\r"):
+            die(f"{HUGEPAGES_CONF_PATH} contains byte U+{ord(ch):04X} "
+                "outside the ASCII sysctl grammar; refusing to bake a "
+                "file whose boot-time interpretation cannot be "
+                "validated at build time (#16243)")
+
+    def normalize(key: str) -> str:
+        # sysctl_normalize + parse_file (systemd sysctl-util.c/sysctl.c),
+        # in consumer order. parse_file consumes ONE leading '-' itself
+        # (the caller has already removed it), then strstrip (ASCII
+        # " \t\n\r" only — guaranteed by the lexical gate above), then
+        # sysctl_normalize:
+        k = key.strip(" \t\n\r")
+        # 1. first-separator rule: swap separators only when the FIRST
+        #    separator is a dot.
+        first = next((i for i, c in enumerate(k) if c in "/."), None)
+        if first is not None and k[first] == ".":
+            k = k.translate(str.maketrans({".": "/", "/": "."}))
+        # 2. path_simplify_full: drop empty and '.' components; skip
+        #    LEADING '..' only on an absolute path ('/../foo' -> '/foo');
+        #    PRESERVE internal '..' ('/foo/bar/..' stays) — the write
+        #    path then fails path_is_safe (accept_dot_dot=false) and
+        #    systemd rejects it. Preserve, never pop()-resolve.
+        absolute = k.startswith("/")
+        parts = []
+        for seg in k.split("/"):
+            if seg in ("", "."):
+                continue
+            if seg == ".." and absolute and not parts:
+                continue  # leading '..' of an absolute path: skipped
+            parts.append(seg)
+        # 3. kill one leading slash (after simplification).
+        return "/".join(parts)
+
+    entries = {}
+    # systemd read_line_full treats LF, CR, and CRLF each as ONE line
+    # ending (categorize_eol/read_line_full in fileio.c) — a CR-separated
+    # entry is a real line at boot, so split on both, consuming CRLF as
+    # a single separator (never an empty phantom line).
+    for line in re.split(r"\r\n|\r|\n", conf_text):
+        stripped = line.strip(" \t\n\r")
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        # parse_file: the ignore-failure marker is exactly ONE leading
+        # '-', consumed before strstrip+normalize — whether or not the
+        # line carries '='. '--key' therefore keys on '-key'.
+        ignore_failure = stripped.startswith("-")
+        body = stripped[1:] if ignore_failure else stripped
+        key, sep, value = body.partition("=")
+        normalized = normalize(key)
+        if "*" in normalized or "?" in normalized or "[" in normalized:
+            die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} is a glob "
+                "pattern; systemd expands it against live /proc at boot, so "
+                "its effect on vm.nr_hugepages cannot be validated at build "
+                "time — refusing to ship it in the hugepage conf (#16243)")
+        if normalized.startswith("vm/nr_hugepages_mempolicy"):
+            # Sibling pool mutator (review 16260): under CONFIG_NUMA
+            # nr_hugepages_mempolicy shares hugetlb_sysctl_handler_common
+            # with obey_mempolicy=true against the SAME default hstate
+            # pool, and systemd applies distinct keys in insertion
+            # order — a trailing '= 0' shrinks the just-reserved,
+            # still-unused boot pool. Simulating host mempolicy is out
+            # of scope; the guarded file must not carry the key at all.
+            die(f"{HUGEPAGES_CONF_PATH}: key {key.strip()!r} mutates the "
+                "same hugepage pool under CONFIG_NUMA and is applied in "
+                "file order by systemd-sysctl; refusing to ship it in "
+                "the guarded hugepage conf — size the pool with "
+                "vm.nr_hugepages only (#16243)")
+        if sep:
+            entries[normalized] = value.strip(" \t\n\r")
+        elif ignore_failure:
+            # Bare negative-match directive ('-key', no '='): systemd
+            # stores it as a NULL entry replacing any earlier assignment
+            # for the key, then skips it at apply time.
+            entries[normalized] = None
+        # Any other bare line is ignored by systemd's parser as well.
+
+    def kernel_ulong(text: str) -> int:
+        # proc_get_long/strtoul_lenient base-0 grammar behind
+        # proc_doulongvec_minmax: optional single '-', then a digit;
+        # '0x'/'0X' hex, leading '0' octal, else decimal; every byte
+        # must be an ASCII digit of that base (no '+', '_', spaces, or
+        # non-ASCII digits); negatives and unsigned-long overflow make
+        # the kernel write fail, so both are refused here. Token
+        # length: proc_get_long reads into TMPBUFLEN=22 and returns
+        # EINVAL when conversion consumes all 21 characters, so a
+        # token longer than 20 characters is kernel-rejected even
+        # when its mathematical value would fit.
+        if len(text) > 20:
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "exceeds the kernel's 20-character numeric token limit "
+                "(proc_get_long TMPBUFLEN); refusing to bake (#16243)")
+        if not text or text[0] == "-":
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "is negative or empty; the kernel rejects it — refusing "
+                "to bake (#16243)")
+        if text[:2] in ("0x", "0X"):
+            digits, alphabet, base = text[2:], "0123456789abcdefABCDEF", 16
+        elif len(text) > 1 and text[0] == "0":
+            digits, alphabet, base = text[1:], "01234567", 8
+        else:
+            digits, alphabet, base = text, "0123456789", 10
+        if not digits or any(c not in alphabet for c in digits):
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "is not a kernel-parseable unsigned value; refusing "
+                "to bake an image without a valid UMEM hugepage pool "
+                "(#16243)")
+        parsed = int(digits, base)
+        if parsed >= 2**64:
+            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value {text!r} "
+                "overflows the kernel's unsigned long; refusing to "
+                "bake (#16243)")
+        return parsed
+
+    if "vm/nr_hugepages" not in entries or entries["vm/nr_hugepages"] is None:
+        die(f"{HUGEPAGES_CONF_PATH} has no effective vm.nr_hugepages "
+            "assignment (absent, or suppressed by a bare negative-match "
+            "directive); refusing to bake an image without the UMEM "
+            "hugepage knob (#16243)")
+    raw_value = entries["vm/nr_hugepages"]
+    effective = kernel_ulong(raw_value)
+    if effective < 1440:
+        die(f"{HUGEPAGES_CONF_PATH} effectively reserves "
+            f"vm.nr_hugepages={effective}, below the 1440 pages "
+            "(80 x 18 bindings) the reference ring-entries 16384 "
+            "topology needs; refusing to bake an under-provisioned "
+            "image (#16243)")
+    return conf_text
+
 
 # apt-get update exits 0 even when an index fetch fails; --error-on=any
 # makes that fatal, one retry covers a transient blip.
@@ -650,6 +865,7 @@ def virt_customize(work_qcow, xpf_deb):
         "--copy-in", f"{HERE}/99-incus-agent.rules:/usr/lib/udev/rules.d",
         "--run-command", "chmod 0755 /usr/lib/systemd/incus-agent-setup",
         "--write", f"/etc/sysctl.d/99-xpf.conf:{SYSCTL_CONF}",
+        "--write", f"/etc/sysctl.d/99-xpf-hugepages.conf:{hugepages_conf()}",
         "--run-command", "mkdir -p /etc/xpf && chmod 0750 /etc/xpf",
         # #7114: the appliance-image marker. xpfd's #1922 bootstrap lifeline
         # refuses to rename or bring up ANY NIC when it cannot identify a

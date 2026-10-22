@@ -206,6 +206,47 @@ shim). The NIC the VM sees decides the rest:
 virtio for mgmt and anything under a few Gb/s; mlx5 VFs or PF
 passthrough for line-rate ports.
 
+## UMEM hugepages (required for `ring-entries 16384`)
+
+At the default `ring-entries 1024` a binding's UMEM is ~10 MiB and no
+hugepage pool is needed. If you raise `set system dataplane ring-entries`
+to 16384 (the ≥20 Gbps setting), each bound queue's UMEM is 160 MiB and
+must be backed by explicit 2 MiB hugepages: without a pool the helper
+falls back to 4 KiB pages plus an advisory THP hint, throughput drops
+(measured 22.1 → 20.4 Gbps), and status reports
+`Hugepage-backed bindings: 0/N` with a growing `UMEM fallback bytes`.
+
+The knob is `vm.nr_hugepages` in `99-xpf-hugepages.conf`. Where the
+shipped default lives depends on the install path (#16243): the baked
+image writes it to `/etc/sysctl.d/`; the `.deb` installs it under
+`/usr/lib/sysctl.d/` (package-owned, so unattended upgrades never hit a
+dpkg conffile prompt adopting it). Both are sized for the reference
+topology. **To resize, always edit `/etc/sysctl.d/99-xpf-hugepages.conf`**
+— sysctl.d precedence (`/etc` > `/run` > `/usr/lib` for equal basenames)
+makes your copy win over either shipped default, and package upgrades
+will never touch it. Size from the **total** binding count, not one NIC:
+
+```
+pages = 80 × Σ over every binding candidate of min(rx_queues, 16)
+```
+
+(binding candidates include the fabric IPVLAN parent). The shipped
+`1440` covers 3 candidates × 6 queues = 18 bindings; a 30-binding box
+needs 2400. For a bigger topology, write that file, then apply and restart:
+
+```bash
+sysctl --system          # or reboot
+systemctl restart xpfd
+grep HugePages_ /proc/meminfo   # HugePages_Total must cover the sum
+cli -c "show dataplane status"  # Hugepage-backed bindings: N/N
+```
+
+Hugepages are withheld from ordinary memory for the life of the boot —
+do not over-reserve on small appliances (1440 pages = 2.8 GiB). UMEM does
+not appear in RSS; read `Private_Hugetlb` in `/proc/<xpfd-pid>/smaps_rollup`.
+Full rationale: `docs/userspace-dataplane-architecture.md` ("Hugepages").
+
+
 ## Fleet pattern (many sites, few humans)
 
 The YAML + `xpf.conf` are the deployable artifacts — treat them as code:
@@ -229,3 +270,4 @@ The YAML + `xpf.conf` are the deployable artifacts — treat them as code:
 | VF dataplane dead after host reboot | unpinned VF MAC rotated — set `mac:` on the interface |
 | no mgmt after commit | hypervisor console → `cli` → `rollback 1`, `commit` |
 | HA split-brain / no sync | `show chassis cluster status`; confirm the `em0` link is a dedicated L2 carrying nothing else |
+| `Hugepage-backed bindings: 0/N` at ring-entries 16384 | the hugepage pool is missing/short: check `grep HugePages_ /proc/meminfo`, size `/etc/sysctl.d/99-xpf-hugepages.conf` per "UMEM hugepages" above, `sysctl --system`, restart xpfd |

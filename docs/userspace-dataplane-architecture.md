@@ -3187,17 +3187,24 @@ stopped.
   = 18 bindings); it replaces a previous `600`, which was derived from one NIC's
   6 bindings and covered only 7 of those 18.
 
-  **The appliance image ships NO reservation.** `scripts/image/bake.py` writes
-  `/etc/sysctl.d/99-xpf.conf` with BPF-JIT and router-advertisement settings
-  only; transit forwarding sysctls belong exclusively to the daemon's #9725
-  gate. Nothing in the bake or
-  the deploy installs `99-xpf-hugepages.conf`. This is correct at the default
-  `ring-entries` (a binding is ~10 MiB at 1024, so no pool is needed),
-  but it means raising `ring-entries` to 16384 on a baked appliance takes the THP
-  fallback on **every** binding unless the operator adds the reservation in the
-  same change. Sizing a blind reservation at bake time would be worse — a pool is
-  taken from ordinary memory for the whole boot, and the appliance's RAM is not
-  known then.
+  **The appliance image ships the reservation (#16243).** `scripts/image/bake.py`
+  writes `/etc/sysctl.d/99-xpf-hugepages.conf` verbatim from the repo file
+  (`hugepages_conf()`, which models systemd-sysctl's effective-value
+  semantics for the file — normalized-key table with the exact
+  first-separator rule — and refuses to bake below 1440; pinned by
+  `scripts/image/test_bake_hugepages_16243.py`), and `debian/rules` installs the
+  same file into the `.deb` under `/usr/lib/sysctl.d/` (package-owned rather
+  than an `/etc` conffile, so unattended adoption never prompts; an operator's
+  `/etc/sysctl.d` copy still wins by sysctl.d precedence). Before #16243 NO
+  provisioning path installed it — the file existed in the repo only — so a
+  ring-16384 rig booted with `HugePages_Total=0` and reported
+  `Hugepage-backed bindings: 0/30` despite the bind code being correct.
+  The shipped pool (1440) is the reference-topology size above; a topology with
+  more bindings (30 needs 2400) still needs the operator to raise the `/etc`
+  file, because a pool is withheld from ordinary memory for the whole boot and
+  the appliance's RAM and binding count are not known at bake time. At the
+  default `ring-entries` most of the pool stays unallocated (small UMEMs still
+  try `MAP_HUGETLB` first, so a few pages are used).
 
   Apply with `sysctl --system` (or reboot). Verify with `grep HugePages_ /proc/meminfo`.
   If the pool cannot back a UMEM, `MAP_HUGETLB` fails and the daemon falls back to

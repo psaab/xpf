@@ -118,6 +118,21 @@ override_dh_auto_install:
 	install -d debian/xpf/etc/needrestart/conf.d
 	install -m 0644 debian/xpf.needrestart \
 	                debian/xpf/etc/needrestart/conf.d/xpf.conf
+	@# #16243: ship the UMEM hugepage reservation so a foreign-host /
+	@# manual .deb install gets the same knob the baked image carries
+	@# (scripts/image/bake.py writes the identical repo file). It goes
+	@# under /usr/lib/sysctl.d, NOT /etc: a conffile under /etc prompts
+	@# under unattended dpkg on first adoption by a host that already
+	@# hand-installed the file (review 16260). /usr/lib/sysctl.d is
+	@# package-owned (non-conffile, like the keyring below), upgrades
+	@# never prompt, and an operator's /etc/sysctl.d/99-xpf-hugepages.conf
+	@# -- the path every xpf doc names -- still wins: sysctl.d precedence
+	@# is /etc > /run > /usr/lib for equal basenames. The value takes
+	@# effect at the next boot or `sysctl --system`; sizing formula is in
+	@# the file header and docs/deploy-quickstart.md.
+	install -d debian/xpf/usr/lib/sysctl.d
+	install -m 0644 etc/sysctl.d/99-xpf-hugepages.conf \
+	                debian/xpf/usr/lib/sysctl.d/99-xpf-hugepages.conf
 	@# Ship the apt archive keyring in the package payload (#1924 NIT-2) so
 	@# existing hosts get a ROTATED key via `apt upgrade` even though they
 	@# never re-run install.sh. Install under /usr/share/keyrings (NOT
