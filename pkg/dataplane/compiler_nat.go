@@ -377,7 +377,7 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 		// rule-set, healthy siblings still compile) instead of aborting
 		// every apply. A cfg without the record (strict, hand-built, or
 		// JSON-round-tripped) keeps the fail-closed errors below.
-		if cfg.LenientNATUndefinedZoneRuleSets["source\x00"+rs.Name] {
+		if cfg.LenientNATUndefinedZoneRuleSets[config.NATRuleSetRef{Kind: "source", Name: rs.Name}] {
 			compileWarn(dp, "source NAT rule-set skipped: undefined zone",
 				"rule-set", rs.Name, "from", rs.FromZone, "to", rs.ToZone)
 			continue
@@ -656,7 +656,7 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 				continue
 			}
 			// #15001: tolerant skip, as for source NAT above.
-			if cfg.LenientNATUndefinedZoneRuleSets["destination\x00"+rs.Name] {
+			if cfg.LenientNATUndefinedZoneRuleSets[config.NATRuleSetRef{Kind: "destination", Name: rs.Name}] {
 				compileWarn(dp, "destination NAT rule-set skipped: undefined zone",
 					"rule-set", rs.Name, "from", rs.FromZone)
 				continue

@@ -306,9 +306,11 @@ func TestEveryCompiledClusterStatementIsSplit_6672(t *testing.T) {
 		candidates[kw] = true
 	}
 
-	src, err := os.ReadFile("compiler_system.go")
+	// compileChassis was evicted to compiler_chassis.go (#16146); the
+	// scan follows it so the candidate population keeps this source.
+	src, err := os.ReadFile("compiler_chassis.go")
 	if err != nil {
-		t.Fatalf("read compiler_system.go: %v", err)
+		t.Fatalf("read compiler_chassis.go: %v", err)
 	}
 	scanned := clusterFindChildRe.FindAllStringSubmatch(string(src), -1)
 	if len(scanned) == 0 {

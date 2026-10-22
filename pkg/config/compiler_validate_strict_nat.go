@@ -28,41 +28,56 @@ import (
 // cfg.LenientNATUndefinedZoneRuleSets so compileNAT can skip exactly
 // those rule-sets and their healthy siblings still apply. Static NAT has
 // no dataplane zone error and stays warn-only (out of scope).
-func validateNATUndefinedZoneStrict(cfg *Config) error {
-	if cfg == nil {
-		return nil
-	}
-	for _, rs := range natUndefinedZoneOffenders(cfg) {
-		return fmt.Errorf("%s", rs)
-	}
-	return nil
+//
+// #16146: the strict error, the per-field offender list, and the
+// per-rule-set tolerant skip-set are three projections of the single
+// natUndefinedZoneFindings walk below, so they cannot drift.
+
+// NATRuleSetRef identifies one NAT rule-set by kind and authored name.
+// It replaces the former "kind\x00name" string key so consumers never
+// re-derive the separator encoding (#16146).
+type NATRuleSetRef struct {
+	Kind string // "source" or "destination"
+	Name string
 }
 
-// natUndefinedZoneOffenders returns deterministic diagnostics for every
-// undefined-zone source/destination NAT rule-set, in config order
-// (source rule-sets first, then destination). Each diagnostic names the
-// rule-set and the undefined zone. Empty zone fields are unscoped and
-// are not offenders; nil rule-sets are skipped (#3494 tolerant shape).
-func natUndefinedZoneOffenders(cfg *Config) []string {
+// natUndefinedZoneFinding is one per-field undefined-zone diagnostic:
+// the strict gate is per missing field (source from, then to, in
+// config order; then destination from), while the tolerant skip-set
+// is per rule-set. Both projections derive from this single walk so
+// they cannot drift (#16146).
+type natUndefinedZoneFinding struct {
+	Ref     NATRuleSetRef
+	Message string
+}
+
+// natUndefinedZoneFindings is the single undefined-zone walk. It
+// returns per-field findings in deterministic source-then-destination
+// order. Empty zone fields are unscoped and are not findings; nil
+// rule-sets are skipped (#3494 tolerant shape). Zone membership is a
+// direct map lookup on cfg.Security.Zones — no intermediate zones map
+// is allocated.
+func natUndefinedZoneFindings(cfg *Config) []natUndefinedZoneFinding {
 	if cfg == nil {
 		return nil
 	}
-	zones := make(map[string]bool, len(cfg.Security.Zones))
-	for name := range cfg.Security.Zones {
-		zones[name] = true
-	}
-	var out []string
+	var out []natUndefinedZoneFinding
 	for _, rs := range cfg.Security.NAT.Source {
 		if rs == nil {
 			continue
 		}
-		if rs.FromZone != "" && !zones[rs.FromZone] {
-			out = append(out, fmt.Sprintf(
-				"source-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone))
+		ref := NATRuleSetRef{Kind: "source", Name: rs.Name}
+		if rs.FromZone != "" {
+			if _, ok := cfg.Security.Zones[rs.FromZone]; !ok {
+				out = append(out, natUndefinedZoneFinding{Ref: ref, Message: fmt.Sprintf(
+					"source-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone)})
+			}
 		}
-		if rs.ToZone != "" && !zones[rs.ToZone] {
-			out = append(out, fmt.Sprintf(
-				"source-nat rule-set %q: to-zone %q not defined", rs.Name, rs.ToZone))
+		if rs.ToZone != "" {
+			if _, ok := cfg.Security.Zones[rs.ToZone]; !ok {
+				out = append(out, natUndefinedZoneFinding{Ref: ref, Message: fmt.Sprintf(
+					"source-nat rule-set %q: to-zone %q not defined", rs.Name, rs.ToZone)})
+			}
 		}
 	}
 	if dnat := cfg.Security.NAT.Destination; dnat != nil {
@@ -70,45 +85,50 @@ func natUndefinedZoneOffenders(cfg *Config) []string {
 			if rs == nil {
 				continue
 			}
-			if rs.FromZone != "" && !zones[rs.FromZone] {
-				out = append(out, fmt.Sprintf(
-					"destination-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone))
+			if rs.FromZone != "" {
+				if _, ok := cfg.Security.Zones[rs.FromZone]; !ok {
+					out = append(out, natUndefinedZoneFinding{
+						Ref: NATRuleSetRef{Kind: "destination", Name: rs.Name},
+						Message: fmt.Sprintf(
+							"destination-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone)})
+				}
 			}
 		}
 	}
 	return out
 }
 
-// NATUndefinedZoneRuleSetNames returns the set of "kind\x00name" keys for
-// rule-sets carrying an undefined zone reference. It is the shared
-// predicate the tolerant compile records and the dataplane compileNAT
-// consults to skip exactly those rule-sets. Exported for pkg/dataplane.
-func NATUndefinedZoneRuleSetNames(cfg *Config) map[string]bool {
-	out := make(map[string]bool)
+func validateNATUndefinedZoneStrict(cfg *Config) error {
 	if cfg == nil {
-		return out
+		return nil
 	}
-	zones := make(map[string]bool, len(cfg.Security.Zones))
-	for name := range cfg.Security.Zones {
-		zones[name] = true
+	if findings := natUndefinedZoneFindings(cfg); len(findings) > 0 {
+		return fmt.Errorf("%s", findings[0].Message)
 	}
-	for _, rs := range cfg.Security.NAT.Source {
-		if rs == nil {
-			continue
-		}
-		if (rs.FromZone != "" && !zones[rs.FromZone]) || (rs.ToZone != "" && !zones[rs.ToZone]) {
-			out["source\x00"+rs.Name] = true
-		}
+	return nil
+}
+
+// natUndefinedZoneOffenders projects the unified walk to per-field
+// diagnostic strings, preserving source-then-destination order.
+func natUndefinedZoneOffenders(cfg *Config) []string {
+	findings := natUndefinedZoneFindings(cfg)
+	if len(findings) == 0 {
+		return nil
 	}
-	if dnat := cfg.Security.NAT.Destination; dnat != nil {
-		for _, rs := range dnat.RuleSets {
-			if rs == nil {
-				continue
-			}
-			if rs.FromZone != "" && !zones[rs.FromZone] {
-				out["destination\x00"+rs.Name] = true
-			}
-		}
+	out := make([]string, len(findings))
+	for i, f := range findings {
+		out[i] = f.Message
+	}
+	return out
+}
+
+// NATUndefinedZoneRuleSets projects the unified walk to the per
+// rule-set tolerant skip-set. Exported for pkg/dataplane via
+// cfg.LenientNATUndefinedZoneRuleSets.
+func NATUndefinedZoneRuleSets(cfg *Config) map[NATRuleSetRef]bool {
+	out := make(map[NATRuleSetRef]bool)
+	for _, f := range natUndefinedZoneFindings(cfg) {
+		out[f.Ref] = true
 	}
 	return out
 }
