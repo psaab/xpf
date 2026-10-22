@@ -302,3 +302,73 @@ for the worker that holds the row; the live cure needs the evidence
 restored after each run: clean master `2c8575b70e`, helper
 `2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
 target OK, P4 verification 14.0 Gbit/s.
+
+## Backup-origin publication (FZFixWire8)
+
+Proven (Wire7 live, cell26): fw1 holds Established
+`WorkerLocalImport`/`SharedPromote` rows on SOME worker; fabric
+retransmits land on OTHER workers whose local table lacks them, so
+the Wire7 local gate misses. Fix prescribed: fw1-side publication —
+the ct-slice maintenance must, on the BACKUP node too, restamp the
+shared canonical + forward-wire alias to Established from LOCAL
+serving rows.
+
+Why the slices skipped them on fw1: both collectors keyed the
+serving test on `!origin.is_peer_synced() || origin == SharedPromote`.
+`WorkerLocalImport::is_peer_synced()` is true (it participates in
+peer-synced control gates), so every `WorkerLocalImport` row was
+excluded — yet `WorkerLocalImport` is not a peer replica: it is THIS
+node's own session replicated across its workers
+(`is_cluster_synced_origin` is the peer test, and it is false for
+`WorkerLocalImport`). The pure HA-peer replicas are
+`SyncImport`/`SharedMaterialize`. On fw1 the heavy canonical rows
+sit as `WorkerLocalImport` on the worker that served them; no slice
+ever collected them, the shared wire stayed w=2, and only the
+receiving worker's local gate (Wire7) could rescue — on the wrong
+worker it could not.
+
+Fix: `node_served_forward_slice` (`session/lookup.rs`) and
+`node_served_evidence` (`session/mod.rs`) now treat
+`WorkerLocalImport` as a local serving origin alongside
+`SharedPromote`. The ct-slice (`worker/loop_body/ct_slice.rs`,
+unchanged) therefore restamps shared canonical
+(`restamp_shared_handshakes_established`) + forward-wire alias
+(`restamp_shared_forward_wire_established`) to Established from
+fw1's local serving rows, so the gate's shared lookup
+(`lookup_shared_established_for_wire`) hits regardless of the
+receiving worker. Fail-closed predicates unchanged: non-reverse,
+Established, `!handshake_pending`, `!closing` (the slice's direct
+arm requires all four; the evidence arm requires Established +
+pending-cleared + non-closing on a serving companion). Pure
+`SyncImport`/`SharedMaterialize` replicas still never publish from
+their own flags.
+
+Tests: `backup_origin_row_publishes_to_shared_16217` —
+`WorkerLocalImport` + `SharedPromote` Established rows collect
+(publish); `SyncImport` + `SharedMaterialize` Established rows do
+not; pending `WorkerLocalImport` fails closed. FAIL-ON-REVERT
+verified (dropping `WorkerLocalImport` from the slice predicate
+reds the WorkerLocalImport arm). `cargo test 16217` 12/12, `16223`
+20/20; `session::` 501 passed with 2 failures identical on clean
+base (`tcp_seq_15753`, `session_decision_typed_snat_layout_11064`,
+pre-existing).
+
+Live Runs 7–8 (build `99.16217.27`, deb sha256 `0641167f…2e8`,
+fix `aceab79d7b`, helper sha256 `f11cf2b6…bcd` homogeneous
+`/proc/<pid>/exe` both nodes before traffic; evidence
+`/var/worktrees/fzadopt2/cell27/`): aged 30 s RG1 failover P4,
+all-node0, FO at 30 s — **FAIL, 25 SUM zero intervals (31 s→end)
+in BOTH runs** — twice-on-loss confirmed. Run 1 also showed
+`snat_revoked` fw0 0→2 at FO+1 s (run 2: 0 throughout). At d28
+fw1's Backup canonical rows STILL read `Timeout: 20` for every
+data tuple while fw0's Active rows carry multi-GB counters also
+at `Timeout: 20` — i.e. live, the fw1 rows the slice must publish
+from are not Established in the worker tables at slice time
+either (the completing evidence lives in flow-cache service, not
+in an Established local row on fw1), so this publication leg,
+though predicate-proven, does not fire for the heavy tuples. The
+remaining blackhole stays at/downstream of the adoption instant.
+Do not merge as the aged-failover cure. Cluster restored after
+each run: clean master `2c8575b70e`, helper `2f2f5cbf…b04` both
+nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
+verification 12.9 / 14.0 Gbit/s.
