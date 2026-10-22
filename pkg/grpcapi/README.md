@@ -20,7 +20,7 @@ tab completion. The wire schema is `proto/xpf/v1`.
 - `RunFabricListenerWithVRFDeviceFunc(ctx, addr, fn)` — `server.go`.
   Refreshes `SO_BINDTODEVICE` on every listener attempt when the binding can
   converge while the comms epoch is retrying.
-- Tab completion: `Complete` RPC, backed by `pkg/cmdtree`.
+- Tab completion: `Complete` RPC (`server_complete.go`), backed by `pkg/cmdtree`.
 
 ## Trust boundary (loopback-only, #5035 + per-principal, #5278)
 
@@ -591,8 +591,8 @@ contract.
   distinguishable from a reject without reading as a clean success;
   `compiled == nil` → 400 (unchanged fail-safe).
 - **Zeroize goes through the apply gate AND stops xpfd (#5281).** The
-  `SystemAction{zeroize}` handler does NOT call `performZeroizeWipe`
-  directly. It routes through `ZeroizeFn` (wired by the daemon to
+  `SystemAction{zeroize}` handler does NOT call the wipe
+  (`pkg/factoryreset`, extracted in #16138) directly. It routes through `ZeroizeFn` (wired by the daemon to
   `factoryReset`), which takes the SAME apply semaphore `CommitFn` uses
   and enters a **terminal reset generation** before erasing, so a
   concurrent in-flight apply is drained and no later commit / HA-sync /
@@ -621,7 +621,8 @@ contract.
   which LEFT `tls/`, the rendered service configs (frr/swanctl/kea), and
   the provisioned login accounts (shadow/authorized_keys/`sudoers.d/xpf-*`)
   on disk — secret residue on a re-tenanted device. The console now
-  DELEGATES to the exported log-aware `PerformZeroizeWipeWithLogInventory` —
+  DELEGATES to the exported log-aware
+  `factoryreset.PerformZeroizeWipeWithLogInventory` —
   the SAME primitive `runZeroize` runs — so both paths erase an IDENTICAL
   single-source-of-truth OWNED-artifact set (including xpf firewall logs) and
   cannot diverge again. Journald copies and remote collectors remain outside
@@ -641,7 +642,7 @@ contract.
   `factoryResetFn` is nil and the console falls back to the ungated direct
   wipe (no reconcile loop is running to race), mirroring `runZeroize`'s
   `zeroizeFn==nil` fallback. The rendered/BPF/networkd leg targets in
-  `performZeroizeWipe` are package vars so the full primitive is hermetically
+  the factoryreset wipe are package vars so the full primitive is hermetically
   testable end-to-end (no real `/etc`) — production paths unchanged.
 - **The peer fan-out is charged to the REMOTE budget, not the local
   session-walk budget (#9041 part 2).** `GetSessions`, `GetSessionSummary`,

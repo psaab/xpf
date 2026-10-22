@@ -199,7 +199,7 @@ type CLI struct {
 	// the wipe closure runs, so no concurrent/subsequent commit / HA-sync /
 	// reconcile re-persists the erased .configdb SSOT or re-renders the wiped
 	// secrets (frr.conf / swanctl PSKs / Kea / login accounts). The wipe closure
-	// it receives is the shared grpcapi.PerformZeroizeWipe primitive (via the
+	// it receives is the shared factoryreset.PerformZeroizeWipe primitive (via the
 	// zeroizeFullWipe seam), so the console and gRPC paths run an identical,
 	// single-source-of-truth reset under identical fencing. Nil ONLY when the CLI
 	// is spawned OUTSIDE the daemon (offline recovery / unit test): there is no

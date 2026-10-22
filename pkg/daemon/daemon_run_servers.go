@@ -282,7 +282,7 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		// #5281: a gRPC zeroize runs the wipe under the SAME apply gate as
 		// commit/sync and enters a terminal reset generation so no concurrent
 		// or later config writer re-creates the erased state before the daemon
-		// stops. The grpcapi handler passes its performZeroizeWipe primitive.
+		// stops. The grpcapi handler passes its factoryreset wipe primitive.
 		ZeroizeFn:         d.factoryReset,
 		VRRPMgr:           d.vrrpMgr,
 		RAMgr:             d.ra,

@@ -1373,7 +1373,7 @@ func stripManagedSection(content string) (string, bool) {
 // #10100 R-2: a symlinked path is REFUSED (non-nil, no read-through, no write)
 // — ReadFile+WithResolveSymlinks would otherwise replace content AT THE TARGET,
 // a privileged modification of a victim file carrying managed markers. The
-// grpcapi zeroize pre-check reports the typed Skipped entry; this Lstat guard
+// factoryreset wipe pre-check reports the typed Skipped entry; this Lstat guard
 // is defense-in-depth for direct callers (plain error naming path+target).
 // Re-Lstat after ReadFile so a swap between the checks still refuses without
 // writing victim-derived content over the link.

@@ -100,7 +100,7 @@ func NewForTest(confPath string, exec frrExecutor) *Manager {
 // SetFRRGroupResolverForTest replaces the frr-group resolver (the seam
 // planFRRWrite consults exactly once per frr.conf write, #16046) and
 // returns a restore func. It lets cross-package tests (daemon boot
-// paths writing through NewForTest managers, grpcapi zeroize) run
+// paths writing through NewForTest managers, factoryreset wipe) run
 // deterministically without root or a host frr group: pass a resolver
 // returning the test process's egid so seeded 0644 files tighten by
 // pure preserve. Test-only; production never calls it, and it is not

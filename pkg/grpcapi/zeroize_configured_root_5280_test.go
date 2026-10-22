@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"path/filepath"
 	"testing"
 
@@ -29,16 +30,16 @@ import (
 // defaultConfigDir instead of the store's temp root — so the gotDir/gotBase
 // assertions (and the explicit defaultConfigDir guard) fail.
 func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
+	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
+		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotDir, gotBase string
 	var called bool
-	performZeroizeWipeWithLogInventory = func(configDir, configBase, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	factoryreset.PerformWipeWithLogInventoryForTest = func(configDir, configBase, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		called = true
 		gotDir, gotBase = configDir, configBase
 		return nil
@@ -65,8 +66,8 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 		t.Fatalf("zeroize wiped configBase %q, want the CONFIGURED base %q", gotBase, "site.conf")
 	}
 	// Explicit revert-shape guard: a hardcoded wipe would pass defaultConfigDir.
-	if gotDir == defaultConfigDir {
-		t.Fatalf("zeroize wiped the hardcoded default %q instead of the configured root %q", defaultConfigDir, dir)
+	if gotDir == "/etc/xpf" {
+		t.Fatalf("zeroize wiped the hardcoded default %q instead of the configured root %q", "/etc/xpf", dir)
 	}
 }
 
@@ -78,15 +79,15 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 // A bare Server with a nil store cannot resolve ConfigPath, so runZeroize must
 // return an error BEFORE ever invoking performZeroizeWipe or scheduling a stop.
 func TestZeroizeFailsClosedWithoutConfigRoot(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
+	origWipe := factoryreset.PerformWipeWithLogInventoryForTest
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
+		factoryreset.PerformWipeWithLogInventoryForTest = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	factoryreset.PerformWipeWithLogInventoryForTest = func(_, _, _ string, _ factoryreset.LogInventory, _ factoryreset.Completion) error {
 		wiped = true
 		return nil
 	}

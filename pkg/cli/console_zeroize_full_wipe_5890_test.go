@@ -3,9 +3,9 @@ package cli
 // #5890: the interactive-console `request system zeroize` must run the FULL
 // factory-reset wipe (config state + tls/ + rendered service configs + login
 // accounts + archive), not the partial config-state-only wipe it used before.
-// It does so by DELEGATING to grpcapi.PerformZeroizeWipe — the exact primitive
+// It does so by DELEGATING to factoryreset.PerformZeroizeWipe — the exact primitive
 // the gRPC path runs — so the two paths cannot diverge and leave secret residue.
-// The full secret-set erasure is proven in pkg/grpcapi (TestPerformZeroizeWipe
+// The full secret-set erasure is proven in pkg/factoryreset (TestPerformZeroizeWipe
 // ErasesFullSecretSet_5890, which the console's delegate calls); these tests pin
 // the CONSOLE-side contract: it delegates, propagates a wipe failure fail-closed,
 // and only stops the daemon once the wipe succeeded.

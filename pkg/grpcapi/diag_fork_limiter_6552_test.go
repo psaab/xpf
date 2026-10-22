@@ -165,14 +165,10 @@ var declaredUnboundedForks = []unboundedForkExemption{
 	{"server_diag_system_action.go", "SystemAction", "combinedOutputTimeoutUnlimited",
 		"ip -4/-6 neigh flush: state-changing operator actions behind PermControl, " +
 			"not diagnostics — cheap, and refusing them under diagnostic load is a regression"},
-	{"server_diag_zeroize.go", "<package-scope>", "combinedOutputTimeoutUnlimited",
-		"zeroizeUserdel / zeroizeLockRootPassword: a factory reset must run to " +
-			"completion; a half-zeroized box that left root unlocked because the " +
-			"semaphore was busy is strictly worse than a slow one"},
-	{"server_diag_zeroize_seal_10769.go", "stopKeaUnits", "combinedOutputTimeoutUnlimited",
-		"factory reset must stop Kea before erasing tenant lease data and cannot be refused by diagnostic backpressure"},
-	{"server_diag_zeroize_seal_10769.go", "keaUnitActive", "combinedOutputTimeoutUnlimited",
-		"factory-reset Kea stop/verify queries share the stop exemption: the lease wipe cannot be refused by diagnostic backpressure"},
+	// #16138: the zeroize userdel/passwd and Kea stop/verify forks moved
+	// with the wipe into pkg/factoryreset (which owns its uncapped,
+	// time-bounded exec helper there); they no longer fork from this
+	// package, so their exemptions were removed with the move.
 }
 
 // unboundedForkCallees are the helpers that fork WITHOUT drawing a diagnostic

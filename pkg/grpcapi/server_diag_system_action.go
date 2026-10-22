@@ -17,6 +17,7 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -341,9 +342,9 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	// from, and daemon post-verification plus boot repair need the
 	// pre-wipe path recorded in the flag.
 	wipe := func() error {
-		logInventory := ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
+		logInventory := factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
 		helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
-		return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, logInventory, zeroizeCompletion{pending: true, helperPath: helperPath})
+		return factoryreset.PerformWipeWithLogInventoryForTest(configDir, configBase, archiveDir, logInventory, factoryreset.PendingCompletion(helperPath))
 	}
 	if s.zeroizeFn != nil {
 		return s.zeroizeFn(ctx, wipe)
@@ -353,7 +354,7 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	// follows. A custom path outside the wiped dirs would otherwise
 	// survive under a clean receipt.
 	helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
-	return PerformZeroizeWipeUngated(configDir, configBase, archiveDir, ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
+	return factoryreset.PerformZeroizeWipeUngated(configDir, configBase, archiveDir, factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
 }
 
 func (s *Server) acknowledgeDynamicAddressShrink(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {

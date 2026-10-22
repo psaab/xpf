@@ -165,7 +165,7 @@ type Config struct {
 	// gate (#5281). It acquires the same apply semaphore commit/sync serialize
 	// on, enters a TERMINAL reset generation so no concurrent or subsequent
 	// config writer can re-create the erased .configdb SSOT or re-render the
-	// wiped secrets, runs the passed wipe closure (the package performZeroizeWipe
+	// wiped secrets, runs the passed wipe closure (the factoryreset wipe
 	// primitive) while quiesced, and returns nil ONLY when the wipe fully
 	// completed. On failure it fail-closes (the box stays recoverable) and
 	// returns the error, and the SystemAction handler does NOT stop the daemon.
