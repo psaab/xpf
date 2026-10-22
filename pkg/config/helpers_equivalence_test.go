@@ -86,13 +86,41 @@ func TestKitParseHierTextEquivalence16139(t *testing.T) {
 	}
 }
 
-func TestKitParseHierTextRejectsGarbage16139(t *testing.T) {
-	// A subtest cannot observe Fatalf, so assert via the underlying
-	// channel contract: NewParser reports errors for this input, which
-	// is exactly what parseHierText fatals on (len(errs) > 0).
-	if _, errs := NewParser("system { host-name ;;; }").Parse(); len(errs) == 0 {
-		t.Fatal("fixture unexpectedly parses clean; parseHierText would not fatal")
+// kitChildMode16139 selects which kit-helper failure leg a child copy of
+// a test runs (see runKitChild16139). Empty means parent mode.
+const kitChildMode16139 = "XPF_KIT_CHILD_16139"
+
+// runKitChild16139 re-runs testName in a child copy of this test binary
+// with kitChildMode16139=mode, and requires the child to FAIL with output
+// containing wantSubstr (the helper's own fatal prefix). Kit helpers
+// report failure via t.Fatalf, which the calling test cannot observe, so
+// every "helper must reject" cell goes through the kit helper itself in
+// the child — never through the raw channel the helper wraps. A child
+// that succeeds means the helper accepted input it must reject (guard
+// dropped or channel flattened); a child that fails without wantSubstr
+// means it failed for the wrong reason.
+func runKitChild16139(t *testing.T, testName, mode, wantSubstr string) {
+	t.Helper()
+	child := exec.Command(os.Args[0], "-test.run=^"+testName+"$", "-test.v")
+	child.Env = append(os.Environ(), kitChildMode16139+"="+mode)
+	out, err := child.CombinedOutput()
+	if err == nil {
+		t.Fatalf("%s child (mode %q) unexpectedly succeeded; helper accepted input it must reject:\n%s", testName, mode, out)
 	}
+	if !strings.Contains(string(out), wantSubstr) {
+		t.Fatalf("%s child (mode %q) failed without %q in output:\n%s", testName, mode, wantSubstr, out)
+	}
+}
+
+func TestKitParseHierTextRejectsGarbage16139(t *testing.T) {
+	if os.Getenv(kitChildMode16139) == "parse-garbage" {
+		// Child: must not return — parseHierText must fatal on the
+		// []ParseError from NewParser. Returning means the helper's
+		// len(errs) guard was dropped.
+		_ = parseHierText(t, "system { host-name ;;; }")
+		return
+	}
+	runKitChild16139(t, "TestKitParseHierTextRejectsGarbage16139", "parse-garbage", "parse errors for")
 }
 
 func TestKitParseSetCommandsEquivalence16139(t *testing.T) {
@@ -233,23 +261,28 @@ func TestKitForNodeDistinguishesNodes16139(t *testing.T) {
 // succeed and this test fails; if compileHierLenient ever routed to
 // CompileConfig, the lenient leg below fatals in-process.
 func TestKitChannelsNotFlattened16139(t *testing.T) {
-	if os.Getenv("XPF_KIT_STRICT_CHILD_16139") == "1" {
+	switch os.Getenv(kitChildMode16139) {
+	case "hier-strict":
 		// Child: must not return. compileHierStrict fatals on the strict
 		// CompileConfig rejection; returning here means the helper
-		// accepted (flattened) and the child test passes, which the
-		// parent treats as failure.
+		// accepted (flattened to lenient) and the child test passes,
+		// which the parent treats as failure.
 		_ = compileHierStrict(t, kitClusterNoKey)
 		return
+	case "set-strict":
+		// Child: must not return. compileSetStrict must reject the flat
+		// `set` form of the same keyless cluster; returning means the
+		// strict set channel was flattened to lenient.
+		_ = compileSetStrict(t,
+			"set chassis cluster cluster-id 1",
+			"set chassis cluster node 0",
+			"set chassis cluster reth-count 2",
+			"set chassis cluster redundancy-group 1 node 0 priority 200",
+		)
+		return
 	}
-	child := exec.Command(os.Args[0], "-test.run=^TestKitChannelsNotFlattened16139$", "-test.v")
-	child.Env = append(os.Environ(), "XPF_KIT_STRICT_CHILD_16139=1")
-	out, err := child.CombinedOutput()
-	if err == nil {
-		t.Fatalf("compileHierStrict child unexpectedly succeeded (strict channel flattened?):\n%s", out)
-	}
-	if !strings.Contains(string(out), "CompileConfig:") {
-		t.Fatalf("compileHierStrict child failed without the helper's CompileConfig fatal:\n%s", out)
-	}
+	runKitChild16139(t, "TestKitChannelsNotFlattened16139", "hier-strict", "CompileConfig:")
+	runKitChild16139(t, "TestKitChannelsNotFlattened16139", "set-strict", "CompileConfig:")
 	cfg := compileHierLenient(t, kitClusterNoKey)
 	if cfg == nil {
 		t.Fatal("lenient channel returned nil config for keyless cluster")
@@ -263,10 +296,10 @@ func TestKitChannelsNotFlattened16139(t *testing.T) {
 	if !found {
 		t.Fatalf("lenient keyless cluster produced no cluster warning; warnings=%v", cfg.Warnings)
 	}
-	// The set channel is not flattened either: flat `set` forms of the
-	// same keyless cluster compile leniently through compileSetLenient
-	// (the strict set leg, compileSetStrict, wraps the same CompileConfig
-	// rejected above, so its premise is already pinned per-tree).
+	// The set channel is not flattened either: the strict set leg was
+	// pinned above through compileSetStrict itself (set-strict child),
+	// and the flat `set` form of the same keyless cluster compiles
+	// leniently through compileSetLenient here.
 	setCfg := compileSetLenient(t,
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",

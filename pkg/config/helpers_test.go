@@ -27,7 +27,7 @@ package config
 // pkg/configstore or in package config_test where that import is legal.
 // Naming a CompileConfig helper "check" would flatten that distinction.
 //
-// Decl census at introduction (origin/master 9d098201cb, pkg/config,
+// Decl census at introduction (origin/master 0ffdc6f35b, pkg/config,
 // package config test files only): 73 pure parse clones of the
 // parseHierText shape (single string arg, *ConfigTree return, only
 // NewParser(param).Parse() + len(errs) guard + return) were found by
