@@ -279,3 +279,26 @@ SharedPromote) adopts and derives the canonical key; empty table,
 local Opening, peer-synced Established, and reverse-only Established
 all decline. FAIL-ON-REVERT: dropping the local arm turns the
 Established-local assertions false.
+
+Live Runs 5–6 (build `99.16217.26`, deb sha256 `4fc3b9ee…a9`,
+helper sha256 `82ba83c7…23b8` homogeneous `/proc/<pid>/exe` both
+nodes before traffic; evidence `/var/worktrees/fzadopt2/cell26/`):
+aged 30 s RG1 failover P4, all-node0, FO at 30 s — **FAIL, 25 SUM
+zero intervals (31 s→end) in BOTH runs**, `snat_revoked=0` both
+nodes at every sample, no pre-FO zeros. Twice-on-loss for this leg
+confirmed. Narrowing: at d28 fw1's Backup rows are mixed again —
+the wire-keyed rows (`172.16.80.8:<sport>`, the adopted/fabric-era
+tuples) read `Timeout: 1800` while the canonical heavy rows
+(`10.0.61.102:34452/34482/34494`, multi-GB counters on fw0) still
+read `Timeout: 20`; post-FO fw1 forward `Pkts: 0` for every data
+tuple. So the local-table arm did not rescue the heavy canonical
+tuples live: either the receiving worker's table does not hold the
+Established serving row at the failover instant (the serving rows
+sit on other workers/nodes — the gate is per-worker-table), or the
+post-adoption forward path still blackholes. This commit is the
+per-context gate the FZDiag16 evidence prescribes and is unit-proven
+for the worker that holds the row; the live cure needs the evidence
+(or the adopted row) to reach the fabric-receiving worker. Cluster
+restored after each run: clean master `2c8575b70e`, helper
+`2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
+target OK, P4 verification 14.0 Gbit/s.
