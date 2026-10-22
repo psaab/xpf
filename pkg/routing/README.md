@@ -678,8 +678,14 @@ intent while guaranteeing no two VRFs ever share a table.
 
 Each reconciler's `Apply` is clear-then-re-add: `clear()` removes every
 rule in the manager's own priority window, then `Apply` re-installs the
-desired set. `clear()` walks `[AF_INET, AF_INET6]`, calling `RuleList`
-(a per-family netlink dump) on each. The error handling is:
+desired set. The two true twins — `nextTableManager.clear` and
+`ribGroupManager.clear` — share the `clearMatchingRules` skeleton
+(#16174): each keeps its own ownership predicate and kind string, from
+which the list/delete error text and log messages are formed.
+`pbrManager.clear` (ENOENT second-action retry) and
+`probePinManager.clear` (Debug-only per-item deletes) keep bespoke
+implementations; folding them in would change their failure semantics.
+`clear()` walks `[AF_INET, AF_INET6]`, calling `RuleList`
 
 - **Per-family `RuleList` failures are best-effort but observable.** A
   family whose dump fails is skipped (its in-window rules are left in
