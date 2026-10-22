@@ -140,11 +140,16 @@ def hugepages_conf(conf_text=None) -> str:
 
     Fail-closed (review 16260): parse the EFFECTIVE reservation, not a
     substring. sysctl applies assignments in order, so the last
-    uncommented exact-key `vm.nr_hugepages` line wins; a commented-out
-    line, a zero value, a wrong key (`vm.nr_hugepages_mempolicy`), or a
+    uncommented assignment of the key wins; a commented-out line, a
+    zero value, a wrong key (`vm.nr_hugepages_mempolicy`), or a
     trailing override to zero must all stop the bake, never ship an
-    image whose status will report 0/N backed. The effective value must
-    cover the reference topology: 80 pages x 18 bindings = 1440.
+    image whose status will report 0/N backed. Keys are normalized the
+    way sysctl normalizes them before comparison: `.` and `/` are
+    equivalent separators (`vm/nr_hugepages` IS `vm.nr_hugepages`),
+    and a leading `-` (ignore-errors) still applies the assignment, so
+    `-vm/nr_hugepages = 0` is a real override, not an ignorable line.
+    The effective value must cover the reference topology:
+    80 pages x 18 bindings = 1440.
     """
     if conf_text is None:
         with open(HUGEPAGES_CONF_PATH) as f:
@@ -155,7 +160,13 @@ def hugepages_conf(conf_text=None) -> str:
         if not stripped or stripped.startswith("#"):
             continue
         key, sep, value = stripped.partition("=")
-        if not sep or key.strip() != "vm.nr_hugepages":
+        # sysctl key normalization: leading '-' = ignore errors (the
+        # assignment is still applied), '/' and '.' are equivalent
+        # separators. Compare only the normalized exact key so a
+        # slash-form or dash-prefixed override cannot smuggle a short
+        # pool past the dot-form validated value.
+        normalized = key.strip().lstrip("-").strip().replace("/", ".")
+        if not sep or normalized != "vm.nr_hugepages":
             continue
         try:
             effective = int(value.strip())

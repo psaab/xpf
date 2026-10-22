@@ -68,8 +68,17 @@ class BakeHugepagesTests(unittest.TestCase):
                 "vm.nr_hugepages = 1440\nvm.nr_hugepages = 0\n",
             "trailing short override":
                 "vm.nr_hugepages = 1440\nvm.nr_hugepages = 600\n",
+            "slash-form zero override":
+                "vm.nr_hugepages = 1440\nvm/nr_hugepages = 0\n",
+            "slash-form alone, short":
+                "vm/nr_hugepages = 600\n",
+            "leading-minus zero override":
+                "vm.nr_hugepages = 1440\n-vm.nr_hugepages = 0\n",
+            "leading-minus slash-form short override":
+                "vm.nr_hugepages = 1440\n-vm/nr_hugepages = 600\n",
             "under reference pool": "vm.nr_hugepages = 600\n",
             "non-integer": "vm.nr_hugepages = lots\n",
+            "slash-form non-integer": "vm/nr_hugepages = lots\n",
         }
         for name, text in cases.items():
             with self.subTest(name=name):
@@ -81,6 +90,19 @@ class BakeHugepagesTests(unittest.TestCase):
                 "vm.nr_hugepages_mempolicy = 0\n"
                 "vm.nr_hugepages = 2400\n")
         self.assertEqual(bake.hugepages_conf(text), text)
+
+    def test_hugepages_conf_accepts_sysctl_normalized_forms(self):
+        # sysctl accepts the slash form, the leading '-' (ignore-errors,
+        # still applied), and no spaces around '='. A valid pool written
+        # that way is a valid pool (fail-closed must not false-positive).
+        for text in ("vm/nr_hugepages = 2400\n",
+                     "-vm.nr_hugepages = 2400\n",
+                     "vm.nr_hugepages=1440\n",
+                     # A dash/slash override that RAISES the pool is the
+                     # effective value too.
+                     "vm.nr_hugepages = 600\n-vm/nr_hugepages = 2400\n"):
+            with self.subTest(text=text):
+                self.assertEqual(bake.hugepages_conf(text), text)
 
     def test_invalid_conf_stops_virt_customize_before_run(self):
         # The write argument is built through hugepages_conf(); a bad
