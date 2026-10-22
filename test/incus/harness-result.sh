@@ -833,6 +833,10 @@ harness_result_emit() {
 		_hr_warn "REFUSED: --env is required (a band is only comparable within one env)"
 		return 2
 	fi
+	if [[ "$env" == -* ]]; then
+		_hr_warn "REFUSED: --env must be an env label, not a flag token (got '${env}'); an empty expansion likely consumed the next flag (#16288)"
+		return 2
+	fi
 	if [[ "$verdict" == "VOID" && -z "$void_reason" ]]; then
 		_hr_warn "REFUSED: a VOID row must carry a --void-reason; 'we do not know' is not an answer"
 		return 2
@@ -1081,6 +1085,7 @@ harness_result_run() {
 	[[ -n "$gate" ]] || { _hr_warn "run: --gate is required"; return 2; }
 	[[ -n "$adapter" ]] || { _hr_warn "run: --adapter is required"; return 2; }
 	[[ -n "$env" ]] || { _hr_warn "run: --env is required"; return 2; }
+	[[ "$env" != -* ]] || { _hr_warn "run: --env must be an env label, not a flag token (got '${env}'); an empty expansion likely consumed the next flag (#16288)"; return 2; }
 	# A child fixture flag changes what the wrapper is measuring. Scan only
 	# the child argv (after the wrapper's `--`) and never attest cluster images
 	# for a verdict produced from a local transcript.

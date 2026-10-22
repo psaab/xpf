@@ -1597,14 +1597,17 @@ CLUSTER_ENV := test/incus/loss-userspace-cluster.env
 else
 CLUSTER_ENV := $(BPFRX_CLUSTER_ENV)
 endif
+endif
 
 # Ledger `env` label for a gate run (test/results/ledger.d/). A band is only
 # comparable WITHIN one env, so this label is what keeps runs on the loss
 # userspace cluster from being compared against runs on the legacy local
 # cluster. It is the env file's basename, or `local-cluster` when CLUSTER_ENV
 # is empty (cluster-setup.sh's local xpf-fw0/xpf-fw1 defaults).
+# Computed from the FINAL CLUSTER_ENV regardless of origin (#16288): a
+# command-line CLUSTER_ENV=... (the tcp/udp-cluster workflow) must still
+# label its rows, not expand empty and let --cluster be consumed as the env.
 HARNESS_ENV := $(if $(CLUSTER_ENV),$(notdir $(basename $(CLUSTER_ENV))),local-cluster)
-endif
 LOSS_CLUSTER_ENV ?= test/incus/loss-cluster.env
 CLUSTER_SETUP = BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/cluster-setup.sh
 LOSS_CLUSTER_SETUP = BPFRX_CLUSTER_ENV=$(LOSS_CLUSTER_ENV) ./test/incus/cluster-setup.sh
