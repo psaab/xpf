@@ -6,7 +6,12 @@ feed servers and triggers config recompile when the resolved set changes
 
 ## Entry points
 
-- `Manager` — `feeds.go`.
+- `Manager` — `feeds.go`. Feed-body parsing lives in `parse.go`
+  (`parseFeed`, `fetchResult`, `canonicalize`, `hashPrefixes` and the
+  parse caps/guards); the HTTP fetch path lives in `fetch.go`
+  (`fetchFeed`/`readFeed`, SSRF destination validation, pinned dial,
+  redirect policy and feed-URL construction). The split is mechanical
+  and same-package (#16182): no symbol, signature or behaviour changed.
 - `New(updateFn)` — `feeds.go`. `updateFn` is `func() error`: it applies the
   fetched content to the dataplane and RETURNS the apply result. A rejected
   apply (non-nil error) is retried on the next identical refetch (#5646, below).

@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Split pkg/feeds/feeds.go mechanically into parse.go (parseFeed,
+    fetchResult, canonicalize/hashPrefixes and the parse caps/guards)
+    and fetch.go (fetchFeed/readFeed, SSRF destination validation,
+    pinned dial, redirect policy and feed-URL construction), leaving
+    the Manager, shrink-guard epoch machinery and publication/hold
+    handling in feeds.go. Same package, no statement, signature or
+    behaviour change and no test file modified; imports pruned per
+    file (#16182).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Extract the shared SNMP v1/v2c community admission gate:
     communityGate in pkg/snmp/agent.go now holds the single fail-closed
     head (BER community decode, getCommunity lookup, clients
