@@ -459,6 +459,22 @@ func mgmtDNSRulePairs(leases []*dhcp.Lease, mgmtSet map[string]bool) []mgmtDNSRu
 	return pairs
 }
 
+// mgmtDNSRulesApplyFn is the programmable core of applyMgmtDNSRules,
+// overridable in tests so a rule-reconcile failure can be driven without
+// a privileged netlink handle. Production never overrides it.
+var mgmtDNSRulesApplyFn = func(d *Daemon, leases []*dhcp.Lease, cfg *config.Config) error {
+	mainRoutes, err := mgmtDNSMainRoutes()
+	if err != nil {
+		// Fail closed (#15059): without the main inventory we cannot prove
+		// a nameserver is not already main-covered, so install nothing.
+		// Existing rules are left for the next successful reconcile; the
+		// publication gate independently refuses covered/peer servers.
+		slog.Warn("SECURITY: refusing management DNS steering without main-table inventory (#15059)", "err", err)
+		return err
+	}
+	return reconcileMgmtDNSRulesFiltered(netlinkMgmtDNSRuleOps{}, leases, d.mgmtVRFIfaceSet(), mainRoutes, cfg)
+}
+
 // applyMgmtDNSRules reconciles DNS routing from the current lease snapshot.
 // It also runs with no DHCP manager or no management leases so stale rules from
 // a withdrawn/deconfigured management interface are removed.
@@ -471,16 +487,7 @@ func (d *Daemon) applyMgmtDNSRules() error {
 	if d.store != nil {
 		cfg = d.store.ActiveConfig()
 	}
-	mainRoutes, err := mgmtDNSMainRoutes()
-	if err != nil {
-		// Fail closed (#15059): without the main inventory we cannot prove
-		// a nameserver is not already main-covered, so install nothing.
-		// Existing rules are left for the next successful reconcile; the
-		// publication gate independently refuses covered/peer servers.
-		slog.Warn("SECURITY: refusing management DNS steering without main-table inventory (#15059)", "err", err)
-		return err
-	}
-	return reconcileMgmtDNSRulesFiltered(netlinkMgmtDNSRuleOps{}, leases, d.mgmtVRFIfaceSet(), mainRoutes, cfg)
+	return mgmtDNSRulesApplyFn(d, leases, cfg)
 }
 
 func reconcileMgmtDNSRules(ops mgmtDNSRuleOps, leases []*dhcp.Lease, mgmtSet map[string]bool) error {

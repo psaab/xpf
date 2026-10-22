@@ -438,6 +438,16 @@ type mgmtRouteProgrammer interface {
 	mgmtRouteReconciler
 }
 
+// mgmtVRFRoutesApplyFn is the programmable core of applyMgmtVRFRoutes,
+// overridable in tests so a RouteReplace failure can be driven without a
+// privileged netlink handle (the #5867 pattern: applyMgmtVRFRoutesTo is
+// the injectable core; this var lets the full applyConfigLocked path in
+// apply_phase_errors_production_16170_test.go reach it). Production never
+// overrides it.
+var mgmtVRFRoutesApplyFn = func(d *Daemon, nlh mgmtRouteProgrammer, leases []*dhcp.Lease) error {
+	return d.applyMgmtVRFRoutesTo(nlh, leases, d.mgmtVRFIfaceSet())
+}
+
 // applyMgmtVRFRoutes reconciles configured and DHCP-learned routes in the
 // management VRF. It is a thin wrapper: it acquires a real netlink handle and
 // delegates programming + cleanup to applyMgmtVRFRoutesTo (the injectable,
@@ -453,7 +463,7 @@ func (d *Daemon) applyMgmtVRFRoutes() error {
 	if d.dhcp != nil {
 		leases = d.dhcp.Leases()
 	}
-	return d.applyMgmtVRFRoutesTo(nlh, leases, d.mgmtVRFIfaceSet())
+	return mgmtVRFRoutesApplyFn(d, nlh, leases)
 }
 
 // applyMgmtVRFRoutesTo reconciles configured management statics and each

@@ -41,35 +41,22 @@ type applyPhaseErrors struct {
 	FRR         error
 }
 
-// join returns errors.Join of the carried phase errors in exactly today's
-// operand order relative to each other
+// join returns one flat errors.Join of the carried phase errors in exactly
+// today's operand order relative to each other
 // (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947):
 // Networkd, Dataplane, DHCPServer, IPsec, Iface, RouteLeak, RoutingRule,
 // MgmtRoute, VRF, Fabric, FRR — the flat tail order with the tail-local
 // operands (hostInboundErr/lo0Err/dnsErr, the five host-credential errors,
-// vrrpErr) removed. Error-string order is observable in commit output, so
-// this order MUST NOT change; it is pinned by
-// TestApplyPhaseErrorsSentinelPerPhase16170.
+// vrrpErr) removed. It deliberately constructs a single flat join rather
+// than wrapping subgroup joins: errors.Join does not flatten nested joins,
+// so subgroups would add intermediate join nodes. Error-string order is
+// observable in commit output, so this order MUST NOT change; it is pinned
+// by TestApplyPhaseErrorsSentinelPerPhase16170.
 func (e applyPhaseErrors) join() error {
-	return errors.Join(e.lead(), e.follow(), e.FRR)
-}
-
-// lead is the operand group that precedes the tail-local errors in the flat
-// tail join: Networkd, Dataplane, DHCPServer (then hostInboundErr, lo0Err,
-// dnsErr and the five host-credential errors, which originate inside
-// applyTailReconciles itself).
-func (e applyPhaseErrors) lead() error {
-	return errors.Join(e.Networkd, e.Dataplane, e.DHCPServer)
-}
-
-// follow is the operand group between the tail-local host-credential errors
-// and the tail-local vrrpErr in the flat tail join: IPsec, Iface, RouteLeak,
-// RoutingRule, MgmtRoute, VRF, Fabric (then vrrpErr, then FRR). errors.Join
-// flattens nested joins, so errors.Join(phase.lead(), <tail locals>,
-// phase.follow(), vrrpErr, phase.FRR) reproduces the pre-struct flat join
-// exactly, in error string and in Is/As traversal alike.
-func (e applyPhaseErrors) follow() error {
-	return errors.Join(e.IPsec, e.Iface, e.RouteLeak, e.RoutingRule, e.MgmtRoute, e.VRF, e.Fabric)
+	return errors.Join(
+		e.Networkd, e.Dataplane, e.DHCPServer, e.IPsec, e.Iface, e.RouteLeak,
+		e.RoutingRule, e.MgmtRoute, e.VRF, e.Fabric, e.FRR,
+	)
 }
 
 // applyCoreResult bundles the values applyDataplaneAndHACore returns to
@@ -535,9 +522,13 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 	// sshd / root-auth), whose failures were discarded here — a commit that did
 	// not actually revoke a removed operator's password or authorized_keys is
 	// not a successful commit. All are joined so none masks the other.
-	return errors.Join(phase.lead(), hostInboundErr, lo0Err, dnsErr,
+	// One flat join, exactly the pre-#16170 operand order. It is spelled out
+	// with named phase fields rather than via phase.join() because the
+	// tail-local operands are interleaved here, and because errors.Join does
+	// not flatten subgroup joins — subgroups would add intermediate nodes.
+	return errors.Join(phase.Networkd, phase.Dataplane, phase.DHCPServer, hostInboundErr, lo0Err, dnsErr,
 		loginErr, sudoersErr, absentUsersErr, sshConfigErr, rootAuthErr,
-		phase.follow(), vrrpErr, phase.FRR)
+		phase.IPsec, phase.Iface, phase.RouteLeak, phase.RoutingRule, phase.MgmtRoute, phase.VRF, phase.Fabric, vrrpErr, phase.FRR)
 }
 
 // reconcileClusterTransportBinding compares the live transport epoch with

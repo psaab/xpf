@@ -2,19 +2,25 @@ package daemon
 
 // apply_phase_errors_16170_test.go — #16170 (daemon R2).
 //
-// The decisive acceptance check for replacing applyTailReconciles' 11
-// positional same-typed error parameters (and applyDataplaneAndHACore's
-// 5-value return) with applyPhaseErrors / applyCoreResult: one distinct
-// sentinel per phase, each asserted to land in its own field, and the
-// errors.Join ordering + errors.Is results identical to the pre-struct flat
-// join. This test is genuinely unwriteable against the positional form — a
-// transposition there compiles cleanly and only this per-field sentinel
-// attribution catches it.
+// The tests in this file have distinct, limited purposes:
 //
-// FAIL-ON-REVERT: swap any two operands in applyPhaseErrors.join (or in the
-// tail's lead/follow interleave) and the ordering cells go RED; drop a field
-// from join and its sentinel's errors.Is cell goes RED; transpose two fields
-// at a construction site and that site's sentinel lands in the wrong field.
+//   - The sentinel cells below characterize applyPhaseErrors.join itself:
+//     every hand-set field reaches errors.Is, and join's string is the flat
+//     pre-struct order. They deliberately construct applyPhaseErrors in the
+//     test, so they do NOT prove that production assigns any producer's
+//     error to the correct field.
+//   - The tail-order cell drives the real applyTailReconciles with all
+//     tail-local producers healthy; it therefore pins only phase-relative
+//     order, not interleaving against non-nil local errors.
+//   - Production producer -> field attribution, retry-debt observation,
+//     exact local/phase interleaving, and exact leaf unwrapping are pinned
+//     separately in apply_phase_errors_production_16170_test.go, whose
+//     fixtures fail real production seams and drive applyConfigLocked /
+//     applyDataplaneAndHACore.
+//
+// FAIL-ON-REVERT for these unit cells: swap two operands in join and the
+// all-sentinel order cell goes RED; drop a field from join and the matching
+// field-attribution/order cell goes RED.
 
 import (
 	"context"
@@ -89,10 +95,12 @@ func TestApplyPhaseErrorsSentinelPerPhase16170(t *testing.T) {
 	}
 }
 
-// TestApplyPhaseErrorsSingleSentinelAttribution16170 proves each field
-// contributes exactly its own sentinel: with only one field set, join()
-// surfaces only that sentinel. A transposed join operand would surface the
-// wrong sentinel here (or none).
+// TestApplyPhaseErrorsSingleSentinelAttribution16170 proves each hand-set
+// field reaches join by itself and no other hand-set sentinel appears. It
+// is a join/drop characterization only: because just one operand is
+// non-nil, it cannot detect a permutation among join operands, and because
+// the test constructs the struct itself it cannot detect a production
+// construction-site transposition.
 func TestApplyPhaseErrorsSingleSentinelAttribution16170(t *testing.T) {
 	sentinels, _ := phaseSentinels16170()
 	setters := []func(*applyPhaseErrors, error){
@@ -128,13 +136,13 @@ func TestApplyPhaseErrorsSingleSentinelAttribution16170(t *testing.T) {
 	}
 }
 
-// TestApplyTailJoinInterleaveOrder16170 pins the tail's interleaving of its
-// local operands (hostInboundErr/lo0Err/dnsErr, the five host-credential
-// errors, vrrpErr) among the phase operands by driving the REAL
-// applyTailReconciles with every phase sentinel set and asserting the
-// resulting commit error's string order equals the pre-struct flat join's
-// order. The tail-local steps run clean in this fixture, so only the phase
-// sentinels can appear — in lead/follow/FRR positions.
+// TestApplyTailJoinInterleaveOrder16170 drives the real applyTailReconciles
+// with every phase sentinel set while this fixture's tail-local producers
+// are healthy. It therefore pins phase-relative order only. It cannot
+// detect moving a phase group across a non-nil local error, swapping
+// local errors, or misplacing VRRP relative to FRR; the production-path
+// test in apply_phase_errors_production_16170_test.go covers those cases
+// with distinguishable non-nil local failures.
 func TestApplyTailJoinInterleaveOrder16170(t *testing.T) {
 	sentinels, phase := phaseSentinels16170()
 
