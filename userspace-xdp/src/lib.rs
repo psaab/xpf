@@ -66,12 +66,12 @@ const USERSPACE_FALLBACK_REASON_MAX: u32 = 21;
 // degraded disposition, and renumbering or inflating that map would
 // re-label every operator drop counter. A new disposable map keeps
 // the existing ABI byte-identical while giving every dispatch arm a
-// hit slot. Per-CPU for the #4113 reason: native XDP runs one
-// program instance per RX queue on distinct CPUs, and the outlined
-// `incr_branch_stat` RMW is only correct CPU-locally (per-CPU slots
-// need no queue/CPU affinity: the helper always writes the executing
-// CPU's slot). Counting is
-// gated on the TRACE ctrl flag (the `record_trace_packed` precedent):
+// hit slot. Per-CPU for the #4113 reason: the outlined
+// `incr_branch_stat` RMW is a non-atomic load/add/store, and a
+// per-CPU map makes it correct without atomics — the helper always
+// writes the executing CPU's own slot, so no queue/CPU affinity or
+// "one instance per queue on distinct CPUs" property is required.
+// Counting is gated on the TRACE ctrl flag (the `record_trace_packed` precedent):
 // with tracing off the hot path pays only the flag test inside the
 // one outlined callee, so the instrumentation is not itself a new
 // per-packet map cost on the plain-TCP hit-forward it measures.
@@ -79,15 +79,23 @@ const USERSPACE_FALLBACK_REASON_MAX: u32 = 21;
 // word, and its hit is already counted unconditionally by the
 // degraded map's `land_alarm` reason.
 //
-// Semantics: every slot counts a TERMINAL disposition — the arm
-// that actually returned (or, for fall-through arms, actually
-// redirected). The redirect-family slots in particular count only
-// at the successful XSK redirect return: an attempt that dies in
-// the metadata checks or the redirect error arm is counted by
-// `adjust_meta_fail` / `meta_bounds_fail` / `redirect_err` alone.
-// "Successful" means the redirect helper returned XDP_REDIRECT;
-// AF_XDP delivery can still fail past that point, and no slot
-// claims completed userspace forwarding.
+// Semantics: a slot counts the disposition its arm decides, and for
+// the four redirect-origin slots (`session_hit_redirect`,
+// `session_miss_redirect`, `session_miss_ifnat_redirect`, `redirect`)
+// — ONLY those — the decision is counted at the successful XSK
+// redirect return, so an attempt that dies in the metadata checks or
+// the redirect error arm is counted by `adjust_meta_fail` /
+// `meta_bounds_fail` / `redirect_err` instead and never as a forward.
+// Every other slot is counted where its arm decides; notably
+// `fragment_redirect` is a branch-attempt count: it fires when the
+// fragment arm claims the packet for the helper, before the shared
+// metadata/redirect tail, so one fragment can legitimately appear
+// in `fragment_redirect` plus `redirect` or `fragment_redirect` plus
+// `redirect_err`. Summing all 27 slots therefore does NOT yield a
+// packet count; only the four origin slots partition successful
+// helper redirects. "Successful" means the redirect helper returned
+// XDP_REDIRECT; AF_XDP delivery can still fail past that point, and
+// no slot claims completed userspace forwarding.
 //
 // Index order is dispatch order in `try_xdp_userspace` (healthy
 // path first, then the ctrl-disabled twin where it has one), so a

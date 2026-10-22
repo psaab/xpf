@@ -47,7 +47,7 @@ import (
 // PASS at 815623 (18.44%), retiring the exception this comment still
 // described as live. The branch-hit instrumentation (new
 // userspace_branch_stats map + one outlined counter callee) costs
-// +40977 processed insns (856646 vs the 815623 PASS object) of verifier walk: the regenerated object
+// +41023 processed insns (856646 vs the 815623 PASS object) of verifier walk: the regenerated object
 // LOADS on this host at 856646 (14.34% headroom), below the floor
 // again, so it is installed OVERRIDDEN under the same exception
 // shape — exactly this count, nothing else. Counting is TRACE-gated

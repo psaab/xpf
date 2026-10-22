@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "verified_at": "2026-10-22T06:26:05.651632773Z",
+  "verified_at": "2026-10-22T06:38:59.464448744Z",
   "object_sha256": "41ed42ef94fff12e7203f77c3cb4a02a85ed4ebf1bf559c6f756a8e09fb76501",
-  "build_digest": "c8b467d95381f9df7c9e66a90b4324a65f29a89adb8ee6df77e91facc156015f",
+  "build_digest": "207c761335378d7db8ee7e2c0cd21ba1f519e5fa2aede9280cba621a66c8df3c",
   "verdict": "OVERRIDDEN",
   "override_consumed": true,
   "reason": "measured headroom 14.34% is below the 15.0% floor; installed with XPF_SHIM_ALLOW_LOW_HEADROOM=1",

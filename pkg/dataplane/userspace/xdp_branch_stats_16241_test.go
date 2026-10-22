@@ -212,15 +212,21 @@ func seedHealthy16241(t *testing.T, coll *ebpf.Collection, extraFlags uint32) {
 // itself (BPF_PROG_TEST_RUN) and asserts the EXACT branch counter the
 // terminal disposition produced (==1) plus the arms that must stay 0.
 //
-// Counter semantics (fold fix): every slot counts a TERMINAL
-// disposition. The redirect-family slots fire only at the successful
+// Counter semantics (fold fix): the four redirect-origin slots
+// (session_hit_redirect, session_miss_redirect,
+// session_miss_ifnat_redirect, redirect) fire only at the successful
 // XSK redirect return, so with the harness's empty XSK map a
-// hit/miss/ifnat packet takes redirect_err and its origin slot stays
-// 0 — an attempt is never reported as a forward. (A populated XSK
-// map cannot be built under the test runner — XSKMAP updates need a
-// real AF_XDP socket fd — so the success point itself is pinned by
-// the source-level exactly-one-count-site invariant below plus the
-// adjust_meta/redirect_err failure cells here.)
+// hit/miss/ifnat packet takes redirect_err and ALL FOUR origin slots
+// stay 0 — an attempt is never reported as a forward. Every other
+// slot counts where its arm decides; fragment_redirect is a
+// branch-attempt count and can co-occur with redirect/redirect_err,
+// so the 27 slots do not sum to packets. (A populated XSK map cannot
+// be built under the test runner — XSKMAP updates need a real AF_XDP
+// socket fd — so successful delivery is covered by the pending-main
+// attribution run; what is pinned here is the failure side — every
+// origin zero under metadata/helper failure — and, by the source
+// invariant below, that the only origin count call sits textually
+// between the XSK redirect call and its Ok arm.)
 //
 // Packet classes named by the issue — local / WG / GRE / NAT-miss /
 // early-filter — each appear, plus the plain-TCP hit-forward the
@@ -255,7 +261,7 @@ func TestXDPBranchDispositionMatrix16241(t *testing.T) {
 			},
 			wantAction: xdpActionDrop, // empty XSK map: redirect_err drop
 			wantArm:    "redirect_err",
-			absentArms: []string{"session_hit_redirect", "session_hit_pass_kernel",
+			absentArms: []string{"session_hit_redirect", "session_hit_pass_kernel", "session_miss_ifnat_redirect",
 				"session_miss_redirect", "redirect",
 				"early_filter", "wg_steer", "gre_inner_pass_kernel"},
 		},
@@ -275,7 +281,7 @@ func TestXDPBranchDispositionMatrix16241(t *testing.T) {
 			packet:     xdpDispatchIPv4TCPPacket10864(src, transitDst, 12345, 443),
 			wantAction: xdpActionDrop,
 			wantArm:    "redirect_err",
-			absentArms: []string{"session_hit_redirect", "session_miss_redirect", "session_miss_local"},
+			absentArms: []string{"session_hit_redirect", "session_miss_redirect", "redirect", "session_miss_local"},
 		},
 		{
 			name:   "local destination session miss passes to kernel",
@@ -295,7 +301,7 @@ func TestXDPBranchDispositionMatrix16241(t *testing.T) {
 			},
 			wantAction: xdpActionDrop,
 			wantArm:    "redirect_err",
-			absentArms: []string{"session_miss_ifnat_redirect", "session_miss_redirect", "session_miss_local"},
+			absentArms: []string{"session_miss_ifnat_redirect", "session_miss_redirect", "redirect", "session_miss_local"},
 		},
 		{
 			name:       "early-filter multicast passes before any session lookup",
@@ -428,17 +434,19 @@ func TestXDPBranchWGSteer16241(t *testing.T) {
 	})
 }
 
-// Source invariant for the success point: exactly one branch-count
-// call site may reference each redirect-family origin arm, and it must
-// be the single success-site call in the XSK Ok arm (the `origin`
-// selection). The classifying arms may only STAMP redirect_origin —
-// a second incr_branch_stat on an origin constant is attempt counting
-// returning through the back door. XSK success itself cannot be
-// executed under BPF_PROG_TEST_RUN (XSKMAP entries need a real AF_XDP
-// socket fd), so this syntactic pin plus the empty-XSK failure cells
-// above are the executable contract.
+// Source invariant for the success point. Textual cardinality alone
+// would NOT pin the location (moving the one call would keep every
+// count), so this asserts the ORDER of the relevant statements in
+// `try_xdp_userspace`: the XSK redirect call < the origin selection
+// < the origin count call < the redirect-error count call, with the
+// metadata-failure returns (`ADJUST_META` / `META_BOUNDS`) also
+// before the count call. A count hoisted ahead of the metadata
+// checks or into a classifying arm breaks the ordering and reddens.
+// What this still cannot do is execute a successful redirect:
+// XSKMAP entries need a real AF_XDP socket fd, so helper-success
+// execution is covered only by the pending-main attribution run.
+// The failure side IS executed (matrix cells above).
 func TestXDPBranchRedirectOriginsCountOnlyAtSuccess16241(t *testing.T) {
-	byIndex, _ := shimBranchArms(t)
 	path := filepath.Join("..", "..", "..", "userspace-xdp", "src", "lib.rs")
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -450,20 +458,39 @@ func TestXDPBranchRedirectOriginsCountOnlyAtSuccess16241(t *testing.T) {
 		"session_miss_ifnat_redirect", "redirect",
 	} {
 		constName := "USERSPACE_BRANCH_ARM_" + strings.ToUpper(arm)
-		// Stamps + definition + the one success-site selection/call.
-		stamps := strings.Count(text, "redirect_origin = "+constName)
-		calls := strings.Count(text, "incr_branch_stat(ctrl.flags, "+constName+")")
-		if calls != 0 {
+		if calls := strings.Count(text, "incr_branch_stat(ctrl.flags, "+constName+")"); calls != 0 {
 			t.Errorf("arm %s has %d direct incr_branch_stat call(s); origins must be "+
 				"counted only via the success-site origin selection", arm, calls)
 		}
-		if arm != "redirect" && stamps != 1 {
-			t.Errorf("arm %s is stamped as redirect_origin %d time(s), want exactly 1", arm, stamps)
+		if arm != "redirect" {
+			if stamps := strings.Count(text, "redirect_origin = "+constName); stamps != 1 {
+				t.Errorf("arm %s is stamped as redirect_origin %d time(s), want exactly 1", arm, stamps)
+			}
 		}
-		_ = byIndex
 	}
 	if got := strings.Count(text, "incr_branch_stat(ctrl.flags, origin)"); got != 1 {
 		t.Fatalf("success-site origin count call appears %d time(s), want exactly 1", got)
+	}
+	ordered := []string{
+		"USERSPACE_BRANCH_ARM_ADJUST_META_FAIL",
+		"USERSPACE_BRANCH_ARM_META_BOUNDS_FAIL",
+		"USERSPACE_XSK_MAP.redirect(binding_slot_ready, 0)",
+		"let origin = if redirect_origin ==",
+		"incr_branch_stat(ctrl.flags, origin)",
+		"incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_REDIRECT_ERR)",
+	}
+	prev := -1
+	for _, stmt := range ordered {
+		idx := strings.Index(text, stmt)
+		if idx < 0 {
+			t.Fatalf("statement %q not found in the shim source", stmt)
+		}
+		if idx <= prev {
+			t.Fatalf("statement %q is out of order: the origin count must sit "+
+				"after the metadata-failure returns and the XSK redirect call, "+
+				"and before the redirect-error count", stmt)
+		}
+		prev = idx
 	}
 }
 
@@ -502,4 +529,28 @@ func TestXDPBranchCountingIsTraceGated16241(t *testing.T) {
 	}
 	// The degraded counters are NOT gated: redirect_err still records.
 	assertUserspaceXDPDegradedPathStat(t, coll, "redirect_err")
+}
+
+// Fragment attempt semantics, executed: a GRE fragment (MF set) with
+// native GRE enabled claims the fragment arm, whose counter is a
+// branch-ATTEMPT count — it fires before the shared metadata/redirect
+// tail, so with the empty XSK map the same packet ALSO counts
+// redirect_err exactly once. This cell documents that the 27 slots
+// do not sum to packets: this one packet legitimately contributes 2.
+func TestXDPBranchFragmentAttemptSemantics16241(t *testing.T) {
+	coll := loadUserspaceXDPTestCollection(t)
+	seedHealthy16241(t, coll, xdpDispatchNativeGREFlag10864)
+	// Plain GRE packet (proto 47) with MF set in the frag field.
+	pkt := ipv4TestPacket([4]byte{198, 51, 100, 10}, [4]byte{203, 0, 113, 20}, 47, 8)
+	pkt[14+6] = 0x20 // MF bit in flags/fragment field
+	got := runUserspaceXDPTestPacket(t, coll, pkt)
+	if got != xdpActionDrop {
+		t.Fatalf("GRE fragment action = %d, want DROP (redirect_err on empty XSK)", got)
+	}
+	assertXDPBranchStat(t, coll, "fragment_redirect")
+	assertXDPBranchStat(t, coll, "redirect_err")
+	// Attempt semantics: no success origin may fire for this packet.
+	for _, origin := range []string{"session_hit_redirect", "session_miss_redirect", "session_miss_ifnat_redirect", "redirect"} {
+		assertXDPBranchStatAbsent(t, coll, origin)
+	}
 }
