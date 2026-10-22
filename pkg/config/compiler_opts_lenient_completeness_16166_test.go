@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 // #16166 PR-0: completeness of the tolerant-path opt set.
@@ -18,11 +19,12 @@ import (
 //
 // This test enforces links 1-2 by construction: it reflects recursively
 // over compileOpts (including the embedded protocolScopeOpts, whose two
-// lenient bools a shallow NumField walk over compileOpts would miss)
-// and asserts every lenient*/sanitize* bool is true in
-// lenientCompileOpts(). It does NOT enforce links 3-4 (gate call-site
-// reads the right flag; warning/show surface) — that is the separately
-// gated registry work, not PR-0.
+// lenient bools a shallow NumField walk over compileOpts would miss,
+// and any future pointer-embedded struct, traversed under the
+// nil/cycle policy in walkBoolFields16166) and asserts every
+// lenient*/sanitize* bool is true in lenientCompileOpts(). It does NOT
+// enforce links 3-4 (gate call-site reads the right flag; warning/show
+// surface) — that is the separately gated registry work, not PR-0.
 //
 // Scope is deliberately the name prefix, not "every bool": compileOpts
 // also carries non-downgrade bools whose lenient value is not uniformly
@@ -39,9 +41,14 @@ import (
 
 // lenientCompletenessAllowlist16166 names every bool field reachable
 // from compileOpts that is NOT required to be true in
-// lenientCompileOpts(), with the reason. Any bool not prefixed
-// lenient*/sanitize* and not listed here fails the census arm of the
-// test, so a new bool forces an explicit decision here.
+// lenientCompileOpts(), with the reason. Keys are FULL dotted field
+// paths from the compileOpts root (e.g. "skipCompactNormalize" at the
+// root, "protocolScopeOpts.<field>" inside the embedded struct), never
+// bare leaf names: a nested bool that happens to share an allowlisted
+// leaf name does NOT inherit the exemption. Any bool neither prefixed
+// lenient*/sanitize* (by leaf name) nor keyed here by full path fails
+// the census arm of the test, so a new bool forces an explicit
+// decision here.
 var lenientCompletenessAllowlist16166 = map[string]string{
 	// #8690 test seam: production and the tolerant path must run the
 	// compact normalizer; only measurement tests set this.
@@ -61,9 +68,46 @@ var lenientCompletenessAllowlist16166 = map[string]string{
 }
 
 // walkBoolFields16166 visits every bool field reachable from v,
-// recursing into embedded and nested struct fields. path is the dotted
+// recursing into embedded and nested struct fields AND through
+// pointer-to-struct fields (embedded or named). path is the dotted
 // field path from the root (e.g. "protocolScopeOpts.lenientOSPFAreaInterface11400").
+//
+// Pointer policy (explicit, fail-closed):
+//   - nil pointer-to-struct: the pointed-to fields cannot be inspected
+//     in this instance, so the walk falls back to the pointed-to TYPE
+//     and reports each reachable bool with value false. A nil pointer
+//     therefore never hides a lenient* bool: in the completeness test
+//     it surfaces as an unregistered (false) downgrade rather than a
+//     silent skip. The type fallback terminates via visitedTypes.
+//   - non-nil pointer-to-struct: dereferenced and walked by value.
+//   - cycles: visitedTypes bounds the type fallback and visitedPtrs
+//     (type+pointer identity) bounds live-pointer recursion; revisiting
+//     an already-walked pointer reports no fields twice and cannot loop.
 func walkBoolFields16166(v reflect.Value, path string, visit func(path string, fv reflect.Value)) {
+	walkBoolFieldsRec16166(v, path, visit, map[reflect.Type]bool{}, map[visitPtr16166]bool{})
+}
+
+type visitPtr16166 struct {
+	typ reflect.Type
+	ptr unsafe.Pointer
+}
+
+func walkBoolFieldsRec16166(v reflect.Value, path string, visit func(path string, fv reflect.Value), visitedTypes map[reflect.Type]bool, visitedPtrs map[visitPtr16166]bool) {
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			walkBoolFieldsByType16166(v.Type().Elem(), path, visit, visitedTypes)
+			return
+		}
+		key := visitPtr16166{typ: v.Type(), ptr: v.UnsafePointer()}
+		if visitedPtrs[key] {
+			return
+		}
+		visitedPtrs[key] = true
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return
+	}
 	t := v.Type()
 	for i := range v.NumField() {
 		sf := t.Field(i)
@@ -72,12 +116,45 @@ func walkBoolFields16166(v reflect.Value, path string, visit func(path string, f
 		if path != "" {
 			p = path + "." + sf.Name
 		}
-		if fv.Kind() == reflect.Struct {
-			walkBoolFields16166(fv, p, visit)
-			continue
-		}
-		if fv.Kind() == reflect.Bool {
+		switch {
+		case fv.Kind() == reflect.Struct:
+			walkBoolFieldsRec16166(fv, p, visit, visitedTypes, visitedPtrs)
+		case fv.Kind() == reflect.Pointer && fv.Type().Elem().Kind() == reflect.Struct:
+			walkBoolFieldsRec16166(fv, p, visit, visitedTypes, visitedPtrs)
+		case fv.Kind() == reflect.Bool:
 			visit(p, fv)
+		}
+	}
+}
+
+// walkBoolFieldsByType16166 reports every bool reachable from struct
+// type t (through struct and pointer-to-struct fields) with a false
+// value. Used only for nil pointers, where no live value exists.
+// visitedTypes bounds recursion on self-referential types.
+func walkBoolFieldsByType16166(t reflect.Type, path string, visit func(path string, fv reflect.Value), visitedTypes map[reflect.Type]bool) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || visitedTypes[t] {
+		return
+	}
+	visitedTypes[t] = true
+	falseVal := reflect.ValueOf(false)
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		p := sf.Name
+		if path != "" {
+			p = path + "." + sf.Name
+		}
+		ft := sf.Type
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		switch {
+		case ft.Kind() == reflect.Struct:
+			walkBoolFieldsByType16166(ft, p, visit, visitedTypes)
+		case sf.Type.Kind() == reflect.Bool:
+			visit(p, falseVal)
 		}
 	}
 }
@@ -88,25 +165,30 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 
 	var downgrades, others int
 	walkBoolFields16166(v, "", func(path string, fv reflect.Value) {
-		name := path[strings.LastIndex(path, ".")+1:]
+		// Downgrade detection is by LEAF name (a lenient* bool is a
+		// downgrade wherever it nests); the allowlist exemption is by
+		// FULL dotted path, so a nested bool sharing an allowlisted
+		// leaf name (e.g. a future nested "skipCompactNormalize") does
+		// NOT inherit the root field's exemption.
+		leaf := path[strings.LastIndex(path, ".")+1:]
 		switch {
-		case strings.HasPrefix(name, "lenient"), strings.HasPrefix(name, "sanitize"):
+		case strings.HasPrefix(leaf, "lenient"), strings.HasPrefix(leaf, "sanitize"):
 			downgrades++
 			if !fv.Bool() {
 				t.Errorf("%s is false in lenientCompileOpts(): the field exists but its "+
 					"lenientCompileOpts() entry is missing, so the tolerant load / peer-sync "+
 					"path stays STRICT for this gate and a persisted or peer-synced config an "+
 					"older binary accepted would fail to boot (#1960). Add `%s: true` to "+
-					"lenientCompileOpts() in compiler_opts.go", path, name)
+					"lenientCompileOpts() in compiler_opts.go", path, leaf)
 			}
-		case lenientCompletenessAllowlist16166[name] != "":
+		case lenientCompletenessAllowlist16166[path] != "":
 			others++
 		default:
 			t.Errorf("%s is a bool in compileOpts that is neither a lenient*/sanitize* "+
-				"downgrade nor allowlisted in lenientCompletenessAllowlist16166: classify it. "+
+				"downgrade nor allowlisted by full path in lenientCompletenessAllowlist16166: classify it. "+
 				"If it downgrades a gate on the tolerant path, name it lenient*/sanitize* so "+
-				"this test requires it true in lenientCompileOpts(); otherwise add it to the "+
-				"allowlist with the reason its lenient value is not required to be true", path)
+				"this test requires it true in lenientCompileOpts(); otherwise add its full "+
+				"dotted path to the allowlist with the reason its lenient value is not required to be true", path)
 		}
 	})
 
@@ -205,5 +287,134 @@ func TestLenientCompletenessWalkRecurses16166(t *testing.T) {
 	}
 	if len(falseDowngrades) != 2 {
 		t.Errorf("false-downgrade detection = %v, want the unset direct and embedded planted fields", falseDowngrades)
+	}
+}
+
+// TestLenientCompletenessWalkPointerEmbedded16166 proves the walk
+// traverses POINTER-embedded structs — the shape the value-only walker
+// silently skipped (scratch-proven false negative on the first head).
+// Non-nil: live values are read (a set bool reads true, an unset
+// lenient bool is reported false). Nil: the type fallback reports the
+// pointed-to bools as false, so a nil pointer can never hide an
+// unregistered downgrade. A self-referential pointer cycle must
+// terminate without double-visiting.
+func TestLenientCompletenessWalkPointerEmbedded16166(t *testing.T) {
+	type plantedPtrEmbedded struct {
+		lenientPlantedPtrEmbedded16166 bool
+		lenientPlantedPtrSet16166      bool
+	}
+	type plantedPtrRoot struct {
+		*plantedPtrEmbedded
+	}
+	collect := func(root plantedPtrRoot) (seen map[string]bool, falseDown []string) {
+		seen = map[string]bool{}
+		walkBoolFields16166(reflect.ValueOf(root), "", func(path string, fv reflect.Value) {
+			if _, dup := seen[path]; dup {
+				t.Errorf("walk visited %s twice", path)
+			}
+			seen[path] = fv.Bool()
+			leaf := path[strings.LastIndex(path, ".")+1:]
+			if strings.HasPrefix(leaf, "lenient") && !fv.Bool() {
+				falseDown = append(falseDown, path)
+			}
+		})
+		return seen, falseDown
+	}
+
+	// Non-nil pointer-embedded: set reads true, unset reported.
+	seen, falseDown := collect(plantedPtrRoot{plantedPtrEmbedded: &plantedPtrEmbedded{lenientPlantedPtrSet16166: true}})
+	if len(seen) != 2 {
+		t.Fatalf("non-nil pointer-embedded: visited %v, want both planted fields", seen)
+	}
+	if !seen["plantedPtrEmbedded.lenientPlantedPtrSet16166"] {
+		t.Errorf("non-nil pointer-embedded: lenientPlantedPtrSet16166 read false, want true (live value not read); visited %v", seen)
+	}
+	if len(falseDown) != 1 || falseDown[0] != "plantedPtrEmbedded.lenientPlantedPtrEmbedded16166" {
+		t.Errorf("non-nil pointer-embedded: false downgrades = %v, want [plantedPtrEmbedded.lenientPlantedPtrEmbedded16166]", falseDown)
+	}
+
+	// Nil pointer-embedded: type fallback must still surface both
+	// fields as false — never a silent skip.
+	seen, falseDown = collect(plantedPtrRoot{})
+	if len(seen) != 2 {
+		t.Fatalf("nil pointer-embedded: visited %v, want both planted fields via type fallback", seen)
+	}
+	if len(falseDown) != 2 {
+		t.Errorf("nil pointer-embedded: false downgrades = %v, want both planted fields reported false", falseDown)
+	}
+
+	// Cycle: a self-referential struct linked to itself must terminate
+	// and visit its bool once.
+	type plantedCycle struct {
+		lenientPlantedCycle16166 bool
+		next                     *plantedCycle
+	}
+	node := &plantedCycle{}
+	node.next = node
+	visits := 0
+	walkBoolFields16166(reflect.ValueOf(node), "", func(path string, fv reflect.Value) {
+		visits++
+		if path != "lenientPlantedCycle16166" {
+			t.Errorf("cycle walk visited unexpected %s", path)
+		}
+	})
+	if visits != 1 {
+		t.Errorf("cycle walk visited bool %d times, want 1 (visited-pointer guard)", visits)
+	}
+
+	// Nil self-referential type: type fallback must also terminate.
+	type plantedNilCycle struct {
+		lenientPlantedNilCycle16166 bool
+		next                        *plantedNilCycle
+	}
+	nilPaths := map[string]bool{}
+	walkBoolFields16166(reflect.ValueOf(plantedNilCycle{}), "", func(path string, fv reflect.Value) {
+		if nilPaths[path] {
+			t.Errorf("nil-cycle walk visited %s twice", path)
+		}
+		nilPaths[path] = true
+		if fv.Bool() {
+			t.Errorf("nil-cycle walk reported %s true, want live false at root and false type-fallback under next", path)
+		}
+	})
+	// Root bool (live) plus the same bool under the nil `next` pointer
+	// (type fallback, distinct path): two distinct paths, each once,
+	// and the visited-type guard stops next.next.* expansion.
+	if len(nilPaths) != 2 || !nilPaths["lenientPlantedNilCycle16166"] || !nilPaths["next.lenientPlantedNilCycle16166"] {
+		t.Errorf("nil-cycle walk visited %v, want root + next.* exactly once each (visited-type guard)", nilPaths)
+	}
+}
+
+// TestLenientCompletenessAllowlistFullPath16166 proves classification
+// is by full dotted path, not leaf name: a nested bool whose leaf name
+// collides with an allowlisted root field ("skipCompactNormalize")
+// must NOT be exempted — with leaf-name matching it would be silently
+// classified as the allowlisted test seam.
+func TestLenientCompletenessAllowlistFullPath16166(t *testing.T) {
+	type plantedNested struct {
+		skipCompactNormalize bool
+	}
+	type plantedRoot struct {
+		plantedNested
+	}
+	var classified []string
+	walkBoolFields16166(reflect.ValueOf(plantedRoot{}), "", func(path string, fv reflect.Value) {
+		leaf := path[strings.LastIndex(path, ".")+1:]
+		switch {
+		case strings.HasPrefix(leaf, "lenient"), strings.HasPrefix(leaf, "sanitize"):
+			classified = append(classified, "downgrade:"+path)
+		case lenientCompletenessAllowlist16166[path] != "":
+			classified = append(classified, "allowlisted:"+path)
+		default:
+			classified = append(classified, "unclassified:"+path)
+		}
+	})
+	want := "unclassified:plantedNested.skipCompactNormalize"
+	if len(classified) != 1 || classified[0] != want {
+		t.Errorf("nested leaf-name collision classified as %v, want [%s] (full-path allowlist)", classified, want)
+	}
+	// The genuine root field IS allowlisted by its full path.
+	if lenientCompletenessAllowlist16166["skipCompactNormalize"] == "" {
+		t.Error("root skipCompactNormalize missing from full-path allowlist")
 	}
 }
