@@ -12726,3 +12726,152 @@ fn unknown_flags_never_cache_local_delivery_16007() {
     ));
 }
 
+/// #16270 (option b): republication ordering cell. Post-activation
+/// the helper FIB holds the republished connected /24 (RG1 locally
+/// owned, `connected_rg_peer_owned=false`) AND the pref-200
+/// cluster-terminal. A lookup for the on-link WAN target
+/// 172.16.80.200 must return the ForwardCandidate WAN egress (12),
+/// never the demoted DiscardRoute: the connected row is longer
+/// than the terminal's /0, so LPM already prefers it — this cell
+/// pins that the republished state forwards directly and that HA
+/// enforcement (RG1 active) keeps it a ForwardCandidate.
+///
+/// RED-on-revert: suppress the connected row (peer-owned marking)
+/// and the same lookup surfaces ClusterTerminalHAInactive; demote
+/// RG1 in the HA map and it becomes DiscardRoute.
+#[test]
+fn republication_ordering_connected_wins_16270() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    for route in &mut snapshot.routes {
+        route.preference = 5;
+    }
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: true,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 200,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // The on-link WAN target needs a neighbor row, exactly as the
+    // live kernel table holds it (#15742 live-shape precedent).
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.200".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let active = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(
+        1,
+        active_ha_runtime(now_secs),
+    )])));
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let raw = lookup_forwarding_resolution(&state, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "post-activation lookup must forward via the connected WAN row, got {:?}",
+        raw.disposition
+    );
+    assert_eq!(raw.egress_ifindex, 12);
+    let enforced = enforce_ha_resolution(&state, &active, raw);
+    assert_eq!(
+        enforced.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "locally-active RG1 must keep the connected ForwardCandidate, got {:?}",
+        enforced.disposition
+    );
+    assert_eq!(enforced.egress_ifindex, 12);
+}
+
+/// #16270 (option b): the connected-win for a non-cluster terminal.
+/// Fixture: an operator discard at 172.16.80.0/25 (LONGER than the
+/// connected /24) covering the target, so `select_v4_route`
+/// returns the terminal, not the connected row. The connected-win
+/// fires only when the table also holds a cluster-terminal
+/// (republication owed); without one the operator discard keeps
+/// its exact pre-fix semantics (control stays DiscardRoute).
+///
+/// RED-on-revert: dropping the `table_has_cluster_terminal_v4`
+/// guard makes the control forward (fail-open on an operator
+/// discard); dropping the connected-win makes the owed cell drop.
+#[test]
+fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
+    let build = |with_cluster: bool| {
+        let mut snapshot = nat_snapshot_with_fabric();
+        snapshot.routes.retain(|r| r.destination != "0.0.0.0/0");
+        snapshot.routes.push(RouteSnapshot {
+            reject: false,
+            cluster_terminal: false,
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "172.16.80.0/25".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec![],
+            discard: true,
+            next_table: String::new(),
+            preference: 200,
+            rule_priority: 0,
+            mtu: 0,
+        });
+        if with_cluster {
+            snapshot.routes.push(RouteSnapshot {
+                reject: false,
+                cluster_terminal: true,
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "0.0.0.0/0".to_string(),
+                next_hop_weights: vec![],
+                next_hops: vec![],
+                discard: true,
+                next_table: String::new(),
+                preference: 200,
+                rule_priority: 0,
+                mtu: 0,
+            });
+        }
+        snapshot.neighbors.push(NeighborSnapshot {
+            interface: "ge-0-0-0.80".to_string(),
+            ifindex: 12,
+            family: "inet".to_string(),
+            ip: "172.16.80.100".to_string(),
+            mac: "00:11:22:33:44:66".to_string(),
+            state: "reachable".to_string(),
+            router: false,
+            link_local: false,
+            ..Default::default()
+        });
+        build_forwarding_state(&snapshot)
+    };
+    let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 100));
+    let owed = build(true);
+    let raw = lookup_forwarding_resolution(&owed, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "republication-owed: connected /24 must beat the /25 operator discard, got {:?}",
+        raw.disposition
+    );
+    assert_eq!(raw.egress_ifindex, 12);
+    let settled = build(false);
+    let raw = lookup_forwarding_resolution(&settled, dst).resolution;
+    assert_eq!(
+        raw.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "no cluster-terminal: operator discard must stay a drop, got {:?}",
+        raw.disposition
+    );
+}

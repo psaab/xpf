@@ -544,6 +544,23 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		d.scheduleConnectedRGRepublish("cluster-state")
 	}
 	if isPrimary {
+		// #16270 (option a): republish the connected RG prefixes
+		// SYNCHRONOUSLY, before SetRGActive reports the RG
+		// forwarding-active. The pre-fix activation ordered
+		// rg_active first and republished from a nonblocking
+		// goroutine (scheduleConnectedRGRepublish at the tail of
+		// this handler) that could duplicate-skip or lose the race
+		// to an arriving retransmit: the helper FIB still lacked
+		// the /24 connected row, the lookup reached the pref-200
+		// cluster-terminal, and HA enforcement demoted it to
+		// DiscardRoute — a permanent blackhole for aged flows.
+		// Running the same routes-only publisher inline (under
+		// applySem) closes the ordering window by construction;
+		// the async tail remains as the retry/duplicate-skip
+		// backstop for every other edge.
+		if clusterOwnershipEdge {
+			d.republishConnectedRGSync(ctx, "cluster-state")
+		}
 		// Activation: enable forwarding first.
 		// Re-read desired state to guard against a
 		// concurrent VRRP goroutine that may have
@@ -990,6 +1007,12 @@ func (d *Daemon) watchVRRPEvents(ctx context.Context) {
 				s := d.getOrCreateRGState(rgID)
 				tr := s.SetVRRP(ev.Interface, true)
 				if rt := d.dataplane(); tr.Changed && tr.Active && rt != nil {
+					// #16270 (option a): republish the connected RG
+					// prefixes synchronously BEFORE SetRGActive, so
+					// the helper FIB holds the /24 transit row when
+					// the RG reports forwarding-active (see the
+					// cluster-event twin in handleClusterEvent).
+					d.republishConnectedRGSync(ctx, "vrrp-master")
 					// Activation order: set rg_active FIRST, then
 					// remove blackhole routes. Re-read desired state
 					// to guard against interleaved cluster goroutine.
