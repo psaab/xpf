@@ -70,8 +70,8 @@ func TestRxMTUAdvisoryBoundaryAndUnitOverride9727(t *testing.T) {
 	}{
 		{"exactly the budget fits", userspaceRxMTUBudget, 0, false},
 		{"one byte over warns", userspaceRxMTUBudget + 1, 0, true},
-		{"unit MTU overrides a jumbo interface MTU", 9000, 1500, false},
-		{"a jumbo unit MTU warns under a small interface MTU", 1500, 9000, true},
+		{"untagged unit MTU overrides a jumbo interface MTU", 9000, 1500, false},
+		{"a jumbo untagged unit MTU warns under a small interface MTU", 1500, 9000, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := rxMTUCfg9727(map[string][]string{"trust": {"ge-0/0/1.0"}},
@@ -162,14 +162,48 @@ func TestUserspaceUMEMConstantsMatchTheHelper9727(t *testing.T) {
 
 // TestJumboMTUAdvisoryReachesTheCompiledConfig9727 binds the wiring: the unit
 // cells above call the advisory directly, so this compiles real set commands
-// and requires the warning on the result.
+// and requires the warning on the result. Since #16244 the strict path
+// refuses this shape outright, so the advisory wiring is exercised on the
+// tolerant path, where the #16244 gate downgrades to a warning and the
+// #9727 advisory itself is suppressed — the compiled config must carry
+// exactly one MTU line for the interface, from the downgrade.
 func TestJumboMTUAdvisoryReachesTheCompiledConfig9727(t *testing.T) {
-	cfg := compileSetLines(t, []string{
+	tree := flatTreeFromSets(t,
 		"set interfaces ge-0/0/1 mtu 9000",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 		"set security zones security-zone trust interfaces ge-0/0/1.0",
-	})
-	if w := rxMTUWarnings9727(cfg); len(w) != 1 || !strings.Contains(w[0], "ge-0/0/1") {
-		t.Fatalf("the compiled config must carry the jumbo MTU advisory for ge-0/0/1: %v", cfg.Warnings)
+	)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	joined := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(joined, "ge-0/0/1") || !strings.Contains(joined, "#16244") {
+		t.Fatalf("the compiled config must carry the jumbo MTU warning for ge-0/0/1: %v", cfg.Warnings)
+	}
+	if w := rxMTUWarnings9727(cfg); len(w) != 0 {
+		t.Fatalf("the #9727 advisory must stay suppressed on the tolerant path, got %v", w)
+	}
+}
+
+func TestRxMTUAdvisoryUsesEffectiveTaggedParent9727(t *testing.T) {
+	tagged := iface9727("ge-0/0/1", 9000, map[int]int{50: 1500})
+	tagged.VlanTagging = true
+	tagged.Units[50].VlanID = 50
+	cfg := rxMTUCfg9727(map[string][]string{"trust": {"ge-0/0/1.50"}},
+		map[string]*InterfaceConfig{"ge-0/0/1": tagged})
+	appendUserspaceRxMTUAdvisoryLocked(cfg, compileOpts{})
+	if w := rxMTUWarnings9727(cfg); len(w) != 1 || !strings.Contains(w[0], "9000") {
+		t.Fatalf("tagged parent must warn at its effective 9000, got %v", cfg.Warnings)
+	}
+
+	sibling := iface9727("ge-0/0/1", 9000, map[int]int{0: 1500, 50: 0})
+	sibling.VlanTagging = true
+	sibling.Units[50].VlanID = 50
+	cfg = rxMTUCfg9727(map[string][]string{"trust": {"ge-0/0/1.0", "ge-0/0/1.50"}},
+		map[string]*InterfaceConfig{"ge-0/0/1": sibling})
+	appendUserspaceRxMTUAdvisoryLocked(cfg, compileOpts{})
+	if w := rxMTUWarnings9727(cfg); len(w) != 0 {
+		t.Fatalf("untagged sibling lowers the effective parent to 1500, got %v", w)
 	}
 }

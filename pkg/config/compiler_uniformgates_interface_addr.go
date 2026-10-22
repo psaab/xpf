@@ -43,6 +43,23 @@ func runUniformGatesInterfaceAddr(_ *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #16244 userspace single-frame MTU gate. Strict on commit /
+	// commit-check (hard-reject a dataplane-bound interface whose
+	// effective MTU exceeds the AF_XDP UMEM single-frame budget — the
+	// netdev would take the MTU, but no frame that large can reach a
+	// worker, so the commit would succeed and then drop at line rate).
+	// Lenient on load / peer-sync (warn so an already-persisted or
+	// peer-synced jumbo config still boots — #1960 no-brick). Runs before
+	// the #13936 gate below, so an over-budget error wins that slot.
+	if err := validateUserspaceRxMTUStrict(cfg); err != nil {
+		if opts.lenientUserspaceRxMTU16244 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("userspace MTU (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// RFC 8200 §5 minimum IPv6 link MTU (#13936). The compiled effective
 	// unit MTU is the value applied to the link; tolerant loads warn so
 	// persisted configurations remain bootable (#1960).

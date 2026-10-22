@@ -3,8 +3,6 @@ package config
 import (
 	"fmt"
 	"sort"
-	"strconv"
-	"strings"
 )
 
 // #9727: the userspace dataplane receives into fixed-size UMEM frames and binds
@@ -33,25 +31,29 @@ const (
 	userspaceRxMTUBudget = userspaceUMEMFrameSize - (userspaceXDPacketHeadroom + userspaceUMEMHeadroom) - 14 - 4
 )
 
-// appendUserspaceRxMTUAdvisoryLocked warns once per interface the userspace
-// dataplane binds whose effective MTU exceeds userspaceRxMTUBudget.
+// appendUserspaceRxMTUAdvisoryLocked warns once per AF_XDP bind parent
+// whose effective MTU exceeds userspaceRxMTUBudget.
 //
-// "Binds" mirrors the dataplane's own rule (userspaceSkipsIngressInterface and
-// netdevExclusionClasses in pkg/dataplane/userspace), which pkg/config cannot
-// import:
-//   - only interfaces referenced by a security zone;
-//   - not tunnels, fxp*, em*, fab* or lo0 by interface identity;
-//   - not local fabric members.
+// The parent set and effective MTU come from
+// userspaceRxMTUBoundParents: InterfaceZoneMap supplies surviving zone
+// membership, ResolveKernelIfName resolves each logical row to its
+// netdev, tagged rows redirect to their physical parent, and a
+// referenced untagged unit (lowest unit number) overrides the
+// interface MTU. Config-owned tunnel/secure-tunnel rows, lifeline
+// names, and local-fabric rows are excluded. Live-kernel xfrm state
+// cannot be known at commit time and remains outside this predicate.
 //
 // The zone name is deliberately absent. `mgmt` and `control` are
-// operator-controlled labels, not lifeline identity; a data NIC in one of
-// those zones is still AF_XDP-bound and policy-adjudicated (#10308).
+// operator-controlled labels, not lifeline identity; a data NIC in one
+// of those zones is still AF_XDP-bound and policy-adjudicated (#10308).
 //
-// A WARNING, not an error. Commit cannot tell a copy-mode binding (drops
-// counted) from a zero-copy one (a refused bind), and a jumbo MTU remains
-// correct for the kernel-forwarded traffic of an interface.
-// opts.suppressContestedTrunkZoneAdvisory silences it on the tolerant boot and
-// peer-sync paths, for the reason given at appendContestedTrunkZoneAdvisoryLocked.
+// A WARNING, not an error. Commit cannot tell a copy-mode binding
+// (drops counted) from a zero-copy one (a refused bind), and a jumbo
+// MTU remains correct for the kernel-forwarded traffic of an
+// interface. The strict #16244 gate uses the same effective parents.
+// opts.suppressContestedTrunkZoneAdvisory silences it on the tolerant
+// boot and peer-sync paths, for the reason given at
+// appendContestedTrunkZoneAdvisoryLocked.
 func appendUserspaceRxMTUAdvisoryLocked(cfg *Config, opts compileOpts) {
 	if cfg == nil || opts.suppressContestedTrunkZoneAdvisory {
 		return
@@ -75,54 +77,21 @@ func appendUserspaceRxMTUAdvisoryLocked(cfg *Config, opts compileOpts) {
 	}
 }
 
-// userspaceRxMTUOverBudget returns base interface name -> the largest effective
-// MTU above the budget among its zoned, dataplane-bound references.
+// userspaceRxMTUOverBudget returns authored parent name -> the
+// effective MTU above the budget for its resolved AF_XDP bind parent.
+// The map key remains the authored parent stanza (for a RETH reference,
+// `reth<N>`) because the advisory and refusal name what the operator
+// configured; userspaceRxMTUBoundParents records the distinct Linux
+// bind netdev separately for callers that need it.
 func userspaceRxMTUOverBudget(cfg *Config) map[string]int {
 	out := map[string]int{}
-	if cfg.Security.Zones == nil || cfg.Interfaces.Interfaces == nil {
-		return out
-	}
-	for _, zone := range cfg.Security.Zones {
-		if zone == nil {
-			continue
+	for _, parent := range userspaceRxMTUBoundParents(cfg) {
+		name := parent.Parent
+		if name == "" {
+			name = parent.AuthoredBase
 		}
-		for _, ref := range zone.Interfaces {
-			// #9821 D17: the split base (declared-aware) — a dotted unit
-			// ref resolves against its declared stanza instead of an
-			// undeclared first segment, so strict-reachable both-declared
-			// zone members keep their over-budget warnings. Lifeline-prefix
-			// skip preserved on the split base.
-			s := cfg.SplitInterfaceUnitRef(ref)
-			base := s.Base
-			if strings.HasPrefix(base, "fxp") || strings.HasPrefix(base, "em") ||
-				strings.HasPrefix(base, "fab") || base == "lo0" {
-				continue
-			}
-			ifc := cfg.Interfaces.Interfaces[base]
-			if ifc == nil || ifc.Tunnel != nil || ifc.LocalFabricMember != "" {
-				continue
-			}
-			mtu := ifc.MTU
-			unitNum := 0
-			unitOK := true
-			if s.HasUnit {
-				var err error
-				unitNum, err = strconv.Atoi(s.UnitTok)
-				unitOK = err == nil
-			}
-			if unitOK {
-				if unit := ifc.Units[unitNum]; unit != nil {
-					if unit.Tunnel != nil {
-						continue
-					}
-					if unit.MTU > 0 {
-						mtu = unit.MTU
-					}
-				}
-			}
-			if mtu > userspaceRxMTUBudget && mtu > out[base] {
-				out[base] = mtu
-			}
+		if parent.MTU > userspaceRxMTUBudget && parent.MTU > out[name] {
+			out[name] = parent.MTU
 		}
 	}
 	return out

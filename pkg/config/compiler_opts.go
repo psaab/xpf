@@ -3501,6 +3501,17 @@ type compileOpts struct {
 	// tolerant load / peer-sync paths so previously persisted state can boot.
 	lenientIPv6UnitMTU13936 bool
 
+	// lenientUserspaceRxMTU16244 (#16244) downgrades the userspace
+	// single-frame MTU gate — a dataplane-bound interface whose effective
+	// MTU exceeds the AF_XDP UMEM budget — from a hard compile error to a
+	// cfg.Warnings entry. Set ONLY on the tolerant load / peer-sync paths
+	// so an already-persisted or peer-synced jumbo config still boots
+	// (#1960 no-brick); the #9727 advisory is suppressed there, so this
+	// downgraded warning is that path's MTU signal. Candidate commit /
+	// commit-check stay strict, because the committed MTU would otherwise
+	// never be received by the userspace dataplane.
+	lenientUserspaceRxMTU16244 bool
+
 	// lenientInterfaceNumericBounds (#9899 F030/F031) downgrades the
 	// interface tunnel/VLAN numeric gate — a tunnel key/TTL or vlan-id /
 	// inner-vlan-id token that is non-canonical (sign/whitespace/garbage) or
@@ -3893,6 +3904,7 @@ func lenientCompileOpts() compileOpts {
 		lenientInterfaceAddressList:            true,
 		lenientVlanUnitMTU:                     true,
 		lenientIPv6UnitMTU13936:                true,
+		lenientUserspaceRxMTU16244:             true,
 		lenientInterfaceBandwidth:              true,
 		lenientInterfaceDuplex:                 true,
 		lenientInterfaceSpeed:                  true,
