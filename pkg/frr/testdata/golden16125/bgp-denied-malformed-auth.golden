@@ -1,0 +1,7 @@
+! xpf managed config - do not edit
+!
+router bgp 65000
+ no bgp ebgp-requires-policy
+ neighbor 192.0.2.1 remote-as 65001
+exit
+!

@@ -44,6 +44,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # W1.12 (#16206/#16125): install real FRR so the vtysh oracle
+      # (TestRenderedRoutingConfigAcceptedByFRR11417) RUNS in CI
+      # instead of silently skipping when vtysh is absent. Without
+      # this step the grown golden corpus proves nothing in CI.
+      - name: Install FRR for the vtysh oracle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends frr
+          command -v vtysh
       - name: Build all Go packages
         run: go build ./...
       - name: Test affected Go packages

@@ -1,0 +1,23 @@
+! xpf managed config - do not edit
+!
+ip route 203.0.113.0/24 192.0.2.10 5
+!
+ip prefix-list xpf-qnh-dst-783bf388144bb9c4 seq 5 permit 203.0.113.0/24
+ip prefix-list xpf-qnh-nh-40ccc5735b91671d seq 5 permit 192.0.2.10/32
+!
+route-map xpf-qnh-static-ec82feb6c470a32b-xpf-redist permit 10
+ match ip address prefix-list xpf-qnh-dst-783bf388144bb9c4
+ match ip next-hop prefix-list xpf-qnh-nh-40ccc5735b91671d
+ on-match next
+exit
+route-map xpf-qnh-static-ec82feb6c470a32b-xpf-redist permit 20
+exit
+!
+router ospf
+ redistribute static route-map xpf-qnh-static-ec82feb6c470a32b-xpf-redist
+exit
+!
+interface ge-0/0/0
+ ip ospf area 0.0.0.0
+exit
+!

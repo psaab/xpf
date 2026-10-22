@@ -101,6 +101,29 @@ func TestRenderedRoutingConfigAcceptedByFRR11417(t *testing.T) {
 			keyword: "router bgp ",
 		},
 	}
+	// #16125 / W1.12 (#16206): the per-protocol golden corpus is also
+	// the real-FRR oracle corpus. Each golden fixture that renders a
+	// top-level routing stanza is validated by vtysh below with the
+	// same sentinel + invalid-keyword controls as the hand-authored
+	// cases, so the grown table cannot silently stop at an early exit
+	// or accept a malformed renderer. Fixtures without a keyword
+	// (denied-malformed-auth renders that deliberately omit a stanza,
+	// cluster-mode and QNH renders) stay golden-only.
+	oracleRuns16125, oracleTotal16125 := 0, 0
+	for _, gf := range goldenFixtures16125() {
+		oracleTotal16125++
+		if gf.keyword == "" {
+			continue
+		}
+		oracleRuns16125++
+		cfg := gf.config
+		tests = append(tests, struct {
+			name    string
+			config  FullConfig
+			keyword string
+		}{name: "golden16125 " + gf.name, config: *cfg, keyword: gf.keyword})
+	}
+	t.Logf("W1.12 vtysh oracle denominator (#16125): %d/%d golden fixtures carry a vtysh-validated stanza; %d hand-authored cases; vtysh present so none skip in this run", oracleRuns16125, oracleTotal16125, len(tests)-oracleRuns16125)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rendered := New().buildManagedSection(&tc.config)
