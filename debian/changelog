@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Stamp the applied-config marker through two UnderSem helpers:
+    stampActiveAppliedIfConvergedUnderSem and
+    stampDigestIfConvergedUnderSem own the convergence gate (no apply
+    error, no policy-invalidation debt, publication landed, non-nil
+    store; empty digest is a no-op) so the five shape-(a) sites and the
+    config-sync digest site can no longer hand-copy it wrong. The
+    policy-debt discharge sites and the #9811 digest retry keep their
+    own explicitly-gated stamps, allowlisted by function name in a new
+    AST canary, because folding them into the PublishLanded gate would
+    change debt-discharge semantics (#16171).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Refuse a disputed per-unit host-inbound override on a shared ifindex:
     when configured logical units collapsed onto one netdev carried
     different effective host-inbound overrides, the dataplane's flat

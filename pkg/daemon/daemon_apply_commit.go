@@ -462,10 +462,7 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// config has converged on the dataplane. A peer push failure is independent:
 	// it must not erase the local applied proof, though it remains in the return
 	// error for reconnect/reconciliation.
-	if localErr == nil && d.policyInvalidationDebt == nil &&
-		d.policyInvalidationPublishLanded && d.store != nil {
-		d.store.MarkActiveApplied()
-	}
+	d.stampActiveAppliedIfConvergedUnderSem(localErr)
 	resp := compiled
 	if respCfg != nil {
 		resp = respCfg
@@ -823,9 +820,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		// on empty digest (nil-active defensive path) or a non-nil retErr leaves
 		// the prior digest, so a config whose apply did not fully converge is never
 		// marked applied — the #4957 invariant handleConfigSync's shortcut relies on.
-		if retErr == nil && d.policyInvalidationDebt == nil && d.policyInvalidationPublishLanded {
-			d.store.MarkAppliedDigest(appliedDigest)
-		}
+		d.stampDigestIfConvergedUnderSem(retErr, appliedDigest)
 	}()
 
 	// #5564: capture the apply error instead of returning early on ANY error.
