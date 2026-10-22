@@ -384,6 +384,16 @@ pub(in crate::afxdp) enum CachedDecisionInvalid {
     /// the entry was demoted while this node did not own the RG and
     /// is stale at takeover. The slow path re-resolves it locally.
     FabricIngressDiscardNowLocal,
+    /// #16270 (cache supersession): a cached ForwardCandidate whose
+    /// egress RG is known (>0) but is NOT forwarding-active locally
+    /// right now — the RG left this node (failover) or was never
+    /// active here, so serving the stored decision transmits on a
+    /// non-owner WAN egress forever. The slow path re-resolves it
+    /// (HA enforcement demotes it and the fabric converter redirects
+    /// it to the new owner). Guard: only when the egress RG is known
+    /// and not active; a locally-active egress (and an unknown /
+    /// standalone egress) is never invalidated by this arm.
+    ForwardCandidateEgressDeparted,
 }
 
 pub(in crate::afxdp) fn cached_flow_decision_valid(
@@ -503,6 +513,52 @@ fn cached_flow_decision_invalid_reason_inner(
         && discard_route_cluster_terminal_now_local(forwarding, ha_state, now_secs, &resolution)
     {
         return Some(CachedDecisionInvalid::FabricIngressDiscardNowLocal);
+    }
+    // #16270 (cache supersession): a cached ForwardCandidate whose
+    // egress RG is known (>0) but is NOT forwarding-active locally
+    // right now must not be served locally — its RG has left this
+    // node (failover) or was never active here, so the stored
+    // decision transmits on a non-owner WAN egress forever (the
+    // aged-failover blackhole: fw0 kept WAN-TXing ForwardCandidate
+    // egress=14/RG1 tuples after RG1 moved to fw1). This is placed
+    // here, deliberately independent of `enforce_ha_resolution_snapshot`
+    // above: on the live build that check did NOT evict these
+    // entries (enforce_changed stayed 0 post-failover in the cell
+    // stats — the stored resolution is re-judged against the same
+    // FIB row and the HAInactive demotion did not fire for these
+    // cache hits), so the supersession must stand on its own
+    // egress-RG test rather than relying on the enforce rewrite.
+    // Evict so the slow path re-resolves: HA enforcement demotes
+    // the fresh resolution and the fabric converter redirects it
+    // to the new owner.
+    //
+    // Guard (acceptance): only when the egress RG is KNOWN and not
+    // active — `owner_rg_for_resolution` > 0 (a real EgressInterface
+    // / tunnel-endpoint row names the RG) and that RG is absent
+    // from `ha_state` or not forwarding-active. A locally-active
+    // egress is bit-identical (the arm never fires), an unknown
+    // egress (rg 0: standalone, pre-RETH-propagation, or missing
+    // row) is never touched here (the #16220 EnforceChanged arm
+    // above owns that clustered-node shape), and an empty HA map
+    // (standalone) can never fire because every known RG reads as
+    // absent — so the explicit `!ha_state.is_empty()` keeps a
+    // standalone node's ForwardCandidates bit-identical too.
+    // ForwardCandidate is the only cacheable locally-egressing
+    // forward disposition (`from_forward_decision` admits only
+    // ForwardCandidate | FabricRedirect; FabricRedirect is judged
+    // by the arms below) — MissingNeighbor/LocalDelivery are never
+    // cached, so no other disposition needs this arm.
+    if resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && !ha_state.is_empty()
+    {
+        let egress_rg = owner_rg_for_resolution(forwarding, resolution);
+        if egress_rg > 0
+            && !ha_state
+                .get(&egress_rg)
+                .is_some_and(|group| group.is_forwarding_active(now_secs))
+        {
+            return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
+        }
     }
     // RG-stamped redirect hits are the common split-RG cache case. Once the
     // cached owner RG becomes locally active again, invalidate immediately and

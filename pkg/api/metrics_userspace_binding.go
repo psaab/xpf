@@ -164,6 +164,7 @@ var flowCacheEvictionArmLabels = []string{
 	"post_hit_fabric_redirect_on_fabric_ingress",
 	"post_hit_fabric_local_wins_same_owner",
 	"post_hit_fabric_ingress_discard_now_local",
+	"post_hit_forward_candidate_egress_departed",
 }
 
 // #16220: emit per-arm flow-cache evictions so a cache-retention failure
