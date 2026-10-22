@@ -206,12 +206,12 @@ func containsString9416(in []string, want string) bool {
 // `community` declares `args: 1` and a children map, so the container node IS
 // the schema node -- the body's leaves hang off it directly.
 func snmpCommunitySchema9416() *schemaNode {
-	return resolveSchemaChild(resolveSchemaChild(setSchema, "snmp"), "community")
+	return refSNMPCommunity.resolve()
 }
 
 // snmpRoutingInstanceSchema9416 resolves `snmp community <name>
 // routing-instance <ri>`, whose body carries the SIXTH spelling's own
 // `clients` / `client-list-name`.
 func snmpRoutingInstanceSchema9416() *schemaNode {
-	return resolveSchemaChild(snmpCommunitySchema9416(), "routing-instance")
+	return refSNMPRoutingInstance.resolve()
 }

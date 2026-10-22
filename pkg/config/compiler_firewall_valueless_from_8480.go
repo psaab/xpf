@@ -87,14 +87,14 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 	// family-independent, so fall back to the inet from-schema and keep
 	// packed sight regardless of family spelling.
 	if fromSchema == nil {
-		fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
+		fromSchema = refFirewallFamilyInetFilterTermFrom.resolve()
 	}
 	if termNode == nil || fromSchema == nil {
 		return nil
 	}
 	seen := map[string]bool{}
 	valued := map[string]bool{}
-	termSchema := schemaForPath("firewall", "family", "inet", "filter", "term")
+	termSchema := refFirewallFamilyInetFilterTerm.resolve()
 	fromNodes, packedFroms := firewallTermFromNodes(termNode, termSchema)
 	ambiguousFrom := map[*Node]bool{}
 	// #10073: preserve raw packed `from` nodes when the operand has the

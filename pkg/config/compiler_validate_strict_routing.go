@@ -1055,14 +1055,7 @@ func validateRibGroupImportRibReferencesStrict(cfg *Config) error {
 // instance (`routing-options rib-groups <name>`), shared by pointer with
 // the per-instance grammar (#15065), for expanding packed bodies.
 func ribGroupImportPolicySchema15661() *schemaNode {
-	rg := resolveSchemaChild(schemaRoutingOptions, "rib-groups")
-	if rg == nil {
-		return nil
-	}
-	if rg.wildcard != nil {
-		return rg.wildcard
-	}
-	return rg
+	return refRibGroupsInstance.resolve()
 }
 
 // ribGroupHasImportPolicy15661 reports whether one compiled-form rib-group

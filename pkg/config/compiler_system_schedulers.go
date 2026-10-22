@@ -193,13 +193,5 @@ func schedulerWindowFromNode(n *Node) (SchedulerDayWindow, bool) {
 // declares. `daily` and every weekday share it, which is why one lookup serves
 // both call sites of schedulerWindowFromNode.
 func schedulerDayLeafSchema8939() *schemaNode {
-	sch := resolveSchemaChild(setSchema, "schedulers")
-	inst := resolveSchemaChild(sch, "scheduler")
-	if inst == nil {
-		return nil
-	}
-	if inst.wildcard != nil {
-		inst = inst.wildcard
-	}
-	return resolveSchemaChild(inst, "daily")
+	return refSchedulerDaily.resolve()
 }

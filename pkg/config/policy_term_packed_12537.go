@@ -50,7 +50,7 @@ package config
 // inline is set and a `then` clause opens with an unknown action word.
 func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Node {
 	if term == nil || len(term.Children) > 0 || leafSchema == nil ||
-		leafSchema != schemaForPath("policy-options", "policy-statement", "term") {
+		leafSchema != refPolicyTerm.resolve() {
 		return nil
 	}
 	fromSchema := resolveSchemaChild(leafSchema, "from")

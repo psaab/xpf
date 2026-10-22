@@ -15,13 +15,5 @@ package config
 // Applied at BOTH the global site and its routing-instance twin. Fixing one and
 // not the other is how this class keeps coming back.
 func interfaceRoutesRibGroupSchema8939() *schemaNode {
-	ro := resolveSchemaChild(setSchema, "routing-options")
-	if ro == nil {
-		return nil
-	}
-	ir := resolveSchemaChild(ro, "interface-routes")
-	if ir == nil {
-		return nil
-	}
-	return resolveSchemaChild(ir, "rib-group")
+	return refInterfaceRoutesRibGroup.resolve()
 }

@@ -174,7 +174,7 @@ func validateSNMPv3Node14767(v3 *Node) error {
 		return err
 	}
 	var usm *Node
-	for _, c := range packedBodyChildren(v3, schemaForPath("snmp", "v3")) {
+	for _, c := range packedBodyChildren(v3, refSNMPv3.resolve()) {
 		if c.Name() == "usm" {
 			usm = c
 			break
@@ -189,7 +189,7 @@ func validateSNMPv3Node14767(v3 *Node) error {
 	// #14405: expand the engine level too — a fully packed tail
 	// (`v3 usm local-engine { ... }` / `usm local-engine user u1 ...`)
 	// can synthesise the user itself from the engine node.
-	for _, eng := range packedBodyChildren(usm, schemaForPath("snmp", "v3", "usm")) {
+	for _, eng := range packedBodyChildren(usm, refSNMPv3USM.resolve()) {
 		if eng.Name() != "local-engine" {
 			continue
 		}
@@ -214,7 +214,7 @@ func validateSNMPv3Node14767(v3 *Node) error {
 		// A fully packed tail can synthesise the user itself
 		// (`v3 usm local-engine user u1 ...`): packedBodyChildren
 		// on the engine yields the user nodes directly.
-		for _, user := range packedBodyChildren(eng, schemaForPath("snmp", "v3", "usm", "local-engine")) {
+		for _, user := range packedBodyChildren(eng, refSNMPv3USMLocalEngine.resolve()) {
 			if user.Name() != "user" {
 				continue
 			}
@@ -461,7 +461,7 @@ func checkSNMPv3UserKeywords9155(user *Node) error {
 		}
 	}
 	hoisted := hoistAndSplitRun8939(user.Children,
-		schemaForPath("snmp", "v3", "usm", "local-engine", "user"))
+		refSNMPv3USMUser.resolve())
 	for _, prop := range hoisted {
 		for _, tok := range prop.Keys {
 			if err := rejectUnknownSNMPv3Keyword9155(name, tok); err != nil {

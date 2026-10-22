@@ -523,7 +523,7 @@ func bracketedGroupInstances8794(nodes []*Node) []struct {
 // `security zones functional-zone management` for the #9792 packed-run
 // expansion at the functional-zone compile site.
 func functionalZoneManagementSchema15668() *schemaNode {
-	return resolveSchemaPath9235("security", "zones", "functional-zone", "management")
+	return refFunctionalZoneMgmt.resolve()
 }
 
 // managementFunctionalZoneInstances15668 returns every `functional-zone

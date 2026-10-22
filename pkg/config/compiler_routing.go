@@ -2286,7 +2286,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 	for _, tc := range children {
 		switch tc.Name() {
 		case "from":
-			fromSchema := schemaForPath("policy-options", "policy-statement", "term", "from")
+			fromSchema := refPolicyTermFrom.resolve()
 			fromChildren := policyTermFromChildren11779(term, tc, fromSchema)
 			if len(fromChildren) == 0 {
 				term.UnknownFrom = append(term.UnknownFrom, policyFromMissingPredicate11779)
@@ -3331,23 +3331,9 @@ func RibGroupConnectedPrefixes(cfg *Config) map[string][]string {
 // 200; load-balance per-packet; accept; }` is ordinary Junos. That is the row
 // with the operator behind it.
 func policyStatementThenSchema8939() *schemaNode {
-	po := resolveSchemaChild(setSchema, "policy-options")
-	ps := resolveSchemaChild(po, "policy-statement")
-	if ps != nil && ps.wildcard != nil {
-		ps = ps.wildcard
-	}
-	return resolveSchemaChild(ps, "then")
+	return refPolicyStatementInstanceThen.resolve()
 }
 
 func policyTermThenSchema8939() *schemaNode {
-	po := resolveSchemaChild(setSchema, "policy-options")
-	ps := resolveSchemaChild(po, "policy-statement")
-	if ps != nil && ps.wildcard != nil {
-		ps = ps.wildcard
-	}
-	term := resolveSchemaChild(ps, "term")
-	if term != nil && term.wildcard != nil {
-		term = term.wildcard
-	}
-	return resolveSchemaChild(term, "then")
+	return refPolicyTermThen.resolve()
 }

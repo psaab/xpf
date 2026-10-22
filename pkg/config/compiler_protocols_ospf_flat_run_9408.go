@@ -41,13 +41,13 @@ package config
 // without this would have shipped a leaf whose first measurable behaviour is a
 // silent drop.
 func ospfSchema9408() *schemaNode {
-	return resolveSchemaChild(resolveSchemaChild(setSchema, "protocols"), "ospf")
+	return refOSPF.resolve()
 }
 
 // ospf3Schema13531 resolves `protocols ospf3` for schema-gated flat-run
 // expansion, so chained top-level leaves and areas are segmented alike.
 func ospf3Schema13531() *schemaNode {
-	return resolveSchemaChild(resolveSchemaChild(setSchema, "protocols"), "ospf3")
+	return refOSPF3.resolve()
 }
 
 // applyOSPFReferenceBandwidth9408 stores `protocols ospf reference-bandwidth`

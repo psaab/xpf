@@ -103,7 +103,7 @@ func expandRunChildren9235(children []*Node, container *schemaNode) []*Node {
 // behavioural test would necessarily notice.
 
 func policerIfExceedingSchema9235() *schemaNode {
-	return resolveSchemaPath9235("firewall", "policer", "if-exceeding")
+	return refFirewallPolicerIfExceeding.resolve()
 }
 
 // #9882: the policer `then` containers, for the hoistAndSplitRun8939 reader
@@ -113,68 +113,63 @@ func policerIfExceedingSchema9235() *schemaNode {
 // reader makes every spelling read what the operator wrote. Covered by
 // TestFlatRunResidueSchemasResolve9235 like every resolver here.
 func policerThenSchema9882() *schemaNode {
-	return resolveSchemaPath9235("firewall", "policer", "then")
+	return refFirewallPolicerThen.resolve()
 }
 
 func threeColorPolicerThenSchema9882() *schemaNode {
-	return resolveSchemaPath9235("firewall", "three-color-policer", "then")
+	return refThreeColorPolicerThen.resolve()
 }
 
 func raPrefixSchema9235() *schemaNode {
-	return resolveSchemaPath9235("protocols", "router-advertisement", "interface", "prefix")
+	return refRAPrefix.resolve()
 }
 
 func staticQualifiedNextHopSchema9235() *schemaNode {
-	return resolveSchemaPath9235("routing-options", "static", "route", "qualified-next-hop")
+	return refStaticQualifiedNextHop.resolve()
 }
 
 func schedulerSchema9235() *schemaNode {
-	return resolveSchemaPath9235("schedulers", "scheduler")
+	return refScheduler.resolve()
 }
 
 func flowAgingSchema9235() *schemaNode {
-	return resolveSchemaPath9235("security", "flow", "aging")
+	return refFlowAging.resolve()
 }
 
 func securityLogSchema9235() *schemaNode {
-	return resolveSchemaPath9235("security", "log")
+	return refSecurityLog.resolve()
 }
 
 func persistentNATSchema9235() *schemaNode {
-	return resolveSchemaPath9235("security", "nat", "source", "pool", "persistent-nat")
+	return refNATPersistentNAT.resolve()
 }
 
 func ipfixTemplateSchema9235() *schemaNode {
-	return resolveSchemaPath9235("services", "flow-monitoring", "version-ipfix", "template")
+	return refIPFIXTemplate.resolve()
 }
 
 func version9TemplateSchema9235() *schemaNode {
-	return resolveSchemaPath9235("services", "flow-monitoring", "version9", "template")
+	return refVersion9Template.resolve()
 }
 
 func dataplaneCoalescenceSchema9235() *schemaNode {
-	return resolveSchemaPath9235("system", "dataplane", "coalescence")
+	return refDataplaneCoalescence.resolve()
 }
 
 func dhcpStaticBindingSchema9235() *schemaNode {
-	return resolveSchemaPath9235("system", "services", "dhcp-local-server", "group", "pool", "static-binding")
+	return refDHCPStaticBinding.resolve()
 }
 
 func systemServicesSSHSchema9235() *schemaNode {
-	return resolveSchemaPath9235("system", "services", "ssh")
+	return refSystemServicesSSH.resolve()
 }
 
-// resolveSchemaPath9235 walks `setSchema` by keyword. An `args:N` container IS
-// the node its arguments are written after, so no wildcard step is needed for
-// any container in this family -- measured, not assumed
-// (TestFlatRunResidueSchemasResolve9235 pins the children each one declares).
+// resolveSchemaPath9235 is retained for the arg-taking resolvers that
+// stay functions (#16147): their dynamic element (keyword, server,
+// branch) cannot be a static SchemaRef. The walk itself is
+// schemaForPath, the single keyword-path walker; the static paths that
+// used to be spelled through here are now SchemaRefs in schema_refs.go,
+// audited by TestSchemaRefsResolve and validateSchemaRefs.
 func resolveSchemaPath9235(path ...string) *schemaNode {
-	n := setSchema
-	for _, k := range path {
-		if n == nil {
-			return nil
-		}
-		n = resolveSchemaChild(n, k)
-	}
-	return n
+	return schemaForPath(path...)
 }

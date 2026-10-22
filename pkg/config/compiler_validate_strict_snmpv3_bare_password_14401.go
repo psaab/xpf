@@ -110,7 +110,7 @@ func checkSNMPv3BarePasswordLeaf14401(user *Node) error {
 		userChildren = user.Children[0].Children
 	}
 	expanded := hoistAndSplitRun8939(userChildren,
-		schemaForPath("snmp", "v3", "usm", "local-engine", "user"))
+		refSNMPv3USMUser.resolve())
 	for _, prop := range expanded {
 		if len(prop.Keys) == 0 {
 			continue

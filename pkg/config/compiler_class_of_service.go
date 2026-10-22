@@ -729,7 +729,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		if sched == nil {
 			sched = &CoSScheduler{Name: inst.name}
 		}
-		for _, child := range cosPackedInstanceBody(inst.node, inst.name, "schedulers", schemaForPath("class-of-service", "schedulers")) {
+		for _, child := range cosPackedInstanceBody(inst.node, inst.name, "schedulers", refCoSSchedulers.resolve()) {
 			switch child.Name() {
 			case "transmit-rate":
 				rate, percent, remainder, exact := parseCoSTransmitRate(child)
@@ -826,7 +826,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// #15064: expand a packed instance tail (`TCP shaping-rate 10m;`)
 		// into children first; the #8939 flat-run split below then sees
 		// the same child shape as the braced spelling.
-		inst.node = cosPackedInstanceNode(inst.node, inst.name, "traffic-control-profiles", schemaForPath("class-of-service", "traffic-control-profiles"))
+		inst.node = cosPackedInstanceNode(inst.node, inst.name, "traffic-control-profiles", refCoSTrafficControlProfiles.resolve())
 		// #8939: split a packed run before any lookup. This block asks
 		// inst.node.FindChild(...) once per option, and `traffic-control-profiles
 		// TCP delay-buffer-rate 100000 guaranteed-rate 200000 scheduler-map M`
@@ -887,7 +887,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		if schedMap.Entries == nil {
 			schedMap.Entries = make(map[string]*CoSSchedulerMapEntry)
 		}
-		for _, child := range cosPackedInstanceBody(inst.node, inst.name, "scheduler-maps", schemaForPath("class-of-service", "scheduler-maps")) {
+		for _, child := range cosPackedInstanceBody(inst.node, inst.name, "scheduler-maps", refCoSSchedulerMaps.resolve()) {
 			// #15064: a forwarding-class packed at its own level inside a
 			// braced map (`M { be scheduler S; }`) arrives as a name-first
 			// child ([be scheduler S]); expand it behind its keyword so
@@ -896,7 +896,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 				if len(child.Keys) == 0 {
 					continue
 				}
-				body := cosPackedInstanceBody(child, child.Keys[0], "forwarding-class", schemaForPath("class-of-service", "scheduler-maps", "forwarding-class"))
+				body := cosPackedInstanceBody(child, child.Keys[0], "forwarding-class", refCoSSchedulerMapsFC.resolve())
 				child = &Node{Keys: []string{"forwarding-class", child.Keys[0]}, Children: body, InheritedFrom: child.InheritedFrom}
 			}
 			// #15064: a class packed at its own level inside a braced
@@ -904,7 +904,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 			// arrives as a name-first grandchild; expand it the same way.
 			if len(child.Children) == 1 && len(child.Children[0].Keys) > 0 && child.Children[0].Name() != "scheduler" {
 				sub := child.Children[0]
-				body := cosPackedInstanceBody(sub, sub.Keys[0], "forwarding-class", schemaForPath("class-of-service", "scheduler-maps", "forwarding-class"))
+				body := cosPackedInstanceBody(sub, sub.Keys[0], "forwarding-class", refCoSSchedulerMapsFC.resolve())
 				child = &Node{Keys: []string{"forwarding-class", sub.Keys[0]}, Children: body, InheritedFrom: child.InheritedFrom}
 			}
 			if child.Name() != "forwarding-class" || len(child.Keys) < 2 {
@@ -938,7 +938,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// handled by parseCoSInterfaceUnitBody's own expansion) into
 		// children so the level body and the `unit` enumeration below see
 		// the braced shape.
-		inst.node = cosPackedInstanceNode(inst.node, inst.name, "interfaces", schemaForPath("class-of-service", "interfaces"))
+		inst.node = cosPackedInstanceNode(inst.node, inst.name, "interfaces", refCoSInterfaces.resolve())
 		iface := cos.Interfaces[inst.name]
 		if iface == nil {
 			iface = &CoSInterface{
@@ -1034,7 +1034,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 			// children so parseCoSInterfaceUnitBody sees the braced
 			// shape. Its existing #9792 expansion only rewrites
 			// CHILD runs and cannot synthesize children from Keys.
-			unitNode = cosPackedInstanceNode(unitNode, unitNode.Keys[1], "unit", schemaForPath("class-of-service", "interfaces", "unit"))
+			unitNode = cosPackedInstanceNode(unitNode, unitNode.Keys[1], "unit", refCoSInterfacesUnit.resolve())
 			parseCoSInterfaceUnitBody(unitNode, unit)
 			if coSInterfaceUnitHasBinding(unit) {
 				iface.Units[unitID] = unit
@@ -1052,8 +1052,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 			// collecting an expectation. A flat `active-workers 2
 			// at-least-active-workers 3` chain otherwise exposes only the head
 			// and silently installs the incomplete expectation.
-			queueSchema := resolveSchemaPath9235(
-				"class-of-service", "fairness", "rss-expectation", "interface", "queue")
+			queueSchema := refCoSFairnessQueue.resolve()
 			warnRSS := func(detail error) {
 				if warnings != nil {
 					*warnings = append(*warnings, fmt.Sprintf(

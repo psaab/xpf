@@ -8,20 +8,5 @@ package config
 // too, and both readers share this schema — the override keywords are the same
 // set at either depth.
 func dhcpRelayOverridesSchema8939() *schemaNode {
-	fo := resolveSchemaChild(setSchema, "forwarding-options")
-	if fo == nil {
-		return nil
-	}
-	dr := resolveSchemaChild(fo, "dhcp-relay")
-	if dr == nil {
-		return nil
-	}
-	grp := resolveSchemaChild(dr, "group")
-	if grp == nil {
-		return nil
-	}
-	if grp.wildcard != nil {
-		grp = grp.wildcard
-	}
-	return resolveSchemaChild(grp, "overrides")
+	return refDHCPrelayOverrides.resolve()
 }

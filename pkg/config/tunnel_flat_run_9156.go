@@ -51,11 +51,7 @@ import "strconv"
 // so one resolver serves both readers; TestTunnelSchemaResolvesBothPositions9156
 // asserts that rather than assuming it.
 func tunnelSchema9156() *schemaNode {
-	ifaces := resolveSchemaChild(setSchema, "interfaces")
-	if ifaces == nil || ifaces.wildcard == nil {
-		return nil
-	}
-	return resolveSchemaChild(ifaces.wildcard, "tunnel")
+	return refTunnel.resolve()
 }
 
 // tunnelRunChildren9156 is what both tunnel readers iterate.

@@ -210,7 +210,7 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 			unit := unitInst.node
 			// The packed unit form itself may carry vlan leaves on its
 			// own Keys tail; expand those into children for the stack.
-			if unitBody := packedBody(unit, schemaForPath("interfaces", "xpfname", "unit")); unitBody != nil {
+			if unitBody := packedBody(unit, refInterfaceUnit.resolve()); unitBody != nil {
 				unit = unitBody
 			}
 			st := unitVLANStack(unit)

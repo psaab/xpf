@@ -421,7 +421,7 @@ func promoteChainedClusterLeaf8939(c *Node) []*Node {
 	if c == nil || len(c.Children) == 0 || len(c.Keys) == 0 {
 		return nil
 	}
-	clusterSchema := schemaForPath("chassis", "cluster")
+	clusterSchema := refChassisCluster.resolve()
 	if clusterSchema == nil {
 		return nil
 	}

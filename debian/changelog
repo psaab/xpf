@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Introduce typed static SchemaRefs for pkg/config (#16147): no-arg
+    schema resolvers and literal schemaForPath call sites now resolve
+    through registered refXxx handles in schema_refs.go, audited by
+    the non-panicking TestSchemaRefsResolve (wrong-node and
+    pointer-identity pins, arg-resolver prefix coverage) and by an
+    init-time validateSchemaRefs that panics naming every dead ref
+    at once. Arg-taking resolvers stay functions; genuinely dynamic,
+    config-driven schemaForPath keeps its tolerant nil return, so the
+    #1960 no-brick load/sync paths gain no new panic. The audit found
+    no dead paths on the base tree, so no silent-drop bug is filed.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Give the application ID space typed Go returns (#16142, one ID
     space per PR): config.AssignedAppID (uint16 underlying) is now the
     collision-resolved id returned by AssignStableAppIDs /

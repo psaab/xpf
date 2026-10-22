@@ -191,7 +191,7 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 			}
 			return nil
 		}
-		if err := walk(iface, nil, schemaForPath("interfaces")); err != nil {
+		if err := walk(iface, nil, refInterfaces.resolve()); err != nil {
 			return nil, err
 		}
 	}
@@ -480,7 +480,7 @@ func validateMemberlessInterfaceRangeFilters12090(nodes []*Node, lenient bool) (
 					continue
 				}
 				for _, path := range rd.shared {
-					pathSchema := schemaForPath("interfaces", "x")
+					pathSchema := refInterfaceInstanceRaw.resolve()
 					for _, p := range filterKeywordPositions12090(pathSchema, path) {
 						keyword := path[p]
 						if keyword != "filter" || !isInterfaceFilterConsumerTokens12090(path, p) {
@@ -875,7 +875,7 @@ func unitPackedTailHasFamilyBeforeFilter14435(n *Node) bool {
 	if n == nil || n.Name() != "unit" {
 		return false
 	}
-	schema := schemaForPath("interfaces", "x", "unit")
+	schema := refInterfaceUnit.resolve()
 	if schema == nil {
 		return false
 	}

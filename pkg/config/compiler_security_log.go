@@ -42,27 +42,14 @@ func validSyslogPort(n int) bool { return n >= 1 && n <= 65535 }
 // the compiler only through a config file or an HA sync, where
 // Store.compileTreeLenient logs a warning naming the leaf.
 func securityLogStreamSchema9391() *schemaNode {
-	n := setSchema
-	for _, k := range []string{"security", "log", "stream"} {
-		if n == nil {
-			return nil
-		}
-		n = n.children[k]
-	}
-	if n == nil {
-		return nil
-	}
-	if n.wildcard != nil {
-		return n.wildcard
-	}
-	return n
+	return refSecurityLogStreamInstance.resolve()
 }
 
 // securityLogProfileSchema resolves the `security log profile <p>` body so a
 // flat/compact run of its own leaves can be expanded before the reader walks
 // it (the profile counterpart of securityLogStreamSchema9391).
 func securityLogProfileSchema() *schemaNode {
-	return schemaForPath("security", "log", "profile")
+	return refSecurityLogProfile.resolve()
 }
 
 // securityLogInstanceBody returns the expanded property nodes for a named
@@ -92,25 +79,7 @@ func securityLogInstanceBody(inst struct {
 }
 
 func securityLogTransportSchema() *schemaNode {
-	n := setSchema
-	for _, k := range []string{"security", "log", "stream"} {
-		if n == nil {
-			return nil
-		}
-		n = n.children[k]
-	}
-	if n == nil {
-		return nil
-	}
-	// `stream` is a named instance: its per-instance body hangs off the
-	// wildcard when one is declared, otherwise off the node itself.
-	if n.wildcard != nil {
-		n = n.wildcard
-	}
-	if n == nil {
-		return nil
-	}
-	return n.children["transport"]
+	return refSecurityLogTransport.resolve()
 }
 
 func compileLog(node *Node, sec *SecurityConfig) error {

@@ -7,14 +7,5 @@ package config
 // compiler_protocols.go sits just under the 1500 LOC [WATCH] floor, and an
 // appended helper block is what pushed it over last time.
 func raInterfaceSchema8939() *schemaNode {
-	ra := resolveSchemaChild(resolveSchemaChild(setSchema, "protocols"),
-		"router-advertisement")
-	ifc := resolveSchemaChild(ra, "interface")
-	if ifc == nil {
-		return nil
-	}
-	if ifc.wildcard != nil {
-		return ifc.wildcard
-	}
-	return ifc
+	return refRAInterface.resolve()
 }

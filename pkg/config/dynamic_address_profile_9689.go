@@ -16,14 +16,5 @@ package config
 // and drops fail-mode on a commit that reports success (the #2419 and #9156
 // gates caught it). hoistAndSplitRun8939 undoes both shapes, given this node.
 func dynamicAddressProfileSchema9689() *schemaNode {
-	sec := resolveSchemaChild(setSchema, "security")
-	da := resolveSchemaChild(sec, "dynamic-address")
-	an := resolveSchemaChild(da, "address-name")
-	if an == nil {
-		return nil
-	}
-	if an.wildcard != nil {
-		an = an.wildcard
-	}
-	return resolveSchemaChild(an, "profile")
+	return refDynamicAddressProfile.resolve()
 }

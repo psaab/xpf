@@ -12,7 +12,7 @@ package config
 // share one resolver; it now returns the declared VPN schema directly rather
 // than manufacturing a second, compiler-only child map.
 func ipsecVPNRunSchema9088() *schemaNode {
-	return ipsecVPNLeafSchema8939()
+	return refIPsecVPNInstance.resolve()
 }
 
 // expandIPsecVPNRun9088 feeds both AST serializations to the shared reader:

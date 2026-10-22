@@ -14,18 +14,10 @@ package config
 // /tmp that MkdirAll would adopt with no peer check. An operator who moved the
 // socket off /tmp in the same statement as another option did not move it.
 func systemDataplaneSchema8939() *schemaNode {
-	sys := resolveSchemaChild(setSchema, "system")
-	if sys == nil {
-		return nil
-	}
-	return resolveSchemaChild(sys, "dataplane")
+	return refSystemDataplane.resolve()
 }
 
 // systemDataplaneSharedUMEMSchema8939 resolves the `shared-umem` body.
 func systemDataplaneSharedUMEMSchema8939() *schemaNode {
-	dp := systemDataplaneSchema8939()
-	if dp == nil {
-		return nil
-	}
-	return resolveSchemaChild(dp, "shared-umem")
+	return refSystemDataplaneSharedUMEM.resolve()
 }

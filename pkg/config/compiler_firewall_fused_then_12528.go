@@ -281,8 +281,8 @@ func validateFirewallFusedThenStrict12528(children []*Node, lenient bool) ([]str
 		if termSchema == nil || fromSchema == nil {
 			// Family-less spelling: the same inet fallback compileFilterFrom
 			// and the #8480 gate use.
-			termSchema = schemaForPath("firewall", "family", "inet", "filter", "term")
-			fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
+			termSchema = refFirewallFamilyInetFilterTerm.resolve()
+			fromSchema = refFirewallFamilyInetFilterTermFrom.resolve()
 		}
 		for _, filterInst := range namedInstances(filterNodes) {
 			termNodes := filterInst.node.FindChildren("term")

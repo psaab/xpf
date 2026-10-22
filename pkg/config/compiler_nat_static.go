@@ -862,7 +862,7 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 			// twin — see compileNATSource. Static keeps its strict #7216
 			// gate; this only makes the packed match visible to it and
 			// to the reader, identically to the braced spelling.
-			ruleNode := packedBody(ruleInst.node, schemaForPath("security", "nat", "static", "rule-set", "rule"))
+			ruleNode := packedBody(ruleInst.node, refNATStaticRule.resolve())
 
 			// #3850: iterate EVERY `match {}` block, not just the first — a
 			// duplicate block (a `load merge`/`load override` that splits its

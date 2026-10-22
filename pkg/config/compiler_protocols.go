@@ -104,7 +104,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 	lldpNode := node.FindChild("lldp")
 	if lldpNode != nil {
 		proto.LLDP = &LLDPConfig{}
-		lldpSchema := schemaForPath("protocols", "lldp")
+		lldpSchema := refLLDP.resolve()
 		lldpChildren := expandFlatRun(flattenChainedChildren(packedTopChildren(lldpNode, lldpSchema), lldpSchema), lldpSchema)
 		for _, child := range lldpChildren {
 			switch child.Name() {
@@ -285,7 +285,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 				// dropped AuthType. Expand the tail schema-driven, exactly as
 				// the #6818/#6821 siblings do.
 				for _, prop := range packedBodyChildren(ifInst.node,
-					schemaForPath("protocols", "ospf", "area", "interface")) {
+					refOSPFAreaInterface.resolve()) {
 					switch prop.Name() {
 					case "passive":
 						iface.Passive = true
@@ -346,7 +346,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						// AuthKey stayed empty, and the adjacency formed
 						// UNAUTHENTICATED with no error and no warning.
 						for _, authChild := range packedBodyChildren(prop,
-							schemaForPath("protocols", "ospf", "area", "interface", "authentication")) {
+							refOSPFAreaInterfaceAuth.resolve()) {
 							switch authChild.Name() {
 							case "md5":
 								iface.AuthType = "md5"
@@ -476,8 +476,8 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			// uses, instead of reading Children directly. It is applied TWICE:
 			// once to lift `area-type …` off the AREA node's own keys, and once
 			// to lift `stub` / `nssa` off the `area-type` node's keys.
-			areaSchema := schemaForPath("protocols", "ospf", "area")
-			atSchema := schemaForPath("protocols", "ospf", "area", "area-type")
+			areaSchema := refOSPFArea.resolve()
+			atSchema := refOSPFAreaType.resolve()
 			for _, atNode := range packedBodyChildren(areaInst.node, areaSchema) {
 				if atNode.Name() != "area-type" {
 					continue
@@ -972,7 +972,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		for _, areaInst := range namedInstances(ospf3Expanded.FindChildren("area")) {
 			area := &OSPFv3Area{ID: areaInst.name}
 
-			areaSchema := schemaForPath("protocols", "ospf3", "area")
+			areaSchema := refOSPF3Area.resolve()
 			areaChildren := expandFlatRun(packedBodyChildren(areaInst.node, areaSchema), areaSchema)
 			areaNode := &Node{Keys: areaInst.node.Keys, Children: areaChildren}
 
@@ -1007,7 +1007,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 				}
 				// #7653: same packed-instance shape as the OSPFv2 loop above.
 				for _, prop := range packedBodyChildren(ifInst.node,
-					schemaForPath("protocols", "ospf3", "area", "interface")) {
+					refOSPF3AreaInterface.resolve()) {
 					switch prop.Name() {
 					case "passive":
 						iface.Passive = true
@@ -1071,7 +1071,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			// reader at both levels so elided, braced-leaf, and braced-container
 			// spellings all populate the same model. Junos calls the flag
 			// "no-summaries"; FRR's area command uses "no-summary".
-			areaTypeSchema := schemaForPath("protocols", "ospf3", "area", "area-type")
+			areaTypeSchema := refOSPF3AreaType.resolve()
 			for _, typeNode := range packedBodyChildren(areaNode, areaSchema) {
 				if typeNode.Name() != "area-type" {
 					continue
@@ -1402,7 +1402,7 @@ func compileRouterAdvertisement(node *Node, proto *ProtocolsConfig) error {
 		// for an explicit 0 (#4119 via a dropped leaf). packedBodyChildren
 		// expands the tail schema-driven, exactly as the OSPF interface loops
 		// above; expandFlatRun then splits any flat-set chain in the result.
-		for _, prop := range expandFlatRun(packedBodyChildren(inst.node, schemaForPath("protocols", "router-advertisement", "interface")), raInterfaceSchema8939()) {
+		for _, prop := range expandFlatRun(packedBodyChildren(inst.node, refRAInterfaceRaw.resolve()), raInterfaceSchema8939()) {
 			switch prop.Name() {
 			case "managed-configuration":
 				ra.ManagedConfig = true

@@ -7,5 +7,5 @@ package config
 // compiler_protocols.go sits just under the 1500 LOC [WATCH] floor and an
 // appended helper block is what crossed it in #9106.
 func bgpLeafSchema8939() *schemaNode {
-	return resolveSchemaChild(resolveSchemaChild(setSchema, "protocols"), "bgp")
+	return refBGP.resolve()
 }

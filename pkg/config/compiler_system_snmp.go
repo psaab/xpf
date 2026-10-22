@@ -682,7 +682,7 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 					tg = &SNMPTrapGroup{Name: tgName}
 					snmp.TrapGroups[tgName] = tg
 				}
-				tgChildren := expandFlatRun(packedBodyChildren(instNode15706, schemaForPath("snmp", "trap-group")), schemaForPath("snmp", "trap-group"))
+				tgChildren := expandFlatRun(packedBodyChildren(instNode15706, refSNMPTrapGroup.resolve()), refSNMPTrapGroup.resolve())
 				// packedBodyChildren on a named node with no packed tail
 				// returns its Children (the braced body); on a two-level
 				// instance node (Keys[0]==name) the schema walk declines
@@ -1158,7 +1158,7 @@ func blockHasNetconfSSH15781(ncNode *Node) bool {
 			return true
 		}
 	}
-	for _, c := range packedBodyChildren(ncNode, schemaForPath("system", "services", "netconf")) {
+	for _, c := range packedBodyChildren(ncNode, refSystemServicesNetconf.resolve()) {
 		if c.Name() == "ssh" || blockHasNetconfSSH15781(c) {
 			return true
 		}
@@ -1171,7 +1171,7 @@ func blockHasNetconfSSH15781(ncNode *Node) bool {
 // (`set system services ssh root-login deny rate-limit 5` nests rate-limit
 // under root-login) back to the sibling position the advisory walks (#13089).
 func systemServicesSSHSchema13089() *schemaNode {
-	return resolveSchemaPath9235("system", "services", "ssh")
+	return refSystemServicesSSH.resolve()
 }
 
 // collectInternetOptionsExtras13089 appends the name of every statement in an
@@ -1224,7 +1224,7 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 	// rebuilds each into the braced chain, with the body attached under the
 	// deepest node (#6818), and returns a braced v3's children unchanged.
 	var usmNode *Node
-	for _, c := range packedBodyChildren(node, schemaForPath("snmp", "v3")) {
+	for _, c := range packedBodyChildren(node, refSNMPv3.resolve()) {
 		if c.Name() == "usm" {
 			usmNode = c
 			break
@@ -1243,7 +1243,7 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 	// usmNode.Children and they belong under the synthesized local-engine.
 	engineNode := usmNode.FindChild("local-engine")
 	if engineNode == nil {
-		for _, c := range packedBodyChildren(usmNode, schemaForPath("snmp", "v3", "usm")) {
+		for _, c := range packedBodyChildren(usmNode, refSNMPv3USM.resolve()) {
 			if c.Name() == "local-engine" {
 				engineNode = c
 				break
@@ -1333,7 +1333,7 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 			// The privacy stanza is nested UNDER that body, which is exactly the
 			// case hoistAndSplitRun8939 exists to lift.
 			userChildren = hoistAndSplitRun8939(userChildren,
-				schemaForPath("snmp", "v3", "usm", "local-engine", "user"))
+				refSNMPv3USMUser.resolve())
 			for _, prop := range userChildren {
 				// #6822: the compact spelling
 				//   authentication-sha256 authentication-password "s3cret";
