@@ -79,6 +79,18 @@ class BakeHugepagesTests(unittest.TestCase):
             "under reference pool": "vm.nr_hugepages = 600\n",
             "non-integer": "vm.nr_hugepages = lots\n",
             "slash-form non-integer": "vm/nr_hugepages = lots\n",
+            "leading-slash zero override":
+                "vm.nr_hugepages = 1440\n/vm/nr_hugepages = 0\n",
+            "leading-slash dot-form short override":
+                "vm.nr_hugepages = 1440\n/vm.nr_hugepages = 600\n",
+            "bare negative-match suppresses assignment":
+                "vm.nr_hugepages = 1440\n-vm.nr_hugepages\n",
+            "bare negative-match slash form suppresses":
+                "vm.nr_hugepages = 1440\n-vm/nr_hugepages\n",
+            "glob key cannot be evaluated":
+                "vm.nr_hugepages = 1440\nvm.* = 0\n",
+            "trailing inline comment is part of the value":
+                "vm.nr_hugepages = 1440 # pages\n",
         }
         for name, text in cases.items():
             with self.subTest(name=name):
@@ -101,6 +113,18 @@ class BakeHugepagesTests(unittest.TestCase):
                      # A dash/slash override that RAISES the pool is the
                      # effective value too.
                      "vm.nr_hugepages = 600\n-vm/nr_hugepages = 2400\n"):
+            with self.subTest(text=text):
+                self.assertEqual(bake.hugepages_conf(text), text)
+
+    def test_hugepages_conf_accepts_leading_slash_and_resumed_forms(self):
+        for text in ("/vm/nr_hugepages = 2400\n",
+                     "/vm.nr_hugepages = 2400\n",
+                     # A bare directive suppresses only until a later
+                     # real assignment replaces it again.
+                     "vm.nr_hugepages = 600\n-vm.nr_hugepages\n"
+                     "vm.nr_hugepages = 2400\n",
+                     # Suppressing an unrelated key changes nothing.
+                     "vm.nr_hugepages = 1440\n-net.ipv4.ip_forward\n"):
             with self.subTest(text=text):
                 self.assertEqual(bake.hugepages_conf(text), text)
 

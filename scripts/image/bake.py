@@ -138,46 +138,78 @@ def hugepages_conf(conf_text=None) -> str:
     on-box file, and the 80-pages-per-binding formula pinned by
     userspace-dp's umem_sizing_contract_tests from drifting apart.
 
-    Fail-closed (review 16260): parse the EFFECTIVE reservation, not a
-    substring. sysctl applies assignments in order, so the last
-    uncommented assignment of the key wins; a commented-out line, a
-    zero value, a wrong key (`vm.nr_hugepages_mempolicy`), or a
-    trailing override to zero must all stop the bake, never ship an
-    image whose status will report 0/N backed. Keys are normalized the
-    way sysctl normalizes them before comparison: `.` and `/` are
-    equivalent separators (`vm/nr_hugepages` IS `vm.nr_hugepages`),
-    and a leading `-` (ignore-errors) still applies the assignment, so
-    `-vm/nr_hugepages = 0` is a real override, not an ignorable line.
-    The effective value must cover the reference topology:
-    80 pages x 18 bindings = 1440.
+    Fail-closed (review 16260): model the file the way its boot consumer
+    (systemd-sysctl) does, not as a substring. Lines are processed in
+    order against a per-key table:
+
+    - Keys are normalized with systemd's `sysctl_normalize`: the
+      ignore-errors prefix `-` is stripped, `path_simplify` collapses
+      redundant separators and removes a leading `/`, and `.`/`/` are
+      equivalent separators after the first (`vm/nr_hugepages`,
+      `/vm/nr_hugepages` and `vm.nr_hugepages` are ONE key).
+    - A later line for the same normalized key REPLACES the earlier
+      entry — including a bare negative-match directive (`-key` with no
+      `=`), which systemd stores as a NULL value and then skips at
+      apply time, suppressing the key entirely.
+    - Inline comments do not exist in this format: everything after
+      `=` is the value.
+
+    The bake dies unless the surviving entry for `vm.nr_hugepages` is an
+    integer >= 1440 (80 pages x 18 bindings, the reference ring-entries
+    16384 topology). A glob pattern (`*`/`?`/`[`) in any key is refused
+    outright: systemd expands globs against live /proc at boot, which a
+    build-time check cannot evaluate, so it must never ship silently in
+    the one file this guard claims to validate.
     """
     if conf_text is None:
         with open(HUGEPAGES_CONF_PATH) as f:
             conf_text = f.read()
-    effective = None
+    # Per-key table mirroring systemd-sysctl's parse_line/apply_all:
+    # normalized key -> value string, or None for a bare negative-match
+    # directive (stored by systemd as NULL and skipped at apply time).
+    entries = {}
     for line in conf_text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
             continue
         key, sep, value = stripped.partition("=")
-        # sysctl key normalization: leading '-' = ignore errors (the
-        # assignment is still applied), '/' and '.' are equivalent
-        # separators. Compare only the normalized exact key so a
-        # slash-form or dash-prefixed override cannot smuggle a short
-        # pool past the dot-form validated value.
-        normalized = key.strip().lstrip("-").strip().replace("/", ".")
-        if not sep or normalized != "vm.nr_hugepages":
-            continue
-        try:
-            effective = int(value.strip())
-        except ValueError:
-            die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value "
-                f"{value.strip()!r} is not an integer; refusing to bake "
-                "an image without a valid UMEM hugepage pool (#16243)")
-    if effective is None:
-        die(f"{HUGEPAGES_CONF_PATH} has no active vm.nr_hugepages "
-            "assignment; refusing to bake an image without the UMEM "
+        # systemd sysctl_normalize: strip the ignore-errors '-', then
+        # path_simplify the key (collapse redundant separators, drop a
+        # leading '/'), then map every '/' to '.' (first-separator rule:
+        # after simplification both spellings denote the same /proc
+        # path either way).
+        raw_key = key.strip().lstrip("-").strip()
+        segments = [s for s in raw_key.replace("\\", "/").split("/") if s not in ("", ".")]
+        if any(s == ".." for s in segments):
+            die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} contains "
+                "'..'; refusing to bake a file whose normalized key cannot "
+                "be evaluated at build time (#16243)")
+        normalized = ".".join(segments)
+        if "*" in normalized or "?" in normalized or "[" in normalized:
+            die(f"{HUGEPAGES_CONF_PATH}: sysctl key {key.strip()!r} is a glob "
+                "pattern; systemd expands it against live /proc at boot, so "
+                "its effect on vm.nr_hugepages cannot be validated at build "
+                "time — refusing to ship it in the hugepage conf (#16243)")
+        if sep:
+            entries[normalized] = value.strip()
+        elif stripped.startswith("-"):
+            # Bare negative-match directive ('-key', no '='): systemd
+            # stores it as a NULL entry replacing any earlier assignment
+            # for the key, then skips it at apply time.
+            entries[normalized] = None
+        # Any other bare line is ignored by systemd's parser as well.
+    if "vm.nr_hugepages" not in entries or entries["vm.nr_hugepages"] is None:
+        die(f"{HUGEPAGES_CONF_PATH} has no effective vm.nr_hugepages "
+            "assignment (absent, or suppressed by a bare negative-match "
+            "directive); refusing to bake an image without the UMEM "
             "hugepage knob (#16243)")
+    raw_value = entries["vm.nr_hugepages"]
+    try:
+        effective = int(raw_value)
+    except ValueError:
+        die(f"{HUGEPAGES_CONF_PATH}: vm.nr_hugepages value "
+            f"{raw_value!r} is not an integer; refusing to bake "
+            "an image without a valid UMEM hugepage pool (#16243)")
     if effective < 1440:
         die(f"{HUGEPAGES_CONF_PATH} effectively reserves "
             f"vm.nr_hugepages={effective}, below the 1440 pages "
