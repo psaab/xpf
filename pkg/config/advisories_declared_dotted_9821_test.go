@@ -59,7 +59,11 @@ func TestUserspaceRxMTUOverBudgetDeclaredDotted9821(t *testing.T) {
 		"z": {Interfaces: []string{"ge-0/0/5.0.10", "ge-0/0/0.1"}},
 	}
 	got := userspaceRxMTUOverBudget(cfg)
-	want := map[string]int{"ge-0/0/5.0": 9000, "ge-0/0/0": 9000}
+	// The dotted stanza's unit 10 is tagged (VlanID 100), so its 9000
+	// belongs to the VLAN child, not the AF_XDP parent. The parent
+	// stanza has no interface MTU, so there is no effective parent MTU
+	// to report. The untagged ge-0/0/0 unit remains over-budget.
+	want := map[string]int{"ge-0/0/0": 9000}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("userspaceRxMTUOverBudget = %v, want %v", got, want)
 	}

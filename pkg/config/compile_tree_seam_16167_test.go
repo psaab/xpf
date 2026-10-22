@@ -230,22 +230,31 @@ func TestCompileTreePublicPairsAreOneLineWrappers16167(t *testing.T) {
 
 // TestCompileTreeWarningOrderBaseHead16167 is the paired base/head order
 // test for the #16167 review folds: one fixture carrying the #10308
-// MgmtZone advisory (data NIC in zone mgmt), the #9727 Rx-MTU advisory
-// (same NIC at MTU 9000), and the #10105/#13967 fabric advisories
-// (configured fabric interface), compiled strict on every branch.
-// Site-by-site, the parent twins emitted this suffix as:
+// MgmtZone advisory (data NIC in zone mgmt) and the #10105/#13967 fabric
+// advisories (configured fabric interface), compiled strict on every
+// branch. Site-by-site, the parent twins emitted this suffix as:
 //
-//	generic: ... MgmtZone, RxMTU, Fabric
-//	node:    ... Fabric, MgmtZone, RxMTU
+//	generic: ... MgmtZone, Fabric
+//	node:    ... Fabric, MgmtZone
 //
 // The unified body must reproduce BOTH sequences exactly — the node
 // sequence for node0 and node1, the generic sequence for nil.
+//
+// #16244: the fixture used to carry MTU 9000 on the same NIC so the
+// #9727 Rx-MTU advisory fired between MgmtZone and Fabric. That shape
+// is now refused at commit (the gate and the advisory share
+// userspaceRxMTUOverBudget, so no strict-compilable fixture can carry
+// the advisory), and the RxMTU leg of the order is unobservable on the
+// strict path. The MgmtZone/Fabric order — the #16167 delta this test
+// exists to pin — is unchanged; RxMTU keeps its slot between them in
+// compiler.go, now reachable only before the gate would have refused
+// (the gate runs in runUniformGates, after the advisory append).
 func TestCompileTreeWarningOrderBaseHead16167(t *testing.T) {
 	lines := []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"set chassis cluster fabric-interface fab0",
-		"set interfaces ge-0/0/1 mtu 9000",
+		"set interfaces ge-0/0/1 mtu 1500",
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
 		"set security zones security-zone mgmt interfaces ge-0/0/1.0",
 	}
@@ -257,31 +266,33 @@ func TestCompileTreeWarningOrderBaseHead16167(t *testing.T) {
 		}
 		return -1
 	}
-	positions := func(t *testing.T, cfg *Config) (mgmt, rx, fabric int) {
+	positions := func(t *testing.T, cfg *Config) (mgmt, fabric int) {
 		t.Helper()
 		mgmt = indexOf(cfg, "(#10308)")
-		rx = indexOf(cfg, "(#9727)")
 		fabric = indexOf(cfg, "(#10105)")
-		if mgmt < 0 || rx < 0 || fabric < 0 || indexOf(cfg, "(#13967)") < 0 {
-			t.Fatalf("fixture must carry #10308, #9727, #10105 and #13967 advisories; warnings=%q", cfg.Warnings)
+		if mgmt < 0 || fabric < 0 || indexOf(cfg, "(#13967)") < 0 {
+			t.Fatalf("fixture must carry #10308, #10105 and #13967 advisories; warnings=%q", cfg.Warnings)
 		}
-		return mgmt, rx, fabric
+		if rx := indexOf(cfg, "(#9727)"); rx >= 0 {
+			t.Fatalf("MTU 1500 must not carry the #9727 advisory (#16244); warnings=%q", cfg.Warnings)
+		}
+		return mgmt, fabric
 	}
 
 	generic, err := CompileConfig(buildTree(t, lines))
 	if err != nil {
 		t.Fatalf("generic compile: %v", err)
 	}
-	if mgmt, rx, fabric := positions(t, generic); !(mgmt < rx && rx < fabric) {
-		t.Fatalf("generic order must be MgmtZone(%d) < RxMTU(%d) < Fabric(%d); warnings=%q", mgmt, rx, fabric, generic.Warnings)
+	if mgmt, fabric := positions(t, generic); !(mgmt < fabric) {
+		t.Fatalf("generic order must be MgmtZone(%d) < Fabric(%d); warnings=%q", mgmt, fabric, generic.Warnings)
 	}
 	for _, n := range []int{0, 1} {
 		nodeCfg, err := CompileConfigForNode(buildTree(t, lines), n)
 		if err != nil {
 			t.Fatalf("node %d compile: %v", n, err)
 		}
-		if mgmt, rx, fabric := positions(t, nodeCfg); !(fabric < mgmt && mgmt < rx) {
-			t.Fatalf("node %d order must be Fabric(%d) < MgmtZone(%d) < RxMTU(%d) (prior node-path sequence); warnings=%q", n, fabric, mgmt, rx, nodeCfg.Warnings)
+		if mgmt, fabric := positions(t, nodeCfg); !(fabric < mgmt) {
+			t.Fatalf("node %d order must be Fabric(%d) < MgmtZone(%d) (prior node-path sequence); warnings=%q", n, fabric, mgmt, nodeCfg.Warnings)
 		}
 	}
 }
