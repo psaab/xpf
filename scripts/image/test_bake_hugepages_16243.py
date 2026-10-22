@@ -146,6 +146,17 @@ class BakeHugepagesTests(unittest.TestCase):
                 "vm.nr_hugepages_mempolicy = 0\nvm.nr_hugepages = 1440\n",
             "slash-form mempolicy refused":
                 "vm.nr_hugepages = 1440\nvm/nr_hugepages_mempolicy = 5\n",
+            # systemd line grammar: CR is a line ending too
+            # (read_line_full), so CR-separated entries are real
+            # lines at boot and must not hide from validation.
+            "CR-separated zero override":
+                "vm.nr_hugepages = 1440\rvm.nr_hugepages = 0\n",
+            "CR-separated bare suppressor":
+                "vm.nr_hugepages = 1440\r-vm.nr_hugepages\n",
+            "CR-separated mempolicy":
+                "vm.nr_hugepages = 1440\rvm.nr_hugepages_mempolicy = 0\n",
+            "CR-only file with short pool":
+                "vm.nr_hugepages = 600\r",
         }
         for name, text in cases.items():
             with self.subTest(name=name):
@@ -162,6 +173,10 @@ class BakeHugepagesTests(unittest.TestCase):
         # Positive controls for the lexical gate: CRLF line endings,
         # tabs, and ordinary ASCII spacing are consumer-valid.
         for text in ("vm.nr_hugepages = 1440\r\n",
+                     # CR alone is a line ending: two valid CR-separated
+                     # lines, and a CRLF file, parse as at boot.
+                     "vm.unrelated_knob = 0\rvm.nr_hugepages = 1440\r",
+                     "vm.nr_hugepages = 1440\r\nvm.unrelated_knob = 0\r\n",
                      "\tvm.nr_hugepages\t=\t1440 \n",
                      "vm.nr_hugepages = " + "0" * 16 + "2640\n"):  # 20-char octal
             with self.subTest(text=text):

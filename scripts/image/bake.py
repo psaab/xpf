@@ -234,7 +234,11 @@ def hugepages_conf(conf_text=None) -> str:
         return "/".join(parts)
 
     entries = {}
-    for line in conf_text.split("\n"):
+    # systemd read_line_full treats LF, CR, and CRLF each as ONE line
+    # ending (categorize_eol/read_line_full in fileio.c) — a CR-separated
+    # entry is a real line at boot, so split on both, consuming CRLF as
+    # a single separator (never an empty phantom line).
+    for line in re.split(r"\r\n|\r|\n", conf_text):
         stripped = line.strip(" \t\n\r")
         if not stripped or stripped.startswith("#") or stripped.startswith(";"):
             continue
