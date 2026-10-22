@@ -1,0 +1,70 @@
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "dhcp-socket-type": "udp",
+      "interfaces": [
+        "ge-0-0-0",
+        "ge-0-0-1"
+      ]
+    },
+    "lease-database": {
+      "name": "/var/lib/kea/kea-leases4.csv",
+      "type": "memfile"
+    },
+    "subnet4": [
+      {
+        "id": 1586321448,
+        "subnet": "10.0.1.0/25",
+        "pools": [
+          {
+            "pool": "10.0.1.10 - 10.0.1.20"
+          }
+        ],
+        "interface": "ge-0-0-0",
+        "option-data": [
+          {
+            "name": "routers",
+            "data": "10.0.1.1"
+          },
+          {
+            "name": "domain-name-servers",
+            "data": "10.0.1.2, 10.0.1.3"
+          },
+          {
+            "name": "domain-name",
+            "data": "example.com"
+          }
+        ],
+        "valid-lifetime": 3600,
+        "reservations": [
+          {
+            "hw-address": "aa:bb:cc:dd:ee:ff",
+            "ip-address": "10.0.1.50",
+            "hostname": "host-a"
+          }
+        ]
+      },
+      {
+        "id": 2438076924,
+        "subnet": "10.10.32.64/26",
+        "pools": [
+          {
+            "pool": "10.10.32.70 - 10.10.32.80"
+          }
+        ],
+        "interface": "ge-0-0-1"
+      },
+      {
+        "id": 996695149,
+        "subnet": "10.99.33.0/26",
+        "pools": [
+          {
+            "pool": "10.99.33.10 - 10.99.33.20"
+          }
+        ],
+        "interface": "ge-0-0-1"
+      }
+    ],
+    "valid-lifetime": 86400
+  }
+}

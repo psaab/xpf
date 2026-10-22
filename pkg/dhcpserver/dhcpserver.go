@@ -1327,9 +1327,141 @@ func resolveSubnetID(subnet string, used map[int]bool) int {
 	return id // unreachable: subnet count is always << keaSubnetIDMax
 }
 
+// keaPool and keaOpt are the Kea subnet pool / option-data JSON shapes,
+// shared by the v4 and v6 renders (#16175). They were previously
+// redeclared as local types inside each generator.
+type keaPool struct {
+	Pool string `json:"pool"`
+}
+
+type keaOpt struct {
+	Name string `json:"name"`
+	Data string `json:"data"`
+}
+
+// keaReservationBinding is the family-neutral form of one static host
+// reservation: the v4 render marshals it as a scalar ip-address, the v6
+// render as a one-element ip-addresses array.
+type keaReservationBinding struct {
+	HWAddress string
+	IPAddress string
+	Hostname  string
+}
+
+// renderedSubnet is the shared intermediate one claimed pool produces in
+// the Kea subnet walk (#16175): the group and pool it came from, the
+// stable subnet-id resolveSubnetID assigned it, and the family-neutral
+// pieces (range pool, interface selector, canonical reservations) both
+// family renders marshal. Family option-data is NOT pre-rendered here:
+// the option names differ per family (routers/domain-name vs
+// dns-servers/domain-search), so each render maps pool fields to its own
+// keaOpt entries.
+type renderedSubnet struct {
+	group        *config.DHCPServerGroup
+	pool         *config.DHCPPool
+	id           int
+	pools        []keaPool
+	iface        string
+	reservations []keaReservationBinding
+}
+
+// keaSubnetSkip describes a pool the walk skipped before any subnet-id
+// was assigned, so the generators can keep their exact warnings while
+// SubnetIDAssignments15694 stays silent.
+type keaSubnetSkip struct {
+	group *config.DHCPServerGroup
+	pool  *config.DHCPPool
+	kept  string // claiming pool, duplicate skips only (#9785)
+	dup   bool
+}
+
+// keaWalkHooks carries the generators' warning seams into the shared
+// walk. Either hook may be nil (SubnetIDAssignments15694 passes none).
+type keaWalkHooks struct {
+	skip   func(keaSubnetSkip)
+	badMAC func(group *config.DHCPServerGroup, sb *config.DHCPStaticBinding)
+}
+
+// walkKeaSubnets is the ONE stable group/pool walk behind
+// generateKea4Config, generateKea6Config, and
+// SubnetIDAssignments15694 (#16175; the display walk is the third copy
+// this extraction exists to fold in, so a skip/id rule can never drift
+// between the rendered config and the displayed ids).
+//
+// It walks stableGroups -> stablePools, skips interface-less groups,
+// subnet-less pools, and later duplicates of an already-claimed masked
+// prefix (#9785, via claimPoolSubnet), and only then assigns an id via
+// resolveSubnetID — so a skipped pool consumes no id. visit is called
+// once per claimed pool, in walk order, with the assigned id; a visit
+// error aborts the walk (the v6 multi-interface / narrowed-group render
+// refusal rides this: the generators refuse, while
+// SubnetIDAssignments15694's visit never errors, preserving its
+// deliberate non-refusal — a refused v6 render writes no Kea config and
+// no lease exists to correlate).
+//
+// #5041/#2668/#5203: the id is a stable hash of the subnet CIDR (see
+// stableSubnetID), so it is identical on both HA nodes, across
+// MASTER-filtered subsets and reloads; resolveSubnetID's CIDR-derived
+// probe keeps even hash collisions node-independent.
+func walkKeaSubnets(groups map[string]*config.DHCPServerGroup, hooks keaWalkHooks, visit func(renderedSubnet) error) error {
+	usedIDs := make(map[int]bool)
+	seenSubnets := make(map[netip.Prefix]string) // #9785: claimPoolSubnet
+	for _, group := range stableGroups(groups) {
+		if group == nil || len(group.Interfaces) == 0 {
+			continue
+		}
+		for _, pool := range stablePools(group.Pools) {
+			if pool == nil || pool.Subnet == "" {
+				if hooks.skip != nil && pool != nil {
+					hooks.skip(keaSubnetSkip{group: group, pool: pool})
+				}
+				continue
+			}
+			if kept, dup := claimPoolSubnet(seenSubnets, group.Name, pool); dup {
+				if hooks.skip != nil {
+					hooks.skip(keaSubnetSkip{group: group, pool: pool, kept: kept, dup: true})
+				}
+				continue
+			}
+			id := resolveSubnetID(pool.Subnet, usedIDs)
+			usedIDs[id] = true
+			rs := renderedSubnet{group: group, pool: pool, id: id, iface: subnetInterface(group)}
+			if pool.RangeLow != "" && pool.RangeHigh != "" {
+				rs.pools = append(rs.pools, keaPool{Pool: fmt.Sprintf("%s - %s", pool.RangeLow, pool.RangeHigh)})
+			}
+			// #2243: per-subnet static (fixed/reserved) host reservations.
+			// Commit-time validation has already rejected a malformed MAC,
+			// an out-of-subnet address, or a duplicate identity/address, so
+			// this is a direct mapping; an unparseable MAC reaching the
+			// tolerant path is skipped via the badMAC hook.
+			for _, sb := range pool.StaticBindings {
+				if sb == nil || sb.MACAddress == "" || sb.FixedAddress == "" {
+					continue
+				}
+				hw, ok := canonicalMAC(sb.MACAddress)
+				if !ok {
+					if hooks.badMAC != nil {
+						hooks.badMAC(group, sb)
+					}
+					continue
+				}
+				rs.reservations = append(rs.reservations, keaReservationBinding{
+					HWAddress: hw,
+					IPAddress: sb.FixedAddress,
+					Hostname:  sb.HostName,
+				})
+			}
+			if err := visit(rs); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // SubnetIDAssignments15694 returns, per family, the Kea subnet-id each
-// rendered pool subnet receives, in the same stable (sorted-group,
-// sorted-pool) walk generateKea4Config / generateKea6Config use (#15694).
+// rendered pool subnet receives, from the same walkKeaSubnets walk
+// generateKea4Config / generateKea6Config use (#15694, #16175).
 // The keys are the pool subnet CIDRs as authored. Pools the generators
 // skip — subnet-less pools, pools in interface-less groups, and later
 // duplicates of an already-claimed masked prefix (#9785) — take no id and
@@ -1348,56 +1480,21 @@ func SubnetIDAssignments15694(cfg *config.DHCPServerConfig) (v4, v6 map[string]i
 		return v4, v6
 	}
 	if srv := cfg.DHCPLocalServer; srv != nil {
-		used := make(map[int]bool)
-		seen := make(map[netip.Prefix]string)
-		for _, group := range stableGroups(srv.Groups) {
-			if group == nil || len(group.Interfaces) == 0 {
-				continue
-			}
-			for _, pool := range stablePools(group.Pools) {
-				if pool == nil || pool.Subnet == "" {
-					continue
-				}
-				if _, dup := claimPoolSubnet(seen, group.Name, pool); dup {
-					continue
-				}
-				id := resolveSubnetID(pool.Subnet, used)
-				used[id] = true
-				v4[pool.Subnet] = id
-			}
-		}
+		_ = walkKeaSubnets(srv.Groups, keaWalkHooks{}, func(rs renderedSubnet) error {
+			v4[rs.pool.Subnet] = rs.id
+			return nil
+		})
 	}
 	if srv := cfg.DHCPv6LocalServer; srv != nil {
-		used := make(map[int]bool)
-		seen := make(map[netip.Prefix]string)
-		for _, group := range stableGroups(srv.Groups) {
-			if group == nil || len(group.Interfaces) == 0 {
-				continue
-			}
-			for _, pool := range stablePools(group.Pools) {
-				if pool == nil || pool.Subnet == "" {
-					continue
-				}
-				if _, dup := claimPoolSubnet(seen, group.Name, pool); dup {
-					continue
-				}
-				id := resolveSubnetID(pool.Subnet, used)
-				used[id] = true
-				v6[pool.Subnet] = id
-			}
-		}
+		_ = walkKeaSubnets(srv.Groups, keaWalkHooks{}, func(rs renderedSubnet) error {
+			v6[rs.pool.Subnet] = rs.id
+			return nil
+		})
 	}
 	return v4, v6
 }
 
 func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
-	type keaPool struct {
-		Pool string `json:"pool"`
-	}
-	type keaOpt struct {
-		Name string `json:"name"`
-		Data string `json:"data"`
-	}
 	type keaReservation struct {
 		HWAddress string `json:"hw-address"`
 		IPAddress string `json:"ip-address"`
@@ -1420,88 +1517,51 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	m.warnAmbiguousV4SubnetSelection(cfg.DHCPLocalServer)
 
 	var subnets []keaSubnet4
-	usedIDs := make(map[int]bool)
-	seenSubnets := make(map[netip.Prefix]string) // #9785: claimPoolSubnet
-	// #5041/#2668/#5203: assign Kea subnet_id from a STABLE hash of the subnet
-	// CIDR, walking a DETERMINISTIC (sorted-group, sorted-pool) order. Kea binds
-	// memfile leases (kea-leases4.csv) to subnets by the subnet_id column. The
-	// prior positional counter gave the SAME subnet a DIFFERENT id on the two
-	// HA nodes because each renders only its MASTER-filtered subset, so a
-	// synced lease misbound on the receiver (#5041). Hashing the CIDR makes the
-	// id a function of the subnet identity alone — identical on both nodes,
-	// across filtered subsets and reloads (#2668). On the astronomically rare
-	// hash collision, resolveSubnetID probes a CIDR-DERIVED sequence (not the
-	// node's set position), so even the colliding pair resolves to the same id
-	// on both nodes (#5203).
-	for _, group := range stableGroups(cfg.DHCPLocalServer.Groups) {
-		if len(group.Interfaces) == 0 {
-			continue
-		}
-		for _, pool := range stablePools(group.Pools) {
-			if pool.Subnet == "" {
-				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",
-					"group", group.Name, "pool", pool.Name)
-				continue
-			}
-			if kept, dup := claimPoolSubnet(seenSubnets, group.Name, pool); dup {
+	hooks := keaWalkHooks{
+		skip: func(s keaSubnetSkip) {
+			if s.dup {
 				m.warn("skipping DHCP pool whose subnet duplicates one already rendered (Kea refuses a second subnet with the same prefix)",
-					"group", group.Name, "pool", pool.Name, "subnet", pool.Subnet, "kept", kept)
-				continue
+					"group", s.group.Name, "pool", s.pool.Name, "subnet", s.pool.Subnet, "kept", s.kept)
+			} else {
+				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",
+					"group", s.group.Name, "pool", s.pool.Name)
 			}
-			id := resolveSubnetID(pool.Subnet, usedIDs)
-			usedIDs[id] = true
-			sub := keaSubnet4{
-				ID:     id,
-				Subnet: pool.Subnet,
-			}
-			if pool.RangeLow != "" && pool.RangeHigh != "" {
-				sub.Pools = append(sub.Pools, keaPool{
-					Pool: fmt.Sprintf("%s - %s", pool.RangeLow, pool.RangeHigh),
-				})
-			}
-			sub.Interface = subnetInterface(group)
-			if pool.Router != "" {
-				sub.OptionData = append(sub.OptionData, keaOpt{
-					Name: "routers", Data: pool.Router,
-				})
-			}
-			if len(pool.DNSServers) > 0 {
-				sub.OptionData = append(sub.OptionData, keaOpt{
-					Name: "domain-name-servers", Data: strings.Join(pool.DNSServers, ", "),
-				})
-			}
-			if pool.Domain != "" {
-				sub.OptionData = append(sub.OptionData, keaOpt{
-					Name: "domain-name", Data: pool.Domain,
-				})
-			}
-			if pool.LeaseTime > 0 {
-				sub.ValidLifetime = pool.LeaseTime
-			}
-			// #2243: per-subnet static (fixed/reserved) host reservations.
-			// Each binds a client hw-address to a fixed ip-address; the
-			// matching client always receives that address. Commit-time
-			// validation (validateDHCPStaticBindingsStrict) has already
-			// rejected a malformed MAC, an out-of-subnet address, or a
-			// duplicate identity/address, so the render is a direct mapping.
-			for _, sb := range pool.StaticBindings {
-				if sb == nil || sb.MACAddress == "" || sb.FixedAddress == "" {
-					continue
-				}
-				hw, ok := canonicalMAC(sb.MACAddress)
-				if !ok {
-					m.warn("skipping DHCP static binding with unparseable MAC",
-						"group", group.Name, "mac", sb.MACAddress)
-					continue
-				}
-				sub.Reservations = append(sub.Reservations, keaReservation{
-					HWAddress: hw,
-					IPAddress: sb.FixedAddress,
-					Hostname:  sb.HostName,
-				})
-			}
-			subnets = append(subnets, sub)
+		},
+		badMAC: func(group *config.DHCPServerGroup, sb *config.DHCPStaticBinding) {
+			m.warn("skipping DHCP static binding with unparseable MAC",
+				"group", group.Name, "mac", sb.MACAddress)
+		},
+	}
+	if err := walkKeaSubnets(cfg.DHCPLocalServer.Groups, hooks, func(rs renderedSubnet) error {
+		pool := rs.pool
+		sub := keaSubnet4{ID: rs.id, Subnet: pool.Subnet, Pools: rs.pools, Interface: rs.iface}
+		if pool.Router != "" {
+			sub.OptionData = append(sub.OptionData, keaOpt{
+				Name: "routers", Data: pool.Router,
+			})
 		}
+		if len(pool.DNSServers) > 0 {
+			sub.OptionData = append(sub.OptionData, keaOpt{
+				Name: "domain-name-servers", Data: strings.Join(pool.DNSServers, ", "),
+			})
+		}
+		if pool.Domain != "" {
+			sub.OptionData = append(sub.OptionData, keaOpt{
+				Name: "domain-name", Data: pool.Domain,
+			})
+		}
+		if pool.LeaseTime > 0 {
+			sub.ValidLifetime = pool.LeaseTime
+		}
+		for _, r := range rs.reservations {
+			sub.Reservations = append(sub.Reservations, keaReservation{
+				HWAddress: r.HWAddress, IPAddress: r.IPAddress, Hostname: r.Hostname,
+			})
+		}
+		subnets = append(subnets, sub)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Collect interfaces. Sorted group order (#2668) also keeps this list
@@ -1559,13 +1619,6 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 }
 
 func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
-	type keaPool struct {
-		Pool string `json:"pool"`
-	}
-	type keaOpt struct {
-		Name string `json:"name"`
-		Data string `json:"data"`
-	}
 	// Kea DHCPv6 reservations bind an identity (hw-address / duid) to an
 	// ARRAY of addresses (ip-addresses), unlike v4's scalar ip-address.
 	// #2243 reserves by client hardware address with a single fixed
@@ -1586,116 +1639,87 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 	}
 
 	var subnets []keaSubnet6
-	usedIDs := make(map[int]bool)
-	seenSubnets := make(map[netip.Prefix]string) // #9785: claimPoolSubnet
-	// #5041/#2668/#5203: same stable-hash subnet_id assignment as the v4 path.
-	// Kea binds kea-leases6.csv leases by subnet_id, so a positional counter
-	// over each node's MASTER-filtered subset gave one subnet different ids on
-	// the two nodes and misbound synced leases. Hash the CIDR so the id is
-	// stable per subnet across nodes, filtered subsets, and reloads; on a hash
-	// collision resolveSubnetID probes a CIDR-DERIVED sequence so the colliding
-	// pair still resolves identically on both nodes (#5203).
-	for _, group := range stableGroups(cfg.DHCPv6LocalServer.Groups) {
-		if len(group.Interfaces) == 0 {
-			continue
-		}
-		for _, pool := range stablePools(group.Pools) {
-			if pool.Subnet == "" {
-				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",
-					"group", group.Name, "pool", pool.Name)
-				continue
-			}
-			if kept, dup := claimPoolSubnet(seenSubnets, group.Name, pool); dup {
+	hooks := keaWalkHooks{
+		skip: func(s keaSubnetSkip) {
+			if s.dup {
 				m.warn("skipping DHCP pool whose subnet duplicates one already rendered (Kea refuses a second subnet with the same prefix)",
-					"group", group.Name, "pool", pool.Name, "subnet", pool.Subnet, "kept", kept)
-				continue
+					"group", s.group.Name, "pool", s.pool.Name, "subnet", s.pool.Subnet, "kept", s.kept)
+			} else {
+				m.warn("skipping subnet-less DHCP pool (Kea refuses an empty subnet and would stop serving every pool of the family)",
+					"group", s.group.Name, "pool", s.pool.Name)
 			}
-			id := resolveSubnetID(pool.Subnet, usedIDs)
-			usedIDs[id] = true
-			sub := keaSubnet6{
-				ID:     id,
-				Subnet: pool.Subnet,
-			}
-			if pool.RangeLow != "" && pool.RangeHigh != "" {
-				sub.Pools = append(sub.Pools, keaPool{
-					Pool: fmt.Sprintf("%s - %s", pool.RangeLow, pool.RangeHigh),
-				})
-			}
-			// Kea v6 subnet selection cannot fall back to address
-			// matching the way v4 can (clients talk from link-local
-			// source addresses), so subnet6 REQUIRES the interface
-			// selector — silently omitting it for a multi-interface
-			// group would orphan the subnet (Codex review on PR
-			// #1835). Reject loudly; the operator splits the group.
-			if len(group.Interfaces) > 1 {
-				return fmt.Errorf("DHCPv6 group spanning interfaces %v: Kea subnet6 requires a single interface selector — split the group per interface", group.Interfaces)
-			}
-			// #9122: a group NARROWED by the RG member filter must be refused
-			// too, and it is a DIFFERENT state from the one above with a
-			// different remedy, so it gets its own message rather than being
-			// folded into that one.
-			//
-			// `subnetInterface` returns "" first on MembersFiltered, so the
-			// check above no longer trips — it sees the FILTERED list, which is
-			// a singleton — and the subnet renders with NO interface selector,
-			// contradicting the invariant three lines up. Kea then cannot select
-			// the subnet for a link-local SOLICIT: a silent, total DHCPv6 outage
-			// for that group with no error anywhere.
-			//
-			// This is the STEADY STATE, not a failover transient.
-			// filterDHCPConfigForMasterRGs is driven by the 2s periodic
-			// converger as well as by RG edges, so for a v6 group spanning two
-			// RGs in an active/active cluster BOTH nodes render it this way
-			// continuously.
-			//
-			// #6520's remedy — fall back to address-based selection — is valid
-			// for v4 and INVALID for v6 by this file's own comment: v6 clients
-			// talk from link-local sources, so there is no address to match on.
-			// The v4 suppression is deliberately left untouched.
-			//
-			// Emphatically NOT `group.Interfaces[0]`: that binds the REMOVED
-			// member's pool to the survivor's interface, which is exactly the
-			// cross-bind #6520 was filed to stop, re-opened for v6. Kea would
-			// lease a foreign prefix on that link.
-			if group.MembersFiltered {
-				return fmt.Errorf("DHCPv6 group %q was narrowed to interfaces %v by redundancy-group membership: Kea subnet6 requires an interface selector and v6 has no address-based fallback, so the subnet would be unselectable — author one DHCPv6 group per redundancy group instead of one spanning several", group.Name, group.Interfaces)
-			}
-			sub.Interface = subnetInterface(group)
-			if len(pool.DNSServers) > 0 {
-				sub.OptionData = append(sub.OptionData, keaOpt{
-					Name: "dns-servers", Data: strings.Join(pool.DNSServers, ", "),
-				})
-			}
-			if pool.Domain != "" {
-				sub.OptionData = append(sub.OptionData, keaOpt{
-					Name: "domain-search", Data: pool.Domain,
-				})
-			}
-			if pool.LeaseTime > 0 {
-				sub.ValidLifetime = pool.LeaseTime
-			}
-			// #2243: per-subnet static (fixed/reserved) host reservations.
-			// v6 binds hw-address -> ip-addresses array. Commit-time
-			// validation already rejected malformed / out-of-subnet /
-			// duplicate bindings.
-			for _, sb := range pool.StaticBindings {
-				if sb == nil || sb.MACAddress == "" || sb.FixedAddress == "" {
-					continue
-				}
-				hw, ok := canonicalMAC(sb.MACAddress)
-				if !ok {
-					m.warn("skipping DHCPv6 static binding with unparseable MAC",
-						"group", group.Name, "mac", sb.MACAddress)
-					continue
-				}
-				sub.Reservations = append(sub.Reservations, keaReservation6{
-					HWAddress:   hw,
-					IPAddresses: []string{sb.FixedAddress},
-					Hostname:    sb.HostName,
-				})
-			}
-			subnets = append(subnets, sub)
+		},
+		badMAC: func(group *config.DHCPServerGroup, sb *config.DHCPStaticBinding) {
+			m.warn("skipping DHCPv6 static binding with unparseable MAC",
+				"group", group.Name, "mac", sb.MACAddress)
+		},
+	}
+	if err := walkKeaSubnets(cfg.DHCPv6LocalServer.Groups, hooks, func(rs renderedSubnet) error {
+		group, pool := rs.group, rs.pool
+		// Kea v6 subnet selection cannot fall back to address
+		// matching the way v4 can (clients talk from link-local
+		// source addresses), so subnet6 REQUIRES the interface
+		// selector — silently omitting it for a multi-interface
+		// group would orphan the subnet (Codex review on PR
+		// #1835). Reject loudly; the operator splits the group.
+		if len(group.Interfaces) > 1 {
+			return fmt.Errorf("DHCPv6 group spanning interfaces %v: Kea subnet6 requires a single interface selector — split the group per interface", group.Interfaces)
 		}
+		// #9122: a group NARROWED by the RG member filter must be refused
+		// too, and it is a DIFFERENT state from the one above with a
+		// different remedy, so it gets its own message rather than being
+		// folded into that one.
+		//
+		// `subnetInterface` returns "" first on MembersFiltered, so the
+		// check above no longer trips — it sees the FILTERED list, which is
+		// a singleton — and the subnet renders with NO interface selector,
+		// contradicting the invariant three lines up. Kea then cannot select
+		// the subnet for a link-local SOLICIT: a silent, total DHCPv6 outage
+		// for that group with no error anywhere.
+		//
+		// This is the STEADY STATE, not a failover transient.
+		// filterDHCPConfigForMasterRGs is driven by the 2s periodic
+		// converger as well as by RG edges, so for a v6 group spanning two
+		// RGs in an active/active cluster BOTH nodes render it this way
+		// continuously.
+		//
+		// #6520's remedy — fall back to address-based selection — is valid
+		// for v4 and INVALID for v6 by this file's own comment: v6 clients
+		// talk from link-local sources, so there is no address to match on.
+		// The v4 suppression is deliberately left untouched.
+		//
+		// Emphatically NOT `group.Interfaces[0]`: that binds the REMOVED
+		// member's pool to the survivor's interface, which is exactly the
+		// cross-bind #6520 was filed to stop, re-opened for v6. Kea would
+		// lease a foreign prefix on that link.
+		if group.MembersFiltered {
+			return fmt.Errorf("DHCPv6 group %q was narrowed to interfaces %v by redundancy-group membership: Kea subnet6 requires an interface selector and v6 has no address-based fallback, so the subnet would be unselectable — author one DHCPv6 group per redundancy group instead of one spanning several", group.Name, group.Interfaces)
+		}
+		sub := keaSubnet6{ID: rs.id, Subnet: pool.Subnet, Pools: rs.pools, Interface: rs.iface}
+		if len(pool.DNSServers) > 0 {
+			sub.OptionData = append(sub.OptionData, keaOpt{
+				Name: "dns-servers", Data: strings.Join(pool.DNSServers, ", "),
+			})
+		}
+		if pool.Domain != "" {
+			sub.OptionData = append(sub.OptionData, keaOpt{
+				Name: "domain-search", Data: pool.Domain,
+			})
+		}
+		if pool.LeaseTime > 0 {
+			sub.ValidLifetime = pool.LeaseTime
+		}
+		for _, r := range rs.reservations {
+			sub.Reservations = append(sub.Reservations, keaReservation6{
+				HWAddress:   r.HWAddress,
+				IPAddresses: []string{r.IPAddress},
+				Hostname:    r.Hostname,
+			})
+		}
+		subnets = append(subnets, sub)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Sorted group order (#2668) keeps this list deterministic across reloads.
