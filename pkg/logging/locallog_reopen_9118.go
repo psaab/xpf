@@ -52,50 +52,95 @@ type wedgeState9118 struct {
 	recovered   atomic.Uint64
 }
 
-// ensureOpenLocked attempts to recover a wedged writer, and reports whether the
-// handle is usable afterwards. The caller must hold lw.mu.
+// ensureOpenForWriter is the single implementation behind both writers'
+// ensureOpenLocked methods (#16181, dedup of #9118). It attempts to recover
+// a wedged writer and reports whether the handle is usable afterwards.
+//
+// Only cheap scalars and field references cross into the helper: logPath is
+// the writer's path as logged (lw.path / tw.path), openArg is the argument
+// for the writer-specific open (lw.path for openHardenedAuditLog, tw.name
+// for openTraceFile), and trace selects between those two open paths and
+// the recovery log message. The open call and the recovery log attributes
+// are constructed only inside the reopen branch below, so the healthy
+// path (file != nil, taken on every ordinary write) performs no callback
+// or slice construction and allocates nothing -- verified by an
+// AllocsPerRun probe in locallog_reopen_dedup_16181_test.go.
+//
+// file and written are pointer parameters because the two writer structs
+// store them in distinct field sets that cannot share a base type without
+// restructuring both writers; passing them explicitly keeps this helper
+// free of writer-specific knowledge beyond the supplied scalars. wedge is
+// shared because both writers already embed wedgeState9118.
+//
+// The caller must hold the owning writer's mutex.
 //
 // Returns false without touching the filesystem when the writer was closed
-// deliberately, or when the last attempt was too recent -- so a caller can use
-// the result directly as "may I write?" and the existing drop-and-count arm
-// stays exactly where it was for the cases that genuinely cannot write.
-func (lw *LocalLogWriter) ensureOpenLocked() bool {
-	if lw.file != nil {
+// deliberately, or when the last attempt was too recent -- so a caller can
+// use the result directly as "may I write?" and the existing drop-and-count
+// arm stays exactly where it was for the cases that genuinely cannot write.
+func ensureOpenForWriter(wedge *wedgeState9118, file **os.File, written *int64, dropped, failed *atomic.Uint64, logPath, openArg string, trace bool) bool {
+	if *file != nil {
 		return true
 	}
-	if lw.wedge.closed {
+	if wedge.closed {
 		return false
 	}
 	now := time.Now()
-	if !lw.wedge.lastAttempt.IsZero() && now.Sub(lw.wedge.lastAttempt) < reopenBackoff9118 {
+	if !wedge.lastAttempt.IsZero() && now.Sub(wedge.lastAttempt) < reopenBackoff9118 {
 		return false
 	}
-	lw.wedge.lastAttempt = now
+	wedge.lastAttempt = now
 
-	f, err := openHardenedAuditLog(lw.path, os.O_APPEND)
+	// Reopen branch only (slow path): select the writer-specific open and,
+	// on success, build the recovery log record. Keeping both out of the
+	// wrappers above the healthy check is what keeps a healthy write at
+	// zero allocations.
+	var f *os.File
+	var err error
+	if trace {
+		f, err = openTraceFile(openArg)
+	} else {
+		f, err = openHardenedAuditLog(openArg, os.O_APPEND)
+	}
 	if err != nil {
 		// Deliberately NOT counted as a failed rotation: no rotation was
 		// attempted. It is counted by the caller's existing drop path, which is
 		// the honest accounting -- one dropped line, one drop.
 		return false
 	}
-	lw.file = f
+	*file = f
 	// Re-sync the byte count to the file that actually exists. The wedge may
-	// have begun mid-rotation, so `written` describes a file that was already
+	// have begun mid-rotation, so *written describes a file that was already
 	// renamed aside; carrying it forward would make the next rotation fire
 	// against the wrong size.
 	if info, statErr := f.Stat(); statErr == nil {
-		lw.written = info.Size()
+		*written = info.Size()
 	} else {
-		lw.written = 0
+		*written = 0
 	}
-	lw.wedge.recovered.Add(1)
-	slog.Warn("local security-log writer recovered after a failed rotation reopen (#9118)",
-		"path", lw.path,
-		"dropped_writes", lw.droppedWrites.Load(),
-		"failed_rotations", lw.failedRotations.Load(),
-		"recoveries", lw.wedge.recovered.Load())
+	wedge.recovered.Add(1)
+	logMsg := "local security-log writer recovered after a failed rotation reopen (#9118)"
+	if trace {
+		logMsg = "flow-trace writer recovered after a failed rotation reopen (#9118)"
+	}
+	slog.Warn(logMsg,
+		"path", logPath,
+		"dropped_writes", dropped.Load(),
+		"failed_rotations", failed.Load(),
+		"recoveries", wedge.recovered.Load())
 	return true
+}
+
+// ensureOpenLocked attempts to recover a wedged writer, and reports whether
+// the handle is usable afterwards. The caller must hold lw.mu.
+//
+// Thin wrapper over ensureOpenForWriter (#16181): the local writer opens a
+// raw path via openHardenedAuditLog, which is deliberately NOT unified with
+// the trace writer's open path (openTraceFile resolves under the trace dir
+// and takes a sanitised basename). Only cheap scalars are passed, so a
+// healthy write allocates nothing.
+func (lw *LocalLogWriter) ensureOpenLocked() bool {
+	return ensureOpenForWriter(&lw.wedge, &lw.file, &lw.written, &lw.droppedWrites, &lw.failedRotations, lw.path, lw.path, false)
 }
 
 // RecoveredWrites reports how many times a wedged writer was reopened (#9118).
@@ -104,43 +149,14 @@ func (lw *LocalLogWriter) ensureOpenLocked() bool {
 // those two look identical if only the drop counter is visible.
 func (lw *LocalLogWriter) RecoveredWrites() uint64 { return lw.wedge.recovered.Load() }
 
-// ensureOpenLocked is the TraceWriter twin, and it exists separately for the
-// same reason the two writers are separate types: they open different paths
-// (openTraceFile resolves under traceLogDir and sanitizes the basename, which
-// openHardenedAuditLog on a raw path would not). The RECOVERY LOGIC is
-// identical, and the wedge is identical -- trace.go's own rotate() nils the
-// handle before reopening and WriteRecord drops forever after -- so the
-// bookkeeping type is shared rather than duplicated.
+// ensureOpenLocked is the TraceWriter wrapper over ensureOpenForWriter
+// (#16181). It exists as a separate method only because the trace writer
+// opens a different path: openTraceFile resolves under traceLogDir and
+// sanitises the basename, which openHardenedAuditLog on a raw path would
+// not. The recovery logic itself is the shared helper above, and only
+// cheap scalars are passed so a healthy write allocates nothing.
 func (tw *TraceWriter) ensureOpenLocked() bool {
-	if tw.file != nil {
-		return true
-	}
-	if tw.wedge.closed {
-		return false
-	}
-	now := time.Now()
-	if !tw.wedge.lastAttempt.IsZero() && now.Sub(tw.wedge.lastAttempt) < reopenBackoff9118 {
-		return false
-	}
-	tw.wedge.lastAttempt = now
-
-	f, err := openTraceFile(tw.name)
-	if err != nil {
-		return false
-	}
-	tw.file = f
-	if info, statErr := f.Stat(); statErr == nil {
-		tw.written = info.Size()
-	} else {
-		tw.written = 0
-	}
-	tw.wedge.recovered.Add(1)
-	slog.Warn("flow-trace writer recovered after a failed rotation reopen (#9118)",
-		"path", tw.path,
-		"dropped_writes", tw.droppedWrites.Load(),
-		"failed_rotations", tw.failedRotations.Load(),
-		"recoveries", tw.wedge.recovered.Load())
-	return true
+	return ensureOpenForWriter(&tw.wedge, &tw.file, &tw.written, &tw.droppedWrites, &tw.failedRotations, tw.path, tw.name, true)
 }
 
 // RecoveredWrites reports how many times a wedged trace writer was reopened.
