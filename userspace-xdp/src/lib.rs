@@ -68,7 +68,9 @@ const USERSPACE_FALLBACK_REASON_MAX: u32 = 21;
 // the existing ABI byte-identical while giving every dispatch arm a
 // hit slot. Per-CPU for the #4113 reason: native XDP runs one
 // program instance per RX queue on distinct CPUs, and the outlined
-// `incr_branch_stat` RMW is only correct CPU-locally. Counting is
+// `incr_branch_stat` RMW is only correct CPU-locally (per-CPU slots
+// need no queue/CPU affinity: the helper always writes the executing
+// CPU's slot). Counting is
 // gated on the TRACE ctrl flag (the `record_trace_packed` precedent):
 // with tracing off the hot path pays only the flag test inside the
 // one outlined callee, so the instrumentation is not itself a new
@@ -76,6 +78,16 @@ const USERSPACE_FALLBACK_REASON_MAX: u32 = 21;
 // LAND_ALARM has no slot here: `land_gate` runs without the ctrl
 // word, and its hit is already counted unconditionally by the
 // degraded map's `land_alarm` reason.
+//
+// Semantics: every slot counts a TERMINAL disposition — the arm
+// that actually returned (or, for fall-through arms, actually
+// redirected). The redirect-family slots in particular count only
+// at the successful XSK redirect return: an attempt that dies in
+// the metadata checks or the redirect error arm is counted by
+// `adjust_meta_fail` / `meta_bounds_fail` / `redirect_err` alone.
+// "Successful" means the redirect helper returned XDP_REDIRECT;
+// AF_XDP delivery can still fail past that point, and no slot
+// claims completed userspace forwarding.
 //
 // Index order is dispatch order in `try_xdp_userspace` (healthy
 // path first, then the ctrl-disabled twin where it has one), so a
@@ -1003,10 +1015,13 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // is_local_destination arm of the session-miss path. A remote
     // destination continues to the AF_XDP redirect and is adjudicated by
     // the worker.
-    // #16241: set by the classifying arms that fall through to the XSK
-    // redirect (session hit, plain miss, interface-NAT miss) so the
-    // redirect arm does not double-count them under the generic slot.
-    let mut redirect_origin_counted = false;
+    // #16241: the redirect origin the classifying arms fall through
+    // with (session hit, plain miss, interface-NAT miss). Carried, not
+    // counted, until the XSK redirect actually succeeds: the success
+    // arm below counts exactly this origin, so metadata/redirect
+    // failures are never reported as forwards. USERSPACE_BRANCH_ARM_MAX
+    // is the "no origin claimed" sentinel.
+    let mut redirect_origin = USERSPACE_BRANCH_ARM_MAX;
     if !native_gre && !native_gre_fragment && !wg_fragment {
         let session_action = if wg_steer_candidate {
             wg_steer_session_action
@@ -1015,8 +1030,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         };
         match session_action {
             USERSPACE_SESSION_ACTION_REDIRECT => {
-                incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_HIT_REDIRECT);
-                redirect_origin_counted = true;
+                // #16241: the origin is carried, not counted, here. The
+                // session_hit_redirect SUCCESS counter fires only in the
+                // Ok arm of the XSK redirect below, so an attempt that
+                // dies in the metadata checks or the redirect error arm
+                // is never reported as a forward.
+                redirect_origin = USERSPACE_BRANCH_ARM_SESSION_HIT_REDIRECT;
                 // Session exists and stays on the userspace dataplane.
             }
             USERSPACE_SESSION_ACTION_PASS_TO_KERNEL => {
@@ -1131,11 +1150,9 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                         return Ok(cpumap_or_pass(ctrl));
                     }
                     incr_fallback_stat(USERSPACE_FALLBACK_REASON_INTERFACE_NAT_NO_SESSION);
-                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_IFNAT_REDIRECT);
-                    redirect_origin_counted = true;
+                    redirect_origin = USERSPACE_BRANCH_ARM_SESSION_MISS_IFNAT_REDIRECT;
                 } else {
-                    incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_SESSION_MISS_REDIRECT);
-                    redirect_origin_counted = true;
+                    redirect_origin = USERSPACE_BRANCH_ARM_SESSION_MISS_REDIRECT;
                 }
                 // Let all session misses through to the userspace dataplane.
                 // The userspace DP will evaluate policy and either create a
@@ -1269,15 +1286,26 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     );
     match USERSPACE_XSK_MAP.redirect(binding_slot_ready, 0) {
         Ok(action) => {
-            // #16241: SESSION_HIT_REDIRECT / SESSION_MISS_REDIRECT /
-            // SESSION_MISS_IFNAT_REDIRECT were already counted at their
-            // classifying arms above; this slot counts a redirect that no
-            // earlier arm claimed (WG worker claim, GRE-inner REDIRECT or
-            // miss). Together the four redirect slots partition every
-            // successful XSK redirect.
-            if !redirect_origin_counted {
-                incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_REDIRECT);
-            }
+            // #16241: SUCCESS counting lives exactly here. Every arm
+            // that falls through to this redirect either stamped its
+            // origin above (session hit, plain miss, interface-NAT
+            // miss) or claimed none (WG worker claim, GRE-inner
+            // REDIRECT/miss, fragment); the four counters
+            // session_hit_redirect / session_miss_redirect /
+            // session_miss_ifnat_redirect / redirect therefore
+            // partition successful XSK redirects — attempts that died
+            // in the metadata checks or the redirect itself are
+            // counted only by adjust_meta_fail / meta_bounds_fail /
+            // redirect_err, never as a forward. Note the boundary:
+            // "successful" means the redirect helper returned
+            // XDP_REDIRECT; AF_XDP delivery can still fail after this
+            // point, and no counter here claims completed forwarding.
+            let origin = if redirect_origin == USERSPACE_BRANCH_ARM_MAX {
+                USERSPACE_BRANCH_ARM_REDIRECT
+            } else {
+                redirect_origin
+            };
+            incr_branch_stat(ctrl.flags, origin);
             Ok(action)
         }
         Err(_) => {

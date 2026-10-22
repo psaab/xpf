@@ -47,8 +47,8 @@ import (
 // PASS at 815623 (18.44%), retiring the exception this comment still
 // described as live. The branch-hit instrumentation (new
 // userspace_branch_stats map + one outlined counter callee) costs
-// +47273 processed insns of verifier walk: the regenerated object
-// LOADS on this host at 862896 (13.71% headroom), below the floor
+// +40977 processed insns (856646 vs the 815623 PASS object) of verifier walk: the regenerated object
+// LOADS on this host at 856646 (14.34% headroom), below the floor
 // again, so it is installed OVERRIDDEN under the same exception
 // shape — exactly this count, nothing else. Counting is TRACE-gated
 // in the shim, so the shipped hot path pays no map cost for these
@@ -89,8 +89,8 @@ func TestShimGateVerdictIsMeasuredPass14851(t *testing.T) {
 	if v.Verdict != "OVERRIDDEN" || !v.OverrideConsumed {
 		t.Fatalf("#14851/#15645: shipped gate verdict is %q (override_consumed=%v); want measured PASS or the recorded #15645 OVERRIDDEN exception", v.Verdict, v.OverrideConsumed)
 	}
-	if v.Stats.ProcessedInsns != 862896 {
-		t.Fatalf("#16241: OVERRIDDEN object measures %d processed insns; the recorded exception is exactly 862896 (13.71%%). A different count is a new object and needs a fresh deliberate decision", v.Stats.ProcessedInsns)
+	if v.Stats.ProcessedInsns != 856646 {
+		t.Fatalf("#16241: OVERRIDDEN object measures %d processed insns; the recorded exception is exactly 856646 (14.34%%). A different count is a new object and needs a fresh deliberate decision", v.Stats.ProcessedInsns)
 	}
 }
 
