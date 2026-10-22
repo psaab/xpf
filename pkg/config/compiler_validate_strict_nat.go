@@ -45,10 +45,20 @@ type NATRuleSetRef struct {
 // the strict gate is per missing field (source from, then to, in
 // config order; then destination from), while the tolerant skip-set
 // is per rule-set. Both projections derive from this single walk so
-// they cannot drift (#16146).
+// they cannot drift (#16146). Findings carry structured fields only;
+// diagnostic text is formatted solely at the strict/warn projection
+// sites (see message), so the skip-set projection formats nothing.
 type natUndefinedZoneFinding struct {
-	Ref     NATRuleSetRef
-	Message string
+	Ref   NATRuleSetRef
+	Field string // "from-zone" or "to-zone"
+	Zone  string // the undefined zone name
+}
+
+// message formats the per-field diagnostic. It is called only by the
+// strict gate (first finding) and the tolerant warning projection.
+func (f natUndefinedZoneFinding) message() string {
+	return fmt.Sprintf("%s-nat rule-set %q: %s %q not defined",
+		f.Ref.Kind, f.Ref.Name, f.Field, f.Zone)
 }
 
 // natUndefinedZoneFindings is the single undefined-zone walk. It
@@ -69,14 +79,12 @@ func natUndefinedZoneFindings(cfg *Config) []natUndefinedZoneFinding {
 		ref := NATRuleSetRef{Kind: "source", Name: rs.Name}
 		if rs.FromZone != "" {
 			if _, ok := cfg.Security.Zones[rs.FromZone]; !ok {
-				out = append(out, natUndefinedZoneFinding{Ref: ref, Message: fmt.Sprintf(
-					"source-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone)})
+				out = append(out, natUndefinedZoneFinding{Ref: ref, Field: "from-zone", Zone: rs.FromZone})
 			}
 		}
 		if rs.ToZone != "" {
 			if _, ok := cfg.Security.Zones[rs.ToZone]; !ok {
-				out = append(out, natUndefinedZoneFinding{Ref: ref, Message: fmt.Sprintf(
-					"source-nat rule-set %q: to-zone %q not defined", rs.Name, rs.ToZone)})
+				out = append(out, natUndefinedZoneFinding{Ref: ref, Field: "to-zone", Zone: rs.ToZone})
 			}
 		}
 	}
@@ -88,9 +96,9 @@ func natUndefinedZoneFindings(cfg *Config) []natUndefinedZoneFinding {
 			if rs.FromZone != "" {
 				if _, ok := cfg.Security.Zones[rs.FromZone]; !ok {
 					out = append(out, natUndefinedZoneFinding{
-						Ref: NATRuleSetRef{Kind: "destination", Name: rs.Name},
-						Message: fmt.Sprintf(
-							"destination-nat rule-set %q: from-zone %q not defined", rs.Name, rs.FromZone)})
+						Ref:   NATRuleSetRef{Kind: "destination", Name: rs.Name},
+						Field: "from-zone",
+						Zone:  rs.FromZone})
 				}
 			}
 		}
@@ -103,7 +111,7 @@ func validateNATUndefinedZoneStrict(cfg *Config) error {
 		return nil
 	}
 	if findings := natUndefinedZoneFindings(cfg); len(findings) > 0 {
-		return fmt.Errorf("%s", findings[0].Message)
+		return fmt.Errorf("%s", findings[0].message())
 	}
 	return nil
 }
@@ -117,7 +125,7 @@ func natUndefinedZoneOffenders(cfg *Config) []string {
 	}
 	out := make([]string, len(findings))
 	for i, f := range findings {
-		out[i] = f.Message
+		out[i] = f.message()
 	}
 	return out
 }
