@@ -727,7 +727,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 						if fm.BitLength == 0 {
 							fm.BitLength = 32
 						}
-						if fm.Mask == 0 {
+						// #15943 (H12-01): only an UNSET mask gets the default;
+						// an explicit match-mask 0x0 must survive.
+						if !fm.MaskSet && fm.Mask == 0 {
 							// #3203/#14634: default mask covers the field's
 							// BitLength bits. Stored field-aligned (low bits);
 							// each matcher boundary MSB-aligns the pair into
@@ -2342,12 +2344,14 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 							parts := strings.SplitN(v, "/", 2)
 							if val, err := strconv.ParseUint(strings.TrimPrefix(parts[0], "0x"), 16, 32); err == nil {
 								fm.Value = uint32(val)
+								fm.ValueSet = true
 							} else {
 								term.UnknownFlexMatch = append(term.UnknownFlexMatch, "match-value "+parts[0])
 							}
 							if len(parts) == 2 {
 								if mask, err := strconv.ParseUint(strings.TrimPrefix(parts[1], "0x"), 16, 32); err == nil {
 									fm.Mask = uint32(mask)
+									fm.MaskSet = true
 								} else {
 									term.UnknownFlexMatch = append(term.UnknownFlexMatch, "match-mask "+parts[1])
 								}
@@ -2357,6 +2361,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 						if v := nodeVal(rc); v != "" {
 							if mask, err := strconv.ParseUint(strings.TrimPrefix(v, "0x"), 16, 32); err == nil {
 								fm.Mask = uint32(mask)
+								fm.MaskSet = true
 							} else {
 								term.UnknownFlexMatch = append(term.UnknownFlexMatch, "match-mask "+v)
 							}

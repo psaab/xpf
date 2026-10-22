@@ -157,6 +157,8 @@ func TestFilterSnapshotFlexMatchOversizedWidthNotCapped(t *testing.T) {
 				BitLength:  40, // 5 bytes — exceeds the u32 wire value
 				Value:      0x1,
 				Mask:       0xFFFFFFFF,
+				ValueSet:   true,
+				MaskSet:    true,
 			},
 		}}},
 	}

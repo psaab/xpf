@@ -30,6 +30,8 @@ func TestFilterSnapshotFlexMatchSerialized(t *testing.T) {
 				BitLength:  16,
 				Value:      0x0800,
 				Mask:       0xFFFF,
+				ValueSet:   true,
+				MaskSet:    true,
 			},
 		}}},
 	}
@@ -82,6 +84,8 @@ func TestFilterSnapshotFlexMatchStart(t *testing.T) {
 					BitLength:  16,
 					Value:      0x0800,
 					Mask:       0xFFFF,
+					ValueSet:   true,
+					MaskSet:    true,
 				},
 			}}},
 		}
@@ -111,6 +115,8 @@ func TestFilterSnapshotFlexMatchValuePreMasked(t *testing.T) {
 				BitLength:  16,
 				Value:      0xFFFF, // bits outside the mask must be stripped
 				Mask:       0x00FF,
+				ValueSet:   true,
+				MaskSet:    true,
 			},
 		}}},
 	}
@@ -160,6 +166,8 @@ func TestFilterSnapshotFlexMatchDefaultLength(t *testing.T) {
 				BitLength:  0, // unset -> default 32-bit
 				Value:      0x12345678,
 				Mask:       0xFFFFFFFF,
+				ValueSet:   true,
+				MaskSet:    true,
 			},
 		}}},
 	}
@@ -203,6 +211,8 @@ func TestFilterSnapshotFlexMatchCeilByteLength(t *testing.T) {
 					BitLength:  tc.bits,
 					Value:      0x1,
 					Mask:       0xFFFFFFFF,
+					ValueSet:   true,
+					MaskSet:    true,
 				},
 			}}},
 		}

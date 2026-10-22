@@ -1807,6 +1807,56 @@ type FlexMatchConfig struct {
 	BitLength  uint8  // match length in bits (8, 16, 32)
 	Value      uint32 // expected value (after mask)
 	Mask       uint32 // mask to apply before comparison
+	// ValueSet records that a `range`/`match-value` leaf actually supplied
+	// a value (#15943, H12-01). Without it a range with no value is
+	// indistinguishable from an explicit `match-value 0x0` after compile,
+	// and finalisation silently turned the value-less range into a live
+	// match on value 0 with a full mask. MaskSet likewise records an
+	// explicit `match-mask` (including `0x0`, match-anything) so the
+	// finalisation default does not overwrite an authored zero mask.
+	// FlexMatchValid (below) is the shared predicate the strict gate and
+	// every snapshot/lo0 builder consult.
+	ValueSet bool
+	MaskSet  bool
+}
+
+// FlexMatchValid reports whether fm's value/mask fit within its bit-length
+// and a value was actually authored (#15943, H12-01). ok=false means the
+// term cannot be represented as authored: no match-value was supplied, or the
+// value carries bits at or above BitLength. Callers on
+// the tolerant path must fail the term closed, exactly as they do for
+// UnknownFlexMatch, rather than silently truncating or inventing a match.
+// A nil fm is valid (no flex-match constraint). An authored mask of 0 is
+// valid when MaskSet is true (match-anything within the field); the
+// finalisation default is applied by the compiler only when !MaskSet.
+func FlexMatchValid(fm *FlexMatchConfig) bool {
+	if fm == nil {
+		return true
+	}
+	if !fm.ValueSet {
+		return false
+	}
+	if fm.BitLength == 0 || fm.BitLength >= 32 {
+		return true // full-width (or defaulted 32): any u32 fits
+	}
+	limit := uint32(1) << fm.BitLength
+	if fm.MaskSet {
+		// An explicit mask defines which value bits matter: both builders
+		// pre-mask (Value & Mask), so value bits outside the mask are
+		// inert by design. What must fit is the EFFECTIVE value.
+		if fm.Value&fm.Mask >= limit {
+			return false
+		}
+		return true
+	}
+	// No explicit mask: finalisation substitutes the full-field default,
+	// so any value bit at or above BitLength would be silently ANDed
+	// away by (Value & Mask) in the builders — a different pattern than
+	// authored.
+	if fm.Value >= limit {
+		return false
+	}
+	return true
 }
 
 // PrefixListRef references a named prefix-list with optional "except" modifier.

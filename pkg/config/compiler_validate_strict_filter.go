@@ -1182,6 +1182,22 @@ func validateFilterFlexMatchStrict(cfg *Config) error {
 						len(term.FlexMatchRangeNames),
 						strings.Join(term.FlexMatchRangeNames, ", "))
 				}
+				// #15943 (H12-01): a value-less range, an explicit mask the
+				// finaliser would have overwritten (now preserved via
+				// MaskSet), or a value/mask carrying bits outside
+				// bit-length cannot be represented as authored. The
+				// compiler used to invent a live 0x0/full-mask match or
+				// silently truncate; reject at commit instead. The
+				// tolerant path fails the term closed via FlexMatchValid
+				// in the snapshot/lo0 builders.
+				if term.FlexMatch != nil && len(term.UnknownFlexMatch) == 0 && !FlexMatchValid(term.FlexMatch) {
+					return fmt.Errorf(
+						"firewall family %s filter %q term %q: flexible-match-range "+
+							"must specify a match-value that fits within bit-length; "+
+							"a range with no match-value would match value 0 and an "+
+							"out-of-width value would be silently truncated (#15943)",
+						family, name, term.Name)
+				}
 				if len(term.UnknownFlexMatch) == 0 {
 					continue
 				}
