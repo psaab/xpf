@@ -1996,15 +1996,46 @@ func hostInboundDestinationWideDropAddrs(views []dpuserspace.ZoneHostInboundView
 	return set
 }
 
+// hostInboundAddrMatchesFamily reports whether a is a syntactically valid
+// bare address of fam ('4' or '6'). A 4-in-6 literal is neither: it renders
+// as ::ffff:a.b.c.d, which neither the text oracle's `ip`/`ip6 daddr` nor
+// the netlink payload compare can express as a host address of one family.
+func hostInboundAddrMatchesFamily(fam byte, a string) bool {
+	addr, err := netip.ParseAddr(a)
+	if err != nil || addr.Zone() != "" {
+		return false
+	}
+	switch fam {
+	case '4':
+		return addr.Is4()
+	case '6':
+		return addr.Is6() && !addr.Is4In6()
+	}
+	return false
+}
+
 // hostInboundUncoveredDropAddrs returns the desired-drop addresses (v4, v6, bare,
 // de-duplicated, sorted) that are NOT in `covered` — the destinations the
 // retained generation has no deny for (#5789). Empty covered (cold boot) makes
 // every desired address uncovered. The returned lists feed
 // buildHostInboundGapFencePayload.
+//
+// #15977 audit: production producers split by family via
+// strings.Contains(host, ":") on hostIPFromCIDR output (which re-renders
+// through net.ParseIP, so a v6 literal always contains ':' and a v4 literal
+// never does) — mis-family cannot arise there today. The filter below keeps
+// that guarantee at THIS boundary regardless of producer: a wrong-family or
+// malformed literal is dropped rather than emitted as `ip daddr <v6>` /
+// `ip6 daddr <v4>` (the text oracle copies literals verbatim via nftAddrSet;
+// the netlink builder fails the whole plan on the same token — a divergent,
+// fail-closed-but-loud outcome this filter makes unreachable from here).
 func hostInboundUncoveredDropAddrs(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, covered map[string]struct{}) (v4, v6 []string) {
 	seen4, seen6 := map[string]struct{}{}, map[string]struct{}{}
 	consider := func(fam byte, addrs []string, seen map[string]struct{}, out *[]string) {
 		for _, a := range addrs {
+			if !hostInboundAddrMatchesFamily(fam, a) {
+				continue
+			}
 			if _, dup := seen[a]; dup {
 				continue
 			}
