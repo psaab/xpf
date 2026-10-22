@@ -258,7 +258,39 @@ impl crate::afxdp::Coordinator {
         // pkg/daemon/daemon_ha_sync.go falls back to the authoritative
         // BulkSync -- so the defect was the nondeterministic refusal itself.
         let sessions = lock_shared_recover(&self.sessions.synced);
+        // #16217 (export stamp): the forward-wire alias map is the
+        // second half of the shared evidence. Lock order is
+        // `shared_sessions` THEN `shared_forward_wire_sessions` (the
+        // single node-wide order); both guards are held for the whole
+        // snapshot so each delta's stamp reads one consistent pair.
+        let wire_sessions = lock_shared_recover(&self.sessions.forward_wire);
 
+        // #16217 (export stamp): per-tuple completion evidence over
+        // BOTH shared maps (canonical lock order above). Computed
+        // once per exported tuple from the guards already held — an
+        // actual reverse packet count > 0 on a reverse/forward row
+        // for the tuple (fail-closed: a synthesized companion with
+        // `rev_packets = 0` never stamps). A row's own Established
+        // wire is NOT evidence here (it is this stamp's output).
+        let evidence_for = |key: &crate::session::SessionKey| {
+            let mut ev = crate::session::NodeServedEvidence::default();
+            for map in [&*sessions, &*wire_sessions] {
+                for e in map.values() {
+                    if e.rev_packets == 0 {
+                        continue;
+                    }
+                    let same = e.key.bare_tuple() == key.bare_tuple();
+                    let reversed =
+                        crate::session::reverse_session_key(&e.key, e.decision.nat)
+                            .bare_tuple()
+                            == key.bare_tuple();
+                    if (same || reversed) && (e.metadata.is_reverse || same) {
+                        ev.rev_packets_any = ev.rev_packets_any.max(e.rev_packets);
+                    }
+                }
+            }
+            ev
+        };
         let ha_state = self.ha.rg_runtime.load();
         let mut deltas = Vec::new();
         for entry in sessions.values() {
@@ -349,11 +381,19 @@ impl crate::afxdp::Coordinator {
                 bulk_resync: false,
                 is_admission: false,
                 tcp_close_class: entry.tcp_close_class,
-                tcp_handshake_state: entry.tcp_handshake_state,
+                // #16217 (export stamp): Established when node-wide
+                // completion evidence holds for this tuple over the
+                // shared maps; otherwise the row's own wire.
+                tcp_handshake_state: if evidence_for(&entry.key).served_and_completed() {
+                    crate::session::TcpHandshakeState::Established.to_wire()
+                } else {
+                    entry.tcp_handshake_state
+                },
                 pptp_call_ids: entry.pptp_call_ids,
                 purge_retirement: false,
             });
         }
+        drop(wire_sessions);
         drop(sessions);
 
         Ok(AllSessionsExport {

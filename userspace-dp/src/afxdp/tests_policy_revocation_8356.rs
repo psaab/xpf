@@ -729,22 +729,17 @@ fn drive_shared_hit_10582_t1_t2(
     let shared_sessions = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
     shared_sessions.lock().expect("shared sessions").insert(
         key.clone(),
-        SyncedSessionEntry {
-            key: key.clone(),
-            decision: decision(WAN_IFINDEX),
-            metadata: metadata(false),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: TCP_ACK,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        SyncedSessionEntry { key: key.clone(),
+        decision: decision(WAN_IFINDEX),
+        metadata: metadata(false),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
     let frame = build_txn_tcp_syn_frame_v4(
         SRC,

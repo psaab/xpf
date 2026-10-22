@@ -1544,22 +1544,17 @@ fn synced_entry_for(
     decision: SessionDecision,
     metadata: SessionMetadata,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    }
+    SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    source_nat_static: None, }
 }
 
 fn flush_deltas_for_test(

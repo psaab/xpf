@@ -298,22 +298,17 @@ fn shared_closing_copies(
     sessions.iter_with_origin(|key, decision, metadata, origin| {
         entries.insert(
             key.clone(),
-            crate::afxdp::SyncedSessionEntry {
-                key: key.clone(),
-                decision,
-                metadata: metadata.clone(),
-                leak_incarnation: 0,
-                origin,
-                protocol: key.protocol,
-                tcp_flags: 0,
-                generation: 0,
-                session_id: sessions.session_id_for(key),
-                tcp_close_class: sessions.close_class_wire_for(key),
-                tcp_handshake_state: 0,
-                pptp_call_ids: 0,
-                rev_packets: 0,
-                source_nat_static: None,
-            },
+            crate::afxdp::SyncedSessionEntry { key: key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            leak_incarnation: 0,
+            origin,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: sessions.session_id_for(key),
+            tcp_close_class: sessions.close_class_wire_for(key), tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+            source_nat_static: None, },
         );
     });
     drop(entries);

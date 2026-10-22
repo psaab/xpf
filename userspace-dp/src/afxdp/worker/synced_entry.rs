@@ -55,6 +55,15 @@ pub(crate) struct SyncedSessionEntry {
     /// #10888: the owning node's TCP handshake state (`0` = legacy/established).
     /// `upsert_synced_with_origin` applies it independently of close class.
     pub(crate) tcp_handshake_state: u8,
+    /// #16217 (export stamp): actual reverse-direction packets the
+    /// serving node has forwarded for this tuple, snapshotted onto the
+    /// shared row at publish/restamp time. Synced rows otherwise carry
+    /// no counters, so this is the only node-wide reverse-service
+    /// evidence `shared_completion_evidence` may read. A synthesized
+    /// reverse companion is published with 0 here; only admitted
+    /// reverse traffic (forward entry's `counters.rev_packets`) ever
+    /// raises it. Never set from a handshake wire.
+    pub(crate) rev_packets: u64,
     /// #14303: the PPTP call-id pair (`PptpCall::to_wire_call_ids`) for a
     /// `Pptp(handle)` forward session, `PPTP_CALL_IDS_ABSENT` (0) otherwise.
     /// Carried on the shared entry so the coordinator bulk export and the

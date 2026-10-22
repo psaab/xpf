@@ -161,22 +161,17 @@ fn tun_origin_reverse_exempt_lookup_10038() {
                 "local forward must install"
             );
         };
-    let shared_entry = |origin: SessionOrigin| SyncedSessionEntry {
-        key: fwd_key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin,
-        protocol: 17,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let shared_entry = |origin: SessionOrigin| SyncedSessionEntry { key: fwd_key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin,
+    protocol: 17,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    source_nat_static: None, };
     let fresh_shared = || Arc::new(Mutex::new(FastMap::default()));
 
     // Local marker → exempt.
@@ -328,22 +323,17 @@ fn tun_origin_legacy_ha_transit_import_does_not_match_10038() {
     let shared = Arc::new(Mutex::new(FastMap::default()));
     shared.lock().expect("shared map").insert(
         fwd_key.clone(),
-        SyncedSessionEntry {
-            key: fwd_key.clone(),
-            decision,
-            metadata,
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: 17,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            rev_packets: 0,
-            source_nat_static: None,
-        },
+        SyncedSessionEntry { key: fwd_key.clone(),
+        decision,
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: 17,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+        source_nat_static: None, },
     );
     assert!(
         !tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat),
@@ -5814,22 +5804,17 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
         forward_ingress_vlan_id: None,
         nat_scope_ifindex: None,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: 6,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 15178,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: 6,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 15178,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    source_nat_static: None, };
     let flow = SessionFlow {
         src_ip: key.src_ip,
         dst_ip: key.dst_ip,
@@ -6023,22 +6008,17 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
             .insert(21, "ge-0/0/0.0".to_string());
         forwarding
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: 6,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 15932,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        pptp_call_ids: 0,
-        rev_packets: 0,
-        source_nat_static: None,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: 6,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 15932,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    source_nat_static: None, };
     let flow = SessionFlow {
         src_ip: key.src_ip,
         dst_ip: key.dst_ip,
@@ -6080,22 +6060,17 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
     metadata.nat_scope_ifindex = None;
     metadata.ingress_ifindex = 0;
     metadata.ingress_zone = 0;
-    let legacy_entry = SyncedSessionEntry {
-        metadata: metadata.clone(),
-        key: entry.key.clone(),
-        decision: entry.decision,
-        leak_incarnation: entry.leak_incarnation,
-        origin: entry.origin,
-        protocol: entry.protocol,
-        tcp_flags: entry.tcp_flags,
-        generation: entry.generation,
-        session_id: entry.session_id,
-        tcp_close_class: entry.tcp_close_class,
-        tcp_handshake_state: entry.tcp_handshake_state,
-        pptp_call_ids: entry.pptp_call_ids,
-        rev_packets: 0,
-        source_nat_static: entry.source_nat_static,
-    };
+    let legacy_entry = SyncedSessionEntry { metadata: metadata.clone(),
+    key: entry.key.clone(),
+    decision: entry.decision,
+    leak_incarnation: entry.leak_incarnation,
+    origin: entry.origin,
+    protocol: entry.protocol,
+    tcp_flags: entry.tcp_flags,
+    generation: entry.generation,
+    session_id: entry.session_id,
+    tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: 0u64, pptp_call_ids: entry.pptp_call_ids,
+    source_nat_static: entry.source_nat_static, };
     let forwarding = mk_forwarding(crate::nat64::Nat64State::from_snapshots(&[
         det_a.clone(),
         rr_b("other-zone"),

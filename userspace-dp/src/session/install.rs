@@ -1194,12 +1194,27 @@ impl SessionTable {
             .unwrap_or(0);
         let source_nat_static = self.source_nat_static_for(&key);
         let pptp_call_ids = self.pptp_call_ids_wire_for(&key);
+        // #16217 (export stamp): when node-wide completion evidence
+        // holds for this tuple (serving rows / node-served stamps in
+        // THIS table — the shared-map half is merged by callers that
+        // hold those locks), the exported Open must read Established
+        // even if this table's own row is still Opening/Pending: the
+        // receiving peer's adoption gate only adopts Established
+        // wires, and a split pair's completion may have been observed
+        // on a sibling worker. Without evidence the live wire is
+        // exported unchanged (fail-closed).
+        let tcp_handshake_state = if self.completion_evidence_for(&key) {
+            crate::session::TcpHandshakeState::Established.to_wire()
+        } else {
+            self.handshake_state_wire_for(&key)
+        };
         Some(SessionDelta {
             provenance,
             tcp_close_class: self.close_class_wire_for(&key),
-            tcp_handshake_state: self.handshake_state_wire_for(&key),
+            tcp_handshake_state,
             pptp_call_ids,
             purge_retirement: false,
+
             kind: SessionDeltaKind::Open,
             key,
             decision,
@@ -1230,6 +1245,41 @@ impl SessionTable {
             is_admission: false,
             source_nat_static,
         })
+    }
+    /// #16217 (export stamp): `open_export_delta_with_provenance`
+    /// with the shared-map half of the completion evidence merged in.
+    /// The caller holds (or held) the shared maps and gathered
+    /// `shared_completion_evidence` for `key`; when the merged
+    /// evidence holds, the Open delta's `tcp_handshake_state` is
+    /// Established. Fail-closed: zero shared evidence and no local
+    /// completion leaves the live wire untouched. The shared evidence
+    /// alone never stamps — it must survive the same
+    /// `served_and_completed` test as the table half (actual reverse
+    /// packet count > 0, never synthesized-companion existence).
+    pub(crate) fn open_export_delta_with_shared_evidence(
+        &self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        fabric_redirect_sync: bool,
+        provenance: ExportProvenance,
+        shared: NodeServedEvidence,
+    ) -> Option<SessionDelta> {
+        let completed = self.completion_evidence_with_shared(&key, shared);
+        let mut delta = self.open_export_delta_with_provenance(
+            key,
+            decision,
+            metadata,
+            origin,
+            fabric_redirect_sync,
+            provenance,
+        )?;
+        if completed {
+            delta.tcp_handshake_state =
+                crate::session::TcpHandshakeState::Established.to_wire();
+        }
+        Some(delta)
     }
 
     pub fn emit_open_delta_with_origin(

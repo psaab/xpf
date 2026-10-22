@@ -743,6 +743,20 @@ pub(super) fn stage_flow_cache_hit(
         // The packet survived the cached output-filter/policer verdicts;
         // only now may a completing ACK's HA transition be published.
         sessions.emit_probe_hit_state_update(&flow.forward_key);
+        // #16217: keep the shared rows' reverse-packet evidence
+        // current on the same packet path — the serving worker's
+        // actual admitted reverse count, never a wire state.
+        {
+            let rev = sessions.rev_packets_for(&flow.forward_key);
+            if rev > 0 {
+                crate::afxdp::shared_ops::restamp_shared_rev_packets(
+                    worker_ctx.shared_sessions,
+                    &flow.forward_key,
+                    cached_decision.nat,
+                    rev,
+                );
+            }
+        }
         // #16223: once the serving pair is established for this tuple,
         // restamp the shared synced entries so sibling replica tables
         // and the peer's expiry probe consult node-level proof instead

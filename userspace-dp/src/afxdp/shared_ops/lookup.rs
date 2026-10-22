@@ -69,41 +69,57 @@ pub(in crate::afxdp) fn lookup_shared_established_for_wire(
     )
     .filter(is_established)
 }
-/// #16217: INPUT evidence for the ct-slice collector — reverse
-/// service observed for the canonical key anywhere in the shared
-/// maps (synced peer/replica row or forward+reverse counters across
-/// the two maps), plus node-wide completion: any shared row that is
-/// a forward entry with observed reverse counters, or a #16223
-/// served cache-hit advanced it. A shared row's Established WIRE is
-/// deliberately NOT read here: shared Established is an OUTPUT of
-/// the restamp this evidence feeds, so importing it would be
-/// chicken-and-egg. (The import/GC consumers that may trust the
-/// wire use `shared_node_served_evidence` instead.)
+/// #16217: INPUT evidence for the ct-slice collector and the export
+/// stamp — reverse service observed for the canonical key anywhere
+/// in the shared maps. Fail-closed: only an ACTUAL reverse packet
+/// count > 0 read off a row counts (`SyncedSessionEntry::rev_packets`,
+/// snapshotted from the serving forward entry's admitted reverse
+/// counters at publish/restamp time). Mere existence of a synthesized
+/// reverse companion NEVER counts — it is published with
+/// `rev_packets = 0`. Which row may vouch: a REVERSE row for the
+/// tuple carries the forward pair's reverse count; a FORWARD row
+/// only counts when its stored key is the REVERSE tuple (its own
+/// counters then measure this pair's reverse direction). A shared
+/// row's Established WIRE is deliberately NOT read here: shared
+/// Established is an OUTPUT of the restamp this evidence feeds, so
+/// importing it would be chicken-and-egg. (The import/GC consumers
+/// that may trust the wire use `shared_node_served_evidence`
+/// instead.)
+///
+/// Lock order: `shared_sessions` THEN `shared_forward_wire_sessions`
+/// — the single node-wide order for the shared maps. Every function
+/// that needs both maps takes them in this order and never holds
+/// them in reverse; see `restamp_shared_forward_wire_established`.
 pub(in crate::afxdp) fn shared_completion_evidence(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     key: &SessionKey,
 ) -> crate::session::NodeServedEvidence {
-    // Synced rows carry no packet counters; worker-table counters are
-    // folded into the collector's local half. The shared maps here
-    // contribute node-wide completion/reverse-service evidence: a
-    // reverse-orientation replica for this tuple in either shared
-    // map was published only after the serving side forwarded the
-    // reverse direction, and a forward row whose derived reverse
-    // matches was served in both directions somewhere node-wide.
+    // Both maps, canonical order (shared_sessions first), held
+    // together so the two halves of the evidence are one snapshot.
     let holders = lock_shared_recover(shared_sessions);
     let wires = lock_shared_recover(shared_forward_wire_sessions);
     let mut ev = crate::session::NodeServedEvidence::default();
     for map in [&*holders, &*wires] {
         for entry in map.values() {
+            if entry.rev_packets == 0 {
+                continue;
+            }
             let same = entry.key.bare_tuple() == key.bare_tuple();
             let reversed = crate::session::reverse_session_key(&entry.key, entry.decision.nat)
                 .bare_tuple()
                 == key.bare_tuple();
-            if same || reversed {
-                if entry.metadata.is_reverse {
-                    ev.rev_packets_any = ev.rev_packets_any.max(1);
-                }
+            if !(same || reversed) {
+                continue;
+            }
+            // A forward row stored under the FORWARD tuple measures
+            // its own forward direction — its `rev_packets` IS this
+            // pair's reverse count, so it vouches. A forward row
+            // stored under some other tuple does not. A reverse row
+            // for the tuple carries the pair's reverse count by
+            // construction (snapshotted from its forward entry).
+            if entry.metadata.is_reverse || same {
+                ev.rev_packets_any = ev.rev_packets_any.max(entry.rev_packets);
             }
         }
     }
@@ -218,6 +234,33 @@ pub(in crate::afxdp) fn restamp_shared_handshake_established(
         }
     }
 }
+
+/// #16217: snapshot a serving pair's ACTUAL reverse packet count
+/// onto its shared rows (canonical forward + derived reverse in
+/// `shared_sessions`). This is the write side of the fail-closed
+/// evidence: only admitted reverse traffic (the forward entry's
+/// `counters.rev_packets`, folded by the serving worker) ever raises
+/// a row's `rev_packets`; synthesized companions publish 0 and this
+/// restamp only ever takes the max, so existence alone never
+/// becomes evidence. `shared_sessions` only — no second map, so no
+/// lock-order question.
+pub(in crate::afxdp) fn restamp_shared_rev_packets(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forward_key: &SessionKey,
+    nat: crate::nat::NatDecision,
+    rev_packets: u64,
+) {
+    if rev_packets == 0 {
+        return;
+    }
+    let reverse_key = crate::session::reverse_session_key(forward_key, nat);
+    let mut sessions = lock_shared_recover(shared_sessions);
+    for candidate in [forward_key, &reverse_key] {
+        if let Some(entry) = sessions.get_mut(candidate) {
+            entry.rev_packets = entry.rev_packets.max(rev_packets);
+        }
+    }
+}
 /// #16223: periodic maintenance — advance the shared entries for
 /// every ESTABLISHED forward key in `established_keys` to the
 /// Established handshake wire. Driven from each worker's budgeted
@@ -273,6 +316,26 @@ pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
         return;
     }
     let established = crate::session::TcpHandshakeState::Established.to_wire();
+    // Lock order: `shared_sessions` THEN `shared_forward_wire_sessions`
+    // — the single node-wide order (see `shared_completion_evidence`).
+    // Phase 1 (shared_sessions only): snapshot the canonical rows the
+    // alias slots may need to clone, then release the guard. Phase 2
+    // (forward_wire only): advance or insert. The pre-fix code held
+    // the wire guard while locking sessions inside the loop (AB-BA
+    // against `shared_completion_evidence`'s sessions-then-wire).
+    let mut canonicals: Vec<(SessionKey, SyncedSessionEntry)> = Vec::new();
+    {
+        let sessions = lock_shared_recover(shared_sessions);
+        for (forward_key, nat) in established_keys {
+            let wire_key = crate::session::forward_wire_key(forward_key, *nat);
+            if wire_key == *forward_key {
+                continue;
+            }
+            if let Some(canonical) = sessions.get(forward_key).cloned() {
+                canonicals.push((wire_key, canonical));
+            }
+        }
+    }
     let mut wire_sessions = lock_shared_recover(shared_forward_wire_sessions);
     for (forward_key, nat) in established_keys {
         let wire_key = crate::session::forward_wire_key(forward_key, *nat);
@@ -283,10 +346,8 @@ pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
             if entry.tcp_handshake_state != established {
                 entry.tcp_handshake_state = established;
             }
-        } else if let Some(canonical) =
-            lock_shared_recover(shared_sessions).get(forward_key).cloned()
-        {
-            let mut aliased = canonical;
+        } else if let Some((_, canonical)) = canonicals.iter().find(|(wk, _)| *wk == wire_key) {
+            let mut aliased = canonical.clone();
             aliased.tcp_handshake_state = established;
             wire_sessions.insert(wire_key, aliased);
         }
