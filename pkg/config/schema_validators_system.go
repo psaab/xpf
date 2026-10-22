@@ -385,6 +385,21 @@ func ValidateDNSDomain(raw string) error {
 	return validateDNSNameShape(raw, "domain")
 }
 
+// ValidateDNSProxyDefaultDomain is ValidateDNSDomain plus the one
+// documented wildcard form: `system services dns dns-proxy
+// default-domain *` means "all domains" (valueDesc on the leaf, and
+// TestDNSProxyWarned strict-compiles it). The wildcard is a named
+// exception here, NOT part of ValidateDNSDomain: `system domain-name *`
+// and a DHCP pool domain of `*` are not wildcards and must still reject.
+// #16163 fold: wiring plain ValidateDNSDomain onto the dns-proxy leaf
+// silently revoked the documented `*` spelling at commit-check.
+func ValidateDNSProxyDefaultDomain(raw string, cfg *Config) error {
+	if raw == "*" {
+		return nil
+	}
+	return ValidateDNSDomain(raw, cfg)
+}
+
 // ValidateSystemHostname accepts the `system host-name` value. Unlike the
 // resolver/domain leaves, this name becomes the kernel node identity and is
 // persisted verbatim, so its admission diagnostic names `host-name` directly.

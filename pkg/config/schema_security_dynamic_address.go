@@ -38,7 +38,7 @@ func dynamicAddressSchema() *schemaNode {
 			// spellings compile identically (TestDynamicAddressFailModeSurvivesOneLineSpellings9689).
 			"profile": {desc: "Feed binding profile", packedStatements: true, children: map[string]*schemaNode{
 				"feed-name": {desc: "Feed to bind to this address name", args: 1, placeholder: "<feed-name>", children: nil},
-				"fail-mode": {desc: "What a feed's hold-interval drop does to this binding: retain (default) keeps enforcing the previous-good policy set, drop publishes an empty set (#9689)", args: 1, valueType: ValueEnumOf, valueDesc: "retain | drop", placeholder: "<mode>", validator: ValidateEnum([]string{"retain", "drop"}), children: nil},
+				"fail-mode": {desc: "What a feed's hold-interval drop does to this binding: retain (default) keeps enforcing the previous-good policy set, drop publishes an empty set (#9689)", args: 1, valueType: ValueEnumOf, valueDesc: "retain | drop", valueExamples: []string{"retain", "drop"}, placeholder: "<mode>", validator: ValidateEnum([]string{"retain", "drop"}), children: nil},
 			}},
 		}},
 	}}

@@ -10229,6 +10229,47 @@ Rules:
   This contract was converged across 7 hostile Codex review rounds; do not
   re-add packed-tail validation without re-checking compiler reachability.
 
+## schemaNode invariant census, Phase A (#16163)
+
+`schemaNode`'s field-combination invariants were comment-only
+(`validator` XOR `treeValidator`, `validator` nil under a
+`tailValidator`, `keyValidator` XOR `keyValidatorPos`, no `valueType` on
+a key-slot container, a `validator` only ever runs when `valueType` is
+non-`ValueAny`). A mis-combined node compiles and commits while no walk
+arm owns it — the #9206 silently-never-validated class.
+`TestSchemaNodeInvariantCensus16163`
+(`pkg/config/schema_node_census_16163_test.go`) walks the live
+`setSchema` by pointer identity (1882 unique nodes on the initial tree)
+and asserts those invariants, plus the R9 enum census as a test only:
+every `ValueEnumOf` leaf's `valueExamples` must be accepted by its own
+validator and must surface in `?` completion. There is deliberately NO
+`enumValues` field on `schemaNode` and NO constructor
+(`typedLeaf`/`enumLeaf`/…): Phase B constructors stay deferred until
+the Phase A allow-list burns down, because a constructor adopted before
+the invariant test exists is a second unpoliced way to build illegal
+nodes.
+
+Initial violations that are deliberate or need a per-site audit live in
+`pkg/config/testdata/schema_node_violations_16163.txt`, one
+`<rule> | <path> | <reason>` line per violation; the test asserts
+set-equality in both directions against the current tree, and a frozen
+baseline (`schemaNodeBaseline16163`, the initial 10 keys) anchors
+monotonicity — the allow-list must stay a subset of the baseline, so a
+fixed entry can never be swapped for a new violation. The census also
+checks the reverse direction for every type (R4b): a `valueType` with
+no validator/treeValidator/tailValidator/nodeValidator owner, or a
+`keyValueType` with no key validator. The seeded-fixture control
+(`TestSchemaNodeCensusSeededViolations16163`, including a node with
+both `validator` and `tailValidator`) keeps the census honest in both
+directions. No `schemaNode` field was added, removed, or renamed, and
+no nested-struct reshaping of the ~1.5k literals was done.
+
+Fold note: the dns-proxy `default-domain` leaf documents `*` as "for
+all domains" (`TestDNSProxyWarned` strict-compiles it), so its wired
+validator is `ValidateDNSProxyDefaultDomain` — `ValidateDNSDomain`
+plus that one named wildcard exception; plain `ValidateDNSDomain`
+(system domain-name, DHCP pool domains) still rejects `*`.
+
 ## Help-text discipline (#1892)
 
 Every `schemaNode` in `setSchema` MUST carry a `desc:` — an empty desc

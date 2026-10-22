@@ -84,6 +84,19 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * Add the Phase-A schemaNode invariant census (#16163): a test walks
+    every node in setSchema (1882 unique) and asserts the documented
+    field-combination invariants plus the enum-example census, with a
+    shrink-only allow-list (10 reasoned entries) for the initial
+    violations. Wire the previously dead validators on the chassis
+    ip-monitoring interface/secondary-ip-address leaves and the
+    dns-proxy default-domain leaf (preserving its documented `*`
+    wildcard), add the DHCP group interface key type, and add enum
+    examples to fail-mode and the NTP threshold
+    action. No schemaNode field or constructor changes.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Refuse a disputed per-unit host-inbound override on a shared ifindex:
     when configured logical units collapsed onto one netdev carried
     different effective host-inbound overrides, the dataplane's flat
