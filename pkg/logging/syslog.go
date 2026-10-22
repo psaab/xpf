@@ -1807,23 +1807,66 @@ func (s *SyslogClient) ShouldSendEvent(severity int, categoryBit uint8) bool {
 	return s.Categories == 0 || s.Categories&categoryBit != 0
 }
 
+// categoryVocabulary is the single spelling table for the category parsers
+// (#16179). The lenient and strict category vocabularies are identical by
+// design — they differ only in what an unrecognized name does — so one table
+// proves they agree on every spelling. The sentinel rows are explicit:
+// "all" and "" both map to 0 (no filter = send everything), which is also
+// the lenient fallback for unknown names; the strict parser distinguishes
+// the sentinels from typos by membership, not by value.
+var categoryVocabulary = map[string]uint8{
+	"":         0, // sentinel: no filter
+	"all":      0, // sentinel: no filter
+	"session":  CategorySession,
+	"policy":   CategoryPolicy,
+	"screen":   CategoryScreen,
+	"firewall": CategoryFirewall,
+}
+
+// severityVocabulary is the LENIENT severity table for ParseSeverity
+// (#16179). It is deliberately separate from severityVocabularyStrict: the
+// two parsers accept different vocabularies, and merging them would either
+// broaden the strict parser (fail-open) or narrow this one (compat break).
+// Sentinel rows are explicit because their values collide with other
+// meanings of the same code: "any" (and "") map to 0, which is also
+// SyslogEmergency's raw level and the unknown-name fallback, while "none"
+// maps to SeverityNone and "emergency" to SeverityEmergency so neither
+// extreme collapses into the send-all zero (#5314). Keys are lower-case;
+// ParseSeverity lower-cases its input.
+var severityVocabulary = map[string]int{
+	"":          0, // sentinel: no filter
+	"any":       0, // sentinel: no filter (send all)
+	"none":      SeverityNone,
+	"emergency": SeverityEmergency,
+	"alert":     SyslogAlert,
+	"critical":  SyslogCritical,
+	"error":     SyslogError,
+	"warning":   SyslogWarning,
+	"notice":    SyslogNotice,
+	"info":      SyslogInfo,
+	"debug":     SyslogDebug,
+}
+
+// severityVocabularyStrict is the STRICT severity table for
+// ParseSeverityStrict (#16179) — a separate, deliberately smaller set than
+// severityVocabulary. Only "" (no filter) and the four SSE filter levels
+// are admitted, with exact (case-sensitive) spelling; the lenient-only
+// names ("any", "none", "emergency", "alert", "critical", "debug") must
+// stay absent so the fail-closed parser keeps rejecting them (#3383).
+var severityVocabularyStrict = map[string]int{
+	"":        0, // sentinel: no filter
+	"error":   SyslogError,
+	"warning": SyslogWarning,
+	"notice":  SyslogNotice,
+	"info":    SyslogInfo,
+}
+
 // ParseCategory converts a Junos category name to a bitmask.
 // "all" or "" returns 0 (no filter = send everything).
 func ParseCategory(name string) uint8 {
-	switch name {
-	case "all", "":
-		return 0
-	case "session":
-		return CategorySession
-	case "policy":
-		return CategoryPolicy
-	case "screen":
-		return CategoryScreen
-	case "firewall":
-		return CategoryFirewall
-	default:
-		return 0
-	}
+	// An unrecognized name tolerantly returns 0 (no filter), the same
+	// value as the "all"/"" sentinels in categoryVocabulary.
+	return categoryVocabulary[name]
 }
 
 // ParseCategoryStrict is the fail-closed variant of ParseCategory (#3383).
@@ -1833,20 +1876,10 @@ func ParseCategory(name string) uint8 {
 // a typo (the SSE log/event stream, where a misspelled query would widen a live
 // feed to everything) use this instead of treating an unknown token as "all".
 func ParseCategoryStrict(name string) (uint8, error) {
-	switch name {
-	case "all", "":
-		return 0, nil
-	case "session":
-		return CategorySession, nil
-	case "policy":
-		return CategoryPolicy, nil
-	case "screen":
-		return CategoryScreen, nil
-	case "firewall":
-		return CategoryFirewall, nil
-	default:
-		return 0, fmt.Errorf("unknown log category %q (want session, policy, screen, firewall, or all)", name)
+	if bit, ok := categoryVocabulary[name]; ok {
+		return bit, nil
 	}
+	return 0, fmt.Errorf("unknown log category %q (want session, policy, screen, firewall, or all)", name)
 }
 
 // ParseSeverityStrict is the fail-closed variant of ParseSeverity (#3383).
@@ -1854,20 +1887,10 @@ func ParseCategoryStrict(name string) (uint8, error) {
 // a non-nil error rather than 0, so a typo'd severity cannot silently disable
 // filtering on the SSE log stream.
 func ParseSeverityStrict(name string) (int, error) {
-	switch name {
-	case "":
-		return 0, nil
-	case "error":
-		return SyslogError, nil
-	case "warning":
-		return SyslogWarning, nil
-	case "notice":
-		return SyslogNotice, nil
-	case "info":
-		return SyslogInfo, nil
-	default:
-		return 0, fmt.Errorf("unknown severity %q (want error, warning, notice, info)", name)
+	if sev, ok := severityVocabularyStrict[name]; ok {
+		return sev, nil
 	}
+	return 0, fmt.Errorf("unknown severity %q (want error, warning, notice, info)", name)
 }
 
 // ParseSeverity converts a Junos syslog severity name to the MinSeverity
@@ -1892,30 +1915,9 @@ func ParseSeverityStrict(name string) (int, error) {
 // reach here; ParseSeverityStrict is the fail-closed variant used by the SSE
 // surface.
 func ParseSeverity(name string) int {
-	switch strings.ToLower(name) {
-	case "any":
-		return 0
-	case "none":
-		return SeverityNone
-	case "emergency":
-		return SeverityEmergency
-	case "alert":
-		return SyslogAlert
-	case "critical":
-		return SyslogCritical
-	case "error":
-		return SyslogError
-	case "warning":
-		return SyslogWarning
-	case "notice":
-		return SyslogNotice
-	case "info":
-		return SyslogInfo
-	case "debug":
-		return SyslogDebug
-	default:
-		return 0
-	}
+	// An unrecognized name tolerantly returns 0 (no filter), the same
+	// value as the "any"/"" sentinels in severityVocabulary.
+	return severityVocabulary[strings.ToLower(name)]
 }
 
 // ParseFacilityChecked converts a facility name to its numeric code and
