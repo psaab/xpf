@@ -358,6 +358,7 @@ func isKnownUnsentFailure(err error) bool {
 	// knownUnsentError cause chain. Both forms exclude adoption.
 	if errors.Is(err, errSnapshotDigest) ||
 		errors.Is(err, errSnapshotPolicyMismatch) ||
+		errors.Is(err, errSnapshotPolicyAction) ||
 		errors.Is(err, errRGProviderNotWired) ||
 		errors.Is(err, errControlSocketNotConfigured) ||
 		errors.Is(err, errControlRequestEncode) ||

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 )
 
 // RecordDeferredWorkerArmDebt marks that the MANDATORY deferred-MAC re-apply
@@ -58,18 +57,13 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 	}
 
 	// Compute the next generation locally and commit m.generation ONLY after
-	// the publish succeeds (mirrors UpdatePolicyScheduleState). A failed
-	// apply_snapshot must not permanently advance m.generation — otherwise
-	// each failed retry tick would burn a generation while the debt persists.
-	nextGeneration := m.generation + 1
-	next := *m.lastSnapshot
-	if !m.pendingFullSnapshotMetadata {
-		stripSingleUseCommitMetadata(&next)
-	}
+	// the publish succeeds (the shared bump + adopt do exactly this). A
+	// failed apply_snapshot must not permanently advance m.generation —
+	// otherwise each failed retry tick would burn a generation while the
+	// debt persists. #16153 (P3): clone/bump/adopt via the shared pipeline.
+	next, _ := m.cloneRetainedSnapshotLocked()
+	m.bumpRetainedGenerationLocked(&next)
 	next.DeferWorkers = false
-	next.Generation = nextGeneration
-	next.FIBGeneration = m.readFIBGeneration()
-	next.GeneratedAt = time.Now().UTC()
 	m.refreshCaptureAuthorityLocked(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 
@@ -89,43 +83,14 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		// Debt stays set — the status loop retries on the next tick.
 		return fmt.Errorf("re-arm deferred workers: %w", err)
 	}
-	// #15043: retain every section the apply-time rebuild rewrote
-	// (#14209), not just Interfaces; see UpdatePolicyScheduleState.
-	// Neighbors stays uncaptured (publishable-only filter copy).
-	next.Interfaces = publishSnap.Interfaces
-	next.Routes = publishSnap.Routes
-	next.LearnedRouteImportCapped = publishSnap.LearnedRouteImportCapped
-	next.Fabrics = publishSnap.Fabrics
-	next.TunnelEndpoints = publishSnap.TunnelEndpoints
-	next.MirrorConfigs = publishSnap.MirrorConfigs
-	next.MirrorExclusions = publishSnap.MirrorExclusions
-	next.SourceNAT = publishSnap.SourceNAT
-	next.Zones = publishSnap.Zones
-	next.Summary = publishSnap.Summary
-	next.ZoneSetValidated = publishSnap.ZoneSetValidated
-	next.zoneIDCollisions = publishSnap.zoneIDCollisions
-	next.wgFanUpBaseRows = publishSnap.wgFanUpBaseRows
-	next.xfrmDumpFailed = publishSnap.xfrmDumpFailed
-	// The helper accepted the re-arm snapshot, so commit any scheduler state
-	// it carries to the applied/show cache (mirrors the overlay publish).
-	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
-	m.logWgEndpointSetTransitionLocked(&publishSnap, "deferred-worker-arm")
-	// Publish succeeded — commit the generation it carried (#9520: a
-	// content-conflict republish moves it past nextGeneration).
-	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
-	m.lastSnapshot = &next
-	m.rebuildNeighborIndex()
-	m.rebuildMonitoredIfindexes()
-	m.publishedSnapshot = next.Generation
-	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
-	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&publishSnap); ok {
-		m.lastSnapshotHash = h
-	}
+	// #15043/#16153: retain every section the apply-time rebuild rewrote
+	// (#14209) via copyPreparedSectionsBack inside the shared adopt.
+	// Neighbors stays uncaptured (publishable-only filter copy). The
+	// helper accepted the re-arm snapshot, so the shared adopt commits
+	// any scheduler state it carries (mirrors the overlay publish) and
+	// the generation apply_snapshot carried (#9520).
+	m.adoptPreparedPublishLocked(&next, &publishSnap, "deferred-worker-arm", wasDebt, resampled)
 	m.pendingWorkerArm = false
-	m.armPendingHAStateReplayLocked(wasDebt)
-	m.resolvePartialOutcomesLocked(resampled)
 	slog.Info("userspace: armed deferred AF_XDP workers after deferred-MAC re-apply retry",
 		"generation", next.Generation)
 	if err := m.applyHelperStatusLocked(&status); err != nil {

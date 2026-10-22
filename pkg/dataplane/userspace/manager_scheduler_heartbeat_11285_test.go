@@ -20,7 +20,8 @@ func TestScheduledSnapshotSeedsBestEffortHeartbeat11285(t *testing.T) {
 	}
 
 	snapshot := &ConfigSnapshot{
-		Policies: []PolicyRuleSnapshot{{SchedulerName: "workhours"}},
+		Summary:  SnapshotSummary{PolicyCount: 1},
+		Policies: []PolicyRuleSnapshot{{SchedulerName: "workhours", Action: "permit"}},
 	}
 	m.mu.Lock()
 	err := m.requestApplySnapshotLocked(snapshot, nil)
@@ -47,8 +48,8 @@ func TestScheduledSnapshotSeedsBestEffortHeartbeat11285(t *testing.T) {
 // stale stamp exists; the version-zero lease never expires), a continuous
 // scheduled era does not pre-send, and a no-schedule snapshot never sends.
 func TestScheduledReintroductionSendsHeartbeatBeforeApply15093(t *testing.T) {
-	scheduled := &ConfigSnapshot{Policies: []PolicyRuleSnapshot{{SchedulerName: "workhours"}}}
-	plain := &ConfigSnapshot{Policies: []PolicyRuleSnapshot{{Name: "plain"}}}
+	scheduled := &ConfigSnapshot{Summary: SnapshotSummary{PolicyCount: 1}, Policies: []PolicyRuleSnapshot{{SchedulerName: "workhours", Action: "permit"}}}
+	plain := &ConfigSnapshot{Summary: SnapshotSummary{PolicyCount: 1}, Policies: []PolicyRuleSnapshot{{Name: "plain", Action: "permit"}}}
 
 	run := func(t *testing.T, snaps ...*ConfigSnapshot) []ControlRequest {
 		t.Helper()

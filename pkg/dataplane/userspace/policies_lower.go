@@ -343,13 +343,21 @@ func (s *PolicyRuleSnapshot) effectiveMatchToZones() []string {
 	return nil
 }
 
+// policyActionString lowers the config-side typed action to the wire
+// token via the typed policyAction vocabulary (#16153 P2). The default
+// arm is deny: config.PolicyAction's zero value is PolicyPermit, but
+// the compiler guarantees Action is always explicitly set (a policy
+// with no terminal action is forced to PolicyDeny at compile), and any
+// out-of-range value must fail closed to deny rather than permit. The
+// tokens returned are exactly typedPolicyAction's vocabulary, so a
+// lowered snapshot always satisfies the send-site invariant.
 func policyActionString(action config.PolicyAction) string {
 	switch action {
 	case config.PolicyPermit:
-		return "permit"
+		return string(policyActionPermit)
 	case config.PolicyReject:
-		return "reject"
+		return string(policyActionReject)
 	default:
-		return "deny"
+		return string(policyActionDeny)
 	}
 }
