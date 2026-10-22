@@ -15,6 +15,20 @@ const FLOW_CACHE_SETS: usize = FLOW_CACHE_SIZE / FLOW_CACHE_WAYS;
 const FLOW_CACHE_SET_MASK: usize = FLOW_CACHE_SETS - 1;
 /// Denial entries expire quickly even when config/FIB generations remain stable.
 pub(super) const DENY_CACHE_TTL_SECS: u64 = 1;
+/// #16269: cluster-terminal-derived DiscardRoute entries (demoted
+/// `ClusterTerminalHAInactive`, carrying the FIB `source_ifindex`
+/// provenance stamp) NEVER expire on the deny TTL: they are revalidated
+/// per-hit by `discard_route_cluster_terminal_now_local` /
+/// `discard_route_is_cluster_terminal_peer_owned`, and the generation /
+/// RG-epoch / lease fences still bound them. The 1s deny TTL exists to
+/// stop a stale OPERATOR/policy verdict surviving a policy change; a
+/// cluster-terminal row is an ownership statement whose truth flips
+/// exactly at RG takeover, which can be arbitrarily later than any TTL
+/// (aged flows blackholed at failover+1s while the entry was re-seeded
+/// every ~1s by retransmits that themselves died on the cached drop).
+/// Refusing the TTL keeps the entry alive until the hit path can judge
+/// it against the CURRENT owner state instead of racing re-seed churn.
+pub(super) const CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS: u64 = u64::MAX;
 pub(super) const ACTIVE_WINDOW_EPOCHS: u16 = 10;
 pub(super) const FLOW_WORKER_MAP_MAX_PER_BINDING: usize = 256;
 const _: () = assert!(FLOW_CACHE_SETS.is_power_of_two());
@@ -286,6 +300,13 @@ pub(super) struct FlowCacheEntry {
     /// Zero for forwarding entries; terminal drops expire at the monotonic
     /// second passed to lookup, in addition to generation fences.
     pub(super) deny_expires_at_secs: u64,
+    /// #16269: cluster-terminal provenance captured at deny-seed time:
+    /// the FIB `source_ifindex` provenance on the seeded decision and
+    /// the flow-cache stamp owner RG at the same instant. The hit-path
+    /// rescue gates judge the cached decision; these keep the seed fact
+    /// auditable (unit + live DISC evidence compare seed vs hit).
+    pub(super) cluster_terminal_source_ifindex: i32,
+    pub(super) cluster_terminal_stamp_owner_rg: i32,
     pub(super) metadata: SessionMetadata,
     /// Validation stamp captured at insert time. Stale entries are treated as
     /// misses without requiring per-entry scans at RG transition.
@@ -689,6 +710,8 @@ impl FlowCacheEntry {
             decision,
             policy_deny: None,
             deny_expires_at_secs: 0,
+            cluster_terminal_source_ifindex: 0,
+            cluster_terminal_stamp_owner_rg: 0,
             metadata: SessionMetadata {
                 ingress_zone: ingress_zone.unwrap_or(0),
                 egress_zone: 0,
@@ -800,11 +823,28 @@ impl FlowCacheEntry {
         ) {
             return None;
         }
-
         let owner_rg_id = if flow_owner_rg_id > 0 {
             flow_owner_rg_id
         } else {
             owner_rg_for_resolution(forwarding, decision.resolution)
+        };
+        // #16269 (option c, seed time): a DiscardRoute carrying the FIB
+        // `source_ifindex` provenance stamp is cluster-terminal-derived
+        // (demoted ClusterTerminalHAInactive; operator discards never
+        // carry the stamp). Preserve that provenance INTO the cached
+        // entry and refuse the 1s deny TTL for it: the hit path judges
+        // the cached decision against CURRENT ownership, and a deny-TTL
+        // expiry/re-seed race at takeover must not strand the entry
+        // before that judgment can run. Generation/RG-epoch/lease
+        // fences still bound the entry. Operator discards
+        // (source_ifindex == 0) and PolicyDenied keep the caller's TTL
+        // bit-identically.
+        let cluster_terminal_provenance = disposition == ForwardingDisposition::DiscardRoute
+            && decision.resolution.source_ifindex > 0;
+        let deny_expires_at_secs = if cluster_terminal_provenance {
+            CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS
+        } else {
+            deny_expires_at_secs
         };
         Some(Self {
             key: flow.forward_key.clone(),
@@ -851,6 +891,16 @@ impl FlowCacheEntry {
             ),
             policy_deny,
             deny_expires_at_secs,
+            cluster_terminal_source_ifindex: if cluster_terminal_provenance {
+                decision.resolution.source_ifindex
+            } else {
+                0
+            },
+            cluster_terminal_stamp_owner_rg: if cluster_terminal_provenance {
+                owner_rg_id
+            } else {
+                0
+            },
             observed_bytes: u64::from(meta.pkt_len),
             last_used_epoch: 0,
             neighbor_mac_epoch: 0,

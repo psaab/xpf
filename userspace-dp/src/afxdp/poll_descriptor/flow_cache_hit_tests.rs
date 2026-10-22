@@ -385,6 +385,8 @@ fn cached_entry() -> FlowCacheEntry {
         },
         policy_deny: None,
         deny_expires_at_secs: 0,
+        cluster_terminal_source_ifindex: 0,
+        cluster_terminal_stamp_owner_rg: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
@@ -5711,3 +5713,114 @@ fn fabric_ingress_discard_still_peer_owned_stays_drop_16269() {
     assert_eq!(run.dbg_disposition_other, 1);
 }
 
+
+/// #16269 (option c, LIVE shape): the fw1 fabric-ingress entry as the
+/// scratch DISC cell proved it — DiscardRoute, nat=(None,None),
+/// stamp_owner_rg=0, egress=0 — but seeded THROUGH
+/// `FlowCacheEntry::from_deny_decision` with the FIB provenance stamp,
+/// so the seed-time preservation (never-expire + provenance fields)
+/// is what the hit judges. RG1 is locally forwarding-active
+/// (takeover). The hit must evict to the slow path
+/// (FabricIngressDiscardNowLocal arm), not terminal-drop.
+/// RED-on-revert: drop the seed-time provenance/TTL preservation and
+/// the entry either expires before the hit or carries no stamp.
+#[test]
+fn fabric_ingress_discard_seeded_live_shape_falls_through_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let flow = SessionFlow {
+        src_ip: test_key().src_ip,
+        dst_ip: test_key().dst_ip,
+        forward_key: test_key(),
+    };
+    // Seed through the production deny constructor, exactly as
+    // stage_flow_cache_deny_seed does: TTL now+1s, provenance stamped.
+    let mut resolution = cached_entry().decision.resolution;
+    resolution.disposition = ForwardingDisposition::DiscardRoute;
+    resolution.egress_ifindex = 0;
+    resolution.tx_ifindex = 0;
+    resolution.next_hop = None;
+    resolution.neighbor_mac = None;
+    resolution.src_mac = None;
+    resolution.source_ifindex = EGRESS_IFINDEX;
+    let decision = SessionDecision {
+        resolution,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let ha_state = BTreeMap::from([(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    )]);
+    let rg_epochs: [AtomicU32; crate::afxdp::flow_cache::MAX_RG_EPOCHS] =
+        std::array::from_fn(|_| AtomicU32::new(0));
+    let seeded = FlowCacheEntry::from_deny_decision(
+        &flow,
+        accounted_meta(&frame),
+        ValidationState::default(),
+        decision,
+        0,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        0,
+        None,
+        None,
+        None,
+        crate::filter::CachedFilterCounters::default(),
+        1 + crate::afxdp::flow_cache::DENY_CACHE_TTL_SECS,
+        &fixture.forwarding,
+        &ha_state,
+        &rg_epochs,
+    )
+    .expect("live-shape DiscardRoute must seed through from_deny_decision");
+    // Live shape: stamp_owner_rg=0 (owner resolution DiscardRoute->0),
+    // nat=(None,None); seed preservation carries provenance + no TTL.
+    assert_eq!(seeded.stamp.owner_rg_id, 0);
+    assert_eq!(seeded.decision.nat, NatDecision::default());
+    assert_eq!(seeded.cluster_terminal_source_ifindex, EGRESS_IFINDEX);
+    assert_eq!(
+        seeded.deny_expires_at_secs,
+        crate::afxdp::flow_cache::CLUSTER_TERMINAL_DENY_EXPIRES_AT_SECS
+    );
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        seeded,
+        0,
+        StageSeed {
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16269 live shape: seeded cluster-terminal DiscardRoute now locally owned must re-resolve, not drop"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressDiscardNowLocal as usize],
+        1,
+        "the takeover eviction must attribute to its own arm"
+    );
+    assert_eq!(run.dbg_disposition_other, 0);
+}
