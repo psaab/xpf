@@ -36,6 +36,148 @@ pub(in crate::afxdp) fn lookup_shared_session(
     // shared-session lookup into a spurious miss.
     lock_shared_recover(shared_sessions).get(key).cloned()
 }
+/// #16223: node-level served-handshake evidence for `key` (either
+/// half of the pair): the shared synced entry whose handshake wire is
+/// Established. The counter half of the evidence is NOT carried on
+/// the shared entry; production merges this wire with the serving
+/// worker's admitted-counter stamp (`SessionTable` node-served
+/// stamps, surfaced through the expiry context). Either half's key
+/// may name the entry, and a reverse key also probes its derived
+/// forward companion, so a SNAT-translated reverse replica still
+/// finds the serving forward row.
+pub(in crate::afxdp) fn shared_node_served_evidence(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> crate::session::NodeServedEvidence {
+    let mut evidence = crate::session::NodeServedEvidence::default();
+    let sessions = lock_shared_recover(shared_sessions);
+    let mut probe = |candidate: &SessionKey| {
+        if let Some(entry) = sessions.get(candidate) {
+            if entry.tcp_handshake_state
+                == crate::session::TcpHandshakeState::Established.to_wire()
+            {
+                evidence.handshake_wire = entry.tcp_handshake_state;
+                evidence.shared_established = true;
+            }
+        }
+    };
+    probe(key);
+    // The serving pair may sit under the opposite orientation (a
+    // reverse replica's key is the forward tuple swapped) or under a
+    // SNAT-translated reverse key (`172.16.80.8:port`), neither of
+    // which a same-orientation probe finds. Match on the unordered
+    // endpoint pair: same two IP:port endpoints in either order, or
+    // the serving forward whose derived reverse shares the server
+    // endpoint and client port. Bounded: this runs only on
+    // idle-crossed GC candidates, never per packet in steady state.
+    if evidence.handshake_wire == 0 {
+        for entry in sessions.values() {
+            if entry.tcp_handshake_state
+                != crate::session::TcpHandshakeState::Established.to_wire()
+            {
+                continue;
+            }
+            let ek = &entry.key;
+            let same = ek.bare_tuple() == key.bare_tuple();
+            let swapped = ek.src_ip == key.dst_ip
+                && ek.dst_ip == key.src_ip
+                && ek.src_port == key.dst_port
+                && ek.dst_port == key.src_port
+                && ek.protocol == key.protocol;
+            let derived_reverse = crate::session::reverse_session_key(ek, entry.decision.nat);
+            let snat_reverse = derived_reverse.src_ip == key.src_ip
+                && derived_reverse.src_port == key.src_port
+                && ek.dst_port == key.src_port;
+            if same || swapped || snat_reverse {
+                evidence.handshake_wire = entry.tcp_handshake_state;
+                evidence.shared_established = true;
+                break;
+            }
+        }
+    }
+    evidence
+}
+
+/// #16223: restamp the shared synced entries for `forward_key` (and
+/// its derived reverse companion) to the Established handshake wire
+/// once a serving worker completes the pair, so sibling replica
+/// tables and the peer-facing expiry probe see node-level proof.
+/// Only ever advances Opening/Pending wires to Established; never
+/// regresses a close or an already-established row.
+/// #16223: advance the shared entries for `key` (any stored
+/// orientation, including the SNAT-translated stored key) to
+/// Established. Companion to the ct-slice bulk maintenance for
+/// callers that already know the completed tuple key.
+pub(in crate::afxdp) fn advance_shared_handshake_for_tuple(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) {
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let reverse_a = crate::session::reverse_session_key(key, crate::nat::NatDecision::default());
+    let mut sessions = lock_shared_recover(shared_sessions);
+    let targets: Vec<SessionKey> = sessions
+        .keys()
+        .filter(|stored| {
+            let s = *stored;
+            (s.src_ip == key.src_ip && s.dst_ip == key.dst_ip && s.src_port == key.src_port && s.dst_port == key.dst_port)
+                || (s.src_ip == key.dst_ip && s.dst_ip == key.src_ip && s.src_port == key.dst_port && s.dst_port == key.src_port)
+                || (s.src_ip == reverse_a.src_ip && s.dst_ip == reverse_a.dst_ip && s.src_port == reverse_a.src_port && s.dst_port == reverse_a.dst_port)
+        })
+        .cloned()
+        .collect();
+    for target in targets {
+        if let Some(entry) = sessions.get_mut(&target) {
+            if entry.tcp_handshake_state != established {
+                entry.tcp_handshake_state = established;
+            }
+        }
+    }
+}
+
+pub(in crate::afxdp) fn restamp_shared_handshake_established(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forward_key: &SessionKey,
+    nat: crate::nat::NatDecision,
+) {
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let reverse_key = crate::session::reverse_session_key(forward_key, nat);
+    let mut sessions = lock_shared_recover(shared_sessions);
+    for candidate in [forward_key, &reverse_key] {
+        if let Some(entry) = sessions.get_mut(candidate) {
+            if entry.tcp_handshake_state != established {
+                entry.tcp_handshake_state = established;
+            }
+        }
+    }
+}
+/// #16223: periodic maintenance — advance the shared entries for
+/// every ESTABLISHED forward key in `established_keys` to the
+/// Established handshake wire. Driven from each worker's budgeted
+/// conntrack-refresh slice (its own table's completed pairs), so the
+/// shared wire that sibling replicas and the expiry probe consult
+/// reflects completions that landed on any local hit path (slow-path
+/// lookup, update/promotion, cache probe). One lock acquisition per
+/// slice; only ever advances the wire, never regresses it.
+pub(in crate::afxdp) fn restamp_shared_handshakes_established(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    established_keys: &[(SessionKey, crate::nat::NatDecision)],
+) {
+    if established_keys.is_empty() {
+        return;
+    }
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let mut sessions = lock_shared_recover(shared_sessions);
+    for (forward_key, nat) in established_keys {
+        let reverse_key = crate::session::reverse_session_key(forward_key, *nat);
+        for candidate in [forward_key, &reverse_key] {
+            if let Some(entry) = sessions.get_mut(candidate) {
+                if entry.tcp_handshake_state != established {
+                    entry.tcp_handshake_state = established;
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ReverseDomainAdmission {

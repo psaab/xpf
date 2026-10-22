@@ -349,3 +349,175 @@ fn synced_pending_reverse_cache_hit_completes_16223() {
     assert_eq!(table.timeout_secs_for(&forward), 1800);
     assert_eq!(table.timeout_secs_for(&reverse), 1800);
 }
+
+/// LIVE SHAPE (B1/B5, separate tables): the fw1 dying row is a lone
+/// `syn_ack_first=true` reverse replica in its OWN worker table with
+/// NO companion, while the serving pair (promoted, Timeout 1800,
+/// reverse counters in the thousands) lives in a DIFFERENT table on
+/// the same node. Node-level evidence — not any local flag — must
+/// complete/retain the replica. Without evidence it must still reap
+/// (#4109: a SYN-ACK-first row whose server was never served waits
+/// for its reverse ACK and dies on the opening window).
+#[test]
+fn syn_ack_first_replica_completes_from_node_evidence_16223() {
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+
+    // Serving table: promoted pair with real reverse service.
+    let mut serving = SessionTable::new();
+    let serving_reverse = install_forward_reverse_pair(&mut serving, &forward, now, TCP_SYN);
+    assert_eq!(serving_reverse, reverse);
+    assert!(serving.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    assert!(serving.probe_hit(&forward, now + 2 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    assert!(serving.probe_hit(&reverse, now + 3 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    let serving_entry = serving.entry_by_key(&forward).expect("serving forward");
+    assert!(serving_entry.established && !serving_entry.handshake_pending);
+    assert!(serving_entry.counters.rev_packets > 0, "premise: serving pair served reverse");
+
+    // Replica table: ONLY the syn_ack_first reverse half, no companion.
+    let mut replica = SessionTable::new();
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = crate::test_zone_ids::TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = crate::test_zone_ids::TEST_LAN_ZONE_ID;
+    assert!(replica.upsert_synced_with_origin(
+        SessionInstall {
+            key: reverse.clone(),
+            decision: decision(),
+            metadata: reverse_metadata,
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: 77,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::SynAckFirstPending.to_wire(),
+            source_nat_static: None,
+        },
+        false,
+    ));
+    {
+        let entry = replica.entry_by_key(&reverse).expect("replica reverse");
+        assert!(
+            !entry.established && entry.handshake_pending && entry.syn_ack_first,
+            "premise: live fw1 shape (syn_ack_first, pending, not established)"
+        );
+        assert!(replica.entry_by_key(&forward).is_none(), "premise: companion absent");
+    }
+    // No node evidence yet: a SYN-ACK retransmit (the only segment
+    // this replica ever observes — its completing ACK is consumed on
+    // the fabric peer) must NOT complete it. The classic arm refuses
+    // SYN-bearing segments, and without node proof the #4109 guard
+    // holds. (A bare reverse ACK would complete classically — that
+    // is the #4109 rule itself, exercised by the guard test above.)
+    assert!(replica.probe_hit(&reverse, now + SEC, 512, TCP_SYN | TCP_ACK, 0, 0));
+    assert!(
+        replica.entry_by_key(&reverse).expect("replica").handshake_pending,
+        "without node evidence the syn_ack_first replica must stay pending"
+    );
+    // Node-level proof arrives (shared-map Established + serving rev).
+    replica.note_node_served_handshake(
+        &forward,
+        TcpHandshakeState::Established.to_wire(),
+        serving_entry.counters.rev_packets,
+    );
+    // GC at the opening deadline must RETAIN it on node evidence alone.
+    replica.last_gc_ns = now + 20 * SEC;
+    let node_served = |_: &SessionKey| NodeServedEvidence {
+        handshake_wire: TcpHandshakeState::Established.to_wire(),
+        rev_packets: serving_entry.counters.rev_packets,
+        shared_established: true,
+    };
+    let forwards = |_: i32| true;
+    let epoch = |_: i32| 0u32;
+    let ha = ExpireHaContext {
+        node_active: true,
+        forwards_rg: &forwards,
+        epoch_of: &epoch,
+        ceiling_mult: STALE_SYNCED_CEILING_MULT,
+        ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
+        node_served: &node_served,
+    };
+    let expired = replica.expire_stale_entries_ha(now + 22 * SEC, Some(&ha));
+    assert!(
+        expired.is_empty(),
+        "#16223 B1: syn_ack_first replica with node-served proof must survive GC"
+    );
+    assert!(replica.entry_by_key(&reverse).is_some());
+    // And a served hit now completes it to the established window.
+    assert!(replica.probe_hit(&reverse, now + 23 * SEC, 512, TCP_ACK | TCP_PSH, 512, 0));
+    let entry = replica.entry_by_key(&reverse).expect("completed replica");
+    assert!(
+        entry.established && !entry.handshake_pending && !entry.syn_ack_first,
+        "#16223 B1: node evidence must complete the syn_ack_first replica"
+    );
+    assert_eq!(entry.expires_after_ns, replica.timeouts.tcp_established_ns);
+}
+
+/// LIVE SHAPE (B2/B5, separate tables): fw0 replicas are pure Opening
+/// (`handshake_pending=false`) with an Opening companion and zero
+/// counters. Node-level served evidence must retain them at GC;
+/// without it they reap together on the opening window.
+#[test]
+fn opening_replica_survives_gc_only_with_node_evidence_16223() {
+    let now = 1_000_000_000u64;
+    // Control: no evidence -> both Opening halves reap.
+    let (mut control, forward, reverse, _) = opening_pair();
+    control.last_gc_ns = now;
+    let _ = control.expire_stale_entries(now + 21 * SEC);
+    let _ = control.expire_stale_entries(now + 42 * SEC);
+    assert!(control.entry_by_key(&forward).is_none(), "control forward must reap");
+    assert!(control.entry_by_key(&reverse).is_none(), "control reverse must reap");
+
+    // With node evidence (separate serving table promoted + served):
+    let (mut replica, forward, reverse, _) = opening_pair();
+    replica.note_node_served_handshake(
+        &forward,
+        TcpHandshakeState::Established.to_wire(),
+        8850,
+    );
+    replica.last_gc_ns = now;
+    let expired = replica.expire_stale_entries(now + 21 * SEC);
+    assert!(
+        expired.is_empty(),
+        "#16223 B2: Opening replica with node-served proof must survive GC, expired {}",
+        expired.len()
+    );
+    assert!(replica.entry_by_key(&forward).is_some());
+    assert!(replica.entry_by_key(&reverse).is_some());
+    // A served hit completes the Opening replica pair.
+    assert!(replica.probe_hit(&forward, now + 22 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    for key in [&forward, &reverse] {
+        let entry = replica.entry_by_key(key).expect("completed half");
+        assert!(
+            entry.established && !entry.handshake_pending,
+            "#16223 B2: Opening replica must complete on node evidence"
+        );
+        assert_eq!(entry.expires_after_ns, replica.timeouts.tcp_established_ns);
+    }
+    assert_eq!(replica.timeout_secs_for(&forward), 1800);
+}
+
+/// Guard: node evidence with a promoted wire but ZERO served reverse
+/// packets must NOT complete or retain — a promoted-but-never-answered
+/// pair cannot launder a half-open flow into 1800s.
+#[test]
+fn node_evidence_without_served_reverse_does_not_complete_16223() {
+    let (mut table, forward, reverse, now) = opening_pair();
+    table.note_node_served_handshake(&forward, TcpHandshakeState::Established.to_wire(), 0);
+    assert!(table.probe_hit(&forward, now + 6 * SEC, 1200, TCP_ACK | TCP_PSH, 1200, 0));
+    for key in [&forward, &reverse] {
+        let entry = table.entry_by_key(key).expect("half");
+        assert!(
+            !entry.established || entry.handshake_pending,
+            "#16223 guard: zero served-reverse evidence must not complete"
+        );
+    }
+    table.last_gc_ns = now + 7 * SEC;
+    let _ = table.expire_stale_entries(now + 28 * SEC);
+    let _ = table.expire_stale_entries(now + 60 * SEC);
+    assert!(table.entry_by_key(&forward).is_none(), "unserved pair must reap");
+    assert!(table.entry_by_key(&reverse).is_none(), "unserved pair must reap");
+}
+

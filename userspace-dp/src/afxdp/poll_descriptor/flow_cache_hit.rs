@@ -741,6 +741,19 @@ pub(super) fn stage_flow_cache_hit(
         // The packet survived the cached output-filter/policer verdicts;
         // only now may a completing ACK's HA transition be published.
         sessions.emit_probe_hit_state_update(&flow.forward_key);
+        // #16223: once the serving pair is established for this tuple,
+        // restamp the shared synced entries so sibling replica tables
+        // and the peer's expiry probe consult node-level proof instead
+        // of the replica's own stale Opening/syn_ack_first flags.
+        if sessions.handshake_state_wire_for(&flow.forward_key)
+            == crate::session::TcpHandshakeState::Established.to_wire()
+        {
+            crate::afxdp::shared_ops::restamp_shared_handshake_established(
+                worker_ctx.shared_sessions,
+                &flow.forward_key,
+                cached_decision.nat,
+            );
+        }
         // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,
         // but a filter-pinned queue must not be reclassified. The separate
         // `cos_lp_reclassify` arm refreshes only that pinned queue's rewrite.

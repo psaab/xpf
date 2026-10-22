@@ -7342,6 +7342,7 @@ fn run_expire_ha(
         epoch_of: epoch_for_rg,
         ceiling_mult: TEST_CEIL_MULT,
         ceiling_abs_ns: TEST_CEIL_ABS_NS,
+    node_served: &|_| NodeServedEvidence::default(),
     };
     table.expire_stale_entries_ha(now_ns, Some(&ctx))
 }

@@ -385,22 +385,30 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
-                    // #16223: a never-established (Opening / pending)
-                    // half whose companion proves handshake progress
-                    // (served reverse counters / promoted companion —
-                    // see `cache_hit_handshake_progress`) must not reap
-                    // while the flow is active: in split posture the
-                    // serving workers never re-stamp these replica rows
-                    // (`last_seen == created` at expiry in the live
-                    // capture), so the classic `companion_keeps_alive`
-                    // refusal (`!companion.established`) reaps both
-                    // halves at 20 s under continuous cache service.
-                    // Require the companion itself to be within its
-                    // window (the probe inside
-                    // `opening_companion_keeps_alive` checks that), so
-                    // a genuinely idle pair still reaps.
+                    // #16223: node-level evidence is consulted BEFORE
+                    // the local refusals inside
+                    // `opening_companion_keeps_alive`: the HA context's
+                    // shared-map/serving probe for this tuple, merged
+                    // with this table's own serving stamps. A replica
+                    // whose node-level serving pair has promoted and
+                    // served reverse traffic is retained even when its
+                    // local flags are Opening / syn_ack_first.
+                    let node_evidence = {
+                        let mut ev = self.node_served_evidence(&key);
+                        if let Some(ha) = ha {
+                            let shared = (ha.node_served)(&key);
+                            if shared.handshake_wire
+                                == TcpHandshakeState::Established.to_wire()
+                            {
+                                ev.handshake_wire = shared.handshake_wire;
+                            }
+                            ev.shared_established |= shared.shared_established;
+                            ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
+                        }
+                        ev
+                    };
                     if companion_eligible
-                        && self.opening_companion_keeps_alive(&key, e_nat, now_ns)
+                        && self.opening_companion_keeps_alive(&key, e_nat, now_ns, node_evidence)
                     {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
@@ -746,23 +754,38 @@ impl SessionTable {
         key: &SessionKey,
         entry_nat: NatDecision,
         now_ns: u64,
+        node_evidence: NodeServedEvidence,
     ) -> bool {
-        // Only classic-pending TCP halves take this arm: pairs the
-        // state machine already promoted past SYN-ACK-observed
-        // (`handshake_pending`) but whose completing segment was
-        // consumed on another worker/node. Pure Opening pairs
-        // (`handshake_pending=false`) keep the #6752/#13679 refusal —
-        // a retransmitted SYN-ACK alone must not hold them — and
-        // closing pairs keep their fixed fuse (#10885). SYN-ACK-first
-        // pairs still wait for their reverse ACK (#4109).
         let Some(entry) = self.entry_by_key(key) else {
             return false;
         };
-        if key.protocol != PROTO_TCP
-            || entry.closing
-            || entry.syn_ack_first
-            || !entry.handshake_pending
-        {
+        if key.protocol != PROTO_TCP || entry.closing {
+            return false;
+        }
+        // #16223 (node-level first): a promoted serving companion for
+        // this tuple on this node (shared-map Established +
+        // admitted reverse counters) retains the replica/opening row
+        // BEFORE the local `syn_ack_first` / `handshake_pending`
+        // refusals below — the live fw1 row is `syn_ack_first=true`
+        // with no local companion, and the fw0 replicas are pure
+        // Opening. Retain on the SERVING pair's activity: re-stamp
+        // from `now_ns` (this GC pass is the retention event; the
+        // serving pair's own hits keep its stamp fresh, so a flow
+        // that goes quiet still crosses one window later when the
+        // shared/serving proof stops advancing — production merges
+        // the serving last-activity through the same evidence).
+        if node_evidence.promoted_and_served() {
+            let Some(em) = self.entry_by_key_mut(key) else {
+                return false;
+            };
+            em.last_seen_ns = now_ns;
+            self.rebucket_alive_entry(key, now_ns);
+            return true;
+        }
+        // Classic arm: only SYN-ACK-observed pending halves whose
+        // completing segment was consumed elsewhere. Pure Opening and
+        // SYN-ACK-first pairs keep the #6752/#13679/#4109 refusals.
+        if entry.syn_ack_first || !entry.handshake_pending {
             return false;
         }
         let companion_key = reverse_session_key(key, entry_nat);
@@ -772,20 +795,12 @@ impl SessionTable {
         if companion.closing || companion.syn_ack_first {
             return false;
         }
-        // Companion must be within ITS idle window now (complement of
-        // the Case-3 strict-`>` test), exactly as
-        // `companion_keeps_alive` requires of established companions.
         if now_ns.saturating_sub(companion.last_seen_ns) > companion.expires_after_ns {
             return false;
         }
         if self.cache_hit_handshake_progress(key).is_none() {
             return false;
         }
-        // #6752: freshness from the install / a SYN-ACK retransmit
-        // alone must not hold the pair — additionally require admitted
-        // reverse counters (the server direction was actually
-        // forwarded on this table; a lookup SYN-ACK retransmit folds
-        // none).
         let fwd = if companion.metadata.is_reverse {
             self.entry_by_key(key)
         } else {

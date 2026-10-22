@@ -103,9 +103,44 @@ pub(super) fn reap_expired_sessions(
     // with nothing refreshing them. Whichever expires first must NOT free a
     // `(pool_addr, port)` the still-forwarding worker is using.
     worker_id: u32,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
 ) -> crate::session::DeferredConntrackDeletes {
     let mut deferred = crate::session::DeferredConntrackDeletes::new();
     for expired_entry in expired_entries {
+        // #16223 (replica fence): a WorkerLocalImport replica's expiry
+        // must NOT tear down the serving pair's state. The replica
+        // adopts the serving incarnation's session_id, so the
+        // incarnation-gated conntrack delete below would otherwise
+        // pass its gate and delete the serving pair's BPF mirror row,
+        // and the unconditional flow-cache invalidation would evict
+        // the serving descriptor. When the shared synced map still
+        // holds a promoted (Established) serving entry for this tuple
+        // under the same session_id, skip ALL map/cache/NAT teardown
+        // for the replica — only its per-table row (already removed
+        // by the expire pass) goes away. A replica with no promoted
+        // serving entry keeps the full teardown.
+        let replica_fenced = expired_entry.origin == SessionOrigin::WorkerLocalImport
+            && shared_sessions
+                .lock()
+                .map(|sessions| {
+                    sessions.values().any(|entry| {
+                        entry.session_id != 0
+                            && entry.session_id == expired_entry.session_id
+                            && entry.tcp_handshake_state
+                                == crate::session::TcpHandshakeState::Established.to_wire()
+                            && (entry.key.bare_tuple() == expired_entry.key.bare_tuple()
+                                || crate::session::reverse_session_key(
+                                    &entry.key,
+                                    entry.decision.nat,
+                                )
+                                .bare_tuple()
+                                    == expired_entry.key.bare_tuple())
+                    })
+                })
+                .unwrap_or(false);
+        if replica_fenced {
+            continue;
+        }
         release_source_nat_allocation_for_worker(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
@@ -188,6 +223,7 @@ pub(in crate::afxdp) fn production_sweep_for_test(
         -1,
         now_ns,
         0,
+        &Arc::new(Mutex::new(FastMap::default())),
     );
     sessions.defer_conntrack_deletes(deferred);
     expired_entries
