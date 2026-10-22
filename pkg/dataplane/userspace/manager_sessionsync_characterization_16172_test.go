@@ -106,10 +106,10 @@ func TestSessionSyncGoldenV4Representative16172(t *testing.T) {
 		TunnelDiscriminator: 0xDEADBEEF, PptpCallIDs: 0x11112222,
 		TCPCloseClass: 1, TCPHandshakeState: 3,
 		InstallTableDomain: 525590, InstallTableCheck: 77,
-		SourceNatICMPValid: true, SourceNatICMPType: 8, SourceNatICMPCode: 0,
+		SourceNatICMPValid: true, SourceNatICMPType: 8, SourceNatICMPCode: 3,
 	}
 	got := mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key, val))
-	want := `{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.61.102","dst_ip":"172.16.80.200","src_port":50952,"dst_port":5201,"ingress_zone_id":1,"egress_zone_id":2,"ingress_ifindex":42,"ingress_vlan_id":50,"nat_scope_ifindex":43,"owner_rg_id":1,"egress_ifindex":12,"tx_ifindex":6,"tx_vlan_id":80,"neighbor_mac":"aa:bb:cc:dd:ee:ff","src_mac":"02:bf:72:00:50:08","nat_src_ip":"10.0.61.1","nat_dst_ip":"10.0.61.102","nat_src_port":40000,"nat_dst_port":8443,"source_nat_icmp_valid":true,"source_nat_icmp_type":8,"source_nat_provenance":1,"fabric_ingress":true,"is_reverse":true,"log_session_init":true,"log_session_close":true,"generation":11259375,"policy_id":42,"policy_counter_idx":7,"policy_rule_id":"lan-wan/allow-web","inactivity_timeout":30,"session_id":1234605616436508552,"tunnel_discriminator":3735928559,"pptp_call_ids":286335522,"routing_domain":100007,"tcp_close_class":1,"tcp_handshake_state":3,"install_table_domain":525590,"install_table_check":77}`
+	want := `{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.61.102","dst_ip":"172.16.80.200","src_port":50952,"dst_port":5201,"ingress_zone_id":1,"egress_zone_id":2,"ingress_ifindex":42,"ingress_vlan_id":50,"nat_scope_ifindex":43,"owner_rg_id":1,"egress_ifindex":12,"tx_ifindex":6,"tx_vlan_id":80,"neighbor_mac":"aa:bb:cc:dd:ee:ff","src_mac":"02:bf:72:00:50:08","nat_src_ip":"10.0.61.1","nat_dst_ip":"10.0.61.102","nat_src_port":40000,"nat_dst_port":8443,"source_nat_icmp_valid":true,"source_nat_icmp_type":8,"source_nat_icmp_code":3,"source_nat_provenance":1,"fabric_ingress":true,"is_reverse":true,"log_session_init":true,"log_session_close":true,"generation":11259375,"policy_id":42,"policy_counter_idx":7,"policy_rule_id":"lan-wan/allow-web","inactivity_timeout":30,"session_id":1234605616436508552,"tunnel_discriminator":3735928559,"pptp_call_ids":286335522,"routing_domain":100007,"tcp_close_class":1,"tcp_handshake_state":3,"install_table_domain":525590,"install_table_check":77}`
 	if got != want {
 		t.Fatalf("V4 golden mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -120,8 +120,11 @@ func TestSessionSyncGoldenV4Representative16172(t *testing.T) {
 func TestSessionSyncGoldenV6RepresentativeNat64_16172(t *testing.T) {
 	m := goldenManager16172()
 	m.SetIngressFoldResolver(func(fold uint32) (uint32, uint16, bool) {
-		if fold == 0xCCCC {
+		switch fold {
+		case 0xCCCC:
 			return 7, 80, true
+		case 0xDDDD:
+			return 43, 0, true
 		}
 		return 0, 0, false
 	})
@@ -130,23 +133,24 @@ func TestSessionSyncGoldenV6RepresentativeNat64_16172(t *testing.T) {
 		SrcPort: hostToNetwork16(54321), DstPort: hostToNetwork16(443), Protocol: 6,
 	}
 	val := &dataplane.SessionValueV6{
-		IngressZone: 1, EgressZone: 2, IngressIfaceFold: 0xCCCC, RoutingDomain: 100008,
+		IngressZone: 1, EgressZone: 2, IngressIfaceFold: 0xCCCC, NatScopeFold: 0xDDDD, RoutingDomain: 100008,
 		FibIfindex: 6, FibVlanID: 80,
 		FibDmac: [6]byte{1, 2, 3, 4, 5, 6}, FibSmac: [6]byte{6, 5, 4, 3, 2, 1},
 		Flags:    dataplane.SessFlagSNAT | dataplane.SessFlagDNAT | dataplane.WithSourceNatProvenance(0, dataplane.SourceNatProvenanceStatic),
 		NATSrcIP: ip16("2001:db8:61::1"), NATDstIP: ip16("2001:db8:61::102"),
 		NATSrcPort: hostToNetwork16(54321), NATDstPort: hostToNetwork16(8443),
-		LogFlags:   dataplane.LogFlagSessionInit,
+		LogFlags:   dataplane.LogFlagSessionInit | dataplane.LogFlagSessionClose | dataplane.LogFlagUserspaceFabricIngress,
+		IsReverse:  1,
 		Generation: 0x123456, PolicyID: 99, PolicyCounterIdx: 11,
 		PolicyRuleID: "lan-wan/allow-web", AppTimeout: 45,
 		Nat64SnatV4:     [4]byte{203, 0, 113, 5},
 		RTFlowSessionID: 0x99, SessionID: 55,
-		TunnelDiscriminator: 7, TCPCloseClass: 2, TCPHandshakeState: 99, // 99 normalizes to 4
+		TunnelDiscriminator: 7, PptpCallIDs: 0x11112222, TCPCloseClass: 2, TCPHandshakeState: 99, // 99 normalizes to 4
 		InstallTableDomain: 525590, InstallTableCheck: 88,
-		SourceNatICMPValid: true, SourceNatICMPType: 128, SourceNatICMPCode: 0,
+		SourceNatICMPValid: true, SourceNatICMPType: 128, SourceNatICMPCode: 3,
 	}
 	got := mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key, val))
-	want := `{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::10","dst_ip":"2001:db8:80::8","src_port":54321,"dst_port":443,"ingress_zone_id":1,"egress_zone_id":2,"ingress_ifindex":7,"ingress_vlan_id":80,"owner_rg_id":1,"egress_ifindex":12,"tx_ifindex":6,"tx_vlan_id":80,"neighbor_mac":"01:02:03:04:05:06","src_mac":"06:05:04:03:02:01","nat_src_ip":"2001:db8:61::1","nat_dst_ip":"2001:db8:61::102","nat_src_port":54321,"nat_dst_port":8443,"source_nat_icmp_valid":true,"source_nat_icmp_type":128,"source_nat_provenance":2,"log_session_init":true,"generation":1193046,"policy_id":99,"policy_counter_idx":11,"policy_rule_id":"lan-wan/allow-web","inactivity_timeout":45,"nat64_snat_v4":"203.0.113.5","session_id":153,"tunnel_discriminator":7,"routing_domain":100008,"tcp_close_class":2,"tcp_handshake_state":4,"install_table_domain":525590,"install_table_check":88}`
+	want := `{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::10","dst_ip":"2001:db8:80::8","src_port":54321,"dst_port":443,"ingress_zone_id":1,"egress_zone_id":2,"ingress_ifindex":7,"ingress_vlan_id":80,"nat_scope_ifindex":43,"owner_rg_id":1,"egress_ifindex":12,"tx_ifindex":6,"tx_vlan_id":80,"neighbor_mac":"01:02:03:04:05:06","src_mac":"06:05:04:03:02:01","nat_src_ip":"2001:db8:61::1","nat_dst_ip":"2001:db8:61::102","nat_src_port":54321,"nat_dst_port":8443,"source_nat_icmp_valid":true,"source_nat_icmp_type":128,"source_nat_icmp_code":3,"source_nat_provenance":2,"fabric_ingress":true,"is_reverse":true,"log_session_init":true,"log_session_close":true,"generation":1193046,"policy_id":99,"policy_counter_idx":11,"policy_rule_id":"lan-wan/allow-web","inactivity_timeout":45,"nat64_snat_v4":"203.0.113.5","session_id":153,"tunnel_discriminator":7,"pptp_call_ids":286335522,"routing_domain":100008,"tcp_close_class":2,"tcp_handshake_state":4,"install_table_domain":525590,"install_table_check":88}`
 	if got != want {
 		t.Fatalf("V6 NAT64 golden mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -216,92 +220,82 @@ func TestSessionSyncGoldenNilValueAndMissingSnapshot16172(t *testing.T) {
 	}
 }
 
-// TestSessionSyncGoldenOrderVariants16172 pins the order-sensitive variants:
+// TestSessionSyncGoldenOrderVariants16172 pins the stale/order variants
+// as FULL-BYTE JSON for BOTH families (no substrings, no field picks):
 //   - stale generation rides verbatim (a large/old generation is not clamped)
-//   - RTFlowSessionID==0 falls back to SessionID; both present => RTFlow wins;
-//     double-zero omits session_id
-//   - tunnel-endpoint FibGen override beats the egress-derived endpoint and
-//     clears TX/MAC fields; stale FibGen naming no endpoint zeroes egress
+//   - RTFlowSessionID==0 falls back to SessionID; both present => RTFlow
+//     wins; double-zero omits session_id entirely
+//   - tunnel-endpoint FibGen override beats the egress-derived endpoint
+//     and clears TX/MAC fields; a stale FibGen naming no endpoint zeroes
+//     egress; no flag => the egress-derived endpoint applies
 //   - peer-egress fold (unresolvable) suppresses MACs and zeroes egress
+//
+// Every literal below was captured from the pre-collapse twins at
+// 24f2c40e5e and verified byte-identical there before being pinned.
 func TestSessionSyncGoldenOrderVariants16172(t *testing.T) {
 	m := goldenManager16172()
-	key := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, Protocol: 6}
+	key4 := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, Protocol: 6}
+	key6 := dataplane.SessionKeyV6{SrcIP: ip16("2001:db8::1"), DstIP: ip16("2001:db8::2"), Protocol: 6}
+	dmac := [6]byte{1, 2, 3, 4, 5, 6}
+	smac := [6]byte{6, 5, 4, 3, 2, 1}
 
-	// Stale generation: verbatim, however old/large.
-	req := m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{Generation: 0xFFFFFFFFFFFFFFFE})
-	if req.Generation != 0xFFFFFFFFFFFFFFFE {
-		t.Fatalf("stale generation = %#x, want verbatim", req.Generation)
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"v4_stale_generation",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{Generation: 0xFFFFFFFFFFFFFFFE})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","generation":18446744073709551614,"tunnel_discriminator":0}`},
+		{"v6_stale_generation",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{Generation: 0xFFFFFFFFFFFFFFFE})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","generation":18446744073709551614,"tunnel_discriminator":0}`},
+		{"v4_sessionid_fallback",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{SessionID: 78})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","generation":0,"session_id":78,"tunnel_discriminator":0}`},
+		{"v6_sessionid_fallback",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{SessionID: 78})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","generation":0,"session_id":78,"tunnel_discriminator":0}`},
+		{"v4_rtflow_precedence",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{SessionID: 78, RTFlowSessionID: 77})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","generation":0,"session_id":77,"tunnel_discriminator":0}`},
+		{"v6_rtflow_precedence",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{SessionID: 78, RTFlowSessionID: 77})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","generation":0,"session_id":77,"tunnel_discriminator":0}`},
+		{"v4_double_zero_identity",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","generation":0,"tunnel_discriminator":0}`},
+		{"v6_double_zero_identity",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","generation":0,"tunnel_discriminator":0}`},
+		{"v4_tunnel_fibgen_live",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{LogFlags: dataplane.LogFlagUserspaceTunnelEndpoint, FibGen: 3, FibIfindex: 894, FibVlanID: 80, FibDmac: dmac, FibSmac: smac})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","owner_rg_id":1,"egress_ifindex":586,"tunnel_endpoint_id":3,"generation":0,"tunnel_discriminator":0}`},
+		{"v6_tunnel_fibgen_live",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{LogFlags: dataplane.LogFlagUserspaceTunnelEndpoint, FibGen: 3, FibIfindex: 894, FibVlanID: 80, FibDmac: dmac, FibSmac: smac})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","owner_rg_id":1,"egress_ifindex":586,"tunnel_endpoint_id":3,"generation":0,"tunnel_discriminator":0}`},
+		{"v4_tunnel_fibgen_stale",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{LogFlags: dataplane.LogFlagUserspaceTunnelEndpoint, FibGen: 99, FibIfindex: 6, FibVlanID: 80})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","tunnel_endpoint_id":99,"generation":0,"tunnel_discriminator":0}`},
+		{"v6_tunnel_fibgen_stale",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{LogFlags: dataplane.LogFlagUserspaceTunnelEndpoint, FibGen: 99, FibIfindex: 6, FibVlanID: 80})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","tunnel_endpoint_id":99,"generation":0,"tunnel_discriminator":0}`},
+		{"v4_tunnel_derived",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{FibIfindex: 586})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","owner_rg_id":1,"egress_ifindex":586,"tunnel_endpoint_id":3,"generation":0,"tunnel_discriminator":0}`},
+		{"v6_tunnel_derived",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{FibIfindex: 586})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","owner_rg_id":1,"egress_ifindex":586,"tunnel_endpoint_id":3,"generation":0,"tunnel_discriminator":0}`},
+		{"v4_peer_egress",
+			mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key4, &dataplane.SessionValue{FibIfindex: 42, EgressIfaceFold: 0xDEADBEEF, FibDmac: dmac, FibSmac: smac})),
+			`{"operation":"upsert","addr_family":2,"protocol":6,"src_ip":"10.0.0.1","dst_ip":"10.0.0.2","generation":0,"tunnel_discriminator":0}`},
+		{"v6_peer_egress",
+			mustJSON16172(t, m.buildSessionSyncRequestV6("upsert", key6, &dataplane.SessionValueV6{FibIfindex: 42, EgressIfaceFold: 0xDEADBEEF, FibDmac: dmac, FibSmac: smac})),
+			`{"operation":"upsert","addr_family":10,"protocol":6,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2","generation":0,"tunnel_discriminator":0}`},
 	}
-	if got := mustJSON16172(t, req); !strings.Contains(got, `"generation":18446744073709551614`) {
-		t.Fatalf("stale generation JSON = %s", got)
-	}
-
-	// Identity fallback order.
-	if r := m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{SessionID: 78}); r.RTFlowSessionID != 78 {
-		t.Fatalf("SessionID fallback = %d, want 78", r.RTFlowSessionID)
-	}
-	if r := m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{SessionID: 78, RTFlowSessionID: 77}); r.RTFlowSessionID != 77 {
-		t.Fatalf("RTFlow precedence = %d, want 77", r.RTFlowSessionID)
-	}
-	if r := m.buildSessionSyncRequestV6("upsert", dataplane.SessionKeyV6{Protocol: 6}, &dataplane.SessionValueV6{SessionID: 78}); r.RTFlowSessionID != 78 {
-		t.Fatalf("v6 SessionID fallback = %d, want 78", r.RTFlowSessionID)
-	}
-	if got := mustJSON16172(t, m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{})); strings.Contains(got, "session_id") {
-		t.Fatalf("double-zero identity must omit session_id: %s", got)
-	}
-
-	// Tunnel override via FibGen (stale-gen naming a live endpoint id 3).
-	tun := m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{
-		LogFlags: dataplane.LogFlagUserspaceTunnelEndpoint, FibGen: 3, FibIfindex: 894, FibVlanID: 80,
-		FibDmac: [6]byte{1, 2, 3, 4, 5, 6}, FibSmac: [6]byte{6, 5, 4, 3, 2, 1},
-	})
-	if tun.TunnelEndpointID != 3 || tun.EgressIfindex != 586 || tun.OwnerRGID != 1 || tun.TXIfindex != 0 || tun.TXVLANID != 0 || tun.NeighborMAC != "" || tun.SrcMAC != "" {
-		t.Fatalf("tunnel override = %+v", tun)
-	}
-	// Stale FibGen naming NO endpoint: egress zeroed.
-	stale := m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{
-		LogFlags: dataplane.LogFlagUserspaceTunnelEndpoint, FibGen: 99, FibIfindex: 6, FibVlanID: 80,
-	})
-	if stale.TunnelEndpointID != 99 || stale.EgressIfindex != 0 || stale.OwnerRGID != 0 {
-		t.Fatalf("stale tunnel gen = %+v, want endpoint 99 with zeroed egress", stale)
-	}
-	// Tunnel flag WITHOUT FibGen: egress-derived endpoint (ifindex 586 => id 3).
-	derived := m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{FibIfindex: 586})
-	if derived.TunnelEndpointID != 3 || derived.EgressIfindex != 586 {
-		t.Fatalf("derived tunnel endpoint = %+v", derived)
-	}
-
-	// Peer-egress: unresolvable egress fold suppresses MACs, zeroes egress.
-	peer := m.buildSessionSyncRequestV4("upsert", key, &dataplane.SessionValue{
-		FibIfindex: 42, EgressIfaceFold: 0xDEADBEEF,
-		FibDmac: [6]byte{1, 2, 3, 4, 5, 6}, FibSmac: [6]byte{6, 5, 4, 3, 2, 1},
-	})
-	if peer.NeighborMAC != "" || peer.SrcMAC != "" || peer.EgressIfindex != 0 {
-		t.Fatalf("peer-egress = %+v, want MACs suppressed and egress 0", peer)
-	}
-	peer6 := m.buildSessionSyncRequestV6("upsert", dataplane.SessionKeyV6{Protocol: 6}, &dataplane.SessionValueV6{
-		FibIfindex: 42, EgressIfaceFold: 0xDEADBEEF,
-		FibDmac: [6]byte{1, 2, 3, 4, 5, 6}, FibSmac: [6]byte{6, 5, 4, 3, 2, 1},
-	})
-	if peer6.NeighborMAC != "" || peer6.SrcMAC != "" || peer6.EgressIfindex != 0 {
-		t.Fatalf("v6 peer-egress = %+v, want MACs suppressed and egress 0", peer6)
-	}
-}
-
-// TestSessionSyncGoldenAllocations16172 guards the no-new-per-request-rendering
-// bar: building a request must not allocate more after the collapse than the
-// twin baseline. The bound is generous (the request carries ~10 strings) but
-// catches a regression to per-field formatting helpers.
-func TestSessionSyncGoldenAllocations16172(t *testing.T) {
-	m := goldenManager16172()
-	key := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, Protocol: 6}
-	val := &dataplane.SessionValue{IngressZone: 1, EgressZone: 2, FibIfindex: 6, FibVlanID: 80, Flags: dataplane.SessFlagSNAT | dataplane.SessFlagDNAT, NATSrcIP: natU32("10.0.61.1"), NATDstIP: natU32("10.0.61.102")}
-	allocs := testing.AllocsPerRun(50, func() {
-		_ = m.buildSessionSyncRequestV4("upsert", key, val)
-	})
-	// Baseline measured on the pre-collapse twins; the collapsed builder
-	// carries raw net.IP values in the view (no extra string rendering).
-	if allocs > 8 {
-		t.Fatalf("buildSessionSyncRequestV4 allocs/run = %.1f, want <= 8 (pre-collapse baseline 6; headroom 2)", allocs)
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Fatalf("%s golden mismatch:\n got: %s\nwant: %s", tc.name, tc.got, tc.want)
+		}
 	}
 }
