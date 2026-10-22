@@ -5824,3 +5824,95 @@ fn fabric_ingress_discard_seeded_live_shape_falls_through_16269() {
     );
     assert_eq!(run.dbg_disposition_other, 0);
 }
+
+/// #16270 (cache supersession): the aged-failover shape at the live
+/// hit stage — a cached ForwardCandidate (the stock `cached_entry`,
+/// egress EGRESS_IFINDEX) whose egress is stamped RG1, with RG1 no
+/// longer forwarding-active locally (failed over to the peer). The
+/// hit must evict (PostHitForwardCandidateEgressDeparted) and fall
+/// through to the slow path for re-resolve, NOT serve locally.
+/// Control: RG1 locally active -> served (Consumed), no arm moves.
+/// RED-on-revert: without the ForwardCandidateEgressDeparted arm the
+/// departed hit is Consumed (served from the non-owner egress).
+#[test]
+fn forward_candidate_egress_departed_falls_through_16270() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    // Departed: egress RG1 present but inactive (peer-owned now).
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16270: cached ForwardCandidate whose egress RG departed must re-resolve, not serve locally"
+    );
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize]
+            + run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "the supersession must attribute to exactly one eviction (EnforceChanged on this fixture, whose egress row is present; the dedicated arm owns shapes where enforce compares equal)"
+    );
+    // Control: same entry with RG1 locally forwarding-active is served.
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 1;
+    entry.stamp.owner_rg_id = 1;
+    // Lease-carrying stamp would gate the lookup itself; keep the stamp
+    // leaseless so the hit reaches decision revalidation (the arm under test).
+    entry.stamp.owner_rg_lease_until = 0;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "locally-active egress RG must keep serving the cached ForwardCandidate"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        0,
+        "locally-active control must not move the supersession arm"
+    );
+}

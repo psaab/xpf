@@ -840,6 +840,161 @@ fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
     ));
 }
 
+/// #16270 (cache supersession): the aged-failover shape — a cached
+/// ForwardCandidate egressing reth0.80 (ifindex 12, RG1) seeded while
+/// RG1 was locally active, then RG1 leaves this node (failover to the
+/// peer). The next hit must NOT serve locally: it supersedes
+/// (EnforceChanged where the egress row is present for enforce to
+/// demote, ForwardCandidateEgressDeparted where enforce compares
+/// equal — the live fw0 shape) so the hit path evicts and the slow
+/// path re-resolves (HA demotion + fabric redirect to the new owner).
+/// Controls pin the guard: RG1 still locally active -> valid
+/// (bit-identical); RG1 absent from the HA map (peer-owned by
+/// omission) -> also superseded; standalone (empty HA map) -> valid.
+/// RED-on-revert: drop the ForwardCandidateEgressDeparted arm AND
+/// the enforce demotion and the departed cases read None (served
+/// locally forever — the blackhole); with the arm alone reverted,
+/// the stage test's arm-sum still passes via EnforceChanged, which
+/// is why the arm exists for the enforce-equal live shape rather
+/// than as the sole supersession path.
+#[test]
+fn cached_forward_candidate_egress_rg_departed_supersedes_16270() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    // Fresh resolution egresses reth0.80/12 (RG1) as ForwardCandidate.
+    let resolution =
+        lookup_forwarding_resolution(&state, target).resolution;
+    assert_eq!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "fixture: target must resolve to a local ForwardCandidate"
+    );
+    assert_eq!(
+        owner_rg_for_resolution(&state, resolution),
+        1,
+        "fixture: egress reth0.80 must be owned by RG1"
+    );
+    let active = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let departed = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
+    let absent: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
+    // Control: egress RG still locally forwarding-active -> unchanged.
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &active,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            false,
+            target,
+            None,
+            resolution,
+        ),
+        None,
+        "locally-active egress RG must keep the cached ForwardCandidate"
+    );
+    // Departed: RG1 inactive locally (failed over to the peer). On this
+    // fixture the egress row is present, so the pre-existing
+    // EnforceChanged arm fires first (enforce demotes to HAInactive) —
+    // the entry is superseded either way; the dedicated arm below owns
+    // the shapes where enforce compares equal (the live fw0 shape).
+    let departed_reason = cached_flow_decision_invalid_reason(
+        &state,
+        &departed,
+        &dynamic_neighbors,
+        now_secs,
+        1,
+        false,
+        target,
+        None,
+        resolution,
+    );
+    assert!(
+        matches!(
+            departed_reason,
+            Some(CachedDecisionInvalid::EnforceChanged)
+                | Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted)
+        ),
+        "cached ForwardCandidate whose egress RG left must supersede to slow-path re-resolve, got {departed_reason:?}"
+    );
+    // Absent RG (clustered node, RG not in the map) also supersedes:
+    // a non-empty map with another RG proves this is not the standalone arm.
+    let absent_rg1 = BTreeMap::from([(2, active_ha_runtime(now_secs))]);
+    let absent_reason = cached_flow_decision_invalid_reason(
+        &state,
+        &absent_rg1,
+        &dynamic_neighbors,
+        now_secs,
+        1,
+        false,
+        target,
+        None,
+        resolution,
+    );
+    assert!(
+        matches!(
+            absent_reason,
+            Some(CachedDecisionInvalid::EnforceChanged)
+                | Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted)
+        ),
+        "egress RG absent from a clustered HA map must supersede, got {absent_reason:?}"
+    );
+    // Standalone guard for the NEW arm: an empty HA map must never
+    // read ForwardCandidateEgressDeparted (every known RG would
+    // otherwise read as "absent" and fire). This fixture's clustered
+    // shape is still superseded by the pre-existing EnforceChanged
+    // arm (absent RG -> HAInactive), which is not the new arm — pin
+    // exactly that distinction.
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &absent,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            false,
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::EnforceChanged),
+        "standalone read must never be the new ForwardCandidateEgressDeparted arm"
+    );
+    // The per-flow production entry point agrees on the departed case.
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: target,
+        src_port: 46248,
+        dst_port: 5211,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    assert!(
+        matches!(
+            cached_flow_decision_invalid_reason_for_flow(
+                &state,
+                &departed,
+                &dynamic_neighbors,
+                now_secs,
+                1,
+                false,
+                false,
+                Some(&key),
+                target,
+                None,
+                resolution,
+            ),
+            Some(CachedDecisionInvalid::EnforceChanged)
+                | Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted)
+        ),
+        "per-flow hit path must supersede the departed ForwardCandidate"
+    );
+}
+
 #[test]
 fn inactive_owner_rg_redirects_established_session_to_fabric() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
