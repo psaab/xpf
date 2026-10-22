@@ -325,6 +325,9 @@ pub(super) fn stage_flow_cache_hit(
                     Some(crate::afxdp::forwarding::CachedDecisionInvalid::FabricIngressLocalWins) => {
                         crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressLocalWins
                     }
+                    Some(
+                        crate::afxdp::forwarding::CachedDecisionInvalid::FabricIngressDiscardNowLocal,
+                    ) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressDiscardNowLocal,
                     None => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitDecisionInvalid,
                 }
             };

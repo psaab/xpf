@@ -1091,9 +1091,10 @@ const _: [(); 2865] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pen
 // both sentinels; offsets advance by 8 bytes, size unchanged.
 // #16220 adds seventeen unconditional u64 per-arm flow-cache eviction
 // counters before both sentinels.
+// #16269 adds the eighteenth arm; offsets advance by 8 bytes, size unchanged.
 const _: [(); 2880] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2688] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2817] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2696] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2825] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 impl BindingLiveState {
     pub(super) fn new() -> Self {
         Self {

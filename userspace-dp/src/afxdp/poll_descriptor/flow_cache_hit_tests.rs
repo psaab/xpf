@@ -5566,3 +5566,148 @@ fn neighbor_mac_stale_attributes_to_neighbor_arm_16220() {
     );
 }
 
+/// #16269: a fabric-ingress cached DiscardRoute whose cluster-terminal
+/// origin is CERTAIN (provenance stamp preserved, nat=(None,None),
+/// stamp_owner_rg=0 — the exact live fw1 shape) and whose would-be
+/// egress RG is now locally forwarding-active must NOT terminal-drop
+/// on the new owner: it evicts to the slow path for re-resolve.
+/// RED-on-revert: without the FabricIngressDiscardNowLocal arm the
+/// hit is Consumed as a terminal drop (the aged-failover blackhole).
+#[test]
+fn fabric_ingress_discard_now_local_falls_through_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    // EGRESS_IFINDEX (7) is the would-be WAN egress; stamp it RG1 and
+    // make RG1 locally forwarding-active (the takeover state).
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let mut entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    entry.decision.resolution.source_ifindex = EGRESS_IFINDEX;
+    assert_eq!(entry.decision.nat, NatDecision::default());
+    assert_eq!(entry.stamp.owner_rg_id, 0);
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#16269: fabric-ingress DiscardRoute now locally owned must re-resolve, not drop"
+    );
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitFabricIngressDiscardNowLocal as usize],
+        1,
+        "the takeover eviction must attribute to its own arm"
+    );
+    assert_eq!(run.dbg_disposition_other, 0);
+    assert!(run.scratch.scratch_recycle.is_empty());
+}
+
+/// #16269 control: same fabric-ingress DiscardRoute shape but WITHOUT
+/// provenance (source_ifindex == 0 — operator discard / unattributable
+/// row). Origin uncertain: it must stay a terminal drop even though
+/// RG1 is locally active. Fail-closed; never a rescue guess.
+#[test]
+fn fabric_ingress_discard_without_provenance_stays_drop_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: 1,
+            lease: HAGroupRuntime::active_lease_until(1, 1),
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    assert_eq!(entry.decision.resolution.source_ifindex, 0);
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "uncertain-origin DiscardRoute must remain a terminal drop"
+    );
+    assert_eq!(run.dbg_disposition_other, 1);
+}
+
+/// #16269 control: certain origin but the would-be egress RG is still
+/// peer-owned (not locally active) — the entry is not stale here; the
+/// fabric-ingress packet must not re-resolve locally (and never
+/// re-redirect). It stays a terminal drop on this node.
+#[test]
+fn fabric_ingress_discard_still_peer_owned_stays_drop_16269() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: 1,
+            lease: HAForwardingLease::Inactive,
+        },
+    );
+    let frame = tcp_v4_ack_frame();
+    let mut entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    entry.decision.resolution.source_ifindex = EGRESS_IFINDEX;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            packet_fabric_ingress: true,
+            fabric_link_ingress: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "still-peer-owned DiscardRoute must not re-resolve locally"
+    );
+    assert_eq!(run.dbg_disposition_other, 1);
+}
+

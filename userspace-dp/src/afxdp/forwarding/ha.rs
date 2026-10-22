@@ -86,6 +86,41 @@ pub(in crate::afxdp) fn discard_route_is_cluster_terminal_peer_owned(
     resolution.disposition == ForwardingDisposition::DiscardRoute
         && cluster_terminal_peer_owned_egress_rg(forwarding, ha_state, now_secs, resolution)
 }
+/// #16269: is this DiscardRoute's cluster-terminal origin CERTAIN —
+/// the row was demoted from `ClusterTerminalHAInactive` (or still
+/// carries that spelling) and its would-be egress RG is locally
+/// forwarding-active RIGHT NOW, so on THIS node the row must forward
+/// to the WAN instead of dropping? Origin is certain only when the
+/// demotion preserved the FIB's `source_ifindex` provenance stamp;
+/// `source_ifindex == 0` means the stamp is absent (operator discard,
+/// or a row shape the FIB could not attribute) and the answer is
+/// always false — fail-closed, never a rescue guess. This is the
+/// takeover-side twin of `discard_route_is_cluster_terminal_peer_owned`:
+/// that one asks "is the would-be egress peer-owned NOW" (the split
+/// node's fabric crossing); this one asks "is it LOCALLY active NOW"
+/// (the new owner's fabric-ingress cache hit). A fabric-ingress
+/// cached DiscardRoute answering true here is stale by construction:
+/// it was demoted while this node did not own the egress RG, and the
+/// RG has since activated locally, so the slow path re-resolves it to
+/// the local WAN ForwardCandidate.
+pub(in crate::afxdp) fn discard_route_cluster_terminal_now_local(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: &ForwardingResolution,
+) -> bool {
+    if resolution.disposition != ForwardingDisposition::DiscardRoute
+        || resolution.source_ifindex <= 0
+    {
+        return false;
+    }
+    let rg = owner_rg_for_flow(forwarding, resolution.source_ifindex);
+    rg > 0
+        && ha_state
+            .get(&rg)
+            .is_some_and(|g| g.is_forwarding_active(now_secs))
+}
+
 
 pub(in crate::afxdp) fn enforce_ha_resolution(
     forwarding: &ForwardingState,
@@ -343,6 +378,12 @@ pub(in crate::afxdp) enum CachedDecisionInvalid {
     /// #16220: FabricLocalWins where the local resolution's owner RG is
     /// the SAME as the cached entry's owner (vs a different local owner).
     FabricLocalWinsSameOwner,
+    /// #16269: a fabric-ingress cached DiscardRoute whose cluster-
+    /// terminal origin is certain (provenance stamp preserved) and
+    /// whose would-be egress RG is now locally forwarding-active:
+    /// the entry was demoted while this node did not own the RG and
+    /// is stale at takeover. The slow path re-resolves it locally.
+    FabricIngressDiscardNowLocal,
 }
 
 pub(in crate::afxdp) fn cached_flow_decision_valid(
@@ -450,6 +491,18 @@ fn cached_flow_decision_invalid_reason_inner(
 ) -> Option<CachedDecisionInvalid> {
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
         return Some(CachedDecisionInvalid::EnforceChanged);
+    }
+    // #16269: a fabric-ingress cached DiscardRoute whose cluster-
+    // terminal origin is certain and whose would-be egress RG is now
+    // locally active is stale at takeover: it was demoted while this
+    // node did not own the RG. Evict so the slow path re-resolves it
+    // to the local WAN ForwardCandidate instead of terminal-dropping
+    // every fabric-redirected retransmit on the new owner. Uncertain
+    // origin (no provenance stamp) never reaches here — fail-closed.
+    if fabric_ingress
+        && discard_route_cluster_terminal_now_local(forwarding, ha_state, now_secs, &resolution)
+    {
+        return Some(CachedDecisionInvalid::FabricIngressDiscardNowLocal);
     }
     // RG-stamped redirect hits are the common split-RG cache case. Once the
     // cached owner RG becomes locally active again, invalidate immediately and

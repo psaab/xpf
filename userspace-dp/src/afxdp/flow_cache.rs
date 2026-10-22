@@ -894,9 +894,13 @@ pub(super) enum FlowCacheEvictionArm {
     PostHitFabricIngressLocalWins = 14,
     PostHitFabricRedirectOnFabricIngress = 15,
     PostHitFabricLocalWinsSameOwner = 16,
+    /// #16269: fabric-ingress cached DiscardRoute with certain
+    /// cluster-terminal origin whose would-be egress RG is now
+    /// locally active — stale at takeover, evicted for re-resolve.
+    PostHitFabricIngressDiscardNowLocal = 17,
 }
 
-pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 17;
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 18;
 
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
@@ -917,6 +921,7 @@ impl FlowCacheEvictionArm {
         Self::PostHitFabricIngressLocalWins,
         Self::PostHitFabricRedirectOnFabricIngress,
         Self::PostHitFabricLocalWinsSameOwner,
+        Self::PostHitFabricIngressDiscardNowLocal,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -940,6 +945,9 @@ impl FlowCacheEvictionArm {
                 "post_hit_fabric_redirect_on_fabric_ingress"
             }
             Self::PostHitFabricLocalWinsSameOwner => "post_hit_fabric_local_wins_same_owner",
+            Self::PostHitFabricIngressDiscardNowLocal => {
+                "post_hit_fabric_ingress_discard_now_local"
+            }
         }
     }
 }
