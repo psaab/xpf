@@ -1648,12 +1648,6 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         tx_kick_latency_count: 21,
         tx_kick_latency_sum_ns: 22,
         tx_kick_retry_count: 23,
-        tx_batch_hist: vec![24, 25],
-        tx_batch_commits: 26,
-        tx_batch_descriptors: 27,
-        tx_kick_batch_hist: vec![28],
-        tx_kick_batch_kicks: 29,
-        tx_kick_batch_descriptors: 30,
         // #878: UMEM / TX-ring utilization fields. Plausible
         // values so the wire-key assertions below also cover them.
         umem_total_frames: 24,
@@ -1670,6 +1664,7 @@ fn binding_counters_snapshot_serializes_with_expected_wire_keys() {
         v_min_throttle_hard_cap_overrides: 28,
         v_min_throttles: 29,
         v_min_suspended_batches: 30,
+        ..Default::default()
     };
     let value: serde_json::Value =
         serde_json::to_value(&snap).expect("serialize snapshot to Value");
@@ -2487,12 +2482,6 @@ fn tx_latency_hist_serialization_roundtrip() {
         tx_kick_latency_count: 4105,
         tx_kick_latency_sum_ns: 7_654_321,
         tx_kick_retry_count: 42,
-        tx_batch_hist: vec![1, 2],
-        tx_batch_commits: 3,
-        tx_batch_descriptors: 4,
-        tx_kick_batch_hist: vec![5],
-        tx_kick_batch_kicks: 6,
-        tx_kick_batch_descriptors: 7,
         // #878: UMEM / TX-ring utilization fields.
         umem_total_frames: 12_288,
         umem_inflight_frames: 4_096,
@@ -2504,6 +2493,7 @@ fn tx_latency_hist_serialization_roundtrip() {
         v_min_throttle_hard_cap_overrides: 18,
         v_min_throttles: 19,
         v_min_suspended_batches: 20,
+        ..Default::default()
     };
     let json = serde_json::to_string(&snap).expect("serialize snapshot");
     let back: BindingCountersSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
