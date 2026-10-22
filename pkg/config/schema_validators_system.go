@@ -393,11 +393,11 @@ func ValidateDNSDomain(raw string) error {
 // and a DHCP pool domain of `*` are not wildcards and must still reject.
 // #16163 fold: wiring plain ValidateDNSDomain onto the dns-proxy leaf
 // silently revoked the documented `*` spelling at commit-check.
-func ValidateDNSProxyDefaultDomain(raw string, cfg *Config) error {
+func ValidateDNSProxyDefaultDomain(raw string) error {
 	if raw == "*" {
 		return nil
 	}
-	return ValidateDNSDomain(raw, cfg)
+	return ValidateDNSDomain(raw)
 }
 
 // ValidateSystemHostname accepts the `system host-name` value. Unlike the

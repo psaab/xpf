@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fix master pkg/config build (#16245): drop the pre-#16162
+    two-argument `cfg *Config` signature from
+    ValidateDNSProxyDefaultDomain left by the #16162/#16163 semantic
+    merge collision (body never read cfg) and update the #16163
+    census test's remaining two-argument LeafValidator,
+    PositionalKeyValidator, ValidateDNSDomain and SchemaValidate
+    call sites to the retired-cfg forms. No validation acceptance
+    logic changed.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Complete the Go-Rust userspace wire fixture coverage (#16132): the
     protocol_wire_v1.json golden now carries populated specimens for every
     field a default specimen cannot show (skip-on-default keys and nested
