@@ -215,7 +215,7 @@ func TestPackedFromStatementMatchesNestedFromBlock(t *testing.T) {
 			// Anti-vacuity: the block spelling must actually record a
 			// condition, or "equal" would mean "both empty" — which is the
 			// exact bug, passing as a green.
-			if reflect.DeepEqual(*blockTerms[0], FirewallFilterTerm{Name: "t1", Action: "discard", TerminalActions: []string{"discard"}}) {
+			if reflect.DeepEqual(*blockTerms[0], FirewallFilterTerm{Name: "t1", Action: FilterActionDiscard, TerminalActions: []FilterAction{FilterActionDiscard}}) {
 				t.Fatalf("the from-BLOCK spelling recorded no match condition either; the fixture cannot detect the defect")
 			}
 			if !reflect.DeepEqual(blockTerms, stmtTerms) {

@@ -44,7 +44,7 @@ func TestRawTermRendersEveryField15173(t *testing.T) {
 		Syslog:            true,
 		Count:             "hits",
 		Policer:           "p1",
-		Action:            "discard",
+		Action:            config.FilterActionDiscard,
 	}
 	out := renderTerm15173(term)
 	for _, want := range []string{
@@ -84,7 +84,7 @@ func TestRawTermRendersEveryField15173(t *testing.T) {
 func TestRawTermExceptPortDiscardNotBroad15173(t *testing.T) {
 	out := renderTerm15173(&config.FirewallFilterTerm{
 		Name: "ssh-only", Protocols: []string{"tcp"},
-		DestPortsExcept: []string{"22"}, Action: "discard",
+		DestPortsExcept: []string{"22"}, Action: config.FilterActionDiscard,
 	})
 	if !strings.Contains(out, "    from destination-port-except 22\n") {
 		t.Errorf("except-port predicate dropped; narrow discard reads as broad discard:\n%s", out)
@@ -121,18 +121,18 @@ func TestRawTermActionHonesty15173(t *testing.T) {
 		},
 		{
 			name: "reject renders its message type",
-			term: &config.FirewallFilterTerm{Name: "rej", Action: "reject", RejectMessageType: "tcp-reset"},
+			term: &config.FirewallFilterTerm{Name: "rej", Action: config.FilterActionReject, RejectMessageType: "tcp-reset"},
 			want: []string{"    then reject tcp-reset\n"},
 		},
 		{
 			name: "plain reject has no phantom type",
-			term: &config.FirewallFilterTerm{Name: "rej", Action: "reject"},
+			term: &config.FirewallFilterTerm{Name: "rej", Action: config.FilterActionReject},
 			want: []string{"    then reject\n"},
 			not:  []string{"tcp-reset"},
 		},
 		{
 			name: "contradictory discard+next-term terminates and discloses",
-			term: &config.FirewallFilterTerm{Name: "bad", Action: "discard", NextTerm: true},
+			term: &config.FirewallFilterTerm{Name: "bad", Action: config.FilterActionDiscard, NextTerm: true},
 			want: []string{"    then discard\n", "    then next term (ignored"},
 			not:  []string{"    then next term\n"},
 		},
@@ -150,7 +150,7 @@ func TestRawTermActionHonesty15173(t *testing.T) {
 		},
 		{
 			name: "explicit accept unchanged (control)",
-			term: &config.FirewallFilterTerm{Name: "ok", Action: "accept"},
+			term: &config.FirewallFilterTerm{Name: "ok", Action: config.FilterActionAccept},
 			want: []string{"    then accept\n"},
 			not:  []string{"next term"},
 		},
@@ -175,8 +175,8 @@ func TestRawTermActionHonesty15173(t *testing.T) {
 func TestWriteAllFiltersSortedAndNilSafe15173(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
-		"zzz":  {Terms: []*config.FirewallFilterTerm{{Name: "t", Action: "accept"}, nil}},
-		"aaa":  {Terms: []*config.FirewallFilterTerm{{Name: "t", Action: "discard"}}},
+		"zzz":  {Terms: []*config.FirewallFilterTerm{{Name: "t", Action: config.FilterActionAccept}, nil}},
+		"aaa":  {Terms: []*config.FirewallFilterTerm{{Name: "t", Action: config.FilterActionDiscard}}},
 		"nilf": nil,
 	}
 	var b strings.Builder

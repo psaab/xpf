@@ -127,7 +127,7 @@ func TestFilterAction_Unknown_LenientWarns(t *testing.T) {
 		t.Fatalf("expected lenient path to record a firewall-filter-action downgrade warning, got %v", cfg.Warnings)
 	}
 	term := cfg.Firewall.FiltersInet["f1"].Terms[0]
-	if term.Action != "discard" {
+	if term.Action != FilterActionDiscard {
 		t.Fatalf("an unknown action must fail closed as discard, got %q", term.Action)
 	}
 }
@@ -149,7 +149,7 @@ func TestFilterAction_CompileCapturesUnknownToken(t *testing.T) {
 	if len(term.UnknownActions) == 0 || term.UnknownActions[0] != "frobnicate" {
 		t.Fatalf("expected term.UnknownActions to capture %q, got %v", "frobnicate", term.UnknownActions)
 	}
-	if term.Action != "discard" {
+	if term.Action != FilterActionDiscard {
 		t.Fatalf("expected an unknown action to select fail-closed discard, got %q", term.Action)
 	}
 }
@@ -169,7 +169,7 @@ func TestFilterAction_UnknownNextActionsRejectAndDiscardLeniently11357(t *testin
 				t.Fatalf("lenient compile of %q must remain bootable: %v", then, err)
 			}
 			term := cfg.Firewall.FiltersInet["f1"].Terms[0]
-			if term.Action != "discard" {
+			if term.Action != FilterActionDiscard {
 				t.Fatalf("lenient action %q compiled as %q, want fail-closed discard", then, term.Action)
 			}
 			if len(term.UnknownActions) == 0 || term.UnknownActions[0] != strings.Fields(then)[0] {
@@ -226,7 +226,7 @@ firewall {
 				t.Fatalf("lenient compile with separate then blocks %q and %q: %v", order[0], order[1], err)
 			}
 			term := cfg.Firewall.FiltersInet["F1"].Terms[0]
-			if len(term.UnknownActions) == 0 || term.Action != "discard" {
+			if len(term.UnknownActions) == 0 || term.Action != FilterActionDiscard {
 				t.Fatalf("unknown action must dominate known accept across separate then blocks, got %+v", term)
 			}
 		})
@@ -243,7 +243,7 @@ func TestFilterAction_RejectMessageType_CommitsAndCaptures(t *testing.T) {
 		t.Fatalf("then reject tcp-reset must commit, got %v", err)
 	}
 	term := cfg.Firewall.FiltersInet["f1"].Terms[0]
-	if term.Action != "reject" {
+	if term.Action != FilterActionReject {
 		t.Fatalf("expected Action reject, got %q", term.Action)
 	}
 	if term.RejectMessageType != "tcp-reset" {
@@ -269,7 +269,7 @@ func TestFilterAction_NextTerm_CommitsAndMarks(t *testing.T) {
 		t.Fatalf("next term must not be flagged unknown, got %v", term.UnknownActions)
 	}
 	// Fall-through keeps Action == "" (no terminating action).
-	if term.Action != "" {
+	if term.Action != FilterActionUnset {
 		t.Fatalf("next term must keep Action \"\", got %q", term.Action)
 	}
 }
@@ -402,7 +402,7 @@ func TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355(t *testing
 		t.Fatalf("hierarchical reject/count action chain should compile: %v", err)
 	}
 	term := cfg.Firewall.FiltersInet["f1"].Terms[0]
-	if term.Action != "reject" || term.RejectMessageType != "tcp-reset" || term.Count != "c1" {
+	if term.Action != FilterActionReject || term.RejectMessageType != "tcp-reset" || term.Count != "c1" {
 		t.Fatalf("nested reject tail compiled as action=%q message=%q count=%q",
 			term.Action, term.RejectMessageType, term.Count)
 	}

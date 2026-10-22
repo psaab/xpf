@@ -30,11 +30,11 @@ func TestOracleEmitsL4ProtoWithBarePortMatch_9953(t *testing.T) {
 		name string
 		term *config.FirewallFilterTerm
 	}{
-		{"dport", &config.FirewallFilterTerm{Name: "ssh", DestinationPorts: []string{"22"}, Action: "accept"}},
-		{"sport", &config.FirewallFilterTerm{Name: "ssh-s", SourcePorts: []string{"22"}, Action: "accept"}},
-		{"dport_set", &config.FirewallFilterTerm{Name: "mgmt", DestinationPorts: []string{"22", "161"}, Action: "accept"}},
-		{"dport_except", &config.FirewallFilterTerm{Name: "not-ssh", DestPortsExcept: []string{"22"}, Action: "discard"}},
-		{"sport_except", &config.FirewallFilterTerm{Name: "not-ssh-s", SourcePortsExcept: []string{"22"}, Action: "discard"}},
+		{"dport", &config.FirewallFilterTerm{Name: "ssh", DestinationPorts: []string{"22"}, Action: config.FilterActionAccept}},
+		{"sport", &config.FirewallFilterTerm{Name: "ssh-s", SourcePorts: []string{"22"}, Action: config.FilterActionAccept}},
+		{"dport_set", &config.FirewallFilterTerm{Name: "mgmt", DestinationPorts: []string{"22", "161"}, Action: config.FilterActionAccept}},
+		{"dport_except", &config.FirewallFilterTerm{Name: "not-ssh", DestPortsExcept: []string{"22"}, Action: config.FilterActionDiscard}},
+		{"sport_except", &config.FirewallFilterTerm{Name: "not-ssh-s", SourcePortsExcept: []string{"22"}, Action: config.FilterActionDiscard}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := rulesForTerm9953(t, tc.term)
@@ -55,7 +55,7 @@ func TestOracleEmitsL4ProtoWithBarePortMatch_9953(t *testing.T) {
 func TestOracleKeepsTheOperatorsProtocol_9953(t *testing.T) {
 	got := rulesForTerm9953(t, &config.FirewallFilterTerm{
 		Name: "ssh", Protocols: []string{"tcp"},
-		DestinationPorts: []string{"22"}, Action: "accept",
+		DestinationPorts: []string{"22"}, Action: config.FilterActionAccept,
 	})
 	// tcp resolves to 6 (#3436 numeric spelling).
 	if !strings.Contains(got, "meta l4proto 6") {
@@ -82,7 +82,7 @@ func TestOracleDoesNotRescueAnUnresolvableProtocol_9953(t *testing.T) {
 	const unresolvable = "definitely-not-a-protocol"
 	got := rulesForTerm9953(t, &config.FirewallFilterTerm{
 		Name: "weird", Protocols: []string{unresolvable},
-		DestinationPorts: []string{"22"}, Action: "accept",
+		DestinationPorts: []string{"22"}, Action: config.FilterActionAccept,
 	})
 	if !strings.Contains(got, unresolvable) {
 		t.Fatalf("premise: #6806 keeps an unresolvable token VERBATIM so the load fails "+
@@ -102,7 +102,7 @@ func TestOracleDoesNotRescueAnUnresolvableProtocol_9953(t *testing.T) {
 func TestOracleDoesNotGuardAnICMPTerm_9953(t *testing.T) {
 	got := rulesForTerm9953(t, &config.FirewallFilterTerm{
 		Name: "icmp-ports", ICMPTypes: []int{8},
-		DestinationPorts: []string{"22"}, Action: "discard",
+		DestinationPorts: []string{"22"}, Action: config.FilterActionDiscard,
 	})
 	if strings.Contains(got, "meta l4proto { 6, 17 }") {
 		t.Errorf("#9953: the fallback fired on a term carrying an icmp-type. The ICMP lowering "+
@@ -115,7 +115,7 @@ func TestOracleDoesNotGuardAnICMPTerm_9953(t *testing.T) {
 // A term with no port comparison must not be narrowed at all.
 func TestOracleDoesNotNarrowAPortlessTerm_9953(t *testing.T) {
 	got := rulesForTerm9953(t, &config.FirewallFilterTerm{
-		Name: "from-net", SourceAddresses: []string{"10.0.0.0/8"}, Action: "accept",
+		Name: "from-net", SourceAddresses: []string{"10.0.0.0/8"}, Action: config.FilterActionAccept,
 	})
 	if strings.Contains(got, "meta l4proto") {
 		t.Errorf("#9953: a term comparing no port acquired a protocol guard. The guard exists "+
@@ -129,7 +129,7 @@ func TestOracleDoesNotNarrowAPortlessTerm_9953(t *testing.T) {
 // this cannot drift; this cell is what would notice if someone re-derived it.
 func TestBothRenderPathsUseTheSameFallback_9953(t *testing.T) {
 	got := rulesForTerm9953(t, &config.FirewallFilterTerm{
-		Name: "ssh", DestinationPorts: []string{"22"}, Action: "accept",
+		Name: "ssh", DestinationPorts: []string{"22"}, Action: config.FilterActionAccept,
 	})
 	want := xnft.Lo0PortFallbackL4ProtoExpr()
 	if want == "" {

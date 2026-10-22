@@ -27,7 +27,7 @@ func perPacketMatchCfg() *config.Config {
 					Protocols:  []string{"tcp"},
 					TCPFlags:   []string{"syn"},
 					IsFragment: false,
-					Action:     "discard",
+					Action:     config.FilterActionDiscard,
 				},
 			},
 		},
@@ -66,7 +66,7 @@ func TestFilterSnapshotTCPFlagsUnparseableSetsMarker(t *testing.T) {
 			// matcher cannot represent — ParseTCPFlagsExpression rejects it.
 			Protocols: []string{"tcp"},
 			TCPFlags:  []string{"syn", "|", "ack"},
-			Action:    "discard",
+			Action:    config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -98,7 +98,7 @@ func TestFilterSnapshotTCPFlagsMultipleAreAnded(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name: "t", Protocols: []string{"tcp"}, TCPFlags: []string{"syn", "ack"},
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -125,7 +125,7 @@ func TestFilterSnapshotTCPFlagsExpressionParsed(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name: "t", Protocols: []string{"tcp"}, TCPFlags: []string{"(syn & !ack)"},
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -151,7 +151,7 @@ func TestFilterSnapshotTCPFlagsNegationOnly(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name: "t", Protocols: []string{"tcp"}, TCPFlags: []string{"!rst"},
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -168,7 +168,7 @@ func TestFilterSnapshotIsFragmentSerialized(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
-			Name: "t", IsFragment: true, Action: "discard",
+			Name: "t", IsFragment: true, Action: config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -181,7 +181,7 @@ func TestFilterSnapshotICMPTypeCodeSerialized(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
-			Name: "t", Protocols: []string{"icmp"}, ICMPTypes: []int{8}, ICMPCodes: []int{0}, Action: "discard",
+			Name: "t", Protocols: []string{"icmp"}, ICMPTypes: []int{8}, ICMPCodes: []int{0}, Action: config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -200,7 +200,7 @@ func TestFilterSnapshotICMPUnsetStaysNil(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
-			Name: "t", Protocols: []string{"tcp"}, Action: "accept",
+			Name: "t", Protocols: []string{"tcp"}, Action: config.FilterActionAccept,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)

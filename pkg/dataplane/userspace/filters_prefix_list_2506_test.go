@@ -31,7 +31,7 @@ func prefixListCfg(srcRefs, dstRefs []config.PrefixListRef, prefixes map[string]
 					Name:              "t",
 					SourcePrefixLists: srcRefs,
 					DestPrefixLists:   dstRefs,
-					Action:            "discard",
+					Action:            config.FilterActionDiscard,
 				},
 			},
 		},
@@ -52,7 +52,7 @@ func TestFilterSnapshotLiteralAnyIsUnconstrained(t *testing.T) {
 		"edge": {
 			Name: "edge",
 			Terms: []*config.FirewallFilterTerm{
-				{Name: "t", SourceAddresses: []string{"any"}, Action: "accept"},
+				{Name: "t", SourceAddresses: []string{"any"}, Action: config.FilterActionAccept},
 			},
 		},
 	}

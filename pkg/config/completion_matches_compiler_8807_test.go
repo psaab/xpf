@@ -72,7 +72,7 @@ func TestCompletionMatchesCompiler8807(t *testing.T) {
 	}
 
 	// ---- and the compiled result, unchanged in every spelling ----
-	rejOf := func(t *testing.T, body string) (action, msg string, rejected bool) {
+	rejOf := func(t *testing.T, body string) (action FilterAction, msg string, rejected bool) {
 		t.Helper()
 		text := `firewall { family inet { filter f1 { term t1 { from { protocol tcp; } ` + body + ` } } } }`
 		tree, perrs := NewParser(text).Parse()
@@ -81,7 +81,7 @@ func TestCompletionMatchesCompiler8807(t *testing.T) {
 		}
 		cfg, err := CompileConfig(tree)
 		if err != nil || cfg == nil {
-			return "", "", true
+			return FilterActionUnset, "", true
 		}
 		for _, f := range cfg.Firewall.FiltersInet {
 			for _, tm := range f.Terms {
@@ -89,13 +89,16 @@ func TestCompletionMatchesCompiler8807(t *testing.T) {
 			}
 		}
 		t.Fatal("no term compiled")
-		return "", "", false
+		return FilterActionUnset, "", false
 	}
-	for _, c := range []struct{ name, body, action, msg string }{
-		{"bare", `then { reject; }`, "reject", ""},
-		{"packed", `then reject tcp-reset;`, "reject", "tcp-reset"},
-		{"braced", `then { reject tcp-reset; }`, "reject", "tcp-reset"},
-		{"child form", `then { reject { tcp-reset; } }`, "reject", "tcp-reset"},
+	for _, c := range []struct {
+		name, body, msg string
+		action          FilterAction
+	}{
+		{name: "bare", body: `then { reject; }`, action: FilterActionReject, msg: ""},
+		{name: "packed", body: `then reject tcp-reset;`, action: FilterActionReject, msg: "tcp-reset"},
+		{name: "braced", body: `then { reject tcp-reset; }`, action: FilterActionReject, msg: "tcp-reset"},
+		{name: "child form", body: `then { reject { tcp-reset; } }`, action: FilterActionReject, msg: "tcp-reset"},
 	} {
 		a, m, rej := rejOf(t, c.body)
 		if rej || a != c.action || m != c.msg {
@@ -151,7 +154,7 @@ apply-groups g1;`).Parse()
 	}
 	for _, f := range cfg.Firewall.FiltersInet {
 		for _, tm := range f.Terms {
-			if tm.Action != "reject" || tm.RejectMessageType != "tcp-reset" {
+			if tm.Action != FilterActionReject || tm.RejectMessageType != "tcp-reset" {
 				t.Errorf("apply-groups inheritance: Action=%q Msg=%q, want reject/tcp-reset. "+
 					"Declaring children changes how a group's value merges, which is how a "+
 					"schema flag stops being additive", tm.Action, tm.RejectMessageType)

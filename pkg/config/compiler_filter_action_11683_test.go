@@ -48,7 +48,7 @@ func TestFilterAction_UnkeyedRejectPreservesNestedCount11683(t *testing.T) {
 	assertRejectCount := func(t *testing.T, cfg *Config) {
 		t.Helper()
 		term := cfg.Firewall.FiltersInet["f1"].Terms[0]
-		if term.Action != "reject" || term.RejectMessageType != "" ||
+		if term.Action != FilterActionReject || term.RejectMessageType != "" ||
 			term.Count != "c1" || len(term.UnknownActions) != 0 {
 			t.Fatalf("compiled action=%q message=%q count=%q unknown=%v; want unkeyed reject, c1, no unknown actions",
 				term.Action, term.RejectMessageType, term.Count, term.UnknownActions)

@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Type FirewallFilterTerm.Action/TerminalActions as the
+    string-underlying FilterAction enum {Unset,Accept,Reject,Discard}
+    (#16140); NextTerm stays bool so the co-authored terminal +
+    next-term conflict evidence survives. JSON tokens are unchanged
+    ("accept"/"reject"/"discard"/""); the userspace snapshot converts
+    with string(term.Action) into the unchanged string wire field.
+    Measured G1: the depth-limited #8892 shape digest does not reach
+    this struct and marshal bytes are identical pre/post, so the
+    golden is untouched and ProtocolVersion is not bumped (v66 STANDS
+    ledger entry). Routing-policy PolicyTerm.Action is unchanged.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Add per-arm XDP branch hit counters (#16241): a new per-CPU
     userspace_branch_stats map counts every try_xdp_userspace dispatch
     arm (TRACE-gated inside one outlined callee, so the hot path pays

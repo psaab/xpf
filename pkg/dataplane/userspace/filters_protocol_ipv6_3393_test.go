@@ -39,7 +39,7 @@ func TestFilterSnapshotIPv6ProtocolEmittedAndResolvable(t *testing.T) {
 		"f6": {Name: "f6", Terms: []*config.FirewallFilterTerm{{
 			Name:      "scoped",
 			Protocols: []string{token},
-			Action:    "discard",
+			Action:    config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)

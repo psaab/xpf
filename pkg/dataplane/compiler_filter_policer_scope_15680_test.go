@@ -30,7 +30,7 @@ func TestCompileFirewallFiltersAllocatesPolicerPerTerm15680(t *testing.T) {
 		"orphan": {Name: "orphan", BandwidthLimit: 4000, BurstSizeLimit: 500},
 	}
 	mkTerm := func(name string) *config.FirewallFilterTerm {
-		return &config.FirewallFilterTerm{Name: name, Action: "accept", Policer: "shared"}
+		return &config.FirewallFilterTerm{Name: name, Action: config.FilterActionAccept, Policer: "shared"}
 	}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"edge": {Name: "edge", Terms: []*config.FirewallFilterTerm{mkTerm("first"), mkTerm("second")}},

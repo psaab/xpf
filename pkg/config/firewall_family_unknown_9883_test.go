@@ -197,7 +197,7 @@ func TestUnknownFamilyEscapesCollisionGate9883(t *testing.T) {
 			t.Fatalf("declared family inet filter X was not installed (pools: inet=%d inet6=%d)",
 				len(cfg.Firewall.FiltersInet), len(cfg.Firewall.FiltersInet6))
 		}
-		if len(got.Terms) != 1 || got.Terms[0].Action != "accept" {
+		if len(got.Terms) != 1 || got.Terms[0].Action != FilterActionAccept {
 			t.Errorf("inet/X installed with wrong terms (quarantined copy leaked in?): %+v", got.Terms)
 		}
 	})

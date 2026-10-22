@@ -107,7 +107,7 @@ func TestFilterBareRoutingInstanceStillAllowed_9140(t *testing.T) {
 		t.Fatalf("bare `then routing-instance` (no next-term) is the legitimate FBF case and must compile: %v", err)
 	}
 	term := cfg.Firewall.FiltersInet["ok"].Terms[0]
-	if term.RoutingInstance != "mgmt-vrf" || term.NextTerm || term.Action != "" {
+	if term.RoutingInstance != "mgmt-vrf" || term.NextTerm || term.Action != FilterActionUnset {
 		t.Fatalf("FBF term compiled wrong: RoutingInstance=%q NextTerm=%v Action=%q",
 			term.RoutingInstance, term.NextTerm, term.Action)
 	}

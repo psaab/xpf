@@ -13,18 +13,19 @@ import (
 func TestThenLeafOutOfScopeHeadsKeepRoutingInstance11354(t *testing.T) {
 	const ri = "ri54"
 	heads := []struct {
-		name, head, action, rejectMessageType string
-		log, syslog, nextTerm                 bool
-		terminals                             []string
-		strictConflict                        []string
+		name, head, rejectMessageType string
+		action                        FilterAction
+		log, syslog, nextTerm         bool
+		terminals                     []FilterAction
+		strictConflict                []string
 	}{
-		{name: "accept", head: "accept", action: "accept", terminals: []string{"accept"}},
-		{name: "discard", head: "discard", action: "discard", terminals: []string{"discard"},
+		{name: "accept", head: "accept", action: FilterActionAccept, terminals: []FilterAction{FilterActionAccept}},
+		{name: "discard", head: "discard", action: FilterActionDiscard, terminals: []FilterAction{FilterActionDiscard},
 			strictConflict: []string{"routing-instance " + ri, "discard", "mutually exclusive"}},
-		{name: "reject", head: "reject", action: "reject", terminals: []string{"reject"},
+		{name: "reject", head: "reject", action: FilterActionReject, terminals: []FilterAction{FilterActionReject},
 			strictConflict: []string{"routing-instance " + ri, "reject", "mutually exclusive"}},
-		{name: "reject-message-type", head: "reject administratively-prohibited", action: "reject",
-			rejectMessageType: "administratively-prohibited", terminals: []string{"reject"},
+		{name: "reject-message-type", head: "reject administratively-prohibited", action: FilterActionReject,
+			rejectMessageType: "administratively-prohibited", terminals: []FilterAction{FilterActionReject},
 			strictConflict: []string{"routing-instance " + ri, "reject", "mutually exclusive"}},
 		{name: "next", head: "next", nextTerm: true,
 			strictConflict: []string{"routing-instance " + ri, "next term"}},

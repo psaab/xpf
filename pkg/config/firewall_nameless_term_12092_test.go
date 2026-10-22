@@ -197,7 +197,7 @@ func TestFirewallNamedTermStillCommits12092(t *testing.T) {
 				t.Fatalf("named control was rejected: %v", err)
 			}
 			term := cfg.Firewall.FiltersInet["f1"].Terms[0]
-			if term.Name != "last" || term.Action != "discard" {
+			if term.Name != "last" || term.Action != FilterActionDiscard {
 				t.Fatalf("named control compiled to name=%q action=%q, want last/discard", term.Name, term.Action)
 			}
 			if len(term.unknownChildren) != 0 {

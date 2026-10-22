@@ -31,7 +31,7 @@ func TestFilterTermExpansionCountLargeValidMatchesAndBoundsUint32(t *testing.T) 
 	}
 	term := &config.FirewallFilterTerm{
 		Name:              "big",
-		Action:            "discard",
+		Action:            config.FilterActionDiscard,
 		SourcePrefixLists: []config.PrefixListRef{{Name: "src"}},
 		DestPrefixLists:   []config.PrefixListRef{{Name: "dst"}},
 		DestinationPorts:  []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"},
@@ -63,7 +63,7 @@ func TestFilterTermExpansionCountOverCapBoundedConsistently(t *testing.T) {
 	}
 	term := &config.FirewallFilterTerm{
 		Name:              "overcap",
-		Action:            "discard",
+		Action:            config.FilterActionDiscard,
 		SourcePrefixLists: []config.PrefixListRef{{Name: "src"}},
 		DestPrefixLists:   []config.PrefixListRef{{Name: "dst"}},
 	}

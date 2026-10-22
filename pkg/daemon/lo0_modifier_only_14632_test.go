@@ -73,7 +73,7 @@ func TestLo0PayloadModifierOnlyShadowsLaterDiscard14632(t *testing.T) {
 			Name: "lo0-in",
 			Terms: []*config.FirewallFilterTerm{
 				{Name: "count-bgp", Protocols: []string{"tcp"}, DestinationPorts: []string{"179"}, Count: "bgp"},
-				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: "discard"},
+				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 			},
 		},
 	}
@@ -97,7 +97,7 @@ func TestLo0PayloadModifierOnlyShadowsLaterDiscard14632(t *testing.T) {
 			Name: "lo0-in",
 			Terms: []*config.FirewallFilterTerm{
 				{Name: "count-bgp", Protocols: []string{"tcp"}, DestinationPorts: []string{"179"}, Count: "bgp", NextTerm: true},
-				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: "discard"},
+				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 			},
 		},
 	}

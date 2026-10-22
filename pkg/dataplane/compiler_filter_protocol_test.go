@@ -43,7 +43,7 @@ func filterCfgWithProtocol(family, proto string) *config.Config {
 	term := &config.FirewallFilterTerm{
 		Name:      "t",
 		Protocols: []string{proto},
-		Action:    "accept",
+		Action:    config.FilterActionAccept,
 	}
 	filter := &config.FirewallFilter{Name: "f", Terms: []*config.FirewallFilterTerm{term}}
 	if family == "inet6" {
@@ -89,7 +89,7 @@ func TestExpandFilterTermProtocolSSOT(t *testing.T) {
 		term := &config.FirewallFilterTerm{
 			Name:      "proto-" + tc.proto,
 			Protocols: []string{tc.proto},
-			Action:    "accept",
+			Action:    config.FilterActionAccept,
 		}
 		rules := expandFilterTerm(term, AFInet, nil, nil, nil)
 		if len(rules) != 1 {

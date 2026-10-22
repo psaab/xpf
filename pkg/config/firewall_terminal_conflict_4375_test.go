@@ -155,7 +155,7 @@ func TestFilterTerminalConflictPoisonsLenientAction11507(t *testing.T) {
 				t.Fatalf("tolerant compile must remain bootable (#1960 no-brick): %v", err)
 			}
 			term := cfg.Firewall.FiltersInet["f"].Terms[0]
-			if term.Action != "discard" {
+			if term.Action != FilterActionDiscard {
 				t.Fatalf("conflicting terminals %v installed Action=%q; want fail-closed discard",
 					term.TerminalActions, term.Action)
 			}

@@ -559,9 +559,9 @@ func expandFilterTerm(term *config.FirewallFilterTerm, family uint8, riTableIDs 
 		}
 	} else {
 		switch term.Action {
-		case "discard":
+		case config.FilterActionDiscard:
 			base.Action = FilterActionDiscard
-		case "reject":
+		case config.FilterActionReject:
 			base.Action = FilterActionReject
 		default:
 			base.Action = FilterActionAccept

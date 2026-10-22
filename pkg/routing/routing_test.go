@@ -901,7 +901,7 @@ func TestBuildPBRRules(t *testing.T) {
 		filter := &config.FirewallFilter{
 			Name: "mixed",
 			Terms: []*config.FirewallFilterTerm{
-				{Name: "accept-term", DSCPs: []string{"ef"}, Action: "accept"},
+				{Name: "accept-term", DSCPs: []string{"ef"}, Action: config.FilterActionAccept},
 				{Name: "route-term", DSCPs: []string{"af43"}, RoutingInstance: "ATT"},
 			},
 		}
@@ -923,11 +923,11 @@ func TestBuildPBRRules(t *testing.T) {
 	// steers slow-path / XDP_PASS / unfiltered-interface traffic into the VRF
 	// that userspace drops. Pre-fix the builder keyed only on RoutingInstance
 	// and emitted a steering rule regardless of the deny action.
-	for _, action := range []string{"discard", "reject"} {
+	for _, action := range []config.FilterAction{config.FilterActionDiscard, config.FilterActionReject} {
 		action := action
-		t.Run("routing-instance with "+action+" not steered", func(t *testing.T) {
+		t.Run("routing-instance with "+string(action)+" not steered", func(t *testing.T) {
 			filter := &config.FirewallFilter{
-				Name: "deny-" + action,
+				Name: "deny-" + string(action),
 				Terms: []*config.FirewallFilterTerm{
 					{
 						Name:            "contradictory",
@@ -966,7 +966,7 @@ func TestBuildPBRRules(t *testing.T) {
 					Name:            "steer-accept",
 					SourceAddresses: []string{"10.0.2.0/24"},
 					RoutingInstance: "ATT",
-					Action:          "accept",
+					Action:          config.FilterActionAccept,
 				},
 			},
 		}
@@ -1723,7 +1723,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{
 			name: "accept destination carve-out",
 			prior: &config.FirewallFilterTerm{
-				Name: "accept-exception", Action: "accept",
+				Name: "accept-exception", Action: config.FilterActionAccept,
 				DestAddresses: []string{"10.1.2.3/32"},
 			},
 			candidate: &config.FirewallFilterTerm{
@@ -1735,7 +1735,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{
 			name: "discard destination carve-out",
 			prior: &config.FirewallFilterTerm{
-				Name: "discard-exception", Action: "discard",
+				Name: "discard-exception", Action: config.FilterActionDiscard,
 				DestAddresses: []string{"10.1.2.3/32"},
 			},
 			candidate: &config.FirewallFilterTerm{
@@ -1747,7 +1747,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{
 			name: "reject destination carve-out",
 			prior: &config.FirewallFilterTerm{
-				Name: "reject-exception", Action: "reject",
+				Name: "reject-exception", Action: config.FilterActionReject,
 				DestAddresses: []string{"10.1.2.3/32"},
 			},
 			candidate: &config.FirewallFilterTerm{
@@ -1759,7 +1759,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{
 			name: "disjoint destination remains steerable",
 			prior: &config.FirewallFilterTerm{
-				Name: "accept-other", Action: "accept",
+				Name: "accept-other", Action: config.FilterActionAccept,
 				DestAddresses: []string{"192.0.2.0/24"},
 			},
 			candidate: &config.FirewallFilterTerm{
@@ -1771,7 +1771,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{
 			name: "disjoint DSCP remains steerable",
 			prior: &config.FirewallFilterTerm{
-				Name: "accept-ef", Action: "accept", DSCPs: []string{"ef"},
+				Name: "accept-ef", Action: config.FilterActionAccept, DSCPs: []string{"ef"},
 			},
 			candidate: &config.FirewallFilterTerm{
 				Name: "steer-af43", DSCPs: []string{"af43"}, RoutingInstance: "ATT",
@@ -1781,7 +1781,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{
 			name: "disjoint protocol remains steerable",
 			prior: &config.FirewallFilterTerm{
-				Name: "accept-tcp", Action: "accept", Protocols: []string{"tcp"},
+				Name: "accept-tcp", Action: config.FilterActionAccept, Protocols: []string{"tcp"},
 			},
 			candidate: &config.FirewallFilterTerm{
 				Name: "steer-udp", Protocols: []string{"udp"}, RoutingInstance: "ATT",
@@ -1791,7 +1791,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{
 			name: "disjoint source port remains steerable",
 			prior: &config.FirewallFilterTerm{
-				Name: "accept-443", Action: "accept", SourcePorts: []string{"443"},
+				Name: "accept-443", Action: config.FilterActionAccept, SourcePorts: []string{"443"},
 			},
 			candidate: &config.FirewallFilterTerm{
 				Name: "steer-80", SourcePorts: []string{"80"}, RoutingInstance: "ATT",
@@ -2145,8 +2145,8 @@ func TestPBRBuildRulesAndStats(t *testing.T) {
 			Name: "mixed",
 			Terms: []*config.FirewallFilterTerm{
 				{Name: "ok", SourceAddresses: []string{"10.0.1.0/24"}, RoutingInstance: "ATT"},
-				{Name: "bad1", SourceAddresses: []string{"10.0.2.0/24"}, RoutingInstance: "ATT", Action: "discard"},
-				{Name: "bad2", SourceAddresses: []string{"10.0.3.0/24"}, RoutingInstance: "ATT", Action: "reject"},
+				{Name: "bad1", SourceAddresses: []string{"10.0.2.0/24"}, RoutingInstance: "ATT", Action: config.FilterActionDiscard},
+				{Name: "bad2", SourceAddresses: []string{"10.0.3.0/24"}, RoutingInstance: "ATT", Action: config.FilterActionReject},
 			},
 		}
 		rules, degraded := PBRBuildRulesAndStats(pbrTestConfig("inet", filter, instances, nil))

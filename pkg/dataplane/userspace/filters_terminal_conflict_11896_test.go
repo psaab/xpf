@@ -99,8 +99,8 @@ func TestFilterTerminalConflictMarkerUnit11896(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:            "t",
-			Action:          "discard",
-			TerminalActions: []string{"accept", "discard"},
+			Action:          config.FilterActionDiscard,
+			TerminalActions: []config.FilterAction{config.FilterActionAccept, config.FilterActionDiscard},
 		}}},
 	}
 	if term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]; !term.FromUnrepresentable {

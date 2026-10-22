@@ -42,15 +42,15 @@ func TestNftActionNextTermTerminatesMirroringRust10253(t *testing.T) {
 
 	single := []struct {
 		name   string
-		action string
+		action config.FilterAction
 		want   string
 	}{
-		{"accept", "accept", "accept"},
-		{"discard", "discard", "drop"},
+		{"accept", config.FilterActionAccept, "accept"},
+		{"discard", config.FilterActionDiscard, "drop"},
 		// An unknown non-empty action must still fail CLOSED to drop (#3724
 		// M08) — the NextTerm bit must not suppress the fail-closed verdict
 		// into a silent fall-through.
-		{"unknown-fails-closed", "frobnicate", "drop"},
+		{"unknown-fails-closed", config.FilterAction("frobnicate"), "drop"},
 	}
 	for _, c := range single {
 		t.Run(c.name, func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestNftActionNextTermTerminatesMirroringRust10253(t *testing.T) {
 		for _, fam := range []string{"ip", "ip6"} {
 			term := &config.FirewallFilterTerm{
 				Name:     "clash",
-				Action:   "reject",
+				Action:   config.FilterActionReject,
 				NextTerm: true,
 			}
 			rules := nftRulesFromTerm(term, fam, prefixLists)
@@ -104,7 +104,7 @@ func TestNftActionNextTermTerminatesMirroringRust10253(t *testing.T) {
 			Name:     "clash-mods",
 			Count:    "hits",
 			Log:      true,
-			Action:   "accept",
+			Action:   config.FilterActionAccept,
 			NextTerm: true,
 		}
 		rules := nftRulesFromTerm(term, "ip", prefixLists)
@@ -157,7 +157,7 @@ func TestNftActionlessAndRITermsUnaffected10253(t *testing.T) {
 	}
 
 	// Pure terminal without NextTerm: unchanged.
-	if got := nftRule(t, &config.FirewallFilterTerm{Name: "t1", Action: "discard"}, "ip", prefixLists); got != "drop" {
+	if got := nftRule(t, &config.FirewallFilterTerm{Name: "t1", Action: config.FilterActionDiscard}, "ip", prefixLists); got != "drop" {
 		t.Errorf("pure discard: got %q, want %q", got, "drop")
 	}
 
@@ -186,8 +186,8 @@ func TestLo0PayloadActionNextTermShadowsLaterDeny10253(t *testing.T) {
 		"lo0-in": {
 			Name: "lo0-in",
 			Terms: []*config.FirewallFilterTerm{
-				{Name: "clash", Protocols: []string{"tcp"}, Action: "accept", NextTerm: true},
-				{Name: "block-ssh", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: "discard"},
+				{Name: "clash", Protocols: []string{"tcp"}, Action: config.FilterActionAccept, NextTerm: true},
+				{Name: "block-ssh", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: config.FilterActionDiscard},
 			},
 		},
 	}

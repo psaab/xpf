@@ -72,7 +72,7 @@ func nftTermAddrPredicates(term *config.FirewallFilterTerm, family string, prefi
 	// the term matches NOTHING (Junos empty-positive set) — skip the whole rule so
 	// the kernel mirror neither over-matches (fail-open) nor emits unloadable nft.
 	srcAddrs, srcExcept, srcConstrained := dpuserspace.ResolveFilterPrefixListAddrs(
-		term.SourceAddresses, term.SourcePrefixLists, prefixLists, "", term.Name, "source", term.Action)
+		term.SourceAddresses, term.SourcePrefixLists, prefixLists, "", term.Name, "source", string(term.Action))
 	srcPred, srcMatchesNothing := nftAddrPredicate("saddr", family, srcAddrs, srcExcept, srcConstrained)
 	if srcMatchesNothing {
 		return nil, true
@@ -82,7 +82,7 @@ func nftTermAddrPredicates(term *config.FirewallFilterTerm, family string, prefi
 	}
 
 	dstAddrs, dstExcept, dstConstrained := dpuserspace.ResolveFilterPrefixListAddrs(
-		term.DestAddresses, term.DestPrefixLists, prefixLists, "", term.Name, "destination", term.Action)
+		term.DestAddresses, term.DestPrefixLists, prefixLists, "", term.Name, "destination", string(term.Action))
 	dstPred, dstMatchesNothing := nftAddrPredicate("daddr", family, dstAddrs, dstExcept, dstConstrained)
 	if dstMatchesNothing {
 		return nil, true
@@ -575,7 +575,7 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// explicit `then next term` paired with a real action is contradictory
 	// input; Rust `continue_term` is false for that shape, so it must reach
 	// the terminating verdict below.
-	if term.NextTerm && term.Action == "" && term.RoutingInstance == "" {
+	if term.NextTerm && term.Action == config.FilterActionUnset && term.RoutingInstance == "" {
 		if modStr == "" {
 			return nil
 		}
@@ -594,7 +594,7 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// response than userspace. The honored modifiers ride BOTH rules; the rules
 	// are mutually exclusive by l4proto, so each matched packet is logged/counted
 	// exactly once.
-	if term.Action == "reject" {
+	if term.Action == config.FilterActionReject {
 		return []string{
 			joinNftFields(match, "meta l4proto 6", modStr, "reject with tcp reset"),
 			joinNftFields(match, modStr, "reject with icmpx type admin-prohibited"),
@@ -620,9 +620,9 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// which admitted host-bound traffic the userspace dataplane drops.
 	var action string
 	switch term.Action {
-	case "discard":
+	case config.FilterActionDiscard:
 		action = "drop"
-	case "accept", "":
+	case config.FilterActionAccept, config.FilterActionUnset:
 		// "" reaches here only for the routing-instance (PBR) term — a plain
 		// empty-action fall-through returned above. Its filter verdict is accept
 		// (userspace terminates-as-accept; route selection stays userspace-only).

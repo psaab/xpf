@@ -60,7 +60,7 @@ func fbfAssert(t *testing.T, cfg *Config) {
 	if len(steer.SourceAddresses) != 1 || steer.SourceAddresses[0] != "10.0.61.0/24" {
 		t.Fatalf("steer term source addresses = %+v", steer.SourceAddresses)
 	}
-	if filter.Terms[1].Action != "accept" {
+	if filter.Terms[1].Action != FilterActionAccept {
 		t.Fatalf("default term action = %q, want accept", filter.Terms[1].Action)
 	}
 

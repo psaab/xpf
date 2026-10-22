@@ -223,9 +223,9 @@ func toNftLo0Spec(cfg *config.Config, filterV4, filterV6 string) xnft.Lo0FilterS
 
 func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixList) xnft.Lo0FilterTerm {
 	src, srcEx, srcC := dpuserspace.ResolveFilterPrefixListAddrs(
-		term.SourceAddresses, term.SourcePrefixLists, pl, "", term.Name, "source", term.Action)
+		term.SourceAddresses, term.SourcePrefixLists, pl, "", term.Name, "source", string(term.Action))
 	dst, dstEx, dstC := dpuserspace.ResolveFilterPrefixListAddrs(
-		term.DestAddresses, term.DestPrefixLists, pl, "", term.Name, "destination", term.Action)
+		term.DestAddresses, term.DestPrefixLists, pl, "", term.Name, "destination", string(term.Action))
 	return xnft.Lo0FilterTerm{
 		Name:              term.Name,
 		SrcAddrs:          src,
@@ -275,7 +275,7 @@ func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixL
 		IsFragment:               term.IsFragment,
 		Log:                      term.Log,
 		Count:                    term.Count,
-		Action:                   term.Action,
+		Action:                   string(term.Action),
 		NextTerm:                 term.NextTerm,
 		RoutingInstance:          term.RoutingInstance,
 	}

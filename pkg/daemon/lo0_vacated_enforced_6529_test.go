@@ -183,12 +183,12 @@ func TestMatchNothingLo0RenderRefuses9940(t *testing.T) {
 	cfg := lo0FenceTestConfig()
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "nothing-v4", SourceAddresses: []string{"2001:db8::/32"}, Action: "discard"},
+			{Name: "nothing-v4", SourceAddresses: []string{"2001:db8::/32"}, Action: config.FilterActionDiscard},
 		}},
 	}
 	cfg.Firewall.FiltersInet6 = map[string]*config.FirewallFilter{
 		"protect-re6": {Name: "protect-re6", Terms: []*config.FirewallFilterTerm{
-			{Name: "nothing-v6", SourceAddresses: []string{"10.0.0.0/8"}, Action: "discard"},
+			{Name: "nothing-v6", SourceAddresses: []string{"10.0.0.0/8"}, Action: config.FilterActionDiscard},
 		}},
 	}
 

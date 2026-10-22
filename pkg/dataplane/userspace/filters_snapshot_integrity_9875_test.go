@@ -25,7 +25,7 @@ func TestFilterSnapshotUnknownFromSetsMarker_9875(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:        "ttl-term",
-			Action:      "accept",
+			Action:      config.FilterActionAccept,
 			Protocols:   []string{"tcp"},
 			UnknownFrom: []string{"ttl"},
 		}}},
@@ -49,7 +49,7 @@ func TestFilterSnapshotValuelessFromSetsMarker_9875(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:          "empty-proto",
-			Action:        "discard",
+			Action:        config.FilterActionDiscard,
 			ValuelessFrom: []string{"protocol"},
 		}}},
 	}
@@ -67,7 +67,7 @@ func TestFilterSnapshotRepresentableFromSetsNoMarker_9875(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:             "ok",
-			Action:           "accept",
+			Action:           config.FilterActionAccept,
 			Protocols:        []string{"tcp"},
 			DestinationPorts: []string{"22"},
 		}}},

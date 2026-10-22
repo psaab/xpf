@@ -23,7 +23,7 @@ func TestFilterSnapshotFlexMatchSerialized(t *testing.T) {
 		"edge": {Name: "edge", Terms: []*config.FirewallFilterTerm{{
 			Name:      "flex",
 			Protocols: []string{"tcp"},
-			Action:    "discard",
+			Action:    config.FilterActionDiscard,
 			FlexMatch: &config.FlexMatchConfig{
 				MatchStart: "layer-3",
 				ByteOffset: 6,
@@ -75,7 +75,7 @@ func TestFilterSnapshotFlexMatchStart(t *testing.T) {
 		cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 			"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 				Name:   "t",
-				Action: "discard",
+				Action: config.FilterActionDiscard,
 				FlexMatch: &config.FlexMatchConfig{
 					MatchStart: tc.start,
 					ByteOffset: 0,
@@ -104,7 +104,7 @@ func TestFilterSnapshotFlexMatchValuePreMasked(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:   "t",
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 			FlexMatch: &config.FlexMatchConfig{
 				MatchStart: "layer-3",
 				ByteOffset: 0,
@@ -135,7 +135,7 @@ func TestFilterSnapshotNoFlexMatchStaysNil(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
-			Name: "t", Protocols: []string{"tcp"}, Action: "accept",
+			Name: "t", Protocols: []string{"tcp"}, Action: config.FilterActionAccept,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -153,7 +153,7 @@ func TestFilterSnapshotFlexMatchDefaultLength(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 			Name:   "t",
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 			FlexMatch: &config.FlexMatchConfig{
 				MatchStart: "layer-3",
 				ByteOffset: 0,
@@ -196,7 +196,7 @@ func TestFilterSnapshotFlexMatchCeilByteLength(t *testing.T) {
 		cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 			"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 				Name:   "t",
-				Action: "discard",
+				Action: config.FilterActionDiscard,
 				FlexMatch: &config.FlexMatchConfig{
 					MatchStart: "layer-3",
 					ByteOffset: 0,
@@ -271,7 +271,7 @@ func TestFilterSnapshotFlexMatchSubByteMSBAligned14634(t *testing.T) {
 			cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 				"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
 					Name:   "t",
-					Action: "discard",
+					Action: config.FilterActionDiscard,
 					FlexMatch: &config.FlexMatchConfig{
 						MatchStart: "layer-3",
 						ByteOffset: 0,

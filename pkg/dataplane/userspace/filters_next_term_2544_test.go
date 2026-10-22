@@ -29,7 +29,7 @@ func TestFilterSnapshotExplicitNextTermFallsThrough(t *testing.T) {
 	cfg := nextTermCfg([]*config.FirewallFilterTerm{
 		{Name: "count-then-next", Protocols: []string{"tcp"}, NextTerm: true,
 			Count: "hits", Action: ""},
-		{Name: "drop", Protocols: []string{"tcp"}, Action: "discard"},
+		{Name: "drop", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 	})
 	snaps := buildFirewallFilterSnapshots(cfg)
 	if len(snaps) != 1 || len(snaps[0].Terms) != 2 {
@@ -79,7 +79,7 @@ func TestFilterSnapshotRoutingInstanceTermIsNotFallThrough(t *testing.T) {
 
 func TestFilterSnapshotTerminatingTermNotFallThrough(t *testing.T) {
 	cfg := nextTermCfg([]*config.FirewallFilterTerm{
-		{Name: "accept-web", Protocols: []string{"tcp"}, Action: "accept"},
+		{Name: "accept-web", Protocols: []string{"tcp"}, Action: config.FilterActionAccept},
 	})
 	snaps := buildFirewallFilterSnapshots(cfg)
 	if snaps[0].Terms[0].NextTerm {

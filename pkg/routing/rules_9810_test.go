@@ -92,7 +92,7 @@ func TestBuildPBRRulesDropsLoopbackAttachments_9810(t *testing.T) {
 	}
 	mkPlainFilter := func() *config.FirewallFilter {
 		return &config.FirewallFilter{Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "t", SourceAddresses: []string{"10.0.1.0/24"}, Action: "accept"},
+			{Name: "t", SourceAddresses: []string{"10.0.1.0/24"}, Action: config.FilterActionAccept},
 		}}
 	}
 

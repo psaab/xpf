@@ -67,20 +67,20 @@ func TestFilterThenPackedRunKeepsEveryAction9153(t *testing.T) {
 		prereq  []string
 		packed  string
 		split   []string
-		wantAct string // the terminating action the SPLIT form must produce
+		wantAct FilterAction // the terminating action the SPLIT form must produce
 	}{
 		{
 			name:    "two actions",
 			packed:  base + "then count c1 discard",
 			split:   []string{base + "then count c1", base + "then discard"},
-			wantAct: "discard",
+			wantAct: FilterActionDiscard,
 		},
 		{
 			// THE FAIL-OPEN. Three actions, and the one lost is the terminator.
 			name:    "three actions, terminator last",
 			packed:  base + "then count c1 log discard",
 			split:   []string{base + "then count c1", base + "then log", base + "then discard"},
-			wantAct: "discard",
+			wantAct: FilterActionDiscard,
 		},
 		{
 			// Order matters: with the terminator FIRST a modifier was lost
@@ -88,7 +88,7 @@ func TestFilterThenPackedRunKeepsEveryAction9153(t *testing.T) {
 			name:    "three actions, terminator first",
 			packed:  base + "then discard log count c1",
 			split:   []string{base + "then discard", base + "then log", base + "then count c1"},
-			wantAct: "discard",
+			wantAct: FilterActionDiscard,
 		},
 		{
 			// Four actions, two of them argument-bearing. This is the row that
@@ -104,7 +104,7 @@ func TestFilterThenPackedRunKeepsEveryAction9153(t *testing.T) {
 			split := compile(t, append(append([]string{}, tc.prereq...), tc.split...))
 			// REFERENCE ARM. If the split form does not produce the terminating
 			// action, the comparison below is between two broken results.
-			if tc.wantAct != "" && split.Action != tc.wantAct {
+			if tc.wantAct != FilterActionUnset && split.Action != tc.wantAct {
 				t.Fatalf("the SPLIT control produced action=%q, want %q — the comparison "+
 					"below would be against a broken reference", split.Action, tc.wantAct)
 			}

@@ -78,7 +78,7 @@ func TestLo0PayloadRoutingInstanceNextTermShadowsLaterDeny9140(t *testing.T) {
 					Name:             "block-ssh",
 					Protocols:        []string{"tcp"},
 					DestinationPorts: []string{"22"},
-					Action:           "discard",
+					Action:           config.FilterActionDiscard,
 				},
 			},
 		},

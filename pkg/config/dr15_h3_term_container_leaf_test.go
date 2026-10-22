@@ -127,7 +127,7 @@ func TestDR15H3FirewallCrossShapeOneTermDiscard14418(t *testing.T) {
 		t.Fatalf("compiled %d t1 terms %v, want exactly 1 (Y-only must reach t2)", len(t1s), names)
 	}
 	tm := t1s[0]
-	if tm.Action != "discard" {
+	if tm.Action != FilterActionDiscard {
 		t.Errorf("t1 Action = %q, want inline discard", tm.Action)
 	}
 	// X AND Y: both conditions must be present on the single term.
@@ -235,7 +235,7 @@ apply-groups g1;
 			cnt, ftm = cnt+1, tm
 		}
 	}
-	if cnt != 1 || ftm == nil || ftm.Action != "discard" {
+	if cnt != 1 || ftm == nil || ftm.Action != FilterActionDiscard {
 		t.Errorf("both-braced firewall: cnt=%d ftm=%v, want 1/discard", cnt, ftm)
 	}
 	if ftm != nil && (len(ftm.SourceAddresses) == 0 || len(ftm.DestAddresses) == 0) {

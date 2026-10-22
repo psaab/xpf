@@ -28,19 +28,19 @@ func TestFilterTermExpansionCountMatchesExpand(t *testing.T) {
 	}{
 		{
 			name: "bare term (any/any) -> 1 rule",
-			term: &config.FirewallFilterTerm{Name: "t", Action: "accept"},
+			term: &config.FirewallFilterTerm{Name: "t", Action: config.FilterActionAccept},
 		},
 		{
 			name: "multi dest-port only",
 			term: &config.FirewallFilterTerm{
-				Name: "t", Action: "accept",
+				Name: "t", Action: config.FilterActionAccept,
 				DestinationPorts: []string{"80", "443"},
 			},
 		},
 		{
 			name: "source-prefix-list (2) x dest-ports (2)",
 			term: &config.FirewallFilterTerm{
-				Name: "t", Action: "accept",
+				Name: "t", Action: config.FilterActionAccept,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "src2"}},
 				DestinationPorts:  []string{"80", "443"},
 			},
@@ -48,7 +48,7 @@ func TestFilterTermExpansionCountMatchesExpand(t *testing.T) {
 		{
 			name: "literal src (1) + src-prefix-list (2) x dst-prefix-list (3)",
 			term: &config.FirewallFilterTerm{
-				Name: "t", Action: "accept",
+				Name: "t", Action: config.FilterActionAccept,
 				SourceAddresses:   []string{"10.0.0.1/32"},
 				SourcePrefixLists: []config.PrefixListRef{{Name: "src2"}},
 				DestPrefixLists:   []config.PrefixListRef{{Name: "dst3"}},
@@ -57,7 +57,7 @@ func TestFilterTermExpansionCountMatchesExpand(t *testing.T) {
 		{
 			name: "except prefix-list still contributes a (negated) rule",
 			term: &config.FirewallFilterTerm{
-				Name: "t", Action: "accept",
+				Name: "t", Action: config.FilterActionAccept,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "src2"}, {Name: "ex1", Except: true}},
 				DestinationPorts:  []string{"53"},
 				SourcePorts:       []string{"1024", "2048"},
@@ -66,7 +66,7 @@ func TestFilterTermExpansionCountMatchesExpand(t *testing.T) {
 		{
 			name: "missing prefix-list reference contributes nothing",
 			term: &config.FirewallFilterTerm{
-				Name: "t", Action: "accept",
+				Name: "t", Action: config.FilterActionAccept,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "does-not-exist"}},
 			},
 		},

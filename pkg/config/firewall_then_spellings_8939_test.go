@@ -143,7 +143,7 @@ func TestFirewallThenRejectBodyIsNotHoisted8939(t *testing.T) {
 	}
 	for _, f := range cfg.Firewall.FiltersInet {
 		for _, tm := range f.Terms {
-			if tm.Action != "reject" || tm.RejectMessageType != "administratively-prohibited" {
+			if tm.Action != FilterActionReject || tm.RejectMessageType != "administratively-prohibited" {
 				t.Errorf("action=%q messageType=%q, want reject/administratively-prohibited "+
 					"-- the chain flatten hoisted a body the schema says `reject` owns (#8939)",
 					tm.Action, tm.RejectMessageType)

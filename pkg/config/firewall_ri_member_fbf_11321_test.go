@@ -62,7 +62,7 @@ func TestFBFOnRoutingInstanceMemberWarnsOnTolerantLoad11321(t *testing.T) {
 	cloneName := cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0].FilterInputV4
 	clone := cfg.Firewall.FiltersInet[cloneName]
 	if cloneName == "member-fbf" || clone == nil || len(clone.Terms) != 1 ||
-		clone.Terms[0].RoutingInstance != "" || clone.Terms[0].Action != "accept" {
+		clone.Terms[0].RoutingInstance != "" || clone.Terms[0].Action != FilterActionAccept {
 		t.Fatalf("tolerant load must rebind only the member attachment to a stripped terminal-accept clone: filter=%q clone=%+v", cloneName, clone)
 	}
 	found := false

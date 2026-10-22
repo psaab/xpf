@@ -21,7 +21,7 @@ import (
 func TestTerminalConflictReachesLo0Builder11896(t *testing.T) {
 	term := lowerLo0Term9875(t, lo0Cfg9875(&config.FirewallFilterTerm{
 		Name: "conflict", Protocols: []string{"tcp"},
-		TerminalActions: []string{"accept", "discard"}, Action: "discard",
+		TerminalActions: []config.FilterAction{config.FilterActionAccept, config.FilterActionDiscard}, Action: config.FilterActionDiscard,
 	}))
 	if !term.FromUnrepresentable {
 		t.Error("#11896: conflicting TerminalActions must set FromUnrepresentable — " +
@@ -34,7 +34,7 @@ func TestTerminalConflictReachesLo0Builder11896(t *testing.T) {
 func TestLo0TextOracleRefusesTerminalConflict11896(t *testing.T) {
 	payload := buildLo0FilterPayload(lo0Cfg9875(&config.FirewallFilterTerm{
 		Name: "conflict", Protocols: []string{"tcp"},
-		TerminalActions: []string{"accept", "discard"}, Action: "discard",
+		TerminalActions: []config.FilterAction{config.FilterActionAccept, config.FilterActionDiscard}, Action: config.FilterActionDiscard,
 	}), "protect-re", "")
 	if !strings.Contains(payload, nftRefuseUnrepresentableFrom) {
 		t.Fatalf("#11896: the oracle must emit the constant refusal rule for a conflicting "+
@@ -93,7 +93,7 @@ func TestLo0TerminalConflictEndToEnd11896(t *testing.T) {
 func TestLo0TerminalConflictNegative11896(t *testing.T) {
 	term := &config.FirewallFilterTerm{
 		Name: "redundant", Protocols: []string{"tcp"},
-		TerminalActions: []string{"discard", "discard"}, Action: "discard",
+		TerminalActions: []config.FilterAction{config.FilterActionDiscard, config.FilterActionDiscard}, Action: config.FilterActionDiscard,
 	}
 	cfg := lo0Cfg9875(term)
 	if lowered := lowerLo0Term9875(t, cfg); lowered.FromUnrepresentable {

@@ -86,13 +86,13 @@ func lo0FenceTestConfig() *config.Config {
 	cfg.System.Lo0FilterInputV6 = "protect-re6"
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "allow-ssh", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: "accept"},
-			{Name: "deny-rest", Action: "discard"},
+			{Name: "allow-ssh", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: config.FilterActionAccept},
+			{Name: "deny-rest", Action: config.FilterActionDiscard},
 		}},
 	}
 	cfg.Firewall.FiltersInet6 = map[string]*config.FirewallFilter{
 		"protect-re6": {Name: "protect-re6", Terms: []*config.FirewallFilterTerm{
-			{Name: "deny-rest6", Action: "discard"},
+			{Name: "deny-rest6", Action: config.FilterActionDiscard},
 		}},
 	}
 	return cfg
@@ -330,7 +330,7 @@ func TestColdBootLo0ZeroDropFenceLeavesEnforcedFalse(t *testing.T) {
 	cfg.System.Lo0FilterInputV4 = "protect-re"
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "deny-rest", Action: "discard"},
+			{Name: "deny-rest", Action: config.FilterActionDiscard},
 		}},
 	}
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
@@ -428,7 +428,7 @@ func TestColdBootLo0FenceThenNewAddressReFences(t *testing.T) {
 	cfg.System.Lo0FilterInputV4 = "protect-re"
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-			{Name: "deny-rest", Action: "discard"},
+			{Name: "deny-rest", Action: config.FilterActionDiscard},
 		}},
 	}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{

@@ -20,7 +20,7 @@ func TestFilterSnapshotMultiValueEmitted(t *testing.T) {
 			DSCPs:     []string{"ef", "af43"},
 			ICMPTypes: []int{8, 0},
 			ICMPCodes: []int{3, 4},
-			Action:    "discard",
+			Action:    config.FilterActionDiscard,
 		}}},
 	}
 	snaps := buildFirewallFilterSnapshots(cfg)
@@ -50,7 +50,7 @@ func TestFilterSnapshotMultiValueEmptyStaysEmpty(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"mv": {Name: "mv", Terms: []*config.FirewallFilterTerm{{
-			Name: "t", Action: "accept",
+			Name: "t", Action: config.FilterActionAccept,
 		}}},
 	}
 	term := buildFirewallFilterSnapshots(cfg)[0].Terms[0]

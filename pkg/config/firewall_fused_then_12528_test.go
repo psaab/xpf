@@ -96,7 +96,7 @@ type fused12528Row struct {
 	kind, token          string
 	// lenientAction is the historical compilation the tolerant path keeps:
 	// "" for a dropped action, the authored action for a packed spelling.
-	lenientAction string
+	lenientAction FilterAction
 }
 
 func fusedRows12528() []fused12528Row {
@@ -122,12 +122,12 @@ func fusedRows12528() []fused12528Row {
 		{name: "flat family-less filter", kind: "then", family: "inet", filter: "F", term: "T", tree: flat(
 			"set firewall filter F term T from is-fragment then discard",
 			"set firewall filter F term allow then accept")},
-		{name: "N6 extra token", kind: "token", token: "foo", lenientAction: "discard",
+		{name: "N6 extra token", kind: "token", token: "foo", lenientAction: FilterActionDiscard,
 			family: "inet", filter: "F", term: "T", tree: flat(
 				"set firewall family inet filter F term T from is-fragment foo",
 				"set firewall family inet filter F term T then discard")},
 		{name: "flat second match nested under the flag", kind: "token", token: "protocol",
-			lenientAction: "discard", family: "inet", filter: "F", term: "T", tree: flat(
+			lenientAction: FilterActionDiscard, family: "inet", filter: "F", term: "T", tree: flat(
 				"set firewall family inet filter F term T from is-fragment protocol udp",
 				"set firewall family inet filter F term T then discard")},
 		{name: "N3 braced", kind: "then", family: "inet", filter: "F", term: "T",
@@ -185,16 +185,16 @@ func fusedRows12528() []fused12528Row {
 			"set firewall family inet filter F term T from flexible-match-range range R match-value 0x11 then discard")},
 		{name: "flex packed term with a body", kind: "flex", family: "inet", filter: "F", term: "T",
 			tree: hier(`firewall { family inet { filter F { term T from flexible-match-range range R { byte-offset 9; then discard; } } } }`)},
-		{name: "N1 packed term", kind: "packed", token: "is-fragment", lenientAction: "discard",
+		{name: "N1 packed term", kind: "packed", token: "is-fragment", lenientAction: FilterActionDiscard,
 			family: "inet", filter: "F", term: "T",
 			tree: hier(`firewall { family inet { filter F { term T from is-fragment then discard; term allow { then accept; } } } }`)},
-		{name: "packed term with a then block", kind: "packed", token: "is-fragment", lenientAction: "discard",
+		{name: "packed term with a then block", kind: "packed", token: "is-fragment", lenientAction: FilterActionDiscard,
 			family: "inet", filter: "F", term: "T",
 			tree: hier(`firewall { family inet { filter F { term T from is-fragment { then discard; } } } }`)},
-		{name: "packed term reject inet6", kind: "packed", token: "is-fragment", lenientAction: "reject",
+		{name: "packed term reject inet6", kind: "packed", token: "is-fragment", lenientAction: FilterActionReject,
 			family: "inet6", filter: "F", term: "T",
 			tree: hier(`firewall { family inet6 { filter F { term T from is-fragment then reject; } } }`)},
-		{name: "flex packed term", kind: "packed", token: "flexible-match-range", lenientAction: "discard",
+		{name: "flex packed term", kind: "packed", token: "flexible-match-range", lenientAction: FilterActionDiscard,
 			family: "inet", filter: "F", term: "T",
 			tree: hier(`firewall { family inet { filter F { term T from flexible-match-range range R match-value 0x11 then discard; } } }`)},
 	}
@@ -323,7 +323,7 @@ func TestFirewallFusedThenDisplaySetRoundTrip12528(t *testing.T) {
 		hierWant        string // "" = the hierarchical spelling commits
 		setWant         string
 		replayedProtos  int
-		replayedAction  string
+		replayedAction  FilterAction
 		replayedFlexSet bool
 	}{
 		{name: "N1 packed term",
@@ -338,7 +338,7 @@ func TestFirewallFusedThenDisplaySetRoundTrip12528(t *testing.T) {
 		{name: "packed from with a second match",
 			text:           `firewall { family inet { filter F { term T { from is-fragment protocol udp; then discard; } } } }`,
 			setWant:        want12528("token", "inet", "F", "T", "protocol"),
-			replayedAction: "discard"},
+			replayedAction: FilterActionDiscard},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := hier12528(t, tc.text)
@@ -369,7 +369,7 @@ func TestFirewallFusedThenDisplaySetRoundTrip12528(t *testing.T) {
 
 func TestFirewallFusedThenPositiveControls12528(t *testing.T) {
 	type want struct {
-		action string
+		action FilterAction
 		frag   bool
 		flex   bool
 		protos string
@@ -388,85 +388,85 @@ func TestFirewallFusedThenPositiveControls12528(t *testing.T) {
 		want                 want
 	}{
 		{"bare is-fragment braced", hier(`firewall { family inet { filter F { term T { from { is-fragment; } then { discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true}},
 		{"bare is-fragment flat", flat("set firewall family inet filter F term T from is-fragment", "set firewall family inet filter F term T then discard"),
-			"inet", "F", "T", want{action: "discard", frag: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true}},
 		{"is-fragment beside protocol", hier(`firewall { family inet { filter F { term T { from { is-fragment; protocol udp; } then discard; } } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true, protos: "udp"}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true, protos: "udp"}},
 		{"packed from is-fragment", hier(`firewall { family inet { filter F { term T { from is-fragment; then discard; } } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true}},
 		{"packed from is-fragment protocol udp", hier(`firewall { family inet { filter F { term T { from is-fragment protocol udp; then discard; } } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true, protos: "udp"}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true, protos: "udp"}},
 		{"packed from is-fragment destination-port 53", hier(`firewall { family inet { filter F { term T { from is-fragment destination-port 53; then accept; } } } }`),
-			"inet", "F", "T", want{action: "accept", frag: true, dports: "53"}},
+			"inet", "F", "T", want{action: FilterActionAccept, frag: true, dports: "53"}},
 		{"term named is-fragment", hier(`firewall { family inet { filter F { term is-fragment { from { is-fragment; } then { discard; } } } } }`),
-			"inet", "F", "is-fragment", want{action: "discard", frag: true}},
+			"inet", "F", "is-fragment", want{action: FilterActionDiscard, frag: true}},
 		{"term named is-fragment flat", flat("set firewall family inet filter F term is-fragment from is-fragment", "set firewall family inet filter F term is-fragment then discard"),
-			"inet", "F", "is-fragment", want{action: "discard", frag: true}},
+			"inet", "F", "is-fragment", want{action: FilterActionDiscard, frag: true}},
 		{"term named is-fragment quoted", hier(`firewall { family inet { filter F { term "is-fragment" { from { is-fragment; } then { discard; } } } } }`),
-			"inet", "F", "is-fragment", want{action: "discard", frag: true}},
+			"inet", "F", "is-fragment", want{action: FilterActionDiscard, frag: true}},
 		{"term named is-fragment inet6", hier(`firewall { family inet6 { filter F { term is-fragment { from { is-fragment; } then { discard; } } } } }`),
-			"inet6", "F", "is-fragment", want{action: "discard", frag: true}},
+			"inet6", "F", "is-fragment", want{action: FilterActionDiscard, frag: true}},
 		{"filter named is-fragment", hier(`firewall { family inet { filter is-fragment { term T { from { protocol udp; } then { discard; } } } } }`),
-			"inet", "is-fragment", "T", want{action: "discard", protos: "udp"}},
+			"inet", "is-fragment", "T", want{action: FilterActionDiscard, protos: "udp"}},
 		{"filter named is-fragment flat", flat("set firewall family inet filter is-fragment term T from protocol udp", "set firewall family inet filter is-fragment term T then discard"),
-			"inet", "is-fragment", "T", want{action: "discard", protos: "udp"}},
+			"inet", "is-fragment", "T", want{action: FilterActionDiscard, protos: "udp"}},
 		{"filter named is-fragment inet6", hier(`firewall { family inet6 { filter is-fragment { term T { from { next-header udp; } then { discard; } } } } }`),
-			"inet6", "is-fragment", "T", want{action: "discard", protos: "udp"}},
+			"inet6", "is-fragment", "T", want{action: FilterActionDiscard, protos: "udp"}},
 		{"term named flexible-match-range", hier(`firewall { family inet { filter F { term flexible-match-range { from { protocol udp; } then { discard; } } } } }`),
-			"inet", "F", "flexible-match-range", want{action: "discard", protos: "udp"}},
+			"inet", "F", "flexible-match-range", want{action: FilterActionDiscard, protos: "udp"}},
 		{"term named flexible-match-range flat", flat("set firewall family inet filter F term flexible-match-range from protocol udp", "set firewall family inet filter F term flexible-match-range then discard"),
-			"inet", "F", "flexible-match-range", want{action: "discard", protos: "udp"}},
+			"inet", "F", "flexible-match-range", want{action: FilterActionDiscard, protos: "udp"}},
 		{"term named flexible-match-range quoted inet6", hier(`firewall { family inet6 { filter F { term "flexible-match-range" { from { next-header udp; } then { discard; } } } } }`),
-			"inet6", "F", "flexible-match-range", want{action: "discard", protos: "udp"}},
+			"inet6", "F", "flexible-match-range", want{action: FilterActionDiscard, protos: "udp"}},
 		{"filter named flexible-match-range flat", flat("set firewall family inet filter flexible-match-range term T from protocol udp", "set firewall family inet filter flexible-match-range term T then discard"),
-			"inet", "flexible-match-range", "T", want{action: "discard", protos: "udp"}},
+			"inet", "flexible-match-range", "T", want{action: FilterActionDiscard, protos: "udp"}},
 		{"filter named flexible-match-range quoted", hier(`firewall { family inet { filter "flexible-match-range" { term T { from { protocol udp; } then { discard; } } } } }`),
-			"inet", "flexible-match-range", "T", want{action: "discard", protos: "udp"}},
+			"inet", "flexible-match-range", "T", want{action: FilterActionDiscard, protos: "udp"}},
 		{"term named then", hier(`firewall { family inet { filter F { term then { from { is-fragment; } then { discard; } } } } }`),
-			"inet", "F", "then", want{action: "discard", frag: true}},
+			"inet", "F", "then", want{action: FilterActionDiscard, frag: true}},
 		{"term named then flat", flat("set firewall family inet filter F term then from is-fragment", "set firewall family inet filter F term then then discard"),
-			"inet", "F", "then", want{action: "discard", frag: true}},
+			"inet", "F", "then", want{action: FilterActionDiscard, frag: true}},
 		{"prefix-list named is-fragment braced except", hier(`policy-options { prefix-list is-fragment { 10.0.0.0/8; } } firewall { family inet { filter F { term T { from { source-prefix-list { is-fragment except; } } then { discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard"}},
+			"inet", "F", "T", want{action: FilterActionDiscard}},
 		{"prefix-list named is-fragment flat except", flat("set policy-options prefix-list is-fragment 10.0.0.0/8", "set firewall family inet filter F term T from source-prefix-list is-fragment except", "set firewall family inet filter F term T then discard"),
-			"inet", "F", "T", want{action: "discard"}},
+			"inet", "F", "T", want{action: FilterActionDiscard}},
 		{"prefix-list named is-fragment braced destination", hier(`policy-options { prefix-list is-fragment { 10.0.0.0/8; } } firewall { family inet { filter F { term T { from { destination-prefix-list { is-fragment; } } then { discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard"}},
+			"inet", "F", "T", want{action: FilterActionDiscard}},
 		{"range named then flat", flat("set firewall family inet filter F term T from flexible-match-range range then byte-offset 9", "set firewall family inet filter F term T then discard"),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"range named then packed", hier(`firewall { family inet { filter F { term T { from { flexible-match-range range then { byte-offset 9; } } then { discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"range named then block-named", hier(`firewall { family inet { filter F { term T { from { flexible-match-range { range { then { byte-offset 9; } } } } then { discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"range named then flat with match-start", flat("set firewall family inet filter F term T from flexible-match-range range then match-start layer-3", "set firewall family inet filter F term T from flexible-match-range range then byte-offset 9", "set firewall family inet filter F term T then discard"),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"then-first flex", hier(`firewall { family inet { filter F { term T then discard from flexible-match-range range R byte-offset 9; } } }`),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"then-first is-fragment", hier(`firewall { family inet { filter F { term T then discard from is-fragment; } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true}},
 		{"then-first is-fragment inet6", hier(`firewall { family inet6 { filter F { term T then discard from is-fragment; } } }`),
-			"inet6", "F", "T", want{action: "discard", frag: true}},
+			"inet6", "F", "T", want{action: FilterActionDiscard, frag: true}},
 		{"packed term protocol", hier(`firewall { family inet { filter F { term T from protocol udp then discard; } } }`),
-			"inet", "F", "T", want{action: "discard", protos: "udp"}},
+			"inet", "F", "T", want{action: FilterActionDiscard, protos: "udp"}},
 		{"packed term is-fragment then protocol", hier(`firewall { family inet { filter F { term T from is-fragment protocol udp then discard; } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true, protos: "udp"}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true, protos: "udp"}},
 		{"counter named is-fragment", hier(`firewall { family inet { filter F { term T { from { is-fragment; } then { count is-fragment; discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true}},
 		{"counter named flexible-match-range", hier(`firewall { family inet { filter F { term T { from { flexible-match-range { range R { byte-offset 9; } } } then { count flexible-match-range; discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"policer named is-fragment", hier(`firewall { policer is-fragment { if-exceeding { bandwidth-limit 1m; burst-size-limit 15k; } then discard; } family inet { filter F { term T { from { is-fragment; } then { policer is-fragment; accept; } } } } }`),
-			"inet", "F", "T", want{action: "accept", frag: true}},
+			"inet", "F", "T", want{action: FilterActionAccept, frag: true}},
 		{"flex braced", hier(`firewall { family inet { filter F { term T { from { flexible-match-range { range R { match-start layer-3; byte-offset 9; bit-length 8; match-value 0x11; } } } then { discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"flex flat", flat("set firewall family inet filter F term T from flexible-match-range range R match-start layer-3", "set firewall family inet filter F term T from flexible-match-range range R byte-offset 9", "set firewall family inet filter F term T then discard"),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"flex packed from", hier(`firewall { family inet { filter F { term T { from flexible-match-range range R byte-offset 9; then discard; } } } }`),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"flex packed inside braced from", hier(`firewall { family inet { filter F { term T { from { flexible-match-range range R byte-offset 9; } then discard; } } } }`),
-			"inet", "F", "T", want{action: "discard", flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, flex: true}},
 		{"flex beside is-fragment", hier(`firewall { family inet { filter F { term T { from { flexible-match-range { range R { byte-offset 9; } } is-fragment; } then { discard; } } } } }`),
-			"inet", "F", "T", want{action: "discard", frag: true, flex: true}},
+			"inet", "F", "T", want{action: FilterActionDiscard, frag: true, flex: true}},
 	}
 	for _, c := range controls {
 		t.Run(c.name, func(t *testing.T) {

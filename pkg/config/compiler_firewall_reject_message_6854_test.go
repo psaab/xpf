@@ -53,7 +53,7 @@ firewall { family inet { filter f { term t { then { reject host-unreachable; } }
 				t.Fatalf("filter f did not compile one term: %+v", cfg.Firewall.FiltersInet)
 			}
 			term := filter.Terms[0]
-			if term.Action != "reject" {
+			if term.Action != FilterActionReject {
 				t.Errorf("Action = %q, want reject", term.Action)
 			}
 			if term.RejectMessageType != "host-unreachable" {
@@ -79,7 +79,7 @@ firewall { family inet { filter f { term t { then reject; } } } }
 		t.Fatalf("compile: %v", err)
 	}
 	term := cfg.Firewall.FiltersInet["f"].Terms[0]
-	if term.Action != "reject" {
+	if term.Action != FilterActionReject {
 		t.Fatalf("Action = %q, want reject", term.Action)
 	}
 	if term.RejectMessageType != "" {

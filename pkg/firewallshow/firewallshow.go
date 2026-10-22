@@ -159,12 +159,12 @@ func WriteTerm(buf *strings.Builder, term *config.FirewallFilterTerm, leadingBla
 // contradictory next-term bit beside a terminating action/routing-instance
 // is disclosed as ignored rather than printed as fall-through (#10012).
 func writeThenAction(buf *strings.Builder, term *config.FirewallFilterTerm) {
-	fallThrough := term.NextTerm && term.Action == "" && term.RoutingInstance == ""
+	fallThrough := term.NextTerm && term.Action == config.FilterActionUnset && term.RoutingInstance == ""
 	if fallThrough {
 		buf.WriteString("    then next term\n")
 		return
 	}
-	if term.Action != "" {
+	if term.Action != config.FilterActionUnset {
 		if term.RejectMessageType != "" {
 			fmt.Fprintf(buf, "    then %s %s\n", term.Action, term.RejectMessageType)
 		} else {

@@ -22,21 +22,21 @@ func TestLo0UnresolvedPositiveRefusesCandidate14132(t *testing.T) {
 		{
 			name: "discard",
 			term: config.FirewallFilterTerm{
-				Name: "discard-unresolved-positive", Action: "discard",
+				Name: "discard-unresolved-positive", Action: config.FilterActionDiscard,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
 			},
 		},
 		{
 			name: "reject",
 			term: config.FirewallFilterTerm{
-				Name: "reject-unresolved-positive", Action: "reject",
+				Name: "reject-unresolved-positive", Action: config.FilterActionReject,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
 			},
 		},
 		{
 			name: "accept",
 			term: config.FirewallFilterTerm{
-				Name: "accept-unresolved-positive", Action: "accept",
+				Name: "accept-unresolved-positive", Action: config.FilterActionAccept,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "TYPO"}},
 			},
 		},
@@ -50,7 +50,7 @@ func TestLo0UnresolvedPositiveRefusesCandidate14132(t *testing.T) {
 		{
 			name: "discard partial OR",
 			term: config.FirewallFilterTerm{
-				Name: "discard-partial-or", Action: "discard",
+				Name: "discard-partial-or", Action: config.FilterActionDiscard,
 				SourcePrefixLists: []config.PrefixListRef{{Name: "known"}, {Name: "TYPO"}},
 			},
 		},
@@ -80,7 +80,7 @@ func TestLo0UnresolvedPositiveRefusesCandidate14132(t *testing.T) {
 // rendering (anti-over-fix control).
 func TestLo0DefinedPositiveDoesNotRefuse14132(t *testing.T) {
 	term := config.FirewallFilterTerm{
-		Name: "discard-defined-positive", Action: "discard",
+		Name: "discard-defined-positive", Action: config.FilterActionDiscard,
 		SourcePrefixLists: []config.PrefixListRef{{Name: "known"}},
 	}
 	cfg := lo0Cfg9875(&term)

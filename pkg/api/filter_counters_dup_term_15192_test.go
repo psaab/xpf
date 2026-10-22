@@ -58,7 +58,7 @@ func dupTermCollector15192(t *testing.T) (*xpfCollector, *dupTermDP15192) {
 		t.Fatalf("fixture: want one term T, got %+v", f)
 	}
 	// The duplicate shape a lenient load preserves: a second same-named term.
-	f.Terms = append(f.Terms, &config.FirewallFilterTerm{Name: "T", Action: "discard"})
+	f.Terms = append(f.Terms, &config.FirewallFilterTerm{Name: "T", Action: config.FilterActionDiscard})
 	c := newCollector(&Server{store: store})
 	dp := &dupTermDP15192{
 		Manager: dataplane.New(),

@@ -24,7 +24,7 @@ func TestFilterSnapshotModifierOnlyDoesNotFallThrough14632(t *testing.T) {
 	// Authored `then count bgp;` — no `next term`, no terminating action.
 	cfg := nextTermCfg([]*config.FirewallFilterTerm{
 		{Name: "count-bgp", Protocols: []string{"tcp"}, DestinationPorts: []string{"179"}, Count: "bgp"},
-		{Name: "drop-rest", Protocols: []string{"tcp"}, Action: "discard"},
+		{Name: "drop-rest", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 	})
 	snaps := buildFirewallFilterSnapshots(cfg)
 	if len(snaps) != 1 || len(snaps[0].Terms) != 2 {
@@ -42,7 +42,7 @@ func TestFilterSnapshotExplicitNextTermStillFallsThrough14632(t *testing.T) {
 	// Authored `then { count c; next term; }` — the explicit continuation.
 	cfg := nextTermCfg([]*config.FirewallFilterTerm{
 		{Name: "count-next", Protocols: []string{"tcp"}, Count: "hits", NextTerm: true},
-		{Name: "drop", Protocols: []string{"tcp"}, Action: "discard"},
+		{Name: "drop", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 	})
 	snaps := buildFirewallFilterSnapshots(cfg)
 	if !snaps[0].Terms[0].NextTerm {

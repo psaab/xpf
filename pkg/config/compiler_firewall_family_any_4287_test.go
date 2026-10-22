@@ -53,7 +53,7 @@ firewall {
 	}
 	// Both must carry the discard action (the deny must apply to both families).
 	for fam, f := range map[string]*FirewallFilter{"inet": v4, "inet6": v6} {
-		if len(f.Terms) != 1 || f.Terms[0].Action != "discard" {
+		if len(f.Terms) != 1 || f.Terms[0].Action != FilterActionDiscard {
 			t.Fatalf("family any drop6 (%s pool): expected one discard term, got %+v", fam, f.Terms)
 		}
 	}

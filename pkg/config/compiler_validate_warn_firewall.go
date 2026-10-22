@@ -502,7 +502,7 @@ func firewallTermIsTerminatingAction(t *FirewallFilterTerm) bool {
 		return false
 	}
 	switch t.Action {
-	case "accept", "discard", "reject":
+	case FilterActionAccept, FilterActionDiscard, FilterActionReject:
 		return true
 	default:
 		return false

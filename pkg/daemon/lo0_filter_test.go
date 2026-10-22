@@ -49,12 +49,12 @@ func lo0FilterTestConfig() *config.Config {
 					Protocols:         []string{"tcp"},
 					SourcePrefixLists: []config.PrefixListRef{{Name: "trusted"}},
 					DestinationPorts:  []string{"22"},
-					Action:            "accept",
+					Action:            config.FilterActionAccept,
 				},
 				{
 					Name:      "deny-rest",
 					Protocols: []string{"tcp"},
-					Action:    "discard",
+					Action:    config.FilterActionDiscard,
 				},
 			},
 		},
@@ -67,7 +67,7 @@ func lo0FilterTestConfig() *config.Config {
 					Name:      "drop-rh0",
 					ICMPTypes: []int{134},
 					ICMPCodes: []int{0},
-					Action:    "discard",
+					Action:    config.FilterActionDiscard,
 				},
 			},
 		},
@@ -292,7 +292,7 @@ func TestNftRuleFromTermPrefixListExpansion(t *testing.T) {
 			{Name: "management-hosts", Except: false},
 		},
 		DestinationPorts: []string{"22"},
-		Action:           "accept",
+		Action:           config.FilterActionAccept,
 	}
 
 	rule := nftRule(t, term, "ip", prefixLists)
@@ -318,7 +318,7 @@ func TestNftRuleFromTermPrefixListExcept(t *testing.T) {
 			{Name: "allowed", Except: true},
 		},
 		DestinationPorts: []string{"22"},
-		Action:           "reject",
+		Action:           config.FilterActionReject,
 	}
 
 	// #3445: a `then reject` now lowers to TWO faithful rules (TCP RST + ICMP
@@ -344,17 +344,17 @@ func TestNftRuleFromTermRejectVsDiscard(t *testing.T) {
 	prefixLists := map[string]*config.PrefixList{}
 
 	tests := []struct {
-		action     string
+		action     config.FilterAction
 		wantAction string
 	}{
-		{"accept", "accept"},
-		{"discard", "drop"},
+		{config.FilterActionAccept, "accept"},
+		{config.FilterActionDiscard, "drop"},
 		// #14632: an empty action WITHOUT an authored `next term` is a
 		// modifier-only term — Junos nonterminating actions carry an implicit
 		// accept, so the kernel mirror TERMINATES as `accept` (shadowing
 		// later terms exactly as the Rust evaluator does). Only an authored
 		// `then next term` term (NextTerm set, tested below) falls through.
-		{"", "accept"},
+		{config.FilterActionUnset, "accept"},
 	}
 
 	for _, tt := range tests {
@@ -371,7 +371,7 @@ func TestNftRuleFromTermRejectVsDiscard(t *testing.T) {
 	// #3445: `reject` lowers to a faithful TCP-RST + ICMP-admin-prohibited pair,
 	// not the pre-fix bare `reject` (which sent ICMP port-unreachable for ALL
 	// protocols including TCP — a different wire response than userspace).
-	reject := nftRulesFromTerm(&config.FirewallFilterTerm{Name: "test", Action: "reject"}, "ip", prefixLists)
+	reject := nftRulesFromTerm(&config.FirewallFilterTerm{Name: "test", Action: config.FilterActionReject}, "ip", prefixLists)
 	wantReject := []string{
 		"meta l4proto 6 reject with tcp reset",
 		"reject with icmpx type admin-prohibited",
@@ -404,18 +404,18 @@ func TestNftRuleFromTermUnknownActionFailsClosed(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		action     string
+		action     config.FilterAction
 		wantAction string
 	}{
 		// Known terminating actions still map correctly.
-		{"known-accept", "accept", "accept"},
-		{"known-discard", "discard", "drop"},
+		{"known-accept", config.FilterActionAccept, "accept"},
+		{"known-discard", config.FilterActionDiscard, "drop"},
 		// Unknown / future action strings a mixed-version snapshot could carry.
 		// All must FAIL CLOSED to drop (mirroring Rust FilterAction::Discard),
 		// never fail open to accept.
-		{"unknown-redirect", "redirect", "drop"},
-		{"unknown-sample", "sample-and-accept", "drop"},
-		{"unknown-garbage", "frobnicate", "drop"},
+		{"unknown-redirect", config.FilterAction("redirect"), "drop"},
+		{"unknown-sample", config.FilterAction("sample-and-accept"), "drop"},
+		{"unknown-garbage", config.FilterAction("frobnicate"), "drop"},
 	}
 
 	for _, tt := range tests {
@@ -439,7 +439,7 @@ func TestNftRuleFromTermMultiplePorts(t *testing.T) {
 		Name:             "allow-web",
 		Protocols:        []string{"tcp"},
 		DestinationPorts: []string{"80", "443"},
-		Action:           "accept",
+		Action:           config.FilterActionAccept,
 	}
 
 	rule := nftRule(t, term, "ip", prefixLists)
@@ -456,7 +456,7 @@ func TestNftRuleFromTermSingleSourceAddr(t *testing.T) {
 	term := &config.FirewallFilterTerm{
 		Name:            "allow-single",
 		SourceAddresses: []string{"10.0.1.0/24"},
-		Action:          "accept",
+		Action:          config.FilterActionAccept,
 	}
 	if rule := nftRule(t, term, "ip", prefixLists); rule != "ip saddr 10.0.1.0/24 accept" {
 		t.Errorf("v4 literal in ip chain: got %q, want %q", rule, "ip saddr 10.0.1.0/24 accept")
@@ -477,7 +477,7 @@ func TestNftRuleFromTermWrongFamilyMatchesNothing(t *testing.T) {
 	term := &config.FirewallFilterTerm{
 		Name:            "v4-in-v6",
 		SourceAddresses: []string{"10.0.1.0/24"},
-		Action:          "accept",
+		Action:          config.FilterActionAccept,
 	}
 	if rule := nftRule(t, term, "ip6", prefixLists); rule != "" {
 		t.Errorf("wrong-family v4 literal in ip6 chain: got %q, want \"\" (match-nothing, #3433 H02)", rule)
@@ -487,7 +487,7 @@ func TestNftRuleFromTermWrongFamilyMatchesNothing(t *testing.T) {
 	term6 := &config.FirewallFilterTerm{
 		Name:            "v6-in-v4",
 		SourceAddresses: []string{"2001:db8::/32"},
-		Action:          "discard",
+		Action:          config.FilterActionDiscard,
 	}
 	if rule := nftRule(t, term6, "ip", prefixLists); rule != "" {
 		t.Errorf("wrong-family v6 literal in ip chain: got %q, want \"\" (match-nothing, #3433 H02)", rule)
@@ -518,7 +518,7 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			// match-nothing empty set and not the unloadable `ip saddr any`.
 			name: "positive any -> no predicate (match all)",
 			term: &config.FirewallFilterTerm{
-				Name: "any-accept", SourceAddresses: []string{"any"}, Action: "accept",
+				Name: "any-accept", SourceAddresses: []string{"any"}, Action: config.FilterActionAccept,
 			},
 			fam:  "ip",
 			want: "accept",
@@ -532,7 +532,7 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			term: &config.FirewallFilterTerm{
 				Name: "empty-pos", Protocols: []string{"tcp"},
 				SourcePrefixLists: []config.PrefixListRef{{Name: "empty"}},
-				DestinationPorts:  []string{"22"}, Action: "accept",
+				DestinationPorts:  []string{"22"}, Action: config.FilterActionAccept,
 			},
 			fam:  "ip",
 			want: "",
@@ -544,7 +544,7 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			term: &config.FirewallFilterTerm{
 				Name: "empty-exc", Protocols: []string{"tcp"},
 				SourcePrefixLists: []config.PrefixListRef{{Name: "empty", Except: true}},
-				DestinationPorts:  []string{"22"}, Action: "discard",
+				DestinationPorts:  []string{"22"}, Action: config.FilterActionDiscard,
 			},
 			fam:  "ip",
 			want: "meta l4proto 6 th dport 22 drop",
@@ -556,7 +556,7 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			name: "unresolved positive prefix-list -> match nothing (skip)",
 			term: &config.FirewallFilterTerm{
 				Name: "typo", SourcePrefixLists: []config.PrefixListRef{{Name: "does-not-exist"}},
-				Action: "accept",
+				Action: config.FilterActionAccept,
 			},
 			fam:  "ip",
 			want: "",
@@ -570,7 +570,7 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			term: &config.FirewallFilterTerm{
 				Name: "mixed", SourceAddresses: []string{"172.16.0.0/24"},
 				SourcePrefixLists: []config.PrefixListRef{{Name: "trusted", Except: true}},
-				Action:            "discard",
+				Action:            config.FilterActionDiscard,
 			},
 			fam:  "ip",
 			want: "ip saddr 172.16.0.0/24 drop",
@@ -596,7 +596,7 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			// unconstrained (match ALL).
 			name: "malformed positive literal -> emitted verbatim (nft rejects, fail closed)",
 			term: &config.FirewallFilterTerm{
-				Name: "bad", SourceAddresses: []string{"10.0.0.0/99"}, Action: "accept",
+				Name: "bad", SourceAddresses: []string{"10.0.0.0/99"}, Action: config.FilterActionAccept,
 			},
 			fam:  "ip",
 			want: "ip saddr 10.0.0.0/99 accept",
@@ -606,7 +606,7 @@ func TestNftRuleFromTermAddressSemantics3433(t *testing.T) {
 			name: "non-empty except -> negated set",
 			term: &config.FirewallFilterTerm{
 				Name: "exc", SourcePrefixLists: []config.PrefixListRef{{Name: "trusted", Except: true}},
-				Action: "discard",
+				Action: config.FilterActionDiscard,
 			},
 			fam:  "ip",
 			want: "ip saddr != { 10.0.0.0/8, 192.168.0.0/16 } drop",
@@ -631,7 +631,7 @@ func TestNftRuleFromTermICMPTypeCode(t *testing.T) {
 		Name:      "block-ra",
 		ICMPTypes: []int{134},
 		ICMPCodes: []int{0},
-		Action:    "discard",
+		Action:    config.FilterActionDiscard,
 	}
 	rule := nftRule(t, term, "ip6", prefixLists)
 	want := "icmpv6 type 134 icmpv6 code 0 drop"
@@ -643,7 +643,7 @@ func TestNftRuleFromTermICMPTypeCode(t *testing.T) {
 	term2 := &config.FirewallFilterTerm{
 		Name:      "block-redirect",
 		ICMPTypes: []int{5},
-		Action:    "discard",
+		Action:    config.FilterActionDiscard,
 	}
 	rule2 := nftRule(t, term2, "ip", prefixLists)
 	want2 := "icmp type 5 drop"
@@ -670,7 +670,7 @@ func TestNftRuleFromTermICMPCodeOnly(t *testing.T) {
 		Name:      "drop-icmp-code4",
 		Protocols: []string{"icmp"},
 		ICMPCodes: []int{4},
-		Action:    "discard",
+		Action:    config.FilterActionDiscard,
 	}
 	ruleV4 := nftRule(t, v4, "ip", prefixLists)
 	wantV4 := "meta l4proto 1 icmp code 4 drop"
@@ -686,7 +686,7 @@ func TestNftRuleFromTermICMPCodeOnly(t *testing.T) {
 		Name:      "drop-icmpv6-code1",
 		Protocols: []string{"icmpv6"},
 		ICMPCodes: []int{1},
-		Action:    "discard",
+		Action:    config.FilterActionDiscard,
 	}
 	ruleV6 := nftRule(t, v6, "ip6", prefixLists)
 	wantV6 := "meta l4proto 58 icmpv6 code 1 drop"
@@ -701,7 +701,7 @@ func TestNftRuleFromTermICMPCodeOnly(t *testing.T) {
 	multi := &config.FirewallFilterTerm{
 		Name:      "drop-icmp-codes",
 		ICMPCodes: []int{0, 4},
-		Action:    "discard",
+		Action:    config.FilterActionDiscard,
 	}
 	ruleMulti := nftRule(t, multi, "ip", prefixLists)
 	wantMulti := "icmp code { 0, 4 } drop"
@@ -716,7 +716,7 @@ func TestNftRuleFromTermDSCP(t *testing.T) {
 	term := &config.FirewallFilterTerm{
 		Name:   "dscp-match",
 		DSCPs:  []string{"ef"},
-		Action: "accept",
+		Action: config.FilterActionAccept,
 	}
 	rule := nftRule(t, term, "ip", prefixLists)
 	// #3436: the DSCP name resolves to its numeric value (ef == 46). nft's DSCP
@@ -761,7 +761,7 @@ func TestNftRuleFromTermProtocolAliases(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			term := &config.FirewallFilterTerm{
-				Name: "p", Protocols: []string{c.proto}, Action: "accept",
+				Name: "p", Protocols: []string{c.proto}, Action: config.FilterActionAccept,
 			}
 			want := c.want + " accept"
 			if rule := nftRule(t, term, "ip", prefixLists); rule != want {
@@ -778,7 +778,7 @@ func TestNftRuleFromTermProtocolAliases(t *testing.T) {
 func TestNftRuleFromTermProtocolMultiAliasSet(t *testing.T) {
 	prefixLists := map[string]*config.PrefixList{}
 	term := &config.FirewallFilterTerm{
-		Name: "p", Protocols: []string{"junos-gre", "tcp", "50"}, Action: "accept",
+		Name: "p", Protocols: []string{"junos-gre", "tcp", "50"}, Action: config.FilterActionAccept,
 	}
 	want := "meta l4proto { 47, 6, 50 } accept"
 	if rule := nftRule(t, term, "ip", prefixLists); rule != want {
@@ -807,7 +807,7 @@ func TestNftRuleFromTermDSCPNamesAndCase(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			term := &config.FirewallFilterTerm{
-				Name: "d", DSCPs: []string{c.dscp}, Action: "accept",
+				Name: "d", DSCPs: []string{c.dscp}, Action: config.FilterActionAccept,
 			}
 			want := c.want + " accept"
 			if rule := nftRule(t, term, "ip", prefixLists); rule != want {
@@ -818,7 +818,7 @@ func TestNftRuleFromTermDSCPNamesAndCase(t *testing.T) {
 
 	// Multi-value DSCP set with a mixed-case name and a numeric token.
 	multi := &config.FirewallFilterTerm{
-		Name: "d", DSCPs: []string{"EF", "af21", "0"}, Action: "accept",
+		Name: "d", DSCPs: []string{"EF", "af21", "0"}, Action: config.FilterActionAccept,
 	}
 	want := "ip dscp { 46, 18, 0 } accept"
 	if rule := nftRule(t, multi, "ip", prefixLists); rule != want {
@@ -867,7 +867,7 @@ func TestNftRuleFromTermTCPFlags(t *testing.T) {
 				Name:      c.name,
 				Protocols: []string{"tcp"},
 				TCPFlags:  c.flags,
-				Action:    "discard",
+				Action:    config.FilterActionDiscard,
 			}
 			rule := nftRule(t, term, "ip", prefixLists)
 			if rule != c.want {
@@ -926,7 +926,7 @@ func TestNftRuleFromTermTCPFlagsUnrepresentableFailsClosed(t *testing.T) {
 			Name:      "admit-flagged",
 			Protocols: []string{"tcp"},
 			TCPFlags:  flags,
-			Action:    "accept",
+			Action:    config.FilterActionAccept,
 		}
 		rule := nftRule(t, term, "ip", prefixLists)
 		if !strings.HasSuffix(rule, " drop") {
@@ -947,7 +947,7 @@ func TestNftRuleFromTermTCPFlagsUnrepresentableFailsClosed(t *testing.T) {
 	only := &config.FirewallFilterTerm{
 		Name:     "flags-only",
 		TCPFlags: []string{"syn", "|", "ack"},
-		Action:   "accept",
+		Action:   config.FilterActionAccept,
 	}
 	if rule := nftRule(t, only, "ip", prefixLists); rule != "meta l4proto 6 drop" {
 		t.Errorf("tcp-flags-only unrepresentable term: got %q, want %q (TCP-scoped drop, not bare drop)", rule, "meta l4proto 6 drop")
@@ -959,7 +959,7 @@ func TestNftRuleFromTermTCPFlagsUnrepresentableFailsClosed(t *testing.T) {
 		Name:      "deny-flagged",
 		Protocols: []string{"tcp"},
 		TCPFlags:  []string{"bogus"},
-		Action:    "discard",
+		Action:    config.FilterActionDiscard,
 	}
 	if rule := nftRule(t, discard, "ip", prefixLists); rule != "meta l4proto 6 meta l4proto 6 drop" {
 		t.Errorf("discard-term with unrepresentable tcp-flags: got %q, want a TCP-scoped drop", rule)
@@ -971,7 +971,7 @@ func TestNftRuleFromTermTCPFlagsUnrepresentableFailsClosed(t *testing.T) {
 		Name:      "reject-flagged",
 		Protocols: []string{"tcp"},
 		TCPFlags:  []string{"syn", "|", "ack"},
-		Action:    "reject",
+		Action:    config.FilterActionReject,
 	}, "ip", prefixLists)
 	if len(reject) != 1 || !strings.HasSuffix(reject[0], " drop") || strings.Contains(reject[0], "accept") {
 		t.Errorf("reject-term with unrepresentable tcp-flags must fail closed to a single drop, got: %v", reject)
@@ -984,7 +984,7 @@ func TestNftRuleFromTermTCPFlagsUnrepresentableFailsClosed(t *testing.T) {
 		Protocols: []string{"tcp"},
 		TCPFlags:  []string{"syn", "|", "ack"},
 		Count:     "badflags",
-		Action:    "accept",
+		Action:    config.FilterActionAccept,
 	}
 	rule := nftRule(t, counted, "ip", prefixLists)
 	if !strings.Contains(rule, `counter name "xpflo0_badflags"`) || !strings.HasSuffix(rule, " drop") {
@@ -997,7 +997,7 @@ func TestNftRuleFromTermTCPFlagsUnrepresentableFailsClosed(t *testing.T) {
 		Name:      "good-flags",
 		Protocols: []string{"tcp"},
 		TCPFlags:  []string{"syn", "&", "!ack"},
-		Action:    "accept",
+		Action:    config.FilterActionAccept,
 	}
 	if rule := nftRule(t, valid, "ip", prefixLists); rule != "meta l4proto 6 tcp flags & (syn | ack) == syn accept" {
 		t.Errorf("representable tcp-flags term must be unchanged, got: %s", rule)
@@ -1026,9 +1026,9 @@ func TestLo0FilterPayloadUnrepresentableTCPFlagsParses(t *testing.T) {
 					Protocols: []string{"tcp"},
 					TCPFlags:  []string{"syn", "|", "ack"}, // unrepresentable
 					Count:     "badflags",
-					Action:    "accept",
+					Action:    config.FilterActionAccept,
 				},
-				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: "discard"},
+				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 			},
 		},
 	}
@@ -1064,7 +1064,7 @@ func TestNftRuleFromTermPortExcept(t *testing.T) {
 		Name:            "accept-except-ssh",
 		Protocols:       []string{"tcp"},
 		DestPortsExcept: []string{"22"},
-		Action:          "accept",
+		Action:          config.FilterActionAccept,
 	}
 	rule := nftRule(t, term, "ip", prefixLists)
 	want := "meta l4proto 6 th dport != 22 accept"
@@ -1077,7 +1077,7 @@ func TestNftRuleFromTermPortExcept(t *testing.T) {
 		Name:            "accept-except-web",
 		Protocols:       []string{"tcp"},
 		DestPortsExcept: []string{"80", "443"},
-		Action:          "accept",
+		Action:          config.FilterActionAccept,
 	}
 	rule2 := nftRule(t, term2, "ip", prefixLists)
 	want2 := "meta l4proto 6 th dport != { 80, 443 } accept"
@@ -1090,7 +1090,7 @@ func TestNftRuleFromTermPortExcept(t *testing.T) {
 		Name:              "src-except",
 		Protocols:         []string{"udp"},
 		SourcePortsExcept: []string{"123"},
-		Action:            "discard",
+		Action:            config.FilterActionDiscard,
 	}
 	rule3 := nftRule(t, term3, "ip", prefixLists)
 	want3 := "meta l4proto 17 th sport != 123 drop"
@@ -1108,7 +1108,7 @@ func TestNftRuleFromTermFragment(t *testing.T) {
 	term := &config.FirewallFilterTerm{
 		Name:       "drop-frags",
 		IsFragment: true,
-		Action:     "discard",
+		Action:     config.FilterActionDiscard,
 	}
 	rule := nftRule(t, term, "ip", prefixLists)
 	if rule != nftRefuseIPv4Lo0Fragment {
@@ -1276,7 +1276,7 @@ func TestLo0PayloadFallThroughDoesNotShadowDiscard(t *testing.T) {
 			Name: "lo0-in",
 			Terms: []*config.FirewallFilterTerm{
 				{Name: "fallthrough", Protocols: []string{"tcp"}, NextTerm: true},
-				{Name: "block-ssh", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: "discard"},
+				{Name: "block-ssh", Protocols: []string{"tcp"}, DestinationPorts: []string{"22"}, Action: config.FilterActionDiscard},
 			},
 		},
 	}
@@ -1307,7 +1307,7 @@ func TestLo0PayloadRoutingInstanceTerminatesAcceptNoOverDrop(t *testing.T) {
 			Name: "lo0-in",
 			Terms: []*config.FirewallFilterTerm{
 				{Name: "steer", Protocols: []string{"tcp"}, RoutingInstance: "mgmt"},
-				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: "discard"},
+				{Name: "deny-rest", Protocols: []string{"tcp"}, Action: config.FilterActionDiscard},
 			},
 		},
 	}
@@ -1342,7 +1342,7 @@ func TestNftRuleFromTermLogMirror(t *testing.T) {
 		Protocols:        []string{"tcp"},
 		DestinationPorts: []string{"22"},
 		Log:              true,
-		Action:           "accept",
+		Action:           config.FilterActionAccept,
 	}
 	got := nftRule(t, term, "ip", prefixLists)
 	want := `meta l4proto 6 th dport 22 log prefix "xpf-lo0 log-ssh: " accept`
@@ -1354,7 +1354,7 @@ func TestNftRuleFromTermLogMirror(t *testing.T) {
 	}
 
 	// log on a discard: the log fires before the drop.
-	dterm := &config.FirewallFilterTerm{Name: "log-drop", Log: true, Action: "discard"}
+	dterm := &config.FirewallFilterTerm{Name: "log-drop", Log: true, Action: config.FilterActionDiscard}
 	dgot := nftRule(t, dterm, "ip", prefixLists)
 	dwant := `log prefix "xpf-lo0 log-drop: " drop`
 	if dgot != dwant {
@@ -1376,7 +1376,7 @@ func TestNftRuleFromTermCountMirror(t *testing.T) {
 		Protocols:        []string{"tcp"},
 		DestinationPorts: []string{"22"},
 		Count:            "ssh-hits",
-		Action:           "accept",
+		Action:           config.FilterActionAccept,
 	}
 	got := nftRule(t, term, "ip", prefixLists)
 	want := `meta l4proto 6 th dport 22 counter name "xpflo0_ssh-hits" accept`
@@ -1415,13 +1415,13 @@ func TestLo0PayloadSharedCounterDeclaredOnce(t *testing.T) {
 	cfg.System.Lo0FilterInputV6 = "v6"
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"v4": {Name: "v4", Terms: []*config.FirewallFilterTerm{
-			{Name: "a", Protocols: []string{"tcp"}, Count: "shared", Action: "accept"},
-			{Name: "b", Protocols: []string{"udp"}, Count: "shared", Action: "discard"},
+			{Name: "a", Protocols: []string{"tcp"}, Count: "shared", Action: config.FilterActionAccept},
+			{Name: "b", Protocols: []string{"udp"}, Count: "shared", Action: config.FilterActionDiscard},
 		}},
 	}
 	cfg.Firewall.FiltersInet6 = map[string]*config.FirewallFilter{
 		"v6": {Name: "v6", Terms: []*config.FirewallFilterTerm{
-			{Name: "c", Count: "shared", Action: "accept"},
+			{Name: "c", Count: "shared", Action: config.FilterActionAccept},
 		}},
 	}
 	payload := buildLo0FilterPayload(cfg, "v4", "v6")
@@ -1463,7 +1463,7 @@ func TestNftRuleFromTermFlexMatchUnrepresentableMatchesNothing7722(t *testing.T)
 	// Route 1: a load width outside 1..4 bytes (40 bits -> 5).
 	wide := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 40, Value: 1, Mask: 0xff}
 	got := nftRule(t, &config.FirewallFilterTerm{
-		Name: "flex-too-wide", FlexMatch: &wide, Action: "accept",
+		Name: "flex-too-wide", FlexMatch: &wide, Action: config.FilterActionAccept,
 	}, "ip", prefixLists)
 	if got != "" {
 		t.Errorf("unrepresentable flex-match (5-byte load) rendered %q, want \"\" — "+
@@ -1479,7 +1479,7 @@ func TestNftRuleFromTermFlexMatchUnrepresentableMatchesNothing7722(t *testing.T)
 	// Route 2: an unparseable numeric token recorded by the compiler.
 	got = nftRule(t, &config.FirewallFilterTerm{
 		Name: "flex-unparseable", UnknownFlexMatch: []string{"byte-offset=not-a-number"},
-		Action: "discard",
+		Action: config.FilterActionDiscard,
 	}, "ip", prefixLists)
 	if got != "" {
 		t.Errorf("UnknownFlexMatch token rendered %q, want \"\" — a token the compiler "+
@@ -1491,7 +1491,7 @@ func TestNftRuleFromTermFlexMatchUnrepresentableMatchesNothing7722(t *testing.T)
 	// flex-match at all.
 	ok := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff}
 	got = nftRule(t, &config.FirewallFilterTerm{
-		Name: "flex-ok", FlexMatch: &ok, Action: "accept",
+		Name: "flex-ok", FlexMatch: &ok, Action: config.FilterActionAccept,
 	}, "ip", prefixLists)
 	if !strings.Contains(got, "@nh,") {
 		t.Errorf("representable flex-match did not render a payload match: %q — without "+
@@ -1514,7 +1514,7 @@ func TestLo0DNATToSelfIKEIsGlobalInputMatch10525(t *testing.T) {
 				DestAddresses:    []string{"203.0.113.9/32"},
 				Protocols:        []string{"udp"},
 				DestinationPorts: []string{"500"},
-				Action:           "discard",
+				Action:           config.FilterActionDiscard,
 			}},
 		},
 	}

@@ -14453,7 +14453,11 @@ at commit. `compileFilterThen` now records the unrecognized token on
 `FirewallFilterTerm.UnknownActions`, and **`validateFilterActionsStrict`**
 (`compiler_validate_strict.go`) hard-rejects any term carrying one, naming
 the family / filter / term / offending token. Note that an EMPTY action
-(`Action == ""`) is the legitimate "no terminating action" case (a term
+(`Action == FilterActionUnset`, #16140: `FirewallFilterTerm.Action` and
+`TerminalActions` are the string-underlying `FilterAction` enum
+{Unset,Accept,Reject,Discard} — the JSON tokens are unchanged, and
+`NextTerm` stays a bool so the co-authored terminal+next-term conflict
+remains representable) is the legitimate "no terminating action" case (a term
 with only modifiers and NO authored `next term` terminates as implicit accept, #14632; only an authored `then next term` falls through) and is NOT flagged.
 Two more VALID Junos constructs are recognized so a real config import is
 NOT over-rejected: `then reject <message-type>` (the standard ICMP-unreachable

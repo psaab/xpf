@@ -23,7 +23,7 @@ func TestFilterSnapshotMultiRangePoisonedToMatchNothing_5823(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"edge": {Name: "edge", Terms: []*config.FirewallFilterTerm{{
 			Name:   "multi",
-			Action: "accept",
+			Action: config.FilterActionAccept,
 			// The first range is compiled into FlexMatch (as today), but two
 			// ranges were named — the cardinality marker drives the poison.
 			FlexMatch: &config.FlexMatchConfig{
@@ -66,7 +66,7 @@ func TestFilterSnapshotSingleRangeNotPoisoned_5823(t *testing.T) {
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"edge": {Name: "edge", Terms: []*config.FirewallFilterTerm{{
 			Name:   "one",
-			Action: "discard",
+			Action: config.FilterActionDiscard,
 			FlexMatch: &config.FlexMatchConfig{
 				MatchStart: "layer-3",
 				ByteOffset: 6,

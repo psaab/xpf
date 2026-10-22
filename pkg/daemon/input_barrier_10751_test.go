@@ -291,7 +291,7 @@ func TestEarlyInputHandoffGatedOnLo0AndIntent10751(t *testing.T) {
 		cfg.System.Lo0FilterInputV4 = "protect-re"
 		cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 			"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
-				{Name: "deny-rest", Action: "discard"},
+				{Name: "deny-rest", Action: config.FilterActionDiscard},
 			}},
 		}
 		return cfg
