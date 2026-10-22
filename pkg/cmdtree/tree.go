@@ -1546,251 +1546,29 @@ func resolveTreeWord(tree map[string]*Node, word string) (string, *Node, []strin
 }
 
 // CompleteFromTree walks the tree to find completion candidates for the given words and partial.
+// It is the name-only projection of CompleteFromTreeWithDesc (#16138:
+// the twin walkers were merged into the single CompleteFromTreeWithDesc
+// walk below, so the two surfaces cannot drift; candidate names and order
+// are exactly the WithDesc names in order).
 func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg *config.Config) []string {
-	current := tree
-	var currentNode *Node
-	// parentTyped tracks whether the most recent matched node is a typed
-	// leaf whose value slot has not yet been consumed. If so, the next
-	// unmatched word is the value and we stay at the same children
-	// level after consuming it (#1319: same shape as <placeholder> but
-	// derived from ValueType instead of an explicit "<name>" node).
-	parentTyped := false
-	dynamicConsumed := false
-	// A dynamic node consumes at most one unmatched value (#11835).
-	dynamicFilled := false
-	// options is the child map of the nearest enclosing node that declares
-	// Options, mirroring Canonicalize (#9505/#15720). Once one option is
-	// complete the next word may be any option, in any order — but only
-	// when Options is set: everywhere else a leaf still ends the walk
-	// (#8289). nil must stay distinguishable from a declared empty map so
-	// the `options != nil` gates cannot widen a non-Options command.
-	var options map[string]*Node
-	atOptionsLeaf := false
-	inOptionsSubtree := false
-	subtreeConsumed := false
-	optionsValueFilled := false
-	// #5196 (A3-b1-F4): resolveTreeWord accepts unique keyword prefixes
-	// for traversal, but ContextDynamicFn providers scan the consumed
-	// words for exact keywords (e.g. the policy provider looks for
-	// "from-zone"/"to-zone"). Track the CANONICAL keyword for each
-	// resolved word so an accepted abbreviation ("from-z"/"to-z") still
-	// carries the state those providers key off. Value slots (dynamic /
-	// typed / placeholder — the !ok branches) keep the raw word, since
-	// that is the operator-supplied value, not a keyword.
-	canonWords := append([]string(nil), words...)
-	for wi, w := range words {
-		if atOptionsLeaf {
-			// The previous matched word was a childless option leaf and
-			// this word is its value: consume exactly one word, then
-			// resume among the options (#15720). current already holds
-			// the options map (set below); just clear the pending slot.
-			// The stale dynamicFilled of an earlier option must clear
-			// too, or a later dynamic option (`... source-port 514 zone`)
-			// would read as already filled.
-			atOptionsLeaf = false
-			parentTyped = false
-			dynamicFilled = false
-			dynamicConsumed = true
-			optionsValueFilled = true
-			// A value that is itself another option keyword means the
-			// previous option never got its value — Canonicalize
-			// refuses that shape (its pending slot takes the word as
-			// the value, and the word after it then matches nothing),
-			// so exactly one further word may follow (#15720).
-			if _, _, _, isOpt := resolveTreeWord(options, w); isOpt && wi < len(words)-1 {
-				return nil
-			}
-			continue
-		}
-		dynamicConsumed = false
-		name, node, matches, ok := resolveTreeWord(current, w)
-		if !ok && options != nil && !parentTyped && !optionsValueFilled && !(currentNode != nil && currentNode.HasDynamic() && !dynamicFilled) {
-			// The previous option is complete, so a word that is not one
-			// of its children may be the next option (#15720, mirroring
-			// Canonicalize #9505).
-			if name2, node2, matches2, ok2 := resolveTreeWord(options, w); ok2 {
-				name, node, matches, ok = name2, node2, matches2, true
-				current = options
-			} else if len(matches2) > len(matches) {
-				matches = matches2
-			}
-		}
-		if !ok {
-			if optionsValueFilled {
-				// #15720: a dynamic/typed option's value was just
-				// consumed and this word is neither an option nor a
-				// value for anything: Canonicalize refuses it, so
-				// completion offers nothing.
-				return nil
-			}
-			if parentTyped {
-				// Typed-leaf value slot consumed this word; stay at same level.
-				parentTyped = false
-				dynamicConsumed = true
-				continue
-			}
-			if currentNode != nil && currentNode.HasDynamic() && !dynamicFilled {
-				dynamicFilled = true
-				dynamicConsumed = true
-				if options != nil && wi < len(words)-1 {
-					// #15720: this word filled a dynamic option's
-					// value; the next word must resolve among the
-					// options, so a stray word there returns nil
-					// below instead of completing the option map.
-					optionsValueFilled = true
-				}
-				continue
-			}
-			// Check for placeholder node that consumes any value
-			if ph := findPlaceholder(current); ph != nil {
-				// Placeholder consumed this word. If the placeholder has
-				// children, descend so follow-on keywords can complete
-				// (e.g. "show route <dest> exact"). Otherwise stay at this
-				// level so sibling options remain available (e.g. "ping
-				// <host> count").
-				if ph.Children != nil {
-					currentNode = ph
-					current = ph.Children
-					dynamicFilled = false
-				}
-				dynamicConsumed = true
-				continue
-			}
-			if wi == len(words)-1 && len(matches) > 0 {
-				return matches
-			}
-			return nil
-		}
-		// Resolved (possibly via unique prefix): record the canonical
-		// keyword so downstream ContextDynamicFn providers see it (#5196).
-		canonWords[wi] = name
-		currentNode = node
-		parentTyped = node.IsTypedLeaf()
-		dynamicFilled = false
-		if node.Options && node.Children != nil {
-			options = node.Children
-		}
-		if node.Children == nil {
-			if options != nil && maps.Equal(current, options) {
-				if wi == len(words)-1 {
-					if node.HasDynamic() {
-						// #5196 (A3-b1-F3): invoke the provider even when cfg==nil.
-						// nil-safety is the provider contract (all DynamicFn /
-						// ContextDynamicFn either guard `cfg == nil` or ignore cfg),
-						// and config-independent providers (e.g. `show route table`
-						// → inet.0/inet6.0, `show route protocol`) intentionally
-						// supply defaults for a nil config (fresh boot /
-						// compile-failure recovery). The old `&& cfg != nil` caller
-						// gate suppressed those defaults.
-						return FilterPrefix(node.DynamicValues(cfg, canonWords), partial)
-					}
-					if parentTyped {
-						// At the value slot of a typed leaf: surface examples
-						// for `?` completion, mirroring the non-nil exit below.
-						candidates := append([]string(nil), node.ValueExamples...)
-						if ph := node.ValueType.Placeholder(); ph != "" {
-							candidates = append(candidates, ph)
-						}
-						return FilterPrefix(candidates, partial)
-					}
-					// Flag leaf (nat): the option itself is consumed and no
-					// value slot is pending, so offer the remaining options.
-					return FilterPrefix(KeysOf(options), partial)
-				}
-				if node.HasDynamic() || parentTyped {
-					// Value pending: the next word is this option's value;
-					// resume among the options after it.
-					atOptionsLeaf = true
-					current = options
-					continue
-				}
-				// Flag leaf with words remaining: resume among the
-				// options; the next word resolves there at loop top.
-				current = options
-				continue
-			}
-			if options != nil && inOptionsSubtree {
-				// #15720: a leaf of a subtree under the Options node
-				// (sort-by bytes): the subtree option is complete, so
-				// resume among the options. At the last word the options
-				// themselves are the candidates (dynamic/typed last-word
-				// handling below is for value slots, not this leaf).
-				if wi == len(words)-1 {
-					return FilterPrefix(KeysOf(options), partial)
-				}
-				current = options
-				inOptionsSubtree = false
-				subtreeConsumed = true
-				continue
-			}
-			if node.HasDynamic() && wi < len(words)-1 {
-				dynamicConsumed = true
-				continue
-			}
-			if node.HasDynamic() {
-				// #5196 (A3-b1-F3): invoke the provider even when cfg==nil.
-				// nil-safety is the provider contract (all DynamicFn /
-				// ContextDynamicFn either guard `cfg == nil` or ignore cfg),
-				// and config-independent providers (e.g. `show route table`
-				// → inet.0/inet6.0, `show route protocol`) intentionally
-				// supply defaults for a nil config (fresh boot /
-				// compile-failure recovery). The old `&& cfg != nil` caller
-				// gate suppressed those defaults.
-				return FilterPrefix(node.DynamicValues(cfg, canonWords), partial)
-			}
-			return nil
-		}
-		if options != nil && inOptionsSubtree && !node.Options {
-			// #15720: a non-Options subtree under an Options node
-			// (sort-by under session): a leaf here (bytes) completes
-			// the subtree, and the walk resumes among the options.
-			if wi == len(words)-1 {
-				return FilterPrefix(KeysOf(options), partial)
-			}
-			current = options
-			subtreeConsumed = true
-			continue
-		}
-		inOptionsSubtree = options != nil && maps.Equal(current, options) && !node.Options
-		current = node.Children
+	pairs := CompleteFromTreeWithDesc(tree, words, partial, cfg)
+	if pairs == nil {
+		return nil
 	}
-	if subtreeConsumed {
-		// A subtree leaf (sort-by bytes) was the last word: the option
-		// is complete, so offer the remaining options.
-		return FilterPrefix(KeysOf(current), partial)
+	names := make([]string, len(pairs))
+	for i, p := range pairs {
+		names[i] = p.Name
 	}
-	if atOptionsLeaf && currentNode != nil {
-		// The words ended while an option leaf's value slot was pending:
-		// offer that leaf's value candidates rather than the option names.
-		if currentNode.HasDynamic() {
-			return FilterPrefix(currentNode.DynamicValues(cfg, canonWords), partial)
-		}
-		if parentTyped {
-			candidates := append([]string(nil), currentNode.ValueExamples...)
-			if ph := currentNode.ValueType.Placeholder(); ph != "" {
-				candidates = append(candidates, ph)
-			}
-			return FilterPrefix(candidates, partial)
-		}
-	}
-	candidates := KeysOf(current)
-	if parentTyped && currentNode != nil {
-		// At the value slot of a typed leaf: surface examples for
-		// `?` completion.
-		candidates = append(candidates, currentNode.ValueExamples...)
-		if ph := currentNode.ValueType.Placeholder(); ph != "" {
-			candidates = append(candidates, ph)
-		}
-	}
-	if !dynamicConsumed && currentNode != nil && currentNode.HasDynamic() && !(options != nil && maps.Equal(current, options)) {
-		// #5196 (A3-b1-F3): nil-config-aware providers must still run.
-		// #5196 (A3-b1-F4): pass canonical keywords, not raw abbreviations.
-		candidates = append(candidates, currentNode.DynamicValues(cfg, canonWords)...)
-	}
-	return FilterPrefix(candidates, partial)
+	return names
 }
 
 // CompleteFromTreeWithDesc walks the tree returning name+description pairs.
+// It is the single completion walk (#16138): CompleteFromTree is its
+// name-only projection, replacing the former twin walkers. Note the
+// merged typed-leaf projection: a typed leaf's placeholder now carries
+// its value description and precedes any examples (typedLeafCandidates
+// order); the pre-merge name-only walker appended examples before the
+// placeholder and dropped the description.
 func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial string, cfg *config.Config) []Candidate {
 	current := tree
 	var currentNode *Node

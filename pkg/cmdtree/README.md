@@ -39,7 +39,7 @@ command here automatically propagates to all three frontends.
 - `KeysFromTree(tree)` — `tree.go`. Used by `pkg/cli` and `pkg/grpcapi`
   for Junos-style prefix matching.
 - `WriteHelp`, `LookupDesc`, `PrintTreeHelp`, `CompleteFromTree`,
-  `CompleteFromTreeWithDesc` — the helper API the three frontends consume
+  `CompleteFromTreeWithDesc` (the single completion walk; `CompleteFromTree` is its name-only projection, merged in #16138) — the helper API the three frontends consume
   for the OPERATIONAL tree (and operational typed leaves).
 - `ParseCoSNameTypeArgs`, `CoSNameTypeTopic`, `ParseCoSNameTypeTopic` —
   `cos_filter_topic.go`. The `name <n>` / `type <t>` filter grammar shared

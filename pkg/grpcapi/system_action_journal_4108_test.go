@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"bytes"
 	"context"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,17 +25,18 @@ func TestSystemActionJournalsDestructiveVerbs(t *testing.T) {
 	// including the #5281 post-zeroize daemon stop, which the zeroize verb now
 	// schedules on a successful wipe.
 	origPower := schedulePowerAction
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
 		schedulePowerAction = origPower
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 	var poweredArg string
 	var wiped bool
 	schedulePowerAction = func(arg string) { poweredArg = arg }
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error { wiped = true; return nil }
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
+		wiped = true
+		return nil
+	})
 	scheduleStopDaemon = func() {}
 
 	cases := []struct {

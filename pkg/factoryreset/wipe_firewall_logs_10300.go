@@ -1,0 +1,486 @@
+package factoryreset
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/ipsec"
+)
+
+// ZeroizeLogInventory is the firewall-log wipe scope for a factory reset
+// (#10300): the operator-configured log basenames the static legs cannot know.
+// Both paths that drive the shared wipe (gRPC runZeroize and the console
+// performConsoleZeroize) snapshot it from the store's ActiveConfig BEFORE the
+// wipe runs — the config leg erases the very files the names come from, so
+// resolving them after (or during) the wipe would find nothing and the reset
+// would report clean with the prior tenant's logs intact. A zero value means
+// "no configured names known" (no syslog/trace configured, or a store with no
+// loaded config, e.g. console offline recovery): the static legs still run.
+// LogInventory is the firewall-log wipe scope for a factory reset
+// (formerly grpcapi.ZeroizeLogInventory, #16138).
+type LogInventory = ZeroizeLogInventory
+
+type ZeroizeLogInventory struct {
+	// SyslogFiles are the `system syslog file <name>` destination basenames,
+	// each written by rsyslog to /var/log/<name> (daemon applySyslogFiles).
+	SyslogFiles []string
+	// TraceFile is the `security flow traceoptions file <name>` basename,
+	// written by logging.TraceWriter to /var/log/<name> plus .<N> rotations.
+	// "" means persistent tracing was not configured.
+	TraceFile string
+}
+
+// ZeroizeLogInventoryFromConfig derives the wipe inventory from a compiled
+// config. It is nil-safe at every level: a nil config (or one with no syslog
+// block / no traceoptions) yields the zero inventory, never a panic.
+func ZeroizeLogInventoryFromConfig(cfg *config.Config) ZeroizeLogInventory {
+	if cfg == nil {
+		return ZeroizeLogInventory{}
+	}
+	inv := ZeroizeLogInventory{SyslogFiles: cfg.SyslogLogFileNames()}
+	if to := cfg.Security.Flow.Traceoptions; to != nil {
+		inv.TraceFile = to.File
+	}
+	return inv
+}
+
+var (
+	// wipeVarLogDir is the shared /var/log root the persistent flow-trace
+	// file and the rsyslog-written syslog outputs live directly under. A
+	// package var (not a const) only so tests drive the wipe against a
+	// throwaway tree; production is always /var/log.
+	wipeVarLogDir = "/var/log"
+	// wipeSecurityLogDir holds the event-mode security log
+	// (security.log plus .<N> rotations, logging.NewLocalLogWriter). Seamed
+	// for the same hermeticity reason; production is always /var/log/xpf.
+	wipeSecurityLogDir = "/var/log/xpf"
+	// wipeFlowTraceDir is the dedicated interactive-monitor trace
+	// namespace (cli.openTraceFile, #5038). Every entry in it is
+	// xpf-written flow telemetry. Seamed like the others; production is
+	// always /var/log/xpf-flow-trace.
+	wipeFlowTraceDir = "/var/log/xpf-flow-trace"
+	// wipeRsyslogConfDir holds xpf's persistent rsyslog selectors. Leaving
+	// these drop-ins behind lets a post-zeroize rsyslog restart recreate the
+	// prior tenant's log outputs before the next config reconcile.
+	wipeRsyslogConfDir = "/etc/rsyslog.d"
+)
+
+// wipeSecurityLogBase is the security-log basename (pkg/logging/locallog.go
+// LocalLogConfig default; production writers always use the default — daemon
+// applySyslogConfig and cli apply both pass LocalLogConfig{}).
+const wipeSecurityLogBase = "security.log"
+
+// wipeValidLogBaseName gates a configured log name before it is joined
+// under a wipe root. The writers this mirrors (TraceWriter, applySyslogFiles,
+// SyslogLogFilePath) all demand a bare basename; a leniently-loaded or
+// peer-synced value that is not one was NEVER written (the writers fail safe),
+// so refusing it here both matches what exists and keeps a hostile
+// "../../etc/x" from steering the wipe outside /var/log. Invalid names are
+// skipped with a warning, never an error: there is nothing to erase and a
+// factory reset must not fail closed on a file that was never created.
+func wipeValidLogBaseName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if name != filepath.Base(name) {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	return true
+}
+
+// wipeIsLogGeneration reports whether entry is the active log file (base)
+// or one of the rotated generations. xpf's writers use path.1, path.2, ...
+// and host logrotate commonly adds either numeric/compressed forms
+// (path.1.gz) or dateext forms (path-YYYYMMDD / path-YYYY-MM-DD, optionally
+// compressed). The match is exact-base plus one recognized suffix, so a
+// sibling such as "messages-other" is never treated as xpf's log.
+func wipeIsLogGeneration(entry, base string) bool {
+	if entry == base {
+		return true
+	}
+	rest, ok := strings.CutPrefix(entry, base+".")
+	if ok {
+		if strings.HasSuffix(rest, ".gz") {
+			rest = strings.TrimSuffix(rest, ".gz")
+		}
+		if rest == "" {
+			return false
+		}
+		for i := 0; i < len(rest); i++ {
+			if rest[i] < '0' || rest[i] > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	rest, ok = strings.CutPrefix(entry, base+"-")
+	if !ok {
+		return false
+	}
+	if strings.HasSuffix(rest, ".gz") {
+		rest = strings.TrimSuffix(rest, ".gz")
+	}
+	switch len(rest) {
+	case 8: // dateext -YYYYMMDD
+		for i := 0; i < len(rest); i++ {
+			if rest[i] < '0' || rest[i] > '9' {
+				return false
+			}
+		}
+		return true
+	case 10: // dateformat -%Y-%m-%d
+		for i, want := range []byte("0000-00-00") {
+			if want == '-' {
+				if rest[i] != '-' {
+					return false
+				}
+				continue
+			}
+			if rest[i] < '0' || rest[i] > '9' {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// wipeRemoveSyslogGenerations is the configured-rsyslog counterpart to
+// wipeRemoveLogGenerations. Rsyslog follows an output symlink, so every
+// matching active/rotated name is checked and refused as a typed skip rather
+// than unlinked while the routed tenant logs survive at the target.
+func wipeRemoveSyslogGenerations(dir, base string, fail func(error), skipped *[]configstore.SymlinkedTarget, hardlinks *[]configstore.HardlinkedPath) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fail(err)
+		return
+	}
+	for _, e := range entries {
+		if !wipeIsLogGeneration(e.Name(), base) {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		found, herr := configstore.CollectHardlinkedFiles(path, "")
+		*hardlinks = append(*hardlinks, found...)
+		fail(herr)
+		if sk, isLink := configstore.SymlinkTarget(path); isLink {
+			slog.Warn("zeroize: syslog output generation is a symlink; NOT erasing it",
+				"path", sk.Path, "target", sk.Target)
+			*skipped = append(*skipped, sk)
+			continue
+		}
+		fail(os.Remove(path))
+	}
+}
+
+// wipeRemoveLogGenerations removes the active log file plus every rotated
+// generation under dir, and nothing else: entries are ReadDir-enumerated and
+// only exact base / recognized rotation names are Removed, so host logs
+// sharing the directory (auth.log, syslog, ...) are never touched. An absent
+// dir is the goal state (os.ErrNotExist excluded by fail). Hardlinked files
+// are removed at the managed name but reported so the surviving sibling
+// cannot be mistaken for a clean wipe. A link at a log path is unlinked
+// WITHOUT a #9013 refusal: both xpf writers open O_NOFOLLOW and verify a
+// regular file, so a pre-planted link was never written through and its
+// target holds no xpf log content — unlinking it erases everything xpf owns,
+// and refusing would fail a factory reset over a file that is not ours.
+// (The rsyslog-written syslog outputs below CANNOT take this branch: rsyslog
+// follows links, so a link there may route tenant logs to the target volume.)
+func wipeRemoveLogGenerations(dir, base string, fail func(error), hardlinks *[]configstore.HardlinkedPath) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fail(err)
+		return
+	}
+	for _, e := range entries {
+		if !wipeIsLogGeneration(e.Name(), base) {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		found, herr := configstore.CollectHardlinkedFiles(path, "")
+		*hardlinks = append(*hardlinks, found...)
+		fail(herr)
+		fail(os.Remove(path))
+	}
+}
+
+// wipeRemoveRsyslogDropins removes the xpf-owned output selectors so a
+// daemon restart cannot recreate a configured log destination after zeroize.
+// Only the exact generated `10-xpf-*.conf` shape is owned; neighboring
+// distribution/operator drop-ins remain untouched.
+func wipeRemoveRsyslogDropins(dir string, fail func(error), skipped *[]configstore.SymlinkedTarget, hardlinks *[]configstore.HardlinkedPath) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fail(err)
+		return
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "10-xpf-") || !strings.HasSuffix(e.Name(), ".conf") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		found, herr := configstore.CollectHardlinkedFiles(path, "")
+		*hardlinks = append(*hardlinks, found...)
+		fail(herr)
+		if sk, isLink := configstore.SymlinkTarget(path); isLink {
+			slog.Warn("zeroize: rsyslog drop-in is a symlink; NOT erasing it",
+				"path", sk.Path, "target", sk.Target)
+			*skipped = append(*skipped, sk)
+			continue
+		}
+		fail(os.Remove(path))
+	}
+}
+
+// wipeFirewallLogs erases the prior tenant's firewall logs as part of a
+// factory reset (#10300): without it `request system zeroize` returned a clean
+// receipt while the session/policy/NAT forensics survived under /var/log for
+// the next tenant (or disk owner) to read. Security-critical: any error is
+// surfaced so a partial wipe is never reported as a clean factory reset.
+//
+// The wiped surface, enumerated from the logging paths (miss none):
+//   - /var/log/xpf/security.log plus .<N> rotations (static default);
+//   - /var/log/xpf-flow-trace/*, the whole dedicated interactive-trace dir;
+//   - /var/log/<trace> plus .<N> rotations (configured persistent trace);
+//   - /var/log/<name> and recognized host-rotation forms for each configured
+//     `system syslog file` output;
+//   - /etc/rsyslog.d/10-xpf-*.conf, the xpf-owned selectors that would
+//     otherwise recreate those outputs after a daemon restart.
+//
+// Explicitly NOT covered (receipt scope): journald copies and the remote
+// syslog collector (the durable cross-wipe record lives there by design,
+// #4108 F8). The console offline path with no loaded config cannot name
+// custom syslog/trace destinations (same honest disposition as a custom
+// archive dir there, #7173); its static xpf log surfaces are still erased.
+func wipeFirewallLogs(inv ZeroizeLogInventory) error {
+	var firstErr error
+	fail := func(err error) {
+		if err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	var skipped []configstore.SymlinkedTarget
+	var hardlinks []configstore.HardlinkedPath
+
+	// Static legs: the security log (fixed default path) and the dedicated
+	// interactive-trace namespace. RemoveAll on a symlinked trace dir unlinks
+	// the LINK only and is honest here: openTraceFile refuses a symlinked dir
+	// (#8482), so nothing xpf owns was ever written through it.
+	wipeRemoveLogGenerations(wipeSecurityLogDir, wipeSecurityLogBase, fail, &hardlinks)
+	found, herr := configstore.CollectHardlinkedFiles(wipeFlowTraceDir, "")
+	hardlinks = append(hardlinks, found...)
+	fail(herr)
+	fail(os.RemoveAll(wipeFlowTraceDir))
+
+	// Configured persistent trace, plus the writer's rotated generations.
+	if inv.TraceFile != "" {
+		if !wipeValidLogBaseName(inv.TraceFile) {
+			slog.Warn("zeroize: ignoring invalid flow-trace filename; the writer refuses it too, so no trace was written",
+				"name", inv.TraceFile)
+		} else {
+			wipeRemoveLogGenerations(wipeVarLogDir, inv.TraceFile, fail, &hardlinks)
+		}
+	}
+
+	// Configured syslog file outputs. Rsyslog itself does not rotate these
+	// destinations (#7146), but host logrotate may leave numeric/compressed or
+	// dateext generations. They are still firewall logs for this basename and
+	// are removed by the same exact-name recognizer.
+	for _, name := range inv.SyslogFiles {
+		if err := config.ValidateSyslogFileName(name); err != nil {
+			slog.Warn("zeroize: ignoring invalid syslog file name; no drop-in was rendered for it, so rsyslog wrote nothing",
+				"name", name, "err", err)
+			continue
+		}
+		wipeRemoveSyslogGenerations(wipeVarLogDir, name, fail, &skipped, &hardlinks)
+	}
+
+	// Remove xpf-owned rsyslog selectors as part of the same firewall-log
+	// surface. This leg is independent of the config inventory because stale
+	// selectors are exactly what can recreate configured outputs after the
+	// config state has been erased.
+	wipeRemoveRsyslogDropins(wipeRsyslogConfDir, fail, &skipped, &hardlinks)
+
+	// Durability (#5197): make the unlinks stable before the reboot that
+	// completes the reset. A dir that no longer exists (or never did) holds
+	// nothing to make durable, so only existing dirs are synced.
+	if st, err := os.Stat(wipeSecurityLogDir); err == nil && st.IsDir() {
+		fail(wipeSyncDir(wipeSecurityLogDir))
+	}
+	if st, err := os.Stat(wipeVarLogDir); err == nil && st.IsDir() {
+		fail(wipeSyncDir(wipeVarLogDir))
+	}
+	if st, err := os.Stat(wipeRsyslogConfDir); err == nil && st.IsDir() {
+		fail(wipeSyncDir(wipeRsyslogConfDir))
+	}
+
+	var result []error
+	if len(skipped) > 0 {
+		result = append(result, &configstore.FactoryResetSymlinkError{Skipped: skipped})
+	}
+	if len(hardlinks) > 0 {
+		result = append(result, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+	}
+	if firstErr != nil {
+		result = append(result, firstErr)
+	}
+	switch len(result) {
+	case 0:
+		return nil
+	case 1:
+		return result[0]
+	default:
+		return errors.Join(result...)
+	}
+}
+
+// PerformZeroizeWipeWithLogInventory is the shared, crash-aware factory-reset
+// primitive. It snapshots the inventory durably before erasing any leg,
+// completes every external secret/log leg before removing the config state,
+// and removes the marker only after every leg is durable.
+func PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, wipeComplete)
+}
+
+// Completion selects what a successful wipe records in the reset
+// handoff flag. The daemon-gated paths (gRPC ZeroizeFn, console
+// factoryResetFn) run daemon post-verification AFTER the wipe returns, so
+// the wipe must record PENDING (with the pre-wipe helper path the daemon
+// post-verify and boot repair need) and let the daemon flip the flag
+// clean only after its verification passes — a crash between a clean
+// write and daemon verification would otherwise open N+1 provisioning
+// over unverified residue (#10769 d05-F6). The ungated paths (no daemon
+// to verify) complete immediately, preserving the historical behavior.
+// Exported (with PendingCompletion) so pkg/grpcapi's gated closure can
+// construct the pending completion after the #16138 extraction;
+// production callers otherwise use PerformZeroizeWipePending /
+// PerformZeroizeWipeUngated instead of constructing one directly.
+type Completion struct {
+	// pending records ResetHandoffPending instead of clean, keeping the
+	// daemon-verification outcome open.
+	pending bool
+	// helperPath is the pre-wipe effective helper state path, recorded
+	// durably so boot repair sweeps it instead of re-deriving the
+	// default from the (by then erased) config. "" when unknown.
+	helperPath string
+}
+
+// wipeComplete is the completion for legacy/test direct wipes with no
+// known helper path: no daemon runs post-verification, so the wipe's own
+// final verification grounds clean, minus the helper class it cannot name.
+var wipeComplete = Completion{}
+
+// PerformZeroizeWipePending runs the shared wipe but records a PENDING
+// handoff (dirty until the caller flips it clean) instead of completing.
+// Gated callers (daemon factoryReset) use it with the pre-wipe effective
+// helper state path, then flip the flag clean after post-verification.
+func PerformZeroizeWipePending(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, Completion{pending: true, helperPath: helperPath})
+}
+
+// PerformZeroizeWipeUngated runs the shared wipe to completion for callers
+// with no daemon post-verification (offline console recovery, NoDataplane
+// gRPC fallback). Unlike the gated pending variant it must erase and verify
+// the helper state file itself: no helper stop/sweep follows, so an
+// unerased custom state file would otherwise survive under a clean
+// receipt. helperPath is the pre-wipe effective path (never "").
+func PerformZeroizeWipeUngated(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, Completion{pending: false, helperPath: helperPath})
+}
+
+// Pending reports whether this completion records a PENDING handoff
+// (gated path) rather than completing clean in-wipe.
+func (c Completion) Pending() bool { return c.pending }
+
+// HelperPath returns the pre-wipe effective helper state path recorded
+// in the handoff ("" when unknown).
+func (c Completion) HelperPath() string { return c.helperPath }
+
+// PendingCompletion returns the gated completion: record PENDING (with
+// the pre-wipe helper path) and let the daemon flip the flag clean only
+// after its post-verification passes.
+func PendingCompletion(helperPath string) Completion {
+	return Completion{pending: true, helperPath: helperPath}
+}
+
+// PerformZeroizeWipePendingWithInventory runs the shared wipe with the
+// gated PENDING completion (records pending with helperPath instead of
+// completing clean). It is the production entry pkg/grpcapi's gated
+// closure dispatches to; statically bound, never a variable.
+func PerformZeroizeWipePendingWithInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
+	return performWipeWithLogInventory(configDir, configBase, archiveDir, inv, PendingCompletion(helperPath))
+}
+
+// performWipeWithLogInventory is the shared wipe implementation behind
+// every exported Perform* entry. It is a plain function (#16138 fold-2):
+// production wrappers call it directly and there is no dispatch variable
+// for any caller — production or test — to swap.
+func performWipeWithLogInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion Completion) error {
+	// External cleanup authority must be proven empty before beginZeroize
+	// writes a marker or any destructive leg can remove provider credentials.
+	// Wrapped in the same sentinels as the inner erase legs so callers
+	// classifying aborts with errors.Is see one shape from either layer.
+	if err := wipeCheckDDNSStateEmpty(); err != nil {
+		return fmt.Errorf("%w: %w", errWipeDDNSOwnership, err)
+	}
+	if err := ipsec.CheckConnStateEmpty(wipeIPsecStatePath); err != nil {
+		return fmt.Errorf("%w: %w", errWipeIPsecOwnership, err)
+	}
+	record, err := beginZeroize(configDir, configBase, archiveDir, inv)
+	if err != nil {
+		return err
+	}
+	configDir, configBase, archiveDir, inv =
+		record.ConfigDir, record.ConfigBase, record.ArchiveDir, record.LogInventory
+
+	var errs []error
+	if err := performWipe(configDir, configBase, archiveDir); err != nil {
+		if errors.Is(err, errWipeDDNSOwnership) ||
+			errors.Is(err, errWipeIPsecOwnership) ||
+			errors.Is(err, errWipeKeaStop) {
+			return err
+		}
+		errs = append(errs, err)
+	}
+	if err := wipeFirewallLogs(inv); err != nil {
+		errs = append(errs, err)
+	}
+	// Config state is last. A crash before or during this leg leaves the
+	// pending marker intact, and every external credential/log surface has
+	// already been attempted.
+	if err := wipeConfigDir(configDir, configBase); err != nil {
+		errs = append(errs, err)
+	}
+	// Ungated wipes erase helper and manager-owned persistent runtime state
+	// themselves. Gated wipes wait for the daemon to stop writers and sweep
+	// both files post-stop.
+	if !completion.pending {
+		if err := wipeEraseResetState(completion.helperPath); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// Final verification runs after every leg and immediately before the
+	// markers may clear, so a fence-escaper write that landed after an
+	// early per-leg check fails the wipe here with the boot gate intact.
+	if err := wipeFinalEraseVerification(completion); err != nil {
+		errs = append(errs, err)
+	}
+	switch len(errs) {
+	case 0:
+		return completeZeroize(record, completion)
+	case 1:
+		return errs[0]
+	default:
+		return errors.Join(errs...)
+	}
+}

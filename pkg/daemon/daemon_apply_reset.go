@@ -405,7 +405,7 @@ func markResetHandoffDirtyQuiet(reason string) {
 // re-persist the erased .configdb SSOT or re-render the wiped secrets before the
 // daemon is stopped (#5281). It is wired into the gRPC server as Config.ZeroizeFn
 // and receives the pkg/grpcapi factory-reset primitive as wipe (kept there so
-// the wipe stays testable via the performZeroizeWipe seam).
+// the wipe stays testable via the factoryreset wipe seam).
 //
 // Sequence (fail-CLOSED, wipe-then-stop):
 //  1. Acquire applySem — this DRAINS any in-flight apply and BLOCKS a concurrent

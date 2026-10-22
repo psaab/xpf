@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"path/filepath"
 	"testing"
 
@@ -29,20 +30,18 @@ import (
 // defaultConfigDir instead of the store's temp root — so the gotDir/gotBase
 // assertions (and the explicit defaultConfigDir guard) fail.
 func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotDir, gotBase string
 	var called bool
-	performZeroizeWipeWithLogInventory = func(configDir, configBase, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		called = true
 		gotDir, gotBase = configDir, configBase
 		return nil
-	}
+	})
 	scheduleStopDaemon = func() {}
 
 	// A configured root deliberately different from the hardcoded /etc/xpf
@@ -65,8 +64,8 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 		t.Fatalf("zeroize wiped configBase %q, want the CONFIGURED base %q", gotBase, "site.conf")
 	}
 	// Explicit revert-shape guard: a hardcoded wipe would pass defaultConfigDir.
-	if gotDir == defaultConfigDir {
-		t.Fatalf("zeroize wiped the hardcoded default %q instead of the configured root %q", defaultConfigDir, dir)
+	if gotDir == "/etc/xpf" {
+		t.Fatalf("zeroize wiped the hardcoded default %q instead of the configured root %q", "/etc/xpf", dir)
 	}
 }
 
@@ -78,18 +77,16 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 // A bare Server with a nil store cannot resolve ConfigPath, so runZeroize must
 // return an error BEFORE ever invoking performZeroizeWipe or scheduling a stop.
 func TestZeroizeFailsClosedWithoutConfigRoot(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		wiped = true
 		return nil
-	}
+	})
 	scheduleStopDaemon = func() { stopped = true }
 
 	s := &Server{} // no store => config root undeterminable

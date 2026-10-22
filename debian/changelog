@@ -1,5 +1,23 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Extract the factory-reset wipe into pkg/factoryreset and move the
+    Complete RPC out of server_cluster.go: the shared zeroize wipe
+    (PerformZeroizeWipe and its pending/ungated/log-inventory variants,
+    with the full zeroize_* test corpus) now lives in its own package,
+    so the CLI no longer reaches back into pkg/grpcapi for it — clean
+    cutover, no aliases left in pkg/grpcapi. The gRPC log-first ->
+    apply/terminal-reset gate -> partial-wipe reporting sequence,
+    configured archive/root validation, and the gated-vs-ungated
+    distinction are unchanged (the gate stays in pkg/grpcapi/daemon;
+    only the erase primitive moved, with its uncapped time-bounded
+    exec helper). The twin cmdtree completion walkers are merged into
+    the single CompleteFromTreeWithDesc walk (CompleteFromTree is its
+    name projection, pinned byte-identical by the golden parity
+    corpus), and Complete plus its pair helpers move to
+    server_complete.go (#16138).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Collapse the cluster session-sync V4/V6 twins behind narrow
     generics: the length-gated session tail (Generation through the
     metadata tail) is encoded/decoded once via a shared sessionTail

@@ -1,7 +1,12 @@
 package cmdtree
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -176,11 +181,60 @@ func TestOptionsHonouredByCompletionWalkers15720(t *testing.T) {
 		t.Fatalf("positive control failed: HasDynamic reads found in %v", sortedFuncs(control))
 	}
 	sites := fieldReadSitesByFunc(t, "Options")
-	for _, fn := range []string{"CompleteFromTree", "CompleteFromTreeWithDesc", "LookupDesc"} {
+	// #16138: the twin walkers were merged — CompleteFromTree is now a
+	// name-only projection over the single CompleteFromTreeWithDesc
+	// walk, so Options is read in the surviving walk (and LookupDesc),
+	// and CompleteFromTree must delegate to it rather than re-walking.
+	for _, fn := range []string{"CompleteFromTreeWithDesc", "LookupDesc"} {
 		if sites[fn] == 0 {
 			t.Errorf("Options is not read in %s(); option-map leaves end that walk (sites %v)", fn, sites)
 		}
 	}
+	if sites["CompleteFromTree"] != 0 {
+		t.Errorf("CompleteFromTree reads Options directly (sites %v); it must remain the projection over CompleteFromTreeWithDesc (#16138)", sites)
+	}
+	if !completeFromTreeDelegates(t) {
+		t.Errorf("CompleteFromTree does not call CompleteFromTreeWithDesc; the merged-walker projection is broken (#16138)")
+	}
+}
+
+// completeFromTreeDelegates reports whether CompleteFromTree's body
+// contains a call to CompleteFromTreeWithDesc.
+func completeFromTreeDelegates(t *testing.T) bool {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != "CompleteFromTree" {
+				continue
+			}
+			found := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if ce, ok := n.(*ast.CallExpr); ok {
+					if id, ok := ce.Fun.(*ast.Ident); ok && id.Name == "CompleteFromTreeWithDesc" {
+						found = true
+					}
+				}
+				return true
+			})
+			return found
+		}
+	}
+	t.Fatalf("CompleteFromTree not found in package sources")
+	return false
 }
 
 // A second Options command (monitor security packet-drop) exercises the

@@ -17,6 +17,7 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -302,6 +303,17 @@ func (s *Server) zeroizeConfigRoot() (configDir, configBase string, err error) {
 	return dir, filepath.Base(p), nil
 }
 
+// zeroizePendingWipe / zeroizeUngatedWipe are grpcapi's dispatch seams
+// to the factoryreset wipe (#16138 fold-2). Production values are the
+// statically-bound factoryreset entries; grpcapi's own tests swap them
+// (via stubZeroizeWipes) to capture the wipe at this boundary without
+// touching factoryreset internals — factoryreset itself has no
+// dispatch variable at all.
+var (
+	zeroizePendingWipe = factoryreset.PerformZeroizeWipePendingWithInventory
+	zeroizeUngatedWipe = factoryreset.PerformZeroizeWipeUngated
+)
+
 // runZeroize erases on-disk state for a factory reset. It routes through the
 // daemon-owned apply gate (ZeroizeFn) when wired (#5281): the daemon acquires
 // its apply semaphore, enters the terminal reset generation, and runs the
@@ -341,9 +353,9 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	// from, and daemon post-verification plus boot repair need the
 	// pre-wipe path recorded in the flag.
 	wipe := func() error {
-		logInventory := ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
+		logInventory := factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
 		helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
-		return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, logInventory, zeroizeCompletion{pending: true, helperPath: helperPath})
+		return zeroizePendingWipe(configDir, configBase, archiveDir, logInventory, helperPath)
 	}
 	if s.zeroizeFn != nil {
 		return s.zeroizeFn(ctx, wipe)
@@ -353,7 +365,7 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	// follows. A custom path outside the wiped dirs would otherwise
 	// survive under a clean receipt.
 	helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
-	return PerformZeroizeWipeUngated(configDir, configBase, archiveDir, ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
+	return zeroizeUngatedWipe(configDir, configBase, archiveDir, factoryreset.ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
 }
 
 func (s *Server) acknowledgeDynamicAddressShrink(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {

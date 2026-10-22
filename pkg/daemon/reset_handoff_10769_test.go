@@ -15,7 +15,7 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcpserver"
-	"github.com/psaab/xpf/pkg/grpcapi"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"github.com/psaab/xpf/pkg/vrrp"
 	"golang.org/x/sync/semaphore"
 )
@@ -1847,13 +1847,13 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 }
 
 // Composed ungated recovery (round-11): a REAL PerformZeroizeWipeUngated
-// failure over a reserved alias (hermetic via the grpcapi test seam)
+// failure over a reserved alias (hermetic via the factoryreset test seam)
 // leaves REAL pending markers with no handoff flag; restart takes
 // fail-closed bootstrap; the operator authors clean via commit-confirmed;
 // the REAL ungated retry clears those markers and converges. No
 // synthetic marker, no synthetic wipe closure: every destructive step
 // runs production code. The pure-offline direct-rerun shape (no daemon
-// at all) is proven grpcapi-side.
+// at all) is proven factoryreset-side.
 func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
@@ -1873,7 +1873,7 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	}
 	hostSeams := isolateRecoveryApplyHost(t)
 	root := t.TempDir()
-	restoreWipe := grpcapi.RedirectZeroizeWipePathsForTesting(root)
+	restoreWipe := factoryreset.RedirectWipePathsForTesting(root)
 	t.Cleanup(restoreWipe)
 	configDir := filepath.Join(root, "etc-xpf")
 	if err := os.MkdirAll(filepath.Join(configDir, ".configdb"), 0o700); err != nil {
@@ -1901,7 +1901,7 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Phase 1: the REAL ungated wipe fails on the reserved alias.
-	err := grpcapi.PerformZeroizeWipeUngated(configDir, "xpf.conf", "", grpcapi.ZeroizeLogInventory{}, reserved)
+	err := factoryreset.PerformZeroizeWipeUngated(configDir, "xpf.conf", "", factoryreset.LogInventory{}, reserved)
 	if err == nil {
 		t.Fatal("ungated wipe over a reserved alias must fail, got nil")
 	}
@@ -1913,17 +1913,17 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	}
 	// The surviving marker is a VALID production record: prefix plus a
 	// JSON body whose fields match the wiped root (the private retry
-	// reader gates on exactly this shape; grpcapi pins the reader).
+	// reader gates on exactly this shape; factoryreset pins the reader).
 	markerData, err := os.ReadFile(configstore.FactoryResetPendingPath)
 	if err != nil || !strings.HasPrefix(string(markerData), configstore.FactoryResetPendingPrefix) {
 		t.Fatalf("loader pending marker must survive the failed wipe: %q err=%v", markerData, err)
 	}
 	var record struct {
-		Version      int                         `json:"version"`
-		ConfigDir    string                      `json:"config_dir"`
-		ConfigBase   string                      `json:"config_base"`
-		ArchiveDir   string                      `json:"archive_dir"`
-		LogInventory grpcapi.ZeroizeLogInventory `json:"log_inventory"`
+		Version      int                       `json:"version"`
+		ConfigDir    string                    `json:"config_dir"`
+		ConfigBase   string                    `json:"config_base"`
+		ArchiveDir   string                    `json:"archive_dir"`
+		LogInventory factoryreset.LogInventory `json:"log_inventory"`
 	}
 	body := strings.TrimPrefix(string(markerData), configstore.FactoryResetPendingPrefix)
 	if err := json.Unmarshal([]byte(body), &record); err != nil {
@@ -1932,7 +1932,7 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	if record.Version != 1 || filepath.Clean(record.ConfigDir) != configDir || record.ConfigBase != "xpf.conf" {
 		t.Fatalf("pending record fields = %+v, want Version 1 matching the wiped root", record)
 	}
-	if record.ArchiveDir != "" || !reflect.DeepEqual(record.LogInventory, grpcapi.ZeroizeLogInventory{}) {
+	if record.ArchiveDir != "" || !reflect.DeepEqual(record.LogInventory, factoryreset.LogInventory{}) {
 		t.Fatalf("pending record must carry the empty archive/inventory of this fixture: %+v", record)
 	}
 	if _, _, _, present, err := configstore.ReadResetHandoff(); err != nil || present {
@@ -2009,7 +2009,7 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	}
 	// Phase 4: the REAL ungated retry clears those markers and flips
 	// clean. Production resolves the compiled default (pinned
-	// non-reserved grpcapi-side); the test uses the hermetic
+	// non-reserved factoryreset-side); the test uses the hermetic
 	// equivalent since the destructive mechanics are
 	// path-independent and the live default is forbidden.
 	if err := os.MkdirAll(filepath.Dir(fixed), 0o700); err != nil {
@@ -2018,7 +2018,7 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	if err := os.WriteFile(fixed, []byte(`{"flows":["prior"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := grpcapi.PerformZeroizeWipeUngated(configDir, "xpf.conf", "", grpcapi.ZeroizeLogInventory{}, fixed); err != nil {
+	if err := factoryreset.PerformZeroizeWipeUngated(configDir, "xpf.conf", "", factoryreset.LogInventory{}, fixed); err != nil {
 		t.Fatalf("real retry must converge: %v", err)
 	}
 	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {

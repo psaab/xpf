@@ -25,7 +25,7 @@ import (
 // must move with it or a zeroize would skip the real archive.
 //
 // It is a var, not a const, so the zeroize tests can repoint the ownership
-// guard at a throwaway tree (mirroring the grpcapi zeroize* path seams).
+// guard at a throwaway tree (mirroring the factoryreset wipe* path seams).
 // Production code must never mutate it.
 var DefaultArchiveDir = "/var/lib/xpf/archive"
 

@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"errors"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,20 +34,18 @@ import (
 // GREEN, 1340 collected, 0 failed. Binding the callee is not binding the
 // wiring, and the wiring is where the production defect lived.
 func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var gotArchive string
 	var called bool
-	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		called = true
 		gotArchive = archiveDir
 		return nil
-	}
+	})
 	scheduleStopDaemon = func() {}
 
 	dir := t.TempDir()
@@ -76,20 +75,18 @@ func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
 // Exercise the real archive eraser through the gRPC zeroize path so this cell
 // fails if the default path is skipped again.
 func TestZeroizeErasesDefaultArchiveWhenArchiveDirUnset10739(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	origArchive := configstore.DefaultArchiveDir
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 		configstore.DefaultArchiveDir = origArchive
 	})
 
 	// Keep this integration at the affected archive boundary: use the actual
 	// ownership-guarded eraser while avoiding the unrelated system wipe legs.
-	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		return configstore.FactoryResetArchiveDir(archiveDir)
-	}
+	})
 	scheduleStopDaemon = func() {}
 
 	for _, tc := range []struct {

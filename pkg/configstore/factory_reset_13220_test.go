@@ -8,7 +8,7 @@ import (
 
 // TestFactoryResetConfigDirZeroizeParity13220 pins #13220 (D4-02): the shared
 // FactoryResetConfigDir primitive must erase the same config-root artifacts
-// the production grpcapi zeroizeConfigDir erases (#9236 .configdb copies,
+// the production factoryreset wipeConfigDir erases (#9236 .configdb copies,
 // #4599 tls/, #10769 DUIDs + editor backups), must preserve a factory-reset
 // pending marker, and CollectInteriorSymlinks must skip excluded trees.
 func TestFactoryResetConfigDirZeroizeParity13220(t *testing.T) {

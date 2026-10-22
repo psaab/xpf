@@ -3,12 +3,10 @@ package grpcapi
 import (
 	"context"
 	"errors"
-	"os"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -19,109 +17,13 @@ import (
 // and that a fresh Store.Load does not resurrect it.
 const zeroizeMarker = "MARKER-SECRET-4576-ike-psk"
 
-func mustWriteFile(t *testing.T, path string, data []byte) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
-func assertAbsent(t *testing.T, path string) {
-	t.Helper()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("expected %s to be absent after zeroize, stat err = %v", path, err)
-	}
-}
-
-// TestZeroizeConfigDirWipesSSOTAndSecrets pins #4576: a factory-reset wipe must
-// remove the .configdb SSOT and master.key (plus the text rollback slots and
-// the audit journal) so the prior tenant's config + secrets do not survive.
-//
-// RED on revert: before this fix, performZeroizeWipe removed only top-level
-// .conf / rollback* files, so .configdb/master.key, .configdb/active.json,
-// .configdb/rollback.N.json, the <base>.N text rollback slots and
-// .config.journal all SURVIVED — every assertAbsent below on those paths fails,
-// and a fresh Load reloads the prior tenant's config.
-func TestZeroizeConfigDirWipesSSOTAndSecrets(t *testing.T) {
-	dir := t.TempDir()
-	configBase := "xpf.conf"
-	configPath := filepath.Join(dir, configBase)
-	dbDir := filepath.Join(dir, ".configdb")
-	marker := []byte(zeroizeMarker)
-
-	// The prior tenant's on-disk state: every artifact that carries config or
-	// secret material.
-	masterKey := filepath.Join(dbDir, "master.key")
-	activeJSON := filepath.Join(dbDir, "active.json")
-	candidateJSON := filepath.Join(dbDir, "candidate.json")
-	rollbackJSON := filepath.Join(dbDir, "rollback.1.json")
-	journalPath := filepath.Join(dir, ".config.journal")
-	journalSeg := filepath.Join(dir, ".config.journal.1")
-	textRollback := configPath + ".1"
-	rescue := filepath.Join(dir, "rescue.conf")
-
-	mustWriteFile(t, masterKey, make([]byte, 32))
-	mustWriteFile(t, activeJSON, marker)
-	mustWriteFile(t, candidateJSON, marker)
-	mustWriteFile(t, rollbackJSON, marker)
-	mustWriteFile(t, journalPath, marker)
-	mustWriteFile(t, journalSeg, marker)
-	mustWriteFile(t, configPath, marker)
-	mustWriteFile(t, textRollback, marker)
-	mustWriteFile(t, rescue, marker)
-
-	// A non-xpf file in the same dir must be LEFT ALONE — the wipe is scoped to
-	// xpf-authored artifacts, not everything under /etc/xpf.
-	bystander := filepath.Join(dir, "node-id")
-	mustWriteFile(t, bystander, []byte("0"))
-
-	if err := zeroizeConfigDir(dir, configBase); err != nil {
-		t.Fatalf("zeroizeConfigDir returned error: %v", err)
-	}
-
-	// Every secret-bearing artifact is gone (the fix; RED on revert).
-	for _, p := range []string{
-		dbDir, masterKey, activeJSON, candidateJSON, rollbackJSON,
-		journalPath, journalSeg, configPath, textRollback, rescue,
-	} {
-		assertAbsent(t, p)
-	}
-
-	// Scope guard: the non-xpf file survives.
-	if _, err := os.Stat(bystander); err != nil {
-		t.Errorf("zeroize removed a non-xpf file %s: %v", bystander, err)
-	}
-
-	// A fresh Store.Load on the wiped dir yields the default/empty config:
-	// NewDB recreates an empty .configdb, ReadActive sees no active.json, Load
-	// starts fresh with no crash and no prior-tenant secret.
-	store, err := configstore.New(configPath)
-	if err != nil {
-		t.Fatalf("configstore.New after zeroize: %v", err)
-	}
-	if err := store.Load(); err != nil {
-		t.Fatalf("Load after zeroize: %v", err)
-	}
-	if got := store.ActiveTree().FormatSet(); strings.Contains(got, zeroizeMarker) {
-		t.Errorf("post-zeroize active config still contains prior-tenant secret:\n%s", got)
-	}
-	if store.EverCommitted() {
-		t.Errorf("post-zeroize store reports EverCommitted=true; want fresh/never-committed")
-	}
-}
-
 // TestZeroizeSurfacesWipeError pins #4576 requirement 3: a wipe that fails to
 // fully erase config state must surface an error at the RPC boundary, not
 // report a clean factory reset.
 func TestZeroizeSurfacesWipeError(t *testing.T) {
-	orig := performZeroizeWipeWithLogInventory
-	t.Cleanup(func() { performZeroizeWipeWithLogInventory = orig })
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		return errors.New("simulated .configdb wipe failure")
-	}
+	})
 
 	dir := t.TempDir()
 	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))

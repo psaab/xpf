@@ -11,7 +11,7 @@ import (
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/grpcapi"
+	"github.com/psaab/xpf/pkg/factoryreset"
 )
 
 // consolePowerAction runs systemctl for console reboot/halt/power-off; a var
@@ -102,7 +102,7 @@ func (c *CLI) handleRequestSystem(args []string) error {
 		c.logSystemAction("zeroize")
 
 		// #5890: run the FULL factory-reset wipe by delegating to the shared
-		// grpcapi.PerformZeroizeWipe primitive (see performConsoleZeroize). The
+		// factoryreset.PerformZeroizeWipe primitive (see performConsoleZeroize). The
 		// pre-fix console called only zeroizeConfigState, which erased the config
 		// DB + archive but LEFT tls/, rendered service configs (frr/swanctl/kea),
 		// and provisioned login accounts (shadow/authorized_keys/sudoers.d/xpf-*)
@@ -177,15 +177,15 @@ func (c *CLI) zeroizeConfigRoot() (configDir, configBase string, err error) {
 // erases and verifies the helper state file itself), with the pre-wipe
 // configured log inventory and helper path supplied by performConsoleZeroize
 // (#10300).
-type zeroizeLogInventory = grpcapi.ZeroizeLogInventory
+type zeroizeLogInventory = factoryreset.LogInventory
 
-var zeroizeFullWipe = grpcapi.PerformZeroizeWipeUngated
+var zeroizeFullWipe = factoryreset.PerformZeroizeWipeUngated
 
 // zeroizeFullWipePending is the gated-path wipe seam: records a PENDING
 // handoff (with the pre-wipe helper path) instead of completing, so the
 // daemon's post-verification flips the flag clean only after it passes
 // (#10769 d05-F6). Defaults to the pending gRPC primitive.
-var zeroizeFullWipePending = grpcapi.PerformZeroizeWipePending
+var zeroizeFullWipePending = factoryreset.PerformZeroizeWipePending
 
 // cliZeroizeArchiveDir returns the archive directory the CONSOLE zeroize path
 // erases (#15729). Like the gRPC path (#7173), it hands the wipe the store's
@@ -214,7 +214,7 @@ var zeroizeStopDaemon = func() error {
 }
 
 // performConsoleZeroize runs the FULL factory-reset wipe for the interactive
-// console. #5890: it DELEGATES to grpcapi.PerformZeroizeWipe (via the
+// console. #5890: it DELEGATES to factoryreset.PerformZeroizeWipe (via the
 // zeroizeFullWipe seam) — the exact primitive the gRPC zeroize path runs — so
 // the console and remote paths erase an IDENTICAL, single-source-of-truth
 // OWNED-artifact set (config state + tls/ + rendered service configs
@@ -255,7 +255,7 @@ func (c *CLI) performConsoleZeroize() error {
 		// path is snapshotted here for the same reason: the wipe erases the
 		// config it derives from. Offline, the snapshot feeds the wipe's
 		// own helper sweep: no daemon follows to erase a custom path.
-		logInventory := grpcapi.ZeroizeLogInventoryFromConfig(c.store.ActiveConfig())
+		logInventory := factoryreset.ZeroizeLogInventoryFromConfig(c.store.ActiveConfig())
 		helperPath := dpuserspace.StateFilePathForConfig(c.store.ActiveConfig())
 		if c.factoryResetFn != nil {
 			return zeroizeFullWipePending(configDir, configBase, c.cliZeroizeArchiveDir(), logInventory, helperPath)

@@ -62,7 +62,7 @@ const (
 // The resource markers are written BEFORE their credential mutation
 // (marker-first atomicity, fail-visible) and gate the corresponding REVOCATION;
 // the account registry is unchanged in format and location so the factory-reset
-// teardown (pkg/grpcapi zeroize) that enumerates it is untouched.
+// teardown (pkg/factoryreset wipe) that enumerates it is untouched.
 //
 // #6797 — marker-first alone OVERCLAIMS. Because the markers gate a REVOCATION
 // rather than a write, a marker that outlives a FAILED mutation does not lose

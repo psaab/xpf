@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"errors"
+	"github.com/psaab/xpf/pkg/factoryreset"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,10 +29,8 @@ import (
 // (the gate is bypassed) AND stopped stay false (no stop scheduled), so this
 // test fails.
 func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
@@ -39,10 +38,10 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 	// sequence is gate → wipe → stop (never stop-before-wipe, never a bypassed
 	// gate).
 	var seq []string
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		seq = append(seq, "wipe")
 		return nil
-	}
+	})
 	scheduleStopDaemon = func() { seq = append(seq, "stop") }
 
 	var gateWipeArg func() error
@@ -89,17 +88,15 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 // NOT stop xpfd (stopping a half-wiped box would strand prior-tenant secrets on
 // disk while the daemon is down).
 func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	wantErr := errors.New("configdb not fully erased")
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		return wantErr
-	}
+	})
 	var stopped bool
 	scheduleStopDaemon = func() { stopped = true }
 
@@ -131,18 +128,16 @@ func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
 // directly) and still stops the daemon — the pre-#5281 behavior, preserved for a
 // build with no running reconcile loop to race.
 func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
+	stubZeroizeWipes(t, func(_ bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
 		wiped = true
 		return nil
-	}
+	})
 	scheduleStopDaemon = func() { stopped = true }
 
 	dir := t.TempDir()
@@ -166,7 +161,7 @@ func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
 // path) and leave the clean flip to the daemon.
 func TestGatedZeroizeWipeRecordsPending10769(t *testing.T) {
 	root := t.TempDir()
-	hermeticWipe10100(t, root)
+	t.Cleanup(factoryreset.RedirectWipePathsForTesting(root))
 	configDir := filepath.Join(root, "etc-xpf")
 	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
 	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
@@ -197,17 +192,19 @@ func TestGatedZeroizeWipeRecordsPending10769(t *testing.T) {
 // commit delayed at the gate move the state file first, recording a stale
 // path the boot repair then sweeps instead of the residue.
 func TestGatedZeroizeSnapshotsHelperPathInsideGate10769(t *testing.T) {
-	origWipe := performZeroizeWipeWithLogInventory
 	origStop := scheduleStopDaemon
 	t.Cleanup(func() {
-		performZeroizeWipeWithLogInventory = origWipe
 		scheduleStopDaemon = origStop
 	})
-	var got zeroizeCompletion
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, c zeroizeCompletion) error {
+	var got factoryreset.Completion
+	stubZeroizeWipes(t, func(pending bool, configDir, configBase, archiveDir string, inv factoryreset.LogInventory, helperPath string) error {
+		var c factoryreset.Completion
+		if pending {
+			c = factoryreset.PendingCompletion(helperPath)
+		}
 		got = c
 		return nil
-	}
+	})
 	scheduleStopDaemon = func() {}
 	dir := t.TempDir()
 	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))
@@ -241,8 +238,8 @@ func TestGatedZeroizeSnapshotsHelperPathInsideGate10769(t *testing.T) {
 	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
 		t.Fatalf("SystemAction(zeroize): %v", err)
 	}
-	if !got.pending || got.helperPath != pathB {
-		t.Fatalf("pending completion = %+v, want pending with helper path %q", got, pathB)
+	if !got.Pending() || got.HelperPath() != pathB {
+		t.Fatalf("pending completion = pending=%v helper=%q, want pending with helper path %q", got.Pending(), got.HelperPath(), pathB)
 	}
 }
 
@@ -269,7 +266,7 @@ func commitHelperPaths(t *testing.T, store *configstore.Store, sets ...string) {
 // default and clears post-reboot.
 func TestUngatedFallbackErasesDerivedHelperState10769(t *testing.T) {
 	root := t.TempDir()
-	hermeticWipe10100(t, root)
+	t.Cleanup(factoryreset.RedirectWipePathsForTesting(root))
 	configDir := filepath.Join(root, "etc-xpf")
 	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
 	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
