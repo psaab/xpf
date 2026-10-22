@@ -92,7 +92,7 @@ func TestNetflowSrcDstMaskPopulated(t *testing.T) {
 			t.Fatalf("%s: template missing dstMask IE %d", tc.name, tc.dstIE)
 		}
 
-		e := Exporter{MaskResolver: maskResolverFor(sd.SrcIP, sd.DstIP)}
+		e := Exporter{exporterCore: exporterCore{MaskResolver: maskResolverFor(sd.SrcIP, sd.DstIP)}}
 		e.ExportSessionClose(rec, sd)
 		v4recs, v6recs := e.batch.drain()
 		recs := v4recs
@@ -140,7 +140,7 @@ func TestIPFIXSrcDstMaskPopulated(t *testing.T) {
 			t.Fatalf("%s: template missing dstMask IE %d", tc.name, tc.dstIE)
 		}
 
-		e := IPFIXExporter{MaskResolver: maskResolverFor(sd.SrcIP, sd.DstIP)}
+		e := IPFIXExporter{exporterCore: exporterCore{MaskResolver: maskResolverFor(sd.SrcIP, sd.DstIP)}}
 		e.ExportSessionClose(rec, sd)
 		v4recs, v6recs := e.batch.drain()
 		recs := v4recs
@@ -277,7 +277,7 @@ func TestExportSessionCloseDoesNotBlockOnFIBLookup(t *testing.T) {
 		<-release
 		return 24, true
 	}
-	e := Exporter{MaskResolver: c.resolve}
+	e := Exporter{exporterCore: exporterCore{MaskResolver: c.resolve}}
 	rec, sd := closeRecordForMask(false)
 
 	done := make(chan struct{})

@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/logging"
@@ -739,7 +738,14 @@ func encodeIPFIXRecordV6(b []byte, off int, r FlowRecord, includeDir bool) int {
 }
 
 // IPFIXExporter sends IPFIX (NetFlow v10) messages to configured collectors.
+//
+// #16126: the shared enrichment/lifecycle state lives in the embedded
+// exporterCore (exporter_core.go); the fields below are the IPFIX-only
+// stateful-encoder state that must NOT be unified with NetFlow v9 --
+// the cumulative data-record sequence counter and the prebuilt template
+// / sampler-options bytes.
 type IPFIXExporter struct {
+	exporterCore
 	cfg         *ExportConfig
 	sourceID    uint32
 	templateSet []byte
@@ -747,42 +753,18 @@ type IPFIXExporter struct {
 	// the template set and every data record agree on whether flowDirection
 	// (IE 61) is present (#3270).
 	includeDir bool
-	// #15655: active/inactive timeout tracker (nil = close-only export).
-	tracker *FlowTracker
 	// #3748: sampler Options Template (Set ID 3) + Options Data Record (Set ID
 	// 258) advertising the group's 1-in-N sampling rate. Precomputed at
 	// construction (rate is fixed per group) and re-sent on the template-refresh
-	// cadence. emitSampler gates emission on SamplingRate > 1 — an unsampled
-	// group (rate 0/1, export-all) advertises nothing (a collector then assumes
-	// 1-in-1, which is correct), matching the ShouldExport sampling gate.
+	// cadence. emitSampler gates emission on SamplingRate > 1 -- an unsampled
+	// group (rate 0/1, export-all) advertises nothing, matching the
+	// ShouldExport sampling gate.
 	emitSampler        bool
 	optionsTemplateSet []byte
 	optionsDataSet     []byte
 
-	mu    sync.Mutex
-	seq   uint32 // cumulative data record count
-	conns *collectorConns
-
-	// #2866: resolves per-flow src/dst route prefix lengths (IPFIX
-	// sourceIPv4PrefixLength IE 9 / destinationIPv4PrefixLength IE 13 and the
-	// IPv6 variants IE 29/30) from the FIB. See Exporter.MaskResolver.
-	MaskResolver MaskResolver
-
-	batch flowBatch
-
-	exportedFlows atomic.Uint64
-	exportedPkts  atomic.Uint64
-	// #2465/#11699: count of close flows with no creation timestamp. They are
-	// reported as zero-duration records at their close time, not heuristically
-	// backdated.
-	estimatedDurations atomic.Uint64
-	// #3744: see Exporter.routeMaskUnresolved — count of route-mask halves
-	// exported as an unresolved 0 (no FIB route / cold cache) rather than a
-	// real matched-route prefix length.
-	routeMaskUnresolved atomic.Uint64
-	// #13305: close records whose Created timestamp is later than close time,
-	// clamped to zero duration.
-	clockSkewClamped atomic.Uint64
+	mu  sync.Mutex
+	seq uint32 // cumulative data record count (RFC 7011); template msgs do not advance it
 }
 
 // NewIPFIXExporter creates a new IPFIX exporter. cfg is held by pointer
@@ -796,13 +778,13 @@ func NewIPFIXExporter(cfg *ExportConfig) (*IPFIXExporter, error) {
 	// config-synced. Also the scope value of the #3748 sampler record.
 	sourceID := stableExporterID("ipfix", cfg.InstanceName, cfg.TemplateName, cfg.GroupIsV6)
 	e := &IPFIXExporter{
-		cfg:          cfg,
-		sourceID:     sourceID,
-		includeDir:   cfg.IncludeFlowDir,
-		templateSet:  encodeIPFIXTemplateSetDir(cfg.IncludeFlowDir),
-		MaskResolver: NewRouteMaskResolver(0),
-		tracker:      NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout),
+		cfg:         cfg,
+		sourceID:    sourceID,
+		includeDir:  cfg.IncludeFlowDir,
+		templateSet: encodeIPFIXTemplateSetDir(cfg.IncludeFlowDir),
 	}
+	e.MaskResolver = NewRouteMaskResolver(0)
+	e.tracker = NewFlowTracker(cfg.FlowActiveTimeout, cfg.FlowInactiveTimeout)
 
 	// #3748: advertise the 1-in-N sampling rate via an Options Template +
 	// Options Data Record only when the group is actually sampled (rate > 1),
@@ -848,129 +830,12 @@ func (e *IPFIXExporter) Run(ctx context.Context) {
 	}
 }
 
-// ExportSessionClose queues a flow record for IPFIX export.
+// ExportSessionClose queues a flow record for IPFIX export. The
+// enrichment is the shared exporterCore pipeline (#16126);
+// includeReverse=true because IPFIX exports the RFC 5103 biflow reverse
+// counters (PEN 29305) that NetFlow v9 leaves zero (#3746).
 func (e *IPFIXExporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseData) {
-	// #2465/#11699: a missing creation timestamp cannot establish flow age;
-	// use the close time and count that fallback for operator visibility.
-	startTime, missingCreated, clockSkewClamped := flowStartTime(rec)
-	if missingCreated {
-		e.estimatedDurations.Add(1)
-	}
-	if clockSkewClamped {
-		e.clockSkewClamped.Add(1)
-	}
-	// #2526: resolve the post-NAT tuple with pre-NAT fallback so every
-	// exported record carries the RFC 5103 / RFC 8158 post-NAT fields
-	// (post == pre when the flow was not translated).
-	natSrcIP, natDstIP, natSrcPort, natDstPort := resolvePostNAT(
-		evt.SrcIP, evt.DstIP, evt.SrcPort, evt.DstPort,
-		evt.NATSrcIP, evt.NATDstIP, evt.NATSrcPort, evt.NATDstPort)
-	// #2866: resolve src/dst route prefix lengths from the FIB (0/0 with no
-	// resolver wired). #3744: scope to the flow's ingress VRF table (evt.InIf,
-	// evt.OutIf fallback) and count any unresolved half.
-	srcMask, dstMask, maskMisses := resolveMasks(e.MaskResolver, evt.SrcIP, evt.DstIP, evt.InIf, evt.OutIf)
-	if maskMisses > 0 {
-		e.routeMaskUnresolved.Add(maskMisses)
-	}
-	fr := FlowRecord{
-		SrcIP:   evt.SrcIP,
-		DstIP:   evt.DstIP,
-		SrcPort: evt.SrcPort,
-		DstPort: evt.DstPort,
-		// #3939: source protocolIdentifier (IE 4) from the record's raw numeric
-		// IP protocol (rec.ProtocolNum, 0-255) — NOT a protocol-NAME re-lookup.
-		// The daemon callback derived evt.Protocol via a name table that only
-		// covered TCP/UDP/ICMP/ICMPv6, so GRE (47), ESP (50), AH (51) and every
-		// other protocol exported as 0 and were misattributed at the collector.
-		// rec.ProtocolNum is the authoritative number the dataplane stamped.
-		Protocol: rec.ProtocolNum,
-		Packets:  rec.SessionPkts,
-		Bytes:    rec.SessionBytes,
-		// #3746: RFC 5103 biflow reverse (server→client) volume. Since #2501
-		// the SESSION_CLOSE frame carries the reverse counters (decoded to
-		// rec.RevSessionPkts/RevSessionBytes); they are encoded as the reverse
-		// IPFIX IEs (PEN 29305). Already in scope here — no SessionCloseData
-		// plumbing needed.
-		RevPackets: rec.RevSessionPkts,
-		RevBytes:   rec.RevSessionBytes,
-		StartTime:  startTime,
-		EndTime:    rec.Time,
-		IsIPv6:     evt.IsIPv6,
-		SrcMask:    srcMask,
-		DstMask:    dstMask,
-		NATSrcIP:   natSrcIP,
-		NATDstIP:   natDstIP,
-		NATSrcPort: natSrcPort,
-		NATDstPort: natDstPort,
-		// #2749: ingress ifindex (SNMP ifIndex) -> IPFIX ingressInterface; plus
-		// the re-introduced ipClassOfService (IE 5) / tcpControlBits (IE 6) /
-		// egressInterface (IE 14).
-		InIf:     evt.InIf,
-		TOS:      evt.TOS,
-		TCPFlags: evt.TCPFlags,
-		OutIf:    evt.OutIf,
-		// #3270: flowDirection (IE 61), derived from sampling-direction in the
-		// daemon callback. Encoded only when the group enabled flow-dir.
-		Direction: evt.Direction,
-	}
-
-	e.batch.add(fr)
-}
-
-// Stats returns export statistics.
-func (e *IPFIXExporter) Stats() (flows, packets uint64) {
-	return e.exportedFlows.Load(), e.exportedPkts.Load()
-}
-
-// EstimatedDurations returns the count of exported close records missing a
-// creation timestamp. Those records use StartTime=EndTime rather than a
-// packet-count estimate.
-func (e *IPFIXExporter) EstimatedDurations() uint64 {
-	return e.estimatedDurations.Load()
-}
-
-// RouteMaskUnresolved returns the count of exported route-mask halves (#3744)
-// exported as an unresolved 0 rather than a real matched-route prefix length.
-// See Exporter.RouteMaskUnresolved.
-func (e *IPFIXExporter) RouteMaskUnresolved() uint64 {
-	return e.routeMaskUnresolved.Load()
-}
-
-// ClockSkewClamped returns the number of exported close records whose future
-// creation timestamp was clamped to the close time (#13305).
-func (e *IPFIXExporter) ClockSkewClamped() uint64 { return e.clockSkewClamped.Load() }
-
-// BatchDepth returns the current number of flow records pending in the export
-// batch (both families combined). See Exporter.BatchDepth (#3747).
-func (e *IPFIXExporter) BatchDepth() uint64 { return e.batch.depth() }
-
-// BatchMaxDepth returns the high-water mark of the pending batch depth (#3747).
-func (e *IPFIXExporter) BatchMaxDepth() uint64 { return e.batch.MaxDepth() }
-
-// BatchDropped returns the cumulative count of flow records dropped because
-// the export batch was at capacity. See Exporter.BatchDropped (#3747).
-func (e *IPFIXExporter) BatchDropped() uint64 { return e.batch.Dropped() }
-
-// Retire quiesces the exporter's batch admission lease ahead of the final
-// flush on ctx cancel — the IPFIX equivalent of Exporter.Retire (#4963).
-func (e *IPFIXExporter) Retire() { e.batch.retire() }
-
-// HandoffDropped returns the count of session-close records this exporter
-// rejected because they arrived after it was retired (#4963).
-func (e *IPFIXExporter) HandoffDropped() uint64 { return e.batch.HandoffDropped() }
-
-// SetHandoffCounter injects a fixed-cardinality family-level handoff-drop
-// counter — the IPFIX equivalent of Exporter.SetHandoffCounter (#4963).
-func (e *IPFIXExporter) SetHandoffCounter(c *atomic.Uint64) { e.batch.setSharedHandoff(c) }
-
-// CollectorHealth returns a per-collector write-health snapshot (#2464).
-func (e *IPFIXExporter) CollectorHealth() []CollectorHealth {
-	return e.conns.health()
-}
-
-// Close shuts down all collector connections.
-func (e *IPFIXExporter) Close() {
-	e.conns.close()
+	e.exportSessionClose(rec, evt, true)
 }
 
 func (e *IPFIXExporter) sendTemplates() {

@@ -175,20 +175,6 @@ func (t *FlowTracker) Close(key FlowKey) bool {
 	return ok
 }
 
-// CloseFlow forgets a tracked flow on real session close (v9).
-func (e *Exporter) CloseFlow(key FlowKey) {
-	if e.tracker != nil {
-		e.tracker.Close(key)
-	}
-}
-
-// CloseFlow forgets a tracked flow on real session close (IPFIX).
-func (e *IPFIXExporter) CloseFlow(key FlowKey) {
-	if e.tracker != nil {
-		e.tracker.Close(key)
-	}
-}
-
 // Len reports tracked flow count (tests/metrics).
 func (t *FlowTracker) Len() int {
 	if !t.enabled() {
@@ -199,58 +185,19 @@ func (t *FlowTracker) Len() int {
 	return len(t.flows)
 }
 
-// --- Exporter / IPFIXExporter adapters -------------------------------------
-// Both exporters share the tracker logic; these methods keep the exported
-// API identical so the daemon can drive either family the same way.
-
-// TrackFlowOpen registers a flow on the v9 exporter (no-op without timeouts).
-func (e *Exporter) TrackFlowOpen(key FlowKey, start time.Time) {
-	if e.tracker != nil {
-		e.tracker.TrackFlowOpenSimple(key, start)
-	}
-}
-
-// TouchFlow updates cumulative counters on the v9 exporter.
-func (e *Exporter) TouchFlow(key FlowKey, now time.Time, packets, bytes uint64) {
-	if e.tracker != nil {
-		e.tracker.Touch(key, now, packets, bytes)
-	}
-}
+// CloseFlow / TrackFlowOpen / TouchFlow / CollectDueExports adapters
+// live on exporterCore (exporter_core.go, #16126): one definition
+// promoted to both exporters, so the daemon drives either family the
+// same way. Only the batch-draining CollectDueExports wrapper differs
+// per exporter in name only -- it is exporterCore.collectDueExports
+// behind these thin promoted wrappers.
 
 // CollectDueExports drains due interim/final records into the v9 batch.
 func (e *Exporter) CollectDueExports(now time.Time) []FlowRecord {
-	if e.tracker == nil {
-		return nil
-	}
-	due := e.tracker.CollectDueExports(now)
-	for _, r := range due {
-		e.batch.add(r)
-	}
-	return due
-}
-
-// TrackFlowOpen registers a flow on the IPFIX exporter.
-func (e *IPFIXExporter) TrackFlowOpen(key FlowKey, start time.Time) {
-	if e.tracker != nil {
-		e.tracker.TrackFlowOpenSimple(key, start)
-	}
-}
-
-// TouchFlow updates cumulative counters on the IPFIX exporter.
-func (e *IPFIXExporter) TouchFlow(key FlowKey, now time.Time, packets, bytes uint64) {
-	if e.tracker != nil {
-		e.tracker.Touch(key, now, packets, bytes)
-	}
+	return e.collectDueExports(now)
 }
 
 // CollectDueExports drains due interim/final records into the IPFIX batch.
 func (e *IPFIXExporter) CollectDueExports(now time.Time) []FlowRecord {
-	if e.tracker == nil {
-		return nil
-	}
-	due := e.tracker.CollectDueExports(now)
-	for _, r := range due {
-		e.batch.add(r)
-	}
-	return due
+	return e.collectDueExports(now)
 }
