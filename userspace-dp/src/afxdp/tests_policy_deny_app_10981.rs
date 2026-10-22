@@ -172,11 +172,13 @@ fn dnat_junos_host_deny_logs_the_evaluated_ssh_service_10981() {
         event.dst_port, 2222,
         "RT_FLOW keeps the original wire tuple"
     );
+    // #15951: the deny was judged on the translated 10.0.61.1:22 tuple, so
+    // the record carries it in nat_dst_* (was None/0).
     assert_eq!(
-        event.nat_dst_ip, None,
-        "junos-host deny retains its existing no-NAT event shape"
+        event.nat_dst_ip,
+        Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)))
     );
-    assert_eq!(event.nat_dst_port, 0);
+    assert_eq!(event.nat_dst_port, 22);
 }
 
 #[test]

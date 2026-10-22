@@ -2227,6 +2227,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     flow,
                                     meta,
                                     policy_dst,
+                                    // Stage-11 passthrough carries no translation.
+                                    crate::nat::NatDecision::default(),
                                     from_zone_id,
                                     meta.pkt_len as u64,
                                     now_ns,
@@ -3952,6 +3954,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         resolved.key.dst_port,
                                         resolved.decision,
                                     ),
+                                    resolved.decision.nat,
                                     authority_zone,
                                     meta.pkt_len as u64,
                                     now_ns,
@@ -5739,6 +5742,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         Some(policy_dst_ip),
                                         Some(policy_dst_port),
                                     ),
+                                    decision.nat,
                                     from_zone_id,
                                     meta.pkt_len as u64,
                                     now_ns,
@@ -5886,11 +5890,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // tag. Recorded ONCE here and never re-derived from the zone, which is
                                 // the approximation `show/clear security flow session interface <name>`
                                 // is being freed from.
-                                ingress_ifindex: meta.ingress_ifindex,
-                                ingress_vlan_id: meta.ingress_vlan_id,
+                                // #15951: fabric arrivals stamp the (0,0) identity
+                                // like the transit install (#7096), instead of
+                                // claiming the local fabric NIC as the peer's
+                                // ingress interface.
+                                ingress_ifindex: crate::session::stamped_ingress_identity(
+                                    meta.ingress_ifindex,
+                                    meta.ingress_vlan_id,
+                                    packet_fabric_ingress,
+                                )
+                                .0,
+                                ingress_vlan_id: crate::session::stamped_ingress_identity(
+                                    meta.ingress_ifindex,
+                                    meta.ingress_vlan_id,
+                                    packet_fabric_ingress,
+                                )
+                                .1,
                                 forward_ingress_vlan_id: None,
                                 owner_rg_id: 0,
-                                fabric_ingress: false,
+                                fabric_ingress: packet_fabric_ingress,
                                 is_reverse: false,
                                 // Keep firewall-local sessions in the helper only for HA
                                 // state. Publish only the exact observed key back into the
@@ -5976,6 +5994,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                             }
                             if local_session_capacity_available
+                            // #15951: a cacheable host-bound packet whose session
+                            // cannot be installed must NOT fall through to the
+                            // Trusted slow-path reinject: delivery without an
+                            // installed session has no logging/lease/revalidation
+                            // anchor and no conntrack publication for replies.
+                            // Fail closed — count the refusal and recycle. This
+                            // covers both the capacity-refused arm and an
+                            // install-helper failure after a passing preflight.
+                            let local_installed = local_session_capacity_available
                                 && install_helper_local_session_on_miss(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
@@ -6094,8 +6121,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     timeout_secs,
                                     SessionOrigin::LocalMiss,
                                 );
-                            }
-                            if !local_session_capacity_available {
+                            } else {
                                 sessions.note_admission_refused();
                                 if persistent_lease_hold_outer.is_some() {
                                     rollback_persistent_inbound_hold(
@@ -6105,6 +6131,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     );
                                     persistent_lease_hold_outer = None;
                                 }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
                             }
                         }
                         // #5690: the generic embedded-ICMP NAT reversal is
@@ -9519,6 +9547,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             meta.pkt_len as u64,
                             now_ns,
+                            telemetry.counters,
                         ) {
                             FlowlessLocalVerdict::Deliver => {
                                 // Flowless Deliver is the shared H2 pass result;

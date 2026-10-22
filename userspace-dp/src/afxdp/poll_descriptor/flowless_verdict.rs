@@ -82,6 +82,11 @@ pub(super) fn flowless_local_delivery_verdict(
     ingress_zone_override: Option<u16>,
     packet_len: u64,
     now_ns: u64,
+    // #15951: credited with `policy_denied_packets` on a junos-host deny (the
+    // flow-backed wrapper credits inside `junos_host_local_policy`; this arm
+    // evaluates directly, so it credits here). A lo0-filter `Filtered` verdict
+    // is NOT a policy deny and does not credit it.
+    counters: &mut BatchCounters,
 ) -> FlowlessLocalVerdict {
     // A flowless packet's post-IP bytes are payload, never an authoritative L4
     // header, so the ICMP type/code is NOT known (`policy_packet_icmp` returns
@@ -168,12 +173,19 @@ pub(super) fn flowless_local_delivery_verdict(
         false,
     ) {
         if !matches!(result.action, PolicyAction::Permit) {
+            // #15951: a junos-host deny/reject credits the global policy-deny
+            // counter exactly once per denied packet.
+            counters.touched = true;
+            counters.policy_denied_packets += 1;
             emit_junos_host_deny_l4(
                 forwarding,
                 event_stream,
                 flow,
                 meta,
                 flow.forward_key.dst_port,
+                // #9529: the flowless arm applies no destination translation,
+                // so there is no translated tuple to report.
+                &crate::nat::NatDecision::default(),
                 from_zone_id,
                 result.policy_id,
                 result.action,

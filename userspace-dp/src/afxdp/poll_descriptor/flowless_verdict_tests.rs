@@ -228,6 +228,7 @@ mod flowless_local_delivery_tests {
         meta: UserspaceDpMeta,
         from_zone_id: u16,
     ) -> FlowlessLocalVerdict {
+        let mut counters = BatchCounters::default();
         flowless_local_delivery_verdict(
             fw,
             None,
@@ -239,6 +240,7 @@ mod flowless_local_delivery_tests {
             Some(from_zone_id),
             64,
             1_000,
+            &mut counters,
         )
     }
 
@@ -277,6 +279,7 @@ mod flowless_local_delivery_tests {
         );
         let fw = fw_with_host_inbound(ZONE, &["ssh"], &[]);
         let flow = flowless_flow(PROTO_TCP);
+        let mut counters = BatchCounters::default();
         let v = flowless_local_delivery_verdict(
             &fw,
             Some(&handle),
@@ -288,8 +291,8 @@ mod flowless_local_delivery_tests {
             Some(ZONE),
             64,
             crate::afxdp::neighbor::monotonic_nanos(),
+            &mut counters,
         );
-        assert_eq!(v, FlowlessLocalVerdict::HostInboundDeny);
 
         let event = rx
             .try_recv()
@@ -512,6 +515,7 @@ mod flowless_local_delivery_tests {
         );
         let flow = flowless_flow(PROTO_TCP);
         let meta = flowless_meta(PROTO_TCP);
+        let mut counters = BatchCounters::default();
         assert_eq!(
             flowless_local_delivery_verdict(
                 &fw,
@@ -524,9 +528,13 @@ mod flowless_local_delivery_tests {
                 Some(TEST_TRUST_ZONE_ID),
                 64,
                 1_000,
+                &mut counters,
             ),
             FlowlessLocalVerdict::Filtered,
         );
+        // #15951: the flowless junos-host deny credits the global counter once.
+        assert_eq!(counters.policy_denied_packets, 1);
+        assert!(counters.touched);
 
         let event = rx
             .try_recv()

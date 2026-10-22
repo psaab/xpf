@@ -718,6 +718,10 @@ mod tests_session_hit_authority_window_10591;
 #[cfg(test)]
 #[path = "tests_host_bound_post_dnat_9529.rs"]
 mod tests_host_bound_post_dnat_9529;
+// #15951: host-inbound install-failure fail-closed + junos-host deny credit.
+#[cfg(test)]
+#[path = "tests_host_inbound_15951.rs"]
+mod tests_host_inbound_15951;
 // #10981: secondary policy-deny sites preserve evaluated application attribution.
 #[cfg(test)]
 #[path = "tests_policy_deny_app_10981.rs"]
