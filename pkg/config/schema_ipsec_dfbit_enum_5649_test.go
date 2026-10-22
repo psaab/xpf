@@ -23,7 +23,7 @@ func TestIPsecDFBitEnumSchemaGate_5649(t *testing.T) {
 	reject := func(set, badVal string) {
 		t.Helper()
 		tree := flatTreeFromSets(t, set)
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("%q: expected SchemaValidate to REJECT typo, got nil (silent copy-DF default)", set)
 		}
@@ -34,7 +34,7 @@ func TestIPsecDFBitEnumSchemaGate_5649(t *testing.T) {
 	accept := func(set string) {
 		t.Helper()
 		tree := flatTreeFromSets(t, set)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("%q: expected SchemaValidate to ACCEPT valid value, got %v", set, err)
 		}
 	}

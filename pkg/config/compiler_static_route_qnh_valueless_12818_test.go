@@ -73,7 +73,7 @@ func TestValuelessQualifiedNextHopCompileConfig12818(t *testing.T) {
 					t.Fatalf("error = %v, want parent-chain path %q", err, tc.wantPath)
 				}
 			}
-			if err := SchemaValidate(tc.build(t), nil); err == nil {
+			if err := SchemaValidate(tc.build(t)); err == nil {
 				t.Fatalf("SchemaValidate accepted valueless qualified-next-hop (parity broken the other way)")
 			}
 		})
@@ -84,7 +84,7 @@ func TestValuelessQualifiedNextHopCompileConfig12818(t *testing.T) {
 		if _, err := CompileConfig(hierTree(t, source)); err != nil {
 			t.Fatalf("strict CompileConfig rejected child-bearing QNH: %v", err)
 		}
-		if err := SchemaValidate(hierTree(t, source), nil); err != nil {
+		if err := SchemaValidate(hierTree(t, source)); err != nil {
 			t.Fatalf("SchemaValidate rejected child-bearing QNH: %v", err)
 		}
 	})
@@ -99,7 +99,7 @@ func TestValuelessQualifiedNextHopCompileConfig12818(t *testing.T) {
 		if err != nil {
 			t.Fatalf("strict CompileConfig rejected valid IPv4 QNH: %v", err)
 		}
-		if err := SchemaValidate(hierTree(t, v4), nil); err != nil {
+		if err := SchemaValidate(hierTree(t, v4)); err != nil {
 			t.Fatalf("SchemaValidate rejected valid IPv4 QNH: %v", err)
 		}
 		got := routeHops12813(t, cfg)
@@ -112,7 +112,7 @@ func TestValuelessQualifiedNextHopCompileConfig12818(t *testing.T) {
 		if err != nil {
 			t.Fatalf("strict CompileConfig rejected valid IPv6 QNH: %v", err)
 		}
-		if err := SchemaValidate(hierTree(t, v6), nil); err != nil {
+		if err := SchemaValidate(hierTree(t, v6)); err != nil {
 			t.Fatalf("SchemaValidate rejected valid IPv6 QNH: %v", err)
 		}
 		if hops := findStaticRoute3871(t, v6cfg.RoutingOptions.StaticRoutes, "2001:db8:1::/64").NextHops; len(hops) != 1 || hops[0].Address != "2001:db8:2::2" {

@@ -752,7 +752,7 @@ func TestDescriptionIsATailLeaf(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CompileConfigLenient: %v", err)
 		}
-		schemaErr := SchemaValidate(tree, lenient)
+		schemaErr := SchemaValidate(tree)
 		if schemaErr == nil {
 			t.Fatalf("SchemaValidate returned nil — the head-of-chain spelling is " +
 				"supposed to be caught by the leaf's own untouched arity gate " +

@@ -149,7 +149,7 @@ func advisoryPresent6850(t *testing.T, advisory string, lines []string) bool {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)

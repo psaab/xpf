@@ -29,7 +29,7 @@ func TestISISMetricSchemaGate11823(t *testing.T) {
 	bad := []string{"banana", "default", "-5", "16777216", "9223372036854775808"}
 	for _, tok := range bad {
 		t.Run("reject-"+tok, func(t *testing.T) {
-			if err := SchemaValidate(isisMetricTree11823(t, tok), nil); err == nil {
+			if err := SchemaValidate(isisMetricTree11823(t, tok)); err == nil {
 				t.Fatalf("SchemaValidate accepted isis metric %q; want commit rejection", tok)
 			} else if !strings.Contains(err.Error(), "metric") {
 				t.Fatalf("rejection for metric %q must name the metric slot: %v", tok, err)
@@ -39,7 +39,7 @@ func TestISISMetricSchemaGate11823(t *testing.T) {
 			if len(perrs) > 0 {
 				t.Fatalf("fixture did not parse: %v", perrs)
 			}
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("hierarchical: SchemaValidate accepted isis metric %q; want commit rejection", tok)
 			} else if !strings.Contains(err.Error(), "metric") {
 				t.Fatalf("hierarchical: rejection for metric %q must name the metric slot: %v", tok, err)
@@ -48,7 +48,7 @@ func TestISISMetricSchemaGate11823(t *testing.T) {
 	}
 	for _, tok := range []string{"0", "1", "10", "16777215"} {
 		t.Run("accept-"+tok, func(t *testing.T) {
-			if err := SchemaValidate(isisMetricTree11823(t, tok), nil); err != nil {
+			if err := SchemaValidate(isisMetricTree11823(t, tok)); err != nil {
 				t.Fatalf("SchemaValidate rejected valid isis metric %q: %v", tok, err)
 			}
 		})
@@ -130,7 +130,7 @@ func TestISISMetricReachesTheRoutingInstanceCopy11823(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("fixture did not parse: %v", perrs)
 	}
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted an RI isis metric banana; want commit rejection")
 	} else if !strings.Contains(err.Error(), "metric") {
 		t.Fatalf("RI rejection must name the metric slot: %v", err)

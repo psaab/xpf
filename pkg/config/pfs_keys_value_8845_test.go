@@ -50,7 +50,7 @@ func TestPFSKeysValueRoutes8845(t *testing.T) {
 		{"empty-value", "", "missing value"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := SchemaValidate(build(t, tc.val), nil)
+			err := SchemaValidate(build(t, tc.val))
 			if err == nil {
 				t.Fatalf("commit ACCEPTED `keys %s`. Before #8845 this compiled to "+
 					"PFSGroup=%s -- either silently disabled, or nominally enabled "+
@@ -72,7 +72,7 @@ func TestPFSKeysValueRoutes8845(t *testing.T) {
 	t.Run("valid-groups-accepted", func(t *testing.T) {
 		for _, v := range []string{"group14", "14", "group19", "group2"} {
 			tree := build(t, v)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Errorf("commit rejected the valid group %q: %v", v, err)
 			}
 			cfg, err := CompileConfigLenient(tree)

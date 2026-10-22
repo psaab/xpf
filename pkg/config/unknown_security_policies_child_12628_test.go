@@ -70,7 +70,7 @@ func TestPoliciesJunosValidNonEnforcementChildrenDoNotPoison12628(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			text := policiesBase12628 + "  " + tc.child + "\n" + policiesClose12628
 			tree := parseUnknownSecurityPoliciesChildren12217(t, text)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("strict schema rejected Junos-valid child %s: %v", tc.name, err)
 			}
 			if _, err := CompileConfig(tree); err != nil {

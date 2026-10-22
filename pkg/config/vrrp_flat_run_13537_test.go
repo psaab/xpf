@@ -26,7 +26,7 @@ func TestVRRPFlatRun13537(t *testing.T) {
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.9.0.1/16 vrrp-group 1 priority 150",
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.9.0.1/16 vrrp-group 1 virtual-address 10.9.0.100/16",
 	})
-	if err := SchemaValidate(flat, nil); err != nil {
+	if err := SchemaValidate(flat); err != nil {
 		t.Fatalf("strict schema rejected supported flat run: %v", err)
 	}
 	fcfg, ferr := CompileConfig(flat)
@@ -55,7 +55,7 @@ func TestVRRPFlatRun13537(t *testing.T) {
 	unknown := buildTree(t, []string{
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.9.0.1/16 vrrp-group 1 priority 150 virtual-address 10.9.0.100/16 bogus-token 7",
 	})
-	if err := SchemaValidate(unknown, nil); err == nil {
+	if err := SchemaValidate(unknown); err == nil {
 		t.Fatal("strict schema accepted an unknown VRRP property in a flat run")
 	}
 	// IPv6 shares the same property grammar.

@@ -56,9 +56,9 @@ const (
 	ValueCIDR = config.ValueCIDR
 )
 
-// LeafValidator is the typed-leaf validator signature. cfg is the
-// candidate Config (may be nil when validation runs on the raw AST before
-// compile). Validators return nil for accepted input.
+// LeafValidator is the typed-leaf validator signature: it takes only
+// the raw token (validation runs before compile, so no *Config exists;
+// #16162). Validators return nil for accepted input.
 //
 // We alias config.LeafValidator (same function signature) so operational
 // cmdtree Nodes can carry validators declared in pkg/config directly. The
@@ -97,7 +97,7 @@ type Node struct {
 	// Validator owns acceptance.
 	ValueExamples []string
 	// Validator, if set, is called at SchemaValidate time to accept or
-	// reject the raw string at this leaf. cfg may be nil.
+	// reject the raw string at this leaf.
 	Validator LeafValidator
 
 	// AcceptsArgs marks a node that consumes trailing words this tree

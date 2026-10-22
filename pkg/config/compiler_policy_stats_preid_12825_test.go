@@ -81,7 +81,7 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 	// Invalid value cases.
 	for _, val := range []string{"enabledd", "banana"} {
 		text := `security { policy-stats { system-wide ` + val + `; } }`
-		if err := SchemaValidate(tree12825(t, text), nil); err == nil {
+		if err := SchemaValidate(tree12825(t, text)); err == nil {
 			t.Errorf("%q: SchemaValidate accepted", val)
 		} else if !strings.Contains(err.Error(), "system-wide") {
 			t.Errorf("%q: schema error must name system-wide: %v", val, err)
@@ -143,7 +143,7 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 		{`security { policy-stats { system-wide enable; } policy-stats { system-wide enable; } }`, true},
 	}
 	for _, tc := range controls {
-		if err := SchemaValidate(tree12825(t, tc.text), nil); err != nil {
+		if err := SchemaValidate(tree12825(t, tc.text)); err != nil {
 			t.Errorf("control schema rejected %q: %v", tc.text, err)
 		}
 		cfg, err := CompileConfig(tree12825(t, tc.text))
@@ -173,7 +173,7 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			t.Fatal(err)
 		}
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("flat schema %q: %v", tc.line, err)
 		}
 		cfg, err := CompileConfig(tree)
@@ -185,7 +185,7 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 	tree := &ConfigTree{}
 	path, _ := ParseSetCommand("set security policy-stats system-wide enabledd")
 	_ = tree.SetPath(path)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Errorf("flat enabledd SchemaValidate accepted")
 	}
 	if _, err := CompileConfig(tree); err == nil {
@@ -193,7 +193,7 @@ func TestPolicyStatsSystemWide12825(t *testing.T) {
 	}
 	// Value-less leaves are invalid too.
 	text := `security { policy-stats { system-wide; } }`
-	if err := SchemaValidate(tree12825(t, text), nil); err == nil {
+	if err := SchemaValidate(tree12825(t, text)); err == nil {
 		t.Errorf("value-less SchemaValidate accepted")
 	}
 	if _, err := CompileConfig(tree12825(t, text)); err == nil {

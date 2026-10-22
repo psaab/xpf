@@ -306,7 +306,7 @@ func TestFlatRunResidueChannelIsMeasuredPerRow9235(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			// THE LOAD-BEARING ROW: the supported spelling must still commit.
 			ok := tree9235(t, row.split...)
-			if err := SchemaValidateWithDefinitions(ok, ok, nil); err != nil {
+			if err := SchemaValidateWithDefinitions(ok, ok); err != nil {
 				t.Fatalf("#9235 OVER-REJECTION: the per-leaf spelling — the one the operator "+
 					"is supposed to type — is REFUSED by the schema gate: %v\nlines: %v\n"+
 					"\"The packed spelling is rejected\" is satisfiable by rejecting "+
@@ -314,7 +314,7 @@ func TestFlatRunResidueChannelIsMeasuredPerRow9235(t *testing.T) {
 					"fixed.", err, row.split)
 			}
 			packed := tree9235(t, row.packed)
-			accepted := SchemaValidateWithDefinitions(packed, packed, nil) == nil
+			accepted := SchemaValidateWithDefinitions(packed, packed) == nil
 			if accepted == row.operatorReachable {
 				return
 			}

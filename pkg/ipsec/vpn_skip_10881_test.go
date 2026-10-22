@@ -53,7 +53,7 @@ func compileTolerantIKEAuth10881(t *testing.T) *config.Config {
 			t.Fatalf("SetPath(%q): %v", command, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "dss-signatures") {
+	if err := config.SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "dss-signatures") {
 		t.Fatalf("strict schema error = %v, want rejection naming dss-signatures", err)
 	}
 	compiled, err := config.CompileConfigLenient(tree)

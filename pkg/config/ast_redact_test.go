@@ -251,7 +251,7 @@ func TestRedactionPlaceholderIngestRejected(t *testing.T) {
 
 	// The commit-ingest schema gate (the production strict-commit hook) must
 	// also reject it.
-	if err := SchemaValidate(reingested, nil); err == nil {
+	if err := SchemaValidate(reingested); err == nil {
 		t.Fatal("SchemaValidate accepted a redacted export; want rejection")
 	} else if !errors.Is(err, errRedactionPlaceholderIngest) {
 		t.Fatalf("SchemaValidate err = %v, want errRedactionPlaceholderIngest", err)
@@ -291,7 +291,7 @@ func TestRedactionPlaceholderIngest_NormalSecretPasses(t *testing.T) {
 	if err := checkRedactionPlaceholder(cleartext); err != nil {
 		t.Fatalf("checkRedactionPlaceholder rejected a normal cleartext config: %v", err)
 	}
-	if err := SchemaValidate(cleartext, nil); err != nil {
+	if err := SchemaValidate(cleartext); err != nil {
 		t.Fatalf("SchemaValidate rejected a normal cleartext config: %v", err)
 	}
 }

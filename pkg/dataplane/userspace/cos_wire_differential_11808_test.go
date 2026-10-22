@@ -52,7 +52,7 @@ func compileCoSWireFixture11808(t *testing.T) *config.Config {
 			t.Fatalf("SetPath(%q): %v", command, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfigLenient(tree)

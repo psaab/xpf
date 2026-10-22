@@ -293,7 +293,7 @@ func zeroizeFirewallLogs(inv ZeroizeLogInventory) error {
 	// dateext generations. They are still firewall logs for this basename and
 	// are removed by the same exact-name recognizer.
 	for _, name := range inv.SyslogFiles {
-		if err := config.ValidateSyslogFileName(name, nil); err != nil {
+		if err := config.ValidateSyslogFileName(name); err != nil {
 			slog.Warn("zeroize: ignoring invalid syslog file name; no drop-in was rendered for it, so rsyslog wrote nothing",
 				"name", name, "err", err)
 			continue

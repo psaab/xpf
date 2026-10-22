@@ -42,7 +42,7 @@ func TestClosedWorldNAT64_RejectsUnknownKeyword(t *testing.T) {
 		"rule-set r1 destination-prefix ::/96", // unmodeled keyword under rule-set
 	} {
 		tree := buildTree(t, cwNAT64Set(typo))
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("a typo'd NAT64 leaf %q must be rejected at commit, not silently dropped (NAT64 silently inert)", typo)
 		}
@@ -61,7 +61,7 @@ func TestClosedWorldNAT64_AcceptsValid(t *testing.T) {
 		"rule-set r1 source-pool p1",
 	} {
 		tree := buildTree(t, cwNAT64Set(leaf))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid NAT64 leaf %q must commit clean under closed-world, got: %v", leaf, err)
 		}
 	}
@@ -70,7 +70,7 @@ func TestClosedWorldNAT64_AcceptsValid(t *testing.T) {
 		"rule-set r1 prefix 64:ff9b::/96",
 		"rule-set r1 source-pool p1",
 	))
-	if err := SchemaValidate(full, nil); err != nil {
+	if err := SchemaValidate(full); err != nil {
 		t.Fatalf("a fully-specified NAT64 rule-set must commit clean under closed-world, got: %v", err)
 	}
 }
@@ -80,7 +80,7 @@ func TestClosedWorldNAT64_AcceptsValid(t *testing.T) {
 // warning on the tolerant Store.Load / SyncApply path (CompileConfigLenient).
 func TestClosedWorldNAT64_LenientDoesNotBrick(t *testing.T) {
 	typoTree := buildTree(t, cwNAT64Set("rule-set r1 prefx 64:ff9b::/96"))
-	if err := SchemaValidate(typoTree, nil); err == nil {
+	if err := SchemaValidate(typoTree); err == nil {
 		t.Fatal("precondition: strict SchemaValidate must reject the typo")
 	}
 	if _, err := CompileConfigLenient(typoTree); err != nil {

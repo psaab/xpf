@@ -21,7 +21,7 @@ func TestMetricsRequireAuthCompiles16072(t *testing.T) {
 		"set system services web-management api-auth user admin password correct-horse-battery",
 		"set system services web-management api-auth metrics-require-auth",
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected metrics-require-auth: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

@@ -85,7 +85,7 @@ func CanonicalOSPFNetworkType(raw string) (string, bool) {
 // ValidateOSPFInterfaceType is the schema leaf validator. It accepts exactly
 // what CanonicalOSPFNetworkType resolves, so a value that commits is a value
 // that renders a line vtysh accepts.
-func ValidateOSPFInterfaceType(raw string, _ *Config) error {
+func ValidateOSPFInterfaceType(raw string) error {
 	if _, ok := CanonicalOSPFNetworkType(raw); ok {
 		return nil
 	}

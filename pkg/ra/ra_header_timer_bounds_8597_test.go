@@ -138,7 +138,7 @@ func TestRAHeaderClampsBindTheSchemaConstants_8597(t *testing.T) {
 	}
 	// And the strict gate still enforces the same range, so the runtime clamp
 	// is a belt rather than the only bound.
-	if err := config.ValidateInteger(0, config.RARouterMaxLifetimeSeconds)("-1", nil); err == nil {
+	if err := config.ValidateInteger(0, config.RARouterMaxLifetimeSeconds)("-1"); err == nil {
 		t.Error("the strict typed-leaf gate accepts a negative router lifetime; the " +
 			"tolerant/strict split this clamp exists for no longer holds")
 	}

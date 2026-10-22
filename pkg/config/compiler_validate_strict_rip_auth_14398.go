@@ -53,7 +53,7 @@ const MaxRIPAuthKeyLen = 16
 // compiled gate validateRIPAuthKeyLengthStrict below is the backstop
 // for values that bypass SchemaValidate (programmatic trees,
 // tolerant loads downgraded to warnings).
-func ValidateRIPAuthKeyLength(raw string, _ *Config) error {
+func ValidateRIPAuthKeyLength(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing RIP authentication key (expected 1..%d characters)", MaxRIPAuthKeyLen)
 	}

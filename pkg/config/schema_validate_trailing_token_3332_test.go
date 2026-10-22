@@ -46,7 +46,7 @@ func TestSchema3332_TrailingTokenOnScalarLeaf_Rejected(t *testing.T) {
 	tree := buildSetTree3332(t,
 		"set interfaces ge-0-0-0 description hello bogus",
 	)
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected commit error for trailing token on `description` scalar leaf, got nil (token silently dropped)")
 	}
@@ -61,7 +61,7 @@ func TestSchema3332_ValidScalarLeaf_Accepted(t *testing.T) {
 	tree := buildSetTree3332(t,
 		"set interfaces ge-0-0-0 description hello",
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("unexpected error for valid scalar leaf: %v", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestSchema3332_MultiValueLeaf_Accepted(t *testing.T) {
 		"set system name-server 8.8.8.8",
 		"set system name-server 9.9.9.9",
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("unexpected error for multi-value leaf: %v", err)
 	}
 	// And a REAL #2419 bracketed-list collapse: one set line whose
@@ -85,7 +85,7 @@ func TestSchema3332_MultiValueLeaf_Accepted(t *testing.T) {
 	tree2 := buildSetTree3332(t,
 		"set system name-server [ 8.8.8.8 9.9.9.9 2001:4860:4860::8888 ]",
 	)
-	if err := SchemaValidate(tree2, nil); err != nil {
+	if err := SchemaValidate(tree2); err != nil {
 		t.Fatalf("unexpected error for bracketed multi-value list: %v", err)
 	}
 }
@@ -103,7 +103,7 @@ func TestSchema3332_OpaqueContainerBody_Accepted(t *testing.T) {
 		"set applications application-set my-set application junos-http",
 		"set applications application-set my-set application junos-https",
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("unexpected error for opaque application-set body: %v", err)
 	}
 }
@@ -115,7 +115,7 @@ func TestSchema3332_NamedInstanceLeaf_Accepted(t *testing.T) {
 	tree := buildSetTree3332(t,
 		"set interfaces ge-0-0-0 unit 0 family inet address 10.0.1.1/24",
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("unexpected error for named-instance address leaf: %v", err)
 	}
 }

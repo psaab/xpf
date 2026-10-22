@@ -8,7 +8,7 @@ import (
 
 func compileStrictTree11305(t *testing.T, tree *config.ConfigTree) *config.Config {
 	t.Helper()
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -161,7 +161,7 @@ func TestMalformedJunosSchedulerFormatsStillRejectStrictly11305(t *testing.T) {
 			if len(errs) != 0 {
 				t.Fatalf("parse fixture: %v", errs)
 			}
-			if err := config.SchemaValidate(tree, nil); err == nil {
+			if err := config.SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted %s %q", value.leaf, value.value)
 			}
 		})

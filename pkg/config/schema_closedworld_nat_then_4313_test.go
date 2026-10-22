@@ -39,7 +39,7 @@ func dnatThenSet(thenAction string) []string {
 // the flip closes the #4313 silent-inert gap.
 func TestClosedWorldDNATThen_RejectsUnknownActionKeyword(t *testing.T) {
 	tree := buildTree(t, dnatThenSet("bogus"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("an unmodeled keyword under the closed-world destination-NAT then must be rejected at commit (RED on revert: silently accepted + dropped)")
 	}
@@ -53,7 +53,7 @@ func TestClosedWorldDNATThen_RejectsUnknownActionKeyword(t *testing.T) {
 // ignored — the operator learns the DNAT translation would never apply.
 func TestClosedWorldDNATThen_RejectsTypo(t *testing.T) {
 	tree := buildTree(t, dnatThenSet("poool dp"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("a typo'd DNAT then-action (poool) must be rejected at commit, not silently dropped")
 	}
@@ -67,7 +67,7 @@ func TestClosedWorldDNATThen_RejectsTypo(t *testing.T) {
 func TestClosedWorldDNATThen_AcceptsValidActions(t *testing.T) {
 	for _, action := range []string{"off", "pool dp"} {
 		tree := buildTree(t, dnatThenSet(action))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid destination-NAT then-action %q must commit clean under closed-world, got: %v", action, err)
 		}
 	}
@@ -83,7 +83,7 @@ func TestClosedWorldDNATThen_RejectsUnknownDirectlyUnderThen(t *testing.T) {
 		"set security nat destination rule-set rs1 rule r1 match destination-address 203.0.113.10",
 		"set security nat destination rule-set rs1 rule r1 then bogus-action",
 	})
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("an unknown action directly under a DNAT rule then must be rejected under closed-world")
 	}
@@ -109,7 +109,7 @@ func TestSourceNATThen_StillOpenWorld(t *testing.T) {
 		"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/24",
 		"set security nat source rule-set rs1 rule r1 then source-nat pool p1 persistent-nat permit any-remote-host",
 	})
-	if err := SchemaValidate(persistent, nil); err != nil {
+	if err := SchemaValidate(persistent); err != nil {
 		t.Fatalf("rule-level `then source-nat pool <name> persistent-nat ...` is valid Junos and must NOT be rejected while source-NAT then is open-world (deferred #4313 subtree), got: %v", err)
 	}
 	// #14626: the tail now compiles — assert the compiled effect, not just
@@ -131,7 +131,7 @@ func TestSourceNATThen_StillOpenWorld(t *testing.T) {
 		"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/24",
 		"set security nat source rule-set rs1 rule r1 then source-nat bogus",
 	})
-	if err := SchemaValidate(bogus, nil); err != nil {
+	if err := SchemaValidate(bogus); err != nil {
 		t.Fatalf("source-NAT then is still open-world (deferred #4313 subtree); a bogus action must be silently accepted today, got: %v", err)
 	}
 }

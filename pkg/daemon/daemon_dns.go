@@ -194,7 +194,7 @@ func mergeDNSInputWithMgmtDNSRulesRefused(cfg *config.Config, leases []*dhcp.Lea
 		// resolvers without any bad leased address — a DNS-only hijack of
 		// host resolution, retained across transient renew failures.
 		for _, ns := range cfg.System.NameServers {
-			if err := config.ValidateIPAddress(ns, nil); err != nil {
+			if err := config.ValidateIPAddress(ns); err != nil {
 				slog.Warn("skipping invalid name-server", "server", ns, "err", err)
 				continue
 			}
@@ -259,13 +259,13 @@ func mergeDNSInputWithMgmtDNSRulesRefused(cfg *config.Config, leases []*dhcp.Lea
 		// line. Drop a leniently-loaded / peer-synced value that is not a valid
 		// DNS name (an embedded space would inject an extra resolver token). The
 		// strict commit gate (config.ValidateDNSDomain) rejects it at commit.
-		if config.ValidateDNSDomain(cfg.System.DomainName, nil) == nil {
+		if config.ValidateDNSDomain(cfg.System.DomainName) == nil {
 			in.DomainName = cfg.System.DomainName
 		} else if cfg.System.DomainName != "" {
 			slog.Warn("skipping invalid domain-name", "domain", cfg.System.DomainName)
 		}
 		for _, d := range cfg.System.DomainSearch {
-			if config.ValidateDNSDomain(d, nil) == nil {
+			if config.ValidateDNSDomain(d) == nil {
 				in.DomainSearch = append(in.DomainSearch, d)
 			} else {
 				slog.Warn("skipping invalid domain-search entry", "domain", d)
@@ -286,7 +286,7 @@ func mergeDNSInputWithMgmtDNSRulesRefused(cfg *config.Config, leases []*dhcp.Lea
 			continue
 		}
 		for _, d := range l.DomainSearch {
-			if config.ValidateDNSDomain(d, nil) != nil {
+			if config.ValidateDNSDomain(d) != nil {
 				slog.Warn("skipping invalid DHCP domain-search entry", "interface", l.Interface, "domain", d)
 				continue
 			}

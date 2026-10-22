@@ -35,7 +35,7 @@ func TestDHCPv6PrefixDelegatingLengthsAreRangeChecked6587(t *testing.T) {
 			// three by silently producing 0 or a nonsense length.
 			for _, bad := range []string{"129", "999", "-1", "abc", "64x"} {
 				tree := flatTreeFromSets(t, base+leaf+" "+bad)
-				err := SchemaValidate(tree, nil)
+				err := SchemaValidate(tree)
 				if err == nil {
 					t.Errorf("%s %q was ACCEPTED at commit-check; the operator gets no "+
 						"error and the value is silently discarded or egressed malformed "+
@@ -57,7 +57,7 @@ func TestDHCPv6PrefixDelegatingLengthsAreRangeChecked6587(t *testing.T) {
 			// the value's effect by setting it explicitly.
 			for _, ok := range []string{"0", "1", "48", "56", "64", "127", "128"} {
 				tree := flatTreeFromSets(t, base+leaf+" "+ok)
-				if err := SchemaValidate(tree, nil); err != nil {
+				if err := SchemaValidate(tree); err != nil {
 					t.Errorf("%s %q is in range and must commit clean, got: %v", leaf, ok, err)
 				}
 			}
@@ -72,7 +72,7 @@ func TestDHCPv6PrefixDelegatingLengthsStillCompile6587(t *testing.T) {
 		"set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating preferred-prefix-length 56",
 		"set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating sub-prefix-length 64",
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("a valid prefix-delegating stanza must pass schema validation: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

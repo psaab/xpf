@@ -61,7 +61,7 @@ func unimplementedRegexpsLeaf(leaf string) *schemaNode {
 // supported alternative — an operator following Juniper's documentation needs to
 // know which of the two families this box has.
 func rejectUnimplementedRegexps(leaf string) LeafValidator {
-	return func(_ string, _ *Config) error {
+	return func(_ string) error {
 		return fmt.Errorf(
 			"system login class %s: the Junos `*-regexps` restriction family is not "+
 				"implemented by xpf and is refused rather than silently ignored (#7971). "+

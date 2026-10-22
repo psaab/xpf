@@ -33,7 +33,7 @@ func assertScalar12942(t *testing.T, sched *config.SchedulerConfig, wantStart, w
 func compileStrict12942(t *testing.T, text string) *config.Config {
 	t.Helper()
 	tree := parseWeekdayConfig12238(t, text)
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -55,7 +55,7 @@ func compileFlat12942(t *testing.T, commands ...string) *config.Config {
 			t.Fatalf("SetPath(%q): %v", command, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)

@@ -34,7 +34,7 @@ import (
 // runs the commit-check schema gate.
 func schemaValidate5726(t *testing.T, sets ...string) error {
 	t.Helper()
-	return SchemaValidate(flatTreeFromSets(t, sets...), nil)
+	return SchemaValidate(flatTreeFromSets(t, sets...))
 }
 
 // --- F-01: qualified-next-hop gateway is validated at commit ---------------

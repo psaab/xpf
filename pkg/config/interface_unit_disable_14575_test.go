@@ -21,7 +21,7 @@ func TestUnitDisable14575(t *testing.T) {
 		if len(errs) > 0 {
 			t.Fatalf("parse %q: %v", body, errs)
 		}
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate(%q): %v", body, err)
 		}
 		cfg, err := CompileConfig(tree)
@@ -56,7 +56,7 @@ func TestUnitDisable14575(t *testing.T) {
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 		"set interfaces ge-0/0/1 unit 1 family inet address 10.0.2.1/24",
 	)
-	if err := SchemaValidate(flat, nil); err != nil {
+	if err := SchemaValidate(flat); err != nil {
 		t.Fatalf("SchemaValidate flat: %v", err)
 	}
 	fcfg, err := CompileConfig(flat)

@@ -327,7 +327,7 @@ func TestPolicyThenLog3703UnknownModeRejected(t *testing.T) {
 		"set security policies from-zone trust to-zone untrust policy p1 then permit",
 		"set security policies from-zone trust to-zone untrust policy p1 then log [ session-init boguslog ]",
 	)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatalf("SchemaValidate accepted an unknown then-log mode; want a strict reject (#3703)")
 	} else if !strings.Contains(err.Error(), "boguslog") {
 		t.Fatalf("reject error %q does not name the offending token", err.Error())
@@ -338,7 +338,7 @@ func TestPolicyThenLog3703UnknownModeRejected(t *testing.T) {
 		"set security zones security-zone untrust interfaces ge-0/0/1",
 		"set security policies from-zone trust to-zone untrust policy p1 then log [ session-init session-close ]",
 	)
-	if err := SchemaValidate(ok, nil); err != nil {
+	if err := SchemaValidate(ok); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid then-log list (over-reject): %v", err)
 	}
 }
@@ -382,7 +382,7 @@ func TestDefaultPolicyLog3703UnknownModeRejected(t *testing.T) {
 		"set security policies default-policy permit-all",
 		"set security policies default-policy-log [ session-init bogusmode ]",
 	)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatalf("SchemaValidate accepted an unknown default-policy-log mode; want a strict reject (#3703)")
 	} else if !strings.Contains(err.Error(), "bogusmode") {
 		t.Fatalf("reject error %q does not name the offending token", err.Error())
@@ -425,7 +425,7 @@ func TestPreIDDefaultPolicyLog3703UnknownModeRejected(t *testing.T) {
 	tree := setTree3703(t,
 		"set security pre-id-default-policy then log [ session-init bogusmode ]",
 	)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatalf("SchemaValidate accepted an unknown pre-id-default-policy log mode; want a strict reject (#3703)")
 	} else if !strings.Contains(err.Error(), "bogusmode") {
 		t.Fatalf("reject error %q does not name the offending token", err.Error())

@@ -42,12 +42,11 @@ func TestLoadToleratesAnInjectableSyslogFacility_6844(t *testing.T) {
 	// PRECONDITION, or this test proves nothing: the STRICT gate must actually
 	// reject this value. If it stops rejecting, the tolerance below is vacuous
 	// — it would be tolerating something nothing objects to.
-	cfg, err := config.CompileConfig(tree)
-	if err != nil {
+	if _, err := config.CompileConfig(tree); err != nil {
 		t.Fatalf("precondition: the compiler rejected the value, so this is no longer "+
 			"a schema-layer question: %v", err)
 	}
-	if err := config.SchemaValidate(tree, cfg); err == nil {
+	if err := config.SchemaValidate(tree); err == nil {
 		t.Fatal("precondition: SchemaValidate ACCEPTS the injectable facility, so the " +
 			"#6844 gate is gone and this test tolerates a value nothing rejects")
 	}

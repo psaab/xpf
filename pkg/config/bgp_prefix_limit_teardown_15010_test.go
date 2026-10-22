@@ -77,7 +77,7 @@ func TestBGPPrefixLimitTeardownSchemaRejects15010(t *testing.T) {
 	for _, extra := range bad {
 		t.Run(extra, func(t *testing.T) {
 			tree := bgpPrefixLimitTeardownTree15010(t, "inet", extra)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted %q, want rejection", extra)
 			}
 			if _, err := CompileConfig(tree); err == nil {
@@ -88,7 +88,7 @@ func TestBGPPrefixLimitTeardownSchemaRejects15010(t *testing.T) {
 	// drop-excess / hide-excess are not modelled; they must not commit silently.
 	for _, kw := range []string{"drop-excess 50", "hide-excess 50"} {
 		tree := bgpPrefixLimitTeardownTree15010(t, "inet", kw)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			// If schema admits unknown, compiler must reject/warn — checked below via compile.
 			if _, err := CompileConfig(tree); err == nil {
 				t.Fatalf("%q committed silently with no model", kw)
@@ -103,7 +103,7 @@ func TestBGPPrefixLimitTeardownHierarchical15010(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("hierarchical schema: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

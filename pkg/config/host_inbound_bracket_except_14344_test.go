@@ -47,7 +47,7 @@ func TestHostInboundBracketedParentWithChildExceptBlockRejectedStrict(t *testing
 			if len(errs) > 0 {
 				t.Fatalf("parse: %v", errs)
 			}
-			if err := SchemaValidate(tree, nil); err == nil ||
+			if err := SchemaValidate(tree); err == nil ||
 				!strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("SchemaValidate = %v, want error naming %q", err, tc.want)
 			}

@@ -58,7 +58,7 @@ func TestSchema3117_SchedulerName_FlatSchemaAccepts(t *testing.T) {
 			t.Fatalf("SetPath(%q) failed: %v", cmd, err)
 		}
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("expected scheduler-name leaves to pass schema validation, got: %v", err)
 	}
 }

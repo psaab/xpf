@@ -40,7 +40,7 @@ func TestStaticRouteQNHTailWithFollowingTokens12813(t *testing.T) {
 			if !strings.Contains(err.Error(), "#12813") && !strings.Contains(err.Error(), "#12790") {
 				t.Fatalf("strict CompileConfig error = %v, want QNH tail rejection", err)
 			}
-			if err := SchemaValidate(hierTree(t, tc.src), nil); err == nil {
+			if err := SchemaValidate(hierTree(t, tc.src)); err == nil {
 				t.Fatalf("strict SchemaValidate accepted garbage QNH tail")
 			}
 		})

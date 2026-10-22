@@ -254,7 +254,7 @@ func TestLenientNamedAddressBookDropQuarantinesCollision12049(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("parse: %v", errs)
 	}
-	if err := config.SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), `unknown configuration keyword "red"`) {
+	if err := config.SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), `unknown configuration keyword "red"`) {
 		t.Fatalf("strict schema must continue rejecting the unsupported named address book, got %v", err)
 	}
 	cfg, rules := compileNameCollision12049(t, "", books, "any", "shared")

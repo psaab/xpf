@@ -373,7 +373,7 @@ func TestCanonicalLogicalUnit_5878(t *testing.T) {
 			t.Fatalf("CanonicalLogicalUnit(%q) accepted a malformed/out-of-range unit", bad)
 		}
 		// ValidateLogicalUnit delegates to CanonicalLogicalUnit — same verdict.
-		if err := ValidateLogicalUnit(bad, nil); err == nil {
+		if err := ValidateLogicalUnit(bad); err == nil {
 			t.Fatalf("ValidateLogicalUnit(%q) accepted a malformed/out-of-range unit", bad)
 		}
 	}

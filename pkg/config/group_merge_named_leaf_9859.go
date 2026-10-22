@@ -127,7 +127,7 @@ func addressMembers9859(schema *schemaNode, n *Node) ([]addressMember9859, bool,
 	}
 	var members []addressMember9859
 	add := func(value string, quoted, bracketed bool) bool {
-		if schema.keyValidator(value, nil) != nil {
+		if schema.keyValidator(value) != nil {
 			return false
 		}
 		members = append(members, addressMember9859{value: value, quoted: quoted, bracketed: bracketed})

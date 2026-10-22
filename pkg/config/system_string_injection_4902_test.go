@@ -29,7 +29,7 @@ import (
 func TestValidateNTPServer_Table(t *testing.T) {
 	valid := []string{"192.0.2.1", "2001:db8::1", "pool.ntp.org", "time.example.net", "ntp1", "a.b.c.d.example."}
 	for _, v := range valid {
-		if err := config.ValidateNTPServer(v, nil); err != nil {
+		if err := config.ValidateNTPServer(v); err != nil {
 			t.Errorf("ValidateNTPServer(%q) = %v, want nil", v, err)
 		}
 	}
@@ -43,7 +43,7 @@ func TestValidateNTPServer_Table(t *testing.T) {
 		"has space",                          // space
 	}
 	for _, v := range invalid {
-		if err := config.ValidateNTPServer(v, nil); err == nil {
+		if err := config.ValidateNTPServer(v); err == nil {
 			t.Errorf("ValidateNTPServer(%q) = nil, want error", v)
 		}
 	}
@@ -52,7 +52,7 @@ func TestValidateNTPServer_Table(t *testing.T) {
 func TestValidateDNSDomain_Table(t *testing.T) {
 	valid := []string{"", "example.net", "corp.example.net", "example.net.", "a-b.example"}
 	for _, v := range valid {
-		if err := config.ValidateDNSDomain(v, nil); err != nil {
+		if err := config.ValidateDNSDomain(v); err != nil {
 			t.Errorf("ValidateDNSDomain(%q) = %v, want nil", v, err)
 		}
 	}
@@ -62,7 +62,7 @@ func TestValidateDNSDomain_Table(t *testing.T) {
 		"-lead.example", "a..b", "a/b",
 	}
 	for _, v := range invalid {
-		if err := config.ValidateDNSDomain(v, nil); err == nil {
+		if err := config.ValidateDNSDomain(v); err == nil {
 			t.Errorf("ValidateDNSDomain(%q) = nil, want error", v)
 		}
 	}
@@ -75,7 +75,7 @@ func TestValidateSSHAlgorithm_Table(t *testing.T) {
 		"hmac-sha2-256-etm@openssh.com", "chacha20-poly1305@openssh.com",
 	}
 	for _, v := range valid {
-		if err := config.ValidateSSHAlgorithm(v, nil); err != nil {
+		if err := config.ValidateSSHAlgorithm(v); err != nil {
 			t.Errorf("ValidateSSHAlgorithm(%q) = %v, want nil", v, err)
 		}
 	}
@@ -87,7 +87,7 @@ func TestValidateSSHAlgorithm_Table(t *testing.T) {
 		"-lead",                       // leading punctuation
 	}
 	for _, v := range invalid {
-		if err := config.ValidateSSHAlgorithm(v, nil); err == nil {
+		if err := config.ValidateSSHAlgorithm(v); err == nil {
 			t.Errorf("ValidateSSHAlgorithm(%q) = nil, want error", v)
 		}
 	}
@@ -96,7 +96,7 @@ func TestValidateSSHAlgorithm_Table(t *testing.T) {
 func TestValidateSyslogFileName_Table(t *testing.T) {
 	valid := []string{"messages", "kern.log", "xpf-audit", "app_1"}
 	for _, v := range valid {
-		if err := config.ValidateSyslogFileName(v, nil); err != nil {
+		if err := config.ValidateSyslogFileName(v); err != nil {
 			t.Errorf("ValidateSyslogFileName(%q) = %v, want nil", v, err)
 		}
 	}
@@ -110,7 +110,7 @@ func TestValidateSyslogFileName_Table(t *testing.T) {
 		"*",                  // glob (not a valid file base name here)
 	}
 	for _, v := range invalid {
-		if err := config.ValidateSyslogFileName(v, nil); err == nil {
+		if err := config.ValidateSyslogFileName(v); err == nil {
 			t.Errorf("ValidateSyslogFileName(%q) = nil, want error", v)
 		}
 	}
@@ -119,13 +119,13 @@ func TestValidateSyslogFileName_Table(t *testing.T) {
 func TestValidateSyslogUser_Table(t *testing.T) {
 	valid := []string{"*", "root", "netadmin", "user_1"}
 	for _, v := range valid {
-		if err := config.ValidateSyslogUser(v, nil); err != nil {
+		if err := config.ValidateSyslogUser(v); err != nil {
 			t.Errorf("ValidateSyslogUser(%q) = %v, want nil", v, err)
 		}
 	}
 	invalid := []string{"", "a/b", "has space", "u\n:omusrmsg:*", ".."}
 	for _, v := range invalid {
-		if err := config.ValidateSyslogUser(v, nil); err == nil {
+		if err := config.ValidateSyslogUser(v); err == nil {
 			t.Errorf("ValidateSyslogUser(%q) = nil, want error", v)
 		}
 	}

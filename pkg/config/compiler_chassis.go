@@ -231,12 +231,12 @@ func validateDeviceMapStrict(cfg *Config) error {
 		// searched for a NIC literally named "pci". Reuse the schema
 		// validators so strict compile and schema agree on the format.
 		if e.PCIAddr != "" {
-			if err := ValidatePCIAddr(e.PCIAddr, nil); err != nil {
+			if err := ValidatePCIAddr(e.PCIAddr); err != nil {
 				return fmt.Errorf("chassis device-map: interface %q has an invalid pci identity: %w", e.LogicalName, err)
 			}
 		}
 		if e.MAC != "" {
-			if err := ValidateMAC(e.MAC, nil); err != nil {
+			if err := ValidateMAC(e.MAC); err != nil {
 				return fmt.Errorf("chassis device-map: interface %q has an invalid mac identity: %w", e.LogicalName, err)
 			}
 		}

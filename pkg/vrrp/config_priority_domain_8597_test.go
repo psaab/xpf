@@ -41,7 +41,7 @@ func TestLenientLoadKeepsAnOutOfRangeVRRPPriority_8597(t *testing.T) {
 		}
 	}
 
-	if err := config.SchemaValidate(tree, nil); err == nil {
+	if err := config.SchemaValidate(tree); err == nil {
 		t.Error("the strict typed-leaf gate accepted vrrp-group priority 256; the " +
 			"lenient/strict split this finding rests on no longer exists")
 	}

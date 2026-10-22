@@ -100,7 +100,7 @@ func TestStaticRouteQualifiedNextHopMetric_SchemaGate12184(t *testing.T) {
 	for _, val := range []string{"-1", "4294967296", "abc"} {
 		for _, sp := range spellings {
 			t.Run("reject/"+sp.name+"/"+val, func(t *testing.T) {
-				if err := SchemaValidate(sp.tree(val), nil); err == nil {
+				if err := SchemaValidate(sp.tree(val)); err == nil {
 					t.Fatalf("qualified-next-hop metric %q (%s): expected SchemaValidate to reject, got nil", val, sp.name)
 				}
 			})
@@ -110,7 +110,7 @@ func TestStaticRouteQualifiedNextHopMetric_SchemaGate12184(t *testing.T) {
 	for _, val := range []string{"0", "100", "4294967295"} {
 		for _, sp := range spellings {
 			t.Run("accept/"+sp.name+"/"+val, func(t *testing.T) {
-				if err := SchemaValidate(sp.tree(val), nil); err != nil {
+				if err := SchemaValidate(sp.tree(val)); err != nil {
 					t.Fatalf("qualified-next-hop metric %q (%s): expected SchemaValidate to accept, got %v", val, sp.name, err)
 				}
 			})
@@ -150,7 +150,7 @@ func TestStaticRouteQualifiedNextHopMetric_SchemaGate12184(t *testing.T) {
 func TestStaticRouteQualifiedNextHopMetric_RejectNamesLeafAndValue12184(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set routing-options static route ::/0 qualified-next-hop 2001:db8::1 metric -7")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected a negative qualified-next-hop metric to be rejected at commit")
 	}
@@ -172,7 +172,7 @@ func TestStaticRouteQualifiedNextHopMetric_ValidCommits12184(t *testing.T) {
 		"set routing-options static route 10.0.0.0/24 qualified-next-hop 192.168.1.1 metric 20",
 		"set routing-options static route 10.0.0.0/24 qualified-next-hop 192.168.1.1 interface ge-0-0-0",
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("valid qualified-next-hop metric/preference/interface: SchemaValidate rejected: %v", err)
 	}
 	cfg := assertCommitAccepts(t, tree)
@@ -194,7 +194,7 @@ func TestStaticRouteQualifiedNextHopMetric_ValidCommits12184(t *testing.T) {
 		"set routing-options rib v4-static static route 10.1.0.0/24 qualified-next-hop 192.168.2.1 metric 0",
 		"set routing-instances VRF-A routing-options static route 10.2.0.0/24 qualified-next-hop 192.168.3.1 metric 4294967295",
 	} {
-		if err := SchemaValidate(flatTreeFromSets(t, set), nil); err != nil {
+		if err := SchemaValidate(flatTreeFromSets(t, set)); err != nil {
 			t.Errorf("valid metric at shared staticRouteNode parent for %q: %v", set, err)
 		}
 	}
@@ -225,7 +225,7 @@ func TestStaticRouteQualifiedNextHopPreferenceFlatChains12184(t *testing.T) {
 	for _, value := range []string{"0", "255", "abc"} {
 		for _, spelling := range spellings {
 			t.Run("reject/"+spelling.name+"/"+value, func(t *testing.T) {
-				err := SchemaValidate(spelling.tree(value), nil)
+				err := SchemaValidate(spelling.tree(value))
 				if err == nil {
 					t.Fatalf("expected invalid preference %q in %s to be rejected", value, spelling.name)
 				}

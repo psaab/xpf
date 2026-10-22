@@ -23,7 +23,7 @@ func TestGenerateRouteInvalidPrefixRejected15658(t *testing.T) {
 			tree := buildTree(t, []string{
 				"set routing-options generate route " + prefix + " discard",
 			})
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted generate prefix %q", prefix)
 			} else if !strings.Contains(err.Error(), prefix) {
 				t.Fatalf("SchemaValidate error should quote %q: %v", prefix, err)
@@ -60,7 +60,7 @@ func TestGenerateRouteInvalidPrefixHierarchical15658(t *testing.T) {
         }
     }
 }`)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted hierarchical 999.999.0.0/99")
 	}
 }
@@ -70,7 +70,7 @@ func TestGenerateRouteInstanceInvalidPrefix15658(t *testing.T) {
 		"set routing-instances BLUE instance-type virtual-router",
 		"set routing-instances BLUE routing-options generate route 999.999.0.0/99 discard",
 	})
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted per-instance 999.999.0.0/99")
 	}
 	if _, err := CompileConfig(tree); err == nil {
@@ -83,7 +83,7 @@ func TestGenerateRouteValidPrefixesAccepted15658(t *testing.T) {
 		tree := buildTree(t, []string{
 			"set routing-options generate route " + prefix + " discard",
 		})
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate rejected valid generate prefix %q: %v", prefix, err)
 		}
 		cfg, err := CompileConfig(tree)

@@ -51,7 +51,7 @@ func ipsecProposalSet(bodyLines ...string) []string {
 // the flip closes the #4313 silent-inert gap.
 func TestClosedWorldIPsecProposal_RejectsUnknownKeyword(t *testing.T) {
 	tree := buildTree(t, ipsecProposalSet("bogus aes-256-cbc"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("an unmodeled keyword under the closed-world IPsec proposal must be rejected at commit (RED on revert: silently accepted + dropped)")
 	}
@@ -75,7 +75,7 @@ func TestClosedWorldIPsecProposal_RejectsCryptoTypo(t *testing.T) {
 		"lifetime-kilobyte 100000",
 	} {
 		tree := buildTree(t, ipsecProposalSet(typo))
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("a typo'd IPsec proposal leaf %q must be rejected at commit, not silently dropped (crypto fails open)", typo)
 		}
@@ -104,7 +104,7 @@ func TestClosedWorldIPsecProposal_AcceptsValid(t *testing.T) {
 		`description "corp phase-2 proposal"`,
 	} {
 		tree := buildTree(t, ipsecProposalSet(leaf))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid IPsec proposal leaf %q must commit clean under closed-world, got: %v", leaf, err)
 		}
 	}
@@ -117,7 +117,7 @@ func TestClosedWorldIPsecProposal_AcceptsValid(t *testing.T) {
 		"lifetime-seconds 28800",
 		"lifetime-kilobytes 100000",
 	))
-	if err := SchemaValidate(full, nil); err != nil {
+	if err := SchemaValidate(full); err != nil {
 		t.Fatalf("a fully-specified IPsec proposal must commit clean under closed-world, got: %v", err)
 	}
 }
@@ -135,7 +135,7 @@ func TestClosedWorldIPsecProposal_LenientDoesNotBrick(t *testing.T) {
 		"set security ipsec policy pol1 proposals p1",
 	))
 	// strict gate rejects (the operator commit path)
-	if err := SchemaValidate(typoTree, nil); err == nil {
+	if err := SchemaValidate(typoTree); err == nil {
 		t.Fatal("precondition: strict SchemaValidate must reject the typo")
 	}
 	// lenient compile (the Store.Load / SyncApply path) must NOT brick.

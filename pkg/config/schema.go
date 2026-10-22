@@ -289,9 +289,9 @@ type schemaNode struct {
 	// treeValidator is the TREE-based cross-reference alternative to
 	// validator (#1319 PR 3): it validates the value against
 	// definitions collected from the candidate tree itself
-	// (collectSchemaRefs → schemaRefs), because SchemaValidate's cfg is
-	// always nil in production — validation runs BEFORE compile. A
-	// typed leaf sets EITHER validator OR treeValidator, never both.
+	// (collectSchemaRefs → schemaRefs), because validation runs BEFORE
+	// compile so no *Config exists (#16162). A typed leaf sets EITHER
+	// validator OR treeValidator, never both.
 	treeValidator treeLeafValidator
 	// nodeValidator validates a leaf's complete AST node when a grammar needs
 	// provenance (for example, a bracketed list or a hierarchical block) that

@@ -30,7 +30,7 @@ func TestValidateTimeZone_Table(t *testing.T) {
 		"GMT0",
 	}
 	for _, v := range valid {
-		if err := config.ValidateTimeZone(v, nil); err != nil {
+		if err := config.ValidateTimeZone(v); err != nil {
 			t.Errorf("ValidateTimeZone(%q) = %v, want nil", v, err)
 		}
 	}
@@ -47,7 +47,7 @@ func TestValidateTimeZone_Table(t *testing.T) {
 		"Zone.With.Dot",            // '.' component (not zoneinfo grammar)
 	}
 	for _, v := range invalid {
-		if err := config.ValidateTimeZone(v, nil); err == nil {
+		if err := config.ValidateTimeZone(v); err == nil {
 			t.Errorf("ValidateTimeZone(%q) = nil, want error", v)
 		}
 	}

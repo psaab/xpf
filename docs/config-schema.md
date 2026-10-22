@@ -10156,10 +10156,10 @@ Rules:
   (`ValidateInteger(min,max)`, `ValidateEnum([...])`, the IP family
   validators `ValidateIPAddress` / `ValidateIPv6Address` /
   `ValidateIPv4CIDR` / `ValidateIPv6CIDR` / `ValidatePREF64CIDR`)
-  or a bespoke `ValidateX(raw string, cfg *Config) error`. **cfg is always
-  nil in production** — both call sites run the gate BEFORE compile
-  (`configstore.compileTree` / `compileTreeLenient`), so a validator must
-  never depend on compiled state. Cross-reference validators use the
+  or a bespoke `ValidateX(raw string) error` (#16162: the former
+  always-nil `cfg *Config` parameter is retired — validation runs
+  BEFORE compile, so no compiled state exists to depend on).
+  Cross-reference validators use the
   TREE-based `treeValidator` field instead: `SchemaValidate` pre-collects
   referenceable definitions from the candidate tree into `schemaRefs`
   (`collectSchemaRefs`, e.g. the forwarding-class names) and hands them to

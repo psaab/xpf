@@ -10,7 +10,7 @@ func TestCoSFairnessRSSExpectationQueueKeyIsTyped11796(t *testing.T) {
 		"set class-of-service fairness rss-expectation interface ge-0/0/2 queue nope balanced",
 		"set system dataplane-type userspace",
 	)
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("SchemaValidate accepted a non-numeric RSS expectation queue key")
 	}

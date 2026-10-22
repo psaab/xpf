@@ -35,7 +35,7 @@ func flowAgingSchemaCheck(t *testing.T, cmd string) error {
 	if err := tree.SetPath(path); err != nil {
 		t.Fatalf("SetPath(%q): %v", cmd, err)
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 func TestFlowAgingSchemaRejectsBadValues(t *testing.T) {

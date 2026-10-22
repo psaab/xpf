@@ -280,8 +280,8 @@ func TestCoSPackedInvalidValueRejected15064(t *testing.T) {
 			if len(pErrs) != 0 {
 				t.Fatalf("packed parse: %v", pErrs)
 			}
-			bErr := SchemaValidate(bTree, nil)
-			pErr := SchemaValidate(pTree, nil)
+			bErr := SchemaValidate(bTree)
+			pErr := SchemaValidate(pTree)
 			if bErr == nil {
 				t.Fatalf("braced control %q was supposed to be REJECTED, got nil — cell would be vacuous", tc.braced)
 			}

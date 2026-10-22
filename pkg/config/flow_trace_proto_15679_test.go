@@ -32,13 +32,13 @@ func TestFlowTraceProto15679StrictRejects(t *testing.T) {
 	// SchemaValidate must also reject bogus/empty/0/256 and accept valid.
 	for _, bad := range []string{"bogus", `""`, "0", "256"} {
 		tree := buildTree(t, []string{"set security flow traceoptions packet-filter pf1 protocol " + bad})
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("SchemaValidate must reject protocol %s", bad)
 		}
 	}
 	for _, good := range []string{"tcp", "ospf", "47", "255"} {
 		tree := buildTree(t, []string{"set security flow traceoptions packet-filter pf1 protocol " + good})
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate rejected valid protocol %s: %v", good, err)
 		}
 	}
@@ -52,7 +52,7 @@ func TestFlowTraceProto15679StrictRejects(t *testing.T) {
 	if _, err := CompileConfig(htree); err == nil {
 		t.Fatalf("hierarchical bogus protocol must be rejected")
 	}
-	if err := SchemaValidate(htree, nil); err == nil {
+	if err := SchemaValidate(htree); err == nil {
 		t.Fatalf("SchemaValidate must reject hierarchical bogus protocol")
 	}
 }

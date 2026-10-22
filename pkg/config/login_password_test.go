@@ -34,7 +34,7 @@ func TestValidateCryptHash(t *testing.T) {
 		"!!",              // bare lock sentinel
 	}
 	for _, in := range accept {
-		if err := ValidateCryptHash(in, nil); err != nil {
+		if err := ValidateCryptHash(in); err != nil {
 			t.Errorf("ValidateCryptHash(%q) = %v, want accept", in, err)
 		}
 	}
@@ -68,7 +68,7 @@ func TestValidateCryptHash(t *testing.T) {
 		"$2b$12$saltsaltsalt", // truncated bcrypt payload
 	}
 	for _, in := range reject {
-		if err := ValidateCryptHash(in, nil); err == nil {
+		if err := ValidateCryptHash(in); err == nil {
 			t.Errorf("ValidateCryptHash(%q) = nil, want reject", in)
 		}
 	}
@@ -107,7 +107,7 @@ func TestValidateCryptHashErrorsNeverEchoValue16066(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateCryptHash(tc.in, nil)
+			err := ValidateCryptHash(tc.in)
 			if err == nil {
 				t.Fatalf("ValidateCryptHash(%q) = nil, want reject", tc.in)
 			}
@@ -225,30 +225,30 @@ func TestLoginUserEncryptedPasswordSchemaGate(t *testing.T) {
 		"$6$a$b",
 	} {
 		tree := mustTree(t, `set system login user op authentication encrypted-password "`+value+`"`)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("SchemaValidate accepted invalid per-user encrypted-password %q, want reject", value)
 		}
 		rootTree := mustTree(t, `set system root-authentication encrypted-password "`+value+`"`)
-		if err := SchemaValidate(rootTree, nil); err == nil {
+		if err := SchemaValidate(rootTree); err == nil {
 			t.Errorf("SchemaValidate accepted invalid root encrypted-password %q, want reject", value)
 		}
 	}
 
 	// Valid sha512crypt per-user → accept.
 	good := mustTree(t, `set system login user op authentication encrypted-password "$6$saltsalt$qFmFH.bQmmtXzyBY0s9v7Oicd2z4XSIecDzlB5KiA2/jctKu9YterLp8wwnSq.qc.eoxqOmSuNp2xS0ktL3nh/"`)
-	if err := SchemaValidate(good, nil); err != nil {
+	if err := SchemaValidate(good); err != nil {
 		t.Errorf("SchemaValidate rejected a valid per-user hash: %v", err)
 	}
 
 	// Valid yescrypt root → accept.
 	rootGood := mustTree(t, `set system root-authentication encrypted-password "$y$j9T$saltsaltsaltsalt$Uxvkjnhdr/2B6SINV1mXACdXVbd5kc899ms5aqhxMQD"`)
-	if err := SchemaValidate(rootGood, nil); err != nil {
+	if err := SchemaValidate(rootGood); err != nil {
 		t.Errorf("SchemaValidate rejected a valid root yescrypt hash: %v", err)
 	}
 
 	// Root-auth lock sentinel "*" → accept (the only way to lock root).
 	rootLock := mustTree(t, `set system root-authentication encrypted-password "*"`)
-	if err := SchemaValidate(rootLock, nil); err != nil {
+	if err := SchemaValidate(rootLock); err != nil {
 		t.Errorf("SchemaValidate rejected root lock sentinel: %v", err)
 	}
 }

@@ -33,11 +33,11 @@ func schemaValidateSrc(t *testing.T, src string) error {
 	if len(perrs) > 0 {
 		t.Fatalf("fixture failed to PARSE: %v\n%s", perrs, src)
 	}
-	cfg, err := CompileConfig(tree)
+	_, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("fixture failed to COMPILE: %v\n%s", err, src)
 	}
-	return SchemaValidate(tree, cfg)
+	return SchemaValidate(tree)
 }
 
 // TestSyslogFacilityKeyRejectsInjectableNames_6844 is the fail-on-revert guard.
@@ -203,7 +203,7 @@ func TestSyslogFacilityKeyGateIsSchemaLayer_6844(t *testing.T) {
 			"which is strict only on the commit path, or a persisted / peer-synced "+
 			"config carrying this name blackout-boots the node (#1960).", err)
 	}
-	if err := SchemaValidate(tree, cfg); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted the injectable facility; the gate is missing")
 	}
 	_ = cfg

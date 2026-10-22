@@ -40,13 +40,13 @@ func TestRPMIntervalSchemaGate_5723(t *testing.T) {
 	for _, pfx := range prefixes {
 		for _, v := range bad {
 			tree := flatTreeFromSets(t, pfx+" "+v)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Errorf("%s %q: expected SchemaValidate to reject, got nil", pfx, v)
 			}
 		}
 		for _, v := range good {
 			tree := flatTreeFromSets(t, pfx+" "+v)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Errorf("%s %q: expected SchemaValidate to accept, got %v", pfx, v, err)
 			}
 		}

@@ -56,7 +56,7 @@ func TestSSHNoPasswordKnobsCompiled15282(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compile: %v", err)
 			}
-			if err := SchemaValidate(tree, c); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected the password knobs: %v", err)
 			}
 			if c.System.Services == nil || c.System.Services.SSH == nil {
@@ -88,7 +88,7 @@ func TestSSHNoPasswordKnobsHierarchical15282(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected no-passwords: %v", err)
 	}
 	ssh := c.System.Services.SSH
@@ -99,11 +99,11 @@ func TestSSHNoPasswordKnobsHierarchical15282(t *testing.T) {
 
 func TestSSHUnknownKnobRejected15282(t *testing.T) {
 	tree := buildTree4303(t, []string{"set system services ssh bogus-knob-xyz"})
-	c, err := CompileConfig(tree)
+	_, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("compile (closed-world rejection is a SchemaValidate duty): %v", err)
 	}
-	err = SchemaValidate(tree, c)
+	err = SchemaValidate(tree)
 	if err == nil {
 		t.Fatalf("SchemaValidate accepted bogus-knob-xyz under system services ssh; want closed-world rejection (#15282)")
 	}
@@ -117,11 +117,10 @@ func TestSSHUnknownKnobRejected15282(t *testing.T) {
 		"set system services ssh protocol-version v2",
 		"set system services ssh rate-limit 20",
 	})
-	oc, err := CompileConfig(ok)
-	if err != nil {
+	if _, err := CompileConfig(ok); err != nil {
 		t.Fatalf("compile valid ssh stanza: %v", err)
 	}
-	if err := SchemaValidate(ok, oc); err != nil {
+	if err := SchemaValidate(ok); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid ssh stanza: %v", err)
 	}
 }

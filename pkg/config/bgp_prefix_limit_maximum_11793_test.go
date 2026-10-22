@@ -35,7 +35,7 @@ func TestBGPPrefixLimitMaximumSchemaGate11793(t *testing.T) {
 	bad := []string{"banana", "0", "-5", "4294967296", "99999999999999999999"}
 	for _, tok := range bad {
 		t.Run("reject-"+tok, func(t *testing.T) {
-			if err := SchemaValidate(bgpPrefixLimitTree11793(t, "inet", tok), nil); err == nil {
+			if err := SchemaValidate(bgpPrefixLimitTree11793(t, "inet", tok)); err == nil {
 				t.Fatalf("SchemaValidate accepted prefix-limit maximum %q; want commit rejection", tok)
 			} else if !strings.Contains(err.Error(), "maximum") {
 				t.Fatalf("rejection for maximum %q must name the maximum leaf: %v", tok, err)
@@ -45,7 +45,7 @@ func TestBGPPrefixLimitMaximumSchemaGate11793(t *testing.T) {
 			if len(perrs) > 0 {
 				t.Fatalf("fixture did not parse: %v", perrs)
 			}
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("hierarchical: SchemaValidate accepted prefix-limit maximum %q; want commit rejection", tok)
 			} else if !strings.Contains(err.Error(), "maximum") {
 				t.Fatalf("hierarchical: rejection for maximum %q must name the maximum leaf: %v", tok, err)
@@ -54,7 +54,7 @@ func TestBGPPrefixLimitMaximumSchemaGate11793(t *testing.T) {
 	}
 	for _, tok := range []string{"1", "1000", "4294967295"} {
 		t.Run("accept-"+tok, func(t *testing.T) {
-			if err := SchemaValidate(bgpPrefixLimitTree11793(t, "inet", tok), nil); err != nil {
+			if err := SchemaValidate(bgpPrefixLimitTree11793(t, "inet", tok)); err != nil {
 				t.Fatalf("SchemaValidate rejected in-range prefix-limit maximum %q: %v", tok, err)
 			}
 		})
@@ -161,7 +161,7 @@ func TestBGPPrefixLimitMaximumReachesTheRoutingInstanceCopy11793(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("fixture did not parse: %v", perrs)
 	}
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted an RI prefix-limit maximum banana; want commit rejection")
 	} else if !strings.Contains(err.Error(), "maximum") {
 		t.Fatalf("RI rejection must name the maximum leaf: %v", err)
@@ -194,7 +194,7 @@ func TestBGPPrefixLimitMaximumSchemaGateAllSites11793(t *testing.T) {
 				"set protocols bgp local-as 65001",
 				"set protocols bgp group external peer-as 65002",
 				tc.set)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted %q; want maximum-prefix token rejection", tc.set)
 			} else if !strings.Contains(err.Error(), "maximum") {
 				t.Fatalf("schema error for %q does not name maximum: %v", tc.set, err)

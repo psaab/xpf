@@ -101,7 +101,7 @@ func TestLoginUserClassHeadIsStillRejected9391(t *testing.T) {
 	if err := tree.SetPath(p); err != nil {
 		t.Fatalf("%v", err)
 	}
-	if err := SchemaValidateWithDefinitions(tree, tree, nil); err == nil {
+	if err := SchemaValidateWithDefinitions(tree, tree); err == nil {
 		t.Fatalf("a TYPED head must still be rejected — expanding the run is a READER " +
 			"change and must not widen what the commit gate accepts")
 	}

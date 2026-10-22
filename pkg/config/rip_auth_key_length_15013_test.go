@@ -123,11 +123,10 @@ func TestRIPAuthKeyLengthSchemaValidate15013(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := flatTreeFromSets(t, tc.lines...)
-			cfg, err := CompileConfigLenient(tree)
-			if err != nil {
+			if _, err := CompileConfigLenient(tree); err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
-			err = SchemaValidate(tree, cfg)
+			err := SchemaValidate(tree)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("SchemaValidate err=%v, wantErr=%v", err, tc.wantErr)
 			}
@@ -140,20 +139,20 @@ func TestRIPAuthKeyLengthSchemaValidate15013(t *testing.T) {
 
 // The validator unit: boundary and empty.
 func TestValidateRIPAuthKeyLength15013(t *testing.T) {
-	if err := ValidateRIPAuthKeyLength(ripKey16_15013, nil); err != nil {
+	if err := ValidateRIPAuthKeyLength(ripKey16_15013); err != nil {
 		t.Errorf("key16 rejected: %v", err)
 	}
-	if err := ValidateRIPAuthKeyLength(ripKey17_15013, nil); err == nil {
+	if err := ValidateRIPAuthKeyLength(ripKey17_15013); err == nil {
 		t.Error("key17 accepted by validator")
 	}
-	if err := ValidateRIPAuthKeyLength("", nil); err == nil {
+	if err := ValidateRIPAuthKeyLength(""); err == nil {
 		t.Error("empty key accepted by validator")
 	}
 	// Rune count, not bytes: 16 multi-byte runes (32 bytes) is legal.
-	if err := ValidateRIPAuthKeyLength(strings.Repeat("é", 16), nil); err != nil {
+	if err := ValidateRIPAuthKeyLength(strings.Repeat("é", 16)); err != nil {
 		t.Errorf("16-rune key rejected: %v", err)
 	}
-	if err := ValidateRIPAuthKeyLength(strings.Repeat("é", 17), nil); err == nil {
+	if err := ValidateRIPAuthKeyLength(strings.Repeat("é", 17)); err == nil {
 		t.Error("17-rune key accepted by validator")
 	}
 }

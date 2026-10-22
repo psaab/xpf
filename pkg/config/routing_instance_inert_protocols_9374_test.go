@@ -21,7 +21,7 @@ func warnFor9374(t *testing.T, text string) []string {
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	if err := SchemaValidateWithDefinitions(tr, tr, nil); err != nil {
+	if err := SchemaValidateWithDefinitions(tr, tr); err != nil {
 		t.Fatalf("STRICT REJECT — the arm cannot be read: %v", err)
 	}
 	cfg, err := CompileConfig(tr)

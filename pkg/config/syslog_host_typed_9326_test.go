@@ -29,7 +29,7 @@ func TestSyslogHostLeafIsTyped9326(t *testing.T) {
 		{"empty", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateSyslogHost(tc.host, nil)
+			err := ValidateSyslogHost(tc.host)
 			if tc.wantErr && err == nil {
 				t.Errorf("#9326: host %q must be REFUSED at commit; it was accepted and "+
 					"would be handed to the dialer's resolver", tc.host)
@@ -67,7 +67,7 @@ func TestSyslogHostLeafWiring9326(t *testing.T) {
 	// The validator wired must be the one that admits addresses AND names: a
 	// stricter one (IP-only) would refuse `logs.example.net`, which is the
 	// common configuration.
-	if err := node.validator("logs.example.net", nil); err != nil {
+	if err := node.validator("logs.example.net"); err != nil {
 		t.Errorf("the wired validator refuses a plain hostname (%v) — a syslog target "+
 			"is routinely a name, and refusing it would be a worse defect than the "+
 			"untyped leaf", err)

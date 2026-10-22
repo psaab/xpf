@@ -97,7 +97,7 @@ const (
 // class and the expected form; the id is echoed only in the unreachable
 // default arm where it is already a recognized non-secret algorithm token.
 // The schema-walk redaction (#8434) is retained as defense in depth.
-func ValidateCryptHash(raw string, _ *Config) error {
+func ValidateCryptHash(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected a crypt(3) hash, e.g. from `openssl passwd -6`)")
 	}
@@ -237,7 +237,7 @@ const MaxRingEntries = int64(16384)
 // per-binding UMEM preallocations and could OOM at bring-up. The power-of-two
 // requirement matches the helper's own rounding so the operator-visible
 // number equals the allocated ring depth.
-func ValidateRingEntries(raw string, _ *Config) error {
+func ValidateRingEntries(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return fmt.Errorf("missing value (expected integer)")
 	}
@@ -339,7 +339,7 @@ func validateDNSNameShape(name, what string) error {
 // embedded space (a second chrony directive token such as `trust`/`prefer`), a
 // control character, or a malformed value — any of which would inject an extra
 // token into the rendered chrony source line or fail the chrony reload (#4902).
-func ValidateNTPServer(raw string, _ *Config) error {
+func ValidateNTPServer(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing NTP server (expected an IP address or hostname)")
 	}
@@ -363,7 +363,7 @@ func ValidateNTPServer(raw string, _ *Config) error {
 // Same admission shape as ValidateNTPServer, which is the closest sibling: both
 // are "an address or a name" leaves that end up in a dialer. The noun differs so
 // the message names the leaf the operator actually typed.
-func ValidateSyslogHost(raw string, _ *Config) error {
+func ValidateSyslogHost(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing syslog host (expected an IP address or hostname)")
 	}
@@ -378,7 +378,7 @@ func ValidateSyslogHost(raw string, _ *Config) error {
 // is accepted (the compiler/renderer skips it); a space/control/malformed value
 // is rejected so it cannot inject an extra token into the resolved.conf
 // `Domains=` line or the resolv.conf `search` line (#4902).
-func ValidateDNSDomain(raw string, _ *Config) error {
+func ValidateDNSDomain(raw string) error {
 	if raw == "" {
 		return nil
 	}
@@ -391,7 +391,7 @@ func ValidateDNSDomain(raw string, _ *Config) error {
 // Empty is the unset form and remains valid: compileSystem leaves it empty and
 // applyHostname's empty early-return is load-bearing for config loads that do
 // not configure a system name.
-func ValidateSystemHostname(raw string, _ *Config) error {
+func ValidateSystemHostname(raw string) error {
 	if raw == "" {
 		return nil
 	}
@@ -416,7 +416,7 @@ const maxSystemHostnameLen = 64
 // metacharacter so a crafted token cannot smuggle a second sshd directive token
 // onto the rendered KexAlgorithms/Ciphers/MACs line or fail the sshd reload
 // (#4902).
-func ValidateSSHAlgorithm(raw string, _ *Config) error {
+func ValidateSSHAlgorithm(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing SSH algorithm name")
 	}
@@ -433,7 +433,7 @@ func ValidateSSHAlgorithm(raw string, _ *Config) error {
 // filename (/etc/rsyslog.d/10-xpf-<name>.conf), so it must be a safe base name
 // with no path separator, no `..`, no whitespace, and no rsyslog
 // metacharacters (#4902).
-func ValidateSyslogFileName(raw string, _ *Config) error {
+func ValidateSyslogFileName(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing syslog file name")
 	}
@@ -450,7 +450,7 @@ func ValidateSyslogFileName(raw string, _ *Config) error {
 // The value is formatted into a drop-in filename and the rsyslog
 // `:omusrmsg:<user>` directive, so a path separator, whitespace, or control
 // character is rejected (#4902).
-func ValidateSyslogUser(raw string, _ *Config) error {
+func ValidateSyslogUser(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing syslog user")
 	}
@@ -589,7 +589,7 @@ const maxSyslogFacilityLen = 64
 // commit-check path, and Store.compileTreeLenient downgrades a violation to a
 // warning on the tolerant Load / SyncApply ingress. So a persisted or
 // peer-synced config carrying a name this rejects still BOOTS, per #1960.
-func ValidateSyslogFacility(raw string, _ *Config) error {
+func ValidateSyslogFacility(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing syslog facility")
 	}
@@ -703,7 +703,7 @@ const maxUnixSocketPathLen = 107
 // commit at all. Rejecting `.`/`..` here removes the traversal spelling most
 // likely to be written by hand; it does NOT make the runtime path
 // alias-proof — a symlinked parent still aliases (#7139).
-func ValidateUnixSocketPath(raw string, _ *Config) error {
+func ValidateUnixSocketPath(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected an absolute socket path, e.g. /run/xpf/userspace-dp.sock)")
 	}
@@ -817,7 +817,7 @@ const maxStateFilePathLen = 4096
 // may manage (unlink). Reserved reset-gate/identity paths are rejected:
 // the sweep deletes exactly what this names, so an alias would delete a
 // gate or identity file instead of helper state (#10769 d05-F6).
-func ValidateStateFilePath(raw string, _ *Config) error {
+func ValidateStateFilePath(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected an absolute state-file path, e.g. /var/lib/xpf/userspace-dp.json)")
 	}
@@ -866,7 +866,7 @@ func ValidateStateFilePath(raw string, _ *Config) error {
 // keeps booting (#1960) and the render belt (zoneinfoTarget in
 // pkg/daemon/daemon_system.go) refuses an out-of-root symlink target for a
 // value that slips through.
-func ValidateTimeZone(raw string, _ *Config) error {
+func ValidateTimeZone(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected a time zone, e.g. UTC or America/Los_Angeles)")
 	}

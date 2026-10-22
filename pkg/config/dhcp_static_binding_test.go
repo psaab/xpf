@@ -276,8 +276,8 @@ func TestDHCPStaticBindingSchemaRejectsBadMAC(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	cfg, _ := CompileConfig(tree)
-	err := SchemaValidate(tree, cfg)
+	_, _ = CompileConfig(tree)
+	err := SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), "static-binding") {
 		t.Fatalf("want schema MAC rejection, got %v", err)
 	}
@@ -300,8 +300,8 @@ func TestDHCPStaticBindingSchemaRejectsBadFixedAddress(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	cfg, _ := CompileConfig(tree)
-	err := SchemaValidate(tree, cfg)
+	_, _ = CompileConfig(tree)
+	err := SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), "fixed-address") {
 		t.Fatalf("want schema fixed-address rejection, got %v", err)
 	}

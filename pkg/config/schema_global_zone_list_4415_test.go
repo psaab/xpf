@@ -85,7 +85,7 @@ func TestGlobalPolicyZoneListAccepted4626(t *testing.T) {
 				t.Fatalf("CompileConfigLenient: %v", err)
 			}
 			// The zone LIST must no longer be schema-rejected.
-			if err := SchemaValidate(tree, cfg); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected a multi-zone scope: %v", err)
 			}
 			if len(cfg.Security.GlobalPolicies) != 1 {

@@ -34,7 +34,7 @@ func TestValidateInterfaceNameAcceptsRealNames_6834(t *testing.T) {
 		"ge-0/0/1234567890",         // an existing 17-char fixture: NO length bound
 		"a", "A", "0", "x_y", "x.y", // boundary shapes of the allowed class
 	} {
-		if err := ValidateInterfaceName(name, nil); err != nil {
+		if err := ValidateInterfaceName(name); err != nil {
 			t.Errorf("ValidateInterfaceName(%q) must ACCEPT a real interface name, got %v", name, err)
 		}
 	}
@@ -51,7 +51,7 @@ func TestValidateInterfaceNameRejectsMultiPattern_6834(t *testing.T) {
 		{" ge0", "whitespace"},
 		{"ge0 ", "whitespace"},
 	} {
-		err := ValidateInterfaceName(tc.name, nil)
+		err := ValidateInterfaceName(tc.name)
 		if err == nil {
 			t.Errorf("ValidateInterfaceName(%q) must REJECT — it would claim more than one interface", tc.name)
 			continue
@@ -73,7 +73,7 @@ func TestValidateInterfaceNameRejectsMultiPattern_6834(t *testing.T) {
 // silently matches every interface it globs.
 func TestValidateInterfaceNameRejectsGlobs_6834(t *testing.T) {
 	for _, name := range []string{"ge*", "ge?", "ge[0-9]", "*", "en[p]5s0"} {
-		err := ValidateInterfaceName(name, nil)
+		err := ValidateInterfaceName(name)
 		if err == nil {
 			t.Errorf("ValidateInterfaceName(%q) must REJECT a glob metacharacter", name)
 			continue
@@ -89,7 +89,7 @@ func TestValidateInterfaceNameRejectsGlobs_6834(t *testing.T) {
 // in an interface name. ':' matters because the kernel itself rejects it.
 func TestValidateInterfaceNameRejectsOtherInvalid_6834(t *testing.T) {
 	for _, name := range []string{"ge:0", "ge;0", "ge$0", "ge`0", "ge\"0", "ge'0", "gé0", ""} {
-		if err := ValidateInterfaceName(name, nil); err == nil {
+		if err := ValidateInterfaceName(name); err == nil {
 			t.Errorf("ValidateInterfaceName(%q) must REJECT", name)
 		}
 	}
@@ -107,7 +107,7 @@ func TestAcceptedNamesRenderAsExactlyOnePattern_6834(t *testing.T) {
 	for _, name := range []string{
 		"ge-0/0/0", "ge-0-0-0", "reth0.50", "enp183s0f0v0", "ge-0/0/1234567890",
 	} {
-		if err := ValidateInterfaceName(name, nil); err != nil {
+		if err := ValidateInterfaceName(name); err != nil {
 			t.Fatalf("fixture %q must be accepted: %v", name, err)
 		}
 		if !interfaceNameRendersAsOnePattern(name) {
@@ -136,7 +136,7 @@ func TestInterfaceNameGateIsWiredIntoTheSchema_6834(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			return err
 		}
-		return SchemaValidate(tree, nil)
+		return SchemaValidate(tree)
 	}
 
 	if err := commit("ge-0/0/0"); err != nil {

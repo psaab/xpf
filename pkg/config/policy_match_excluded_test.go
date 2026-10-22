@@ -153,11 +153,10 @@ func TestPolicyMatchExcludedSchemaValidates(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
+	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Errorf("SchemaValidate rejected the excluded match leaves: %v", err)
 	}
 }

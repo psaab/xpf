@@ -69,7 +69,7 @@ func TestUnit5829_MalformedRejectedAtCommit(t *testing.T) {
 			tree := flatTreeFromSets(t, tc.cmds...)
 
 			// Primary gate: schema keyValidator at commit-check.
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted malformed unit; want commit rejection")
 			} else if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("SchemaValidate error must name the bad unit token %s: %v", tc.want, err)
@@ -109,7 +109,7 @@ func TestUnit5829_ValidUnitCompilesFilterReachesMap(t *testing.T) {
 	}
 	for _, tc := range cases {
 		tree := flatTreeFromSets(t, tc.cmds...)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate rejected a valid unit %d: %v", tc.wantNum, err)
 		}
 		cfg, err := CompileConfig(tree)

@@ -112,12 +112,12 @@ func ifaceNumLenientMustWarn9899(t *testing.T, tree *ConfigTree, what string, su
 
 func ifaceNumSchemaFlat9899(t *testing.T, cmds ...string) error {
 	t.Helper()
-	return SchemaValidate(ifaceNumFlatTree9899(t, cmds...), nil)
+	return SchemaValidate(ifaceNumFlatTree9899(t, cmds...))
 }
 
 func ifaceNumSchemaHier9899(t *testing.T, text string) error {
 	t.Helper()
-	return SchemaValidate(ifaceNumHierTree9899(t, text), nil)
+	return SchemaValidate(ifaceNumHierTree9899(t, text))
 }
 
 func ifaceNumAssertSchema9899(t *testing.T, what, leaf string, err error, accept bool) {

@@ -87,7 +87,7 @@ interfaces { eth0 { unit 0 { family inet { address 192.0.2.1/24; } } } eth1 { un
 	if len(errs) > 0 {
 		t.Fatalf("parse: %v", errs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate must accept named book: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -125,7 +125,7 @@ interfaces { eth0 { unit 0 { family inet { address 192.0.2.1/24; } } } eth1 { un
 
 func TestNamedAddressBookFlatSet15672(t *testing.T) {
 	tree := buildTree(t, namedBookLines15672())
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate must accept named book (flat): %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -164,7 +164,7 @@ func TestGlobalAndZoneBookDescription15672(t *testing.T) {
 		"set security zones security-zone trust address-book description localscope",
 		"set security zones security-zone trust address-book address b 10.0.0.2/32",
 	})
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate book descriptions: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -297,7 +297,7 @@ func TestNamedBookMultiZoneAttach15672(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("schema multi-zone attach: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

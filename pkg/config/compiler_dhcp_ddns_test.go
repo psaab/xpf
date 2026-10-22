@@ -229,7 +229,7 @@ func TestDHCPDDNSSchemaAcceptsValidLeaves(t *testing.T) {
 		"set system services dhcp-local-server dynamic-dns conflict-policy replace-owned",
 		"set system services dhcp-local-server dynamic-dns backend rfc2136",
 	})
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected valid DDNS leaves: %v", err)
 	}
 }
@@ -247,7 +247,7 @@ func TestDHCPDDNSSourceBindingLeaves(t *testing.T) {
 		"set system services dhcp-local-server dynamic-dns routing-instance VRF-WAN",
 	}
 	tree := buildTree(t, lines)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected source-binding leaves: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -502,7 +502,7 @@ func TestDHCPDDNSSchemaRejectsBadEnumAndTTL(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := buildTree(t, []string{tc.line})
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted invalid leaf %q", tc.line)
 			}
 		})

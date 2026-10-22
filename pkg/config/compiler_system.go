@@ -226,7 +226,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 	// persisted value and records a warning (#1960 no-brick).
 	if len(node.Keys) >= 3 && node.Keys[1] == "host-name" {
 		hostName := node.Keys[2]
-		if err := ValidateSystemHostname(hostName, nil); err != nil {
+		if err := ValidateSystemHostname(hostName); err != nil {
 			if opts.lenientSystemHostname {
 				if cfg != nil {
 					cfg.Warnings = append(cfg.Warnings,

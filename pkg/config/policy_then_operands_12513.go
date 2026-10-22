@@ -130,7 +130,7 @@ func checkPolicyThenOperand12513(cfg *Config, policy, termName, leaf, value stri
 			"policy-options policy-statement %q term %q then %s: the schema declares no validator for this leaf",
 			policy, termName, leaf)
 	}
-	if err := validate(value, cfg); err != nil {
+	if err := validate(value); err != nil {
 		return fmt.Errorf(
 			"policy-options policy-statement %q term %q then %s: invalid value %q: %v",
 			policy, termName, leaf, value, err)
@@ -142,7 +142,7 @@ func checkPolicyThenOperand12513(cfg *Config, policy, termName, leaf, value stri
 // reuse their schema validator, so the reason matches the child spelling's.
 func policyThenOperandReason12513(cfg *Config, leaf, value string) string {
 	if validate := policyThenLeafValidator12513(leaf); validate != nil {
-		if err := validate(value, cfg); err != nil {
+		if err := validate(value); err != nil {
 			return err.Error()
 		}
 	}

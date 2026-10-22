@@ -46,14 +46,14 @@ func TestVRRPGroupIDValidated8839(t *testing.T) {
 
 	// The defect: a non-numeric id must now be REFUSED by the identity
 	// validator rather than committing to a group that does not exist.
-	if err := ValidateVRRPGroupID("foo", nil); err == nil {
+	if err := ValidateVRRPGroupID("foo"); err == nil {
 		t.Errorf("ValidateVRRPGroupID accepted %q. The compiler parses this token "+
 			"with strconv.Atoi and silently discards the whole group when it "+
 			"fails, so accepting it commits a group that then does not exist.", "foo")
 	}
 	// DEGENERACY CONTROL: a validator that rejects everything passes the line
 	// above just as well.
-	if err := ValidateVRRPGroupID("1", nil); err != nil {
+	if err := ValidateVRRPGroupID("1"); err != nil {
 		t.Errorf("ValidateVRRPGroupID rejected a valid numeric id: %v", err)
 	}
 

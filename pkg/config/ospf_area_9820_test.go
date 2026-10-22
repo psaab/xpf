@@ -20,7 +20,7 @@ func schemaErr9820(t *testing.T, cmds ...string) error {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 func TestOSPFAreaMappedRefused_9820(t *testing.T) {
@@ -77,7 +77,7 @@ protocols {
 	if len(perrs) != 0 {
 		t.Fatalf("parse errors: %v", perrs)
 	}
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil || !strings.Contains(err.Error(), "whitespace is not allowed") {
 		t.Fatalf("padded area id must be refused with the padding reason, got: %v", err)
 	}
@@ -90,12 +90,12 @@ func TestValidateOSPFAreaBoundary_9820(t *testing.T) {
 		"\n0.0.0.0", "0.0.0.0\n", " 0.0.0.0 ", "\t0.0.0.0\t",
 		"0 1", "not-an-area", "2001:db8::1",
 	} {
-		if err := ValidateOSPFArea(bad, nil); err == nil {
+		if err := ValidateOSPFArea(bad); err == nil {
 			t.Errorf("ValidateOSPFArea(%q) accepted, want rejection", bad)
 		}
 	}
 	for _, ok := range []string{"0", "0.0.0.0", "10.1.2.3", "4294967295"} {
-		if err := ValidateOSPFArea(ok, nil); err != nil {
+		if err := ValidateOSPFArea(ok); err != nil {
 			t.Errorf("ValidateOSPFArea(%q) = %v, want nil", ok, err)
 		}
 	}

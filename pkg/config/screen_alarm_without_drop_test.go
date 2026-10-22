@@ -40,7 +40,7 @@ func TestScreenAlarmWithoutDropCompiles(t *testing.T) {
 		t.Fatalf("the sibling land check must still compile alongside alarm-without-drop")
 	}
 	// The config-mode schema must recognize the leaf (commit-check + completion).
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid alarm-without-drop leaf: %v", err)
 	}
 }

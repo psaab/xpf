@@ -37,7 +37,7 @@ func TestInterfaceSpeedTypedLeafAndLineRate11797(t *testing.T) {
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			tree := interfaceSpeedTree11797(t, tc.value)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected valid speed %q: %v", tc.value, err)
 			}
 			cfg, err := CompileConfig(tree)
@@ -61,7 +61,7 @@ func TestInterfaceSpeedInvalidStrictRejectsAndLenientWarns11797(t *testing.T) {
 	for _, value := range []string{"1000", "1000m", "1.5g", "bogus", "autofoo"} {
 		t.Run(value, func(t *testing.T) {
 			tree := interfaceSpeedTree11797(t, value)
-			if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "speed") {
+			if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "speed") {
 				t.Fatalf("SchemaValidate(%q) = %v, want a speed rejection", value, err)
 			}
 			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "speed") {

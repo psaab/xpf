@@ -92,7 +92,7 @@ func TestEmbeddedRedactedPlaceholderIngestRefused15209(t *testing.T) {
 	} else if !errors.Is(err, errRedactionPlaceholderIngest) {
 		t.Fatalf("checkRedactionPlaceholder err = %v, want errRedactionPlaceholderIngest", err)
 	}
-	if err := SchemaValidate(reingested, nil); err == nil {
+	if err := SchemaValidate(reingested); err == nil {
 		t.Fatal("SchemaValidate accepted a redacted embedded command; want rejection")
 	} else if !errors.Is(err, errRedactionPlaceholderIngest) {
 		t.Fatalf("SchemaValidate err = %v, want errRedactionPlaceholderIngest", err)
@@ -178,7 +178,7 @@ event-options {
 	if err := checkRedactionPlaceholder(cleartext); err != nil {
 		t.Fatalf("guard rejected a cleartext embedded credential command: %v", err)
 	}
-	if err := SchemaValidate(cleartext, nil); err != nil {
+	if err := SchemaValidate(cleartext); err != nil {
 		t.Fatalf("SchemaValidate rejected a cleartext embedded credential command: %v", err)
 	}
 }

@@ -29,7 +29,7 @@ func hb166SchemaCheck(t *testing.T, cmds ...string) error {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 func hb166Compile(t *testing.T, cmds ...string) *Config {

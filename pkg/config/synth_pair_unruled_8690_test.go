@@ -74,7 +74,7 @@ func TestEnumPairComesFromTheValidatorNotTheExamples_8690(t *testing.T) {
 	// value the schema refuses — which is exactly what made 103 sites unrulable
 	// before #8662 (probed with an invented value the leaf rejects).
 	for _, v := range []string{v1, v2} {
-		if err := n.validator(v, nil); err != nil {
+		if err := n.validator(v); err != nil {
 			t.Errorf("recovered value %q is REJECTED by the leaf's validator: %v", v, err)
 		}
 	}
@@ -93,11 +93,11 @@ func TestEnumPairDeclinesWhenThereIsNoSetToRead_8690(t *testing.T) {
 		}},
 		{"a validator that accepts anything", &schemaNode{
 			valueType: ValueEnumOf,
-			validator: func(string, *Config) error { return nil },
+			validator: func(string) error { return nil },
 		}},
 		{"a rejection that does not enumerate", &schemaNode{
 			valueType: ValueEnumOf,
-			validator: func(string, *Config) error { return errNoEnumeration8690 },
+			validator: func(string) error { return errNoEnumeration8690 },
 		}},
 		{"a single-valued set", &schemaNode{
 			valueType: ValueEnumOf,
@@ -126,7 +126,7 @@ func TestEnumPairRefusesAValueTheValidatorWouldReject_8690(t *testing.T) {
 	// re-verification returns ("liar-a", "liar-b") — both rejected.
 	lying := &schemaNode{
 		valueType: ValueEnumOf,
-		validator: func(raw string, _ *Config) error {
+		validator: func(raw string) error {
 			if raw == "real-c" {
 				return nil
 			}
@@ -145,7 +145,7 @@ func TestEnumPairRefusesAValueTheValidatorWouldReject_8690(t *testing.T) {
 	// for the lie, not because the helper stopped working.
 	honest := &schemaNode{
 		valueType: ValueEnumOf,
-		validator: func(raw string, _ *Config) error {
+		validator: func(raw string) error {
 			switch raw {
 			case "liar-a", "real-c":
 				return nil
@@ -163,13 +163,12 @@ func TestEnumPairRefusesAValueTheValidatorWouldReject_8690(t *testing.T) {
 	}
 }
 
-// A validator that dereferences the nil *Config must not take the census down
-// with it: the census has no config at this point, and "cannot answer" is a
-// verdict, not a crash.
+// A panicking validator must not take the census down with it:
+// "cannot answer" is a verdict, not a crash.
 func TestEnumPairSurvivesAPanickingValidator_8690(t *testing.T) {
 	n := &schemaNode{
 		valueType: ValueEnumOf,
-		validator: func(_ string, cfg *Config) error { return cfg.validate8690() },
+		validator: func(_ string) error { panic("validator panic (#8690)") },
 	}
 	if _, _, ok := enumPairFromValidator(n); ok {
 		t.Error("a panicking validator must yield no pair, not a pair")
@@ -203,7 +202,7 @@ func TestTheNewValueTypesSynthesizeAcceptedPairs_8690(t *testing.T) {
 				return
 			}
 			for _, v := range []string{v1, v2} {
-				if err := n.validator(v, nil); err != nil {
+				if err := n.validator(v); err != nil {
 					t.Errorf("synthesized %q is REJECTED by the leaf's own validator: "+
 						"%v. Probing with a value the schema refuses is what made 103 "+
 						"sites unrulable before #8662 — the census would record "+
@@ -306,13 +305,6 @@ var errNoEnumeration8690 = errNoEnum8690{}
 type errNoEnum8690 struct{}
 
 func (errNoEnum8690) Error() string { return "invalid value" }
-
-// validate8690 exists only to be called on a nil receiver, so the panicking
-// validator in the cell above panics for a REAL reason.
-func (c *Config) validate8690() error { return c.Warnings8690() }
-
-// Warnings8690 dereferences the receiver.
-func (c *Config) Warnings8690() error { _ = c.System; return nil }
 
 // readInventory8690 returns the site keys currently in the checked-in
 // inventory.

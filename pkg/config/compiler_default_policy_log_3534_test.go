@@ -103,11 +103,10 @@ func TestDefaultPolicyLogSchemaValidates(t *testing.T) {
 			"set security policies default-policy permit-all",
 			"set security policies default-policy-log " + flag,
 		})
-		cfg, err := CompileConfig(tree)
-		if err != nil {
+		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("CompileConfig(%q): %v", flag, err)
 		}
-		if err := SchemaValidate(tree, cfg); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("SchemaValidate rejected valid default-policy-log %q: %v", flag, err)
 		}
 	}
@@ -116,7 +115,7 @@ func TestDefaultPolicyLogSchemaValidates(t *testing.T) {
 	bogus := buildDefaultPolicyLogTree(t, []string{
 		"set security policies default-policy allow-everything",
 	})
-	if err := SchemaValidate(bogus, nil); err == nil {
+	if err := SchemaValidate(bogus); err == nil {
 		t.Errorf("SchemaValidate accepted bogus default-policy value (enum guard regressed)")
 	}
 }

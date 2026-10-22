@@ -132,7 +132,7 @@ func TestRADNSServerValidatorCoversEverySlot_6695(t *testing.T) {
 	}
 	for _, cmds := range reject {
 		tree := buildTreeFromSet(t, cmds)
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Errorf("SchemaValidate accepted %v; a non-IPv6 RDNSS address in a "+
 				"non-zero slot must be rejected", cmds)
@@ -144,7 +144,7 @@ func TestRADNSServerValidatorCoversEverySlot_6695(t *testing.T) {
 	}
 	// Over-reject control: a well-formed two-address list in the same shape.
 	ok := buildTreeFromSet(t, []string{base + " [ 2001:db8::53 2001:db8::54 ]"})
-	if err := SchemaValidate(ok, nil); err != nil {
+	if err := SchemaValidate(ok); err != nil {
 		t.Errorf("SchemaValidate rejected a well-formed RDNSS list: %v", err)
 	}
 }

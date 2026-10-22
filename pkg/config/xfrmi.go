@@ -462,7 +462,7 @@ func (c *Config) secureTunnelBindingForRef(ref string) (string, secureTunnelBind
 // XFRMIfNameAndID's if_id-0 check — by the compiled-config strict gate in
 // compiler_ipsec_bindiface.go, which additionally catches group-expanded /
 // packed forms the schema layer can miss (#1960 layered-defense doctrine).
-func ValidateSecureTunnelBindInterface(raw string, _ *Config) error {
+func ValidateSecureTunnelBindInterface(raw string) error {
 	name := strings.TrimSpace(raw)
 	if name == "" {
 		return fmt.Errorf(

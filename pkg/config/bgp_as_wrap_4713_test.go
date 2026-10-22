@@ -152,7 +152,7 @@ func TestBGPASWrapCommitRejected(t *testing.T) {
 	} {
 		t.Run(set, func(t *testing.T) {
 			tree := buildTreeFromSet(t, []string{set})
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted out-of-range AS %q; expected commit rejection", set)
 			}
 		})
@@ -170,7 +170,7 @@ func TestBGPASValidUnchanged(t *testing.T) {
 				"set protocols bgp group EXT neighbor 10.0.2.1 peer-as " + itoaU32(as),
 			}
 			tree := buildTreeFromSet(t, sets)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected valid peer-as %d: %v", as, err)
 			}
 			cfg, err := CompileConfig(tree)

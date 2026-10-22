@@ -23,7 +23,7 @@ func hierTree15650(t *testing.T, text string) *ConfigTree {
 
 func strictCompile15650(t *testing.T, tree *ConfigTree) *Config {
 	t.Helper()
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -178,7 +178,7 @@ func TestPortMirroringDuplicateIngressAcrossSplitStillRejected15650(t *testing.T
     }
 }`
 	tree := hierTree15650(t, text)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	_, err := CompileConfig(tree)

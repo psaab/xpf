@@ -43,7 +43,7 @@ func TestFBFTwoUpstreamFixtureCompiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile error: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("schema validation: %v", err)
 	}
 

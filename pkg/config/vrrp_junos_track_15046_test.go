@@ -324,7 +324,7 @@ func TestVRRPJunosSpellingsSchemaValidate15046(t *testing.T) {
 		"no-preempt":  noPreemptCIDR,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := SchemaValidate(parseHier(t, text), nil); err != nil {
+			if err := SchemaValidate(parseHier(t, text)); err != nil {
 				t.Fatalf("SchemaValidate must accept %s: %v", name, err)
 			}
 		})

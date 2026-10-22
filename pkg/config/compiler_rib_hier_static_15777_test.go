@@ -48,7 +48,7 @@ func findRoute15777(t *testing.T, routes []*StaticRoute, dst string) *StaticRout
 
 func TestHierarchicalRibStaticRoutes15777(t *testing.T) {
 	const src = `routing-options { rib { inet.0 { static { route 10.77.0.0/16 { next-hop 10.0.0.1; } route 10.78.0.0/16 { next-hop 10.0.0.2; preference 77; } } } inet6.0 { static { route 2001:db8:77::/48 { next-hop 2001:db8::1; } } } } }`
-	if err := SchemaValidate(hierTree(t, src), nil); err != nil {
+	if err := SchemaValidate(hierTree(t, src)); err != nil {
 		t.Fatalf("SchemaValidate must accept hierarchical rib: %v", err)
 	}
 	for _, compile := range []struct {

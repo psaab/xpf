@@ -37,7 +37,7 @@ func TestLLDPInterfacePackedDisable14616(t *testing.T) {
 		{"hierarchical packed under protocols brace", `protocols lldp { interface ge-0/0/0 disable; }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := SchemaValidate(parseLLDP14616(t, tc.text), nil); err != nil {
+			if err := SchemaValidate(parseLLDP14616(t, tc.text)); err != nil {
 				t.Fatalf("SchemaValidate rejected packed disable: %v", err)
 			}
 			lldp := compiledLLDP14616(t, tc.text)
@@ -88,7 +88,7 @@ func TestLLDPInterfacePackedDisable14616(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := parseLLDP14616(t, tc.text)
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted %q, want rejection naming %q", tc.text, tc.want)
 			}
@@ -112,7 +112,7 @@ func TestLLDPInterfacePackedDisable14616(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			t.Fatalf("SetPath: %v", err)
 		}
-		if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "frobnicate") {
+		if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "frobnicate") {
 			t.Fatalf("SchemaValidate = %v, want rejection naming frobnicate", err)
 		}
 	})

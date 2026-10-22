@@ -139,7 +139,7 @@ func TestLLDPNamedInterfaceControlsStillCompile15138(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected flat named controls: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

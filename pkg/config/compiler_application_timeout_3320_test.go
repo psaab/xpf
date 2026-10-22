@@ -242,14 +242,14 @@ func TestApplicationSpec_SchemaGate_TopLevelTimeout(t *testing.T) {
 	reject := func(leaf, val string) {
 		t.Helper()
 		tree := flatTreeFromSets(t, "set applications application X "+leaf+" "+val)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("%s %q: expected SchemaValidate to reject, got nil", leaf, val)
 		}
 	}
 	accept := func(leaf, val string) {
 		t.Helper()
 		tree := flatTreeFromSets(t, "set applications application X "+leaf+" "+val)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("%s %q: expected SchemaValidate to accept, got %v", leaf, val, err)
 		}
 	}

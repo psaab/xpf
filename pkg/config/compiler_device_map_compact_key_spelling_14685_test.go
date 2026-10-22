@@ -25,7 +25,7 @@ import (
 
 func TestDeviceMapCompactKeyPCIConsersTail14685(t *testing.T) {
 	tree := hierTree(t, `chassis { device-map { interface ge-0/0/3 key pci pci 0000:01:00.0; } }`)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate compact key pci: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -44,7 +44,7 @@ func TestDeviceMapCompactKeyPCIConsersTail14685(t *testing.T) {
 
 func TestDeviceMapCompactKeyMACConsersTail14685(t *testing.T) {
 	tree := hierTree(t, `chassis { device-map { interface ge-0/0/3 key mac mac 00:11:22:33:44:55 pci 0000:01:00.0; } }`)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate compact key mac: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

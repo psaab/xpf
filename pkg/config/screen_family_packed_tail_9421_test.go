@@ -104,7 +104,7 @@ func screenChannels9421(t *testing.T, tree *ConfigTree) (strictErr error, schema
 	if lenErr != nil {
 		t.Fatalf("CompileConfigLenient must not reject (tolerant path): %v", lenErr)
 	}
-	schemaErr = SchemaValidate(tree, lenient)
+	schemaErr = SchemaValidate(tree)
 	return strictErr, schemaErr, screenProfileSummary9421(lenient.Security.Screen["P"])
 }
 

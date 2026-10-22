@@ -23,7 +23,7 @@ func TestSchedulerInvertedDateRangeRejected15695(t *testing.T) {
 			if len(errs) != 0 {
 				t.Fatalf("parse: %v", errs)
 			}
-			if err := config.SchemaValidate(tree, nil); err != nil {
+			if err := config.SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate should not be the range gate: %v", err)
 			}
 			if _, err := config.CompileConfig(tree); err == nil {

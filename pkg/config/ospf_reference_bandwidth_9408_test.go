@@ -57,7 +57,7 @@ func schemaValidateRefBandwidth9408(t *testing.T, token string) error {
 			t.Fatalf("SetPath(%v): %v", path, err)
 		}
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 // THE UNIT. The leaf is BITS PER SECOND (Junos) and the compiled field is

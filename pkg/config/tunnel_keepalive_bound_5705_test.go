@@ -40,13 +40,13 @@ func TestTunnelKeepaliveInterval_SchemaGate_5705(t *testing.T) {
 	for _, pfx := range prefixes {
 		for _, v := range bad {
 			tree := flatTreeFromSets(t, pfx+" "+v)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("%s %q: expected SchemaValidate to reject, got nil", pfx, v)
 			}
 		}
 		for _, v := range good {
 			tree := flatTreeFromSets(t, pfx+" "+v)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("%s %q: expected SchemaValidate to accept, got %v", pfx, v, err)
 			}
 		}
@@ -58,7 +58,7 @@ func TestTunnelKeepaliveInterval_SchemaGate_5705(t *testing.T) {
 // commit-check refused.
 func TestTunnelKeepaliveInterval_ErrorNamesValue_5705(t *testing.T) {
 	tree := flatTreeFromSets(t, "set interfaces gr-0/0/0 unit 0 tunnel keepalive 10000000000")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected an int64-overflowing keepalive to be rejected at commit-check")
 	}
@@ -80,7 +80,7 @@ func TestTunnelKeepaliveInterval_HierarchicalGate_5705(t *testing.T) {
         }
     }
 }`)
-	if err := SchemaValidate(reject, nil); err == nil {
+	if err := SchemaValidate(reject); err == nil {
 		t.Fatal("hierarchical overflowing keepalive must be rejected at commit-check")
 	}
 
@@ -93,7 +93,7 @@ func TestTunnelKeepaliveInterval_HierarchicalGate_5705(t *testing.T) {
         }
     }
 }`)
-	if err := SchemaValidate(accept, nil); err != nil {
+	if err := SchemaValidate(accept); err != nil {
 		t.Fatalf("hierarchical valid keepalive must pass commit-check, got %v", err)
 	}
 }

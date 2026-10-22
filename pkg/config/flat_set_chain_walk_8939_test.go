@@ -461,7 +461,7 @@ func flatSetAdmitted(lines []string) bool {
 			return false
 		}
 	}
-	return SchemaValidateWithDefinitions(tr, tr, nil) == nil
+	return SchemaValidateWithDefinitions(tr, tr) == nil
 }
 
 func flatSetCompile(lines []string) (*Config, error) {

@@ -48,7 +48,7 @@ func ikeProposalSet(bodyLines ...string) []string {
 // the flip closes the #4313 silent-inert gap.
 func TestClosedWorldIKEProposal_RejectsUnknownKeyword(t *testing.T) {
 	tree := buildTree(t, ikeProposalSet("bogus aes-256-cbc"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("an unmodeled keyword under the closed-world IKE proposal must be rejected at commit (RED on revert: silently accepted + dropped)")
 	}
@@ -69,7 +69,7 @@ func TestClosedWorldIKEProposal_RejectsCryptoTypo(t *testing.T) {
 		"dh-grop group14",
 	} {
 		tree := buildTree(t, ikeProposalSet(typo))
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("a typo'd IKE proposal crypto leaf %q must be rejected at commit, not silently dropped (crypto fails open)", typo)
 		}
@@ -97,7 +97,7 @@ func TestClosedWorldIKEProposal_AcceptsValid(t *testing.T) {
 		`description "corp phase-1 proposal"`,
 	} {
 		tree := buildTree(t, ikeProposalSet(leaf))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid IKE proposal leaf %q must commit clean under closed-world, got: %v", leaf, err)
 		}
 	}
@@ -109,7 +109,7 @@ func TestClosedWorldIKEProposal_AcceptsValid(t *testing.T) {
 		"encryption-algorithm aes-256-cbc",
 		"lifetime-seconds 28800",
 	))
-	if err := SchemaValidate(full, nil); err != nil {
+	if err := SchemaValidate(full); err != nil {
 		t.Fatalf("a fully-specified IKE proposal must commit clean under closed-world, got: %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestClosedWorldIKEProposal_LenientDoesNotBrick(t *testing.T) {
 		"set security ike policy pol1 proposals p1",
 	))
 	// strict gate rejects (the operator commit path)
-	if err := SchemaValidate(typoTree, nil); err == nil {
+	if err := SchemaValidate(typoTree); err == nil {
 		t.Fatal("precondition: strict SchemaValidate must reject the typo")
 	}
 	// lenient compile (the Store.Load / SyncApply path) must NOT brick — the

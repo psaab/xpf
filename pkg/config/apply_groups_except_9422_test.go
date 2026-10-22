@@ -293,11 +293,10 @@ system { apply-groups-except G; domain-name example.com; }`)
 	if len(cfg.Warnings) != 0 {
 		t.Errorf("unexpected warnings: %v", cfg.Warnings)
 	}
-	lenient, err := CompileConfigLenient(tree)
-	if err != nil {
+	if _, err := CompileConfigLenient(tree); err != nil {
 		t.Fatalf("CompileConfigLenient rejected: %v", err)
 	}
-	if err := SchemaValidate(tree, lenient); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected: %v", err)
 	}
 	if strings.Contains(cfg.System.HostName, "FROM-GROUP") {

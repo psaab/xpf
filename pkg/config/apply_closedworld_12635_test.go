@@ -34,7 +34,7 @@ func TestClosedWorldApplyStatementsAccepted12635(t *testing.T) {
 			if len(errs) != 0 {
 				t.Fatalf("parse: %v", errs[0])
 			}
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("closed-world subtree rejected Junos apply statement (#12635): %v", err)
 			}
 		})
@@ -51,7 +51,7 @@ func TestClosedWorldApplyStatementsFlatSet12635(t *testing.T) {
 	} {
 		t.Run(cmd, func(t *testing.T) {
 			tree := buildTree(t, []string{cmd})
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("flat %q rejected (#12635): %v", cmd, err)
 			}
 		})
@@ -67,7 +67,7 @@ func TestClosedWorldSchedulerApplyGroupsInherits12635(t *testing.T) {
 		"set schedulers scheduler S monday start-time 09:00:00",
 		"set schedulers scheduler S monday stop-time 17:00:00",
 	})
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -98,7 +98,7 @@ func TestClosedWorldStillRejectsGarbage12635(t *testing.T) {
 			if len(errs) != 0 {
 				t.Fatalf("parse: %v", errs[0])
 			}
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("garbage %q accepted under closed-world subtree", tc.bad)
 			}
@@ -109,7 +109,7 @@ func TestClosedWorldStillRejectsGarbage12635(t *testing.T) {
 	}
 	// Flat typo control.
 	tree := buildTree(t, []string{"set schedulers scheduler S boguskw x"})
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("flat boguskw accepted under scheduler")
 	}
 }

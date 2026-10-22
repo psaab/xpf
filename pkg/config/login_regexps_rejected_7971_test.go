@@ -58,7 +58,7 @@ func TestRegexpsFamilyIsRejectedAtCommit_7971(t *testing.T) {
 			tree := loginRegexpsTree(t,
 				"set system login class limited permissions view",
 				`set system login class limited `+leaf+` "^set system"`)
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("%s committed clean. An unimplemented ACCESS CONTROL that "+
 					"accepts and discards is fail-open: the operator authors a "+
@@ -99,7 +99,7 @@ func TestPlainLoginRegexFamilyStillCommits_7971(t *testing.T) {
 			tree := loginRegexpsTree(t,
 				"set system login class limited permissions view",
 				`set system login class limited `+leaf+` "^set system"`)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("the SUPPORTED %s must still commit, got: %v", leaf, err)
 			}
 		})

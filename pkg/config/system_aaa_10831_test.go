@@ -108,7 +108,7 @@ func TestJunosAAAStanzaInAppliedGroupRejected10831(t *testing.T) {
 
 func TestLocalSystemConfigStillCompiles10831(t *testing.T) {
 	tree := aaaTree10831(t, "set system host-name fw1")
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate local system config: %v", err)
 	}
 	if _, err := CompileConfig(tree); err != nil {

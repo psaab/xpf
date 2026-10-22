@@ -19,7 +19,7 @@ func TestUnknownSecurityPolicyThenLogModePoisonsLenientCompile11023(t *testing.T
 		"set security policies from-zone trust to-zone untrust policy p then log session-init bogusmode",
 	)
 
-	if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "bogusmode") {
+	if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "bogusmode") {
 		t.Fatalf("strict schema validation must reject the unknown then-log mode, got %v", err)
 	}
 
@@ -49,7 +49,7 @@ func TestUnknownSecurityPolicyThenLogSelfTokenPoisonsLenientCompile11023(t *test
 		"set security policies from-zone trust to-zone untrust policy p then permit",
 		"set security policies from-zone trust to-zone untrust policy p then log log",
 	)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("strict schema validation must reject `log` as a then-log mode")
 	}
 	cfg, err := CompileConfigLenient(tree)
@@ -64,7 +64,7 @@ func TestUnknownSecurityPolicyThenLogSelfTokenPoisonsLenientCompile11023(t *test
 func TestUnknownSecurityPolicyThenLogChildPoisonsLenientCompile11023(t *testing.T) {
 	tree := policyPoisonTree11013(t,
 		`then { permit; log { session-init; bogusmode; } }`)
-	if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "bogusmode") {
+	if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "bogusmode") {
 		t.Fatalf("strict schema validation must reject the unknown then-log child, got %v", err)
 	}
 	cfg, err := CompileConfigLenient(tree)

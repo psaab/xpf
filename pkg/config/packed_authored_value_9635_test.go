@@ -246,7 +246,7 @@ func TestFusionGateStillRefusesUnderANonPackedContainer9635(t *testing.T) {
 		t.Fatalf("fixture must parse: %v", perrs)
 	}
 	normalizeCompactStanzas(tree)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatalf("a fused statement under a non-packed container must still be refused (#8437)")
 	}
 
@@ -255,7 +255,7 @@ func TestFusionGateStillRefusesUnderANonPackedContainer9635(t *testing.T) {
 		t.Fatalf("fixture must parse: %v", perrs)
 	}
 	normalizeCompactStanzas(authTree)
-	if err := SchemaValidate(authTree, nil); err != nil {
+	if err := SchemaValidate(authTree); err != nil {
 		t.Fatalf("the authored-value spelling must commit, got: %v", err)
 	}
 }
@@ -297,7 +297,7 @@ func TestAuthoredMarkDecidesTheVerdict9635(t *testing.T) {
 				t.Fatalf("fixture must parse: %v", perrs)
 			}
 			normalizeCompactStanzas(bareTree)
-			err := SchemaValidate(bareTree, nil)
+			err := SchemaValidate(bareTree)
 			if err == nil {
 				t.Fatalf("the bare spelling is a missing semicolon and must not commit")
 			}
@@ -310,7 +310,7 @@ func TestAuthoredMarkDecidesTheVerdict9635(t *testing.T) {
 				t.Fatalf("fixture must parse: %v", perrs)
 			}
 			normalizeCompactStanzas(authTree)
-			if err := SchemaValidate(authTree, nil); err != nil {
+			if err := SchemaValidate(authTree); err != nil {
 				t.Fatalf("the authored-value spelling must commit, got: %v", err)
 			}
 		})

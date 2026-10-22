@@ -247,7 +247,7 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 		// applies (reconcileSudoers/writeSudoersGrant, #4895). Combined with the
 		// `--` end-of-options separators below, this fails closed against option
 		// injection into the account/SSH-key writer.
-		if err := config.ValidateLoginUsername(user.Name, nil); err != nil {
+		if err := config.ValidateLoginUsername(user.Name); err != nil {
 			slog.Warn("refusing to provision invalid login user name",
 				"user", user.Name, "err", err)
 			continue
@@ -684,7 +684,7 @@ func (d *Daemon) reconcileSudoers(cfg *config.Config) (err error) {
 			// downgrades that to a warning (#1960), so a bad name can still reach
 			// here. Skip it entirely: neither desire nor write it, so any stale
 			// grant is also revoked by the sweep below.
-			if err := config.ValidateLoginUsername(user.Name, nil); err != nil {
+			if err := config.ValidateLoginUsername(user.Name); err != nil {
 				slog.Warn("refusing sudoers grant for invalid login user name",
 					"user", user.Name, "err", err)
 				continue
@@ -765,7 +765,7 @@ func (d *Daemon) reconcileSudoers(cfg *config.Config) (err error) {
 // sudoers, even if a caller bypassed reconcileSudoers' skip or the strict
 // commit-check gate was downgraded on a tolerant load (#1960).
 func writeSudoersGrant(user string) error {
-	if err := config.ValidateLoginUsername(user, nil); err != nil {
+	if err := config.ValidateLoginUsername(user); err != nil {
 		return fmt.Errorf("refusing sudoers grant for invalid login user name %q: %w", user, err)
 	}
 	path := filepath.Join(sudoersDir, sudoersPrefix+user)
@@ -814,7 +814,7 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 		// it reaches /etc/shadow. Lenient Load/SyncApply ingress may downgrade
 		// strict validation to a warning, so reject here as well and report a
 		// failure rather than claiming that a skipped password converged.
-		if err := config.ValidateCryptHash(desired, nil); err != nil {
+		if err := config.ValidateCryptHash(desired); err != nil {
 			slog.Warn("refusing to apply invalid login encrypted-password to /etc/shadow",
 				"user", user.Name, "err", err)
 			fail(fmt.Errorf("refuse invalid encrypted password for %s: %w", user.Name, err))
@@ -1292,7 +1292,7 @@ func filterSSHAlgorithms(in []string) []string {
 func filterSSHAlgorithmsErr(in []string) ([]string, error) {
 	out := in[:0:0]
 	for _, tok := range in {
-		if err := config.ValidateSSHAlgorithm(tok, nil); err != nil {
+		if err := config.ValidateSSHAlgorithm(tok); err != nil {
 			slog.Warn("skipping invalid SSH algorithm token", "token", tok, "err", err)
 			continue
 		}

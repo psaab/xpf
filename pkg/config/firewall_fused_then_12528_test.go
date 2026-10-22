@@ -244,7 +244,7 @@ func TestFirewallFusedThenNestedMatchWasDropped12528(t *testing.T) {
 // that first-error text so a future precedence shift is deliberate.
 func TestFirewallFusedThenKeepsOlderDiagnostics12528(t *testing.T) {
 	n2 := hier12528(t, `firewall { family inet { filter F { term T { from is-fragment then discard; } } } }`)
-	if err := SchemaValidate(n2, nil); err == nil || strings.Contains(err.Error(), "#12528") ||
+	if err := SchemaValidate(n2); err == nil || strings.Contains(err.Error(), "#12528") ||
 		!strings.Contains(err.Error(), "names a SIBLING statement") || !strings.Contains(err.Error(), "#8437") {
 		t.Fatalf("N2 SchemaValidate error = %v, want the #8437 fused-sibling diagnostic", err)
 	}
@@ -470,7 +470,7 @@ func TestFirewallFusedThenPositiveControls12528(t *testing.T) {
 	}
 	for _, c := range controls {
 		t.Run(c.name, func(t *testing.T) {
-			if err := SchemaValidate(c.tree(t), nil); err != nil {
+			if err := SchemaValidate(c.tree(t)); err != nil {
 				t.Fatalf("SchemaValidate rejected control: %v", err)
 			}
 			cfg, err := CompileConfig(c.tree(t))

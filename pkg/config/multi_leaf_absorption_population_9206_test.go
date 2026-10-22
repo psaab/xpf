@@ -127,7 +127,7 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 			}
 			tree.SetPath(p)
 		}
-		return SchemaValidateWithDefinitions(tree, tree, nil)
+		return SchemaValidateWithDefinitions(tree, tree)
 	}
 	synth := func(n *schemaNode) string {
 		if v, _, ok := synthPair(n); ok && v != "" {

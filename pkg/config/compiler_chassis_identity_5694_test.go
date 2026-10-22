@@ -145,7 +145,7 @@ func TestChassisIdentity5694_PackedOneLinerCovered(t *testing.T) {
 // re-check it.
 func TestChassisIdentity5694_TopLevelNodeSchema(t *testing.T) {
 	tree := flatTreeFromSets(t, "set chassis cluster node foo")
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("top-level chassis cluster node foo must be rejected by SchemaValidate")
 	}
 }

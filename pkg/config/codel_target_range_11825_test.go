@@ -23,11 +23,11 @@ func codelTargetTree11825(t *testing.T, value string) *ConfigTree {
 
 func TestCodelTargetMillisRangeSchema11825(t *testing.T) {
 	max := fmt.Sprint(maxCodelTargetMillis11825)
-	if err := SchemaValidate(codelTargetTree11825(t, max), nil); err != nil {
+	if err := SchemaValidate(codelTargetTree11825(t, max)); err != nil {
 		t.Fatalf("maximum CoDel target %s ms should pass schema: %v", max, err)
 	}
 	for _, value := range []string{fmt.Sprint(maxCodelTargetMillis11825 + 1), "banana"} {
-		err := SchemaValidate(codelTargetTree11825(t, value), nil)
+		err := SchemaValidate(codelTargetTree11825(t, value))
 		if err == nil || !strings.Contains(err.Error(), "codel-target") {
 			t.Errorf("CoDel target %q: want codel-target schema rejection, got %v", value, err)
 		}

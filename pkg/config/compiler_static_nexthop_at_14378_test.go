@@ -17,10 +17,10 @@ import (
 // FRR already renders as `ip route <dst> <ip> <iface>`.
 
 func TestStaticNextHopAtInterfaceSplit_14378(t *testing.T) {
-	if err := ValidateStaticNextHop("10.0.0.1@eth0", nil); err != nil {
+	if err := ValidateStaticNextHop("10.0.0.1@eth0"); err != nil {
 		t.Fatalf("validator must keep accepting 10.0.0.1@eth0: %v", err)
 	}
-	if err := ValidateStaticNextHop("@eth0", nil); err != nil {
+	if err := ValidateStaticNextHop("@eth0"); err != nil {
 		t.Fatalf("validator must keep accepting @eth0: %v", err)
 	}
 

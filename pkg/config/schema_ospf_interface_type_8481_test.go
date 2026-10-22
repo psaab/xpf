@@ -44,7 +44,7 @@ func TestOSPFInterfaceTypeIsTyped8481(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.val, func(t *testing.T) {
-			err := SchemaValidate(ospfIfTypeHier8481(t, row.val), nil)
+			err := SchemaValidate(ospfIfTypeHier8481(t, row.val))
 			if row.wantErr && err == nil {
 				t.Fatalf("%q must be rejected — it reaches frr.conf verbatim as "+
 					"`ip ospf network %s` and fails the managed-section reload",
@@ -102,7 +102,7 @@ func TestOSPFInterfaceTypeIsCanonicalizedForFRR8481(t *testing.T) {
 func TestOSPFInterfaceTypeUnresolvableIsDroppedNotPassedThrough8481(t *testing.T) {
 	tree := ospfIfTypeHier8481(t, "p2P")
 
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("control failed: the strict path must reject this, or the " +
 			"lenient assertion below proves nothing")
 	}
@@ -124,7 +124,7 @@ func TestOSPFInterfaceTypeUnresolvableIsDroppedNotPassedThrough8481(t *testing.T
 // one of: broadcast, non-broadcast, ..." learns the wrong thing — that the
 // product does not accept the syntax it claims to.
 func TestOSPFInterfaceTypeErrorNamesBothSpellings8481(t *testing.T) {
-	err := ValidateOSPFInterfaceType("p2P", nil)
+	err := ValidateOSPFInterfaceType("p2P")
 	if err == nil {
 		t.Fatal("must reject")
 	}

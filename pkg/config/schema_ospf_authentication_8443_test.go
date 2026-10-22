@@ -99,7 +99,7 @@ func TestOSPFInterfaceAuthenticationIsClosedWorld8443(t *testing.T) {
 
 	check := func(t *testing.T, tree *ConfigTree, wantErr string) {
 		t.Helper()
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if wantErr == "" {
 			if err != nil {
 				t.Fatalf("must commit, got: %v", err)
@@ -149,7 +149,7 @@ func TestOSPFAuthClosedWorldReachesTheRoutingInstanceCopy8443(t *testing.T) {
 			if len(perrs) > 0 {
 				t.Fatalf("fixture did not parse: %v", perrs)
 			}
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if row.wantErr == "" {
 				if err != nil {
 					t.Fatalf("must commit, got: %v", err)
@@ -179,7 +179,7 @@ func TestOSPFAuthClosedWorldReachesTheRoutingInstanceCopy8443(t *testing.T) {
 // deliberately rather than inherited.
 func TestOSPFAuthGateDidNotCloseTheInterfaceWorld8443(t *testing.T) {
 	tree := ospfAuthTreeHier8443(t, `frobnicate 7;`)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("the OSPF interface level is still OPEN-world by design "+
 			"(#8296 tracks the flip); this change was scoped to the "+
 			"`authentication` subtree and the `authentication-type` leaf, "+

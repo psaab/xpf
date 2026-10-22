@@ -32,7 +32,7 @@ func TestCompileConfigLenientWarnsUnknownTopLevelStanza11576(t *testing.T) {
 	if got := config.ToleratedUnknownTopLevelStanzaWarnings(compiled); len(got) != 1 {
 		t.Fatalf("active-config unknown-stanza warnings = %v, want one warning", got)
 	}
-	if err := config.SchemaValidate(tree, nil); err == nil || !config.IsUnknownTopLevelStanzaSchemaError(err) {
+	if err := config.SchemaValidate(tree); err == nil || !config.IsUnknownTopLevelStanzaSchemaError(err) {
 		t.Fatalf("strict schema validation = %v, want unknown-stanza rejection", err)
 	}
 	if _, err := CheckText(unknownTopLevelStanza8882, -1); err == nil {

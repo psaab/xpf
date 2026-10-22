@@ -37,7 +37,7 @@ security { nat { proxy-arp { interface ge-0/0/0.0 { address 192.0.2.1; } } proxy
 			nil}, // checked separately below
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := SchemaValidate(tc.tree, nil); err != nil {
+			if err := SchemaValidate(tc.tree); err != nil {
 				t.Fatalf("SchemaValidate rejected proxy-ndp: %v", err)
 			}
 			cfg, err := CompileConfig(tc.tree)

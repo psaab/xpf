@@ -25,7 +25,7 @@ func tunnelSet9156(t *testing.T, lines ...string) *TunnelConfig {
 			t.Fatalf("setpath %q: %v", l, err)
 		}
 	}
-	if err := SchemaValidateWithDefinitions(tree, tree, nil); err != nil {
+	if err := SchemaValidateWithDefinitions(tree, tree); err != nil {
 		t.Fatalf("STRICT REJECT (the arm cannot be read): %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -162,7 +162,7 @@ func TestTypedHeadIsStillRejected9156(t *testing.T) {
 			t.Fatalf("%v", err)
 		}
 	}
-	err := SchemaValidateWithDefinitions(tree, tree, nil)
+	err := SchemaValidateWithDefinitions(tree, tree)
 	if err == nil {
 		t.Fatalf("a TYPED head must still be rejected — the run expansion is a READER " +
 			"change and must not widen what the commit gate accepts")

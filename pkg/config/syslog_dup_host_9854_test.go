@@ -48,7 +48,7 @@ func compileSyslogHosts9854(t *testing.T, text string) []*SyslogHostConfig {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected the fixture: %v", err)
 	}
 	if cfg.System.Syslog == nil {

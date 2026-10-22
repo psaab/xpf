@@ -42,7 +42,7 @@ func TestRoutingInstanceFixedArityRejectsPackedTails9736(t *testing.T) {
 			}
 			for _, text := range spellings {
 				tree := parse9323(t, text)
-				if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), tc.want) {
+				if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), tc.want) {
 					t.Errorf("SchemaValidate accepted %q or named the wrong leaf: %v", text, err)
 				}
 				if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -62,7 +62,7 @@ func TestRoutingInstanceVRFTargetBlockHeaderRejectsPackedPrefix9736(t *testing.T
 		`routing-instances { ri1 { vrf-target junk { target:65000:1; } } }`,
 	} {
 		tree := parse9323(t, text)
-		if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "vrf-target") {
+		if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "vrf-target") {
 			t.Errorf("SchemaValidate accepted malformed block header %q: %v", text, err)
 		}
 		if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "vrf-target") {
@@ -80,7 +80,7 @@ func TestRoutingInstanceSetFixedArityRejectsChildren9736(t *testing.T) {
 		`set routing-instances ri1 route-distinguisher 65000:1 firewall x`,
 	} {
 		tree := buildSetTree3332(t, command)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("SchemaValidate accepted fixed-arity child from %q", command)
 		}
 		if _, err := CompileConfig(tree); err == nil {
@@ -114,7 +114,7 @@ func TestRoutingInstanceVRFTargetFormsRemainValid9736(t *testing.T) {
 		`routing-instances { ri1 { vrf-target target:65000:1; vrf-target target:65000:2; } }`,
 	} {
 		tree := parse9323(t, text)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Errorf("valid vrf-target form rejected by schema: %q: %v", text, err)
 		}
 		if _, err := CompileConfig(tree); err != nil {
@@ -128,7 +128,7 @@ func TestRoutingInstanceVRFTargetSetPathExportRemainsValid9736(t *testing.T) {
 		`set routing-instances ri1 vrf-target export target:65000:1`,
 		`set routing-instances ri1 vrf-target export target:65000:2`,
 	)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("valid SetPath vrf-target export was rejected by schema: %v", err)
 	}
 	if _, err := CompileConfig(tree); err != nil {
@@ -141,7 +141,7 @@ func TestRoutingInstanceVRFTargetBracketMissingTarget9736(t *testing.T) {
 		`routing-instances { ri1 { vrf-target [ export ]; } }`,
 		`routing-instances { ri1 { vrf-target [ import export ]; } }`,
 	} {
-		if err := SchemaValidate(parse9323(t, text), nil); err == nil {
+		if err := SchemaValidate(parse9323(t, text)); err == nil {
 			t.Errorf("SchemaValidate accepted bracketed VRF target without target: %q", text)
 		}
 	}

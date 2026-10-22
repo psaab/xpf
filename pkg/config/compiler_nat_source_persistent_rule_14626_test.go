@@ -265,17 +265,17 @@ func TestRuleLevelPersistentNATLenient14626(t *testing.T) {
 // SchemaValidate must accept the modeled rule-level tail and reject bad values.
 func TestRuleLevelPersistentNATSchema14626(t *testing.T) {
 	good := buildTree(t, rulePNATLines14626(nil, "source-nat pool p1 persistent-nat permit any-remote-host"))
-	if err := SchemaValidate(good, nil); err != nil {
+	if err := SchemaValidate(good); err != nil {
 		t.Fatalf("SchemaValidate(good rule tail) = %v", err)
 	}
 	bad := buildTree(t, rulePNATLines14626(nil, "source-nat pool p1 persistent-nat permit bogus"))
-	if err := SchemaValidate(bad, nil); err == nil {
+	if err := SchemaValidate(bad); err == nil {
 		t.Fatal("SchemaValidate(bad permit) = nil, want reject")
 	} else if !strings.Contains(err.Error(), "bogus") && !strings.Contains(err.Error(), "permit") {
 		t.Fatalf("SchemaValidate error = %q, want permit/bogus named", err)
 	}
 	badTO := buildTree(t, rulePNATLines14626(nil, "source-nat pool p1 persistent-nat inactivity-timeout 99999"))
-	if err := SchemaValidate(badTO, nil); err == nil {
+	if err := SchemaValidate(badTO); err == nil {
 		t.Fatal("SchemaValidate(timeout 99999) = nil, want reject")
 	}
 }

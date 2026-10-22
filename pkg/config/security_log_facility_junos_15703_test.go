@@ -75,7 +75,7 @@ func TestSecurityLogFacilityJunosNamesCommit15703(t *testing.T) {
 	for _, facility := range junosFacilities15703 {
 		t.Run("flat/"+facility, func(t *testing.T) {
 			tree := facilityTree15703(t, facility)
-			if err := config.SchemaValidate(tree, nil); err != nil {
+			if err := config.SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected Junos facility %q: %v (#15703)", facility, err)
 			}
 			if _, known := logging.ParseFacilityChecked(facility); !known {
@@ -97,7 +97,7 @@ func TestSecurityLogFacilityJunosNamesCommit15703(t *testing.T) {
 		})
 		t.Run("hier/"+facility, func(t *testing.T) {
 			tree := facilityHierTree15703(t, facility)
-			if err := config.SchemaValidate(tree, nil); err != nil {
+			if err := config.SchemaValidate(tree); err != nil {
 				t.Fatalf("hierarchical SchemaValidate rejected Junos facility %q: %v (#15703)", facility, err)
 			}
 			cfg, err := config.CompileConfig(tree)
@@ -122,7 +122,7 @@ func TestSecurityLogFacilityExistingNamesStillCommit15703(t *testing.T) {
 		"syslog", "user",
 	} {
 		t.Run(facility, func(t *testing.T) {
-			if err := config.SchemaValidate(facilityTree15703(t, facility), nil); err != nil {
+			if err := config.SchemaValidate(facilityTree15703(t, facility)); err != nil {
 				t.Fatalf("SchemaValidate rejected previously-valid facility %q: %v", facility, err)
 			}
 		})
@@ -137,7 +137,7 @@ func TestSecurityLogFacilityExistingNamesStillCommit15703(t *testing.T) {
 func TestSecurityLogFacilityStillRejectsUnknown15703(t *testing.T) {
 	for _, facility := range []string{"any", "ntp", "locl0", "authh", "kernelx"} {
 		t.Run(facility, func(t *testing.T) {
-			err := config.SchemaValidate(facilityTree15703(t, facility), nil)
+			err := config.SchemaValidate(facilityTree15703(t, facility))
 			if err == nil {
 				t.Fatalf("SchemaValidate accepted facility %q; want strict rejection (#15703)", facility)
 			}

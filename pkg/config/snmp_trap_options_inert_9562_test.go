@@ -24,7 +24,7 @@ func trapOptionsWarnings9562(t *testing.T, sp spelling9414) (strict, lenient []s
 	if err != nil {
 		t.Fatalf("%s: strict CompileConfig REJECTED an operator-valid config: %v", sp.label, err)
 	}
-	if err := SchemaValidate(sp.tree(t), sc); err != nil {
+	if err := SchemaValidate(sp.tree(t)); err != nil {
 		t.Fatalf("%s: SchemaValidate REJECTED an operator-valid config: %v", sp.label, err)
 	}
 	lc, err := CompileConfigLenient(sp.tree(t))

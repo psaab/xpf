@@ -22,14 +22,14 @@ func TestBGPClusterID_SchemaGate_4919(t *testing.T) {
 	for _, v := range bad {
 		tree := flatTreeFromSets(t, "set protocols bgp local-as 65001",
 			"set protocols bgp cluster-id "+v)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("cluster-id %q: expected SchemaValidate to reject, got nil", v)
 		}
 	}
 	for _, v := range good {
 		tree := flatTreeFromSets(t, "set protocols bgp local-as 65001",
 			"set protocols bgp cluster-id "+v)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("cluster-id %q: expected SchemaValidate to accept, got %v", v, err)
 		}
 	}
@@ -49,13 +49,13 @@ func TestBGPOrigin_SchemaGate_4919(t *testing.T) {
 
 	for _, v := range bad {
 		tree := flatTreeFromSets(t, base+"then origin "+v)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("then origin %q: expected SchemaValidate to reject, got nil", v)
 		}
 	}
 	for _, v := range good {
 		tree := flatTreeFromSets(t, base+"then origin "+v)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("then origin %q: expected SchemaValidate to accept, got %v", v, err)
 		}
 	}
@@ -66,14 +66,14 @@ func TestBGPOrigin_SchemaGate_4919(t *testing.T) {
 func TestBGPClusterIDOrigin_ErrorNamesValue_4919(t *testing.T) {
 	tree := flatTreeFromSets(t, "set protocols bgp local-as 65001",
 		"set protocols bgp cluster-id not.an.ip")
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("expected `cluster-id not.an.ip` to be rejected")
 	} else if !strings.Contains(err.Error(), "not.an.ip") {
 		t.Fatalf("cluster-id error %q must name 'not.an.ip'", err.Error())
 	}
 
 	tree = flatTreeFromSets(t, "set policy-options policy-statement P term t1 then origin igpp")
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("expected `then origin igpp` to be rejected")
 	} else if !strings.Contains(err.Error(), "igpp") {
 		t.Fatalf("origin error %q must name 'igpp'", err.Error())
@@ -83,12 +83,12 @@ func TestBGPClusterIDOrigin_ErrorNamesValue_4919(t *testing.T) {
 // TestValidateBGPClusterID_Unit locks the validator's accept/reject set.
 func TestValidateBGPClusterID_Unit(t *testing.T) {
 	for _, v := range []string{"10.0.0.1", "192.0.2.255", "1", "65535", "4294967295", "0.0.0.0"} {
-		if err := ValidateBGPClusterID(v, nil); err != nil {
+		if err := ValidateBGPClusterID(v); err != nil {
 			t.Errorf("ValidateBGPClusterID(%q) = %v, want nil", v, err)
 		}
 	}
 	for _, v := range []string{"", "not.an.ip", "2001:db8::1", "0", "4294967296", "-1", "10.0.0.1/32", "1.2.3"} {
-		if err := ValidateBGPClusterID(v, nil); err == nil {
+		if err := ValidateBGPClusterID(v); err == nil {
 			t.Errorf("ValidateBGPClusterID(%q) = nil, want error", v)
 		}
 	}

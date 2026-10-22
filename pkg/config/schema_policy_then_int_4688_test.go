@@ -26,14 +26,14 @@ func TestPolicyStatementThenInteger_SchemaGate(t *testing.T) {
 	reject := func(leaf, val string) {
 		t.Helper()
 		tree := flatTreeFromSets(t, set(leaf, val))
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("then %s %q: expected SchemaValidate to reject, got nil", leaf, val)
 		}
 	}
 	accept := func(leaf, val string) {
 		t.Helper()
 		tree := flatTreeFromSets(t, set(leaf, val))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("then %s %q: expected SchemaValidate to accept, got %v", leaf, val, err)
 		}
 	}
@@ -61,7 +61,7 @@ func TestPolicyStatementThenInteger_SchemaGate(t *testing.T) {
 func TestPolicyStatementThenLocalPreference_ErrorMentionsValue(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set policy-options policy-statement p1 term t1 then local-preference 42949672960")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected an out-of-range local-preference to be rejected at commit")
 	}

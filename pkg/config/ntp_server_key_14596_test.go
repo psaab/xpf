@@ -27,7 +27,7 @@ func compileNTPKey14596(t *testing.T, sets []string) *Config {
 	if err != nil {
 		t.Fatalf("compile %v: %v", sets, err)
 	}
-	if err := SchemaValidate(tree, c); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate %v: %v", sets, err)
 	}
 	return c

@@ -66,7 +66,7 @@ func TestFirewallPortExceptFlatSetBracketList(t *testing.T) {
 		}
 	}
 	// The new leaves must validate (they are schema-declared multi-value).
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected source/destination-port-except: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -99,7 +99,7 @@ func TestFirewallPortExceptInet6(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected inet6 destination-port-except: %v", err)
 	}
 	cfg, err := CompileConfig(tree)

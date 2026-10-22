@@ -723,7 +723,7 @@ func validateBGPNeighborAddressStrict(cfg *Config) error {
 			if n == nil {
 				continue
 			}
-			if err := ValidateBGPNeighborAddress(n.Address, nil); err != nil {
+			if err := ValidateBGPNeighborAddress(n.Address); err != nil {
 				detail := fmt.Sprintf("%sprotocols bgp neighbor %q", scope, n.Address)
 				if n.GroupName != "" {
 					detail = fmt.Sprintf("%sprotocols bgp group %s neighbor %q", scope, n.GroupName, n.Address)
@@ -1652,7 +1652,7 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 						"policy-statement %q term %q route-filter prefix %q: not a valid CIDR: whitespace-padded prefix",
 						name, term.Name, rf.Prefix)
 				}
-				if err := ValidateRouteFilterArgPositional(0, rf.Prefix, nil); err != nil {
+				if err := ValidateRouteFilterArgPositional(0, rf.Prefix); err != nil {
 					return fmt.Errorf(
 						"policy-statement %q term %q route-filter prefix %q: not a valid CIDR: %v",
 						name, term.Name, rf.Prefix, err)

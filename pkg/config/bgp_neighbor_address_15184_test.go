@@ -37,17 +37,17 @@ var goodNeighborAddrs15184 = []string{
 
 func TestBGPNeighborAddressValidator15184(t *testing.T) {
 	for _, bad := range badNeighborAddrs15184 {
-		if err := ValidateBGPNeighborAddress(bad, nil); err == nil {
+		if err := ValidateBGPNeighborAddress(bad); err == nil {
 			t.Errorf("ValidateBGPNeighborAddress(%q) = nil, want rejection", bad)
 		}
 	}
 	for _, good := range goodNeighborAddrs15184 {
-		if err := ValidateBGPNeighborAddress(good, nil); err != nil {
+		if err := ValidateBGPNeighborAddress(good); err != nil {
 			t.Errorf("ValidateBGPNeighborAddress(%q) = %v, want nil (control)", good, err)
 		}
 	}
 	// Scoped link-local must say unsupported.
-	err := ValidateBGPNeighborAddress("fe80::1%ge-0-0-1", nil)
+	err := ValidateBGPNeighborAddress("fe80::1%ge-0-0-1")
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Errorf("scoped link-local error must mention unsupported, got %v", err)
 	}
@@ -61,7 +61,7 @@ func TestBGPNeighborAddressSchemaGate15184(t *testing.T) {
 		} {
 			// Zone contains % which is fine as a set token.
 			tree := flatTreeFromSets(t, sets...)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Errorf("SchemaValidate accepted bad neighbor %q in %v", bad, sets)
 			}
 		}
@@ -72,7 +72,7 @@ func TestBGPNeighborAddressSchemaGate15184(t *testing.T) {
 			{"set routing-instances VR1 instance-type virtual-router", "set routing-instances VR1 protocols bgp local-as 65001", "set routing-instances VR1 protocols bgp group G peer-as 65002", "set routing-instances VR1 protocols bgp group G neighbor " + good},
 		} {
 			tree := flatTreeFromSets(t, sets...)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Errorf("SchemaValidate rejected good neighbor %q in %v: %v", good, sets, err)
 			}
 		}

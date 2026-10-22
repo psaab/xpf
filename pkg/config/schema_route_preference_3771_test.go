@@ -16,7 +16,7 @@ func TestStaticRoutePreference_SchemaGate(t *testing.T) {
 		t.Helper()
 		tree := flatTreeFromSets(t,
 			"set routing-options static route 0.0.0.0/0 preference "+val)
-		if err := SchemaValidate(tree, nil); err == nil {
+		if err := SchemaValidate(tree); err == nil {
 			t.Fatalf("preference %q: expected SchemaValidate to reject, got nil", val)
 		}
 	}
@@ -24,7 +24,7 @@ func TestStaticRoutePreference_SchemaGate(t *testing.T) {
 		t.Helper()
 		tree := flatTreeFromSets(t,
 			"set routing-options static route 0.0.0.0/0 preference "+val)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("preference %q: expected SchemaValidate to accept, got %v", val, err)
 		}
 	}
@@ -43,7 +43,7 @@ func TestStaticRoutePreference_SchemaGate(t *testing.T) {
 func TestStaticRoutePreference_NegativeErrorMentionsRange(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set routing-options static route ::/0 preference -5")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected a negative route preference to be rejected at commit")
 	}
@@ -55,7 +55,7 @@ func TestStaticRoutePreference_NegativeErrorMentionsRange(t *testing.T) {
 func TestStaticRoutePreference_AboveFRRMaximumNamesLeaf12060(t *testing.T) {
 	tree := flatTreeFromSets(t,
 		"set routing-options static route 0.0.0.0/0 preference 256")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected route preference 256 to be rejected at commit")
 	}

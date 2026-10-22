@@ -29,7 +29,7 @@ const APIAuthKeyMinRunes = 16
 
 // ValidateAPIAuthBasicPassword rejects too-short operator passwords and
 // invalid verifiers produced while tolerantly loading those old values.
-func ValidateAPIAuthBasicPassword(raw string, _ *Config) error {
+func ValidateAPIAuthBasicPassword(raw string) error {
 	if strings.HasPrefix(raw, apiAuthInvalidBcryptPrefix) {
 		return fmt.Errorf("api-auth Basic password is an invalid stored verifier")
 	}
@@ -47,7 +47,7 @@ func ValidateAPIAuthBasicPassword(raw string, _ *Config) error {
 
 // ValidateAPIAuthKey rejects too-short operator keys and invalid verifiers
 // produced while tolerantly loading those old values.
-func ValidateAPIAuthKey(raw string, _ *Config) error {
+func ValidateAPIAuthKey(raw string) error {
 	if strings.HasPrefix(raw, apiAuthInvalidBcryptPrefix) {
 		return fmt.Errorf("api-auth API key is an invalid stored verifier")
 	}
@@ -64,7 +64,7 @@ func ValidateAPIAuthKey(raw string, _ *Config) error {
 }
 
 // ValidateAPIAuthExpiry validates the UTC calendar-date form used by api-auth.
-func ValidateAPIAuthExpiry(raw string, _ *Config) error {
+func ValidateAPIAuthExpiry(raw string) error {
 	if _, err := time.Parse("2006-01-02", raw); err != nil {
 		return fmt.Errorf("api-auth expiry must be a UTC date in YYYY-MM-DD form")
 	}

@@ -257,7 +257,7 @@ func TestSchemaErrorsRedactCredentialPathElements10771(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := SchemaValidate(buildTree(t, []string{tc.set}), nil)
+			err := SchemaValidate(buildTree(t, []string{tc.set}))
 			if err == nil {
 				t.Fatal("malformed secret-path config passed schema validation")
 			}

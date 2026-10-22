@@ -27,7 +27,7 @@ func mustCompileSet4228(t *testing.T, cmds ...string) *config.Config {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)

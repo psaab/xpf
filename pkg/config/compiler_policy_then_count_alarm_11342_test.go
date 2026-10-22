@@ -60,7 +60,7 @@ func TestPolicyThenCountAlarmRejectsStrictAndWarnsLenient11342(t *testing.T) {
 				}
 			}
 
-			if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "alarm") {
+			if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "alarm") {
 				t.Fatalf("SchemaValidate error = %v, want strict closed-world alarm rejection", err)
 			}
 

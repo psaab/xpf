@@ -23,7 +23,7 @@ func parseSchedulerTimeOfDay(raw string) (time.Time, error) {
 	}
 }
 
-func ValidateTimeOfDay(raw string, _ *Config) error {
+func ValidateTimeOfDay(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a time of day, e.g. 09:00 or 09:00:00)")
@@ -48,7 +48,7 @@ func parseSchedulerDateBound(raw string) (time.Time, bool, error) {
 
 // ValidateDate accepts a Junos scheduler date (YYYY-MM-DD) or local
 // date-time (YYYY-MM-DD.HH:MM).
-func ValidateDate(raw string, _ *Config) error {
+func ValidateDate(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a date or date-time, e.g. 2026-03-01 or 2026-03-01.08:30)")

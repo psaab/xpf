@@ -92,7 +92,7 @@ func TestPreIDDefaultPolicyLogCommitSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pre-id-default-policy log must commit (warn, not reject): %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid pre-id-default-policy log stanza: %v", err)
 	}
 	p := cfg.Security.PreIDDefaultPolicy

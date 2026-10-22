@@ -37,13 +37,13 @@ func TestDPDIntervalThreshold_SchemaGate_4878(t *testing.T) {
 			}
 			for _, v := range bad {
 				tree := flatTreeFromSets(t, pfx+" "+leaf+" "+v)
-				if err := SchemaValidate(tree, nil); err == nil {
+				if err := SchemaValidate(tree); err == nil {
 					t.Fatalf("%s %s %q: expected SchemaValidate to reject, got nil", pfx, leaf, v)
 				}
 			}
 			for _, v := range vals {
 				tree := flatTreeFromSets(t, pfx+" "+leaf+" "+v)
-				if err := SchemaValidate(tree, nil); err != nil {
+				if err := SchemaValidate(tree); err != nil {
 					t.Fatalf("%s %s %q: expected SchemaValidate to accept, got %v", pfx, leaf, v, err)
 				}
 			}
@@ -55,7 +55,7 @@ func TestDPDIntervalThreshold_SchemaGate_4878(t *testing.T) {
 // the offending token so the operator sees which value was bad.
 func TestDPDIntervalThreshold_ErrorNamesValue_4878(t *testing.T) {
 	tree := flatTreeFromSets(t, "set security ike gateway gw1 dead-peer-detection interval banana")
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("expected `interval banana` to be rejected at commit-check")
 	}
@@ -76,7 +76,7 @@ func TestDPDIntervalThreshold_HierarchicalGate_4878(t *testing.T) {
         }
     }
 }`)
-	if err := SchemaValidate(rejectHier, nil); err == nil {
+	if err := SchemaValidate(rejectHier); err == nil {
 		t.Fatal("hierarchical `interval banana` must be rejected at commit-check")
 	}
 
@@ -90,7 +90,7 @@ func TestDPDIntervalThreshold_HierarchicalGate_4878(t *testing.T) {
         }
     }
 }`)
-	if err := SchemaValidate(acceptHier, nil); err != nil {
+	if err := SchemaValidate(acceptHier); err != nil {
 		t.Fatalf("hierarchical valid DPD values must pass commit-check, got %v", err)
 	}
 }

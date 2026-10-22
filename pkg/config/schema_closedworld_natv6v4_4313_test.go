@@ -32,7 +32,7 @@ func TestClosedWorldNATv6v4_RejectsUnknownKeyword(t *testing.T) {
 		"bogus",
 	} {
 		tree := buildTree(t, natv6v4Set(typo))
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("a typo'd natv6v4 keyword %q must be rejected at commit, not silently dropped", typo)
 		}
@@ -46,7 +46,7 @@ func TestClosedWorldNATv6v4_RejectsUnknownKeyword(t *testing.T) {
 // flag still commits clean under closed-world.
 func TestClosedWorldNATv6v4_AcceptsValid(t *testing.T) {
 	tree := buildTree(t, natv6v4Set("no-v6-frag-header"))
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("valid natv6v4 no-v6-frag-header must commit clean under closed-world, got: %v", err)
 	}
 }
@@ -55,7 +55,7 @@ func TestClosedWorldNATv6v4_AcceptsValid(t *testing.T) {
 // contract.
 func TestClosedWorldNATv6v4_LenientDoesNotBrick(t *testing.T) {
 	typoTree := buildTree(t, natv6v4Set("no-v6-frag-heder"))
-	if err := SchemaValidate(typoTree, nil); err == nil {
+	if err := SchemaValidate(typoTree); err == nil {
 		t.Fatal("precondition: strict SchemaValidate must reject the typo")
 	}
 	if _, err := CompileConfigLenient(typoTree); err != nil {

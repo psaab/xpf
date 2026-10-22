@@ -38,7 +38,7 @@ func TestFusedEnforcementUnderNonEnforcementNamesPoisons12819(t *testing.T) {
 			text := fusedPoliciesConfig12819(tc.child)
 			// Strict: schema + compile must reject.
 			tree := parseUnknownSecurityPoliciesChildren12217(t, text)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("strict schema accepted fused enforcement child %s", tc.child)
 			} else if !strings.Contains(err.Error(), "content") || !strings.Contains(err.Error(), "traceoptions") &&
 				!strings.Contains(err.Error(), "policy-stats") && !strings.Contains(err.Error(), "pre-id-default-policy") {
@@ -102,7 +102,7 @@ func TestGenuineNonEnforcementStillExempt12819(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			text := fusedPoliciesConfig12819(tc.child)
 			tree := parseUnknownSecurityPoliciesChildren12217(t, text)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("strict schema rejected genuine %s: %v", tc.name, err)
 			}
 			if _, err := CompileConfig(tree); err != nil {
@@ -128,7 +128,7 @@ func TestFusedPolicyDiagnosticsNameRejectedContentShape12819(t *testing.T) {
 	const shape = "traceoptions/global/policy/then/deny"
 
 	tree := parseUnknownSecurityPoliciesChildren12217(t, text)
-	if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), shape) {
+	if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), shape) {
 		t.Fatalf("strict schema error = %v, want rejected content shape %q", err, shape)
 	}
 	tree = parseUnknownSecurityPoliciesChildren12217(t, text)

@@ -44,7 +44,7 @@ func tsSet(bodyLines ...string) []string {
 // silently accepted (SchemaValidate returns nil) and this test fails.
 func TestClosedWorldTrafficSelector_RejectsUnknownKeyword(t *testing.T) {
 	tree := buildTree(t, tsSet("bogus 10.0.0.0/24"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("an unmodeled keyword under the closed-world traffic-selector must be rejected at commit (RED on revert: silently accepted + dropped)")
 	}
@@ -59,7 +59,7 @@ func TestClosedWorldTrafficSelector_RejectsUnknownKeyword(t *testing.T) {
 // and the wrong crypto proxy-id negotiated.
 func TestClosedWorldTrafficSelector_RejectsTypo(t *testing.T) {
 	tree := buildTree(t, tsSet("local-op 10.0.0.0/24"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("a typo'd traffic-selector leaf (local-op) must be rejected at commit, not silently dropped")
 	}
@@ -75,13 +75,13 @@ func TestClosedWorldTrafficSelector_AcceptsValid(t *testing.T) {
 	// each leaf on its own
 	for _, leaf := range []string{"local-ip 10.0.0.0/24", "remote-ip 0.0.0.0/0"} {
 		tree := buildTree(t, tsSet(leaf))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid traffic-selector leaf %q must commit clean under closed-world, got: %v", leaf, err)
 		}
 	}
 	// both together (the real-world shape)
 	tree := buildTree(t, tsSet("local-ip 10.0.0.0/24", "remote-ip 0.0.0.0/0"))
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("a full traffic-selector (local-ip + remote-ip) must commit clean under closed-world, got: %v", err)
 	}
 }
@@ -98,7 +98,7 @@ func vpnMonitorSet(bodyLines ...string) []string {
 
 func TestClosedWorldVPNMonitor_RejectsUnknownKeyword(t *testing.T) {
 	tree := buildTree(t, vpnMonitorSet("bogus 1.2.3.4"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("an unmodeled keyword under the closed-world vpn-monitor must be rejected at commit (RED on revert)")
 	}
@@ -109,7 +109,7 @@ func TestClosedWorldVPNMonitor_RejectsUnknownKeyword(t *testing.T) {
 
 func TestClosedWorldVPNMonitor_RejectsTypo(t *testing.T) {
 	tree := buildTree(t, vpnMonitorSet("destintion-ip 1.2.3.4"))
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("a typo'd vpn-monitor leaf (destintion-ip) must be rejected at commit, not silently dropped")
 	}
@@ -121,12 +121,12 @@ func TestClosedWorldVPNMonitor_RejectsTypo(t *testing.T) {
 func TestClosedWorldVPNMonitor_AcceptsValid(t *testing.T) {
 	for _, leaf := range []string{"source-interface ge-0-0-0", "destination-ip 1.2.3.4", "optimized"} {
 		tree := buildTree(t, vpnMonitorSet(leaf))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid vpn-monitor leaf %q must commit clean under closed-world, got: %v", leaf, err)
 		}
 	}
 	tree := buildTree(t, vpnMonitorSet("source-interface ge-0-0-0", "destination-ip 1.2.3.4", "optimized"))
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("a full vpn-monitor stanza must commit clean under closed-world, got: %v", err)
 	}
 }
@@ -148,7 +148,7 @@ func dpdSet(scope string, bodyLines ...string) []string {
 func TestClosedWorldDeadPeerDetection_RejectsUnknownKeyword(t *testing.T) {
 	for _, scope := range []string{"ike", "ipsec"} {
 		tree := buildTree(t, dpdSet(scope, "bogus 10"))
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("[%s gateway] an unmodeled keyword under the closed-world dead-peer-detection must be rejected at commit (RED on revert)", scope)
 		}
@@ -161,7 +161,7 @@ func TestClosedWorldDeadPeerDetection_RejectsUnknownKeyword(t *testing.T) {
 func TestClosedWorldDeadPeerDetection_RejectsTypo(t *testing.T) {
 	for _, scope := range []string{"ike", "ipsec"} {
 		tree := buildTree(t, dpdSet(scope, "intervl 10"))
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("[%s gateway] a typo'd DPD leaf (intervl) must be rejected at commit, not silently dropped", scope)
 		}
@@ -176,13 +176,13 @@ func TestClosedWorldDeadPeerDetection_AcceptsValid(t *testing.T) {
 		// each keyword on its own
 		for _, leaf := range []string{"always-send", "optimized", "probe-idle-tunnel", "interval 10", "threshold 5"} {
 			tree := buildTree(t, dpdSet(scope, leaf))
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("[%s gateway] valid DPD leaf %q must commit clean under closed-world, got: %v", scope, leaf, err)
 			}
 		}
 		// a real-world tuned stanza
 		tree := buildTree(t, dpdSet(scope, "always-send", "interval 10", "threshold 5"))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("[%s gateway] a tuned dead-peer-detection stanza must commit clean under closed-world, got: %v", scope, err)
 		}
 	}

@@ -25,7 +25,7 @@ func TestTimeRangeSchedulerRejectsUnknownDaysAndLeaves12239(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := buildTree(t, []string{tc.set})
-			err := SchemaValidate(tree, nil)
+			err := SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("strict schema validation accepted %q", tc.bad)
 			}
@@ -52,7 +52,7 @@ func TestMisspelledWeekdayOnScheduledDenyRejected12239(t *testing.T) {
 		"set security policies from-zone trust to-zone untrust policy p1 then deny",
 		"set security policies from-zone trust to-zone untrust policy p1 scheduler-name deny-test",
 	})
-	err := SchemaValidate(tree, nil)
+	err := SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("strict schema validation accepted a scheduled deny whose only weekday is misspelled")
 	}
@@ -65,7 +65,7 @@ func TestMisspelledWeekdayOnScheduledDenyRejected12239(t *testing.T) {
 
 func TestTimeRangeSchedulerNoWindowSchemaControl12239(t *testing.T) {
 	tree := buildTree(t, []string{"set schedulers scheduler empty"})
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("an empty scheduler remains schema-valid: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -95,7 +95,7 @@ func TestTimeRangeSchedulerAcceptsValidClosedWorldShapes12239(t *testing.T) {
 	for i, commands := range flat {
 		t.Run(fmt.Sprintf("flat-%d", i), func(t *testing.T) {
 			tree := buildTree(t, commands)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("valid flat scheduler shape rejected: %v", err)
 			}
 		})
@@ -109,7 +109,7 @@ func TestTimeRangeSchedulerAcceptsValidClosedWorldShapes12239(t *testing.T) {
 		if len(parseErrs) != 0 {
 			t.Fatalf("parse valid scheduler shape: %v", parseErrs[0])
 		}
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid hierarchical scheduler shape rejected: %v", err)
 		}
 	}

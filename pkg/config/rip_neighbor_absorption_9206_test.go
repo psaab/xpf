@@ -14,7 +14,7 @@ func ripSchemaVerdict9206(t *testing.T, line string) error {
 		t.Fatalf("parse %q: %v", line, err)
 	}
 	tree.SetPath(p)
-	return SchemaValidateWithDefinitions(tree, tree, nil)
+	return SchemaValidateWithDefinitions(tree, tree)
 }
 
 // #9206: the absorbed statement is now refused at the leaf that absorbs it.
@@ -48,7 +48,7 @@ func TestRIPNeighborAcceptsRealInterfaceNames9206(t *testing.T) {
 		"em0", "fxp0", "fxp0.0", "fxp1", "lo0", "irb", "irb.100",
 		"vlan100", "eth0", "eth3.0", "ae0", "wg0", "enp5s0", "enp101s0f1np1",
 	} {
-		if err := ValidateRIPNeighborInterface(n, nil); err != nil {
+		if err := ValidateRIPNeighborInterface(n); err != nil {
 			t.Errorf("#9206: legitimate interface name %q was REJECTED: %v", n, err)
 		}
 	}
@@ -72,11 +72,11 @@ func TestRIPNeighborBareKeywordStillAbsorbs9206(t *testing.T) {
 			"has been fixed.")
 	}
 	// And the shape rule's boundary, stated as a fact rather than left implicit.
-	if err := ValidateRIPNeighborInterface("export", nil); err != nil {
+	if err := ValidateRIPNeighborInterface("export"); err != nil {
 		t.Errorf("#9206: `export` is rejected by shape, which would mean bare `irb` is too — "+
 			"re-check the corpus before tightening: %v", err)
 	}
-	if err := ValidateRIPNeighborInterface("irb", nil); err != nil {
+	if err := ValidateRIPNeighborInterface("irb"); err != nil {
 		t.Errorf("#9206: bare `irb` REJECTED (%v). It is a real interface name this repo "+
 			"configures (`set interfaces irb`), and it is why the bare-keyword residual "+
 			"cannot be closed by shape.", err)

@@ -220,7 +220,7 @@ func enumPairFromValidator(n *schemaNode) (v1, v2 string, ok bool) {
 			v1, v2, ok = "", "", false
 		}
 	}()
-	err := n.validator("\x00xpf-no-such-enum-value", nil)
+	err := n.validator("\x00xpf-no-such-enum-value")
 	if err == nil {
 		return "", "", false // accepts anything; not an enumerable set
 	}
@@ -237,7 +237,7 @@ func enumPairFromValidator(n *schemaNode) (v1, v2 string, ok bool) {
 		if cand == "" {
 			continue
 		}
-		if n.validator(cand, nil) != nil {
+		if n.validator(cand) != nil {
 			continue // the parse produced something the gate itself refuses
 		}
 		accepted = append(accepted, cand)

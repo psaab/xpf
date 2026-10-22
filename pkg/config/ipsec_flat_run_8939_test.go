@@ -249,7 +249,7 @@ func TestIPsecTrafficSelectorGateReadsTheRun8939(t *testing.T) {
 			"traffic-selector: %v\nThe compiler-side walk is inert while this "+
 			"rejects (#8939).", err)
 	}
-	if err := SchemaValidateWithDefinitions(tree, tree, nil); err != nil {
+	if err := SchemaValidateWithDefinitions(tree, tree); err != nil {
 		t.Logf("NOTE: the typed-leaf schema walk still refuses this spelling on the "+
 			"operator commit path (%v), so the fix above is reached via Store.Load "+
 			"and Store.SyncApply. Not asserted -- see the comment.", err)

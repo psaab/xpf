@@ -22,7 +22,7 @@ func TestInterfaceDuplexEnumAcceptsCanonicalModes11824(t *testing.T) {
 	for _, mode := range []string{"full", "half", "auto"} {
 		t.Run(mode, func(t *testing.T) {
 			tree := interfaceDuplexTree11824(t, mode)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected valid duplex %q: %v", mode, err)
 			}
 			cfg, err := CompileConfig(tree)
@@ -40,7 +40,7 @@ func TestInterfaceDuplexInvalidValuesStrictRejectLenientWarn11824(t *testing.T) 
 	for _, value := range []string{"garbage", "Full", "FULL"} {
 		t.Run(value, func(t *testing.T) {
 			tree := interfaceDuplexTree11824(t, value)
-			if err := SchemaValidate(tree, nil); err == nil || !strings.Contains(err.Error(), "duplex") {
+			if err := SchemaValidate(tree); err == nil || !strings.Contains(err.Error(), "duplex") {
 				t.Fatalf("strict schema validation for duplex %q = %v, want a duplex rejection", value, err)
 			}
 			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "duplex") {

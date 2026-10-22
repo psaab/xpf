@@ -149,7 +149,7 @@ func TestMasterPasswordCarriesNoSecret6856(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
-		return config.SchemaValidate(tree, nil)
+		return config.SchemaValidate(tree)
 	}
 
 	t.Run("a secret-bearing leaf is rejected at commit", func(t *testing.T) {

@@ -17,7 +17,7 @@ func compileSetsAdj4285(t *testing.T, cmds []string) *Config {
 	// The schema gate must ACCEPT these leaves — before #4285/#4286 they were
 	// unknown to setSchema. RED-on-revert: SchemaValidate rejects the unknown
 	// leaf. (cfg is always nil at this gate; see schema_walk.go.)
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected an adjacency leaf: %v", err)
 	}
 	c, err := CompileConfig(tree)

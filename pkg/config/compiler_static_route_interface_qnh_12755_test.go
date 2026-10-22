@@ -62,7 +62,7 @@ func TestPackedStaticRouteNextHopInterfaceChildKeepsQNH_12755(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := hierTree(t, tc.src)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate: %v", err)
 			}
 			cfg, err := CompileConfig(tree)

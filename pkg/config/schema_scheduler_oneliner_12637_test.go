@@ -108,7 +108,7 @@ func TestSchedulerLevelOneLinerRejectsBadTail12637(t *testing.T) {
 			if len(errs) != 0 {
 				t.Fatalf("parse fixture: %v", errs)
 			}
-			err := config.SchemaValidate(tree, nil)
+			err := config.SchemaValidate(tree)
 			if err == nil {
 				t.Fatalf("strict validation accepted %q", tc.text)
 			}

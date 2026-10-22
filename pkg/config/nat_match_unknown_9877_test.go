@@ -87,7 +87,7 @@ func TestNATUnknownMatchLeavesStrictRejects9877(t *testing.T) {
 		"set security nat source rule-set rs1 rule r1 then source-nat interface",
 	}
 	tree := buildTree(t, lines)
-	if err := SchemaValidate(tree, nil); err == nil {
+	if err := SchemaValidate(tree); err == nil {
 		t.Fatal("SchemaValidate accepted a typo'd NAT match leaf; want closed-world rejection")
 	} else if !strings.Contains(err.Error(), "soruce-address") {
 		t.Fatalf("SchemaValidate error %q does not name the typo", err)

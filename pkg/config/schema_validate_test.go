@@ -24,7 +24,7 @@ func schemaCheck(t *testing.T, input string) error {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	return config.SchemaValidate(tree, nil)
+	return config.SchemaValidate(tree)
 }
 
 func flatSchemaCheck(t *testing.T, cmds ...string) error {
@@ -39,7 +39,7 @@ func flatSchemaCheck(t *testing.T, cmds ...string) error {
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	return config.SchemaValidate(tree, nil)
+	return config.SchemaValidate(tree)
 }
 
 func TestSchemaValidate_TransmitRate_RejectsGarbage(t *testing.T) {
@@ -315,7 +315,7 @@ func TestSchemaValidate_AcceptedSchedulerValuesCompileAsValidated(t *testing.T) 
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("schema validate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -352,7 +352,7 @@ func TestSchemaValidate_PercentBufferSizeCompilesAsPercentNotZeroBytes(t *testin
 			t.Fatalf("SetPath(%q): %v", cmd, err)
 		}
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("schema validate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -414,7 +414,7 @@ func TestSchemaValidate_AcceptsLegacyDPDKSubStanza(t *testing.T) {
 	if tree.FindChild("class-of-service") == nil {
 		t.Fatal("fixture invalid: class-of-service subtree missing")
 	}
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected legacy DPDK sub-stanza alongside valid cos block: %v", err)
 	}
 }
@@ -656,13 +656,13 @@ set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24
 func TestValidateRate(t *testing.T) {
 	good := []string{"100", "100k", "10m", "1g", "10g", "8k"}
 	for _, g := range good {
-		if err := config.ValidateRate(g, nil); err != nil {
+		if err := config.ValidateRate(g); err != nil {
 			t.Errorf("ValidateRate(%q): unexpected error %v", g, err)
 		}
 	}
 	bad := []string{"", "1", "7", "asd", "-1", "1x", "1.0z"}
 	for _, b := range bad {
-		if err := config.ValidateRate(b, nil); err == nil {
+		if err := config.ValidateRate(b); err == nil {
 			t.Errorf("ValidateRate(%q): expected error", b)
 		}
 	}
@@ -671,13 +671,13 @@ func TestValidateRate(t *testing.T) {
 func TestValidateByteSize(t *testing.T) {
 	good := []string{"16m", "256k", "1g"}
 	for _, g := range good {
-		if err := config.ValidateByteSize(g, nil); err != nil {
+		if err := config.ValidateByteSize(g); err != nil {
 			t.Errorf("ValidateByteSize(%q): unexpected error %v", g, err)
 		}
 	}
 	bad := []string{"", "0", "50", "100", "150", "purple", "-5", "1.5"}
 	for _, b := range bad {
-		if err := config.ValidateByteSize(b, nil); err == nil {
+		if err := config.ValidateByteSize(b); err == nil {
 			t.Errorf("ValidateByteSize(%q): expected error", b)
 		}
 	}
@@ -686,13 +686,13 @@ func TestValidateByteSize(t *testing.T) {
 func TestValidateByteSizeOrPercent(t *testing.T) {
 	good := []string{"16m", "256k", "1g", "10%", "12.5%"}
 	for _, g := range good {
-		if err := config.ValidateByteSizeOrPercent(g, nil); err != nil {
+		if err := config.ValidateByteSizeOrPercent(g); err != nil {
 			t.Errorf("ValidateByteSizeOrPercent(%q): unexpected error %v", g, err)
 		}
 	}
 	bad := []string{"", "0", "50", "100", "purple", "-5", "1.5", "0%", "-1%", "101%", "NaN%"}
 	for _, b := range bad {
-		if err := config.ValidateByteSizeOrPercent(b, nil); err == nil {
+		if err := config.ValidateByteSizeOrPercent(b); err == nil {
 			t.Errorf("ValidateByteSizeOrPercent(%q): expected error", b)
 		}
 	}
@@ -700,52 +700,52 @@ func TestValidateByteSizeOrPercent(t *testing.T) {
 
 func TestValidateEnum(t *testing.T) {
 	v := config.ValidateEnum([]string{"low", "high"})
-	if err := v("low", nil); err != nil {
+	if err := v("low"); err != nil {
 		t.Errorf("ValidateEnum low: unexpected error %v", err)
 	}
-	if err := v("LOW", nil); err == nil {
+	if err := v("LOW"); err == nil {
 		t.Errorf("ValidateEnum LOW: expected case-sensitive error")
 	}
-	if err := v("foo", nil); err == nil {
+	if err := v("foo"); err == nil {
 		t.Errorf("ValidateEnum foo: expected error")
 	}
 }
 
 func TestValidateInteger(t *testing.T) {
 	v := config.ValidateInteger(0, 100)
-	if err := v("50", nil); err != nil {
+	if err := v("50"); err != nil {
 		t.Errorf("ValidateInteger 50: unexpected error %v", err)
 	}
-	if err := v("200", nil); err == nil {
+	if err := v("200"); err == nil {
 		t.Errorf("ValidateInteger 200: expected out-of-range error")
 	}
-	if err := v("abc", nil); err == nil {
+	if err := v("abc"); err == nil {
 		t.Errorf("ValidateInteger abc: expected non-integer error")
 	}
 }
 
 func TestValidatePercent(t *testing.T) {
 	v := config.ValidatePercent(0, 100)
-	if err := v("50", nil); err != nil {
+	if err := v("50"); err != nil {
 		t.Errorf("ValidatePercent 50: unexpected error %v", err)
 	}
-	if err := v("0.5", nil); err != nil {
+	if err := v("0.5"); err != nil {
 		t.Errorf("ValidatePercent 0.5: unexpected error %v", err)
 	}
-	if err := v("150", nil); err == nil {
+	if err := v("150"); err == nil {
 		t.Errorf("ValidatePercent 150: expected out-of-range error")
 	}
 	// NaN/Inf bypass the `<`/`>` range check (both comparisons are false
 	// for NaN) and reach the userspace snapshot where json.Marshal fails
 	// on non-finite floats (#4877). Reject them at commit-check.
 	for _, bad := range []string{"NaN", "nan", "+Inf", "-Inf", "Inf", "Infinity"} {
-		if err := v(bad, nil); err == nil {
+		if err := v(bad); err == nil {
 			t.Errorf("ValidatePercent %q: expected non-finite rejection", bad)
 		}
 	}
 	// A NaN/Inf guard must not reject an in-range finite value.
 	vf := config.ValidatePercent(0, 1)
-	if err := vf("0.5", nil); err != nil {
+	if err := vf("0.5"); err != nil {
 		t.Errorf("ValidatePercent(0,1) 0.5: unexpected error %v", err)
 	}
 }

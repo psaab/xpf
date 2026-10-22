@@ -31,7 +31,7 @@ func setTree7318(t *testing.T, cmds ...string) *config.ConfigTree {
 func mustCompile7318(t *testing.T, cmds ...string) *config.Config {
 	t.Helper()
 	tree := setTree7318(t, cmds...)
-	if err := config.SchemaValidate(tree, nil); err != nil {
+	if err := config.SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate: %v", err)
 	}
 	cfg, err := config.CompileConfig(tree)
@@ -127,7 +127,7 @@ func TestSocketTypeRejectsUnknownValue7318(t *testing.T) {
 	// deliberately NOT a value the leaf falls back to.
 	tree := setTree7318(t, baseDHCP7318,
 		"set system services dhcp-local-server dhcp-socket-type packet")
-	err := config.SchemaValidate(tree, nil)
+	err := config.SchemaValidate(tree)
 	if err == nil {
 		t.Fatal("SchemaValidate accepted dhcp-socket-type packet; the enum must reject it")
 	}

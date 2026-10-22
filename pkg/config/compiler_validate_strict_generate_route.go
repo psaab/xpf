@@ -27,7 +27,7 @@ func generateRouteInvalidPrefixes(cfg *Config) []string {
 			if gr == nil {
 				continue
 			}
-			if err := ValidateRouteDestination(gr.Prefix, nil); err != nil {
+			if err := ValidateRouteDestination(gr.Prefix); err != nil {
 				out = append(out, fmt.Sprintf("%s %q: %v", scope, gr.Prefix, err))
 			}
 		}

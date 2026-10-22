@@ -44,7 +44,7 @@ func TestGroupDefaultPolicyInlineOverride12823(t *testing.T) {
 			// SchemaValidate runs on the authored (pre-expansion) tree in
 			// some callers and on expanded trees in others; the authored
 			// tree must validate.
-			if err := SchemaValidate(defaultPolicyTree11821(t, text), nil); err != nil {
+			if err := SchemaValidate(defaultPolicyTree11821(t, text)); err != nil {
 				t.Fatalf("SchemaValidate rejected valid override config: %v", err)
 			}
 			// Lenient must also yield inline value without ambiguity warning.

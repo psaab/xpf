@@ -60,7 +60,7 @@ func TestSourceNATPoolHierarchicalRangeBlock_15675(t *testing.T) {
 	if len(perrs) != 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected hierarchical range block: %v", err)
 	}
 	cfg, err := CompileConfig(tree)
@@ -192,7 +192,7 @@ func TestSourceNATPoolPortNumericAndRandomSchema_15675(t *testing.T) {
 	} {
 		tree := snatPoolTree(t,
 			"set security nat source pool p1 address 203.0.113.5/32", cmd)
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate(%q): %v (want pass)", cmd, err)
 		}
 		cfg, err := CompileConfig(tree)

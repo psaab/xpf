@@ -84,7 +84,7 @@ func TestFilterLossPriorityCommitSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loss-priority must commit (warn, not reject): %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid loss-priority filter: %v", err)
 	}
 	// Sanity: the term actually carries the parsed loss-priority.

@@ -13,7 +13,7 @@ import (
 // live enumeration without normalization drift. The shorter BB:DD.F form
 // (no domain) is rejected: sysfs always carries the 4-digit domain, and
 // accepting an ambiguous short form would silently never match.
-func ValidatePCIAddr(raw string, _ *Config) error {
+func ValidatePCIAddr(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a PCI bus address, e.g. 0000:09:00.0)")
@@ -53,7 +53,7 @@ func pciAddrCanonical(s string) bool {
 // any multicast/group address (LSB of the first octet set) — neither can
 // be a NIC's permanent unicast address, so accepting one guarantees a
 // non-matching key.
-func ValidateMAC(raw string, _ *Config) error {
+func ValidateMAC(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a MAC address, e.g. 00:11:22:33:44:55)")
@@ -85,7 +85,7 @@ func ValidateMAC(raw string, _ *Config) error {
 // suffixes (.N — the map binds the physical NIC, not a unit), and obvious
 // garbage so a typo fails loud at commit rather than producing an unbound
 // entry that only shows up at next boot.
-func ValidateDeviceMapLogicalName(raw string, _ *Config) error {
+func ValidateDeviceMapLogicalName(raw string) error {
 	name := strings.TrimSpace(raw)
 	if name == "" {
 		return fmt.Errorf("missing logical interface name (e.g. ge-0/0/3 or fxp0)")

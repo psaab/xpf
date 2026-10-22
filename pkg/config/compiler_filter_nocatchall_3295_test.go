@@ -283,11 +283,10 @@ func TestFilterNoCatchAllCommitSucceeds(t *testing.T) {
 			t.Fatalf("SetPath(%q): %v", line, err)
 		}
 	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
+	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("no-catch-all allowlist must commit (warn, not reject): %v", err)
 	}
-	if err := SchemaValidate(tree, cfg); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		t.Fatalf("SchemaValidate rejected a valid allowlist filter: %v", err)
 	}
 }

@@ -51,7 +51,7 @@ func flat15125(t *testing.T, cmds ...string) *ConfigTree {
 // the config does not commit.
 func strictCommit15125(t *testing.T, tree *ConfigTree) error {
 	t.Helper()
-	if err := SchemaValidate(tree, nil); err != nil {
+	if err := SchemaValidate(tree); err != nil {
 		return err
 	}
 	_, err := CompileConfig(tree)
@@ -165,7 +165,7 @@ func TestPolicer15125_FullPositiveControlUnchanged(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := tc.tree(t)
-			if err := SchemaValidate(tree, nil); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("SchemaValidate rejected full policer: %v", err)
 			}
 			cfg, err := CompileConfig(tree)

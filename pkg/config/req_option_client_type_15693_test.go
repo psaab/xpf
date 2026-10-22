@@ -161,11 +161,10 @@ func TestDHCPv6ClientEnumValidation15693(t *testing.T) {
 		if err := tree.SetPath(path); err != nil {
 			t.Fatalf("SetPath: %v", err)
 		}
-		cfg, err := CompileConfig(tree)
-		if err != nil {
+		if _, err := CompileConfig(tree); err != nil {
 			t.Fatalf("CompileConfig: %v", err)
 		}
-		return SchemaValidate(tree, cfg)
+		return SchemaValidate(tree)
 	}
 	base := "set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client "
 

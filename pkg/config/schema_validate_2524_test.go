@@ -90,13 +90,13 @@ func TestSchema2524_ValidatorUnit(t *testing.T) {
 	}
 	good := []string{"1", "16384"}
 	for _, v := range good {
-		if err := config.ValidateRingEntries(v, nil); err != nil {
+		if err := config.ValidateRingEntries(v); err != nil {
 			t.Errorf("ValidateRingEntries(%q): unexpected error: %v", v, err)
 		}
 	}
 	bad := []string{"0", "16385", "24576", "asd", ""}
 	for _, v := range bad {
-		if err := config.ValidateRingEntries(v, nil); err == nil {
+		if err := config.ValidateRingEntries(v); err == nil {
 			t.Errorf("ValidateRingEntries(%q): expected error, got nil", v)
 		}
 	}

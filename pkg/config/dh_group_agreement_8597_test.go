@@ -29,7 +29,7 @@ func TestValidateDHGroupAcceptsExactlyWhatCanBeSpelled_8597(t *testing.T) {
 		if !ok || kw == "" {
 			t.Errorf("group %d is in SupportedDHGroups but has no keyword", g)
 		}
-		if err := ValidateDHGroup(itoaDH(g), nil); err != nil {
+		if err := ValidateDHGroup(itoaDH(g)); err != nil {
 			t.Errorf("group %d has keyword %q but the validator rejects it: %v", g, kw, err)
 		}
 	}
@@ -47,7 +47,7 @@ func TestValidateDHGroupRejectsUnspellableGroups_8597(t *testing.T) {
 		{3, "unassigned"},
 		{1000000, "far out of range"},
 	} {
-		if err := ValidateDHGroup(itoaDH(tc.group), nil); err == nil {
+		if err := ValidateDHGroup(itoaDH(tc.group)); err == nil {
 			t.Errorf("group %d accepted (%s); it renders a proposal keyword strongSwan "+
 				"does not take, so IPsec never establishes and the operator debugs "+
 				"charon instead of their config", tc.group, tc.why)
@@ -81,14 +81,14 @@ func TestDHGroupSpellingsAreNotBitCounts_8597(t *testing.T) {
 // `group14` spelling, or every config using it fails to commit.
 func TestDHGroupValidatorStillAcceptsTheGroupPrefix_8597(t *testing.T) {
 	for _, raw := range []string{"14", "group14", " group19 ", "2", "group32"} {
-		if err := ValidateDHGroup(raw, nil); err != nil {
+		if err := ValidateDHGroup(raw); err != nil {
 			t.Errorf("ValidateDHGroup(%q) = %v; both the bare-integer and group<N> "+
 				"spellings must keep working", raw, err)
 		}
 	}
 	// And the pre-existing rejections stay rejections, each for its own reason.
 	for _, raw := range []string{"", "abc", "0", "-5", "group0"} {
-		if err := ValidateDHGroup(raw, nil); err == nil {
+		if err := ValidateDHGroup(raw); err == nil {
 			t.Errorf("ValidateDHGroup(%q) accepted; the pre-#8597 rejections must "+
 				"survive the tightening", raw)
 		}

@@ -20,7 +20,7 @@ func TestValidateUnixSocketPath_5839(t *testing.T) {
 		"/var/run/xpf/dp-0.sock",
 	}
 	for _, raw := range good {
-		if err := ValidateUnixSocketPath(raw, nil); err != nil {
+		if err := ValidateUnixSocketPath(raw); err != nil {
 			t.Errorf("ValidateUnixSocketPath(%q) = %v, want accepted", raw, err)
 		}
 	}
@@ -41,7 +41,7 @@ func TestValidateUnixSocketPath_5839(t *testing.T) {
 		{"/" + strings.Repeat("a", 107) + "/dp.sock", "sun_path limit"},
 	}
 	for _, tc := range bad {
-		err := ValidateUnixSocketPath(tc.raw, nil)
+		err := ValidateUnixSocketPath(tc.raw)
 		if err == nil {
 			t.Errorf("ValidateUnixSocketPath(%q) = nil, want rejection", tc.raw)
 			continue
@@ -57,10 +57,10 @@ func TestValidateUnixSocketPath_5839(t *testing.T) {
 	if got := len(atLimit); got != maxUnixSocketPathLen {
 		t.Fatalf("fixture length = %d, want %d", got, maxUnixSocketPathLen)
 	}
-	if err := ValidateUnixSocketPath(atLimit, nil); err != nil {
+	if err := ValidateUnixSocketPath(atLimit); err != nil {
 		t.Errorf("ValidateUnixSocketPath(<%d octets>) = %v, want accepted", maxUnixSocketPathLen, err)
 	}
-	if err := ValidateUnixSocketPath(atLimit+"a", nil); err == nil {
+	if err := ValidateUnixSocketPath(atLimit+"a"); err == nil {
 		t.Errorf("ValidateUnixSocketPath(<%d octets>) = nil, want rejection", maxUnixSocketPathLen+1)
 	}
 }
@@ -82,7 +82,7 @@ func TestControlSocketTypedLeafGate_5839(t *testing.T) {
 
 	t.Run("valid path commits and compiles", func(t *testing.T) {
 		tree := build(t, "/run/xpf/userspace-dp.sock")
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("SchemaValidate: %v", err)
 		}
 		cfg, err := CompileConfig(tree)
@@ -100,7 +100,7 @@ func TestControlSocketTypedLeafGate_5839(t *testing.T) {
 	for _, bad := range []string{"userspace-dp.sock", "/run/xpf/../../etc/shadow"} {
 		t.Run("rejected: "+bad, func(t *testing.T) {
 			tree := build(t, bad)
-			if err := SchemaValidate(tree, nil); err == nil {
+			if err := SchemaValidate(tree); err == nil {
 				t.Fatalf("SchemaValidate accepted control-socket %q, want a commit-check error", bad)
 			}
 		})

@@ -42,7 +42,7 @@ func buildTree3349(t *testing.T, cmds ...string) *config.ConfigTree {
 // schemaCheck3349 runs the commit-check typed-leaf gate over a flat-set config.
 func schemaCheck3349(t *testing.T, cmds ...string) error {
 	t.Helper()
-	return config.SchemaValidate(buildTree3349(t, cmds...), nil)
+	return config.SchemaValidate(buildTree3349(t, cmds...))
 }
 
 // TestLogStream3349_SchemaFields_RejectTypos asserts every typed log field

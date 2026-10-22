@@ -39,7 +39,7 @@ func isRoutingInstanceType9814(v string) bool {
 // kept verbatim so enumPairFromValidator's message probe still parses (and
 // re-verifies) the accepted set; the leaf's three valueExamples remain the
 // primary #2419 synthesis source.
-func ValidateRoutingInstanceType9814(raw string, _ *Config) error {
+func ValidateRoutingInstanceType9814(raw string) error {
 	if isRoutingInstanceType9814(raw) {
 		return nil
 	}

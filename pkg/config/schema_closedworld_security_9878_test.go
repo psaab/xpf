@@ -38,7 +38,7 @@ func TestClosedWorldSecurity9878_TypoRejected(t *testing.T) {
 		{"zones security-zone trust host-inbound-traffic system-servces ssh", "system-servces"},
 	} {
 		tree := buildTree(t, cwSecurity9878Set(tc.line))
-		err := SchemaValidate(tree, nil)
+		err := SchemaValidate(tree)
 		if err == nil {
 			t.Fatalf("typo %q must be rejected at commit, not silently dropped", tc.line)
 		}
@@ -58,7 +58,7 @@ func TestClosedWorldSecurity9878_MidKeywordRejected(t *testing.T) {
 	flat := buildTree(t, cwSecurity9878Set(
 		"policies from-zone trust to-zon untrust policy p1 then permit",
 	))
-	if err := SchemaValidate(flat, nil); err == nil {
+	if err := SchemaValidate(flat); err == nil {
 		t.Fatal("flat `to-zon` must be rejected at commit, not silently accepted")
 	} else if !strings.Contains(err.Error(), "to-zon") {
 		t.Fatalf("flat rejection must name the typo token, got: %v", err)
@@ -76,7 +76,7 @@ func TestClosedWorldSecurity9878_MidKeywordRejected(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("hierarchical fixture does not parse: %v", perrs)
 	}
-	if err := SchemaValidate(hier, nil); err == nil {
+	if err := SchemaValidate(hier); err == nil {
 		t.Fatal("hierarchical nested `to-zon` must be rejected at commit, not silently accepted")
 	} else if !strings.Contains(err.Error(), "to-zon") {
 		t.Fatalf("hierarchical rejection must name the typo token, got: %v", err)
@@ -95,7 +95,7 @@ func TestClosedWorldSecurity9878_MidKeywordRejected(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("control fixture does not parse: %v", perrs)
 	}
-	if err := SchemaValidate(ok, nil); err != nil {
+	if err := SchemaValidate(ok); err != nil {
 		t.Fatalf("correctly-spelled nested from-zone must commit clean, got: %v", err)
 	}
 }
@@ -169,7 +169,7 @@ func TestClosedWorldSecurity9878_AcceptsValid(t *testing.T) {
 	}
 	for _, stanza := range valid {
 		tree := buildTree(t, cwSecurity9878Set(stanza...))
-		if err := SchemaValidate(tree, nil); err != nil {
+		if err := SchemaValidate(tree); err != nil {
 			t.Fatalf("valid zones/policies stanza %q must commit clean under closed-world, got: %v", stanza, err)
 		}
 	}
@@ -192,7 +192,7 @@ func TestClosedWorldSecurity9878_HierarchicalShapes(t *testing.T) {
 		{"interfces", `security { zones { security-zone trust { interfces ge-0/0/0; } } }`, "interfces"},
 		{"match-typo", `security { policies { from-zone trust to-zone untrust { policy p1 { mach { source-address any; } then permit; } } } }`, "mach"},
 	} {
-		if err := SchemaValidate(parse(tc.text), nil); err == nil {
+		if err := SchemaValidate(parse(tc.text)); err == nil {
 			t.Fatalf("hierarchical typo %q must be rejected at commit", tc.name)
 		} else if !strings.Contains(err.Error(), tc.bad) {
 			t.Fatalf("hierarchical rejection must name %q, got: %v", tc.bad, err)
@@ -218,7 +218,7 @@ func TestClosedWorldSecurity9878_HierarchicalShapes(t *testing.T) {
         }
     }
 }`
-	if err := SchemaValidate(parse(validHier), nil); err != nil {
+	if err := SchemaValidate(parse(validHier)); err != nil {
 		t.Fatalf("valid hierarchical zones/policies must commit clean, got: %v", err)
 	}
 }
@@ -231,7 +231,7 @@ func TestClosedWorldSecurity10078_PolicieRejected(t *testing.T) {
 	flat := buildTree(t, cwSecurity9878Set(
 		"policie from-zone trust to-zone untrust policy p1 then permit",
 	))
-	if err := SchemaValidate(flat, nil); err == nil {
+	if err := SchemaValidate(flat); err == nil {
 		t.Fatal("flat `policie` must be rejected at the security boundary")
 	} else if !strings.Contains(err.Error(), "policie") || !strings.Contains(err.Error(), "closed-world") {
 		t.Fatalf("flat rejection must name `policie` and closed-world, got: %v", err)
@@ -240,7 +240,7 @@ func TestClosedWorldSecurity10078_PolicieRejected(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("hierarchical fixture does not parse: %v", perrs)
 	}
-	if err := SchemaValidate(hier, nil); err == nil {
+	if err := SchemaValidate(hier); err == nil {
 		t.Fatal("hierarchical `policie` must be rejected at the security boundary")
 	} else if !strings.Contains(err.Error(), "policie") || !strings.Contains(err.Error(), "closed-world") {
 		t.Fatalf("hierarchical rejection must name `policie` and closed-world, got: %v", err)
@@ -253,7 +253,7 @@ func TestClosedWorldSecurity10078_PolicieRejected(t *testing.T) {
 // either the kind modeling or the opaque-tail boundary makes one half RED.
 func TestClosedWorldSecurity10078_TCPMSSOpaqueGrammar(t *testing.T) {
 	flat := buildTree(t, []string{"set security flow tcp-mss all-tcp 1350"})
-	if err := SchemaValidate(flat, nil); err != nil {
+	if err := SchemaValidate(flat); err != nil {
 		t.Fatalf("flat all-tcp MSS must survive the security arm: %v", err)
 	}
 	cfg, err := CompileConfig(flat)
@@ -268,7 +268,7 @@ func TestClosedWorldSecurity10078_TCPMSSOpaqueGrammar(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("hierarchical all-tcp fixture does not parse: %v", perrs)
 	}
-	if err := SchemaValidate(hier, nil); err != nil {
+	if err := SchemaValidate(hier); err != nil {
 		t.Fatalf("hierarchical all-tcp MSS must survive the security arm: %v", err)
 	}
 	cfg, err = CompileConfig(hier)
@@ -280,7 +280,7 @@ func TestClosedWorldSecurity10078_TCPMSSOpaqueGrammar(t *testing.T) {
 	}
 
 	bad := buildTree(t, []string{"set security flow tcp-mss all-tpc 1350"})
-	if err := SchemaValidate(bad, nil); err == nil {
+	if err := SchemaValidate(bad); err == nil {
 		t.Fatal("misspelled tcp-mss kind must be rejected by the security arm")
 	} else if !strings.Contains(err.Error(), "all-tpc") || !strings.Contains(err.Error(), "closed-world") {
 		t.Fatalf("tcp-mss kind rejection must name all-tpc and closed-world, got: %v", err)
@@ -295,13 +295,13 @@ func TestClosedWorldSecurity10078_PackedLogRunExpansion(t *testing.T) {
 	valid := buildTree(t, []string{
 		"set security log stream s1 port 5514 category policy",
 	})
-	if err := SchemaValidate(valid, nil); err != nil {
+	if err := SchemaValidate(valid); err != nil {
 		t.Fatalf("valid packed stream run must survive the security arm: %v", err)
 	}
 	bad := buildTree(t, []string{
 		"set security log stream s1 port 5514 categroy policy",
 	})
-	if err := SchemaValidate(bad, nil); err == nil {
+	if err := SchemaValidate(bad); err == nil {
 		t.Fatal("misspelled packed stream sibling must be rejected under closed-world")
 	} else if !strings.Contains(err.Error(), "categroy") || !strings.Contains(err.Error(), "closed-world") {
 		t.Fatalf("packed stream rejection must name categroy and closed-world, got: %v", err)
@@ -317,13 +317,13 @@ func TestClosedWorldSecurity10078_PackedDestinationPortArity(t *testing.T) {
 	valid := buildTree(t, []string{
 		"set security nat destination pool p1 address 192.0.2.1 port 80",
 	})
-	if err := SchemaValidate(valid, nil); err != nil {
+	if err := SchemaValidate(valid); err != nil {
 		t.Fatalf("valid packed destination port must survive the security arm: %v", err)
 	}
 	bad := buildTree(t, []string{
 		"set security nat destination pool p1 address 192.0.2.1 port 80 192.0.2.2",
 	})
-	if err := SchemaValidate(bad, nil); err == nil {
+	if err := SchemaValidate(bad); err == nil {
 		t.Fatal("trailing token after packed destination port must be rejected")
 	} else if !strings.Contains(err.Error(), "192.0.2.2") || !strings.Contains(err.Error(), "closed-world") {
 		t.Fatalf("trailing-token rejection must name 192.0.2.2 and closed-world, got: %v", err)
@@ -338,7 +338,7 @@ func TestClosedWorldSecurity10078_PoolUtilizationAlarmGrammar(t *testing.T) {
 	valid := buildTree(t, []string{
 		"set security nat source pool-utilization-alarm raise-threshold 80 clear-threshold 55",
 	})
-	if err := SchemaValidate(valid, nil); err != nil {
+	if err := SchemaValidate(valid); err != nil {
 		t.Fatalf("valid pool-utilization-alarm must survive the security arm: %v", err)
 	}
 	cfg, err := CompileConfig(valid)
@@ -352,7 +352,7 @@ func TestClosedWorldSecurity10078_PoolUtilizationAlarmGrammar(t *testing.T) {
 	bad := buildTree(t, []string{
 		"set security nat source pool-utilization-alarm raise-threshold 80 clear-threshhold 55",
 	})
-	if err := SchemaValidate(bad, nil); err == nil {
+	if err := SchemaValidate(bad); err == nil {
 		t.Fatal("misspelled pool-utilization-alarm leaf must be rejected")
 	} else if !strings.Contains(err.Error(), "clear-threshhold") {
 		t.Fatalf("alarm typo rejection must name the token, got: %v", err)
@@ -372,7 +372,7 @@ func TestClosedWorldSecurity10078_DirectIPsecVPNLeaves(t *testing.T) {
 		"set security ipsec vpn tun1 gateway gw1 ipsec-policy esp-pol",
 		"set security ipsec vpn tun1 bind-interface st0",
 	})
-	if err := SchemaValidate(valid, nil); err != nil {
+	if err := SchemaValidate(valid); err != nil {
 		t.Fatalf("direct gateway/ipsec-policy leaves must survive the security arm: %v", err)
 	}
 	cfg, err := CompileConfig(valid)
@@ -400,7 +400,7 @@ func TestClosedWorldSecurity10078_DirectIPsecVPNLeaves(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("hierarchical direct VPN fixture does not parse: %v", perrs)
 	}
-	if err := SchemaValidate(hier, nil); err != nil {
+	if err := SchemaValidate(hier); err != nil {
 		t.Fatalf("hierarchical direct VPN leaves must survive the security arm: %v", err)
 	}
 	hcfg, err := CompileConfig(hier)
@@ -420,7 +420,7 @@ func TestClosedWorldSecurity10078_DirectIPsecVPNLeaves(t *testing.T) {
 		"set security ipsec policy esp-pol proposal-set standard",
 		"set security ipsec vpn tun1 gateway gw1 ipsec-policie esp-pol",
 	})
-	if err := SchemaValidate(bad, nil); err == nil {
+	if err := SchemaValidate(bad); err == nil {
 		t.Fatal("misspelled direct ipsec-policy leaf must be rejected")
 	} else if !strings.Contains(err.Error(), "ipsec-policie") || !strings.Contains(err.Error(), "closed-world") {
 		t.Fatalf("direct VPN typo rejection must name the token and closed-world boundary, got: %v", err)
@@ -458,7 +458,7 @@ func TestClosedWorldSecurity10078_CompletionPinsSubtrees(t *testing.T) {
 // nodes — the ipip_no_brick_4785 argument). #1960.
 func TestClosedWorldSecurity9878_LenientDoesNotBrick(t *testing.T) {
 	typoTree := buildTree(t, cwSecurity9878Set("policies frum-zone trust to-zone untrust policy p1 then permit"))
-	if err := SchemaValidate(typoTree, nil); err == nil {
+	if err := SchemaValidate(typoTree); err == nil {
 		t.Fatal("precondition: strict SchemaValidate must reject the typo")
 	}
 	if _, err := CompileConfigLenient(typoTree); err != nil {
@@ -498,9 +498,9 @@ func TestClosedWorldSecurity9878_ShippedConfigsStillCommit(t *testing.T) {
 			t.Errorf("%s does not parse, sweep cannot certify it: %v", filepath.Base(f), perrs)
 			continue
 		}
-		cfg, _ := CompileConfigLenient(tree)
+		_, _ = CompileConfigLenient(tree)
 		tree2, _ := NewParser(string(b)).Parse()
-		if err := SchemaValidate(tree2, cfg); err != nil {
+		if err := SchemaValidate(tree2); err != nil {
 			t.Errorf("%s no longer validates: %v", filepath.Base(f), err)
 			continue
 		}
@@ -522,7 +522,7 @@ func TestClosedWorldSecurity9878_ShippedConfigsStillCommit(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("control file does not parse — the control proves nothing: %v", perrs)
 	}
-	if err := SchemaValidate(ctl, nil); err == nil {
+	if err := SchemaValidate(ctl); err == nil {
 		t.Fatal("the control typo was accepted through the file path — this sweep cannot report a rejection")
 	}
 }

@@ -182,7 +182,7 @@ func equalFlowPolicyFlatSchemaCheck(t *testing.T, cmd string) error {
 	if err := tree.SetPath(path); err != nil {
 		t.Fatalf("SetPath(%q): %v", cmd, err)
 	}
-	return SchemaValidate(tree, nil)
+	return SchemaValidate(tree)
 }
 
 func TestEqualFlowTargetPolicySchemaValidate(t *testing.T) {

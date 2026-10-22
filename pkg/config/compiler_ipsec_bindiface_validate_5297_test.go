@@ -152,13 +152,13 @@ func TestSecureTunnelBindIfaceInvalidLenientWarns(t *testing.T) {
 // schema leaf makes SchemaValidate return nil for "secure0" → RED.
 func TestSecureTunnelBindIfaceInvalidSchemaRejected(t *testing.T) {
 	bad := flatTreeFromSets(t, "set security ipsec vpn V bind-interface secure0")
-	err := SchemaValidate(bad, nil)
+	err := SchemaValidate(bad)
 	if err == nil || !strings.Contains(err.Error(), "secure0") {
 		t.Fatalf("SchemaValidate must reject invalid bind-interface naming the value, got: %v", err)
 	}
 	for _, good := range []string{"st0", "st0.1", "st1.5"} {
 		ok := flatTreeFromSets(t, "set security ipsec vpn V bind-interface "+good)
-		if err := SchemaValidate(ok, nil); err != nil {
+		if err := SchemaValidate(ok); err != nil {
 			t.Errorf("SchemaValidate rejected valid bind-interface %q: %v", good, err)
 		}
 	}

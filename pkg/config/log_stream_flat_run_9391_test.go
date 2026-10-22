@@ -34,7 +34,7 @@ func stream9391(t *testing.T, lines ...string) (*SyslogStream, bool) {
 			t.Fatalf("setpath %q: %v", l, err)
 		}
 	}
-	strictOK := SchemaValidateWithDefinitions(tree, tree, nil) == nil
+	strictOK := SchemaValidateWithDefinitions(tree, tree) == nil
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
