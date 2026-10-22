@@ -671,7 +671,7 @@ impl SessionTable {
         // #9412: the matched entry's close class BEFORE this packet (wire form),
         // captured inside the borrow below so a TRANSITION can be announced to
         // the peer once the borrow has ended.
-        let (result, actual_key, propagate, close_class_before, handshake_state_before) = {
+        let (result, actual_key, propagate, close_class_before, handshake_state_before, progress_key) = {
             let Some(record) = self.entries.get_mut(handle as usize) else {
                 return SessionExpiryProbe::Absent;
             };
@@ -790,6 +790,19 @@ impl SessionTable {
                     || close_progress
                     || payload_progress
                     || (!do_close && !deferred_close_segment && !entry.reset && !entry.fin_own));
+            // #16223: split-path rows can stay Opening/pending on the
+            // serving worker while the SYN-ACK / completing ACK were
+            // consumed on the fabric peer or a sibling worker. Payload
+            // (or a SYN-ACK) on a non-established/pending row is
+            // handshake-progress evidence — defer the verdict to the
+            // companion-aware check after the borrow, exactly as the
+            // cache-hit paths do. Never for a closing entry (#14630).
+            let progress_evidence = !defer_all
+                && !entry.closing
+                && is_tcp
+                && !is_closing(tcp_flags)
+                && (!entry.established || entry.handshake_pending)
+                && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len);
             if refresh {
                 entry.last_seen_ns = now_ns;
                 entry.expires_after_ns = if is_tcp && entry.closing {
@@ -835,6 +848,7 @@ impl SessionTable {
                 established: promote_from_reverse || promote_from_asymmetric_ack,
                 handshake_completed,
             };
+            let progress_key = progress_evidence.then(|| record.key.clone());
             (
                 (
                     SessionLookup {
@@ -864,6 +878,7 @@ impl SessionTable {
                 propagate,
                 close_class_before,
                 handshake_state_before,
+                progress_key,
             )
         }; // <-- &mut self.entries borrow ends here
         // #4109: mirror the close (F17) / handshake promotion (F16) onto the
@@ -877,6 +892,52 @@ impl SessionTable {
         if state_transition {
             self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
             self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
+        }
+        // #16223: companion-aware completion when this hit carried
+        // progress evidence but the classic arms did not fire (the
+        // completing segment was consumed on another worker/node).
+        // Skipped when a classic transition already ran: the helper's
+        // guards refuse an already-established pair anyway, and the
+        // classic HA Update above already announced the transition.
+        if !state_transition {
+            if let Some(progress_key) = &progress_key {
+                if let Some((matched_key, nat)) =
+                    self.cache_hit_handshake_progress(progress_key)
+                {
+                    if let Some(entry) = self.entry_by_key_mut(&matched_key) {
+                        entry.established = true;
+                        entry.handshake_pending = false;
+                        entry.syn_ack_first = false;
+                        entry.last_seen_ns = now_ns;
+                        entry.expires_after_ns = session_timeout_ns(
+                            matched_key.protocol,
+                            tcp_flags,
+                            true,
+                            &timeouts,
+                            entry.metadata.inactivity_timeout_ns,
+                            opening_override_ns,
+                        );
+                    }
+                    self.propagate_tcp_state_to_companion(
+                        &matched_key,
+                        now_ns,
+                        TcpStatePropagation {
+                            nat,
+                            close: false,
+                            reset: false,
+                            fin: false,
+                            established: false,
+                            handshake_completed: true,
+                        },
+                    );
+                    self.emit_session_state_update(
+                        &matched_key,
+                        close_class_before,
+                        handshake_state_before,
+                    );
+                    self.push_to_wheel(&matched_key, now_ns);
+                }
+            }
         }
         // Push the canonical key (NOT the alias lookup `key`) into
         // the wheel. push_to_wheel re-reads the record to compute

@@ -3920,6 +3920,11 @@ impl SessionTable {
         emit_state_update: bool,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #16223: split-path evidence of handshake progress observed on
+        // the COMPANION half (see `cache_hit_handshake_progress`).
+        let mut companion_progress = false;
+        // #16223: companion half already idle-crossed at probe time.
+        let mut companion_crossed = false;
         // #15947 (H29-04): wire state BEFORE the completion below, so the
         // HA Update emission can tell whether the handshake actually
         // transitioned (emit_session_state_update is transition-only).
@@ -3992,8 +3997,13 @@ impl SessionTable {
                 let entry = &mut record.entry;
                 let age = now_ns.saturating_sub(entry.last_seen_ns);
                 if age > entry.expires_after_ns {
-                    return false;
-                }
+                    // #16223: this half idle-crossed, but a live
+                    // companion may still prove the flow is active
+                    // (split-path replicas are never re-stamped on the
+                    // serving worker). Defer to the companion-aware
+                    // check after the borrow instead of refusing.
+                    companion_crossed = true;
+                } else {
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.
@@ -4009,6 +4019,26 @@ impl SessionTable {
                         entry.tcp_handshake_state_wire(key.protocol);
                     close_class_before = entry.tcp_close_class_wire();
                     completing = Some((record.key.clone(), entry.decision.nat));
+                }
+                // #16223: split-RG / fabric-ingress / replica rows never
+                // observe the completing segment on the pending half:
+                // the fw0 forward rows expire `established=false,
+                // handshake_pending=false` (Opening — the predicate
+                // above never even arms) and the fw1 reverse rows stay
+                // `handshake_pending=true` while the completing forward
+                // ACK is cache-served on the fabric peer. What THIS hit
+                // proves, when it carries payload or a SYN-ACK: the
+                // handshake progressed past the bare SYN. Defer the
+                // verdict to the companion-aware check after the borrow
+                // (the companion may be the half that observed the
+                // SYN-ACK / completing ACK).
+                if completing.is_none()
+                    && !entry.closing
+                    && matches!(key.protocol, PROTO_TCP)
+                    && !is_closing(tcp_flags)
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
+                {
+                    companion_progress = true;
                 }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
@@ -4031,8 +4061,81 @@ impl SessionTable {
                 } else {
                     reverse_fold = Some((record.key.clone(), entry.decision.nat));
                 }
+                }
             }
             None => return false,
+        }
+        // #16223: this half idle-crossed before the hit. Only a live,
+        // progressed companion can resurrect it (the GC companion
+        // probe's job, mirrored here so the SERVING hit — not a later
+        // GC pass — decides): complete + re-stamp via the arms below
+        // by treating the hit as progress evidence. A crossed half
+        // with no progressed companion stays refused, exactly as
+        // before (the caller falls through to the slow path / GC).
+        if companion_crossed {
+            if self.cache_hit_handshake_progress(key).is_none() {
+                return false;
+            }
+            companion_progress = true;
+        }
+        // #16223: the classic predicate above did not fire, but this hit
+        // carried handshake-progress evidence (payload / SYN-ACK) on a
+        // non-established or pending row. Complete the pair when the
+        // evidence — this hit plus the companion's observed TCP flags —
+        // proves the handshake progressed past the bare SYN (see
+        // `cache_hit_handshake_progress`). Runs before the refresh arm
+        // so the completing hit re-stamps `last_seen` itself.
+        if completing.is_none() && companion_progress {
+            if let Some((matched_key, nat)) = self.cache_hit_handshake_progress(key) {
+                if let Some(entry) = self.entry_by_key(&matched_key) {
+                    handshake_state_before =
+                        entry.tcp_handshake_state_wire(matched_key.protocol);
+                    close_class_before = entry.tcp_close_class_wire();
+                }
+                completing = Some((matched_key, nat));
+            }
+        }
+        // #16223 (second failure conjunct): the fused probe returns
+        // `false` once EITHER half idle-crosses (`age >
+        // expires_after`), and the GC companion probe refuses a
+        // never-established companion — so a pair whose hits were all
+        // throttled (`age < expires_after/4` re-stamps nothing) or
+        // whose serving worker never re-stamped the replica rows
+        // (live `last_seen == created` on every row) is reaped at
+        // 20 s while both nodes serve it. When this hit proves
+        // handshake progress but the classic completion did not land
+        // (e.g. the pair is SYN-ACK-first on the companion), keep the
+        // live pair alive: re-stamp BOTH halves on their current
+        // windows so the next progress hit can complete them instead
+        // of the GC reaping them mid-flow. Bounded: the re-stamp is
+        // THIS hit's real timestamp, so a flow that goes quiet still
+        // reaps one window after its last served packet.
+        if completing.is_none() && companion_progress {
+            if self.cache_hit_handshake_progress(key).is_some() {
+                let companion_key = {
+                    let hit_nat = self.entry_by_key(key).map(|e| e.decision.nat);
+                    hit_nat.map(|nat| reverse_session_key(key, nat))
+                };
+                let mut touched = false;
+                if let Some(entry) = self.entry_by_key_mut(key) {
+                    entry.last_seen_ns = now_ns;
+                    touched = true;
+                }
+                if let Some(companion_key) = companion_key {
+                    if companion_key != *key {
+                        if let Some(entry) = self.entry_by_key_mut(&companion_key) {
+                            entry.last_seen_ns = now_ns;
+                            touched = true;
+                        }
+                        if touched {
+                            self.push_to_wheel(&companion_key, now_ns);
+                        }
+                    }
+                }
+                if touched {
+                    self.push_to_wheel(key, now_ns);
+                }
+            }
         }
         if let Some((matched_key, nat)) = completing {
             let timeouts = self.timeouts;
@@ -4198,6 +4301,8 @@ impl SessionTable {
         payload_len: u32,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #16223: companion-progress evidence (see probe_hit_inner).
+        let mut companion_progress = false;
         // #15947 (H29-04): pre-completion wire state for the HA Update.
         let mut handshake_state_before = 0u8;
         let mut close_class_before = 0u8;
@@ -4225,6 +4330,18 @@ impl SessionTable {
                     close_class_before = entry.tcp_close_class_wire();
                     completing = Some((record.key.clone(), entry.decision.nat));
                 }
+                // #16223: payload / SYN-ACK on a non-established or
+                // pending row is handshake-progress evidence; defer to
+                // the companion-aware check after the borrow.
+                if completing.is_none()
+                    && !entry.closing
+                    && matches!(key.protocol, PROTO_TCP)
+                    && !is_closing(tcp_flags)
+                    && (!entry.established || entry.handshake_pending)
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
+                {
+                    companion_progress = true;
+                }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
                 let payload_progress = entry.closing
@@ -4238,6 +4355,17 @@ impl SessionTable {
             }
             None => return false,
         };
+        // #16223: companion-aware completion (see probe_hit_inner).
+        if completing.is_none() && companion_progress {
+            if let Some((matched_key, nat)) = self.cache_hit_handshake_progress(key) {
+                if let Some(entry) = self.entry_by_key(&matched_key) {
+                    handshake_state_before =
+                        entry.tcp_handshake_state_wire(matched_key.protocol);
+                    close_class_before = entry.tcp_close_class_wire();
+                }
+                completing = Some((matched_key, nat));
+            }
+        }
         if let Some((matched_key, nat)) = completing {
             let timeouts = self.timeouts;
             let opening_override_ns = self
@@ -4461,6 +4589,127 @@ impl SessionTable {
             source_nat_static: forward.source_nat_static,
         };
         self.push_delta(delta);
+    }
+
+    /// #16223: companion-aware handshake completion for hit paths.
+    ///
+    /// Split-RG / fabric-ingress / worker-replica rows never observe
+    /// the completing segment on the half that needs it: the fw0
+    /// forward rows expire `established=false, handshake_pending=false`
+    /// (wire Opening — the classic predicate's `handshake_pending`
+    /// conjunct never even arms) and the fw1 reverse rows stay
+    /// `handshake_pending=true` while the completing forward ACK is
+    /// flow-cache-served on the fabric peer. The classic conjunct that
+    /// fails is therefore `handshake_pending` on Opening rows, plus
+    /// the orientation conjunct
+    /// (`syn_ack_first == metadata.is_reverse`) for a plain
+    /// HandshakePending row hit on its reverse half.
+    ///
+    /// This helper is consulted only after a hit on `hit_key` carried
+    /// progress evidence (payload-bearing segment or SYN-ACK — the
+    /// callers gate on that) on a non-established or pending row. It
+    /// completes the pair when the evidence proves the handshake
+    /// progressed past the bare SYN:
+    ///
+    /// - the hit half is SYN-ACK-first pending (`syn_ack_first`): only
+    ///   a SYN-ACK crossed in the installing direction is on record;
+    ///   payload alone must NOT complete it — the reverse ACK is still
+    ///   required (#4109), so this shape refuses here and keeps
+    ///   waiting for the classic reverse-ACK arm;
+    /// - otherwise completion requires the companion half to have
+    ///   observed a SYN (`observed_tcp_flags`, seeded at install and
+    ///   OR-folded from both directions by the accounting legs — a
+    ///   SYN-ACK carries SYN): server-side segments crossed this
+    ///   table, so a payload-bearing hit cannot be spoofed client
+    ///   data racing ahead of the SYN-ACK on a never-answered SYN.
+    ///
+    /// A pair with no companion on this table (single FabricRedirect
+    /// half) completes from its own progress evidence alone: payload
+    /// crossed the fabric, which itself proves both directions were
+    /// forwarded by the peer. Closing entries never complete
+    /// (#14630), and an already-established pair is untouched.
+    ///
+    /// Returns the canonical forward key + NAT of the completed pair
+    /// so the caller performs the same completion block as the
+    /// classic arm (establish + re-window + companion propagation +
+    /// HA Update). Cost: one companion probe, only on
+    /// progress-evidence hits of non-established rows — never in
+    /// steady state.
+    fn cache_hit_handshake_progress(
+        &self,
+        hit_key: &SessionKey,
+    ) -> Option<(SessionKey, crate::nat::NatDecision)> {
+        let hit = self.entry_by_key(hit_key)?;
+        if hit.closing || (hit.established && !hit.handshake_pending) {
+            return None;
+        }
+        if hit.syn_ack_first {
+            return None;
+        }
+        // #16223/#6752: only a pair the classic state machine already
+        // promoted past SYN-ACK-observed (`handshake_pending`, set by
+        // `promote_from_reverse` / synced import) may complete from
+        // companion evidence. A pure Opening pair
+        // (`established=false, handshake_pending=false`) has not had
+        // its SYN-ACK validated by any lookup arm, so payload progress
+        // alone must not establish it — the #13676 cell (forward
+        // SYN+ACK after a reverse SYN-ACK must stay pending). The fw0
+        // Opening rows in the live capture are retained by the expire
+        // companion arm while promotion lands; not completed here.
+        if !hit.handshake_pending {
+            return None;
+        }
+        let hit_nat = hit.decision.nat;
+        let hit_is_reverse = hit.metadata.is_reverse;
+        let companion_key = reverse_session_key(hit_key, hit_nat);
+        let Some(companion) = self.entry_by_key(&companion_key) else {
+            // No local companion: the fabric peer forwarded this
+            // payload, which proves the handshake progressed.
+            return if hit_is_reverse {
+                Some((companion_key, hit_nat))
+            } else {
+                Some((hit_key.clone(), hit_nat))
+            };
+        };
+        if companion.closing {
+            return None;
+        }
+        // Observed SYN alone is forgeable: a spoofed SYN-ACK that was
+        // dropped still ORs SYN into the folded flags (liveness and
+        // zone probes charge drops too). Require refreshed-freshness
+        // proof instead — a companion whose `last_seen_ns` advanced
+        // past its creation (or whose pair was already promoted by a
+        // real SYN-ACK: `established`) was genuinely served traffic.
+        // A never-refreshed replica (the #16223 expiry shape:
+        // `last_seen == created` on every row) carries no such proof
+        // and is left for the GC retention path below.
+        // SYN in the folded flags alone is forgeable (a dropped
+        // spoofed SYN-ACK is still charged by liveness probes).
+        // Require the SYN-ACK to have been genuinely SERVED: the
+        // companion was promoted by a real SYN-ACK (`established`),
+        // or either half was refreshed past its creation (a served
+        // hit), or the hit half itself carries reverse-direction
+        // counters — reverse bytes/packets are folded only by
+        // `account_packet`/`probe_hit` on an admitted hit, never by
+        // a dropped probe, so nonzero reverse counters prove the
+        // server direction was actually forwarded on this table.
+        let fwd_counters = if hit_is_reverse {
+            companion.counters
+        } else {
+            hit.counters
+        };
+        let companion_progressed = companion.established
+            || companion.last_seen_ns > companion.created_ns
+            || hit.last_seen_ns > hit.created_ns
+            || fwd_counters.rev_packets > 0;
+        if !companion_progressed {
+            return None;
+        }
+        if hit_is_reverse {
+            Some((companion_key, companion.decision.nat))
+        } else {
+            Some((hit_key.clone(), hit_nat))
+        }
     }
 
     pub(in crate::session) fn propagate_tcp_state_to_companion(
@@ -6309,6 +6558,14 @@ mod handshake_cache_hit_14939_tests;
 #[cfg(test)]
 #[path = "probe_hit_14945_tests.rs"]
 mod probe_hit_14945_tests;
+
+// #16223: split-RG / fabric-ingress / worker-replica rows served only
+// via flow-cache hits never leave the TCP opening window; the pair
+// must promote under cache-hit service once reverse activity proves
+// the handshake progressed, and must survive GC while active.
+#[cfg(test)]
+#[path = "split_handshake_16223_tests.rs"]
+mod split_handshake_16223_tests;
 
 // #15087 (A62-01): L3 reverse bucket must stay O(1) under same-destination
 // SNAT fan-in (hashed membership + per-protocol counts, bounded probe).
