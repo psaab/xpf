@@ -20,6 +20,24 @@ xpf (0.0.0) unstable; urgency=medium
     MissingNeighbor seeds, clamp NAT64 TCP MSS, probe the NAT64
     egress hop on MissingNeighbor drops, and treat reject as terminal
     in recursive static expansion.
+
+  * Fix compiler/show parity defects (#15944): per-family
+    primary/preferred compilation is now order-independent (an
+    inet6-first unit no longer leaks its IPv6 primary/preferred into
+    IPv4 consumers) and a not-yet-installed primary promotes over an
+    incumbent subnet peer; logical-only RETH units and IRB/fabric
+    networkd models carry their configured MTU and primary/preferred;
+    depth-1 packed screen families (e.g. `tcp syn-flood
+    alarm-threshold 100 attack-threshold 500;`) compile every option;
+    `system backup-router` destinations accumulate across nodes and
+    the remote show renders all of them with a family-aware default;
+    remote `show system license` uses the shared LicenseText RPC;
+    repeated `netconf` siblings set NetconfSSH; and cluster
+    heartbeat/sync/VRF/duplicate-identity lookups resolve authored
+    Junos interface names to kernel ifnames. The userspace-MTU
+    on-wire arm of H4-04 remains NEEDS_VALIDATION (Rust MTU
+    precedence untraced) and is not claimed fixed.
+
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per
     (link, family) instead of once per target, preserving the usable-entry
