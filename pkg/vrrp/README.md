@@ -337,6 +337,9 @@ and do not replace the learned identity; the counter above still increments.
 A genuine priority-0 from the learned source still takes over in ~1 ms.
 Cold-start (no learned source) and stale-master records keep normal RFC
 behaviour, so first election and silent-master-death rescue are unaffected.
+When a stale record accepts a new owner's advert, the learned source hands
+over with it — refreshing freshness alone would drop the new owner's own
+resign/demotion while the record looks fresh.
 Ordinary priorities (1–254) are not gated — a higher-priority advert from
 any source still wins the election — and unauthenticated traffic can still
 spoof the learned source itself (the protocol floor). Commit with a VRRP

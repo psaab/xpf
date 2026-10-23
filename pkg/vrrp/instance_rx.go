@@ -54,11 +54,16 @@ func (vi *vrrpInstance) sameAdvertSource(pkt *VRRPPacket) bool {
 
 // learnMasterSource records pkt's source for its family, preserving the
 // #10719 priority-255 carve-out: an unexpected owner advert does not
-// replace an already-learned identity.
-func (vi *vrrpInstance) learnMasterSource(pkt *VRRPPacket) {
+// replace an already-learned identity while that identity is fresh. When
+// the retained record is stale, however, recordMasterAdvert has accepted
+// the advert as the new master (#16018 stale-owner handover): refresh the
+// learned source too, or lastMasterSeen becomes fresh while still naming
+// the dead owner and the gate drops the new owner's own 0/255 adverts.
+// Caller holds vi.mu and has just stamped lastMasterSeen = now.
+func (vi *vrrpInstance) learnMasterSource(pkt *VRRPPacket, staleBefore bool) {
 	// Caller holds vi.mu.
 	if src4, ok := advertSourceFamily(pkt, true); ok {
-		if pkt.Priority != addressOwnerPriority || !vi.lastMasterIPv4Known ||
+		if pkt.Priority != addressOwnerPriority || staleBefore || !vi.lastMasterIPv4Known ||
 			net.IP(vi.lastMasterIPv4[:]).Equal(src4) {
 			copy(vi.lastMasterIPv4[:], src4)
 			vi.lastMasterIPv4Known = true
@@ -66,7 +71,7 @@ func (vi *vrrpInstance) learnMasterSource(pkt *VRRPPacket) {
 		return
 	}
 	if src16, ok := advertSourceFamily(pkt, false); ok {
-		if pkt.Priority != addressOwnerPriority || !vi.lastMasterIPv6Known ||
+		if pkt.Priority != addressOwnerPriority || staleBefore || !vi.lastMasterIPv6Known ||
 			net.IP(vi.lastMasterIPv6[:]).Equal(src16) {
 			copy(vi.lastMasterIPv6[:], src16)
 			vi.lastMasterIPv6Known = true
@@ -110,7 +115,10 @@ func (vi *vrrpInstance) observedMasterStaleLocked(now time.Time) bool {
 // a priority >= the retained master's, a priority-255 advert (which
 // changes mastership unconditionally, subject to the #10719 source
 // carve-out in learnMasterSource), or any advert once the retained
-// record is stale. A rejected lower-priority advert from a different
+// record is stale. A stale record hands the learned source over to the
+// accepted advert as well (#16018): refreshing lastMasterSeen alone
+// would leave the gate comparing the new owner against the dead one.
+// A rejected lower-priority advert from a different
 // source therefore cannot lower the preempt bar, refresh a bogus
 // master's liveness, prime the #10719 detector, or inflate the learned
 // interval. The first lower-than-local master is still recorded: with
@@ -125,17 +133,18 @@ func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
 	vi.mu.Lock()
 	defer vi.mu.Unlock()
 	now := time.Now()
+	staleBefore := vi.observedMasterStaleLocked(now)
 	accepted := vi.lastMasterSeen.IsZero() ||
 		int(pkt.Priority) >= vi.lastMasterPriority ||
 		pkt.Priority == addressOwnerPriority ||
 		vi.sameAdvertSource(pkt) ||
-		vi.observedMasterStaleLocked(now)
+		staleBefore
 	if !accepted {
 		return
 	}
 	vi.lastMasterPriority = int(pkt.Priority)
 	vi.lastMasterSeen = now
-	vi.learnMasterSource(pkt)
+	vi.learnMasterSource(pkt, staleBefore)
 	// Adopt the accepted master's advertised interval (RFC 5798
 	// §6.1/§6.4.2 Master_Adver_Interval). Max Adver Int is centiseconds
 	// on the wire (10 ms units); convert to a Duration. A zero/absent

@@ -157,6 +157,72 @@ func TestStaleMasterUnknownPrio0Applies16018(t *testing.T) {
 	}
 }
 
+// Stale-owner handover (#16018 fold): the old master goes silent, its
+// record goes stale, and a NEW owner (priority 255, different source) is
+// accepted. The acceptance must hand the learned source over too — if it
+// only refreshed lastMasterSeen, the gate would treat the new owner's own
+// later priority-0 as forged (fresh record, mismatched source) and drop a
+// genuine resign, while a third source would still be correctly dropped.
+func TestStaleOwnerHandoverNewOwnerApplies16018(t *testing.T) {
+	vi := newGateTestInstance(t, 100, true)
+	oldOwner := net.IPv4(10, 0, 0, 2)
+	newOwner := net.IPv4(10, 0, 0, 3)
+	seedLearnedMaster16018(t, vi, oldOwner)
+	// Old owner dies: age the record past the master-down horizon.
+	vi.mu.Lock()
+	vi.lastMasterSeen = time.Now().Add(-time.Hour)
+	vi.mu.Unlock()
+
+	// New owner's 255 advert applies (stale) and becomes MASTER peer: as a
+	// BACKUP we must record it as the learned master (demotion exercised
+	// from MASTER state in the second phase below).
+	masterDown, _, preemptHold := longTimers(t)
+	vi.handleBackupRx(&VRRPPacket{Priority: 255, SrcIP: newOwner}, masterDown, preemptHold)
+	if got := vi.unrecognizedMasterAdverts.Load(); got != 1 {
+		t.Fatalf("counter after stale new-owner 255 = %d, want 1 (counted, but applied)", got)
+	}
+	vi.mu.RLock()
+	src := append(net.IP(nil), vi.lastMasterIPv4[:]...)
+	pri := vi.lastMasterPriority
+	vi.mu.RUnlock()
+	if !src.Equal(newOwner) || pri != 255 {
+		t.Fatalf("learned master after handover = %v pri %d, want %v pri 255 (freshness refreshed without source handover)", src, pri, newOwner)
+	}
+
+	// The new owner's genuine priority-0 resign must now apply: ~1ms
+	// takeover armed, no further counter increment for its own source.
+	vi.handleBackupRx(&VRRPPacket{Priority: 0, SrcIP: newOwner}, masterDown, preemptHold)
+	select {
+	case <-masterDown.C:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("new owner's priority-0 resign was dropped after stale handover")
+	}
+	if got := vi.unrecognizedMasterAdverts.Load(); got != 1 {
+		t.Fatalf("counter after new-owner resign = %d, want 1 (own resign not unrecognized)", got)
+	}
+
+	// MASTER-state demotion by the new owner after handover from BACKUP on
+	// a second instance: learn old, go stale, become MASTER, then the new
+	// owner's 255 must demote and its identity must be the learned one.
+	vi2 := newGateTestInstance(t, 100, true)
+	vi2.setState(StateMaster)
+	seedLearnedMaster16018(t, vi2, oldOwner)
+	vi2.mu.Lock()
+	vi2.lastMasterSeen = time.Now().Add(-time.Hour)
+	vi2.mu.Unlock()
+	masterDown2, advert2, _ := longTimers(t)
+	vi2.handleMasterRx(&VRRPPacket{Priority: 255, SrcIP: newOwner}, masterDown2, advert2)
+	if got := vi2.getState(); got != StateBackup {
+		t.Fatalf("state after stale new-owner 255 = %s, want BACKUP (handover demotion applies)", got)
+	}
+	vi2.mu.RLock()
+	src2 := append(net.IP(nil), vi2.lastMasterIPv4[:]...)
+	vi2.mu.RUnlock()
+	if !src2.Equal(newOwner) {
+		t.Fatalf("learned master after MASTER handover = %v, want %v", src2, newOwner)
+	}
+}
+
 // Equal-priority tie-break with spoofed source is unchanged (ordinary
 // priority, not gated): peer with higher IP still wins when no 0/255.
 // (Guarded by existing vrrp_test.go tie-break tests; here we assert an
