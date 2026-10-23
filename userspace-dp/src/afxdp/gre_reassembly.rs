@@ -20,6 +20,7 @@
 //! in [`GRE_OUTER_FRAG_DROPS`]; a completed datagram is returned exactly
 //! once as a synthetic unfragmented frame for the ordinary decap path.
 
+use super::frame::IPV6_GENERIC_EXT_HEADERS;
 use super::types::UserspaceDpMeta;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -202,7 +203,7 @@ fn parse_fragment_with_protocol(
                             upper_protocol,
                         });
                     }
-                    0 | 43 | 60 | 135 | 139 | 140 => {
+                    n if IPV6_GENERIC_EXT_HEADERS.contains(&n) => {
                         let hdr = frame.get(off..off.checked_add(2)?)?;
                         next = hdr[0];
                         off =
@@ -548,7 +549,7 @@ fn patch_v6_next_header_to_protocol(head: &mut [u8], protocol: u8) {
                 head[last_next_pos] = protocol;
                 return;
             }
-            0 | 43 | 60 | 135 | 139 | 140 => {
+            n if IPV6_GENERIC_EXT_HEADERS.contains(&n) => {
                 let Some(hdr) = head.get(off..off + 2) else {
                     return;
                 };
