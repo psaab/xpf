@@ -59,8 +59,9 @@ locating any symbol below is now a matter of opening the named file.
   residual 3) with its off-path, RE-RUNNABLE persistence refinement
   (`refineBootEpoch`, `withEpochFileLock`, `Manager.refreshBootEpoch`) and the
   start-time wiring (`Manager.initHeartbeatEpochState`) — `heartbeat_epoch.go`. The downgrade
-  latch itself is process-scoped state on `heartbeatAuthState`; there is no
-  peer-floor file.
+  latch lives on `heartbeatAuthState` and, since #16022, is persisted with the
+  floor and bound sessions in a key-set-scoped record alongside the boot-epoch
+  file (`heartbeat_epoch_persist.go`).
   - **A returned `Manager.Stop` does NOT imply the epoch flock is released
     (#6826).** `Stop` joins the refinement worker with a bounded budget
     (`bootEpochStopJoinBudget`) and, on timeout, warns and returns; nothing
@@ -1473,123 +1474,89 @@ peer liveness (`lastSeen`) or drive election.
     epoch, an epochless frame from it is REFUSED (`epochSeen` in
     `heartbeatAuthState`). The latch is armed by OBSERVATION, never by local
     build version — that is what keeps a rolling upgrade working.
-  - **The latch is PROCESS-SCOPED, and that is the design decision that
-    REPLACED durability.** It lives on `Manager.hbAuth` (#5086/#6642), so a
-    heartbeat restart, a DHCP-triggered VRF rebind and an HA comms restart all
-    PRESERVE it — the routine events. Only a full daemon restart clears it.
+  - **The latch is DURABLE, scoped to the accepted key set (#16022).** It lives
+    on `Manager.hbAuth` (#5086/#6642), so a heartbeat restart, a DHCP-triggered
+    VRF rebind and an HA comms restart all PRESERVE it — the routine events.
+    Since #16022 the latch, the epoch floor and the per-value session bindings
+    are ALSO persisted across a full daemon restart, in
+    `/var/lib/xpf/ha-peer-epoch` alongside this node's own `ha-boot-epoch`:
+    the record is `{key-set digest, floor, bound sessions}`, written off the
+    accept path by a sender-tick flush (and on `StopHeartbeat`), and restored
+    by the `UpdateConfig` apply that a daemon boot performs before the
+    heartbeat starts. See `heartbeat_epoch_persist.go`.
 
-    **The cost is bounded by the peer's NEXT GENUINE FRAME — not by wall clock**,
-    and that distinction is the whole of it. Measured after a receiver daemon
-    restart: **1080/1080 epoch-less captures admitted** inside the window, then
-    **0/120** once a genuine frame lands. What the attacker gets is one full
-    ascending pass over their captures — about 60 frames across 12 retired
-    incarnations — not a single frame. A replayed OLD epoch CAN set the floor low
-    (the forward bound constrains only how far AHEAD an epoch may be), but it
-    cannot be sustained *while the peer's own epoch is still climbing*: the
-    genuine frame then dominates and re-arms the latch.
+    **Why: the pre-#16022 restart window was the hole.** With the latch and
+    floor only in memory, a receiver daemon restart cleared both, and 65
+    captured sender incarnations — 65 peer restarts' worth, each a distinct
+    per-daemon-incarnation session — replayed while the peer was down churned
+    the 64-entry ring indefinitely: every replayed session was never-seen,
+    admitted, and evicted the oldest watermark. Archived epochless frames
+    sustained forged peer liveness and delayed takeover for as long as the
+    replay ran. Measured pre-fix: 65 epoch-LESS incarnations captured under
+    the CURRENT key admitted **1625/1625** after a restart and kept going.
+    With the record restored, they are refused by the latch before the ring
+    is consulted (`TestEpochlessReplayRefusedAfterDaemonRestart_16022`), and
+    an epoch-BEARING set is bounded to its one finite ascending pass
+    (**325/325**, then **0/1625**) exactly as in-process. The bindings persist
+    with the floor so a restart does not hand back fresh per-value slots
+    (`TestEqualEpochBindingsSurviveRestart_16022`).
 
-    **"The genuine frame always dominates" is FALSE as an unqualified claim, and
-    this section used to make it.** It holds exactly while the sender is
-    monotonic. If the peer's epoch has REGRESSED (residual 3, #6711 — a backward
-    clock step larger than `bootEpochMaxSkew`), a replayed archived frame
-    carrying the peer's *earlier, higher* epoch raises the floor ABOVE the live
-    peer, and the live peer's genuine frames are then refused indefinitely.
-    Measured: 0/5 live frames admitted after one archived frame poisoned a fresh
-    floor, 0/5 after a sender restart at the same clock, and 0/5 again after a
-    receiver restart followed by one re-injected archived frame
-    (`TestArchivedEpochPoisonsAFreshFloor_6711`).
+    **The durable FLOOR that was built, priced and removed stays removed in
+    that form.** Persisting `highEpoch` ALONE — unscoped, written on the
+    accept path, cleared only by deleting the file — turns a deliberate
+    ROLLBACK into "delete the right file on the right node and restart" (a
+    procedure done under pressure at 3am), opens a crash window between
+    accepting a frame and committing the floor, needs cross-process locking
+    on the receive path, and lets an in-range-but-wrong epoch lock a peer
+    out across reboots. #16022's record answers each charge in shape: it is
+    scoped to the accepted-key-set digest (a rotation stops it matching, so
+    the recovery stays "rotate the PSK", with no file to hand-edit); the
+    write is NOT on the accept path and a failed or wedged write fails open
+    to the pre-#16022 process-scoped behaviour (admission never waits on
+    storage, a healthy peer is never refused over a disk fault); and the
+    cross-process lock is the flush's bounded sidecar flock, not a lock the
+    receive path takes. The cost that remains is a bounded crash window — a
+    crash inside one flush interval (10s) loses at most that interval's
+    latch/floor advance — and the no-attacker rollback now needs the PSK
+    rotation rather than a bare restart, which the rejection warning already
+    prescribed first.
 
-    With a LIVE peer that is ~100 ms and the trade is clearly good. With a
-    **SILENT** peer the window stays open until the peer returns — and that is
-    precisely the scenario the durable floor was justified by, so this residual
-    is narrow only in the live-peer case. It is stated that way deliberately: the
-    trade was taken with the silent-peer cost known, not overlooked. Measured by
-    `TestReceiverRestartWindowIsOneHeartbeat_6169`.
+    **"The genuine frame always dominates" is FALSE as an unqualified claim,
+    and this section used to make it.** It holds exactly while the sender is
+    monotonic. If the peer's epoch has REGRESSED (residual 3, #6711 — a
+    backward clock step larger than `bootEpochMaxSkew`), a replayed archived
+    frame carrying the peer's *earlier, higher* epoch raises the floor ABOVE
+    the live peer, and the live peer's genuine frames are then refused
+    indefinitely. Measured: 0/5 live frames admitted after one archived frame
+    poisoned a fresh floor, 0/5 after a sender restart at the same clock, and
+    0/5 again after a receiver restart followed by one re-injected archived
+    frame (`TestArchivedEpochPoisonsAFreshFloor_6711`). Durability does not
+    change this: a replayed archived frame re-arms a restored latch and
+    re-raises a restored floor identically (residual 5).
 
-    In exchange, rollback recovery is a PSK rotation plus `systemctl restart
-    xpfd` rather than deleting a state file, there is no commit window between
-    accepting a frame and durably recording it, the receive path needs no
-    cross-process lock, and an in-range-but-wrong epoch cannot lock a peer out
-    across reboots. The rotation is not optional garnish — a replayed archived
-    epoch frame re-arms the latch against the empty post-restart state, so the
-    restart alone is not reliable recovery (residual 5).
+    **The rotation does NOT retire captures made after it.** A PSK rotation
+    retires everything an attacker recorded BEFORE it; a frame recorded
+    AFTER it, under the current key, still verifies. **And since #6630 it
+    retires nothing until FINALIZE**: while an `additional-authentication-key`
+    window is open the retired key is still accepted, so the archive stays
+    live for the whole rolling procedure. Retirement is step 5, not step 3.
+    That is precisely why the durable latch matters: the epoch-less captures
+    taken under the CURRENT key are the ones that sustained forged liveness
+    indefinitely across a restart, and the restored latch refuses all of
+    them. In the state where those captures exist — the peer held the current
+    key while running a pre-#6169 build (rollback, replacement under the same
+    identity and key, or a partial upgrade) — the latch also refuses the
+    LIVE rolled-back peer, durably. That peer's recovery is the rotation,
+    which clears the key-set-scoped record on the next config apply. No
+    rollback under the current key means no epoch-less captures to replay,
+    so the exposure is bounded by the rollback itself and is metered rather
+    than silent (`Heartbeats without epoch:`).
 
-    An earlier revision persisted the FLOOR so the latch also survived a daemon
-    restart. Review priced that and it was removed: a peer-floor state file
-    turns a deliberate ROLLBACK into "delete the right file on the right node
-    and restart" — a procedure done under pressure at 3am — opens a crash
-    window between accepting a frame and committing the floor, needs
-    cross-process locking on the receive path, and lets an in-range-but-wrong
-    epoch lock a peer out across reboots.
-
-    **A durable LATCH is not the same object as a durable FLOOR, and the two
-    must be priced apart.** The narrowest durable latch is a PSK-scoped boolean
-    — `{key fingerprint, epochSeen}` — which persists no epoch, so an in-range
-    wrong floor still dies at the next restart, and which resets by
-    construction on a PSK rotation. Neither floor cost above applies to it. It
-    is still declined, on its own costs: the durable write has to land BEFORE
-    the frame is accepted (a crash in between leaves the latch clear across the
-    reboot, which is exactly the state a replay wants), so it puts storage on
-    the control-channel receive path with no good failure policy — fail-open
-    buys nothing over today, fail-closed lets a disk fault refuse a healthy
-    peer; it needs the same cross-process lock for the same `SO_REUSEPORT`
-    reason; and it makes the NO-ATTACKER rollback strictly worse, since a
-    restart would no longer clear the latch and every deliberate downgrade
-    would require a PSK rotation across both nodes.
-
-    **The rotation does NOT retire captures made after it, and an earlier
-    revision of this section claimed it did.** A PSK rotation retires everything
-    an attacker recorded BEFORE it; a frame recorded AFTER it, under the current
-    key, still verifies. **And since #6630 it retires nothing until FINALIZE**:
-    while an `additional-authentication-key` window is open the retired key is
-    still accepted, so the archive stays live for the whole rolling procedure.
-    Retirement is step 5, not step 3. Measured: rotate K1→K2, let the peer arm the latch
-    under K2, roll it back under K2 to a build that signs but emits no epoch,
-    record the frames this receiver refuses, then let the peer go silent and
-    restart this daemon — **5/5 of those post-rotation captures are admitted**
-    against the empty state, and a durable K2-scoped latch would have refused
-    them (`TestRotationDoesNotRetirePostRotationCaptures_6669`). The durable
-    latch is still declined, but on its own merits:
-
-    - **Where it matters most, its benefit and its worst cost are the same
-      configuration.** A signed epoch-less frame under the current key can only
-      exist if the peer held that key while running a pre-#6169 build (ALWAYS-
-      EMIT means a #6169+ build always carries an epoch) — rollback, replacement
-      under the same identity and key, or a partial upgrade. While the peer is
-      still on that build a durable latch refuses the captures *and the live
-      peer*: that is the no-attacker-rollback cost above, not a separate gain.
-
-    A second bullet used to read **"where the live peer is healthy again, it
-    shuts one door with another open beside it"** — the latch can only have
-    armed under this key because an epoch-BEARING frame was accepted under it,
-    so an on-link attacker holds one of those too, and against empty
-    post-restart state an archived epoch-bearing frame is admitted whatever the
-    latch says (residual 5). **That argument is wrong**, because the two doors
-    cost the attacker different things. Measured against a restarted receiver:
-    65 captured epoch-BEARING incarnations admit 325/325 on one ascending pass
-    and 0/1625 across five further rounds (the floor climbs with them and the
-    per-session watermark closes the rest — the set is spent), while 65
-    epoch-LESS incarnations captured under the CURRENT key admit 1625/1625 and
-    keep going, because nothing orders them and FIFO eviction hands back a
-    never-seen session every round. That is indefinitely sustained forged
-    liveness against a silent peer, and a durable PSK-scoped latch refuses all
-    of it.
-
-    So the benefit is real and is larger than "captures taken strictly inside a
-    rollback": it is every epoch-less capture taken under the current key. It is
-    **still declined**, on its own costs — a durable write on the accept path
-    with no good failure policy, cross-process locking there, and a strictly
-    heavier procedure for every no-attacker rollback — and the residual is
-    **accepted**, not closed. The exposure is bounded by the rollback (no
-    rollback under the current key, no epoch-less captures to replay) and is
-    metered rather than silent (`Heartbeats without epoch:`). Reconsider the
-    trade if a rollback under the current key ever becomes routine rather than
-    an incident action.
-
-    Rollback recovery is a rotation followed by `systemctl restart xpfd`, both
-    operations operators already perform, rather than a hand-edit of state; the
-    rotation carries real weight because without it the restart is defeatable by
-    one replayed archived frame (residual 5).
+    Rollback recovery is a PSK rotation on both nodes — an operation
+    operators already perform — rather than a hand-edit of state; the
+    rotation carries real weight because without it a restart (which no
+    longer clears the latch at all) is defeatable by one replayed archived
+    frame (residual 5).
   - **ALWAYS-EMIT, and why this mechanism costs no HA availability.** The
     epoch is published SYNCHRONOUSLY from the wall clock with **no file access
     at all**, so every frame carries one from the very first send. Persistence
@@ -1938,32 +1905,25 @@ peer liveness (`lastSeen`) or drive election.
         improves on master once armed and does not close the post-restart
         window. The recovery below retires it by the same mechanism as the
         latch half, because it is the same replay;
-      - **recovery, in this order:** rotate the control-link PSK on BOTH nodes,
-        *then* `systemctl restart xpfd` on the node that is refusing. The latch
-        is process-scoped, so the restart brings it back unlatched and it
-        accepts the rolled-back peer again. There is no state file to hand-edit
-        and no new CLI surface to learn. Rolling BOTH nodes back needs no
-        action beyond that on whichever node had latched.
+      - **recovery:** rotate the control-link PSK on BOTH nodes. Since
+        #16022 the latch is durable and scoped to the accepted key set, so
+        the rotation clears it on the next config apply — no restart is
+        required for the latch itself, and a bare `systemctl restart xpfd`
+        no longer clears it at all. There is no state file to hand-edit and
+        no new CLI surface to learn. Rolling BOTH nodes back needs no action
+        beyond that on whichever node had latched.
 
-        **If you already did it in the wrong order, you are not stuck — restart
-        once more.** Restarting *before* rotating leaves the latch armed
-        THROUGH the rotation: the replay re-arms it after the restart, and the
-        subsequent key change cannot un-arm what is already set. Measured, one
-        rotate→restart pass recovers; restart→rotate needs a **second** restart
-        after the rotation. Nothing else is required, and no state is lost
-        either way.
-
-        **The restart alone is not reliable, and the order is the reason.**
-        A restart clears the floor, the latch and the ring together, and
-        arming the latch needs only an authenticated, orderable, ring-fresh
-        epoch frame — so ONE frame an attacker captured while the peer still
-        ran an epoch-capable build re-arms it against that empty state
-        (`highEpoch` is 0, so nothing is below the floor; an empty ring calls
-        its session never-seen). The rolled-back peer is refused again, and one
-        replay per restart sustains that indefinitely. Rotating the PSK first
-        makes every archived frame fail MAC verification, so it never reaches
-        the latch; the key is re-read per frame on both the send and receive
-        paths, so rotation itself needs no restart.
+        **The rotation is not optional, and a restart is not a substitute.**
+        A restart no longer clears the latch or the floor (the durable
+        record restores both), and arming the latch needs only an
+        authenticated, orderable, ring-fresh epoch frame — so ONE frame an
+        attacker captured while the peer still ran an epoch-capable build
+        re-arms it against any cleared state. The rolled-back peer is
+        refused again, and one replay per clearing sustains that
+        indefinitely. Rotating the PSK makes every archived frame fail MAC
+        verification, so it never reaches the latch; the key is re-read per
+        frame on both the send and receive paths, so rotation itself needs
+        no restart.
 
         **Since #6630, "rotated" means rotated THROUGH FINALIZE.** While an
         `additional-authentication-key` window is open the retired key is still
@@ -1975,23 +1935,28 @@ peer liveness (`lastSeen`) or drive election.
         knowingly, since the cluster is already in a refusing state.
 
         This is pinned by
-        `TestArchivedEpochReplayReArmsLatchAfterRestart_6169` and stated at the
-        arming site in `admitAuthed`, which also records why a durable
-        latch and a freshness test were both rejected.
+        `TestArchivedEpochReplayReArmsLatchAfterRestart_6169`,
+        `TestPeerEpochRecordScopedToKeySet_16022`, and stated at the arming
+        site in `admitAuthed`, which also records why a freshness test was
+        rejected.
   - **Honest residuals**, each measured rather than asserted.
-    1. **Receiver restart window — bounded by the peer's next genuine frame, not
-       by time.** ~100 ms with a LIVE peer; **open until the peer returns if it is
-       SILENT**, which is the case durability existed for. Measured: 1080/1080
-       epoch-less captures admitted inside the window, 0/120 after a genuine
-       frame lands; the attacker gets one full ascending pass (~60 frames across
-       12 retired incarnations). A replayed old epoch can set the floor low but
-       cannot sustain it **while the peer's own epoch is still climbing** — the
-       genuine frame then dominates. It does NOT dominate if the peer's epoch has
-       regressed (residual 3): there a replayed archived frame raises the floor
+    1. **Receiver restart window — CLOSED for the latch/floor by #16022; the
+       in-memory shape is retained here as the pre-fix measurement.** Before
+       #16022 the window was bounded by the peer's next genuine frame, not by
+       time: ~100 ms with a LIVE peer, **open until the peer returns if it is
+       SILENT**. Measured pre-fix: 1080/1080 epoch-less captures admitted
+       inside the window, 0/120 after a genuine frame lands; the attacker got
+       one full ascending pass (~60 frames across 12 retired incarnations).
+       With the durable record restored the window does not open: the latch
+       refuses the epoch-less set and the floor bounds the epoch-bearing one
+       (`TestEpochlessReplayRefusedAfterDaemonRestart_16022`). What remains
+       is the narrower crash window inside one flush interval, and the
+       regressed-sender shape, which does NOT dominate: if the peer's epoch
+       has regressed (residual 3) a replayed archived frame raises the floor
        above the live peer and holds it out, across receiver restarts, at one
        re-injection each.
-       (`TestReceiverRestartWindowIsOneHeartbeat_6169`,
-       `TestArchivedEpochPoisonsAFreshFloor_6711`.)
+       (`TestReceiverRestartWindowIsOneHeartbeat_6169` pins the in-memory
+       shape; `TestArchivedEpochPoisonsAFreshFloor_6711` the regressed one.)
     2. **In-bound clock skew latches a bounded lockout.** A peer epoch ahead of
        us but INSIDE the skew allowance is latched, so a peer later repaired to
        real time sits below that floor. Bounded twice: the slack IS the lockout
@@ -2002,13 +1967,14 @@ peer liveness (`lastSeen`) or drive election.
        caches it for the life of the process (`bootEpochOnce`), so waiting
        changes nothing it emits: recovery is a **sender restart** on the peer,
        or a receiver restart, never elapsed time alone
-       (`TestRunningSenderDoesNotRecoverByWaiting_6669`). The floor is in
-       memory, so `systemctl restart xpfd` on the refusing node clears it
-       immediately — subject to residual 5, since a replayed
-       archived frame can re-raise a cleared floor just as it can re-arm a
-       cleared latch. With a durable floor this needed deleting a state file,
-       which is what made it a MAJOR.
-       (`TestInBoundFarFutureEpochLockoutIsBounded_6169`.)
+       (`TestRunningSenderDoesNotRecoverByWaiting_6669`). Since #16022 the
+       floor is durable, so `systemctl restart xpfd` on the refusing node no
+       longer clears it — the clearing operation is the PSK rotation, which
+       drops the key-set-scoped record — subject to residual 5, since a
+       replayed archived frame can re-raise a floor just as it can re-arm a
+       latch, under whatever key set is current when it verifies.
+       (`TestInBoundFarFutureEpochLockoutIsBounded_6169` pins the in-memory
+       shape.)
     3. **Sender epoch regression — and it is NOT only a double fault.** Losing
        the persisted epoch AND stepping the clock back below the last emitted
        value in the same reboot regresses the sender's epoch and the peer
@@ -2049,34 +2015,37 @@ peer liveness (`lastSeen`) or drive election.
        PSK rotation before the receiver restart. Tracked as **#6711** — a
        behavioural fix there touches persistence semantics and is deliberately
        out of scope here. (`TestArchivedEpochPoisonsAFreshFloor_6711`.)
-    4. **PSK rotation** changes the key-derived marker; the in-memory floor and
-       latch are unaffected and stay valid, since a floor is a per-peer counter
-       rather than key material.
+    4. **PSK rotation** changes the key-derived marker AND, since #16022,
+       re-scopes the durable latch/floor record: the record written under the
+       retired accepted set no longer matches, so the latch and floor do not
+       carry across a rotation. The peer re-proves by observation under the
+       new set. (In-memory, the latch survives a rotation untouched — it is
+       the durable restore that is key-set-scoped.)
     5. **A restart does not recover from a rollback while an archived epoch
-       frame is being replayed.** Restarting clears the floor, the latch and the
-       ring together, and arming needs only an authenticated, orderable,
-       ring-fresh epoch frame — so ONE frame captured while the peer still ran
-       an epoch-capable build re-arms the latch against that empty state and the
-       rolled-back peer is refused again, indefinitely, at one replay per
-       restart. The same shape re-raises the floor in residual 2. Recovery is
-       PSK rotation on both nodes FIRST, then the restart, which is what the
-       rejection warning now says. Scope: a peer that has NEVER emitted an epoch
-       cannot be falsely armed this way — there is nothing to capture — so this
-       bites on rollback, replacement under the same identity and key, or a
-       partial upgrade. Not closed in code: a durable FLOOR re-creates the
-       peer-floor file this design deliberately removed; a durable PSK-scoped
-       LATCH avoids that but pays a durable write on the accept path, a
-       cross-process lock there, and a heavier no-attacker rollback. It is
-       **not** declined as redundant: a rotation retires captures taken *before*
-       it and nothing else, and a durable latch refuses the epoch-less captures
-       taken under the CURRENT key — the ones that sustain forged liveness
-       indefinitely (1625/1625 admitted after a restart, against 0/1625 for a
-       spent epoch-bearing set). The pricing is above; and
-       a freshness test needs a challenge-response or timestamp the wire format
+       frame is being replayed.** Since #16022 a restart does not even clear
+       the latch to begin with; and against any state where it IS clear,
+       arming needs only an authenticated, orderable, ring-fresh epoch frame
+       — so ONE frame captured while the peer still ran an epoch-capable
+       build re-arms the latch and the rolled-back peer is refused again,
+       indefinitely, at one replay per clearing. The same shape re-raises
+       the floor in residual 2. Recovery is PSK rotation on both nodes,
+       which is what the rejection warning now says. Scope: a peer that has
+       NEVER emitted an epoch cannot be falsely armed this way — there is
+       nothing to capture — so this bites on rollback, replacement under the
+       same identity and key, or a partial upgrade. The epoch-less half of
+       this residual IS now closed in code (#16022's key-set-scoped durable
+       latch, written off the accept path): a rotation retires captures taken
+       *before* it and nothing else, and the durable latch refuses the
+       epoch-less captures taken under the CURRENT key — the ones that
+       sustained forged liveness indefinitely (1625/1625 admitted after a
+       restart pre-fix, against 0/1625 for a spent epoch-bearing set). What
+       remains open is only the epoch-BEARING re-arm above, and a freshness
+       test for it needs a challenge-response or timestamp the wire format
        does not carry (a legitimately long-lived peer's epoch is arbitrarily
        old, so no recency test separates it from an archived one).
        (`TestArchivedEpochReplayReArmsLatchAfterRestart_6169`,
-       `TestRollbackRecoveryOrderingIsRotateThenRestart_6169`.)
+       `TestRollbackRecoveryOrderingIsRotateThenRestart_6169`,
+       `TestEpochlessReplayRefusedAfterDaemonRestart_16022`.)
     6. **A bad persisted epoch heals only if the local clock is credible when
        refinement loads it.** Below `epochClockSaneFloor` the forward bound is
        skipped, so a wrong-but-below-2200 persisted value is chained from rather
@@ -2964,22 +2933,20 @@ finalize unsafe again rather than staying green.
 > every pre-upgrade capture fails `macOK` and is discarded before it reaches
 > any epoch logic at all.
 >
-> **This step is what makes the accepted restart residual acceptable.** The
-> downgrade latch (`epochSeen`) is process-scoped, so a full daemon restart on
-> the surviving node clears it. But do NOT read that as "while the genuine peer
-> is absent nothing re-arms it" — an earlier revision of this paragraph said
-> exactly that and it is false, as residual 5 below records. A single ARCHIVED
+> **This step is what makes the archived-frame residual acceptable.** The
+> downgrade latch (`epochSeen`) is durable since #16022, so a full daemon
+> restart on the surviving node no longer clears it — but do NOT read that
+> as "while the genuine peer is absent nothing re-arms it". A single ARCHIVED
 > epoch-bearing frame, captured while the peer still ran an epoch-capable build,
-> re-arms the latch on its own: after the restart `highEpoch` is 0, so the replay
-> passes the absolute band, the forward bound and the empty ring, and arms
-> `epochSeen`. One replay per restart holds the rolled-back peer out
-> indefinitely.
+> re-arms the latch on its own against any cleared state: `highEpoch` is 0
+> there, so the replay passes the absolute band, the forward bound and the
+> empty ring, and arms `epochSeen`. One replay per clearing holds the
+> rolled-back peer out indefinitely, as residual 5 records.
 >
-> That is precisely why rotation comes FIRST. Rotation invalidates the archive,
-> so there is nothing left to replay into the window. Skipping it leaves the
-> residual live, and restarting without rotating leaves the latch armed *through*
-> a later rotation — costing a second restart. The residual was not priced as
-> "narrow" on the assumption that nobody would skip the rotation.
+> That is precisely why rotation is the recovery. Rotation invalidates the
+> archive AND re-scopes the durable record, so there is nothing left to
+> replay and no latch left armed under the old key. Skipping it leaves the
+> residual live; restarting without rotating no longer helps at all.
 >
 > **How to tell whether you are still exposed:** `show chassis cluster
 > information` / `statistics` print `Heartbeats without epoch:` in the

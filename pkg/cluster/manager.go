@@ -482,6 +482,21 @@ type Manager struct {
 	// (new/rotated key) re-anchors; the identical set does not.
 	controlAuthKeySetDigest string
 
+	// peerEpochFlushMu serializes the #16022 durable-latch flush against
+	// itself: the sender-tick flush and the StopHeartbeat flush can race,
+	// and two writers taking the file lock in turn would each write a
+	// correct record, but serializing here keeps the snapshot/write/clear
+	// owed sequence atomic against the other flusher. Never held while
+	// m.mu or hbAuth.mu is held across the write — the snapshot is taken
+	// under hbAuth.mu, the lock is released, then the file is written.
+	peerEpochFlushMu sync.Mutex
+	// peerEpochLastFlush is when the last flush was ATTEMPTED (success or
+	// failure), and peerEpochLastFlushOK whether it landed. They gate the
+	// sender tick so a wedged store is not retried at heartbeat rate.
+	// Guarded by peerEpochFlushMu.
+	peerEpochLastFlush   time.Time
+	peerEpochLastFlushOK bool
+
 	// peerControlKeyID is the #6630 id of the accepted key that last verified
 	// a peer control frame — the running-system evidence that makes
 	// finalizing a rotation safe. An ID, never a key; see controlLinkKeyID.
@@ -831,12 +846,14 @@ func NewManager(nodeID, clusterID int) *Manager {
 // pre-#6169 build — which is operator-actionable. Rate-limited to once per 30s
 // so a 5-10/s heartbeat stream cannot flood the log.
 //
-// THE RECOVERY THIS NAMES IS THE COMPLETE ONE, in order. Restarting xpfd clears
-// the process-scoped latch, but an attacker holding one archived epoch-bearing
-// frame re-arms it against the empty post-restart state — see the arming site
-// in admitAuthed. Rotating the control-link PSK first makes every
-// archived frame fail MAC verification, so it can never reach the latch. An
-// operator told only "restart" would loop.
+// THE RECOVERY THIS NAMES IS THE COMPLETE ONE. Since #16022 the latch is
+// durable and key-set-scoped, so a bare restart no longer clears it — and
+// an attacker holding one archived epoch-bearing frame re-arms it against
+// any empty state anyway (see the arming site in admitAuthed). Rotating
+// the control-link PSK on both nodes retires every capture taken under
+// the old key (they fail MAC verification) AND, because the durable
+// record is scoped to the accepted key set, clears the latch on the next
+// config apply. An operator told only "restart" would loop.
 func (m *Manager) NoteEpochDowngradeHeartbeat() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -847,8 +864,8 @@ func (m *Manager) NoteEpochDowngradeHeartbeat() {
 	slog.Warn("cluster: heartbeat refused — peer stopped signing a boot epoch it previously signed. " +
 		"This is a replayed pre-upgrade capture, or the peer was rolled back to a build older than #6169. " +
 		"If the rollback was intentional: rotate the control-link PSK on BOTH nodes FIRST, then restart " +
-		"xpfd on THIS node to clear the latch. Restarting alone is not enough — a replayed archived " +
-		"epoch frame re-arms the latch, and only rotating the PSK retires that capture")
+		"xpfd on THIS node. Restarting alone no longer clears it (the latch is durable since #16022) — " +
+		"and a replayed archived epoch frame re-arms it in any case; only rotating the PSK retires that capture")
 }
 
 // NodeID returns the local node ID.
@@ -1131,6 +1148,12 @@ func (m *Manager) Stop() {
 	if receiver != nil {
 		receiver.stop()
 	}
+	// #16022: land the durable latch/floor on the terminal teardown too.
+	// Bounded like every write in this area: persistPeerEpochState's flock
+	// acquire has its own budget, and a wedged store fails open (the flush
+	// logs and Stop proceeds), so this cannot stall shutdown past that
+	// budget.
+	m.flushPeerEpochState(true)
 	if !m.joinBootEpochRefine(bootEpochStopJoinBudget) {
 		slog.Warn("cluster: HA boot-epoch refinement still in flight after teardown; "+
 			"proceeding without it (its store is probably wedged — the shutdown path "+

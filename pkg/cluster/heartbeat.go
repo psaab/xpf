@@ -438,129 +438,113 @@ type heartbeatAuthState struct {
 	// floor latched at a live peer's epoch, 975/975 epochless replays were
 	// still admitted.
 	//
-	// DURABILITY — deliberately PROCESS-SCOPED, not on disk.
+	// DURABILITY — the latch, floor and bound sessions are persisted across
+	// daemon restarts, scoped to the accepted key set (#16022). The durable
+	// record lives alongside this node's own ha-boot-epoch file; see
+	// heartbeat_epoch_persist.go for the format and the full design. What
+	// follows is the pricing that file engages, restated where the state
+	// lives.
 	//
-	// A durable latch would additionally cover "the survivor's daemon restarts
-	// while the genuine peer is silent". It was priced and declined — but the
-	// pricing has to be done against the design actually on the table, and an
-	// earlier revision of this comment did not: it charged a durable LATCH for
-	// the costs of a durable FLOOR. Those are different objects.
+	// A durable FLOOR was built, priced and removed, and stays removed in
+	// that form: persisting highEpoch ALONE — unscoped, written on the
+	// accept path, cleared only by deleting the file — turns a deliberate
+	// rollback into "delete the right file on the right node and restart"
+	// (a procedure run under incident pressure) and makes an
+	// in-range-but-wrong epoch — the bounded lockout of README residual 2 —
+	// outlive reboots, converting a self-clearing hour into an operator
+	// ticket.
 	//
-	// A durable FLOOR persists highEpoch. It turns a deliberate rollback into
-	// "delete the right file on the right node and restart" (a procedure run
-	// under incident pressure) and makes an in-range-but-wrong epoch — the
-	// bounded lockout of README residual 2 — outlive reboots, converting a
-	// self-clearing hour into an operator ticket. Those two costs are real and
-	// they are why there is no peer-floor file.
+	// What #16022 persists is not that object. It is the PSK-scoped record
+	// the earlier pricing itself sketched — {key-set digest, floor,
+	// bound sessions} — with the three costs that pricing charged against
+	// it answered in shape:
 	//
-	// A durable LATCH need not be a floor. The narrowest form is a PSK-SCOPED
-	// BOOLEAN — {key fingerprint, epochSeen} — which persists no epoch at all,
-	// so an in-range wrong floor still dies at the next restart, and which
-	// resets by construction when the control-link PSK is rotated. Neither
-	// floor cost above applies to it. What it does cost:
+	//   - The write is NOT on the accept path and does NOT land before the
+	//     frame is accepted. admitAuthed sets peerEpochPersistOwed under
+	//     this lock and performs no I/O; a sender-tick flush
+	//     (Manager.flushPeerEpochState) writes the record afterwards, and
+	//     Manager.StopHeartbeat flushes on teardown. The failure policy the
+	//     old pricing said did not exist is therefore: fail-open to the
+	//     pre-#16022 process-scoped behaviour. A wedged fsync delays the
+	//     durable record, never refuses a healthy peer, and never stalls
+	//     admission; the flush retries on a later tick. The cost is a
+	//     bounded crash window — a crash inside one flush interval loses
+	//     at most that interval's advance — stated in
+	//     heartbeat_epoch_persist.go rather than hidden.
+	//   - Cross-process locking exists but is off the accept path: the
+	//     flush takes withEpochFileLock with its bounded, fail-closed
+	//     acquire, so overlapping incarnations serialize their flushes and
+	//     a contended lock simply leaves the persist owed.
+	//   - The rollback procedure does not become a state-file edit. The
+	//     record is scoped to the accepted-key-set digest, so rotating the
+	//     PSK — the recovery the operator warning already prescribed FIRST —
+	//     stops the old record from matching and the next accepted
+	//     epoch-bearing frame under the new set re-arms from observation.
+	//     Clearing the key set clears the in-memory state and the file in
+	//     UpdateConfig. A bare restart no longer clears the latch; that is
+	//     the fix, and the rotation is now the whole recovery instead of
+	//     rotation-then-restart.
 	//
-	//   - A DURABLE WRITE ON THE ACCEPT PATH, with no good failure policy. The
-	//     write must land BEFORE the frame is accepted, or a crash in between
-	//     leaves the latch clear across the reboot — precisely the state a
-	//     replay wants, so the window it was bought to close is still open. And
-	//     a write that must complete before an accept puts storage back on the
-	//     control-channel receive path, which is the hazard the sender half of
-	//     #6169 spent real effort removing (see the HANGING-store case below):
-	//     fail-open on a wedged fsync buys nothing over today, fail-closed lets
-	//     a disk fault refuse a healthy peer.
-	//   - CROSS-PROCESS LOCKING on that path, for the same concurrent-incarnation
-	//     reason withEpochFileLock exists. (Not SO_REUSEPORT: that was this
-	//     comment's stated reason until #8233 and it was false for the primary
-	//     listener. The conclusion is unaffected — overlapping incarnations are
-	//     still reachable.)
-	//   - It STRICTLY WORSENS the legitimate rollback, which is the common case
-	//     and the one with no attacker in it. Today a restart clears the latch
-	//     and the downgraded peer is accepted. With the latch durable, a
-	//     restart no longer clears it, so every deliberate downgrade requires a
-	//     PSK rotation across both nodes — the heavier procedure — even when
-	//     nothing is being replayed.
+	// WHY THE SESSIONS PERSIST WITH THE FLOOR. A floor restored without its
+	// bindings hands out heartbeatEpochSessionsPerEpoch fresh equality
+	// slots on every restart, so a capture set sharing one epoch churns
+	// across restarts exactly as epochless frames did. The bindings are
+	// what make the restored floor the same bound the in-memory one is.
 	//
-	// WHAT IT BUYS IS NOT "ALREADY BOUGHT BY THE ROTATION". An earlier revision
-	// of this comment said it was, and that is false. The mandatory post-upgrade
-	// PSK rotation retires every capture made BEFORE it; it cannot retire one
-	// made AFTER it under the CURRENT key. Measured sequence: rotate K1->K2,
-	// let the epoch-capable peer arm the latch under K2, roll that peer back
-	// under K2 to a build that signs but emits no epoch, record the frames this
-	// receiver then refuses, let the peer go silent and restart this daemon —
-	// 5/5 of those POST-rotation K2 captures are admitted against the empty
-	// state (TestRotationDoesNotRetirePostRotationCaptures_6669). A durable
-	// K2-scoped latch would have refused them. So the design has to be declined
-	// on its own merits, and it still is:
+	// WHAT IT BUYS, measured in the earlier pricing and now closed: 65
+	// captured epoch-LESS incarnations under the CURRENT key admitted
+	// 1625/1625 after a daemon restart against the empty state and kept
+	// going — nothing orders them, and FIFO eviction hands the attacker a
+	// fresh never-seen session every round. That is forged peer liveness
+	// sustained indefinitely against a silent peer, the exact #6169 threat
+	// in the one configuration the floor cannot see. With the record
+	// restored, those captures are refused by the latch before the ring is
+	// consulted, and an epoch-BEARING set is bounded to its one finite
+	// ascending pass (325/325, then 0/1625) exactly as in-process. Pinned
+	// by TestEpochlessReplayRefusedAfterDaemonRestart_16022.
 	//
-	//   - IN THE STATE WHERE IT MATTERS MOST, ITS BENEFIT AND ITS WORST COST
-	//     ARE THE SAME CONFIGURATION. A signed epoch-less frame under the
-	//     current key can only exist if the peer held that key while running a
-	//     pre-#6169 build (the ALWAYS-EMIT invariant means a #6169+ build always
-	//     carries one, even under storage failure) — rollback, replacement under
-	//     the same identity and key, or a partial upgrade. While the peer is
-	//     still on that build, a durable latch refuses the attacker's captures
-	//     AND the LIVE peer, which is the "strictly worsens the no-attacker
-	//     rollback" cost above, not a separate one. It does not convert
-	//     protected into exposed; it makes an already-refused, already-alarmed
-	//     peer's liveness unforgeable while it is silent.
+	// THE REMAINING COST, stated as it now is. In the state where the latch
+	// matters — the peer held the current key while running a pre-#6169
+	// build (rollback, replacement under the same identity and key, or a
+	// partial upgrade) — a durable latch refuses the attacker's captures
+	// AND the live rolled-back peer, durably. That peer's recovery is the
+	// PSK rotation on both nodes; a restart alone no longer suffices, and
+	// NoteEpochDowngradeHeartbeat names the rotation as the recovery. No
+	// rollback under the current key means no epochless captures exist to
+	// replay, so the exposure the latch closes is bounded by the rollback
+	// itself and is metered (EpochlessAdmitted, EpochDowngradeRejected).
 	//
-	// WHAT IT BUYS IS NOT BOUGHT BY THE EPOCH-BEARING DOOR EITHER, and an
-	// earlier revision of this comment argued that it was: the latch can only
-	// have armed under this key because an epoch-BEARING frame was accepted
-	// under it, so an attacker on-link then holds one of those too, and against
-	// empty post-restart state an archived epoch-bearing frame is admitted
-	// whatever the latch says (TestArchivedEpochReplayReArmsLatchAfterRestart_
-	// 6169) — therefore, the argument went, a durable latch adds nothing outside
-	// a capture window strictly inside the rollback.
+	// A live peer re-arms the latch with its next heartbeat after any
+	// restart — one DefaultHeartbeatInterval, ~100ms — exactly as before;
+	// durability changes only what a restart with a SILENT peer leaves
+	// behind, which was the whole hole.
 	//
-	// THE TWO DOORS ARE NOT EQUIVALENT, because what they cost the attacker in
-	// SUSTAINED liveness differs. Measured against a restarted receiver:
-	//
-	//   - 65 captured epoch-BEARING incarnations admit 325/325 on one ascending
-	//     pass and then 0/1625 across five further rounds. The floor climbs with
-	//     them and the per-session watermark closes the rest, so the capture set
-	//     is spent — one finite pass per receiver restart.
-	//   - 65 captured epoch-LESS incarnations under the CURRENT key admit
-	//     1625/1625 and keep going: nothing orders them, and FIFO eviction hands
-	//     the attacker a fresh never-seen session every round. That is forged
-	//     peer liveness sustained indefinitely against a silent peer — the exact
-	//     #6169 threat, in the one configuration #6169's floor cannot see.
-	//
-	// A durable PSK-scoped latch refuses all 1625. So the benefit is a real one
-	// and larger than "captures taken strictly inside a rollback": it is every
-	// epoch-less capture taken under the current key, which is what a peer that
-	// spent any time on a pre-#6169 build under this key hands an on-link
-	// attacker.
-	//
-	// IT IS STILL DECLINED, on the costs above and not on redundancy: a durable
-	// write on the accept path with no good failure policy, cross-process
-	// locking there, and a strictly heavier procedure (a PSK rotation across
-	// both nodes) for every no-attacker rollback. The exposure that buys is
-	// bounded by the rollback itself — no rollback under the current key, no
-	// epoch-less captures to replay — and is metered, not silent
-	// (EpochlessAdmitted, and the epoch-downgrade warning names the rotation).
-	// Reconsider the trade if a rollback under the current key ever becomes
-	// routine rather than an incident action.
-	//
-	// What process scope costs is otherwise narrow, because this state already
-	// lives on the Manager (#5086/#6642): a heartbeat restart, a DHCP-triggered
-	// VRF rebind and an HA comms restart all PRESERVE it. Only a full daemon
-	// restart clears it, and a live peer re-arms it with its next heartbeat —
-	// one DefaultHeartbeatInterval, ~100ms. So the uncovered case needs a daemon
-	// restart AND a genuinely absent peer AND an attacker holding usable
-	// captures. Rotating the control-link PSK retires everything captured before
-	// the rotation, which is what makes it the recovery step; it is not a
-	// prophylactic against captures taken after it.
-	//
-	// It also makes rollback recovery a restart, an operation operators already
-	// perform, instead of a documented rm.
-	//
-	// What process scope does NOT buy is a restart that recovers
-	// UNCONDITIONALLY. A replayed archived epoch frame re-arms this latch
-	// against the empty post-restart state, so PSK rotation has to come FIRST.
-	// Stated in full at the arming site in admitAuthed, where the
-	// property lives.
+	// What durability does NOT buy is a restart that recovers
+	// UNCONDITIONALLY from a rollback. A replayed archived epoch frame
+	// re-arms this latch against the empty post-restart state, so PSK
+	// rotation has to come FIRST. Stated in full at the arming site in
+	// admitAuthed, where the property lives.
 	epochSeen bool
+
+	// peerEpochKeySetDigest is the accepted-key-set digest the durable
+	// record was last loaded from or flushed under ("" = no key set, or
+	// not yet reconciled). admitAuthed cannot compute it — it has no key —
+	// so Manager.UpdateConfig and the sender-tick flush maintain it under
+	// s.mu; a change means the restored record no longer scopes to the
+	// live key set and must be reconciled before it is read as this peer's
+	// latch. See heartbeat_epoch_persist.go.
+	peerEpochKeySetDigest string
+	// peerEpochPersistOwed records that the in-memory latch/floor/bindings
+	// have advanced past the durable record. Set under s.mu by admitAuthed
+	// (no I/O on the accept path); cleared by a successful flush.
+	peerEpochPersistOwed bool
+	// peerEpochPersistChecked records that this process has reconciled the
+	// in-memory state against the durable record for the CURRENT key-set
+	// digest (restored it, or found none). Without it a flush would
+	// overwrite a not-yet-loaded record with empty state, and a restore
+	// arriving after live frames would clobber the live floor with a
+	// stale one. Guarded by s.mu.
+	peerEpochPersistChecked bool
 
 	// epochlessAdmitted counts authenticated heartbeats ADMITTED without a boot
 	// epoch, and epochDowngradeRejected counts those refused because the peer
@@ -938,6 +922,7 @@ func (s *heartbeatSender) run() {
 				ticks = 0
 				s.mgr.retryOwedBootEpochPersist()
 			}
+			s.mgr.maybeFlushPeerEpochState()
 		}
 	}
 }

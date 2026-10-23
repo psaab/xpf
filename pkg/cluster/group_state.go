@@ -202,6 +202,16 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		m.controlAuthKeyConfiguredAt = time.Time{}
 		m.controlAuthKeySetDigest = ""
 		deleteFabricAuthGraceAnchor(fabricAuthGraceStatePath)
+		// #16022: with no key there is no digest to scope the durable latch
+		// to. Drop the in-memory latch/floor and the file, so a later
+		// re-keying starts unlatched (the migration window) instead of
+		// resurrecting a latch armed under a retired key.
+		m.hbAuth.mu.Lock()
+		m.hbAuth.clearPeerEpochLocked()
+		m.hbAuth.peerEpochKeySetDigest = ""
+		m.hbAuth.peerEpochPersistChecked = false
+		m.hbAuth.mu.Unlock()
+		clearPeerEpochState(peerEpochStatePath)
 	} else {
 		digest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
 		if digest != m.controlAuthKeySetDigest || m.controlAuthKeyConfiguredAt.IsZero() {
@@ -224,6 +234,19 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 				}
 			}
 		}
+		// #16022: restore (or drop, on a key-set change) the durable
+		// downgrade latch/floor for the CURRENT accepted set. Done on every
+		// keyed apply — not only when the digest changed — because the
+		// first apply after a daemon restart is the restore, and it must
+		// happen whether or not the fabric anchor moved. Reconciliation is
+		// idempotent per digest, so a routine re-apply costs one lock.
+		//
+		// NOTE: m.mu is held here (UpdateConfig's contract), and
+		// reconcilePeerEpochState takes hbAuth.mu — the same order
+		// admitFrame's callers already use (m.mu is never taken under
+		// hbAuth.mu on the receive path; handlePeerHeartbeat runs after
+		// admitAuthed returns and its lock is released).
+		m.reconcilePeerEpochState(digest)
 	}
 
 	// Update peer fencing config.

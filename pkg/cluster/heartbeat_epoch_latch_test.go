@@ -24,9 +24,14 @@ import (
 // admitted.
 //
 // The latch closes that: once the peer has proved it emits epochs, an epochless
-// frame from it is refused. It is PROCESS-scoped: the routine restarts preserve
-// it and only a full daemon restart clears it, after which a live peer re-arms
-// it with its next heartbeat.
+// frame from it is refused. The latch lives on Manager.hbAuth so routine
+// restarts preserve it. Since #16022 the latch, floor and bound sessions are
+// also persisted across daemon restarts, scoped to the accepted key set —
+// see heartbeat_epoch_persist_16022_test.go for the durability gates. The
+// tests in THIS file that restart the daemon use the legacy fixture model
+// (restartDaemon sets the committed key directly, without an UpdateConfig
+// apply, and peerEpochStatePath is not redirected), so they exercise the
+// in-memory lifecycle only; the durable lifecycle is pinned separately.
 
 // heldEpochLock takes the REAL advisory lock the persist path needs, for tests
 // that wedge the store rather than simulating a wedge, and returns a
@@ -131,28 +136,33 @@ func TestHeartbeatEpochlessReplayRefusedOnceLatched_6169(t *testing.T) {
 	e.liveRun(rebooted, "genuine peer reboot")
 }
 
-// TestHeartbeatEpochLatchScopeIsTheProcess_6169 pins the ACTUAL durability
-// contract, in both directions, so the boundary is deliberate rather than
-// discovered.
+// TestHeartbeatEpochLatchScopeIsTheProcess_6169 pins the IN-MEMORY
+// durability contract, in both directions, so the boundary is deliberate
+// rather than discovered. (The durable across-restart contract is pinned
+// in heartbeat_epoch_persist_16022_test.go, which redirects the record
+// file and drives the restart through UpdateConfig.)
 //
 // The latch survives the restarts that happen routinely — a heartbeat restart,
 // a DHCP-triggered VRF rebind, an HA comms restart — because the state lives on
-// Manager.hbAuth (#5086/#6642). It does NOT survive a full daemon restart, and
-// a live peer re-arms it with its next heartbeat.
+// Manager.hbAuth (#5086/#6642). In this fixture's model (no UpdateConfig
+// apply, no redirected record) a full daemon restart clears it, and a live
+// peer re-arms it with its next heartbeat.
 //
 // An earlier revision persisted the floor to disk to cover the daemon-restart
 // case too. Review priced that: it made a deliberate rollback require deleting
 // a state file, opened a crash window between accepting a frame and committing
 // the floor, needed cross-process locking, and let an in-range-but-wrong epoch
-// lock a peer out across reboots.
+// lock a peer out across reboots. #16022 answers that pricing with a
+// key-set-scoped record written off the accept path — see the epochSeen field
+// comment.
 //
-// The window it closed is NOT "covered operationally by PSK rotation", which
-// this comment used to say. A rotation retires captures taken BEFORE it and
-// nothing else; captures taken under the CURRENT key survive both the rotation
-// and the restart (TestRotationDoesNotRetirePostRotationCaptures_6669, and the
-// post-rotation replay in TestRollbackRecoveryOrderingIsRotateThenRestart_6169).
-// Durability is declined on its own costs — see the epochSeen field comment —
-// not because rotation already bought it.
+// The window an IN-MEMORY-ONLY latch leaves is NOT "covered operationally by
+// PSK rotation", which this comment used to say. A rotation retires captures
+// taken BEFORE it and nothing else; captures taken under the CURRENT key
+// survive both the rotation and the restart (TestRotationDoesNotRetirePost
+// RotationCaptures_6669, and the post-rotation replay in
+// TestRollbackRecoveryOrderingIsRotateThenRestart_6169). That is the window
+// #16022's durable record closes; this test pins only the in-memory half.
 func TestHeartbeatEpochLatchScopeIsTheProcess_6169(t *testing.T) {
 	e := newLatchEnv(t)
 	const liveEpoch = uint64(9_100_000_000_000_000)
@@ -233,21 +243,22 @@ func TestHeartbeatEpochUpgradeWindowStillAccepts_6169(t *testing.T) {
 // the one legitimate trigger the latch cannot distinguish from an attack.
 //
 // The peer IS refused; that is the deliberate trade, and the same one #4107's
-// sticky peerAuthSeen already makes for the auth trailer. Recovery is
-// ROTATE THE CONTROL-LINK PSK ON BOTH NODES, THEN `systemctl restart xpfd` on
-// the refusing node — operations operators already perform, with no state file
-// to hand-edit. That is the reason the latch is process-scoped: an earlier
-// revision persisted it, which turned this procedure into "delete the right
-// file on the right node, then restart".
+// sticky peerAuthSeen already makes for the auth trailer. In this fixture's
+// in-memory model, recovery is ROTATE THE CONTROL-LINK PSK ON BOTH NODES, THEN
+// `systemctl restart xpfd` on the refusing node — operations operators already
+// perform, with no state file to hand-edit. (Since #16022 the latch is durable,
+// so production recovery is the rotation ALONE — it clears the key-set-scoped
+// record on the next apply; see
+// TestPeerEpochRecordScopedToKeySet_16022. This test pins the in-memory half.)
 //
 // THE ROTATION IS NOT OPTIONAL AND ITS POSITION IS NOT COSMETIC. A bare restart
-// clears the latch, the floor and the ring together, so a single ARCHIVED
-// epoch-bearing frame replayed into that empty state re-arms the latch and the
-// rolled-back peer is refused again — one replay per restart, indefinitely.
-// Rotation is what retires the archive. This test covers only the no-attacker
-// case, where the restart alone is enough; the ordering itself is proved in
-// TestRollbackRecoveryOrderingIsRotateThenRestart_6169 and the re-arm in
-// TestArchivedEpochReplayReArmsLatchAfterRestart_6169.
+// clears the in-memory latch, the floor and the ring together, so a single
+// ARCHIVED epoch-bearing frame replayed into that empty state re-arms the latch
+// and the rolled-back peer is refused again — one replay per restart,
+// indefinitely. Rotation is what retires the archive. This test covers only
+// the no-attacker case, where the restart alone is enough; the ordering itself
+// is proved in TestRollbackRecoveryOrderingIsRotateThenRestart_6169 and the
+// re-arm in TestArchivedEpochReplayReArmsLatchAfterRestart_6169.
 func TestHeartbeatEpochRollbackRefusedThenRecovered_6169(t *testing.T) {
 	e := newLatchEnv(t)
 	e.liveRun(e.captureIncarnation(0x44E0, 9_300_000_000_000_000, epochFramesPerIncarnation), "peer on an epoch-capable build")
@@ -600,8 +611,10 @@ func TestInBoundFarFutureEpochLockoutIsBounded_6169(t *testing.T) {
 	// action at all.
 	e.liveRun(e.captureIncarnation(0xEE03, inBound+1, epochFramesPerIncarnation), "peer once its clock passes the floor")
 
-	// BOUND 2 — and a restart clears it outright. This is the difference the
-	// durable floor did not have: no state file, no rm.
+	// BOUND 2 — and in this in-memory model a restart clears it outright.
+	// (Since #16022 the durable record persists it in production; the
+	// rotation, not the restart, is now the clearing operation — see
+	// TestPeerEpochRecordScopedToKeySet_16022.)
 	e2 := newLatchEnv(t)
 	e2.liveRun(e2.captureIncarnation(0xEE04, now+bootEpochMaxSkew/2, epochFramesPerIncarnation), "peer with a clock inside the allowance")
 	e2.restartDaemon()
@@ -611,8 +624,10 @@ func TestInBoundFarFutureEpochLockoutIsBounded_6169(t *testing.T) {
 	e2.liveRun(e2.captureIncarnation(0xEE05, now, epochFramesPerIncarnation), "repaired peer after restarting xpfd")
 }
 
-// TestReceiverRestartWindowIsOneHeartbeat_6169 measures what the in-memory
-// floor actually costs at a receiver daemon restart, rather than asserting it.
+// TestReceiverRestartWindowIsOneHeartbeat_6169 measures what the IN-MEMORY
+// floor costs at a receiver daemon restart, rather than asserting it.
+// (Since #16022 the durable record closes this window in production; this
+// fixture models the in-memory lifecycle only — see the file header.)
 //
 // The claim being checked: the window is bounded by the peer's next genuine
 // heartbeat — roughly one interval — after which the floor re-establishes above
@@ -1118,13 +1133,15 @@ func feedCount(e *latchEnv, frames [][]byte) int {
 //
 // The sequence needs the peer to have run a build that SIGNS but emits no
 // epoch while holding the current key — rollback, replacement under the same
-// identity and key, or a partial upgrade. That precondition is the reason the
-// durable latch is still declined: in this very state a durable latch would
-// also be refusing the LIVE peer, so its benefit and its worst cost are the
-// same configuration. See the epochSeen field comment for the full pricing.
+// identity and key, or a partial upgrade. That precondition is what #16022's
+// durable latch now refuses across the restart below; in this fixture's
+// in-memory model (no UpdateConfig apply, no redirected record) the restart
+// still clears the latch, so the captures are admitted — the pre-#16022
+// behaviour this test was written to pin. The durable refusal is pinned in
+// TestEpochlessReplayRefusedAfterDaemonRestart_16022.
 //
-// This pins the CURRENT behaviour and the argument that rests on it, not a
-// desired behaviour.
+// This pins the IN-MEMORY behaviour and the argument that rested on it, not
+// the durable one.
 func TestRotationDoesNotRetirePostRotationCaptures_6669(t *testing.T) {
 	e := newLatchEnv(t)
 
@@ -1144,16 +1161,20 @@ func TestRotationDoesNotRetirePostRotationCaptures_6669(t *testing.T) {
 		t.Fatalf("rolled-back peer while latched: %d/%d admitted, want 0", admitted, epochFramesPerIncarnation)
 	}
 
-	// The peer goes silent and this daemon restarts: the process latch clears.
+	// The peer goes silent and this daemon restarts: in this in-memory
+	// fixture the latch clears. (#16022's durable record, restored through
+	// UpdateConfig in production, would still be armed for this key and
+	// would refuse the captures below — pinned in
+	// TestEpochlessReplayRefusedAfterDaemonRestart_16022.)
 	e.restartDaemon()
 	if e.r.auth.peerEpochLatched() {
-		t.Fatal("a daemon restart must clear the process-scoped latch")
+		t.Fatal("a daemon restart must clear the in-memory latch")
 	}
 
-	// The post-rotation captures are admitted against the empty state. A
-	// durable, PSK-scoped latch would still be armed for this key and would
-	// refuse them — that is the benefit the rotation argument wrongly claimed
-	// was already bought.
+	// The post-rotation captures are admitted against the empty in-memory
+	// state. A durable, PSK-scoped latch would still be armed for this key
+	// and would refuse them — that is the benefit the rotation argument
+	// wrongly claimed was already bought, and the one #16022 now takes.
 	admitted := feedCount(e, postRotationCaptures)
 	if admitted != epochFramesPerIncarnation {
 		t.Fatalf("post-rotation epoch-less captures after a restart: %d/%d admitted, want %d — "+

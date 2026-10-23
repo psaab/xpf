@@ -99,9 +99,9 @@ import (
 //     replays those and the floor is never consulted at all. Measured on the
 //     first cut of this change: with the floor latched at a live peer's epoch,
 //     975/975 epochless replays were still admitted. The fix is the DOWNGRADE
-//     LATCH (see heartbeatAuthState.admitAuthed). It is process-scoped: a
-//     durable floor was built, priced against rollback/crash/lock costs, and
-//     removed — see the epochSeen field comment.
+//     LATCH (see heartbeatAuthState.admitAuthed). It is durable since #16022:
+//     a key-set-scoped record persists latch+floor+bindings off the accept
+//     path — see the epochSeen field comment and heartbeat_epoch_persist.go.
 //
 //  2. The sender must therefore ALWAYS advertise an epoch once it runs a build
 //     that can. If a storage fault made a healthy node emit epochless frames, a
@@ -214,8 +214,8 @@ const (
 // is the persistent runtime-state root xpf already uses for durable identity
 // counters (SNMPv3 engineBoots, the config DB). Overridden in tests.
 //
-// There is deliberately NO peer-side floor file; see the DURABILITY note on
-// heartbeatAuthState.epochSeen for why the receiver latch is process-scoped.
+// The peer-side receiver record (latch/floor/bindings) lives alongside it
+// at peerEpochStatePath; see heartbeat_epoch_persist.go (#16022).
 var bootEpochPath = "/var/lib/xpf/ha-boot-epoch"
 
 // bootEpochStopJoinBudget is how long Manager.Stop waits for an in-flight

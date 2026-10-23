@@ -12,21 +12,27 @@ import (
 // pkg/cluster/README.md told operators that `systemctl restart xpfd` on the
 // refusing node recovers from a peer rollback, unqualified. It does not, and
 // the gap matters precisely against the attacker #6169 exists to stop.
-
+//
 // TestArchivedEpochReplayReArmsLatchAfterRestart_6169 is the executable
 // statement of residual 5.
 //
-// The restart clears the floor, the latch and the ring TOGETHER, and arming the
-// latch needs only an authenticated, orderable, ring-fresh epoch frame. Against
-// that empty state a single ARCHIVED frame — captured while the peer still ran
-// an epoch-capable build — satisfies all three: highEpoch is 0 so nothing is
-// below the floor, and an empty ring calls its session never-seen. It re-arms
-// the latch and the legitimately rolled-back peer is refused again.
+// In this fixture's IN-MEMORY model the restart clears the floor, the latch
+// and the ring TOGETHER, and arming the latch needs only an authenticated,
+// orderable, ring-fresh epoch frame. Against that empty state a single
+// ARCHIVED frame — captured while the peer still ran an epoch-capable build —
+// satisfies all three: highEpoch is 0 so nothing is below the floor, and an
+// empty ring calls its session never-seen. It re-arms the latch and the
+// legitimately rolled-back peer is refused again.
 //
-// This is a CHARACTERIZATION test: it pins behaviour the code deliberately does
-// not change (see the arming site in admitAuthed for why a durable latch
-// and a freshness test were both rejected), so that the documentation and the
-// operator warning cannot drift back to claiming a bare restart is enough.
+// This is a CHARACTERIZATION test: it pins the in-memory behaviour the code
+// deliberately does not change (see the arming site in admitAuthed for why a
+// freshness test was rejected), so that the documentation and the operator
+// warning cannot drift back to claiming a bare restart is enough. Since
+// #16022 the latch is ALSO durable (key-set-scoped, off the accept path);
+// that does not close the re-arm — a replayed archived frame re-arms a
+// restored latch identically — it only means the restart no longer clears
+// it in the first place. The durable gates are in
+// heartbeat_epoch_persist_16022_test.go.
 func TestArchivedEpochReplayReArmsLatchAfterRestart_6169(t *testing.T) {
 	e := newLatchEnv(t)
 
@@ -172,10 +178,11 @@ func TestRollbackRecoveryOrderingIsRotateThenRestart_6169(t *testing.T) {
 		}
 
 		// BUT THE POST-ROTATION CAPTURES SURVIVE BOTH STEPS. They were signed
-		// with the key still in force, so rotation cannot retire them, and the
-		// restart is what makes them usable by clearing the latch that was
-		// refusing them. This is the residual the process-scoped latch accepts,
-		// asserted rather than left implicit.
+		// with the key still in force, so rotation cannot retire them, and in
+		// this in-memory fixture the restart is what makes them usable by
+		// clearing the latch that was refusing them. (#16022's durable latch
+		// refuses them in production; this fixture models the in-memory
+		// lifecycle only.)
 		admitted := feedCount(e, postRotation)
 		if admitted != epochFramesPerIncarnation {
 			t.Fatalf("post-rotation epoch-less captures after the restart: %d/%d admitted, "+

@@ -85,11 +85,12 @@ package cluster
 //     Measured on the first cut of this change: floor latched at a live peer's
 //     epoch, and still 975/975 epochless replays admitted.
 //
-// The latch is armed by an ACCEPTED frame that carried an epoch section, and it
-// is PROCESS-scoped: it lives on Manager.hbAuth, so the routine restarts
-// (heartbeat restart, DHCP-triggered VRF rebind, HA comms restart) preserve it
-// and only a full daemon restart clears it. See the epochSeen field comment for
-// why a durable latch was priced and removed.
+// The latch is armed by an ACCEPTED frame that carried an epoch section. It
+// lives on Manager.hbAuth, so the routine restarts (heartbeat restart,
+// DHCP-triggered VRF rebind, HA comms restart) preserve it, and since #16022
+// it is persisted across a full daemon restart in a key-set-scoped record
+// written off this path (heartbeat_epoch_persist.go). See the epochSeen field
+// comment for how the earlier durable-latch pricing is engaged.
 //
 // WHAT MAKES THE LATCH SAFE is the sender-side invariant in heartbeat_epoch.go:
 // a keyed heartbeat carries no epoch IF AND ONLY IF the peer runs a pre-#6169
@@ -108,14 +109,15 @@ package cluster
 //
 // The one remaining trigger is a genuine ROLLBACK of the peer to a pre-#6169
 // build, a deliberate operator-initiated act: that peer's frames are refused
-// until the latch is cleared. There is no state file to hand-edit. This is the
-// same trade #4107's sticky peerAuthSeen already makes for the auth trailer.
+// until the latch is cleared. Clearing it is the PSK rotation (the record is
+// key-set-scoped, so the rotation drops it on the next apply) — there is no
+// state file to hand-edit. This is the same trade #4107's sticky peerAuthSeen
+// already makes for the auth trailer.
 //
-// `systemctl restart xpfd` on THIS node clears the latch, but it is NOT
-// sufficient on its own: an attacker holding one archived epoch-bearing frame
-// re-arms it against the empty post-restart state. Rotate the control-link PSK
-// on both nodes FIRST, then restart. See the arming site in admitAuthed
-// for why, and why it is not closed in code.
+// A bare `systemctl restart xpfd` on THIS node no longer clears the latch at
+// all, and against any cleared state an attacker holding one archived
+// epoch-bearing frame re-arms it. Rotate the control-link PSK on both nodes.
+// See the arming site in admitAuthed for why the re-arm is not closed in code.
 //
 // The three epoch cases, once the peer is known to emit them:
 //
@@ -331,43 +333,36 @@ func (s *heartbeatAuthState) admitAuthed(hasEpoch bool, epoch, session, counter 
 	// residual an operator has to be told about, not a theoretical one.
 	//
 	// Arming requires only an authenticated, orderable, ring-fresh epoch frame.
-	// Against a FRESH state — which is exactly what the documented rollback
-	// recovery (restart xpfd) produces, since highEpoch, this latch and the ring
-	// are all process-scoped — a single ARCHIVED frame captured while the peer
-	// still ran an epoch-capable build satisfies all three: highEpoch is 0 so
-	// nothing is below the floor, and an empty ring calls its session
-	// never-seen. It re-arms the latch, and the legitimately rolled-back peer's
-	// genuine epochless frames are refused again at the top of this function.
-	// One replay per restart sustains that indefinitely.
+	// Against a FRESH state — highEpoch 0, latch clear, ring empty, which is
+	// what a node with no durable record for the current key set starts in —
+	// a single ARCHIVED frame captured while the peer still ran an
+	// epoch-capable build satisfies all three: nothing is below the floor,
+	// and an empty ring calls its session never-seen. It re-arms the latch,
+	// and the legitimately rolled-back peer's genuine epochless frames are
+	// refused again at the top of this function. One replay per clearing
+	// sustains that indefinitely.
 	//
-	// SO RESTARTING xpfd IS NOT, BY ITSELF, RELIABLE RECOVERY FROM A ROLLBACK
-	// while an on-link attacker holds such a capture — which is precisely the
-	// attacker #6169 exists to defend against. The complete recovery is to
-	// ROTATE THE CONTROL-LINK PSK on both nodes FIRST and restart xpfd after:
-	// rotation makes every archived frame fail verifyHeartbeatMAC, so it never
-	// reaches this function to re-arm anything. Order matters — restart first
-	// and the replay can land in the window before the new key is committed.
-	// The key is re-read per frame on both paths, so rotation needs no restart
-	// of its own.
+	// SO RESTARTING xpfd IS NOT, BY ITSELF, RECOVERY FROM A ROLLBACK while an
+	// on-link attacker holds such a capture — which is precisely the attacker
+	// #6169 exists to defend against — and since #16022 it does not even clear
+	// the latch. The complete recovery is to ROTATE THE CONTROL-LINK PSK on
+	// both nodes: rotation makes every archived frame fail
+	// verifyHeartbeatMAC, so it never reaches this function to re-arm
+	// anything, and it re-scopes the durable record so the latch it armed is
+	// dropped on the next apply. The key is re-read per frame on both paths,
+	// so rotation needs no restart of its own.
 	//
-	// This is NOT closed in code, and the alternatives were priced separately,
-	// because they are separate designs. A durable FLOOR re-creates the
-	// peer-floor state file this design deliberately removed and makes an
-	// in-range-but-wrong epoch a lockout that outlives reboots. A durable
-	// PSK-scoped LATCH avoids both of those, and is declined for its own
-	// reasons — a durable write on the accept path with no good failure policy,
-	// cross-process locking there, and a strictly heavier procedure for the
-	// no-attacker rollback. It is NOT declined as redundant with the mandatory
-	// post-upgrade PSK rotation, which an earlier revision of this comment
-	// claimed: a rotation retires captures taken BEFORE it and nothing else, and
-	// a durable latch refuses epoch-less captures taken under the CURRENT key,
-	// which are the ones that sustain forged liveness indefinitely (measured
-	// 1625/1625 admitted after a restart, against 0/1625 for a spent
-	// epoch-bearing set). Both are priced in full at the epochSeen field comment.
-	// Binding arming to freshness needs a challenge-response or a timestamp the
-	// heartbeat wire format does not carry, and cannot be approximated from the
-	// epoch itself: a legitimately long-lived peer's epoch is arbitrarily old,
-	// so no recency test separates it from an archived one.
+	// The RE-ARM is not closed in code, and the alternatives were priced
+	// separately, because they are separate designs. Binding arming to
+	// freshness needs a challenge-response or a timestamp the heartbeat wire
+	// format does not carry, and cannot be approximated from the epoch
+	// itself: a legitimately long-lived peer's epoch is arbitrarily old, so
+	// no recency test separates it from an archived one. The durable half —
+	// refusing the epoch-LESS captures that sustain forged liveness
+	// indefinitely (measured 1625/1625 admitted after a restart pre-#16022,
+	// against 0/1625 for a spent epoch-bearing set) — IS now closed by the
+	// key-set-scoped record in heartbeat_epoch_persist.go, priced in full at
+	// the epochSeen field comment.
 	//
 	// SCOPE, honestly: a peer that has NEVER emitted an epoch cannot be falsely
 	// armed this way — there is nothing to capture. It bites on rollback,
@@ -420,6 +415,15 @@ func (s *heartbeatAuthState) admitAuthed(hasEpoch bool, epoch, session, counter 
 		// epoch == s.highEpoch: admissibility was decided above, so this either
 		// re-affirms a session already bound or consumes a free slot.
 		s.bindEpochSession(session, false)
+	}
+	// #16022: the latch/floor/bindings advanced; the durable record is
+	// behind. No I/O here — the sender-tick flush and the stop flush write
+	// it (heartbeat_epoch_persist.go). Marking owed on EVERY admitted
+	// epoch-bearing frame, not only on a raise, is deliberate: a binding
+	// consumed at an unchanged floor is exactly what a restart must not
+	// hand back to a replay.
+	if !declineRaise {
+		s.peerEpochPersistOwed = true
 	}
 	return true, ""
 }
