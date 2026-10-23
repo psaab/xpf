@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Docs/harness: record the #16217 aged-failover root-cause chain
+    (seed/FIB/supersession/split-handshake/wire-stage/neighbor legs
+    closed, receiving-worker HA-inactive leg still open) in
+    docs/ha-failover-status.md and add the never-again aged cell
+    (--aged-failover: 30s stream age, zero zero-intervals) to
+    scripts/userspace-ha-failover-validation.sh. PR #16217 remains
+    unmerged and is not an aged-failover cure.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Meter LocalDelivery input policers before the miss-path PERMIT
     FilterLog, lo0, and junos-host side effects (#15949, H34-04
     arm 2): a red host-bound packet now drops at the early gate with

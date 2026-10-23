@@ -247,6 +247,176 @@ yet. Here is what is true today:
   userspace cluster, they are synchronized; the disarm is gone. The residual is
   narrower and is described under "Persistent SNAT Lease Boundary"
 
+## The #16217 aged-failover chain (OPEN — not a cure)
+
+PR #16217 (Refs #16215 #16216 #16109 #16222 #16223 #16269 #16270) is
+**not merged and not an aged-failover cure**. Every live aged cell on
+its head still fails the acceptance below. This section is the
+authoritative root-cause chain so no leg is re-diagnosed from scratch;
+per-leg evidence lives in `docs/log/16215.md`, `docs/log/16222.md`,
+`docs/log/16223.md`, `docs/log/16269.md`, `docs/log/16270.md`,
+`docs/log/16270-cache-supersession.md`, and
+`docs/log/16217-fabric-adoption.md` on that branch.
+
+**Acceptance (unchanged, never met live):** all-node0 posture
+(RG0/RG1/RG2 primary on node0, asserted by the harness before
+traffic), P4 iperf3 60 s to `172.16.80.200:5211`, RG1 fw0→fw1 at
+**30 s measured stream age at the RG transition instant**, **zero**
+aggregate (`[SUM]`) and per-stream zero intervals, and a zero delta
+in `xpf_userspace_snat_revoked_sessions_total` on both nodes
+between the **stream-start** baseline and the post-failover sample
+(a pre-failover baseline would hide the ~28 s revocation leg).
+fails it: the source tables record **130 zero intervals** for that
+arm — the column is headed "Zero SUM intervals" in some tables and
+left unqualified in others, and 130 exceeds the ~30 aggregate
+intervals a 60 s run has after the failover, so that number is a
+per-stream/line count, **not** 130 aggregate intervals; do not quote
+it as a SUM baseline. The comparable aggregate signature on the PR
+head is 25 SUM zero intervals (31 s→end), all from failover+1 s. A
+young-flow failover pass proves none of this.
+
+The chain, in the order each leg was proven and closed (each fix is
+necessary, none is sufficient; the residual always moved one stage
+later):
+
+1. **Seed / DiscardRoute demotion (#16269).** Post-revocation
+   retransmits demoted the cluster-terminal FIB row to a plain
+   `DiscardRoute`; fw1's fabric-ingress cache hit then consumed that
+   cached discard as a terminal drop. Fix: HA demotion preserves
+   cluster-terminal provenance (`source_ifindex`), the seed
+   (`from_deny_decision`) preserves it into the cached entry with no
+   1 s deny TTL, and both fabric converters rescue a `DiscardRoute`
+   whose would-be egress RG is now peer-owned / locally active.
+   Operator discards (`source_ifindex == 0`) stay bit-identical
+   drops — the rescue is provenance-gated, never a guess.
+2. **FIB republication ordering (#16270 FIB leg).** Connected-RG
+   republication was async and duplicate-skippable, so an arriving
+   retransmit could hit the pref-200 cluster-terminal before the
+   helper FIB held the republished /24. Fix: synchronous
+   `republishConnectedRG` under `applySem` **before** `SetRGActive`
+   on both activation paths, plus a guarded FIB connected-win (a
+   covering connected prefix beats a selected non-cluster terminal
+   only while a cluster-terminal row proves republication is owed;
+   settled-FIB operator discards are bit-identical).
+3. **Supersession (#16270 cache leg, #16222).** Cache revalidation
+   had supersession arms for `FabricRedirect` and `DiscardRoute`
+   but none for a locally-egressing `ForwardCandidate` whose egress
+   RG became peer-owned, and it judged cached redirects with a
+   destination-only lookup against a per-flow session resolution
+   (split-RG `fabric_local_wins` churn, ~25k evictions/s). Fix:
+   `ForwardCandidateEgressDeparted` eviction arm (known egress RG,
+   not forwarding-active locally, non-empty HA map only) and
+   per-flow ECMP revalidation judged against the stored resolution
+   context — a different-owner local candidate supersedes only if
+   it serves the flow locally. Live nuance: on the uninstrumented
+   build the pre-existing `lookup_rg_epoch`/`lookup_lease` fences
+   usually evict first; the arm owns the enforce-equal shape.
+4. **Split handshake (#16223).** In split posture (RG1 fw0, RG2
+   fw1) flows never left the 20 s TCP opening window: the
+   completion predicate's `syn_ack_first == is_reverse` conjunct
+   never fires for a plain pending pair hit on its reverse half,
+   pure Opening rows never arm, and GC's `companion_keeps_alive`
+   refused pending companions — both halves expired at ~20 s under
+   continuous cache service (`Timeout: 20` at every sampler).
+   Fix: served-evidence completion (`cache_hit_handshake_progress`:
+   promoted companion / refreshed half / nonzero admitted reverse
+   counters — a dropped spoofed SYN-ACK charges none) promotes both
+   halves to Established (`Timeout: 1800`) + HA Update, with
+   node-level evidence consulted before the local refusals and a
+   replica fence so a `WorkerLocalImport` expiry cannot evict the
+   serving incarnation's cache/NAT state. Pure Opening pairs keep
+   the #6752/#13679 refusal; closing pairs keep their fuse.
+5. **Wire-stage / counter carriage (#16217 Wire3–Wire13).** The
+   fabric-ingress adoption gate read only the shared synced wire,
+   which stayed `HandshakePending` (`w=2`) for exactly the heavy
+   split streams: completion evidence was per-table (split across
+   workers, never assembled), gated on the 10 s conntrack-refresh
+   slice, excluded `WorkerLocalImport` serving rows, and — once
+   scoped-evidence adoption existed — the HA wire carried
+   `fwd=0/rev=0` on every delta (Rust stamped
+   `SessionCounters::default()`, Go had no counter fields, import
+   hard-stamped zero; the unit arm constructed counts in-process —
+   test-only-green, FZDiag19). Fixes, all fail-closed: node-wide
+   evidence aggregation at the ct-slice (shared Established remains
+   OUTPUT only), same-packet-path wire advance on cache-hit
+   completion, Established export stamp at all three export sites,
+   evidence requiring an actual reverse packet count > 0, scoped
+   (full `SessionKey`, never `bare_tuple()`) pending-row adoption,
+   backup-origin publication, additive live-counter carriage on
+   Open/Update/bulk in both families with monotonic per-incarnation
+   merge, and backup-arm slice admission. FZDiag20 proved there is
+   **no steady-state HA delta**: all emission is transition-triggered,
+   so counters are only as fresh as the last transition — any future
+   gate must not assume a periodic sync vehicle exists.
+6. **Neighbor / seed completion (Wire13).** Once fw1's rows finally
+   read `Timeout: 1800` pre-failover and fabric packets adopted,
+   resolution landed on `MissingNeighbor`: fw1 never served the
+   flow pre-failover, its kernel entry for the direct server hop
+   `172.16.80.200` (connected /24, `next_hop == None`) had aged to
+   FAILED, and the coordinator warmer only walked route next-hops
+   and fabric peers — no code named the direct destination. Fix:
+   `queue_warm_pass` also enqueues direct destinations of shared
+   synced forward rows covered by a connected prefix, re-driven at
+   RG activation (`on_rg_promote_active`). Proven closed live:
+   `172.16.80.200 … REACHABLE` on fw1 from d28 through post, fw1
+   `Neighbor misses = 0`, in both runs.
+7. **HA-inactive on the receiving worker (OPEN residual).** The
+   current head (`b9741b5bd7`) still fails twice-on-loss (26 and 25
+   SUM zero intervals, all from failover+1 s, no pre-failover
+   zeros). fw1's last resolution for the heavy wire tuples now
+   reads `ha_inactive ingress-ifindex=4 egress-ifindex=14
+   next-hop=172.16.80.200` — neighbor resolved, sessions
+   Established, but the fabric packets are HA-gated/discarded
+   instead of adopted/served on the receiving worker. **This leg
+   is unnamed in code and unfixed. Do not merge #16217 as the
+   aged-failover cure until a cell shows zero zeros with this leg
+   closed.**
+
+Also closed on the branch, independently of the aged cell:
+peer-synced rows (incl. `DemoteOwnerRGS`-retagged `SyncImport`)
+whose stored decision is terminal **or** `FabricRedirect` decline
+SNAT revalidation (the fabric pseudo-egress has no `EgressInterface`
+row, so the first geometry check revoked unconditionally);
+revocation only on a fresh decision's withdrawn translation, and
+`StaleSourceNat` revocations are counted per binding and exported
+as `xpf_userspace_snat_revoked_sessions_total`. Reverse hits never
+substitute the reply decision for the stored forward decision.
+
+### Never-again gates
+
+- **Aged cell, not young cell.** The harness gate is
+  `scripts/userspace-ha-failover-validation.sh --aged-failover`
+  (port 5211, P4 60 s): it asserts RG0/RG1/RG2 are all primary on
+  node0 before traffic, stamps the actual stream start once
+  `start_iperf` proves the client live, and schedules the RG1
+  transition to **land** at 30 s measured stream age: it times an
+  identical 8-call CLI snapshot pass (`capture_cycle_state`)
+  immediately beforehand and sleeps only the remainder, then stamps
+  the age again at confirmed ownership — failing closed if the
+  snapshot lead already overshoots 30 s. The 60 s stream keeps 30 s
+  of post-transition traffic. `MAX_ZERO_INTERVALS` is forced to 0
+  (per-stream and preflight zero budgets already default to 0), and
+  the `xpf_userspace_snat_revoked_sessions_total` delta from the
+  stream-start baseline must be 0 on both nodes (an unavailable
+  metric fails the gate, it does not skip it). A failover issued
+  inside the 20 s opening window or the first conntrack-refresh
+  cycle is not evidence.
+- **Twice on loss.** No leg is "fixed live" on one run; every leg
+  above was required to fail twice on the same build before the
+  next leg was named, and the cure must pass with the identical
+  25-zero signature absent — not merely reduced.
+- **Homogeneous build proof.** Helper sha256 must match
+  `/proc/<pid>/exe` on both nodes before traffic; cluster restored
+  to clean master and re-verified after each cell. Mid-stream
+  helper restarts invalidate the cell (FZDiag20 cells 33–35).
+- **No test-only-green evidence.** A unit arm that constructs the
+  very evidence the wire was dropping (Wire10 counters) does not
+  close a leg; the evidence must cross the real encode/import path.
+- **Fail-closed adoption.** Every gate above declines on absent,
+  pending, closing, reverse-only, scope-mismatched, or zero-count
+  evidence, and falls through to the ordinary miss/drop path.
+  Operator discards without provenance are never rescued.
+
 ## What Works
 
 Manual failover with `request chassis cluster failover redundancy-group 1
@@ -936,6 +1106,16 @@ scripts/userspace-ha-failover-validation.sh --duration 600 --parallel 8
 ```
 
 ```bash
+# Aged-failover never-again gate (#16217): streams age 30s (past the
+# 20s TCP opening window) before a single RG1 failover; acceptance is
+# NO zero intervals. Expect this to FAIL until the HA-inactive leg
+# named in "The #16217 aged-failover chain" is closed.
+BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
+IPERF_TARGET=172.16.80.200 \
+scripts/userspace-ha-failover-validation.sh --aged-failover --duration 60 --parallel 4
+```
+
+```bash
 # Reverse-path coverage is also required. The validator currently exercises the
 # source-sending path, so run a matching reverse iperf after the forward pass.
 iperf3 -c 172.16.80.200 -P 8 -t 600 -R
@@ -987,13 +1167,16 @@ cli -c "request chassis cluster failover redundancy-group 1 node 0"
 
 ## Remaining Work (Priority Order)
 
-1. **Live validation** — run `/failover-test` with all recent fixes deployed
+1. **Close the #16217 HA-inactive leg** — name and fix the
+   receiving-worker `ha_inactive` gate above, then pass the
+   `--aged-failover` cell twice on the same build
+2. **Live validation** — run `/failover-test` with all recent fixes deployed
    to confirm end-to-end failover works with zero stream loss
-2. **Validate translated tuple fix** — confirm PRs #404-406 resolved the
+3. **Validate translated tuple fix** — confirm PRs #404-406 resolved the
    HAInactive resolution for inherited forward-wire entries
-3. **Validate split-RG** — confirm priority ack channel fixed split-RG
+4. **Validate split-RG** — confirm priority ack channel fixed split-RG
    readiness convergence
-4. **Throughput parity** — hardware/topology limitation, not a software fix
+5. **Throughput parity** — hardware/topology limitation, not a software fix
 
 ## Superseded Documents
 
