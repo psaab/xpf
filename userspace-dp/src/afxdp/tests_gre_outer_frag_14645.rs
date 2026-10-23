@@ -149,6 +149,83 @@ fn native_gre_outer_fragment_v6_reassembles_and_decaps_14645() {
     assert_eq!(&decap.frame[decap.meta.l3_offset as usize..], &inner[..]);
 }
 
+/// #16032: a fragmented GRE datagram behind an experimental (253) IPv6
+/// extension header must reassemble+decap. The reassembly walkers in
+/// gre_reassembly.rs hand-copied `0|43|60|135|139|140` and omitted 253/254
+/// from the SSOT `IPV6_GENERIC_EXT_HEADERS`, so parse_fragment returned
+/// None and patch_v6_next_header_to_protocol stopped before Fragment.
+/// RED on revert: restoring either hand-copied list drops this datagram.
+fn build_v6_outer_fragmented_behind_ext(inner: &[u8], ext_type: u8) -> (Vec<u8>, Vec<u8>) {
+    let whole = build_gre_to_self_outer_frame_v6(0, inner);
+    let l3 = 14usize;
+    // whole: fixed hdr (next=47 GRE) + GRE+inner. Rewrite as
+    // fixed(next=ext) + ext(next=44, len0=8B) + frag(next=47) + GRE+inner.
+    let payload = whole[l3 + 40..].to_vec();
+    let split = 16usize;
+    let mk = |offset_units: u16, more: bool, part: &[u8]| -> Vec<u8> {
+        let mut f = whole[..l3].to_vec();
+        f.extend_from_slice(&whole[l3..l3 + 4]);
+        let plen = (8 + 8 + part.len()) as u16;
+        f.extend_from_slice(&plen.to_be_bytes());
+        f.push(ext_type);
+        f.push(64);
+        f.extend_from_slice(&whole[l3 + 8..l3 + 40]);
+        f.push(44); // ext -> Fragment
+        f.push(0); // HdrExtLen 0 => 8 bytes
+        f.extend_from_slice(&[0u8; 6]);
+        let word = ((offset_units & 0x1fff) << 3) | if more { 1 } else { 0 };
+        f.push(47); // frag -> GRE
+        f.push(0);
+        f.extend_from_slice(&word.to_be_bytes());
+        f.extend_from_slice(&0x16032u32.to_be_bytes());
+        f.extend_from_slice(part);
+        f
+    };
+    (
+        mk(0, true, &payload[..split]),
+        mk((split / 8) as u16, false, &payload[split..]),
+    )
+}
+
+#[test]
+fn native_gre_outer_fragment_v6_behind_ext253_reassembles_16032() {
+    let _lock = gre_outer_frag_counter_test_lock();
+    let forwarding = build_forwarding_state(&gre_to_self_snapshot_v6());
+    let inner = build_gre_inner_icmp_packet_v4();
+    for ext in [253u8, 254] {
+        let (head, tail) = build_v6_outer_fragmented_behind_ext(&inner, ext);
+        let mut hm = frag_meta_v6(&head, true);
+        hm.l4_offset = 14 + 40 + 8 + 8;
+        hm.payload_offset = hm.l4_offset;
+        let mut tm = frag_meta_v6(&tail, false);
+        tm.l4_offset = 14 + 40 + 8 + 8;
+        tm.payload_offset = tm.l4_offset;
+        let mut pool = GreReassembler::new();
+        let now = 3_000_000_000u64 + ext as u64;
+        assert!(pool.offer(&head, hm, now).is_none(), "ext {ext}: head buffers");
+        let (frame, meta) = pool
+            .offer(&tail, tm, now + 1)
+            .unwrap_or_else(|| panic!("ext {ext}: head+tail behind ext must complete reassembly (#16032)"));
+        let decap = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
+            .unwrap_or_else(|| panic!("ext {ext}: reassembled datagram must decap (#16032)"));
+        assert_eq!(
+            &decap.frame[decap.meta.l3_offset as usize..],
+            &inner[..],
+            "ext {ext}: decapped inner must be byte-identical"
+        );
+    }
+    // Parity: both walker sites must consume the SSOT const, not a re-spelled list.
+    let src = include_str!("gre_reassembly.rs");
+    assert!(
+        src.matches("IPV6_GENERIC_EXT_HEADERS.contains(&n)").count() >= 2,
+        "#16032: gre_reassembly.rs must guard both generic arms on IPV6_GENERIC_EXT_HEADERS"
+    );
+    assert!(
+        !src.contains("0 | 43 | 60 | 135 | 139 | 140 =>"),
+        "#16032: hand-copied walker list must not return"
+    );
+}
+
 #[test]
 fn native_gre_fragment_shim_truth_table_14645() {
     use shim_gre_classify::native_gre_fragment_stays_on_helper;
