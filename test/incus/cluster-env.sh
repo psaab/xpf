@@ -79,10 +79,21 @@ IPERF_TARGET6="${IPERF_TARGET6:-2001:559:8585:100::200}"
 # parent are shared lab topology; only the per-cluster host octets differ.
 # The DMZ (VLAN-50) prober reuses the mouse target's host octet (iperf
 # target octet + 1) on its own subnet so each cluster's probers stay
-# distinct (loss .201, tcp .211, udp .212). WAN_VIP4 in the env files
-# names the firewall's reth0.50 address (the route gateway for VLAN-80/50
-# hosts). Explicit caller overrides (DMZ_ADDR, MOUSE_TARGET_*, ...) win;
-# on the loss env every derived value equals the historical literal.
+# distinct (loss .201, tcp .211, udp .212). Explicit caller overrides
+# (DMZ_ADDR, MOUSE_TARGET_*, ...) win; on the loss env every derived
+# value equals the historical literal it replaces.
+#
+# Per-VLAN firewall gateways for the wire gates' reverse routes. The
+# VLAN-80 (untrust/mouse) endpoint and the VLAN-50 (DMZ) endpoint sit on
+# separate /24s, so each needs the firewall address on ITS OWN subnet as
+# next hop: DMZ_GW4 on VLAN 50, WAN_GW80_4 on VLAN 80. WAN_VIP4 is NOT
+# usable for either: on loss it is 172.16.50.6 (a VIP, not the .8 reth
+# gateway the gate historically used), and a VLAN-50 address is not
+# on-link for a VLAN-80 host (ip(8) refuses it). Cluster envs set both
+# explicitly from their firewall config (loss .8/.8, tcp .10/.10,
+# udp .11/.11); the defaults here keep loss/legacy byte-identical.
+DMZ_GW4="${DMZ_GW4:-172.16.50.8}"
+WAN_GW80_4="${WAN_GW80_4:-172.16.80.8}"
 _xpf_iperf_host="${IPERF_TARGET4##*.}"
 _xpf_iperf_host="${_xpf_iperf_host%%/*}"
 WAN_PREFIX4="${WAN_PREFIX4:-172.16.80.0/24}"
@@ -106,4 +117,4 @@ export LAN_HOST_IP LAN_VIP4 LAN_VIP6 WAN_GW4 WAN_VIP4
 export IPERF_TARGET4 IPERF_TARGET6
 export WAN_PREFIX4 DMZ_PREFIX4 LAN_PREFIX4 DMZ_ADDR DMZ_TARGET_V6
 export DMZ_TARGET_PF DMZ_TARGET_VLAN MOUSE_TARGET_NAME MOUSE_TARGET_REF
-export MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF
+export MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4 WAN_GW80_4

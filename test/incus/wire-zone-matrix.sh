@@ -675,14 +675,14 @@ route_is_clear "$UNTRUST_HOST" "$LAN_PREFIX4" || fail_void env-void
 route_is_clear "$UNTRUST_HOST" "$DMZ_PREFIX4" || fail_void env-void
 route_is_clear "$DMZ_HOST" "$LAN_PREFIX4" || fail_void env-void
 route_is_clear "$DMZ_HOST" "$WAN_PREFIX4" || fail_void env-void
-if $SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace ${LAN_PREFIX4} via ${WAN_VIP4}" >/dev/null 2>&1; then
+if $SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace ${LAN_PREFIX4} via ${WAN_GW80_4}" >/dev/null 2>&1; then
     ROUTES_MUTATED=1
 else
     fail_void no-prober
 fi
-$SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace ${DMZ_PREFIX4} via ${WAN_VIP4}" >/dev/null 2>&1 || fail_void no-prober
-$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace ${LAN_PREFIX4} via ${WAN_VIP4}" >/dev/null 2>&1 || fail_void no-prober
-$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace ${WAN_PREFIX4} via ${WAN_VIP4}" >/dev/null 2>&1 || fail_void no-prober
+$SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace ${DMZ_PREFIX4} via ${WAN_GW80_4}" >/dev/null 2>&1 || fail_void no-prober
+$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace ${LAN_PREFIX4} via ${DMZ_GW4}" >/dev/null 2>&1 || fail_void no-prober
+$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace ${WAN_PREFIX4} via ${DMZ_GW4}" >/dev/null 2>&1 || fail_void no-prober
 
 # Create the DMZ zone and owned control application/policies. The six
 # directions are represented explicitly in the config, while the default

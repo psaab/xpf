@@ -77,6 +77,8 @@ for spec in "tcp 10.0.62 210" "udp 10.0.63 211"; do
 	eq "${cname} MOUSE_TARGET_V4" "$(resolve MOUSE_TARGET_V4 "$envfile")" "172.16.80.${octet}"
 	eq "${cname} MOUSE_TARGET_REF" "$(resolve MOUSE_TARGET_REF "$envfile")" "${cname}:xpf-mouse-target"
 	eq "${cname} IPERF_TARGET4" "$(resolve IPERF_TARGET4 "$envfile")" "172.16.80.${octet}"
+	eq "${cname} DMZ_GW4"       "$(resolve DMZ_GW4 "$envfile")"       "172.16.50.$((octet - 200))"
+	eq "${cname} WAN_GW80_4"    "$(resolve WAN_GW80_4 "$envfile")"    "172.16.80.$((octet - 200))"
 	eq "${cname} IPERF_TARGET6" "$(resolve IPERF_TARGET6 "$envfile")" "2001:559:8585:80::${octet}"
 done
 # Loss derivation must reproduce the historical literals exactly.
@@ -86,6 +88,9 @@ eq "loss DMZ_TARGET_V6"   "$(resolve DMZ_TARGET_V6)"   "2001:559:8585:50::201"
 eq "loss MOUSE_TARGET_V4" "$(resolve MOUSE_TARGET_V4)" "172.16.80.201"
 eq "loss MOUSE_TARGET_REF" "$(resolve MOUSE_TARGET_REF)" "loss:xpf-mouse-target"
 eq "loss DMZ_TARGET_PF"   "$(resolve DMZ_TARGET_PF)"   "mlx0"
+eq "loss DMZ_GW4"         "$(resolve DMZ_GW4)"         "172.16.50.8"
+eq "loss WAN_GW80_4"      "$(resolve WAN_GW80_4)"      "172.16.80.8"
+eq "loss WAN_VIP4 (not the gateway)" "$(resolve WAN_VIP4)" "172.16.50.6"
 eq "loss DMZ_TARGET_VLAN" "$(resolve DMZ_TARGET_VLAN)" "50"
 
 # #5024 guards: the LAN host must NOT be the unreachable legacy default,
