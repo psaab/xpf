@@ -355,9 +355,12 @@ func (f *fixture9824) snap9824(gen uint64, zones []ZoneSnapshot, neighbors []Nei
 		Version:    ProtocolVersion,
 		Generation: gen,
 		Config:     f.cfg,
-		Zones:      append([]ZoneSnapshot(nil), zones...),
-		Neighbors:  append([]NeighborSnapshot(nil), neighbors...),
-		Fabrics:    append([]FabricSnapshot(nil), fabrics...),
+		// #16056: synthetic snapshots must declare counts matching
+		// their sections or the send gate refuses them.
+		Summary:   SnapshotSummary{ZoneCount: len(zones)},
+		Zones:     append([]ZoneSnapshot(nil), zones...),
+		Neighbors: append([]NeighborSnapshot(nil), neighbors...),
+		Fabrics:   append([]FabricSnapshot(nil), fabrics...),
 	}
 }
 

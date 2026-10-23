@@ -805,6 +805,7 @@ func TestRouteOverlayRepublishRefreshesInterfaceLiveness12064(t *testing.T) {
 	m.lastSnapshot = &ConfigSnapshot{
 		Config:     cfg,
 		Generation: 7,
+		Summary:    SnapshotSummary{InterfaceCount: 1},
 		Interfaces: []InterfaceSnapshot{{
 			Name: "eth0", LinuxName: "eth0", Ifindex: 17, LinkUp: &initiallyUp,
 		}},

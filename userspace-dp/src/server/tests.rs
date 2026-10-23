@@ -3415,6 +3415,11 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
         defer_workers: true,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     };
@@ -3465,6 +3470,11 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     });
@@ -3605,6 +3615,11 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3620,6 +3635,11 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/2", "ge-0-0-2", 12)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3782,6 +3802,11 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3797,6 +3822,11 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/2", "ge-0-0-2", 12)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3937,6 +3967,11 @@ fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -3949,6 +3984,11 @@ fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/2", "ge-0-0-2", 12)],
         zones: vec![trust_zone_6140()],
         ..ConfigSnapshot::default()
@@ -4056,6 +4096,11 @@ fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: true,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     };
@@ -4097,6 +4142,11 @@ fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 0,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![tunnel_iface_3789("10.0.0.1/24")],
         ..ConfigSnapshot::default()
     });
@@ -6061,6 +6111,10 @@ fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
     let wg_snapshot = |generation: u64| ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
         generation,
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
             name: "wgt1866srv".to_string(),
             linux_name: "wgt1866srv".to_string(),
@@ -10595,6 +10649,11 @@ fn same_plan_retry_after_bind_failure_reconciles_14130() {
         defer_workers: false,
         capabilities: forwarding_caps(),
         map_pins: ok_map_pins(),
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
         zones: vec![trust_zone_6140()],
         content_digest: "digest-14130".to_string(),
