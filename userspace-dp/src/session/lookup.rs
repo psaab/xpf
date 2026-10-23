@@ -2157,6 +2157,10 @@ impl SessionTable {
     /// a marked, non-reverse, non-closing, Established, pending-cleared,
     /// non-idle-crossed row qualifies. Anything else is `false`, so
     /// non-adopted flows keep the fail-closed HA terminal bit-identically.
+    /// NOTE (Wire18): the raw mark alone no longer exempts anything — the
+    /// poll session-hit site reads the marked row's decision via
+    /// `fabric_established_decision_for_wire_at` and re-validates its egress
+    /// RG against CURRENT ownership on every hit.
     pub(crate) fn fabric_established_for_wire_at(&self, wire_key: &SessionKey, now_ns: u64) -> bool {
         if let Some((matched, _origin)) =
             self.find_forward_wire_match_with_origin_at(wire_key, now_ns)
@@ -2180,6 +2184,45 @@ impl SessionTable {
             return true;
         }
         false
+    }
+
+    /// #16217 (Wire18, B2): the stored decision behind the marked row for
+    /// `wire_key`, when the row still qualifies as adopted (same qualifying
+    /// shape as `fabric_established_for_wire_at`: marked, non-reverse,
+    /// non-closing, Established, pending-cleared, non-idle-crossed, alias
+    /// ambiguity fails closed). The poll session-hit site re-validates this
+    /// decision's egress RG against CURRENT ownership on every hit: the
+    /// adoption proof is stale once that RG leaves this node again, so the
+    /// session-hit adopted context must lapse with it (failback converts
+    /// again) instead of exempting the re-resolve forever. `None` when no
+    /// marked qualifying row exists.
+    pub(crate) fn fabric_established_decision_for_wire_at(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<crate::session::SessionDecision> {
+        if let Some((matched, _origin)) =
+            self.find_forward_wire_match_with_origin_at(wire_key, now_ns)
+            && let Some(entry) = self.entry_by_key(&matched.key)
+            && entry.fabric_established
+            && !entry.metadata.is_reverse
+            && !entry.closing
+            && entry.established
+            && !entry.handshake_pending
+        {
+            return Some(entry.decision);
+        }
+        if let Some(record) = self.probe_record_with_origin(wire_key)
+            && now_ns.saturating_sub(record.entry.last_seen_ns) <= record.entry.expires_after_ns
+            && record.entry.fabric_established
+            && !record.entry.metadata.is_reverse
+            && !record.entry.closing
+            && record.entry.established
+            && !record.entry.handshake_pending
+        {
+            return Some(record.entry.decision);
+        }
+        None
     }
 
     /// #16217 (fabric adoption): mark the row(s) behind `wire_key` as
