@@ -590,9 +590,71 @@ func TestTwoCrashCyclesExactHistory16064(t *testing.T) {
 // take pending attrs. Uses duplicate content at two positions with distinct
 // timestamp+comment so mis-binding is visible.
 func TestSkewEqualContentAttrs16064(t *testing.T) {
+	// Unlanded direction at DEEPER slot: slot 1 of the crashing save holds
+	// distinct bytes (so its rewrite is content-visible), while slot 2's
+	// future bytes equal its current bytes (duplicate content) and its
+	// writer never runs. Slot 2 must keep CURRENT attrs; slot 1 (rewritten
+	// with distinct bytes) is covered by the landed test below.
 	path := filepath.Join(t.TempDir(), "xpf.conf")
 	s := newTestStoreAt(t, path)
-	// dup content committed twice: history holds identical bytes twice.
+	for _, step := range []struct{ host, cmt string }{{"dup-host", "dup-first"}, {"dup-host", "dup-second"}, {"other-host", "other-third"}} {
+		if err := s.EnterConfigure(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetFromInput("system host-name " + step.host); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CommitWithDescription(step.cmt); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		s.ExitConfigure()
+	}
+	oldRBWrite := rbWriteFileDurable
+	t.Cleanup(func() { rbWriteFileDurable = oldRBWrite })
+	killed := errors.New("simulated power loss")
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	// Same-content recommit: active content unchanged, so future slot 2
+	// (history head dup/other chain) collides equal-content at deeper slot.
+	if err := s.SetFromInput("system host-name other-host"); err != nil {
+		t.Fatal(err)
+	}
+	var rec any
+	func() {
+		defer func() { rec = recover() }()
+		rbWriteFileDurable = func(p string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+			if strings.HasPrefix(filepath.Base(p), "xpf.conf.") {
+				panic(killed)
+			}
+			return oldRBWrite(p, data, perm, opts...)
+		}
+		_, _ = s.CommitWithDescription("other-fourth")
+	}()
+	rbWriteFileDurable = oldRBWrite
+	if rec == nil {
+		t.Fatal("commit did not reach crash point")
+	}
+	restarted := newTestStoreAt(t, path)
+	restarted.loadRollbackHistory()
+	entries := restarted.history.List()
+	foundDup := false
+	for _, e := range entries {
+		if e != nil && e.Config != nil && strings.Contains(e.Config.Format(), "dup-host") {
+			foundDup = true
+			if e.Comment == "other-fourth" {
+				t.Fatalf("untouched equal-content slot took pending comment: %#v", e)
+			}
+		}
+	}
+	if !foundDup {
+		t.Fatalf("equal-content history lost: %#v", entries)
+	}
+}
+
+func TestSkewEqualContentLandedAttrs16064(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	s := newTestStoreAt(t, path)
 	for _, cmt := range []string{"dup-first", "dup-second"} {
 		if err := s.EnterConfigure(); err != nil {
 			t.Fatal(err)
@@ -605,7 +667,6 @@ func TestSkewEqualContentAttrs16064(t *testing.T) {
 		}
 		s.ExitConfigure()
 	}
-	// Stamp deterministic distinct timestamps on the two dup entries.
 	hist := s.history.List()
 	tsOld := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
 	tsNew := time.Date(2025, 5, 6, 7, 8, 9, 0, time.UTC)
@@ -617,7 +678,7 @@ func TestSkewEqualContentAttrs16064(t *testing.T) {
 
 	oldRBWrite := rbWriteFileDurable
 	t.Cleanup(func() { rbWriteFileDurable = oldRBWrite })
-	killed := errors.New("simulated power loss")
+	killed := errors.New("simulated power loss after slot1 rewrite")
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +689,8 @@ func TestSkewEqualContentAttrs16064(t *testing.T) {
 	func() {
 		defer func() { rec = recover() }()
 		rbWriteFileDurable = func(p string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
-			if strings.HasPrefix(filepath.Base(p), "xpf.conf.") {
+			base := filepath.Base(p)
+			if strings.HasPrefix(base, "xpf.conf.") && base != "xpf.conf.1" {
 				panic(killed)
 			}
 			return oldRBWrite(p, data, perm, opts...)
@@ -643,11 +705,9 @@ func TestSkewEqualContentAttrs16064(t *testing.T) {
 	restarted.loadRollbackHistory()
 	entries := restarted.history.List()
 	if len(entries) < 1 || entries[0].Config == nil {
-		t.Fatalf("equal-content crash lost slot 1: %#v", entries)
+		t.Fatalf("landed equal-content crash lost slot 1: %#v", entries)
 	}
-	// Slot 1 bytes are dup content positionally unchanged: current attrs win.
-	// It must NOT be stamped with the pending "dup-third" comment.
-	if entries[0].Comment == "dup-third" {
-		t.Fatalf("slot 1 took pending comment for positionally-unchanged bytes: %#v", entries[0])
+	if entries[0].Comment != "dup-third" {
+		t.Fatalf("landed slot 1 comment = %q, want pending %q (Rewritten set)", entries[0].Comment, "dup-third")
 	}
 }

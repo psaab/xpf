@@ -91,6 +91,15 @@ type rollbackSlotMetadataEntry struct {
 	CurrentHash      string    `json:"current_hash,omitempty"`
 	CurrentTimestamp time.Time `json:"current_timestamp,omitempty"`
 	CurrentComment   string    `json:"current_comment,omitempty"`
+	// Rewritten (#16064 fold 5) records, at preparation time, whether this
+	// slot position will be rewritten by the in-flight commit's history save
+	// with bytes that differ positionally OR will be newly created. It is
+	// the durable rewritten-slot set: at boot, a slot whose bytes match both
+	// PendingHash and CurrentHash takes PENDING attrs iff Rewritten is true
+	// (its rewrite landed with equal bytes), else CURRENT attrs (untouched).
+	// Computed by the writer from (old slot bytes != future bytes) ||
+	// slot file absent; boot cannot re-derive it from hashes alone.
+	Rewritten bool `json:"rewritten,omitempty"`
 }
 
 const (
@@ -483,6 +492,17 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, descr
 		} else {
 			preparedEntry.CurrentHash = rollbackSlotHash([]byte(rollbackTombstoneMarker))
 		}
+		// Fold 5 rewritten-slot set: entry 0 is slot 1 of the future save,
+		// which saveRollbackFiles always rewrites (future[0] is the previous
+		// active). Deeper slots are rewritten exactly when their future bytes
+		// differ from the current slot file bytes; absent = newly created.
+		if i == 0 {
+			preparedEntry.Rewritten = true
+		} else if oldData, rerr := ReadBoundedFile(s.rollbackPath(i+1), MaxConfigSize); rerr == nil {
+			preparedEntry.Rewritten = rollbackSlotHash(oldData) != rollbackSlotHash(data)
+		} else {
+			preparedEntry.Rewritten = true
+		}
 		prepared[i] = preparedEntry
 	}
 	boundActive := snap.ActiveHash
@@ -499,18 +519,25 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, descr
 // at its pre-shift position and which attributes it carries.
 func rollbackSkewSlotAdmission(snap rollbackMetadataSnapshot, pendingSkew bool, i int,
 	slotHash string) (valid bool, ts time.Time, comment string) {
+	// identityOK from the loader is intentionally not consulted here: the
+	// Rewritten set recorded at preparation is the durable authority for the
+	// equal-content case; file identity cannot reveal an equal-byte rewrite.
 	if !pendingSkew {
 		return false, time.Time{}, ""
 	}
 	metadata := snap.Entries
-	// Fold 4 disambiguation: when PendingHash == CurrentHash at this index,
-	// the slot bytes are positionally UNCHANGED (the future content equals
-	// the current content), so the slot was not rewritten by the crashed
-	// commit and must keep its CURRENT attributes, never the pending ones.
-	// Pending attributes apply only when the bytes differ from current,
-	// proving the rewrite landed. Current is therefore checked FIRST.
+	// Fold 5: the preparation's Rewritten flag is the durable rewritten-slot
+	// set. For bytes matching both hashes (equal-content slot), Rewritten
+	// decides: true = the rewrite landed with equal bytes -> PENDING attrs;
+	// false = positionally untouched -> CURRENT attrs. For bytes matching
+	// only one hash, that hash's attrs apply (current checked first so the
+	// equal case falls through to the Rewritten decision).
 	if i-1 < len(metadata) && metadata[i-1].CurrentHash != "" &&
 		slotHash == metadata[i-1].CurrentHash {
+		if metadata[i-1].PendingHash != "" && slotHash == metadata[i-1].PendingHash &&
+			metadata[i-1].Rewritten {
+			return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
+		}
 		return true, metadata[i-1].CurrentTimestamp, metadata[i-1].CurrentComment
 	}
 	if i-1 < len(metadata) && metadata[i-1].PendingHash != "" &&
