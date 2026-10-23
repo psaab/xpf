@@ -1084,7 +1084,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
                             rule.persistent_nat_permit,
                             flow_egress_scope,
                             Some(eff_from_zone),
-                            rule.persistent_permit_version,
+                            rule.persistent_permit_epoch,
                         );
                 }
                 return SyncedReserveOutcome::Reserved;
@@ -1247,7 +1247,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
                         rule.persistent_nat_permit,
                         flow_egress_scope,
                         Some(eff_from_zone),
-                        rule.persistent_permit_version,
+                        rule.persistent_permit_epoch,
                     );
             }
             return SyncedReserveOutcome::Reserved;

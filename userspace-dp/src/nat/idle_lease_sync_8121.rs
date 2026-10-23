@@ -530,13 +530,15 @@ impl PortAllocator {
                     if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
                         let was_any_remote = bucket.any_remote;
                         bucket.any_remote |= rec.permit_any_remote;
-                        if bucket.any_remote && !was_any_remote {
-                            // A repeated import explicitly re-authorizes a
-                            // grant revoked by a permit change. A grant that
-                            // was already locally current stays on its own
-                            // authorizing version.
+                        if bucket.any_remote && !was_any_remote && generation_validated {
+                            // Fold 2: only a generation-validated import may
+                            // re-authorize a grant after a permit change. A
+                            // generation-less (stale-generation) import is
+                            // demoted: remotes merge, any_remote does not
+                            // regain authorization at the new epoch.
                             bucket.permit_change_authorized = true;
-                            bucket.any_remote_permit_version = 0;
+                            bucket.any_remote_permit_epoch = 0;
+                            bucket.authorized_epoch = self.persistent_permit_epoch();
                         }
                         bucket.remotes.extend(rec.permitted_remotes.iter().copied());
                     }
@@ -615,8 +617,9 @@ impl PortAllocator {
                 any_remote: rec.permit_any_remote,
                 remotes: rec.permitted_remotes.iter().copied().collect(),
                 mint_from_zone: None,
-                any_remote_permit_version: 0,
+                any_remote_permit_epoch: 0,
                 permit_change_authorized: true,
+                authorized_epoch: if generation_validated || self.persistent_permit_epoch() <= 1 { self.persistent_permit_epoch() } else { 0 },
             },
         );
         live.persistent_permissions.insert(key, permissions);

@@ -240,7 +240,7 @@ pub(crate) struct SourceNatRule {
     /// `permit_any_remote_host` bool).
     pub(crate) persistent_nat_permit: PersistentNatPermit,
     /// #16017: reuse-allocator permit version (see `PortAllocator::sync_persistent_permit_scopes`).
-    pub(crate) persistent_permit_version: u64,
+    pub(crate) persistent_permit_epoch: u64,
     pub(crate) persistent_nat_inactivity_timeout_secs: i64,
     pub(crate) persistent_nat_timeout_ns: u64,
     pub(crate) pool_addresses_v4: Vec<Ipv4Addr>,
@@ -953,13 +953,13 @@ fn resolve_pool_allocators(
         if let Some(existing) = pool_allocators.get(&key) {
             rule.pool_allocator = existing.clone();
             // #16017: sibling already bumped this shared allocator; share its version.
-            rule.persistent_permit_version = existing.persistent_permit_version();
+            rule.persistent_permit_epoch = existing.persistent_permit_epoch();
             continue;
         }
         if previous_allocators.contains_key(&key) {
             // #16017: reuse-allocator permit version, shared across rules naming this pool.
-            rule.persistent_permit_version =
-                previous_allocators[&key].next_persistent_permit_version();
+            rule.persistent_permit_epoch =
+                previous_allocators[&key].next_persistent_permit_epoch();
         }
         let charge = pending.charge();
         if let Some(existing) = previous_allocators.get(&key) {
@@ -1071,7 +1071,7 @@ fn resolve_pool_allocators(
                 scopes.push((
                     scope,
                     rule.persistent_nat_permit,
-                    rule.persistent_permit_version,
+                    rule.persistent_permit_epoch,
                 ));
             }
             if !scopes.is_empty() {
