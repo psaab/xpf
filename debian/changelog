@@ -54,7 +54,9 @@ xpf (0.0.0) unstable; urgency=medium
     protocol-wire fixture/specimen updated, and a 1s live session-counter
     poll feeding the flow trackers so active/inactive timers advance;
     fold 2: real close exports only the unexported remainder past
-    active interims (baseline-atomic CloseFlow) with no double-count.
+    active interims (baseline-atomic CloseFlow) with no double-count;
+    fold 3: close baselines are applied per exporter/group, not
+    collapsed across same-instance template groups.
 
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per

@@ -985,27 +985,27 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 			// SESSION_OPEN for this exporter. A sampled open therefore
 			// exports its close without consuming another 1-in-N slot;
 			// an unsampled/absent open exports nothing.
+			// #16303 fold 3: baselines are PER EXPORTER. Same-instance
+			// template groups carry different active timeouts, so group A
+			// may hold baseline 200 while group B still holds 0 (or is
+			// untracked). Collapsing them into one tuple and applying it
+			// to every group over/under-subtracts all but the last.
 			sampled := false
-			var basePkts, baseBytes, baseRevPkts, baseRevBytes uint64
 			for k := i; k < j; k++ {
 				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 					continue
 				}
-				if s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key); s {
+				s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key)
+				if !s {
+					continue
+				}
+				if !sampled {
+					sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
 					sampled = true
-					basePkts, baseBytes, baseRevPkts, baseRevBytes = p, by, rp, rb
 				}
-			}
-			if sampled {
-				sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
-				for k := i; k < j; k++ {
-					if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
-						continue
-					}
-					// Entry already forgotten by CloseFlow; Export the
-					// unexported remainder only (fold 2 double-count fix).
-					b.groups[k].exp.ExportSessionCloseRemainder(rec, sd, basePkts, baseBytes, baseRevPkts, baseRevBytes)
-				}
+				// Entry already forgotten by this group's CloseFlow;
+				// export this group's own unexported remainder only.
+				b.groups[k].exp.ExportSessionCloseRemainder(rec, sd, p, by, rp, rb)
 			}
 		}
 		i = j
@@ -1071,25 +1071,17 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 		}
 		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
 		if lead.ServesFamily(sd.IsIPv6) {
-			sampled := false
-			var basePkts, baseBytes, baseRevPkts, baseRevBytes uint64
+			// #16303 fold 3: per-exporter baselines, as in the v9 callback.
 			for k := i; k < j; k++ {
 				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 					continue
 				}
-				if s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key); s {
-					sampled = true
-					basePkts, baseBytes, baseRevPkts, baseRevBytes = p, by, rp, rb
+				s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key)
+				if !s {
+					continue
 				}
-			}
-			if sampled {
 				sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
-				for k := i; k < j; k++ {
-					if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
-						continue
-					}
-					b.groups[k].exp.ExportSessionCloseRemainder(rec, sd, basePkts, baseBytes, baseRevPkts, baseRevBytes)
-				}
+				b.groups[k].exp.ExportSessionCloseRemainder(rec, sd, p, by, rp, rb)
 			}
 		}
 		i = j
