@@ -480,6 +480,18 @@ type Manager struct {
 	// for as long as the family owns records. A keyed/loopback retained
 	// endpoint, or no owned records, clears it.
 	cleanupUnsignedNonLoopback [2]bool
+	// cleanupInFlight (#15992): a cleanup pass is in progress this cycle.
+	// Set at the start of the locked pass (while the previous posture is
+	// still known) and cleared at its end. Stats() ORs it with the last
+	// completed posture so a scrape landing mid-pass — after the opening
+	// Store from the current (disabled/keyed) config — never reads a
+	// transient 0 while cleanup UPDATEs are still in flight. Guarded by
+	// mu semantics via atomics alongside unsignedNonLoopbackActive.
+	cleanupInFlight atomic.Bool
+	// prevUnsignedNonLoopback (#15992): posture at the end of the last
+	// completed pass. The in-flight hold reads this so mid-pass scrapes
+	// keep the prior value until the new pass's verdict is final.
+	prevUnsignedNonLoopback atomic.Bool
 
 	// lastPolicy is the last resolved aggregate policy (for Stats()).
 	lastPolicy atomic.Pointer[ddnsPolicy]
@@ -896,6 +908,10 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 	m.lastPolicy.Store(&agg)
 	pols := [2]ddnsPolicy{pol4, pol6}
 	m.lastPolicies.Store(&pols)
+	// #15992 in-flight hold: mark the pass in-flight BEFORE the opening
+	// Store, so a Stats() scrape landing anywhere inside this pass holds
+	// the previous completed posture instead of a transient reset.
+	m.cleanupInFlight.Store(true)
 	m.unsignedNonLoopbackActive.Store(ddnsUnsignedNonLoopback(pol4, ddns4) || ddnsUnsignedNonLoopback(pol6, ddns6))
 
 	m.mu.Lock()
@@ -921,6 +937,8 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 	// the quarantined bad file is preserved.
 	if m.degraded {
 		err := fmt.Errorf("ddns: reconcile suspended (state degraded): %s", m.degradedReason)
+		m.prevUnsignedNonLoopback.Store(m.unsignedNonLoopbackActive.Load())
+		m.cleanupInFlight.Store(false)
 		m.recordReconcilePass(err)
 		return err
 	}
@@ -1007,6 +1025,13 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 				m.cleanupUnsignedNonLoopback[i] = true
 			} else if updaterUnsignedNonLoopback(env.updater[i]) {
 				m.cleanupUnsignedNonLoopback[i] = true
+			} else if updaterUnsignedNonLoopback(env.prevUpdater[i]) {
+				// #15992 fold: keyed-endpoint transition — the withdraw
+				// for old-endpoint records goes through the PREVIOUS
+				// updater (env.prevUpdater, see the #5814 transition
+				// path), which may be unsigned even though the current
+				// config/updater is keyed. Capture ITS posture.
+				m.cleanupUnsignedNonLoopback[i] = true
 			} else if updaterUnsignedNonLoopback(m.lastLiveUpdater[i]) {
 				// Keep the retained posture: a nop/disabled cycle must not
 				// erase the endpoint pending withdrawals still target.
@@ -1076,6 +1101,10 @@ func (m *Manager) ReconcileScoped(ctx context.Context, cfg *config.DHCPServerCon
 		m.familyOwnsRecords(6) && m.cleanupUnsignedNonLoopback[1] {
 		m.unsignedNonLoopbackActive.Store(true)
 	}
+	// Pass complete: publish the final posture as the held value and
+	// clear the in-flight hold.
+	m.prevUnsignedNonLoopback.Store(m.unsignedNonLoopbackActive.Load())
+	m.cleanupInFlight.Store(false)
 	m.recordReconcilePass(passErr)
 	return passErr
 }
@@ -2188,7 +2217,7 @@ func (m *Manager) Stats() Stats {
 		ReconcileFail:             m.reconcileFail.Load(),
 		OwnedRecords:              n,
 		LastReconcileN:            int(m.lastReconcileN.Load()),
-		UnsignedNonLoopbackActive: m.unsignedNonLoopbackActive.Load(),
+		UnsignedNonLoopbackActive: m.unsignedPostureLocked(),
 	}
 	if ns := m.lastReconcile.Load(); ns > 0 {
 		st.LastReconcile = time.Unix(0, ns)
@@ -2198,6 +2227,17 @@ func (m *Manager) Stats() Stats {
 		st.Backend = p.backend
 	}
 	return st
+}
+
+// unsignedPostureLocked reports the gauge value: while a cleanup pass
+// is in flight, hold the last completed posture; otherwise the current
+// stored posture. Prevents a mid-pass scrape from reading the transient
+// opening Store (current disabled/keyed config) as 0.
+func (m *Manager) unsignedPostureLocked() bool {
+	if m.cleanupInFlight.Load() {
+		return m.prevUnsignedNonLoopback.Load() || m.unsignedNonLoopbackActive.Load()
+	}
+	return m.unsignedNonLoopbackActive.Load()
 }
 
 // DDNSLeasePaths returns the manager's lease CSV paths so a cross-package

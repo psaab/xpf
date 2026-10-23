@@ -288,6 +288,165 @@ func TestDDNSUnsignedGaugeCleanupAfterDisable15992(t *testing.T) {
 	}
 }
 
+// blockingUpdater15992 blocks inside DeleteLease until released, so a
+// test can scrape Stats() while a cleanup UPDATE is in flight.
+type blockingUpdater15992 struct {
+	inner   DNSUpdater
+	server  string
+	entered chan struct{}
+	release chan struct{}
+	once    bool
+}
+
+func (b *blockingUpdater15992) UpsertLease(ctx context.Context, rec LeaseDNSRecord) error {
+	return b.inner.UpsertLease(ctx, rec)
+}
+func (b *blockingUpdater15992) DeleteLease(ctx context.Context, rec LeaseDNSRecord) error {
+	if !b.once {
+		b.once = true
+		close(b.entered)
+		<-b.release
+	}
+	return b.inner.DeleteLease(ctx, rec)
+}
+func (b *blockingUpdater15992) DDNSUpdaterEndpoint() (string, bool) { return b.server, false }
+
+// TestDDNSUnsignedGaugeInFlightHold15992 pins the in-flight hold: while a
+// cleanup pass is blocked inside its withdraw UPDATE (config already
+// disabled), Stats() must still report the previous posture (1), never a
+// transient 0 from the opening reset. Fail-on-revert: drop the hold and
+// the mid-cleanup scrape reads 0.
+func TestDDNSUnsignedGaugeInFlightHold15992(t *testing.T) {
+	ctx := context.Background()
+	srv := newFakeDNSServer(t, nil)
+	m, src := prodManagerTo(t, srv)
+	m.newUpdater = func(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		if pol.backend != "rfc2136" || c == nil || c.UpdateServer == "" {
+			return nopUpdater{}, nil
+		}
+		authored := c.UpdateServer
+		c2 := *c
+		c2.UpdateServer = srv.addrUDP
+		u, err := newRFC2136Updater(pol, &c2, nil,
+			func() { m.skippedPTRNotAuth.Add(1) },
+			func() { m.skippedConflict.Add(1) })
+		if err != nil {
+			return nil, err
+		}
+		return &postureUpdater15992{inner: u, server: authored}, nil
+	}
+	cfg := ddnsCfg("192.0.2.53")
+	src.v4 = laptopMacLease()
+	if err := m.Reconcile(ctx, cfg); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if !m.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("precondition: gauge must be 1 while enabled unsigned")
+	}
+	// Disabled pass whose withdraw blocks mid-flight.
+	bu := &blockingUpdater15992{inner: &fakeUpdater{failUpd: map[string]bool{}, failDel: map[string]bool{}}, server: "192.0.2.53", entered: make(chan struct{}), release: make(chan struct{})}
+	// The blocking updater must actually delete on release; give it the
+	// real backend as inner via the posture path: use a fake that succeeds.
+	m.newUpdater = func(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		return bu, nil
+	}
+	disabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{Enabled: false, Domain: "example.com", TTLSeconds: 300, Backend: "rfc2136", UpdateServer: "192.0.2.53"}}
+	src.v4 = nil
+	done := make(chan error, 1)
+	go func() { done <- m.Reconcile(ctx, disabled) }()
+	<-bu.entered // cleanup UPDATE in flight, lock released by providerIO
+	if !m.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("gauge dipped to 0 during in-progress cleanup (in-flight hold missing)")
+	}
+	close(bu.release)
+	if err := <-done; err != nil {
+		t.Fatalf("disabled cleanup reconcile: %v", err)
+	}
+	if m.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("gauge stuck at 1 after cleanup completed")
+	}
+}
+
+// TestDDNSUnsignedGaugeKeyedTransition15992 pins the transition capture:
+// config transitions unsigned -> keyed (new endpoint keyed, old records
+// withdraw via the PREVIOUS unsigned updater). The gauge must reflect
+// the previous updater's unsigned posture while old records are pending.
+// Fail-on-revert: capture only from current config/updater and the gauge
+// reads the keyed endpoint (0) during the transition cleanup.
+func TestDDNSUnsignedGaugeKeyedTransition15992(t *testing.T) {
+	ctx := context.Background()
+	srv := newFakeDNSServer(t, nil)
+	m, src := prodManagerTo(t, srv)
+	factory := func(keyed bool) func(ddnsPolicy, *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		return func(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+			if pol.backend != "rfc2136" || c == nil || c.UpdateServer == "" {
+				return nopUpdater{}, nil
+			}
+			authored := c.UpdateServer
+			c2 := *c
+			c2.UpdateServer = srv.addrUDP
+			if keyed {
+				c2.TSIGKeyName = "k1"
+				c2.TSIGAlgorithm = "hmac-sha256"
+				c2.TSIGSecret = config.NewSecret("c2VjcmV0")
+			}
+			u, err := newRFC2136Updater(policyFromConfig(&c2), &c2, nil,
+				func() { m.skippedPTRNotAuth.Add(1) },
+				func() { m.skippedConflict.Add(1) })
+			if err != nil {
+				return nil, err
+			}
+			return &keyedPostureUpdater15992{inner: u, server: authored, keyed: keyed}, nil
+		}
+	}
+	m.newUpdater = factory(false)
+	src.v4 = laptopMacLease()
+	if err := m.Reconcile(ctx, ddnsCfg("192.0.2.53")); err != nil {
+		t.Fatalf("publish unsigned: %v", err)
+	}
+	if got := m.Stats().OwnedRecords; got != 1 {
+		t.Fatalf("owned = %d, want 1", got)
+	}
+	// Transition to a keyed endpoint (different server so the fingerprint
+	// changes and old records withdraw via prevUpdater) with withdraw
+	// FAILING, so old ownership is retained through the transition pass.
+	keyedCfg := ddnsCfg("198.51.100.53")
+	keyedCfg.DynamicDNS.TSIGKeyName = "k1"
+	keyedCfg.DynamicDNS.TSIGAlgorithm = "hmac-sha256"
+	keyedCfg.DynamicDNS.TSIGSecret = config.NewSecret("c2VjcmV0")
+	m.newUpdater = factory(true)
+	// Make the previous updater's delete fail by swapping prev anchor's
+	// inner failure: the prev updater is the one retained from pass 1.
+	if pu, ok := m.lastLiveUpdater[0].(*keyedPostureUpdater15992); ok {
+		pu.inner = &failDeleteUpdater15992{}
+	}
+	src.v4 = laptopMacLease()
+	_ = m.Reconcile(ctx, keyedCfg) // transition delete may error; ownership retained is the check
+	if got := m.Stats().OwnedRecords; got != 1 {
+		t.Fatalf("owned = %d, want 1 retained through keyed transition", got)
+	}
+	if !m.Stats().UnsignedNonLoopbackActive {
+		t.Fatal("gauge 0 during keyed transition while old records withdraw via previous unsigned updater")
+	}
+}
+
+// keyedPostureUpdater15992 reports an explicit keyed flag for the gauge.
+type keyedPostureUpdater15992 struct {
+	inner  DNSUpdater
+	server string
+	keyed  bool
+}
+
+func (k *keyedPostureUpdater15992) UpsertLease(ctx context.Context, rec LeaseDNSRecord) error {
+	return k.inner.UpsertLease(ctx, rec)
+}
+func (k *keyedPostureUpdater15992) DeleteLease(ctx context.Context, rec LeaseDNSRecord) error {
+	return k.inner.DeleteLease(ctx, rec)
+}
+func (k *keyedPostureUpdater15992) DDNSUpdaterEndpoint() (string, bool) {
+	return k.server, k.keyed
+}
+
 // postureUpdater15992 wraps a resolved updater and reports a fixed
 // authored server for gauge-posture purposes in tests. The wire behaviour
 // is the inner updater's.

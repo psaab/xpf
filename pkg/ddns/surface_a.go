@@ -474,6 +474,14 @@ type SurfaceAManager struct {
 	// this retained posture keyed by the record's stored fingerprint.
 	// Guarded by mu.
 	cleanupUnsignedNonLoopback map[string]bool
+	// cleanupInFlight (#15992): this pass is in progress. Stats() runs
+	// under mu — which Reconcile holds for the whole pass — so a scrape
+	// can only observe the manager between passes; the flag therefore
+	// also covers the degraded early-return and any future lock release:
+	// while set, Stats holds the last completed posture.
+	cleanupInFlight bool
+	// prevUnsignedNonLoopback (#15992): posture at end of last pass.
+	prevUnsignedNonLoopback bool
 
 	// leaseCoowners, when non-nil, returns the wire-RR claims currently owned by
 	// the SEPARATE Surface B DHCP lease surface (Manager.state.records, rdata in
@@ -862,8 +870,11 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 	// quarantined aside re-reads an absent (clean-empty) store and resumes
 	// publishing.
 	if m.degraded {
+		m.prevUnsignedNonLoopback = m.unsignedNonLoopbackActive
+		m.cleanupInFlight = false
 		return fmt.Errorf("ddns surface-a: reconcile suspended (state degraded): %s", m.degradedReason)
 	}
+	m.cleanupInFlight = true
 
 	// Consume the operator force-now latch (#3276) for THIS pass: a force makes
 	// every configured scope refresh-due so the RG owner re-asserts the wire
@@ -1056,6 +1067,16 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 		// redacted config.Secret and the old endpoint is usually gone) — the alarm
 		// tells the operator to clean it up by hand.
 		backend, status, err := m.classifyOwnedBackend(owned, catalog)
+		// #15992 fold: capture the WITHDRAW backend's posture at the
+		// transition — after provider removal/re-keying the withdraw (or
+		// kept orphan) implicates the backend actually used here, which
+		// may be unsigned even though the current catalog is keyed/gone.
+		if status == ownedBackendOK && updaterUnsignedNonLoopback(backend) && owned.BackendFingerprint != "" {
+			if m.cleanupUnsignedNonLoopback == nil {
+				m.cleanupUnsignedNonLoopback = map[string]bool{}
+			}
+			m.cleanupUnsignedNonLoopback[owned.BackendFingerprint] = true
+		}
 		switch status {
 		case ownedBackendProviderGone:
 			m.noteOrphan(owned, "", orphanReasonProviderGone, now)
@@ -1099,6 +1120,8 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 		}
 	}
 
+	m.prevUnsignedNonLoopback = m.unsignedNonLoopbackActive
+	m.cleanupInFlight = false
 	if err := m.state.save(); err != nil {
 		slog.Warn("ddns surface-a: persist ownership state failed", "err", err)
 		noteErr(err)
@@ -2562,8 +2585,17 @@ func (m *SurfaceAManager) Stats() SurfaceAStats {
 		Orphaned:                  len(m.orphans),
 		Degraded:                  m.degraded,
 		DegradedReason:            m.degradedReason,
-		UnsignedNonLoopbackActive: m.unsignedNonLoopbackActive,
+		UnsignedNonLoopbackActive: m.unsignedPostureLocked(),
 	}
+}
+
+// unsignedPostureLocked holds the last completed posture while a pass
+// is in flight (#15992), so the gauge never dips mid-cleanup.
+func (m *SurfaceAManager) unsignedPostureLocked() bool {
+	if m.cleanupInFlight {
+		return m.prevUnsignedNonLoopback || m.unsignedNonLoopbackActive
+	}
+	return m.unsignedNonLoopbackActive
 }
 
 // buildHostRecord constructs the forward-only A/AAAA record for a Surface A
