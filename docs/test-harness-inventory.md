@@ -54,7 +54,9 @@ a string, never just an exit code); `make harness-compare`,
 ## 2. Connectivity & forwarding behaviour (wire suite)
 
 All run via `make CLUSTER_ENV=<env> test-<name>` and record to the
-ledger. Each also has a `*-lib` selftest target (hermetic, no cluster).
+ledger. Most also have a `*-lib` selftest target (hermetic, no cluster);
+`test-connectivity`, `test-restart-connectivity`, and
+`test-wire-properties` have none.
 
 | Gate target | Script | Proves |
 | --- | --- | --- |
@@ -90,7 +92,7 @@ small-packet cell).
 | `test-rolling-upgrade` | `test/incus/test-rolling-upgrade.sh` | Traffic-carrying two-cut version upgrade with version assertions |
 | `test-dhcp-lease-failover` | `test/incus/dhcp-lease-failover.sh` | DHCP leases survive RG failover |
 | `test-persistent-nat-failover` | (Makefile target) | Persistent NAT bindings survive failover |
-| `test-v6-na-recovery-12495` | `test/incus/test-v6-na-recovery-12495.sh` | IPv6 neighbor recovery after RG failover: unsolicited-NA burst vs RA attribution (plan gate V6's harness) |
+| `test-v6-na-recovery-12495` (script only — no make target; hermetic leg is `make test-v6-na-recovery-lib`) | `test/incus/test-v6-na-recovery-12495.sh` | IPv6 neighbor recovery after RG failover: unsolicited-NA burst vs RA attribution (plan gate V6's harness) |
 
 Drivers that chain the above:
 
@@ -112,7 +114,7 @@ a verdict; it has not yet been run there.
 | --- | --- | --- |
 | Perf compare | `BPFRX_CLUSTER_ENV=<env> ./scripts/userspace-perf-compare.sh` | Before/after iperf3 (8 s, `-P4`) with `perf` capture window; regression comparison between builds |
 | HA validation (throughput leg) | `scripts/userspace-ha-validation.sh` | See §3 — doubles as the v4/v6 throughput gate |
-| Mouse latency | `test/incus/test-mouse-latency.sh <N> <M> <dur> <out>`; `-matrix`, `-same-class` variants; `make test-mouse-latency-*` | N elephant streams (1 Gbit/s exact, port 5202) vs M mouse probes (6200); mouse latency distribution under elephant load |
+| Mouse latency | `test/incus/test-mouse-latency.sh <N> <M> <dur> <out>`; `-matrix`, `-same-class` script variants (invoked directly — no `make test-mouse-latency-*` targets) | N elephant streams (1 Gbit/s exact, port 5202) vs M mouse probes (6200); mouse latency distribution under elephant load |
 | Fairness harness | `test/incus/fairness-harness.sh` | iperf3 `-P N -J` + per-second `/metrics` scrape; per-binding active-flow fairness gates (`docs/fairness-regimes.md`) |
 | Fairness sweeps | `test/incus/fairness-cos-class-sweep.sh`, `fairness-cos-throughput-headroom.sh` | Per-class fairness and headroom cells |
 | CoS contention | `test/incus/cos-be-contention-harness.sh`, `cos-simul-load-smoke.sh`, `cos-gate1-small-four-alone.sh` | Best-effort class contention and simultaneous-load CoS behaviour against the target-services grid |
@@ -167,7 +169,7 @@ From [incus-tcp-udp-plan.md](incus-tcp-udp-plan.md) §6; `ENV=test/incus/<stack>
 | V3 TCP deep | `scripts/userspace-ha-validation.sh` with `V4/V6_TEST_TARGET` overrides + `-R` cells | Not run formally; ad-hoc -P32 baselines recorded (~36–41 Gbit/s) |
 | V4 UDP deep | `iperf3 -u -b {1,5,10,20}G -l 1400 -P {1,4}` sweep + burst gen | Partial: 10G/40G single-flow probes only |
 | V5 HA failover mid-flow | Long iperf + `request chassis cluster failover redundancy-group 1` (harness form: `test-failover`) | **Failed informally on tcp (existing-flow blackhole ~30 s); formal harness run outstanding** |
-| V6 NA/ND & RA | `test-v6-na-recovery-12495.sh`; manual `ndisc6`/RA-expiry checks | Not run |
+| V6 NA/ND & RA | `test/incus/test-v6-na-recovery-12495.sh` (direct script; `make test-v6-na-recovery-lib` for the hermetic leg); manual `ndisc6`/RA-expiry checks | Not run |
 | V7 counters snapshot | `cli show chassis cluster data-plane statistics` + PF `ethtool -S` before/after each gate | Done ad-hoc during perf work |
 
 ## 9. Harness infrastructure & selftests

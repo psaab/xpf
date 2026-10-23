@@ -13,8 +13,10 @@ was kept).
 ## Verdict
 
 Confirmed. The userspace forwarding path costs roughly **1.9 µs
-(~5,700 cycles) per packet** for a flow-cache-hit forward at 1500-byte
-MTU. A lean AF_XDP forwarder does the same hit-forward in roughly
+per packet** for a flow-cache-hit forward at 1500-byte MTU (basis
+below; at an assumed ~3 GHz that is ~5,700 cycles — the VM has no
+vPMU, so no hardware cycle count was measured). A lean AF_XDP
+forwarder does the same hit-forward in roughly
 500–1,000 cycles. There is no single hotspot: the cost is spread across
 the kernel delivery path, a heavyweight XDP classifier, syscall traffic,
 and the userspace descriptor path, plus per-tick housekeeping that runs
@@ -45,10 +47,17 @@ pair — i.e. the own-cluster target/container path also contributes, but
 the firewall stack is the common ceiling.
 
 Derived rate: data-plane RX counter delta 53.4M packets over the
-measurement window ≈ **4.4M pps aggregate** across 10 queues
-(~440k pps/queue). `perf` task-clock sampling: ~83.5 CPU-seconds of
-worker CPU per 10 s wall at 37 Gbit/s → ~1.9 µs/packet all-in
-(kernel + userspace attributed to worker threads).
+measurement window. The window was not recorded alongside the delta,
+so the packet rate is derived from the `perf` sample instead:
+~83.5 CPU-seconds of worker CPU per 10 s wall at 37 Gbit/s over
+~44M packets in that 10 s (≈4.4M pps aggregate across 10 queues,
+~440k pps/queue) → ~1.9 µs/packet all-in (83.5 s ÷ 44M; kernel +
+userspace attributed to worker threads). The 53.4M counter delta
+spans a longer, unrecorded window (≈12 s at 4.4M pps) and must not
+be divided by 10 s — doing so gives 5.34M pps / 1.56 µs and
+contradicts the sampled basis above. Gbit/s↔pps cross-checks at
+1500-byte MTU are approximate (frame overhead and counter scope —
+RX-only vs forwarded — are not separated in the recorded data).
 
 VM has no vPMU (`perf stat` cycles/instructions `<not supported>`), so
 cycles/packet is derived from task-clock samples, not hardware
