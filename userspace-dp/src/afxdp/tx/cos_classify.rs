@@ -1166,15 +1166,39 @@ fn resolve_cos_tx_selection_internal(
     // so a box with v4 tx-selection enabled and v6 not would otherwise
     // short-circuit a NAT64 fragment out of enforcement entirely, before the
     // flowless arm below is ever reached.
+    // #15949 (H34-01): the enable gate must consider BOTH families. `is_v6`
+    // is the POST-NAT wire family (correct for output-filter family/tuple
+    // selection), but the ingress INPUT filter re-walk below runs on the
+    // PRE-NAT ingress family. Gating solely on the post-NAT family
+    // short-circuits cross-family NAT64 (v6 ingress -> v4 egress, or the
+    // mirror) before the ingress policer / `then dscp` /
+    // `then forwarding-class` arm ever runs when only the ingress family
+    // has TX-selection features and no CoS interface exists. The cached
+    // sibling already gates on the pre-NAT ingress family; mirror it by
+    // enabling when either family is enabled. Family selection for the
+    // output walk (`is_v6`) is unchanged.
     let is_v6 = flow_key
         .or(flowless_wire)
         .map(|key| key.addr_family as i32 == libc::AF_INET6)
         .unwrap_or(meta.addr_family as i32 == libc::AF_INET6);
-    let tx_selection_enabled = if is_v6 {
+    let ingress_is_v6_gate = match flow_key {
+        Some(_) => ingress_flow_key
+            .or(flow_key)
+            .map(|key| key.addr_family as i32 == libc::AF_INET6)
+            .unwrap_or(meta.addr_family as i32 == libc::AF_INET6),
+        None => flowless_ingress
+            .map(|key| key.addr_family as i32 == libc::AF_INET6)
+            .unwrap_or(meta.addr_family as i32 == libc::AF_INET6),
+    };
+    let tx_selection_enabled = (if is_v6 {
         forwarding.tx_selection_enabled_v6
     } else {
         forwarding.tx_selection_enabled_v4
-    };
+    }) || (if ingress_is_v6_gate {
+        forwarding.tx_selection_enabled_v6
+    } else {
+        forwarding.tx_selection_enabled_v4
+    });
     if !tx_selection_enabled {
         return CoSTxSelection::default();
     }

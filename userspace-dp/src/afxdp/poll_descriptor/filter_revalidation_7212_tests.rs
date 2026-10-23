@@ -4526,3 +4526,212 @@ fn stale_local_delivery_red_policer_reports_uncounted_15794() {
          charges then count (#15794)"
     );
 }
+
+fn log_term_15949() -> FirewallTermSnapshot {
+    FirewallTermSnapshot { name: "logged".into(), protocols: vec!["tcp".into()], destination_ports: vec!["5201".into()], action: "accept".into(), log: true, ..Default::default() }
+}
+
+#[test]
+fn fresh_static_hit_emits_log_15949() {
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![log_term_15949()]);
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+    for i in 0..3 {
+        let (hit, counted) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), meta(LAN_IFINDEX as u32, 0, false), Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+        let hit = hit.unwrap_or_else(|| panic!("#15949: fresh static hit {i} must carry log"));
+        assert_eq!(hit.eval.action, crate::filter::FilterAction::Accept);
+        assert!(hit.eval.cached_log.is_some(), "hit {i} must carry cached_log");
+        assert!(!counted);
+    }
+}
+
+#[test]
+fn stale_then_fresh_static_hits_emit_log_15949() {
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![log_term_15949()]);
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, None);
+    for i in 0..3 {
+        let (hit, _) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), meta(LAN_IFINDEX as u32, 0, false), Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+        let hit = hit.unwrap_or_else(|| panic!("#15949: hit {i} must carry log"));
+        assert!(hit.eval.cached_log.is_some(), "hit {i} cached_log");
+    }
+}
+
+#[test]
+fn no_local_entry_static_hit_emits_log_15949() {
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![log_term_15949()]);
+    let flow = v4_flow(5201);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    let (hit, _) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), meta(LAN_IFINDEX as u32, 0, false), Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+    let hit = hit.expect("#15949: NoLocalEntry hit must carry log");
+    assert!(hit.eval.cached_log.is_some());
+}
+
+/// #15949 H34-04 zombie: gen-1 policer removed in gen-2 (filter now accept-only,
+/// no policer) => stale hit must clear stored handles, fresh hit must not drop.
+#[test]
+fn zombie_policer_cleared_when_filter_loses_policer_15949() {
+    // Gen-2 forwarding: same filter name/shape but NO policer term.
+    let forwarding2 = forwarding_with_input_filter(LAN_IFINDEX, false, vec![accept_term("web", "5201")]);
+    let flow = v4_flow(5201);
+    let local_decision = SessionDecision { resolution: ForwardingResolution { disposition: ForwardingDisposition::LocalDelivery, ..decision().resolution }, ..decision() };
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(flow.forward_key.clone(), local_decision, metadata(), SessionOrigin::ForwardFlow, 1_000, PROTO_TCP, 0));
+    // Seed zombie handles: capture from a policed gen-1 filter.
+    let mut snap = policy_deny_snapshot();
+    snap.filters = vec![FirewallFilterSnapshot { name: "edge-in".into(), family: "inet".into(), terms: vec![FirewallTermSnapshot { name: "police".into(), protocols: vec!["tcp".into()], destination_ports: vec!["5201".into()], policer: "host-pol".into(), action: "accept".into(), ..Default::default() }] }];
+    snap.three_color_policers = vec![crate::ThreeColorPolicerSnapshot { name: "host-pol".into(), mode: "single-rate".into(), color_blind: true, committed_rate_bytes_per_sec: 1, committed_burst_bytes: 100, peak_or_excess_burst_bytes: 50, then_action: "discard".into(), ..Default::default() }];
+    for iface in snap.interfaces.iter_mut() { if iface.ifindex == LAN_IFINDEX { iface.filter_input_v4 = "edge-in".into(); } }
+    let forwarding1 = build_forwarding_state(&snap);
+    let policers = crate::filter::evaluate_interface_input_filter_policers_cached(&forwarding1.filter_state, LAN_IFINDEX, false, flow.src_ip, flow.dst_ip, PROTO_TCP, 12345, 5201, 0, crate::filter::TermMatchExtra::default());
+    assert!(!policers.is_empty(), "gen-1 capture must yield handles");
+    sessions.set_input_policers(&flow.forward_key, policers);
+    assert!(!sessions.input_policers_for(&flow.forward_key).unwrap().is_empty());
+    // Stale hit under gen-2 (no policer): must clear.
+    let mut m = meta(LAN_IFINDEX as u32, 0, false); m.pkt_len = 900;
+    let (hit, _) = evaluate_input_filter_on_session_hit(&forwarding2, &mut sessions, &flow.forward_key, &frame(), Some(&flow), m, Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+    assert!(hit.is_none() || hit.as_ref().map(|h| h.eval.action == crate::filter::FilterAction::Accept).unwrap_or(true), "gen-2 hit must not policer-drop: {hit:?}");
+    let stored = sessions.input_policers_for(&flow.forward_key).expect("entry exists");
+    assert!(stored.is_empty(), "#15949: zombie handles must be cleared, got non-empty");
+    // Fresh hit: also no drop.
+    let (hit2, _) = evaluate_input_filter_on_session_hit(&forwarding2, &mut sessions, &flow.forward_key, &frame(), Some(&flow), m, Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+    assert!(hit2.is_none() || !hit2.as_ref().map(|h| h.eval.policer_drop).unwrap_or(false));
+}
+
+// ---- #15949 fold: RED + PBR log source ----
+
+fn log_police_term_15949() -> FirewallTermSnapshot {
+    FirewallTermSnapshot {
+        name: "police-log".into(),
+        protocols: vec!["tcp".into()],
+        destination_ports: vec!["5201".into()],
+        policer: "host-pol".into(),
+        action: "accept".into(),
+        log: true,
+        ..Default::default()
+    }
+}
+
+fn policed_forwarding_15949(terms: Vec<FirewallTermSnapshot>) -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms,
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 100,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    build_forwarding_state(&snapshot)
+}
+
+#[test]
+fn fresh_red_policer_hit_carries_deny_log_15949() {
+    let forwarding = policed_forwarding_15949(vec![log_police_term_15949()]);
+    let flow = v4_flow(5201);
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            ..decision().resolution
+        },
+        ..decision()
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(flow.forward_key.clone(), local_decision.clone(), metadata(), SessionOrigin::ForwardFlow, 1_000, PROTO_TCP, 0));
+    sessions.mark_filter_revalidated(&flow.forward_key, LAN_IFINDEX);
+    // Seed stored policers via stale hit under green? Burst 100 < 900 => first stale hit is RED.
+    // Fresh arm: install + mark fresh, then set policers directly from capture.
+    let policers = crate::filter::evaluate_interface_input_filter_policers_cached(&forwarding.filter_state, LAN_IFINDEX, false, flow.src_ip, flow.dst_ip, PROTO_TCP, 12345, 5201, 0, crate::filter::TermMatchExtra::default());
+    assert!(!policers.is_empty());
+    sessions.set_input_policers(&flow.forward_key, policers);
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    let (hit, counted) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), m, Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+    let hit = hit.expect("#15949 fold: fresh RED hit must produce verdict");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(hit.eval.policer_drop);
+    let log = hit.eval.cached_log.expect("#15949 fold: fresh RED hit must carry then-log");
+    assert_eq!(log.log_match.action, crate::filter::FilterAction::Discard, "RED log must report DENY/Discard, not Accept");
+    assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Input);
+    assert!(!counted);
+}
+
+#[test]
+fn stale_red_policer_hit_carries_deny_log_15949() {
+    let forwarding = policed_forwarding_15949(vec![log_police_term_15949()]);
+    let flow = v4_flow(5201);
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            ..decision().resolution
+        },
+        ..decision()
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(flow.forward_key.clone(), local_decision, metadata(), SessionOrigin::ForwardFlow, 1_000, PROTO_TCP, 0));
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    let (hit, _) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), m, Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+    let hit = hit.expect("#15949 fold: stale RED hit must produce verdict");
+    assert!(hit.eval.policer_drop);
+    let log = hit.eval.cached_log.expect("#15949 fold: stale RED hit must carry then-log");
+    assert_eq!(log.log_match.action, crate::filter::FilterAction::Discard);
+}
+
+#[test]
+fn no_local_entry_red_policer_hit_carries_deny_log_15949() {
+    let forwarding = policed_forwarding_15949(vec![log_police_term_15949()]);
+    let flow = v4_flow(5201);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    let (hit, _) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), m, Some(TEST_LAN_ZONE_ID), ForwardingDisposition::LocalDelivery, 1_000);
+    let hit = hit.expect("#15949 fold: sessionless RED hit must produce verdict");
+    assert!(hit.eval.policer_drop);
+    let log = hit.eval.cached_log.expect("#15949 fold: sessionless RED hit must carry then-log");
+    assert_eq!(log.log_match.action, crate::filter::FilterAction::Discard);
+}
+
+#[test]
+fn pbr_accepted_hit_logs_pbr_source_15949() {
+    // PBR accept term with log: `then { routing-instance blue; log; accept; }`
+    let mut term = pbr_term("pbr-route", "5201", "accept");
+    term.log = true;
+    term.count = String::new();
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![term]);
+    let flow = v4_flow(5201);
+    // Fresh: session stamped fresh under live gen so hit takes Fresh/static log arm.
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+    let (hit, _) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), meta(LAN_IFINDEX as u32, 0, false), Some(TEST_LAN_ZONE_ID), ForwardingDisposition::ForwardCandidate, 0);
+    let hit = hit.expect("#15949 fold: PBR accepted hit must carry log");
+    assert!(hit.eval.cached_log.is_some(), "PBR accepted hit must carry log");
+    assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Pbr, "#15949 fold: routing-instance terminal term must log as Pbr, not Input");
+}
+
+#[test]
+fn plain_accepted_hit_logs_input_source_15949() {
+    // Control: plain (non-PBR) log term stays Input.
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![log_term_15949()]);
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+    let (hit, _) = evaluate_input_filter_on_session_hit(&forwarding, &mut sessions, &flow.forward_key, &frame(), Some(&flow), meta(LAN_IFINDEX as u32, 0, false), Some(TEST_LAN_ZONE_ID), ForwardingDisposition::ForwardCandidate, 0);
+    let hit = hit.expect("plain accepted hit must carry log");
+    assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Input);
+}

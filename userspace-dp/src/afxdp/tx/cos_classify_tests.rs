@@ -8852,3 +8852,83 @@ fn generated_reply_metered_classify_still_charges_inline_15268_control() {
     crate::filter::flush_recorded_filter_counters();
     assert_eq!(counter.packets.load(Ordering::Relaxed), 1, "control: metered classify charges inline");
 }
+
+/// #15949 H34-01: cross-family NAT64 must not bypass ingress TX selection.
+/// Egress carries NO scheduler map => has_cos_interfaces=false => per-family
+/// flags come only from filters. v6 ingress filter (policer+fc) sets
+/// tx_selection_enabled_v6 only; post-NAT egress key is v4. Pre-fix gate
+/// read v4 flag (false) => default. Post-fix must drop (red policer).
+#[test]
+fn nat64_ingress_policer_not_bypassed_by_postnat_family_gate_15949() {
+    // v6 ingress policer snapshot, no CoS on egress.
+    let mut snap = input_count_policer_snapshot();
+    // Convert to v6 ingress: family inet6, filter_input_v6 on reth1.0, remove egress CoS map.
+    snap.filters[0].family = "inet6".into();
+    snap.filters[0].name = "in-count-pol6".into();
+    for iface in snap.interfaces.iter_mut() {
+        if iface.ifindex == 101 { iface.filter_input_v6 = "in-count-pol6".into(); iface.filter_input_v4 = String::new(); }
+        if iface.ifindex == 202 { iface.cos_scheduler_map = String::new(); iface.cos_shaping_rate_bytes_per_sec = 0; }
+    }
+    snap.class_of_service = None;
+    let forwarding = build_forwarding_state(&snap);
+    assert!(!forwarding.tx_selection_enabled_v4, "precondition: v4 gate off (no v4 TX features, no CoS)");
+    assert!(forwarding.tx_selection_enabled_v6, "precondition: v6 gate on (ingress policer)");
+    let ingress_key = count4085_v6_key();
+    let egress_key = count4085_v4_key(); // post-NAT wire family v4
+    let meta = count4085_meta(true);
+    let sel = resolve_cos_tx_selection_at_prenat(&forwarding, 202, meta, Some(&egress_key), Some(&ingress_key), TermMatchExtra::default(), 1_000_000_000, None, None);
+    assert!(sel.drop, "#15949: NAT64 v6->v4 ingress policer must meter RED -> drop, got {sel:?}");
+}
+
+#[test]
+fn nat64_mirror_v4_ingress_policer_not_bypassed_15949() {
+    let mut snap = input_count_policer_snapshot();
+    for iface in snap.interfaces.iter_mut() {
+        if iface.ifindex == 202 { iface.cos_scheduler_map = String::new(); iface.cos_shaping_rate_bytes_per_sec = 0; }
+    }
+    snap.class_of_service = None;
+    let forwarding = build_forwarding_state(&snap);
+    assert!(forwarding.tx_selection_enabled_v4 && !forwarding.tx_selection_enabled_v6, "precondition");
+    let ingress_key = count4085_v4_key();
+    let egress_key = count4085_v6_key();
+    let meta = count4085_meta(false);
+    let sel = resolve_cos_tx_selection_at_prenat(&forwarding, 202, meta, Some(&egress_key), Some(&ingress_key), TermMatchExtra::default(), 1_000_000_000, None, None);
+    assert!(sel.drop, "#15949 mirror: NAT64 v4->v6 ingress policer must drop, got {sel:?}");
+}
+
+/// #15949 H35-02: fast-map swap refreshes materialized queue floor/shared_exact
+/// and republishes backlogged slot. Reuses existing lease-swap fixture shape.
+#[test]
+fn fast_map_swap_refreshes_materialized_queue_vtime_floor_15949() {
+    const IFINDEX: i32 = 46;
+    const QUEUE_ID: u8 = 4;
+    use std::sync::Arc as StdArc;
+    let floor_old = StdArc::new(crate::afxdp::types::SharedCoSQueueVtimeFloor::new(2));
+    let floor_new = StdArc::new(crate::afxdp::types::SharedCoSQueueVtimeFloor::new(2));
+    let mut fast_old = test_queue_fast_path(true, 0, None, None);
+    fast_old.vtime_floor = Some(floor_old.clone());
+    let fast_interfaces = test_cos_fast_interfaces(IFINDEX, IFINDEX, QUEUE_ID, vec![(QUEUE_ID, fast_old)], None, None);
+    let fast_path = fast_interfaces.get(&IFINDEX).expect("fast").clone();
+    let mut root = test_cos_runtime_with_queues(1_250_000_000, vec![CoSQueueConfig { queue_id: QUEUE_ID, forwarding_class: "shared".into(), priority: 5, transmit_rate_bytes: 1_250_000_000, guarantee_enabled: true, exact: true, surplus_sharing: false, equal_flow_enforcement: false, equal_flow_target_policy: EqualFlowTargetPolicy::Slowest, surplus_weight: 1, buffer_bytes: 96_000, dscp_rewrite: None, codel_target_ns: 0 }]);
+    enable_test_flow_fair(&mut root.queues[0]);
+    root.queues[0].config.shared_exact = true;
+    root.queues[0].v_min.vtime_floor = Some(floor_old.clone());
+    root.queues[0].v_min.worker_id = 0;
+    // Backlogged: one active bucket so publish (not vacate) fires.
+    {
+        let ff = root.queues[0].flow_fair_state.as_mut().unwrap();
+        ff.active_flow_buckets = 1;
+        ff.queue_vtime = 4242;
+    }
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFINDEX, root, fast_path);
+    let mut fast_new = test_queue_fast_path(true, 0, None, None);
+    fast_new.vtime_floor = Some(floor_new.clone());
+    binding.cos.cos_fast_interfaces = test_cos_fast_interfaces(IFINDEX, IFINDEX, QUEUE_ID, vec![(QUEUE_ID, fast_new)], None, None);
+    refresh_cos_runtime_shared_root_leases(&mut binding);
+    let q = &binding.cos.cos_interfaces.get(&IFINDEX).unwrap().queues[0];
+    assert!(q.v_min.vtime_floor.as_ref().map(|f| StdArc::ptr_eq(f, &floor_new)).unwrap_or(false), "#15949: materialized queue must point at new floor Arc");
+    assert!(q.config.shared_exact);
+    // Backlogged slot republished into NEW floor: slot 0 reads queue_vtime.
+    assert_eq!(floor_new.slots[0].read(), Some(4242), "#15949: backlogged queue must republish into new floor immediately");
+    assert_eq!(floor_old.slots[0].read(), None, "old floor slot must stay NOT_PARTICIPATING (never published)");
+}
