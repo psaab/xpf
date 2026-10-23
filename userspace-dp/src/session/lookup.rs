@@ -1991,11 +1991,10 @@ impl SessionTable {
     /// is a local serving row — locally-authored origins,
     /// `SharedPromote`, or `WorkerLocalImport` (a replica of a
     /// session authored by THIS node's other worker, i.e. a local
-    /// serving row, not a peer replica); pure HA-peer replicas
-    /// (`SyncImport`/`SharedMaterialize`) never qualify; closing
-    /// rows never qualify — is collected when the aggregated
-    /// evidence proves the tuple completed: (a) any worker's local
-    /// row Established (`served_and_completed` via the shared-map
+    /// serving row, not a peer replica) — is collected when it is
+    /// already locally Established, or when the aggregated evidence
+    /// proves the tuple completed: (a) any worker's local row
+    /// Established (`served_and_completed` via the shared-map
     /// aggregator), (b) reverse traffic observed for the canonical
     /// key in the shared synced/replica maps (`rev_packets>0`
     /// across the forward/reverse counters of both maps), or (c)
@@ -2004,6 +2003,24 @@ impl SessionTable {
     /// anywhere node-local; a shared row's Established wire is
     /// OUTPUT only (the restamp this feeds), never an input here.
     /// One bounded walk per slice.
+    ///
+    /// #16217 (backup arm): a HA-peer replica row (`SyncImport` /
+    /// `SharedMaterialize`) is ALSO collected — into the SHARED
+    /// canonical+alias promotion only; its LOCAL stage never moves
+    /// from its own flags — when the evidence arm proves completion
+    /// (`rev_packets>0` via the shared-map counters the counter
+    /// carriage now stamps at import, or a local reverse-served
+    /// sibling). Pre-fix the serving-origin gate dropped every peer
+    /// replica, so on the BACKUP node — whose canonical rows are
+    /// `SyncImport` imports carrying the imported `rev>0` counters
+    /// and whose serving sibling is only a `WorkerLocalImport`
+    /// reverse row in a sibling worker table — nothing qualified:
+    /// the shared maps read Opening/Pending the whole pre-failover
+    /// age and aged flows blackholed from FO+1s. The promotion
+    /// target is unchanged (the ct-slice restamps shared canonical
+    /// + forward-wire alias only); the local pending row stays
+    /// pending until it itself serves/completes or the
+    /// post-failover gate adopts from the now-Established wire.
     pub(crate) fn node_served_forward_slice(
         &self,
         cursor: usize,
@@ -2023,28 +2040,50 @@ impl SessionTable {
                 if entry.metadata.is_reverse || entry.closing {
                     continue;
                 }
-                // Serving rows only: a pure HA-peer replica's own
-                // flags are not node-level proof (its completion is
-                // announced via the HA Update carve-out instead).
-                // `WorkerLocalImport` IS a local serving row (this
-                // node's own session replicated across its workers),
-                // so its Established status is node-local proof on
+                // Serving rows: locally-authored origins,
+                // `SharedPromote`, or `WorkerLocalImport` (this
+                // node's own session replicated across its workers —
+                // a local serving row, not a peer replica). A serving
+                // row's Established status is node-local proof on
                 // the BACKUP node too — excluding it left fw1's
                 // heavy canonical rows unpublished (#16217 Wire8).
+                // A pure HA-peer replica's own flags are NOT
+                // node-level proof (its completion is announced via
+                // the HA Update carve-out instead); it qualifies
+                // only through the evidence arm below.
                 let serving_origin = !entry.origin.is_peer_synced()
                     || entry.origin == SessionOrigin::SharedPromote
                     || entry.origin == SessionOrigin::WorkerLocalImport;
-                if !serving_origin {
-                    continue;
-                }
-                if entry.established && !entry.handshake_pending {
+                if serving_origin && entry.established && !entry.handshake_pending {
                     // Already locally complete: the strict slice
                     // covers it when it also served reverse traffic;
                     // include it here too so the shared wire advances
                     // even before the first reverse packet is folded.
+                    // Peer replicas never take this arm: their own
+                    // flags are not node-level proof (their
+                    // completion is announced via the HA Update
+                    // carve-out instead).
                     out.push((record.key.clone(), entry.decision.nat));
                     continue;
                 }
+                // Evidence arm (serving rows AND peer replicas):
+                // the aggregated node-wide evidence — (b) reverse
+                // traffic observed for the canonical key in the
+                // shared synced/replica maps (`rev_packets>0` on
+                // the wire counters the #16217 counter carriage now
+                // stamps at import, surfaced via
+                // `shared_completion_evidence`), a local
+                // reverse-served sibling in THIS table, or
+                // (a)/(c) — proves the tuple completed, so the
+                // SHARED canonical + alias advance to Established
+                // even though this row's local stage stays pending.
+                // For a pure HA-peer replica (`SyncImport` /
+                // `SharedMaterialize`) this is the ONLY qualifying
+                // arm: its own flags never publish, and it requires
+                // actual counted reverse service (fail-closed: a
+                // zero-count import never publishes). Promotion
+                // target is the shared canonical+alias stage only;
+                // the local row's stage is unchanged.
                 let mut evidence = self.node_served_evidence(&record.key);
                 let shared = shared_evidence(&record.key);
                 evidence.rev_packets_any =
