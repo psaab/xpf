@@ -1903,7 +1903,7 @@ test_manifest_write_wired_after_cluster_deploy() {
 	raw_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha" "$target"' <<<"$code" | cut -d: -f1)
 	deb_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha" "$target"' <<<"$code" | cut -d: -f1)
 	record=$(grep -n 'deploy_manifest_record_failure "$PROJECT_ROOT" "$target"' <<<"$code" | cut -d: -f1)
-	trap_arm=$(grep -n "_deploy_attestation_pending=1" <<<"$code" | cut -d: -f1)
+	trap_arm=$(grep -n 'deploy_manifest_arm_failure_guard "$PROJECT_ROOT" "$target"' <<<"$code" | cut -d: -f1)
 	disarm=$(grep -n '^[[:space:]]*trap - EXIT$' <<<"$code" | cut -d: -f1)
 	rebaseline=$(grep -n '^[[:space:]]*xpf_cluster_rebaseline_build$' <<<"$code" | cut -d: -f1)
 	# The EXIT trap covers every `set -e` abort / die between invalidation
@@ -2027,6 +2027,105 @@ test_manifest_refused_deploy_sequence_16290() {
 		bad "#16290: a marker without a reason was surfaced as a refusal"
 	else
 		ok "#16290: a marker without a reason fails closed (no fabricated refusal)"
+	fi
+	rm -rf "$fixture"
+}
+
+# #16290 fold (PR #16338): exercise the REAL EXIT-trap path, not a manual
+# record_failure call. A child bash arms the guard exactly as cmd_deploy
+# does (invalidate -> arm -> step -> failing command under `set -euo
+# pipefail`, mirroring the refuse-before-PREFLIGHT abort), exits via the
+# trap, and the parent asserts the marker the TRAP wrote: correct global
+# target (a function-local target would die unbound under `set -u` and
+# write nothing), the step label, and the real abort rc (7, not a
+# clobbered 0/1). Two controls: a disarmed guard on an explicit-die path
+# keeps the specific reason (trap must not overwrite it), and a guard
+# disarmed + trap removed after success writes no marker. The child
+# re-declares die after sourcing so this shell's die is not inherited
+# semantics under test; only lib functions come from deploy-lib.sh.
+test_manifest_failure_guard_trap_fires_16290() {
+	local fixture root manifest marker child reason
+	fixture=$(mktemp -d)
+	root="$fixture/root"
+	mkdir -p "$root"
+	manifest="$fixture/xpf-deploy-manifest.json"
+	marker="$manifest.failed"
+	child="$fixture/guard-child.sh"
+	cat >"$child" <<'CHILD'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$1"; ROOT="$2"; MANIFEST="$3"; MODE="$4"
+export XPF_DEPLOY_MANIFEST="$MANIFEST"
+info() { :; }
+warn() { printf 'warn: %s\n' "$*" >&2; }
+die() { echo "die: $*" >&2; exit 1; }
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/deploy-lib.sh"
+# Simulate cmd_deploy: a function with a LOCAL target (the exact shape
+# that broke when the trap referenced it), arm after invalidate, then
+# abort the way the refused rolling cut does.
+simulate_deploy() {
+	local target="all"
+	XPF_DEPLOY_MANIFEST="$MANIFEST" deploy_manifest_invalidate "$ROOT" "$target"
+	deploy_manifest_arm_failure_guard "$ROOT" "$target"
+	deploy_manifest_guard_step "deb rolling deploy"
+	case "$MODE" in
+	refused)
+		# `xpfd upgrade --rolling` refuse-before-PREFLIGHT: nonzero, pre-cut.
+		bash -c 'exit 7'
+		;;
+	explicit-die)
+		deploy_manifest_record_failure "$ROOT" "$target" \
+			"attestation manifest absent because deploy manifest write failed; no new build was attested" || true
+		deploy_manifest_guard_disarm
+		die "deploy completed but its executable attestation manifest could not be written"
+		;;
+	success)
+		deploy_manifest_guard_disarm
+		trap - EXIT
+		return 0
+		;;
+	esac
+}
+simulate_deploy
+CHILD
+
+	# Case 1: refused cut -> the trap itself must write the marker.
+	rm -f "$manifest" "$marker"
+	if bash "$child" "$SCRIPT_DIR" "$root" "$manifest" refused 2>"$fixture/refused.log"; then
+		bad "#16290 guard: refused child exited 0 (the abort was swallowed)"
+	elif [[ -e "$manifest" ]]; then
+		bad "#16290 guard: refused deploy left a manifest behind (stale provenance revived)"
+	elif ! reason=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_failure_reason "$root") ||
+		[[ "$reason" != *"deploy all failed"* ]] ||
+		[[ "$reason" != *"deb rolling deploy failed (rc=7)"* ]]; then
+		bad "#16290 guard: trap marker missing/wrong (rc, step, or global target lost): '$reason'; child log: $(cat "$fixture/refused.log")"
+	elif XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "" 0 >/dev/null 2>&1; then
+		bad "#16290 guard: trap marker attested a binary (must fail closed)"
+	else
+		ok "#16290 guard: real EXIT trap records the refused deploy (global target, step, rc=7) with no manifest"
+	fi
+
+	# Case 2: explicit die path -> specific reason survives, trap silent.
+	rm -f "$marker"
+	if bash "$child" "$SCRIPT_DIR" "$root" "$manifest" explicit-die 2>/dev/null; then
+		bad "#16290 guard: explicit-die child exited 0"
+	elif ! reason=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_failure_reason "$root") ||
+		[[ "$reason" != *"manifest write failed"* ]] ||
+		[[ "$reason" == *"deb rolling deploy"* ]]; then
+		bad "#16290 guard: trap overwrote the explicit die reason: '$reason'"
+	else
+		ok "#16290 guard: disarmed trap does not overwrite an explicit die-path reason"
+	fi
+
+	# Case 3: success (disarm + trap removed) -> no marker at all.
+	rm -f "$marker"
+	if ! bash "$child" "$SCRIPT_DIR" "$root" "$manifest" success 2>/dev/null; then
+		bad "#16290 guard: success child exited nonzero"
+	elif [[ -e "$marker" ]]; then
+		bad "#16290 guard: successful deploy left a failure marker via the trap"
+	else
+		ok "#16290 guard: disarmed/removed trap writes no marker on success"
 	fi
 	rm -rf "$fixture"
 }
@@ -2620,6 +2719,7 @@ test_manifest_raw_records_verified_binary_hashes
 test_manifest_deb_hashes_package_payload
 test_manifest_write_wired_after_cluster_deploy
 test_manifest_refused_deploy_sequence_16290
+test_manifest_failure_guard_trap_fires_16290
 test_cluster_deploy_gate_runs_in_one_ordered_wave
 test_deploy_gate_wave_fences_checkout_sha
 test_reconcile_stale_pin_removes_managed

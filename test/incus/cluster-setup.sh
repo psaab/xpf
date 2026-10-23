@@ -678,22 +678,18 @@ cmd_deploy() {
 	# Backstop for the `set -e` aborts / die() exits between here and a
 	# successful manifest write (which clears the marker itself). Every
 	# explicit die below first records its own reason and disarms, so the
-	# trap cannot overwrite it with the generic step. The guard variables
-	# are globals, not locals: the EXIT trap fires after cmd_deploy has
-	# returned and its locals are gone (under `set -u` a local would make
-	# the trap itself fail unbound). The first trap action captures the
-	# pending exit status before any other command can clobber $?.
-	_deploy_attestation_pending=1
-	_deploy_step="deploy dispatch"
-	_deploy_rc=0
-	trap '_deploy_rc=$?; if (( _deploy_attestation_pending )); then
-		deploy_manifest_record_failure "$PROJECT_ROOT" "$target" "attestation manifest absent because deploy ${_deploy_step} failed (rc=${_deploy_rc}); no new build was attested" || true
-		warn "deploy attestation: manifest absent because deploy ${_deploy_step} failed (rc=${_deploy_rc}); later gates will VOID naming this deploy (#16290)"
-	fi' EXIT
+	# trap cannot overwrite it with the generic step. Armed via the
+	# deploy-lib helper: ALL guard state (root/target/step/pending) is
+	# global there, because this EXIT trap fires after cmd_deploy has
+	# returned and its locals — including `target` — are gone; a trap
+	# referencing them would die unbound under `set -u` and record
+	# nothing (#16290, PR #16338 fold).
+	deploy_manifest_arm_failure_guard "$PROJECT_ROOT" "$target" ||
+		die "cannot arm deploy attestation failure guard"
 	deploy_git_sha=$(deploy_build_git_sha "$PROJECT_ROOT") || {
-		_deploy_step="checkout identity capture"
+		deploy_manifest_guard_step "checkout identity capture"
 		deploy_manifest_record_failure "$PROJECT_ROOT" "$target" "attestation manifest absent because deploy checkout identity capture failed; no new build was attested" || true
-		_deploy_attestation_pending=0
+		deploy_manifest_guard_disarm
 		die "cannot capture checkout identity before deploy"
 	}
 
@@ -711,26 +707,26 @@ cmd_deploy() {
 
 	if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then
 		case "$target" in
-			0)   _deploy_step="raw deploy of node 0"; deploy_vm 0 ;;
-			1)   _deploy_step="raw deploy of node 1"; deploy_vm 1 ;;
-			all) _deploy_step="raw rolling deploy"; deploy_rolling ;;
+			0)   deploy_manifest_guard_step "raw deploy of node 0"; deploy_vm 0 ;;
+			1)   deploy_manifest_guard_step "raw deploy of node 1"; deploy_vm 1 ;;
+			all) deploy_manifest_guard_step "raw rolling deploy"; deploy_rolling ;;
 		esac
 	else
 		case "$target" in
-			0)   _deploy_step="deb deploy of node 0"; deploy_vm_deb 0 ;;
-			1)   _deploy_step="deb deploy of node 1"; deploy_vm_deb 1 ;;
-			all) _deploy_step="deb rolling deploy"; deploy_rolling_deb ;;
+			0)   deploy_manifest_guard_step "deb deploy of node 0"; deploy_vm_deb 0 ;;
+			1)   deploy_manifest_guard_step "deb deploy of node 1"; deploy_vm_deb 1 ;;
+			all) deploy_manifest_guard_step "deb rolling deploy"; deploy_rolling_deb ;;
 		esac
 	fi
 
 	# Record the deployed image identity before the gate has a chance to build
 	# another xpfd in this worktree. Single-node deploys replace only that
 	# node's slot; an all-node deploy records the shared artifact in both.
-	_deploy_step="manifest write"
+	deploy_manifest_guard_step "manifest write"
 	if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then
 		deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha" "$target" || {
 			deploy_manifest_record_failure "$PROJECT_ROOT" "$target" "attestation manifest absent because deploy manifest write failed; no new build was attested" || true
-			_deploy_attestation_pending=0
+			deploy_manifest_guard_disarm
 			die "deploy completed but its executable attestation manifest could not be written"
 		}
 	else
@@ -738,18 +734,18 @@ cmd_deploy() {
 		attestation_deb=$(deploy_select_deb "$PROJECT_ROOT/dist-deb" 2>/dev/null || true)
 		[[ -n "$attestation_deb" ]] || {
 			deploy_manifest_record_failure "$PROJECT_ROOT" "$target" "attestation manifest absent because deploy found no xpf .deb to attest; no new build was attested" || true
-			_deploy_attestation_pending=0
+			deploy_manifest_guard_disarm
 			die "deploy completed but no xpf .deb is available to attest"
 		}
 		deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha" "$target" || {
 			deploy_manifest_record_failure "$PROJECT_ROOT" "$target" "attestation manifest absent because deploy manifest write failed; no new build was attested" || true
-			_deploy_attestation_pending=0
+			deploy_manifest_guard_disarm
 			die "deploy completed but its executable attestation manifest could not be written"
 		}
 	fi
 	# Attested: the marker (already cleared by deploy_write_manifest) must
 	# not be re-created by the EXIT trap on the way out.
-	_deploy_attestation_pending=0
+	deploy_manifest_guard_disarm
 	trap - EXIT
 
 	# This cell changed the build ON PURPOSE. Re-baseline so the cell's

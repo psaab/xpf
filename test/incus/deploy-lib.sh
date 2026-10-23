@@ -379,6 +379,47 @@ deploy_manifest_clear_failure() {
 	rm -f -- "$marker"
 }
 
+# deploy_manifest_arm_failure_guard <project_root> <0|1|all>
+# Arm the EXIT-trap guard cmd_deploy installs right after invalidation
+# (#16290). ALL guard state lives in globals: the EXIT trap fires after
+# the arming function has returned and its locals are gone, so a trap
+# referencing a function-local target/step would die unbound under
+# `set -u` and record nothing (the Opus fold on PR #16338). The target
+# in particular is captured into the global _deploy_guard_target here —
+# a caller's `local target` is exactly what must not be trapped over.
+# The first trap action captures the pending exit status before any
+# other command can clobber $?. Split out of cluster-setup.sh so the
+# hermetic selftest can drive the REAL trap (arm, abort a subshell,
+# observe the marker) instead of hand-calling the recorder.
+deploy_manifest_arm_failure_guard() {
+	local root="$1" scope="${2:-all}"
+	[[ "$scope" == 0 || "$scope" == 1 || "$scope" == all ]] || return 1
+	# Globals on purpose — do NOT declare these local (see above).
+	_deploy_guard_root="$root"
+	_deploy_guard_target="$scope"
+	_deploy_guard_step="deploy dispatch"
+	_deploy_guard_rc=0
+	_deploy_guard_pending=1
+	trap '_deploy_guard_rc=$?; if (( _deploy_guard_pending )); then
+		deploy_manifest_record_failure "$_deploy_guard_root" "$_deploy_guard_target" "attestation manifest absent because deploy ${_deploy_guard_step} failed (rc=${_deploy_guard_rc}); no new build was attested" || true
+		warn "deploy attestation: manifest absent because deploy ${_deploy_guard_step} failed (rc=${_deploy_guard_rc}); later gates will VOID naming this deploy (#16290)"
+	fi' EXIT
+}
+
+# deploy_manifest_guard_step <step label>
+# Label the deploy step the guard will name if the shell aborts now.
+deploy_manifest_guard_step() {
+	_deploy_guard_step="$1"
+}
+
+# deploy_manifest_guard_disarm
+# Explicit die paths record their own specific reason and then disarm,
+# so the EXIT backstop cannot overwrite it with the generic step text.
+# The success path disarms too, then the caller removes the trap.
+deploy_manifest_guard_disarm() {
+	_deploy_guard_pending=0
+}
+
 deploy_manifest_invalidate() {
 	local manifest scope="${2:-all}"
 	manifest=$(deploy_manifest_path "$1") || return 1
