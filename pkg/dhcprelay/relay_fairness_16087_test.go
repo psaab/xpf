@@ -150,6 +150,98 @@ func TestFairLimiter_TicketExpiryUnblocksFIFO(t *testing.T) {
 	}
 }
 
+// TestFairLimiter_PoolPlusTicketCapped pins fold-5 arm 1: with a ticket
+// outstanding, banking more refill must not push pool+ticket past the
+// aggregate burst. Construct: grant a ticket (pool pays 1), then bank
+// two intervals of refill without the holder returning; the pool must
+// clamp to burst-1 so pool+ticket == burst, not burst+1.
+func TestFairLimiter_PoolPlusTicketCapped(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	agg := newTokenBucket(1, relayBurstFor(1), clock) // burst 2
+	fair := newFairLimiter[fairSenderKeyV4](1, clock)
+	keyA := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xA7}}
+	keyB := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xB7}}
+	// Queue A and B (burn fairness bursts), then bank one interval on
+	// B's arrival: ticket granted to head A, paid from the pool.
+	for range 8 {
+		admit(fair, agg, keyA)
+	}
+	admit(fair, agg, keyA)
+	admit(fair, agg, keyB)
+	now = now.Add(time.Second)
+	admit(fair, agg, keyB)
+	if !fair.hasTick {
+		t.Fatal("setup: no ticket granted")
+	}
+	// Bank two more intervals via a third sender's arrivals (which
+	// cannot re-grant while the ticket is outstanding).
+	keyC := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, 0xC7}}
+	now = now.Add(2 * time.Second)
+	admit(fair, agg, keyC)
+	outstanding := 0.0
+	if fair.hasTick {
+		outstanding = 1
+	}
+	if total := fair.credit + outstanding; total > float64(relayBurstFor(1)) {
+		t.Fatalf("pool %.2f + ticket %.0f = %.2f exceeds aggregate burst %d",
+			fair.credit, outstanding, total, relayBurstFor(1))
+	}
+}
+
+// TestFairLimiter_QueuedSenderStaysEvictionFresh pins fold-5 arm 2: a
+// sender actively presenting packets through the queued shortcut
+// (fairAdmit, no fairness spend) must have its last-seen refreshed, so
+// after fairIdleEvict it is NOT the eviction victim while genuinely
+// idle senders are. Without the refresh, the queued sender's entry
+// stays at its queueing time and is evicted first despite contending.
+func TestFairLimiter_QueuedSenderStaysEvictionFresh(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	agg := newTokenBucket(1, relayBurstFor(1), clock)
+	fair := newFairLimiter[fairSenderKeyV4](1, clock)
+	mk := func(b byte) fairSenderKeyV4 {
+		return fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0, 0, 0, 0, b}}
+	}
+	queued := mk(0x51)
+	// Queue the sender (burn its fairness burst first).
+	for range 8 {
+		admit(fair, agg, queued)
+	}
+	admit(fair, agg, queued)
+	if !fair.waiting[queued] {
+		t.Fatal("setup: sender did not queue")
+	}
+	queuedAt := fair.table[queued].last
+	// Fill the table with idle senders at the same instant.
+	for i := 0; i < maxFairSenders-1; i++ {
+		k := fairSenderKeyV4{hlen: 6}
+		k.chaddr[0] = 0x02
+		k.chaddr[3] = byte(i >> 8)
+		k.chaddr[4] = byte(i)
+		k.chaddr[5] = 0x99
+		fair.allowSender(k)
+	}
+	// Advance past fairIdleEvict; the queued sender keeps presenting
+	// (shortcut path, still queued/denied), everyone else stays silent.
+	now = now.Add(fairIdleEvict + time.Second)
+	admit(fair, agg, queued)
+	if got := fair.table[queued].last; !got.After(queuedAt) {
+		t.Fatalf("queued sender last-seen %v not refreshed past queue time %v — shortcut never touches", got, queuedAt)
+	}
+	// Force eviction with a newcomer: the victim must be an idle
+	// sender, not the actively-queued one. (Whether the queued sender
+	// is still queued afterwards is immaterial: by t0+31s the banked
+	// pool has long since granted or expired its rotation turn.)
+	newcomer := mk(0xEE)
+	if !fair.allowSender(newcomer) {
+		t.Fatal("newcomer denied — no idle eviction happened")
+	}
+	if _, ok := fair.table[queued]; !ok {
+		t.Fatal("actively-queued sender was evicted — last-seen refresh missing on shortcut path")
+	}
+}
+
 // TestFairLimiter_WaitersBoundedByTableAndCreditClamped pins fold-3
 // arms 3+4: waiter state never exceeds the sender table, and the banked
 // credit pool never exceeds the aggregate burst.

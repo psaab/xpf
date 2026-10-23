@@ -706,7 +706,7 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   injected clock (`TestTokenBucket_BurstThenRefill`); the end-to-end flood-drop
   is `TestRunRelay_RateLimit_5670` / `TestRunRelay_RateLimit_DefaultBound`.
 
-- **Per-sender fairness (#16087, folded 4x on #16322).** The
+- **Per-sender fairness (#16087, folded 5x on #16322).** The
   aggregate bucket alone let one sender sustaining
   `>= maximum-packet-rate` consume every refill, so other clients'
   DISCOVERs starved for the flood's duration. Each distinct sender now

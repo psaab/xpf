@@ -211,10 +211,12 @@ type fairLimiter[K comparable] struct {
 	// ticket is the sender holding a granted handoff: its next packet
 	// is admitted without fairness or aggregate spend (the grant was
 	// already paid from the banked pool). See admitWithAggregate.
-	// Invariants (fold 3): credit is clamped to the aggregate burst;
-	// len(waiters) never exceeds len(table) (joinRotation requires a
-	// table entry); a ticket expires after fairTicketTTL so an absent
-	// grantee cannot block the FIFO forever.
+	// Invariants (folds 3-5): pool credit + any outstanding ticket
+	// together never exceed the aggregate burst; len(waiters) never
+	// exceeds len(table) (joinRotation requires a table entry,
+	// evictIdle reconciles); a ticket expires after fairTicketTTL so
+	// an absent grantee cannot block the FIFO forever; every admit
+	// attempt refreshes the sender's last-seen.
 	credit  float64
 	waiters []K
 	waiting map[K]bool
@@ -322,6 +324,18 @@ func (f *fairLimiter[K]) allowSender(key K) bool {
 	return fb.bucket.allow()
 }
 
+// touch refreshes a sender's last-seen time without spending fairness.
+// Fold 5: the queued/ticket shortcut paths in admitWithAggregate admit
+// (or queue) a sender without an allowSender call, so without this the
+// sender's table entry went stale while it was actively contending —
+// after fairIdleEvict an actively-queued waiter became the preferred
+// eviction victim. Every admit attempt touches its sender's entry.
+func (f *fairLimiter[K]) touch(key K) {
+	if fb, ok := f.table[key]; ok {
+		fb.last = f.now()
+	}
+}
+
 // fairAdmit is the low-rate fairness verdict: a sender ALREADY queued
 // in the waiter rotation is fairness-admitted without spending its
 // sub-bucket token. Without this, a flooder that burned its fairness
@@ -332,6 +346,7 @@ func (f *fairLimiter[K]) allowSender(key K) bool {
 // the banked pool) remains the hard bound for queued senders.
 func (f *fairLimiter[K]) fairAdmit(key K) bool {
 	if f.waiting[key] {
+		f.touch(key)
 		return true
 	}
 	return f.allowSender(key)
@@ -367,6 +382,10 @@ func (f *fairLimiter[K]) lowRateRotation() bool {
 // banked refill, not minted tokens: total admissions still track
 // burst + rate*elapsed.
 func (f *fairLimiter[K]) admitWithAggregate(key K, agg *tokenBucket) bool {
+	// Fold 5: every admit attempt refreshes the sender's last-seen, so
+	// actively-contending queued/ticketed senders are never the idle
+	// eviction victims allowSender's table-full path would pick.
+	f.touch(key)
 	if !f.lowRateRotation() {
 		if !f.allowSender(key) {
 			return false
@@ -374,8 +393,17 @@ func (f *fairLimiter[K]) admitWithAggregate(key K, agg *tokenBucket) bool {
 		return agg.allow()
 	}
 	f.credit += agg.bankRefill()
-	if cap := float64(relayBurstFor(f.rate)); f.credit > cap {
-		f.credit = cap // fold 3: pool never exceeds the aggregate burst
+	// Fold 5: the cap covers pool + outstanding paid ticket together.
+	// A granted ticket was already paid out of the pool (credit-- at
+	// grant), so clamping the pool alone let pool+ticket reach
+	// burst+1 banked admissions. The outstanding ticket is subtracted
+	// from the room before clamping.
+	room := float64(relayBurstFor(f.rate))
+	if f.hasTick {
+		room--
+	}
+	if f.credit > room {
+		f.credit = room // pool + outstanding ticket <= aggregate burst
 	}
 	// Ticket holder: a previous arrival granted this sender the
 	// handoff (paid from the pool). Admit without further spend —
