@@ -113,40 +113,55 @@ pub(super) fn run_ct_slice(
                 key,
             )
         };
-        // #16217: snapshot this worker's ACTUAL reverse counts onto
-        // the shared rows BEFORE the evidence read below, so a pair
-        // whose reverse traffic landed since the last publish counts
-        // as node-wide evidence in this same slice (the serving
-        // worker's own table is the source; the shared row is the
-        // cross-worker carrier). Only rows this worker serves are
-        // stamped, and only with counts > 0.
-        for (key, nat) in &established {
-            let rev = sessions.rev_packets_for(key);
-            if rev > 0 {
-                crate::afxdp::shared_ops::restamp_shared_rev_packets(
+        // #16217 (fw1 rev=0 leg): stamp EVERY forward pair this
+        // worker's table holds -- any origin incl. `SyncImport`
+        // replicas, any stage -- with its OWN live counters BEFORE
+        // the evidence read below. Pre-fix only `established` pairs
+        // were stamped, and `established_forward_slice` requires
+        // `established && !handshake_pending && rev>0`, so a pending
+        // `SyncImport` replica on fw1 that DOES serve reverse traffic
+        // (its local counters move where packets land -- fabric
+        // pre-FO / post-FO replies) never stamped: its shared row
+        // kept the import-time rev=0 forever and no evidence arm
+        // could ever fire for it. `restamp_*` take the max, so a
+        // zero-count replica never regresses a served count.
+        for (key, nat) in sessions.ct_slice_forward_pairs() {
+            let fwd = sessions.fwd_packets_for(&key);
+            let rev = sessions.rev_packets_for(&key);
+            if fwd > 0 || rev > 0 {
+                crate::afxdp::shared_ops::restamp_shared_packet_counts(
                     shared_sessions,
-                    key,
-                    *nat,
+                    shared_forward_wire_sessions,
+                    &key,
+                    nat,
+                    fwd,
                     rev,
                 );
             }
         }
         let mut node_served: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
         sessions.node_served_forward_slice(0, usize::MAX, &shared_evidence, &mut node_served);
+        // `collected` = strict-established pairs PLUS node-served
+        // (evidence-collected) pairs: the stage/count/alias restamps
+        // below target exactly this union.
+        let mut collected = established.clone();
         for pair in node_served {
-            if !established.contains(&pair) {
-                established.push(pair);
+            if !collected.contains(&pair) {
+                collected.push(pair);
             }
         }
         crate::afxdp::shared_ops::restamp_shared_handshakes_established(
             shared_sessions,
-            &established,
+            &collected,
         );
         // #16217: the collected pairs' ACTUAL fwd+rev counts (folded
         // by their serving workers; the promotion above only moved
         // the stage) must ride onto the shared rows, or the peer's
         // scoped adoption arm keeps reading the import-time counts.
-        for (key, nat) in &established {
+        // (Pairs only in `ct_slice_forward_pairs` were already
+        // stamped above; re-stamping the collected subset is a
+        // max-idempotent no-cost overlap.)
+        for (key, nat) in &collected {
             let fwd = sessions.fwd_packets_for(key);
             let rev = sessions.rev_packets_for(key);
             if fwd > 0 || rev > 0 {
@@ -166,7 +181,7 @@ pub(super) fn run_ct_slice(
         crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
             shared_sessions,
             shared_forward_wire_sessions,
-            &established,
+            &collected,
         );
     }
     // Check if fabric links were updated by the coordinator (e.g. after

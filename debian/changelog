@@ -1,349 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Departed-egress cache candidates survive the lookup fences: the
-    flow-cache RG-epoch/lease lookup fences no longer preempt a cached
-    ForwardCandidate whose egress RG (live FIB attribution, not the
-    stamp-owner RG) has departed, so the hit stage's
-    ForwardCandidateEgressDeparted supersession -- now checked before
-    enforce demotion -- fires and the slow path re-resolves to
-    FabricRedirect instead of re-serving the candidate on a non-owner
-    egress forever. The fabric-established (adopted) mark is likewise
-    re-validated against current RG ownership on every hit (only a
-    revalidated mark suppresses the EnforceChanged demotion; the
-    fabric-adoption gate itself now verifies this node is the
-    forwarding-active owner of the egress RG), so after failback an
-    adopted flow converts toward the fabric again instead of serving
-    on a stale adoption proof (#16217).
-
-  * Adopted flows keep the ha_inactive exemption on subsequent packets:
-    a fabric-established mark on the session entry and the flow-cache
-    entry (stamped at adoption / adoption seeding) makes cache-hit
-    revalidation skip only the EnforceChanged eviction and makes the
-    session-hit re-resolve run with the adopted context, so adopted
-    flows no longer die on the ha_inactive terminal after the first
-    adopted packet. Non-adopted flows stay fail-closed (#16217).
-
-  * Adopted flows bypass the ha_inactive terminal: the poll
-    fabric-adoption resolve now runs with `fabric_adopted = true`,
-    so a ForwardCandidate produced for a gate-proven Established
-    tuple (this node is the RG owner post-takeover) is restored
-    verbatim instead of being terminated as HAInactive /
-    ClusterTerminalHAInactive by the receiving worker's HA-activity
-    enforcement — the last resolution the adopted tuples died on
-    live. Non-adopted resolves, non-candidate lookups, and
-    unknown-egress-RG demotions stay fail-closed (#16217).
-
-  * Direct-destination neighbor warm for adopted seeds: the
-    coordinator warm pass (`queue_warm_pass`) now also enqueues
-    the direct on-link destinations of shared synced rows
-    (connected-prefix targets, per-RG gated, resolved-skipped),
-    so on RG activation the new owner re-drives ARP/ND for the
-    exact server next-hop an adopted MissingNeighbor tuple needs
-    instead of leaving the seed's single buffered packet to time
-    out unresolved (#16217).
-  * Cluster: an open control-key rotation now ages visibly and alarms
-    when forgotten (#16029). UpdateConfig stamps when the current
-    additional-authentication-key window opened (keyed on the additional
-    key's identity, so re-applying the identical config cannot launder
-    the age; swapping the additional key re-anchors, finalize clears).
-    `show chassis cluster statistics` renders the window's age on the
-    Key rotation line, and past 7 days the line carries an ALARM naming
-    the window by key ID — the retired key is still accepted, so a
-    forgotten step-5 finalize previously left it valid indefinitely.
-    The alarm never auto-finalizes (retiring a key the peer still signs
-    with reopens the dual-master window); the stamp is in-memory and
-    re-anchors at the first apply after a daemon restart, so a stale
-    alarm can be up to one restart late, never early.
-  * Logging: unify the raw-event wire parser behind logEvent and
-    DecodeRawEventRecord (#16127). parseRawEvent is now the single
-    offset parser (zero-allocation, caller-owned rawEvent) and
-    formatRawEventAddrs the single address renderer, so the live and
-    decode-only paths cannot diverge on offsets or family rendering.
-    Unknown-address-family policy is explicit and pinned: only
-    AF_INET (2) / AF_INET6 (10) are accepted — the decoder rejects and
-    the live path drops any other family byte, replacing the former
-    live-only "non-v6 means IPv4" fallback. Golden short / legacy-144 /
-    extended / IPv6 frames pin live-vs-decoded parity. Fanout is
-    unchanged (parser-only unification).
-  * Fabric: GetSessions is no longer admitted tokenless during the
-    rollout grace (#16033). A keyed node whose peer has never
-    authenticated previously grace-admitted GetSessions for up to five
-    minutes per anchor event, exposing the full session table (complete
-    5-tuples, NAT bindings and counters) to any on-segment host with no
-    token in peer-down, replacement and rollout windows. GetSessions now
-    requires a valid fabric token at all times; GetStatus,
-    GetSessionSummary, GetZonePairSummary, MonitorInterface and the
-    fabric-safe ShowText topic (counts/statistics only) remain
-    grace-eligible, and a keyed peer's valid-token GetSessions proxy is
-    unchanged.
-  * Fabric: legacy method-only MonitorInterface streams are now rejected
-    and open fabric streams re-authenticate continuously (#16031).
-    Fabric streams must carry the args-bound token matching the request
-    (missing/mismatched is Unauthenticated); the counted fallback and
-    xpf_fabric_stream_args_unbound_total are removed. Local loopback
-    monitor streams are unaffected. Open fabric streams re-verify every
-    5s that the stream token's minting key is still in the accepted-key
-    set (checked at the token's captured mint window, so window expiry
-    alone never kills a healthy stream): removing the cluster PSK ends
-    a stream within one tick, while a rotation still accepting the old
-    key does not.
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Backup-node shared promotion from imported counters: the
-    ct-slice node-served collector (`node_served_forward_slice`)
-    now also admits HA-peer replica rows (SyncImport /
-    SharedMaterialize) through its evidence arm — a still-pending
-    replica collects for the shared canonical + forward-wire alias
-    promotion when the shared-map counters stamped at import read
-    rev_packets > 0 (or a local reverse-served sibling folded
-    rev>0). Promotion target is the shared stage only; the local
-    row's stage is unchanged and a zero-count import stays
-    fail-closed (#16217).
-
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Carry live packet counters end-to-end on the HA session wire:
-    Open/Update deltas snapshot the serving entry's live fwd/rev
-    counters (bulk export stamps the shared row's monotonic counts),
-    the binary + JSON delta legs and Go SessionValue/SessionSyncRequest
-    carry FwdPackets/RevPackets (additive, length-gated/omitempty —
-    old peers decode 0 = no evidence), and the Rust import stamps
-    them so the monotonic publish merge preserves the max. Without
-    this every import stamped (0,0) and the scoped adoption gate
-    could never qualify (#16217).
-
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Fabric-adoption gate gains a scoped completion-evidence arm: a
-    synced forward row at HandshakePending now qualifies as
-    Established-for-adoption when the canonical tuple shows actual
-    reverse packets > 0 (incl. the reverse companion, fail-closed)
-    and forward packets > 0 in the shared maps, compared on the
-    full scoped key (never the bare tuple, so no cross-VRF
-    borrowing). `publish_shared_session`'s forward-wire alias keeps
-    a monotonic handshake stage and packet counts like the
-    canonical row, and cache-hit shared restamps run only on the
-    handshake stage transition, never per-packet (#16217).
-
-
-  * Publish backup-origin serving rows to the shared maps: the
-    ct-slice node-served collector (`node_served_forward_slice`) and
-    the node-served evidence probe (`node_served_evidence`) now treat
-    `WorkerLocalImport` — this node's own session replicated across
-    its workers — as a local serving origin alongside
-    `SharedPromote`, so a Backup node's Established canonical rows
-    restamp the shared canonical + forward-wire alias to Established
-    and the fabric-ingress adoption gate's shared lookup hits
-    regardless of which worker receives the retransmit. Pure HA-peer
-    replicas (`SyncImport`/`SharedMaterialize`) still never publish
-    from their own flags; non-reverse, Established, pending-cleared,
-    non-closing predicates unchanged (#16217).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Fabric-ingress adoption also consults the worker-local session
-    table: when the shared synced maps hold only HandshakePending
-    SyncImport replicas for a wire tuple (the heavy split shape, whose
-    evidence collectors all exclude peer-synced rows), a local
-    non-reverse serving row (WorkerLocalImport/SharedPromote) for the
-    canonical key that is Established now qualifies the gate, which
-    still re-resolves through the ordinary session-hit path and only
-    adopts a ForwardCandidate. Pending, closing, reverse-only, and
-    peer-synced local rows fail closed (#16217).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Stamp Established on session exports when node-wide completion
-    evidence holds for the tuple, make that evidence fail-closed,
-    and unify the shared-map lock order. Exports
-    (open_export_delta_with_provenance, emit_session_state_update,
-    and the coordinator bulk snapshot) now read Established even
-    when the exporting row is still Opening/Pending, provided the
-    shared-map evidence (merged with the table's node-served stamps)
-    proves completion. That evidence requires an actual reverse
-    packet count > 0 snapshotted onto a shared row from the serving
-    forward entry's admitted reverse counters; the mere existence of
-    a synthesized reverse companion (count 0) no longer counts. The
-    forward-wire restamp no longer locks the shared sessions map
-    while holding the wire map (AB-BA); both maps are always taken
-    shared_sessions then forward_wire (#16217).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Advance the forward-wire alias to Established on the cache-hit
-    completion path, not only at the 10 s conntrack slice: a heavy
-    split stream's shared wire stayed HandshakePending at failover,
-    so the fabric-ingress adoption gate read w=2 and discarded every
-    retransmit. The cache-hit path that detects completion now
-    restamps the canonical and forward-wire alias slots in the same
-    packet path (bounded, existing shared-map locks only); the
-    ct-slice remains the backstop (#16217).
-
- xpf (0.0.0) unstable; urgency=medium
-
-  * Adopt established synced flows on fabric ingress: after an aged
-    RG failover the old owner SNATs and fabric-redirects established
-    packets; they arrive on the new owner with the NAT'd wire tuple,
-    miss the pre-NAT session lookup, and were terminally discarded as
-    ClusterTerminalHAInactive (both HAInactive->FabricRedirect
-    converters are anti-loop gated on fabric ingress, and that
-    disposition is not slow-path eligible). On a fabric-link non-SYN
-    session miss, an ESTABLISHED synced session for the exact
-    NAT'd wire tuple is now adopted locally (worker row installed
-    from the synced entry, forwarded as a WAN ForwardCandidate);
-    without one the packet still discards, SYNs keep the existing
-    punt/seed behavior, and adoption never re-redirects. The shared
-    synced wire now advances to Established from completion evidence
-    assembled node-wide at the conntrack slice (any local Established
-    row, reverse counters observed for the canonical key in the
-    shared synced/replica maps, or the #16223 served cache-hit
-    completion; shared Established remains OUTPUT only, canonical
-    plus forward-wire alias), and peer-synced rows emit an HA Update
-    when their handshake stage alone advances to Established, so
-    the peer's adoption gate learns completions observed on a
-    peer/sibling worker (#16217).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Supersede cached ForwardCandidate decisions whose egress RG has
-    left the node: a ForwardCandidate cache entry seeded while its
-    egress RG was locally active was served forever after that RG
-    failed over to the peer, transmitting on a non-owner WAN egress
-    (aged-failover blackhole). Cache revalidation now evicts such an
-    entry (new post_hit_forward_candidate_egress_departed arm) when
-    the egress RG is known and not forwarding-active locally, so the
-    slow path re-resolves and fabric-redirects to the new owner.
-    Locally-active, unknown-egress, and standalone entries are
-    bit-identical (#16270 cache supersession).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Decline SNAT revalidation for peer-synced rows whose stored
-    resolution is FabricRedirect: the fabric pseudo-egress (fabric
-    parent ifindex) has no EgressInterface row, so the first validator
-    check revoked live synced sessions unconditionally on the egress
-    miss. The fabric leg's NAT validity is judged on the egress owner;
-    withdrawn rules on real-egress rows still revoke (#16215).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Close the FIB republication ordering window at RG activation:
-    the connected-RG republish now runs synchronously (under
-    applySem, same routes-only publisher and FIB bump) BEFORE
-    SetRGActive reports the RG forwarding-active, on both the
-    cluster-primary and VRRP-MASTER activation paths, so the
-    helper FIB already holds the /24 transit row when retransmits
-    arrive. The async republish remains as the retry backstop.
-    Defense in depth in the FIB: a covering connected prefix now
-    beats a selected non-cluster terminal only while the table
-    still holds a cluster-terminal (republication owed); operator
-    discards in a settled FIB are bit-identical (#16270).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Preserve cluster-terminal provenance into flow-cache deny seeds:
-    a DiscardRoute seeded from a cluster-terminal resolution now
-    carries its FIB source_ifindex stamp and stamp owner RG in the
-    cached entry and refuses the 1s deny TTL, so the fabric-ingress
-    takeover gate judges the entry against current ownership instead
-    of racing deny-expiry/re-seed churn. Operator discards and
-    policy denies are bit-identical (#16269).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Revalidate fabric-ingress cached DiscardRoute entries at RG
-    takeover: a fabric-era flow-cache entry demoted from
-    ClusterTerminalHAInactive to DiscardRoute (provenance stamp
-    preserved, nat=(None,None), stamp_owner_rg=0) was consumed as a
-    terminal drop on the new RG1 owner, blackholing aged flows at
-    failover+1s. When the provenance stamp is present and the
-    would-be egress RG is now locally forwarding-active, the hit now
-    evicts (new post_hit_fabric_ingress_discard_now_local arm) and
-    re-resolves to the local WAN ForwardCandidate. Uncertain origin
-    (no stamp) and still-peer-owned rows stay terminal drops (#16269).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Complete and retain split-RG replica/opening sessions from
-    node-level served evidence: a promoted serving companion for the
-    tuple (shared synced-map Established wire plus the serving pair's
-    admitted reverse counters) is now consulted before the local
-    syn_ack_first / handshake_pending refusals, so the live fw1
-    syn_ack_first replica with no local companion and the fw0 pure-
-    Opening replicas complete to Timeout 1800 or are retained at GC
-    instead of dying at the 20 s opening window. A WorkerLocalImport
-    replica's expiry no longer tears down the serving pair's BPF
-    conntrack mirror, flow-cache descriptor, or NAT state while the
-    promoted serving entry lives under the same session id (#16223).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Stop per-packet eviction of split-RG fabric redirects on the owner
-    node: flow-cache revalidation judged the cached FabricRedirect by
-    owner inequality and evicted every hit as different-owner
-    FabricLocalWins, so the tuple starved pre-failover. Revalidation now
-    resolves the local candidate per-flow (same ECMP hash and
-    NAT-translated target as the session path) and judges the cached
-    redirect against its stored resolution context: a different-owner
-    local candidate supersedes it only if it serves the flow locally
-    (per-flow resolution is a ForwardCandidate with local egress), never
-    merely for being local. This covers the fw0-seeded shape (direct
-    member ingress, FabricRedirect stamp, owner mismatch) that round 1's
-    fabric-ingress retention missed. Same-owner failback still
-    re-resolves. A debug-log DISC16222 per-tuple line names the seeded
-    decision kind, stamp owner RG, stored resolution, and cache outcome
-    per packet (#16222).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Attribute flow-cache evictions by arm: the PR #16217 no-failover
-    regression (0 hits / 6.9M evictions) could not be diagnosed because
-    evictions were a single counter. Every lookup arm (config/FIB
-    generation, RG epoch, lease, deny expiry, scheduler), the
-    scheduler-phase flush, LRU collisions, and the four post-hit
-    reclassifications now count separately per binding, exported on the
-    CLI statistics line, as
-    xpf_userspace_binding_flow_cache_evictions_total{arm}, and on the
-    BindingStatus wire. A regression test pins that a peer-synced
-    import's second packet hits with no arm moving (#16220).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Do not reap promoted synced flows at RG failover: the standby GC gate
-    instantly reaped any idle-crossed peer-synced row still in its TCP
-    opening/handshake-pending window, before the promotion self-heal or
-    standby hold could run, so aged P4 flows were deleted on both nodes
-    within seconds of the RG move even though source-NAT revocation
-    stayed at zero. Opening rows now self-heal when this node forwards
-    the RG and otherwise hold under the same bounded ceiling as
-    established rows (3x the opening window, never the application
-    timeout), so a genuinely lost Close still reaps. The timer wheel's
-    normal-expiry count is now exported as
-    xpf_userspace_session_gc_expired_total so a failover session loss
-    can be attributed to a deleter from counters. Live validation on the
-    loss cluster shows the GC gate was not the failover deleter in the
-    instrumented run (counters flat across the move; flows still zero),
-    so this hardens the promotion window without claiming the cure
-    (#16218).
-
-xpf (0.0.0) unstable; urgency=medium
-
-  * Keep established flows alive across an RG failover on both nodes:
-    first-hit source-NAT revalidation of a peer-synced row no longer
-    judges the stored terminal decision the standby/demote path left
-    behind (it declines while the stored row is terminal and otherwise
-    judges the packet's re-resolved decision), so a live translation is
-    revoked only on a fresh decision whose live configuration withdrew
-    it; StaleSourceNat revocations are now counted per binding and
-    exported as xpf_userspace_snat_revoked_sessions_total. The HA
-    demotion of a cluster-terminal FIB row preserves its would-be-egress
-    provenance, and the fabric converters rescue a demoted DiscardRoute
-    whose egress RG is peer-owned, so retransmits on the split node
-    cross the fabric to the new owner instead of dropping forever
-    (#16215, #16216, #16109).
+  * Stamp backup-served counters and judge adoption on fresh RG
+    ownership (#16217): the conntrack-refresh slice now stamps every
+    forward pair's own live counters (any origin, incl. SyncImport
+    replicas serving reverse traffic on the backup, any stage) onto
+    its shared rows before the evidence read, so a pending backup
+    replica no longer imports rev=0 forever; and the fabric-adoption
+    gate reads the authoritative RG forwarding-active set freshly
+    loaded from the coordinator snapshot for the packet, not the
+    worker's cached HA snapshot that lags RG activation.
 
 xpf (0.0.0) unstable; urgency=medium
 
@@ -1057,6 +722,307 @@ xpf (0.0.0) unstable; urgency=medium
     pinned by sentinel-per-phase and production-attribution tests that
     drive real failing producers through applyConfigLocked; pure
     signature change, no phase moves, no behaviour change (#16170).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Departed-egress cache candidates survive the lookup fences: the
+    flow-cache RG-epoch/lease lookup fences no longer preempt a cached
+    ForwardCandidate whose egress RG (live FIB attribution, not the
+    stamp-owner RG) has departed, so the hit stage's
+    ForwardCandidateEgressDeparted supersession -- now checked before
+    enforce demotion -- fires and the slow path re-resolves to
+    FabricRedirect instead of re-serving the candidate on a non-owner
+    egress forever. The fabric-established (adopted) mark is likewise
+    re-validated against current RG ownership on every hit (only a
+    revalidated mark suppresses the EnforceChanged demotion; the
+    fabric-adoption gate itself now verifies this node is the
+    forwarding-active owner of the egress RG), so after failback an
+    adopted flow converts toward the fabric again instead of serving
+    on a stale adoption proof (#16217).
+
+  * Adopted flows keep the ha_inactive exemption on subsequent packets:
+    a fabric-established mark on the session entry and the flow-cache
+    entry (stamped at adoption / adoption seeding) makes cache-hit
+    revalidation skip only the EnforceChanged eviction and makes the
+    session-hit re-resolve run with the adopted context, so adopted
+    flows no longer die on the ha_inactive terminal after the first
+    adopted packet. Non-adopted flows stay fail-closed (#16217).
+
+  * Adopted flows bypass the ha_inactive terminal: the poll
+    fabric-adoption resolve now runs with `fabric_adopted = true`,
+    so a ForwardCandidate produced for a gate-proven Established
+    tuple (this node is the RG owner post-takeover) is restored
+    verbatim instead of being terminated as HAInactive /
+    ClusterTerminalHAInactive by the receiving worker's HA-activity
+    enforcement — the last resolution the adopted tuples died on
+    live. Non-adopted resolves, non-candidate lookups, and
+    unknown-egress-RG demotions stay fail-closed (#16217).
+
+  * Direct-destination neighbor warm for adopted seeds: the
+    coordinator warm pass (`queue_warm_pass`) now also enqueues
+    the direct on-link destinations of shared synced rows
+    (connected-prefix targets, per-RG gated, resolved-skipped),
+    so on RG activation the new owner re-drives ARP/ND for the
+    exact server next-hop an adopted MissingNeighbor tuple needs
+    instead of leaving the seed's single buffered packet to time
+    out unresolved (#16217).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Backup-node shared promotion from imported counters: the
+    ct-slice node-served collector (`node_served_forward_slice`)
+    now also admits HA-peer replica rows (SyncImport /
+    SharedMaterialize) through its evidence arm — a still-pending
+    replica collects for the shared canonical + forward-wire alias
+    promotion when the shared-map counters stamped at import read
+    rev_packets > 0 (or a local reverse-served sibling folded
+    rev>0). Promotion target is the shared stage only; the local
+    row's stage is unchanged and a zero-count import stays
+    fail-closed (#16217).
+
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Carry live packet counters end-to-end on the HA session wire:
+    Open/Update deltas snapshot the serving entry's live fwd/rev
+    counters (bulk export stamps the shared row's monotonic counts),
+    the binary + JSON delta legs and Go SessionValue/SessionSyncRequest
+    carry FwdPackets/RevPackets (additive, length-gated/omitempty —
+    old peers decode 0 = no evidence), and the Rust import stamps
+    them so the monotonic publish merge preserves the max. Without
+    this every import stamped (0,0) and the scoped adoption gate
+    could never qualify (#16217).
+
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Fabric-adoption gate gains a scoped completion-evidence arm: a
+    synced forward row at HandshakePending now qualifies as
+    Established-for-adoption when the canonical tuple shows actual
+    reverse packets > 0 (incl. the reverse companion, fail-closed)
+    and forward packets > 0 in the shared maps, compared on the
+    full scoped key (never the bare tuple, so no cross-VRF
+    borrowing). `publish_shared_session`'s forward-wire alias keeps
+    a monotonic handshake stage and packet counts like the
+    canonical row, and cache-hit shared restamps run only on the
+    handshake stage transition, never per-packet (#16217).
+
+
+  * Publish backup-origin serving rows to the shared maps: the
+    ct-slice node-served collector (`node_served_forward_slice`) and
+    the node-served evidence probe (`node_served_evidence`) now treat
+    `WorkerLocalImport` — this node's own session replicated across
+    its workers — as a local serving origin alongside
+    `SharedPromote`, so a Backup node's Established canonical rows
+    restamp the shared canonical + forward-wire alias to Established
+    and the fabric-ingress adoption gate's shared lookup hits
+    regardless of which worker receives the retransmit. Pure HA-peer
+    replicas (`SyncImport`/`SharedMaterialize`) still never publish
+    from their own flags; non-reverse, Established, pending-cleared,
+    non-closing predicates unchanged (#16217).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Fabric-ingress adoption also consults the worker-local session
+    table: when the shared synced maps hold only HandshakePending
+    SyncImport replicas for a wire tuple (the heavy split shape, whose
+    evidence collectors all exclude peer-synced rows), a local
+    non-reverse serving row (WorkerLocalImport/SharedPromote) for the
+    canonical key that is Established now qualifies the gate, which
+    still re-resolves through the ordinary session-hit path and only
+    adopts a ForwardCandidate. Pending, closing, reverse-only, and
+    peer-synced local rows fail closed (#16217).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Stamp Established on session exports when node-wide completion
+    evidence holds for the tuple, make that evidence fail-closed,
+    and unify the shared-map lock order. Exports
+    (open_export_delta_with_provenance, emit_session_state_update,
+    and the coordinator bulk snapshot) now read Established even
+    when the exporting row is still Opening/Pending, provided the
+    shared-map evidence (merged with the table's node-served stamps)
+    proves completion. That evidence requires an actual reverse
+    packet count > 0 snapshotted onto a shared row from the serving
+    forward entry's admitted reverse counters; the mere existence of
+    a synthesized reverse companion (count 0) no longer counts. The
+    forward-wire restamp no longer locks the shared sessions map
+    while holding the wire map (AB-BA); both maps are always taken
+    shared_sessions then forward_wire (#16217).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Advance the forward-wire alias to Established on the cache-hit
+    completion path, not only at the 10 s conntrack slice: a heavy
+    split stream's shared wire stayed HandshakePending at failover,
+    so the fabric-ingress adoption gate read w=2 and discarded every
+    retransmit. The cache-hit path that detects completion now
+    restamps the canonical and forward-wire alias slots in the same
+    packet path (bounded, existing shared-map locks only); the
+    ct-slice remains the backstop (#16217).
+
+ xpf (0.0.0) unstable; urgency=medium
+
+  * Adopt established synced flows on fabric ingress: after an aged
+    RG failover the old owner SNATs and fabric-redirects established
+    packets; they arrive on the new owner with the NAT'd wire tuple,
+    miss the pre-NAT session lookup, and were terminally discarded as
+    ClusterTerminalHAInactive (both HAInactive->FabricRedirect
+    converters are anti-loop gated on fabric ingress, and that
+    disposition is not slow-path eligible). On a fabric-link non-SYN
+    session miss, an ESTABLISHED synced session for the exact
+    NAT'd wire tuple is now adopted locally (worker row installed
+    from the synced entry, forwarded as a WAN ForwardCandidate);
+    without one the packet still discards, SYNs keep the existing
+    punt/seed behavior, and adoption never re-redirects. The shared
+    synced wire now advances to Established from completion evidence
+    assembled node-wide at the conntrack slice (any local Established
+    row, reverse counters observed for the canonical key in the
+    shared synced/replica maps, or the #16223 served cache-hit
+    completion; shared Established remains OUTPUT only, canonical
+    plus forward-wire alias), and peer-synced rows emit an HA Update
+    when their handshake stage alone advances to Established, so
+    the peer's adoption gate learns completions observed on a
+    peer/sibling worker (#16217).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Supersede cached ForwardCandidate decisions whose egress RG has
+    left the node: a ForwardCandidate cache entry seeded while its
+    egress RG was locally active was served forever after that RG
+    failed over to the peer, transmitting on a non-owner WAN egress
+    (aged-failover blackhole). Cache revalidation now evicts such an
+    entry (new post_hit_forward_candidate_egress_departed arm) when
+    the egress RG is known and not forwarding-active locally, so the
+    slow path re-resolves and fabric-redirects to the new owner.
+    Locally-active, unknown-egress, and standalone entries are
+    bit-identical (#16270 cache supersession).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Decline SNAT revalidation for peer-synced rows whose stored
+    resolution is FabricRedirect: the fabric pseudo-egress (fabric
+    parent ifindex) has no EgressInterface row, so the first validator
+    check revoked live synced sessions unconditionally on the egress
+    miss. The fabric leg's NAT validity is judged on the egress owner;
+    withdrawn rules on real-egress rows still revoke (#16215).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Close the FIB republication ordering window at RG activation:
+    the connected-RG republish now runs synchronously (under
+    applySem, same routes-only publisher and FIB bump) BEFORE
+    SetRGActive reports the RG forwarding-active, on both the
+    cluster-primary and VRRP-MASTER activation paths, so the
+    helper FIB already holds the /24 transit row when retransmits
+    arrive. The async republish remains as the retry backstop.
+    Defense in depth in the FIB: a covering connected prefix now
+    beats a selected non-cluster terminal only while the table
+    still holds a cluster-terminal (republication owed); operator
+    discards in a settled FIB are bit-identical (#16270).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Preserve cluster-terminal provenance into flow-cache deny seeds:
+    a DiscardRoute seeded from a cluster-terminal resolution now
+    carries its FIB source_ifindex stamp and stamp owner RG in the
+    cached entry and refuses the 1s deny TTL, so the fabric-ingress
+    takeover gate judges the entry against current ownership instead
+    of racing deny-expiry/re-seed churn. Operator discards and
+    policy denies are bit-identical (#16269).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Revalidate fabric-ingress cached DiscardRoute entries at RG
+    takeover: a fabric-era flow-cache entry demoted from
+    ClusterTerminalHAInactive to DiscardRoute (provenance stamp
+    preserved, nat=(None,None), stamp_owner_rg=0) was consumed as a
+    terminal drop on the new RG1 owner, blackholing aged flows at
+    failover+1s. When the provenance stamp is present and the
+    would-be egress RG is now locally forwarding-active, the hit now
+    evicts (new post_hit_fabric_ingress_discard_now_local arm) and
+    re-resolves to the local WAN ForwardCandidate. Uncertain origin
+    (no stamp) and still-peer-owned rows stay terminal drops (#16269).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Complete and retain split-RG replica/opening sessions from
+    node-level served evidence: a promoted serving companion for the
+    tuple (shared synced-map Established wire plus the serving pair's
+    admitted reverse counters) is now consulted before the local
+    syn_ack_first / handshake_pending refusals, so the live fw1
+    syn_ack_first replica with no local companion and the fw0 pure-
+    Opening replicas complete to Timeout 1800 or are retained at GC
+    instead of dying at the 20 s opening window. A WorkerLocalImport
+    replica's expiry no longer tears down the serving pair's BPF
+    conntrack mirror, flow-cache descriptor, or NAT state while the
+    promoted serving entry lives under the same session id (#16223).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Stop per-packet eviction of split-RG fabric redirects on the owner
+    node: flow-cache revalidation judged the cached FabricRedirect by
+    owner inequality and evicted every hit as different-owner
+    FabricLocalWins, so the tuple starved pre-failover. Revalidation now
+    resolves the local candidate per-flow (same ECMP hash and
+    NAT-translated target as the session path) and judges the cached
+    redirect against its stored resolution context: a different-owner
+    local candidate supersedes it only if it serves the flow locally
+    (per-flow resolution is a ForwardCandidate with local egress), never
+    merely for being local. This covers the fw0-seeded shape (direct
+    member ingress, FabricRedirect stamp, owner mismatch) that round 1's
+    fabric-ingress retention missed. Same-owner failback still
+    re-resolves. A debug-log DISC16222 per-tuple line names the seeded
+    decision kind, stamp owner RG, stored resolution, and cache outcome
+    per packet (#16222).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Attribute flow-cache evictions by arm: the PR #16217 no-failover
+    regression (0 hits / 6.9M evictions) could not be diagnosed because
+    evictions were a single counter. Every lookup arm (config/FIB
+    generation, RG epoch, lease, deny expiry, scheduler), the
+    scheduler-phase flush, LRU collisions, and the four post-hit
+    reclassifications now count separately per binding, exported on the
+    CLI statistics line, as
+    xpf_userspace_binding_flow_cache_evictions_total{arm}, and on the
+    BindingStatus wire. A regression test pins that a peer-synced
+    import's second packet hits with no arm moving (#16220).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Do not reap promoted synced flows at RG failover: the standby GC gate
+    instantly reaped any idle-crossed peer-synced row still in its TCP
+    opening/handshake-pending window, before the promotion self-heal or
+    standby hold could run, so aged P4 flows were deleted on both nodes
+    within seconds of the RG move even though source-NAT revocation
+    stayed at zero. Opening rows now self-heal when this node forwards
+    the RG and otherwise hold under the same bounded ceiling as
+    established rows (3x the opening window, never the application
+    timeout), so a genuinely lost Close still reaps. The timer wheel's
+    normal-expiry count is now exported as
+    xpf_userspace_session_gc_expired_total so a failover session loss
+    can be attributed to a deleter from counters. Live validation on the
+    loss cluster shows the GC gate was not the failover deleter in the
+    instrumented run (counters flat across the move; flows still zero),
+    so this hardens the promotion window without claiming the cure
+    (#16218).
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Keep established flows alive across an RG failover on both nodes:
+    first-hit source-NAT revalidation of a peer-synced row no longer
+    judges the stored terminal decision the standby/demote path left
+    behind (it declines while the stored row is terminal and otherwise
+    judges the packet's re-resolved decision), so a live translation is
+    revoked only on a fresh decision whose live configuration withdrew
+    it; StaleSourceNat revocations are now counted per binding and
+    exported as xpf_userspace_snat_revoked_sessions_total. The HA
+    demotion of a cluster-terminal FIB row preserves its would-be-egress
+    provenance, and the fabric converters rescue a demoted DiscardRoute
+    whose egress RG is peer-owned, so retransmits on the split node
+    cross the fabric to the new owner instead of dropping forever
+    (#16215, #16216, #16109).
 
 xpf (0.0.0) unstable; urgency=medium
 

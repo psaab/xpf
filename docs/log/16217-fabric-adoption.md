@@ -837,3 +837,45 @@ clean master `2c8575b70e`, helper `2f2f5cbf...b04` both nodes
 14.0 Gbit/s. A second identical run was NOT executed in this lane
 (the acceptance bar is ZERO zeros TWICE; reporting one FAIL run,
 not claiming twice). Do not merge as the aged-failover cure.
+
+## Backup counter stamp + fresh-ownership gate (FZFixWire22)
+
+Two prescribed fixes on `1e198beda5` (+ committed changelog conflict
+markers removed):
+
+1. **fw1 rev=0 forever.** The ct-slice stamped only `established`
+   pairs (`established_forward_slice`: Established + !pending +
+   rev>0); a pending `SyncImport` replica on fw1 that serves reverse
+   traffic (fabric pre-FO / post-FO replies -- its local counters DO
+   move via `account_packet`) was never in the stamp set, so its
+   shared row kept the import-time rev=0. Fix:
+   `SessionTable::ct_slice_forward_pairs` (any origin, any stage,
+   non-reverse/non-closing) is stamped via
+   `restamp_shared_packet_counts` BEFORE the evidence read in
+   `run_ct_slice`; the stage/alias restamps now target
+   `collected = established U node_served`. Tests:
+   `ct_slice_pairs_include_pending_sync_import_with_live_rev_16217`
+   (production `account_packet` seam, strict-slice premise).
+2. **Ownership lag.** `fabric_adoption_gate_for_wire` read the
+   worker's cached per-tick `ha_state` snapshot, which lags RG
+   activation. Fix: the gate takes `forwarding_active_rgs`, the
+   authoritative set freshly loaded from the coordinator
+   `rg_runtime` ArcSwap in `poll_binding` per batch and threaded
+   via `WorkerContext`; both poll gate callers pass it. Tests:
+   lag arms in `stage_hit_egress_rg_fence_and_nonowner_gate_16217`
+   (fresh-set-without-RG declines despite cached-owner; fresh-set-
+   with-RG adopts despite cached-non-owner).
+
+Validation: `cargo test 16217` 30/30 (was 29); `session::` 516
+passed with the same 2 pre-existing failures as the unmodified
+head (515 passed). Live aged P4 (build 99.16217.43.dirty, helper
+sha256 0fedccf6... both nodes hash-proved before traffic, evidence
+`/var/worktrees/fzadopt2/cell52/`): **FAIL, 29 SUM zero intervals**
+-- acceptance NOT met. fw1's canonical heavy rows STILL read
+`Timeout: 20` at d28 and its last resolution still reads
+`ha_inactive ingress-ifindex=4 flow=172.16.80.8:58872->...`, so
+neither leg moved the live blackhole on this build; a second run
+was NOT executed (one FAIL, not twice). Cluster restored: clean
+master 2c8575b70e (2f2f5cbf...b04 both nodes), RG0/1/2 node0
+primary, target OK, P4 12.9 Gbit/s. Do not merge as the
+aged-failover cure.

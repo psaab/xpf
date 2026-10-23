@@ -28,6 +28,7 @@ pub(super) fn poll_binding(
     ha_startup_grace_until_secs: u64,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    ha_state_fresh: &Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     pptp_control: &Arc<crate::session::pptp_control::PptpControlInbox>,
     neighbor_resolver: Option<&Arc<NeighborResolver>>,
@@ -66,6 +67,15 @@ pub(super) fn poll_binding(
     // `&mut Umem` escape hatch (`WorkerUmem::umem_mut`, a `RefCell`
     // borrow — #15730) runs solely at bind time, never while
     // polling, so those shared reborrows cannot alias it.
+    // #16217 (ownership lag): authoritative RG forwarding-active set
+    // freshly loaded from the coordinator snapshot for THIS poll --
+    // the adoption gate reads this, not the cached `ha_state`.
+    let forwarding_active_rgs: std::collections::BTreeSet<i32> = ha_state_fresh
+        .load()
+        .iter()
+        .filter(|(_, g)| g.is_forwarding_active(now_secs))
+        .map(|(rg, _)| *rg)
+        .collect();
     let area = UmemAreaHandle::from_umem(&binding.umem);
     maybe_touch_heartbeat(binding, now_ns);
     let tx_work = drain_pending_tx(
@@ -195,6 +205,7 @@ pub(super) fn poll_binding(
             mirror_targets,
             forwarding,
             ha_state,
+            forwarding_active_rgs: &forwarding_active_rgs,
             dynamic_neighbors,
             pptp_control,
             neighbor_resolver,

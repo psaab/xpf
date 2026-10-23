@@ -875,6 +875,7 @@ impl LiveCallSiteFixture {
             mirror_targets: &self.mirror_targets,
             forwarding: &self.forwarding,
             ha_state: &self.ha_state,
+            forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
             dynamic_neighbors: &self.dynamic_neighbors,
             neighbor_resolver: None,
             shared_sessions: &self.shared_sessions,
@@ -6819,6 +6820,7 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
             !crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
                 &forwarding,
                 &non_owner_ha,
+                &std::collections::BTreeSet::new(),
                 1,
                 &sessions,
                 &shared_sessions,
@@ -6842,6 +6844,7 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
             crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
                 &forwarding,
                 &owner_ha,
+                &std::collections::BTreeSet::from([1]),
                 1,
                 &sessions,
                 &shared_sessions,
@@ -6851,6 +6854,42 @@ fn stage_hit_egress_rg_fence_and_nonowner_gate_16217() {
                 1_000_000,
             ),
             "#16217 GLM N1: the forwarding-active owner of egress RG1 adopts"
+        );
+        // #16217 (ownership lag): the AUTHORITATIVE fresh set, not
+        // the cached snapshot, decides. Cached snapshot says owner
+        // (active) but the fresh coordinator set does NOT contain
+        // RG1 -> decline; cached says non-owner but fresh set
+        // contains RG1 -> adopt. FAIL-ON-REVERT: revert the gate to
+        // the cached `ha_state` and both arms flip.
+        assert!(
+            !crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                &forwarding,
+                &owner_ha,
+                &std::collections::BTreeSet::new(),
+                1,
+                &sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &key,
+                1_000_000,
+            ),
+            "#16217 ownership lag: fresh authoritative set without RG1 must decline even when cached snapshot says owner"
+        );
+        assert!(
+            crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                &forwarding,
+                &non_owner_ha,
+                &std::collections::BTreeSet::from([1]),
+                1,
+                &sessions,
+                &shared_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &key,
+                1_000_000,
+            ),
+            "#16217 ownership lag: fresh authoritative set with RG1 must adopt even when cached snapshot lags inactive"
         );
     }
 }
