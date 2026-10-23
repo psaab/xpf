@@ -26,8 +26,12 @@ The helper script:
 > kernel-visible control only: they may show control/slow-path traffic
 > and background frames, but an empty file does not prove the iperf flow
 > never traversed the firewall. The wire evidence is `server-grpc.txt`
-> (and any LAN-host capture); prove firewall traversal with the
-> `fw-stats-before.txt` / `fw-stats-after.txt` counter deltas. See
+> (and any LAN-host capture). Corroborate firewall traversal with the
+> `fw-stats-before.txt` / `fw-stats-after.txt` deltas (`RX packets`,
+> `Flow cache hits`): aggregate counters alone do not prove per-flow
+> traversal on a busy node — they discriminate only for the isolated
+> test flow or when corroborated by `server-grpc.txt`; per-flow proof
+> needs per-flow counters or session deltas. See
 > `testing-docs/failover-testing.md` ("Observation points").
 
 Run:
@@ -60,12 +64,15 @@ Workflow:
 3. If throughput collapses after a strong first interval:
    - compare `server-grpc.txt` with the `fw-stats-before.txt` /
      `fw-stats-after.txt` deltas (`RX packets`, `Flow cache hits`,
-     session hits/misses)
+     session hits/misses), subject to the busy-node qualification above
    - look for port drift, duplicate tuples, RSTs, or missing replies in
      `server-grpc.txt`; treat `fw-lan.txt` / `fw-wan.txt` as
      kernel-visible control only, never as proof the flow was absent
-4. Use `fw-stats-before.txt` and `fw-stats-after.txt` to confirm whether the
-   active firewall actually traversed the userspace dataplane.
+4. Use `fw-stats-before.txt` and `fw-stats-after.txt` as corroboration
+   (not standalone per-flow proof on a busy node) for whether the
+   active firewall traversed the userspace dataplane; standalone proof
+   needs the host/server captures plus per-flow counters or session
+   deltas.
 
 Assumptions:
 - `grpcurl`, `incus`, and `iperf3` are installed locally

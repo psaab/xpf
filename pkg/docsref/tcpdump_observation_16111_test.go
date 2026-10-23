@@ -62,6 +62,13 @@ func TestTCPdumpBlindnessGuidance16111(t *testing.T) {
 		"`Recent exceptions`",
 		"`monitor interface <interface>`",
 		"show security flow session",
+		// The aggregate-counter qualification: node-wide counters cannot
+		// prove a single flow on a busy node.
+		"Aggregate counters alone do not prove per-flow traversal on a busy node",
+		"isolated or controlled workload",
+		"corroborated by host/endpoint captures",
+		"`Last resolution` naming the flow tuple",
+		"per-flow counters or session deltas",
 		// The before/after-on-both-nodes protocol that replaces
 		// "capture on both nodes".
 		"before and after the failover event, on both nodes",
@@ -78,6 +85,7 @@ func TestTCPdumpBlindnessGuidance16111(t *testing.T) {
 		"in-VM `tcpdump` is blind",
 		"does not prove the traffic never arrived",
 		"show chassis cluster data-plane statistics",
+		"Aggregate counters alone do not prove per-flow traversal on a busy node",
 	)
 
 	grpcSkill := read(".codex/skills/iperf-grpc-tcpdump/SKILL.md")

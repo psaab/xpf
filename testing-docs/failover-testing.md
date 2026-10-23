@@ -209,9 +209,9 @@ Working observation points for fast-path flows:
 
 1. **LAN/WAN host captures.** Capture where the frame is on a real wire segment: on the LAN host (`cluster-userspace-host`), on the WAN host, or on the destination endpoint. Host-side `tcpdump` sees the flow normally.
 2. **Remote-target capture.** On the remote target `.200`, use the gRPC capture service documented in `testing-docs/README.md` (`capture-client` / `grpcurl`) instead of assuming local shell access; see also `.codex/skills/iperf-grpc-tcpdump/`, whose server-side and host-side captures are the wire evidence and whose firewall-side captures are kernel-visible control only.
-3. **Helper statistics deltas.** Take `show chassis cluster data-plane statistics`, `show chassis cluster data-plane interfaces`, and `show chassis cluster data-plane flows` before and after the failover event, on both nodes, and compare deltas. The aggregate counters that discriminate "node X saw flow Y" include `RX packets`, `TX packets`, `Flow cache hits`, `Flow cache misses`, `Session hits`, `Session misses`, and `Exception packets`; the same statistics surface carries `Last resolution` (the most recent packet resolution: disposition, ingress/egress ifindex, next hop, flow tuple, zones) and `Recent exceptions` (count, with per-exception records on the monitor surface below).
-4. **Per-interface helper state.** `monitor interface <interface>` on each node shows binding/queue readiness, direct/copy/in-place TX, misses, policy denies, binding errors, and recent exceptions for one interface. Use it to separate "traffic never hit the old owner" from "traffic hit the old owner and redirected across fabric" from "traffic died on the fabric path"; see [userspace-fabric-failover.md](userspace-fabric-failover.md).
-5. **Session state.** `show security flow session destination-prefix <target>` on both nodes shows whether the session exists on each node and which node owns it.
+3. **Helper statistics deltas.** Take `show chassis cluster data-plane statistics`, `show chassis cluster data-plane interfaces`, and `show chassis cluster data-plane flows` before and after the failover event, on both nodes, and compare deltas. Aggregate counters alone do not prove per-flow traversal on a busy node: `RX packets`, `TX packets`, `Flow cache hits`, `Flow cache misses`, `Session hits`, `Session misses`, and `Exception packets` are node-wide, so any concurrent flow moves them. They discriminate "node X saw flow Y" only for an isolated or controlled workload (one test flow, or a before/after window with no other traffic), or when corroborated by host/endpoint captures from (1)-(2) and by `Last resolution` naming the flow tuple. Note that `Last resolution` is only the most recent resolution and is overwritten by the next packet, so a busy node can lose the tuple before you read it. The same statistics surface also carries `Recent exceptions` (count, with per-exception records on the monitor surface below). On a busy node, per-flow proof requires per-flow counters or session deltas instead: the per-tuple rows of `show chassis cluster data-plane flows` (including `observed-bytes`) and the packet/byte counters of the matching `show security flow session` entry on each node, compared before and after the event.
+4. **Per-interface helper state.** `monitor interface <interface>` on each node shows binding/queue readiness, direct/copy/in-place TX, misses, policy denies, binding errors, and recent exceptions for one interface. Use it to separate "traffic never hit the old owner" from "traffic hit the old owner and redirected across fabric" from "traffic died on the fabric path" only under the same qualification as (3): its aggregate counters discriminate for an isolated or controlled workload or when corroborated as above; on a busy node use its per-binding/per-queue breakdown together with the per-flow counters or session deltas from (3)/(5). See [userspace-fabric-failover.md](userspace-fabric-failover.md).
+5. **Session state.** `show security flow session destination-prefix <target>` on both nodes shows whether the session exists on each node and which node owns it; its per-session packet/byte counters are part of the per-flow proof on a busy node (see (3)).
 
 The minimum-artifact protocol is therefore: record the CLI surfaces in
 (3)-(5) before and after the failover event, on both nodes, and keep the
@@ -530,8 +530,11 @@ Working capture targets:
 
 Pair every host/endpoint capture with the helper-statistics, `Last
 resolution` / `Recent exceptions`, `monitor interface`, and session-state
-deltas from both nodes; the counters are what answer "did node X see flow
-Y in direction Z after time T" for a fast-path flow today.
+deltas from both nodes. Aggregate counters alone do not prove per-flow
+traversal on a busy node (see "Observation points" above): they answer
+"did node X see flow Y in direction Z after time T" only for an isolated
+or controlled workload or when corroborated by the host/endpoint captures
+and `Last resolution`; otherwise use per-flow counters or session deltas.
 
 ## Common Failure Shapes
 

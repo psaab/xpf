@@ -4,7 +4,10 @@ xpf (0.0.0) unstable; urgency=medium
     (#16111): testing-docs/failover-testing.md now names the working
     observation points (LAN/WAN host and gRPC endpoint captures, plus
     helper-statistics, Last resolution / Recent exceptions, monitor
-    interface, and session deltas on both nodes) and forbids reading
+    interface, and session deltas on both nodes), qualifies aggregate
+    counters as discriminating per flow only for an isolated/controlled
+    workload or when corroborated (busy-node per-flow proof requires
+    per-flow counters or session deltas), and forbids reading
     `0 packets captured` as "traffic never arrived"; the failover-test
     and iperf-grpc-tcpdump skills and the historical HA archive carry
     the same warning, capture_iperf.sh labels its firewall-side

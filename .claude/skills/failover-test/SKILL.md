@@ -248,8 +248,12 @@ done
 ```
 
 Take the same `show chassis cluster data-plane statistics` readings before
-and after the failover event on both nodes and compare the deltas; the
-counter movement, not an in-VM pcap, proves which node saw the flow.
+and after the failover event on both nodes and compare the deltas.
+Aggregate counters alone do not prove per-flow traversal on a busy node:
+they discriminate only for an isolated or controlled workload, or when
+corroborated by host/endpoint captures; otherwise use per-flow counters
+or session deltas (`show chassis cluster data-plane flows`,
+`show security flow session`) — see `testing-docs/failover-testing.md`.
 
 ## Known Issues
 
