@@ -34,9 +34,13 @@ xpf (0.0.0) unstable; urgency=medium
     remote `show system license` uses the shared LicenseText RPC;
     repeated `netconf` siblings set NetconfSSH; and cluster
     heartbeat/sync/VRF/duplicate-identity lookups resolve authored
-    Junos interface names to kernel ifnames. The userspace-MTU
-    on-wire arm of H4-04 remains NEEDS_VALIDATION (Rust MTU
-    precedence untraced) and is not claimed fixed.
+    Junos interface names to kernel ifnames; family-unspecified
+    (hostname) syslog collectors again resolve an IPv6-only unit's
+    primary. The userspace-MTU on-wire arm of H4-04 remains
+    NEEDS_VALIDATION: the Go snapshot value reaches the Rust
+    validator and its per-ifindex egress merge (validated, shared,
+    or zero-filled), but no live oversized-frame/PTB measurement was
+    run, so no wire consequence is claimed fixed.
 
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per
