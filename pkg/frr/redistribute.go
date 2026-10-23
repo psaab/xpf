@@ -1027,17 +1027,12 @@ func formatRedistEntries(entries []redistEntry) string {
 	return sb.String()
 }
 
-// resolveRedistributeChain renders a whole IGP export chain as one
-// redistribute line per source (#15156). With <2 defined policies it is
+// resolveRedistributeChainCluster15158 renders a whole IGP export
+// chain as one redistribute line per source (#15156) with the #15158
+// cluster flag threaded onto every entry, including the composed
+// multi-policy entries whose maps are guarded in
+// renderRedistComposedMap15156. With <2 defined policies it is
 // byte-identical to resolving each export singly.
-func (m *Manager) resolveRedistributeChain(chain []string, po *config.PolicyOptionsConfig, self string, metrics ...*qnhMetricScope11447) string {
-	return m.resolveRedistributeChainCluster15158(chain, po, self, false, metrics...)
-}
-
-// resolveRedistributeChainCluster15158 is resolveRedistributeChain with
-// the #15158 cluster flag threaded onto every entry, including the
-// composed multi-policy entries (#15156) whose maps are guarded in
-// renderRedistComposedMap15156.
 func (m *Manager) resolveRedistributeChainCluster15158(chain []string, po *config.PolicyOptionsConfig, self string, clusterMode bool, metrics ...*qnhMetricScope11447) string {
 	if countDefined15156(chain, po) < 2 {
 		var b strings.Builder

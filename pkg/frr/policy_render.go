@@ -470,16 +470,6 @@ func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConf
 	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, nil, nil)
 }
 
-// generatePolicyOptionsForSection is generatePolicyOptions for the
-// managed section: #14380 referencedNodes carries the (self, node)
-// pairs at which each policy-statement is referenced by a
-// redistribute-backed export, so a referenced no-from policy gets
-// its expanded per-source maps defined. Direct callers use
-// generatePolicyOptions and keep the explicit-only set.
-func (m *Manager) generatePolicyOptionsForSection(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string) string {
-	return m.generatePolicyOptionsForSection15157(po, bgpAcceptDefault, qnhMetrics, referencedNodes, nil)
-}
-
 // generatePolicyOptionsForSection15157 additionally carries the
 // #15157 carved-export set: policy names whose standalone map is a
 // single-policy BGP export in an originating instance and whose
