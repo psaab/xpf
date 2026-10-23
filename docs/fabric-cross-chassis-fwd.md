@@ -1454,6 +1454,7 @@ for the reasons in the #10105 section: no wire room, replay/epoch state):
   provides link authentication (MACsec / 802.1X; xpf implements neither)
   on that fabric link; the builder carries it as
   `FabricSnapshot.link_authenticated` (serialized `false`, not omitted).
+- Revocation is forced, not sampled: `link_authenticated` is config authority re-derived on every Go fabric sample and re-stamped on every Rust preservation/merge path (`restamp_fabric_link_authentication`), so deleting `fabric-interface-authenticated` forces false on surviving links even while the peer is unresolved.
 - Dataplane V0 gate (`zone_encoded_fabric_stamp_disposition`, before
   V1a/V1b): with the requirement on, a stamp on an unattested link is
   `Invalid` — the existing stage-9 terminal drop, counted as

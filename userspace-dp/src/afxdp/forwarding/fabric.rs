@@ -662,6 +662,30 @@ pub(in crate::afxdp) fn fabric_link_superseded_by_snapshots(
     })
 }
 
+/// #16023: re-stamp `link_authenticated` on a preserved fabric set from the
+/// incoming snapshots (parent_ifindex-keyed; absent row = revoked = false).
+/// Shared by the snapshot-refresh preserve/merge and the fabric-refresh
+/// preserve path so a revocation forces false regardless of peer resolution.
+/// Returns true when any entry changed.
+pub(in crate::afxdp) fn restamp_fabric_link_authentication(
+    fabrics: &mut [FabricLink],
+    snapshots: &[crate::FabricSnapshot],
+) -> bool {
+    let mut changed = false;
+    for link in fabrics {
+        let want = snapshots
+            .iter()
+            .find(|snap| snap.parent_ifindex == link.parent_ifindex)
+            .map(|snap| snap.link_authenticated)
+            .unwrap_or(false);
+        if link.link_authenticated != want {
+            changed = true;
+        }
+        link.link_authenticated = want;
+    }
+    changed
+}
+
 pub(in crate::afxdp) fn resolve_fabric_redirect(
     forwarding: &ForwardingState,
 ) -> Option<ForwardingResolution> {

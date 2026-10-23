@@ -59,6 +59,14 @@ func buildFabricSnapshots(cfg *config.Config) []FabricSnapshot {
 // m.lastSnapshot.Config, the same config the stored rows were built from, so a
 // new parent netdev cannot appear without a config change — and a config change
 // arrives through a full apply, which re-derives both halves anyway.
+//
+// #16023: LinkAuthenticated is deliberately NOT aligned. It is CONFIG
+// authority (the operator's chassis-cluster attestation as compiled into
+// m.lastSnapshot.Config), freshly derived by buildFabricSnapshotsFrom on
+// every sample — including a delete of fabric-interface-authenticated,
+// which therefore arrives here already false. Carrying the stored value
+// forward (as ParentUnbindable is carried) would keep a revoked attestation
+// alive through every SyncFabricState refresh until the next full apply.
 func alignFabricVerdicts(fresh []FabricSnapshot, applied *ConfigSnapshot) []FabricSnapshot {
 	if applied == nil || len(fresh) == 0 {
 		return fresh

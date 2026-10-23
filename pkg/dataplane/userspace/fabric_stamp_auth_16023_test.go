@@ -61,3 +61,22 @@ func TestFabricSnapshotUnauthenticatedByDefault16023(t *testing.T) {
 		t.Fatal("flow snapshot must default require=false")
 	}
 }
+
+// #16023 fold: a SyncFabricState refresh after revoking the attestation must
+// push link_authenticated=false. alignFabricVerdicts carries ParentUnbindable
+// forward from the applied snapshot but must never carry LinkAuthenticated:
+// the fresh sample already reflects the revoked compile.
+func TestAlignFabricVerdictsDoesNotCarryLinkAuthenticated16023(t *testing.T) {
+	fresh := []FabricSnapshot{{Name: "fab0", ParentLinuxName: "ge-0-0-0", ParentUnbindable: false, LinkAuthenticated: false}}
+	applied := &ConfigSnapshot{Fabrics: []FabricSnapshot{{Name: "fab0", ParentLinuxName: "ge-0-0-0", ParentUnbindable: true, LinkAuthenticated: true}}}
+	out := alignFabricVerdicts(fresh, applied)
+	if len(out) != 1 {
+		t.Fatalf("want 1 row, got %d", len(out))
+	}
+	if out[0].LinkAuthenticated {
+		t.Fatal("revoked attestation must not be carried forward by alignFabricVerdicts (#16023)")
+	}
+	if !out[0].ParentUnbindable {
+		t.Fatal("ParentUnbindable alignment control must still carry forward")
+	}
+}

@@ -103,6 +103,19 @@ impl super::Coordinator {
         // `new_fabrics` is built entirely from the current snapshots, so no
         // stale peer can survive there — the prune is only needed on the
         // preserve path.
+        // #16023: re-stamp attestation from the INCOMING snapshots on the
+        // preserve path (keyed by parent_ifindex; absent = revoked = false),
+        // so a delete of `fabric-interface-authenticated` forces false on a
+        // surviving link even while its peer is unresolved. The replace path
+        // builds fresh links from these same snapshots, so it already
+        // carries the current flag. When NO snapshot names the parent at
+        // all (fabric removed, not revoked) retain the working set but with
+        // attestation cleared: a removed fabric cannot keep approving.
+                let attestation_changed = if replace {
+            false
+        } else {
+            restamp_fabric_link_authentication(&mut self.forwarding.fabrics, snapshots)
+        };
         let superseded_removed = if replace {
             false
         } else {
@@ -143,12 +156,12 @@ impl super::Coordinator {
             // #6592: through the choke point, so this fabric-only publish
             // carries the current validation.
             self.publish_runtime_view();
-        } else if skips_changed || superseded_removed {
+        } else if skips_changed || superseded_removed || attestation_changed {
             // Nothing resolved this pass. Publish either because the skip
             // diagnostics changed or because #5686 pruned a stale (superseded)
             // link out of the preserved working set.
             self.forwarding.fabric_skips = pruned;
-            if superseded_removed {
+            if superseded_removed || attestation_changed {
                 // #5686: the pruned fabric set must also reach the worker
                 // fast-path Arc (`shared_fabrics` / `self.ha.fabrics`). The
                 // worker overwrites its forwarding.fabrics from that Arc ONLY
@@ -286,13 +299,23 @@ impl super::Coordinator {
         // non-fabric disposition (safe). A snapshot that still names the SAME
         // peer (steady state) or omits the parent (fabric removed) does not
         // supersede, so the working link survives as before.
-        let preserved_fabrics: Vec<FabricLink> = self
+        // #16023: a preserved link may keep ONLY its resolved transport
+        // identity (peer/local MACs, carrier) across a build whose fabric
+        // could not re-resolve. `link_authenticated` is CONFIG authority,
+        // not resolution state: the incoming snapshot's row for the same
+        // parent is authoritative (absent row = revoked = false), so a
+        // commit that deletes `fabric-interface-authenticated` forces
+        // false here even while the working link survives unresolved.
+        // Keyed by parent_ifindex, the identity both the snapshot build
+        // and the runtime refresh key on.
+        let mut preserved_fabrics: Vec<FabricLink> = self
             .forwarding
             .fabrics
             .iter()
             .copied()
             .filter(|link| !fabric_link_superseded_by_snapshots(link, &snapshot.fabrics))
             .collect();
+        restamp_fabric_link_authentication(&mut preserved_fabrics, &snapshot.fabrics);
         // #3773 (M13): capture the prior fabric-skip set so the post-merge
         // transition log fires only when the named skip set actually changes.
         let old_fabric_skips = self.forwarding.fabric_skips.clone();
@@ -436,9 +459,21 @@ impl super::Coordinator {
         );
         if self.forwarding.fabrics.is_empty() && !preserved_fabrics.is_empty() {
             self.forwarding.fabrics = preserved_fabrics;
-        } else if !preserved_fabrics.is_empty() {
+        } else {
+            // #16023: the new build's rows already carry the incoming
+            // snapshot's attestation (populate_fabrics), but a preserved
+            // link merged below — or a new-build row the merge leaves in
+            // place — must never outlive a revocation. Re-stamp EVERY
+            // surviving entry from the snapshot map (absent = false)
+            // before merging preserved links, so revocation forces false
+            // on both the freshly-built and the preserved entry for a
+            // parent. Without this the gate would approve by overlay
+            // (fabric_for_ingress matches parent OR overlay) on the
+            // survivor the map never touched.
+            restamp_fabric_link_authentication(&mut self.forwarding.fabrics, &snapshot.fabrics);
             // Merge: for each preserved fabric, if the new snapshot
             // doesn't have a matching parent_ifindex, keep the old one.
+            // Preserved entries were already re-stamped above.
             for old in &preserved_fabrics {
                 if !self
                     .forwarding
