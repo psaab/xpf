@@ -27,6 +27,19 @@ pub(super) const GRE_DECAP_INGRESS_FLAG: u8 = 0x40;
 /// collision today; a revival of that header bit must pick another value.
 pub(super) const TUNNEL_DECAP_INGRESS_FLAG: u8 = 0x20;
 
+/// #16007: a TCP first fragment whose declared datagram ends before
+/// the TCP flags byte (L4+14) carries `tcp_flags == 0` as UNKNOWN, not
+/// as "no flags set". True when the shim said so or the worker
+/// re-derives it from the frame; used to fail closed everywhere the
+/// stamped flags would otherwise be trusted.
+#[inline]
+pub(in crate::afxdp) fn meta_l4_flags_unknown(frame: &[u8], meta: super::UserspaceDpMeta) -> bool {
+    if meta.tcp_flags_unknown != 0 {
+        return true;
+    }
+    super::frame::frame_l4_flags_unknown(frame, meta)
+}
+
 /// RFC 1812 §4.3.2.7 / RFC 792 / RFC 4443 §2.4 error-suppression gate
 /// for LOCALLY GENERATED ICMP/ICMPv6 error messages (Time Exceeded,
 /// Destination Unreachable). A router MUST NOT originate an ICMP error

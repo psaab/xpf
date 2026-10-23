@@ -1246,6 +1246,36 @@ fn ip_declared_end(frame: &[u8], l3_offset: usize, addr_family: u8) -> Option<us
 /// bound never rejects legitimate traffic.
 const TCP_FLAGS_DECLARED_MIN: usize = 14;
 
+/// #16007: true when this packet is a TCP FIRST fragment whose declared
+/// datagram ends before the TCP flags byte, so the stamped `tcp_flags`
+/// is UNKNOWN (the shim stamps 0 for it). Frame-derived so slow-path,
+/// injected and replayed frames that never crossed the shim are covered
+/// too. Non-TCP, unfragmented, and non-first-fragment packets are false:
+/// their flags are either proven or absent by construction (non-first
+/// fragments are flowless and never reach flag-gated admission).
+#[inline]
+pub(in crate::afxdp) fn frame_l4_flags_unknown(frame: &[u8], meta: UserspaceDpMeta) -> bool {
+    if meta.protocol != crate::ip_proto::PROTO_TCP {
+        return false;
+    }
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family) as usize;
+    let Some(declared_end) = ip_declared_end(frame, l3, meta.addr_family) else {
+        return false;
+    };
+    let first_fragment = match meta.addr_family as i32 {
+        libc::AF_INET => frame
+            .get(l3..)
+            .is_some_and(|pkt| ipv4_is_any_fragment(pkt) && !ipv4_is_non_first_fragment(pkt)),
+        libc::AF_INET6 => {
+            let walk = walk_ipv6_ext_chain(frame.get(l3..).unwrap_or(&[]), 0);
+            walk.first_non_atomic_fragment.is_some()
+        }
+        _ => false,
+    };
+    first_fragment
+        && declared_end < (meta.l4_offset as usize).saturating_add(TCP_FLAGS_DECLARED_MIN)
+}
+
 /// #2362 fold A + fold B unified (#6435): the ONE per-packet match-input
 /// builder for both metadata flavors. The input-filter path
 /// (`poll_descriptor/filter.rs`, `host_inbound_policy.rs`, `pbr.rs`,

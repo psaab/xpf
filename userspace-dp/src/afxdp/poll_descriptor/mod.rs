@@ -5647,13 +5647,30 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // v4+AH never reaches this gate as TCP).
                         let syn_protocol =
                             crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
-                        if matches!(
+                        // #16007: a tiny first fragment's flags are UNKNOWN,
+                        // so it fails closed on LocalDelivery too — the one
+                        // disposition the proven-flags gate exempts. A proven
+                        // non-SYN LocalDelivery packet still reaches the
+                        // local stack (peer RST/FIN for firewall-originated
+                        // flows); an unseen-flags fragment is not proven
+                        // anything, and delivering it would hand the kernel
+                        // a first fragment whose SYN lives only in the
+                        // reassembled datagram. Scoped to UNKNOWN only, so
+                        // the deliberate LocalDelivery exemption is intact
+                        // for every packet whose flags were actually read.
+                        let tcp_flags_unknown =
+                            crate::afxdp::icmp::meta_l4_flags_unknown(packet_frame, meta);
+                        if (matches!(
                             decision.resolution.disposition,
                             ForwardingDisposition::ForwardCandidate
                                 | ForwardingDisposition::MissingNeighbor
-                        ) && strict_syn_check_drops_new_flow_tunnel(
+                        ) || (tcp_flags_unknown
+                            && decision.resolution.disposition
+                                == ForwardingDisposition::LocalDelivery))
+                            && strict_syn_check_drops_new_flow_tunnel(
                             syn_protocol,
                             meta.tcp_flags,
+                            tcp_flags_unknown,
                             worker_ctx.forwarding.tcp_no_syn_check,
                             worker_ctx.forwarding.tcp_strict_syn_check,
                             worker_ctx.forwarding.tcp_no_syn_check_in_tunnel,
@@ -5943,6 +5960,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 resolution,
                                 meta.protocol,
                                 meta.tcp_flags,
+                                crate::afxdp::icmp::meta_l4_flags_unknown(packet_frame, meta),
                             )
                             && !(flow.forward_key.protocol == PROTO_UDP
                                 && crate::afxdp::wg::decap::is_wg_listener_tuple(

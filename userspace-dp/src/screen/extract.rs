@@ -93,6 +93,7 @@ pub(crate) fn extract_screen_info(
         dst_ip,
         src_port,
         dst_port,
+        tcp_flags_unknown: false,
         tcp_seq: 0,
         tcp_ack: 0,
         tcp_mss: 0,
@@ -596,6 +597,38 @@ pub(crate) fn extract_screen_info(
                 }
                 _ => break,
             }
+        }
+    }
+
+    // #16007: a TCP first fragment whose DECLARED datagram ends before
+    // the flags byte (L4+14) has UNKNOWN flags. The caller-supplied
+    // `tcp_flags` for such a packet is the shim's 0 stamp (or a slow-path
+    // equivalent), which `check_tcp_flag_screens` would otherwise read
+    // as a proven no-flag packet and `strict_syn_check` as a proven
+    // non-SYN. Fail closed here — the one place every screened path
+    // crosses — with the `syn-frag` reason. Declared end is computed
+    // from the IP header itself (total_len / payload_len), never from
+    // capture length, so Ethernet slack cannot manufacture or hide it.
+    // A zero declared length means no declared bound was supplied
+    // (synthetic metas) and manufactures no verdict.
+    if protocol == PROTO_TCP && info.is_first_fragment {
+        let declared_end = if addr_family == libc::AF_INET as u8 {
+            if info.ip_total_len == 0 {
+                usize::MAX
+            } else {
+                l3_offset.saturating_add(info.ip_total_len as usize)
+            }
+        } else if info.ip_payload_len == 0 {
+            usize::MAX
+        } else {
+            l3_offset
+                .saturating_add(40)
+                .saturating_add(info.ip_payload_len as usize)
+        };
+        if let Some(tcp_start) = tcp_offset
+            && declared_end < tcp_start.saturating_add(14)
+        {
+            return Err(ScreenParseError::TinyFirstFragmentFlagsUnknown);
         }
     }
 

@@ -69,10 +69,19 @@ pub(super) fn new_flow_session_limit_drop(
 pub(super) fn strict_syn_check_drops_new_flow(
     protocol: u8,
     tcp_flags: u8,
+    tcp_flags_unknown: bool,
     no_syn_check: bool,
     strict_syn_check: bool,
 ) -> bool {
-    strict_syn_check_drops_new_flow_tunnel(protocol, tcp_flags, no_syn_check, strict_syn_check, false, false)
+    strict_syn_check_drops_new_flow_tunnel(
+        protocol,
+        tcp_flags,
+        tcp_flags_unknown,
+        no_syn_check,
+        strict_syn_check,
+        false,
+        false,
+    )
 }
 
 /// #15753: tunnel-aware variant. When `is_tunnel` and
@@ -82,6 +91,7 @@ pub(super) fn strict_syn_check_drops_new_flow(
 pub(super) fn strict_syn_check_drops_new_flow_tunnel(
     protocol: u8,
     tcp_flags: u8,
+    tcp_flags_unknown: bool,
     no_syn_check: bool,
     strict_syn_check: bool,
     no_syn_check_in_tunnel: bool,
@@ -89,6 +99,16 @@ pub(super) fn strict_syn_check_drops_new_flow_tunnel(
 ) -> bool {
     if !matches!(protocol, crate::ip_proto::PROTO_TCP) {
         return false;
+    }
+    // #16007: flags UNKNOWN (tiny first fragment, flags byte outside the
+    // declared datagram) fails closed in EVERY mode — including
+    // `no_syn_check` and the tunnel opt-out. The stamped 0 is not a
+    // proven non-closing, non-SYN packet; it is no information at all,
+    // and admitting it would let an 8-byte first fragment seed a session
+    // on flags nobody has seen, with the reassembled SYN arriving only
+    // in the offset-1 second fragment.
+    if tcp_flags_unknown {
+        return true;
     }
     if crate::tcp_flags::is_closing(tcp_flags) {
         return true;

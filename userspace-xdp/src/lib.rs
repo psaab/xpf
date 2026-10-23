@@ -258,7 +258,10 @@ struct UserspaceDpMeta {
     meta_flags: u8,
     dscp: u8,
     dscp_rewrite: u8,
-    reserved: u16,
+    // #16007: 1 when `tcp_flags` is UNKNOWN (tiny first fragment whose
+    // declared datagram ends before the flags byte); 0 = flags proven.
+    tcp_flags_unknown: u8,
+    reserved: u8,
     flow_src_port: u16,
     flow_dst_port: u16,
     flow_src_addr: [u8; 16],
@@ -1398,6 +1401,15 @@ fn write_userspace_meta(
             meta_flags: 0,
             dscp: parsed.dscp,
             dscp_rewrite: 0xff,
+            // #16007: a TCP first fragment with declared L4 < 14 stamps
+            // flags=0 as UNKNOWN. `first_fragment_l4` returns
+            // payload_offset == l4_offset for exactly that shape (every
+            // proven-flags TCP parse advances past the header), so the
+            // unknown bit folds out of the existing fields with no new
+            // ParsedPacket state for the verifier to carry.
+            tcp_flags_unknown: (parsed.is_fragment
+                && parsed.protocol == PROTO_TCP
+                && parsed.payload_offset == parsed.l4_offset) as u8,
             reserved: 0,
             flow_src_port: parsed.flow_src_port,
             flow_dst_port: parsed.flow_dst_port,
@@ -2731,6 +2743,9 @@ fn is_connection_initiating(pkt: &ParsedPacket) -> bool {
 /// (else None, and the caller punts under the no-L4 marker), while the flags
 /// byte is read when covered and zero otherwise — a minimum legal first
 /// fragment carries 8 L4 bytes, which names the tuple but not the flags.
+/// #16007: that zero is UNKNOWN, not "no flags set": `write_userspace_meta`
+/// stamps `tcp_flags_unknown` for it, and the worker fails closed on it
+/// (see `meta_l4_flags_unknown` in userspace-dp).
 /// Every other protocol runs the standard arms against the same declared
 /// end (UDP's 8/9-byte and ICMP's 8-byte spans fit a minimum first fragment;
 /// short of that the caller punts rather than dropping).
