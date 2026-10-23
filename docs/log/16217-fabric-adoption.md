@@ -1061,3 +1061,90 @@ FZDiag24 prescribed, not the fw0 fabric-delivery leg.
 Cluster restored after each run: clean master `2c8575b70e`,
 helper `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0
 primary, target OK, P4 verification 13.9 / 13.7 Gbit/s.
+
+## Adopted stored-terminal restore + retryable MissingNeighbor (FZFixWire25)
+
+Diagnosis (FZDiag27, head `0aa2ff08b5`, scratch FILE-sink trace in
+`/var/worktrees/FZDiag27/cell/`, deb `99.16217.51.fz27.dirty`):
+post-FO fabric replies hit the session-HIT on fw1 with
+`session_hit_fabric_adopted=true` (shared-Established arm) yet
+dropped. The dominant shape (352 hits on one tuple, 707 final
+`ClusterTerminalHAInactive`): the `SyncImport` row the peer
+exported carries `ClusterTerminalHAInactive` ITSELF (egress 0, no
+next-hop), so the synced-session lookup returns the stored
+terminal verbatim and `owner_rg_for_resolution` reads 0 off it —
+`fabric_adopted_resolution` fell through (its ForwardCandidate and
+MissingNeighbor arms both require a named egress RG) and kept the
+terminal on every adopted hit. The secondary shape (160 hits):
+looked-up `MissingNeighbor` (egress 14) whose FIB recompute was
+still unresolved during snapshot lag — the MissingNeighbor arm
+re-imposed `HAInactive`, terminalizing a merely unwarm neighbor.
+
+Fix (both arms fail-closed):
+1. **Stored-terminal arm.** `fabric_adopted_resolution`
+   (session_glue/resolve.rs) gains a `ClusterTerminalHAInactive`
+   arm: recompute the resolution from the live FIB
+   (`lookup_forwarding_resolution_with_dynamic` on the resolution
+   target, the MissingNeighbor arm's recompute). Restore only a
+   recomputed `ForwardCandidate` carrying a resolved neighbor MAC
+   and a known egress RG (>0). Ownership stays the adoption
+   gate's job (fresh authoritative `forwarding_active_rgs`,
+   already threaded to both poll callsites); the helper holds no
+   RG set, exactly as for the other arms.
+2. **Retryable MissingNeighbor.** In BOTH the ClusterTerminal and
+   MissingNeighbor arms, a recomputed `MissingNeighbor` with a
+   known egress RG is returned AS `MissingNeighbor` instead of
+   the HA terminal: the poll path drops this packet without
+   terminalizing the flow (MissingNeighbor is slow-path eligible;
+   HAInactive is not), the ordinary MissingNeighbor mechanisms
+   (neg-cache gate, kernel probe, `pending_neigh` retry) drive
+   resolution, and the next retransmit re-enters this restore.
+   Non-candidate / unknown-egress recomputes keep the terminal.
+   Non-adopted flows never reach the helper and stay bit-identical.
+
+Tests (through the session-hit path):
+- `adopted_cluster_terminal_recomputes_from_fib_16217`
+  (session_glue/tests.rs): pure arms (no FIB cover fail-closed,
+  connected-but-unresolved retryable, resolved restore with FIB
+  MAC) PLUS end-to-end through
+  `resolve_flow_session_decision_with_conntrack_and_payload` with
+  `fabric_adopted = true` and a stored `ClusterTerminalHAInactive`
+  SyncImport row — non-adopted control terminates, adopted yields
+  `ForwardCandidate` egress 12 + resolved MAC, adopted-unresolved
+  yields retryable `MissingNeighbor`.
+- Two pre-existing pure-arm expectations updated to the retryable
+  contract (no-FIB-cover shapes keep the terminal).
+- `cargo test 16217` 35/35 (was 34/34); `session::` 518 passed
+  with the same 2 pre-existing failures as the unmodified head
+  (`tcp_seq_15753`, `session_decision_typed_snat_layout_11064`);
+  `forwarding::` 392/1 and `flow_cache` 233/2 failures verified
+  identical on the unmodified head (stash-verified);
+  `policy_revalidation` 112 passed.
+
+Live aged table (all-node0, P4 60 s, RG1 fw0->fw1 at 30 s age +
+failback, deb `99.16217.50.dirty` sha256 `a3b78b59...28`,
+helper sha256 `76c0b9e4...b21` hash-proved `/proc/<pid>/exe` on
+BOTH nodes before traffic; evidence `cell58/`, `cell59/`):
+
+| Arm | Build | SUM zero intervals | Verdict |
+|---|---|---|---|
+| Clean master (FZDiag8) | 2c8575b70e | 130 | FAIL |
+| #16215 third shape | ca91c55e5a / 99.16215.1 | 25 (all from FO+1 s) | FAIL |
+| FZFixWire24 run 1+2 | 0aa2ff08b5 / 99.16217.49.dirty | 29 / 25 (all from FO+1 s) | FAIL |
+| **This fix run 1 (cell58)** | **99.16217.50.dirty** | **29 (all from FO+1 s)** | **FAIL — acceptance NOT met** |
+| **This fix run 2 (cell59)** | **99.16217.50.dirty** | **29 (all from FO+1 s)** | **FAIL — twice on loss confirmed** |
+
+Pre-FO no zeros both runs (8.7-9.0 Gbit/s at 28-30 s). The
+stored-terminal and retryable legs are unit-proven through the
+session-hit path, but the live blackhole persists downstream:
+the fw0-side fabric-delivery leg (client retransmits still not
+fabric-delivered to fw1 after the transient — fw0 keeps serving
+from cache post-FO, the FZDiag24/FZDiag27 residual) remains the
+open leg. **Do not merge as the aged-failover cure**; this closes
+the adopted stored-terminal restore and the retryable
+MissingNeighbor legs FZDiag27 prescribed, not the fw0
+fabric-delivery leg.
+
+Cluster restored after each run: clean master `2c8575b70e`,
+helper `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0
+primary, target OK, P4 verification 14.0 / 14.7 Gbit/s.
