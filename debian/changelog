@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * DHCP relay: add bounded per-sender fairness under the per-interface
+    aggregate token bucket (#16087). One sender sustaining the
+    maximum-packet-rate no longer starves other clients: each chaddr
+    (DHCPv4) / Client-ID DUID (DHCPv6) gets a 1/256 share of the rate
+    with a burst of at least 8, in a 256-entry table. Stops a naive
+    single-identity flood; identity rotation still needs switch
+    controls (documented in pkg/dhcprelay/README.md).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Convert every exhaustive StaticNATRuleSnapshot (35) and
     ThreeColorPolicerSnapshot (5) literal to a
     `..Default::default()` tail, dropping only default-valued

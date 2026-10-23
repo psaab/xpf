@@ -116,11 +116,189 @@ func (b *tokenBucket) allow() bool {
 	return false
 }
 
+// refund returns one previously consumed token (capped at burst). The
+// #16087 fairness layer runs after the aggregate allow(), because the
+// sender key needs the parsed packet; a fairness denial refunds the
+// aggregate token so the flooder's denied packets do not burn the
+// aggregate budget that other senders are supposed to share. Only the
+// single read-loop goroutine touches the bucket, so no lock is needed.
+func (b *tokenBucket) refund() {
+	if b.tokens < b.burst {
+		b.tokens++
+	}
+}
+
 // relayBurstFor sizes the token-bucket burst capacity from the sustained rate:
 // two seconds' worth of packets, so a brief simultaneous-boot spike is admitted
 // instantly while the sustained rate still bounds a persistent flood.
 func relayBurstFor(rate int) int {
 	return rate * 2
+}
+
+// --- Bounded per-sender fairness within the aggregate bucket (#16087) ---
+//
+// #5670's aggregate bucket is the CPU/amplification bound and stays the
+// outer gate. Alone it lets one sender that sustains >= rate consume every
+// refill, so a second sender's DISCOVERs are admitted only in proportion to
+// the flood's gaps — for a saturating single-MAC flood, effectively never.
+// fairLimiter layers a bounded per-sender sub-limit under the aggregate:
+// each distinct sender key gets its own token bucket of
+// ceil(aggregateRate/maxFairSenders) sustained (burst perSenderBurst), so
+// any one sender can consume at most ~1/maxFairSenders of the aggregate
+// sustained rate and the remaining share stays available to other senders.
+// With maxFairSenders senders flooding simultaneously every sub-bucket is
+// full-tilt and their sum still cannot exceed the aggregate rate, so the
+// aggregate bound is preserved. The trade-off is deliberate: a LONE sender
+// is also capped at the per-sender rate, not the full aggregate. That is
+// far above legitimate DHCP client behaviour (a handful of packets per
+// lease, renewals hours apart, retransmissions on a 4/8/16s backoff), and
+// perSenderBurst still admits a whole DORA exchange plus retransmissions
+// instantly; in exchange, a second sender is guaranteed its own share the
+// moment it appears, instead of competing for aggregate refills.
+//
+// HONEST LIMIT (Codex dissent on A10-17, recorded in #16087): the sender
+// key is attacker-chosen (v4 chaddr, v6 Client-ID DUID). This stops a
+// NAIVE single-identity flooder — including the far more common accidental
+// case of one looping/misbehaving client — not a flooder that rotates
+// identities per packet. Rotating identities is bounded by the aggregate
+// bucket (CPU/amplification) and by maxFairSenders: each new identity gets
+// a fresh sub-bucket, so after maxFairSenders rotations the table is full
+// and further NEW identities are denied at the fairness layer while known
+// senders keep their reserved share — rotation can deny service to other
+// NEWcomers during the flood, but cannot evict established senders.
+// Per-port fairness against identity rotation needs trustworthy
+// ingress-port identity, which belongs at the switch (DHCP snooping /
+// port rate limits); that is documented, not implemented here.
+//
+// MEMORY BOUND: the table holds at most maxFairSenders buckets, created
+// lazily and evicted longest-idle-first when full. The per-sender drain
+// uses the same clock seam as the aggregate bucket, so tests are
+// deterministic. Owned solely by the single per-interface read-loop
+// goroutine (v4 main loop / v6 client loop), so it needs no lock, exactly
+// like tokenBucket.
+const maxFairSenders = 256
+
+// fairIdleEvict is how long a sender bucket may sit untouched before it is
+// preferred for eviction. It only orders eviction among idle buckets; a
+// bucket that keeps sending is never evicted under it.
+const fairIdleEvict = pendingTTL
+
+// fairBucket is one sender's sub-bucket plus its last-touch time for
+// idle eviction.
+type fairBucket[K comparable] struct {
+	bucket *tokenBucket
+	last   time.Time
+}
+
+// fairLimiter is the per-sender fairness layer under the aggregate bucket.
+// The zero value is not usable; construct with newFairLimiter.
+type fairLimiter[K comparable] struct {
+	rate  int // aggregate sustained pps (for sub-rate derivation)
+	now   func() time.Time
+	table map[K]*fairBucket[K] // <= maxFairSenders; eviction scans for longest-idle
+}
+
+// newFairLimiter builds a fairness limiter for the given aggregate rate.
+// The per-sender sustained rate is ceil(aggregate/maxFairSenders) with a
+// floor of 1 pps, so even a huge configured aggregate never gives one
+// sender a sub-rate that can starve the rest, and a tiny aggregate still
+// lets every sender make progress at 1 pps. A nil clock defaults to
+// time.Now.
+func newFairLimiter[K comparable](aggregateRate int, now func() time.Time) *fairLimiter[K] {
+	if now == nil {
+		now = time.Now
+	}
+	return &fairLimiter[K]{
+		rate:  resolveMaxPacketRate(aggregateRate),
+		now:   now,
+		table: make(map[K]*fairBucket[K]),
+	}
+}
+
+// perSenderRate returns the sustained pps one sender may consume: its
+// 1/maxFairSenders share of the aggregate, rounded up, at least 1.
+func (f *fairLimiter[K]) perSenderRate() int {
+	r := (f.rate + maxFairSenders - 1) / maxFairSenders
+	if r < 1 {
+		return 1
+	}
+	return r
+}
+
+// fairBurstFloor is the minimum per-sender burst: a complete legitimate
+// exchange (DISCOVER/REQUEST plus RFC 2131 retransmissions, or a v6
+// Solicit/Request/Renew sequence) must clear instantly even though the
+// per-sender sustained rate is only ~1 pps at the default aggregate.
+const fairBurstFloor = 8
+
+// perSenderBurst returns one sender's burst capacity.
+func (f *fairLimiter[K]) perSenderBurst() int {
+	if b := relayBurstFor(f.perSenderRate()); b > fairBurstFloor {
+		return b
+	}
+	return fairBurstFloor
+}
+
+// allowSender reports whether a packet from sender key may pass the
+// fairness layer. It must be called only after the aggregate bucket
+// admitted the packet. A known sender is admitted while its sub-bucket
+// holds a token. A NEW sender is admitted (creating its bucket) unless
+// the table is full and no bucket has been idle for fairIdleEvict — in
+// that case the packet is denied by fairness so established senders keep
+// their share against identity rotation; the caller still counts it as a
+// rate-limit drop.
+func (f *fairLimiter[K]) allowSender(key K) bool {
+	now := f.now()
+	if fb, ok := f.table[key]; ok {
+		fb.last = now
+		return fb.bucket.allow()
+	}
+	if len(f.table) >= maxFairSenders && !f.evictIdle(now) {
+		return false
+	}
+	sub := f.perSenderRate()
+	fb := &fairBucket[K]{bucket: newTokenBucket(sub, f.perSenderBurst(), f.now), last: now}
+	f.table[key] = fb
+	return fb.bucket.allow()
+}
+
+// evictIdle removes the longest-idle bucket if it has been untouched for
+// at least fairIdleEvict, reporting whether a slot was freed.
+func (f *fairLimiter[K]) evictIdle(now time.Time) bool {
+	var oldest K
+	var oldestAt time.Time
+	found := false
+	for k, fb := range f.table {
+		if !found || fb.last.Before(oldestAt) {
+			oldest, oldestAt, found = k, fb.last, true
+		}
+	}
+	if !found || now.Sub(oldestAt) < fairIdleEvict {
+		return false
+	}
+	delete(f.table, oldest)
+	return true
+}
+
+// fairSenderKeyV4 derives the v4 fairness key: the chaddr (clamped like
+// pendingKeyFor) WITHOUT the xid — fairness is per client identity, not
+// per transaction, so retransmissions and renewals from one client share
+// one sub-bucket. The hlen participates so different-length addresses do
+// not collide.
+type fairSenderKeyV4 struct {
+	hlen   uint8
+	chaddr [16]byte
+}
+
+func fairSenderKeyForV4(pkt *dhcpv4.DHCPv4) fairSenderKeyV4 {
+	k := fairSenderKeyV4{}
+	n := len(pkt.ClientHWAddr)
+	if n > len(k.chaddr) {
+		n = len(k.chaddr)
+	}
+	copy(k.chaddr[:], pkt.ClientHWAddr[:n])
+	k.hlen = uint8(n)
+	return k
 }
 
 // readBufSize is the size of the per-loop read buffer for both the
@@ -1633,6 +1811,8 @@ func (m *Manager) runRelaySession(ctx context.Context,
 		// per the project logging rules).
 		rateBucket := newTokenBucket(ir.maxPacketRate,
 			relayBurstFor(ir.maxPacketRate), m.now)
+		// #16087: per-sender fairness (chaddr-keyed) under the aggregate.
+		fair := newFairLimiter[fairSenderKeyV4](ir.maxPacketRate, m.now)
 		warnedRateLimit := false
 		for {
 			n, srcAddr, err := conn.ReadFrom(buf)
@@ -1686,11 +1866,29 @@ func (m *Manager) runRelaySession(ctx context.Context,
 				continue
 			}
 
-			slog.Debug("dhcp-relay: received client request",
-				"interface", ifaceName,
-				"type", msgType,
-				"client_mac", pkt.ClientHWAddr,
-				"src", srcAddr)
+			// #16087: per-sender fairness under the aggregate bucket. The
+			// aggregate check above cannot key by sender (it runs before
+			// the parse, at the cheapest point); now that chaddr is known,
+			// deny a sender that has exhausted its own sub-bucket so one
+			// flooding identity cannot consume every aggregate refill.
+			// The denied packet's aggregate token is refunded: without it
+			// the flooder's own drops would burn the burst that the next
+			// sender is supposed to share. Counted in the same rate-limit
+			// counter (same operator meaning: this sender exceeded its
+			// share of the pps bound).
+			if !fair.allowSender(fairSenderKeyForV4(pkt)) {
+				rateBucket.refund()
+				ir.requestsDroppedRateLimit.Add(1)
+				if !warnedRateLimit {
+					slog.Warn("dhcp-relay: client request rate limit exceeded, dropping excess",
+						"interface", ifaceName, "rate_pps", ir.maxPacketRate, "src", srcAddr)
+					warnedRateLimit = true
+				} else {
+					slog.Debug("dhcp-relay: client request rate limit exceeded, dropping",
+						"interface", ifaceName, "src", srcAddr)
+				}
+				continue
+			}
 
 			// #2456: HA master-state gate. On a shared client segment both the
 			// cluster MASTER and the BACKUP node receive the client broadcast;

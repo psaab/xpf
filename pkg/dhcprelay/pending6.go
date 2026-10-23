@@ -174,6 +174,25 @@ func pending6IALessKey(key pending6Key) pending6Key {
 	return key
 }
 
+// fairSenderKeyV6 is the DHCPv6 fairness identity (#16087): the Client-ID
+// DUID bytes alone — no xid, no IAID — so every transaction from one
+// client shares one sub-bucket. A message with no Client ID (or an
+// unrepresentable DUID) reports ok=false; the caller then applies only
+// the aggregate bucket rather than lumping every unidentified sender
+// into one shared fairness identity.
+type fairSenderKeyV6 struct {
+	duid    [pending6MaxDUIDSize]byte
+	duidLen uint8
+}
+
+func fairSenderKeyForV6(packet dhcpv6.DHCPv6) (fairSenderKeyV6, bool) {
+	k, ok := pending6KeyFor(packet)
+	if !ok || k.duidLen == 0 {
+		return fairSenderKeyV6{}, false
+	}
+	return fairSenderKeyV6{duid: k.duid, duidLen: k.duidLen}, true
+}
+
 // insertPending6 records the binding for a client request the relay is
 // about to forward upstream: the primary IA-bound key, plus — for the
 // request types in pending6MayReplyWithoutIA whose Reply may legally

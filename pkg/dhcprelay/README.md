@@ -706,6 +706,39 @@ set forwarding-options dhcp-relay group <g> overrides maximum-packet-rate <pps>
   injected clock (`TestTokenBucket_BurstThenRefill`); the end-to-end flood-drop
   is `TestRunRelay_RateLimit_5670` / `TestRunRelay_RateLimit_DefaultBound`.
 
+- **Per-sender fairness (#16087).** The aggregate bucket alone let one
+  sender sustaining `>= maximum-packet-rate` consume every refill, so
+  other clients' DISCOVERs starved for the flood's duration. Under the
+  aggregate, each distinct sender now gets its own sub-bucket
+  (`fairLimiter` in `relay.go`): sustained
+  `ceil(rate / 256)` pps per sender, burst at least 8 (a full DORA plus
+  retransmissions always clears instantly). The v4 sender key is the
+  packet `chaddr`; the DHCPv6 key is the Client-ID DUID (a v6 sender
+  with no usable Client ID gets aggregate-only treatment). A fairness
+  denial refunds the aggregate token, so the flooder's drops do not
+  burn the burst other senders share. The table is bounded at 256
+  senders per interface; a new sender is denied while every slot is
+  held by an active sender, and the longest-idle slot (idle >= 30 s)
+  is recycled. Fairness drops count in the same
+  `RequestsDroppedRateLimit` counter and throttled log.
+  - **Honest limit — read before relying on this.** The sender key is
+    chosen by the client, so fairness stops a *naive* single-identity
+    flooder — including the much more common accidental case of one
+    looping client wedging a segment — not an attacker rotating
+    MACs/DUIDs per packet. Rotation is still bounded by the aggregate
+    bucket (CPU/amplification) and cannot evict established senders
+    from the fairness table, but it can deny *new* senders during the
+    flood. Per-port fairness against identity rotation needs
+    trustworthy ingress-port identity: use switch controls (DHCP
+    snooping, per-port rate limits / storm control) on segments where
+    that threat matters. Multi-MAC floods likewise need switch
+    controls; no relay-side keying can distinguish them.
+  - Tests: `TestRunRelay_Fairness_SecondMACCompletesDORA` (the issue's
+    decisive check — 1-MAC flood at the cap, second MAC completes
+    DORA), `TestDHCPV6Fairness_SecondClientGetsShare`,
+    `TestFairLimiter_*` (share, refill, table bound, rotation, idle
+    recycling).
+
 ### Trust override (#5414)
 
 ```
