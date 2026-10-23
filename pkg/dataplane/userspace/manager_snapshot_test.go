@@ -113,8 +113,13 @@ func TestBuildSnapshotSummary(t *testing.T) {
 	if snap.Summary.HostName != "fw-test" {
 		t.Fatalf("HostName = %q", snap.Summary.HostName)
 	}
-	if snap.Summary.InterfaceCount != 2 {
-		t.Fatalf("InterfaceCount = %d, want 2", snap.Summary.InterfaceCount)
+	// #16056: InterfaceCount counts the built rows (2 base + 2 units = 4),
+	// not the 2 authored interfaces — the helper refuses a mismatch.
+	if snap.Summary.InterfaceCount != 4 {
+		t.Fatalf("InterfaceCount = %d, want 4 built rows", snap.Summary.InterfaceCount)
+	}
+	if snap.Summary.InterfaceCount != len(snap.Interfaces) {
+		t.Fatalf("InterfaceCount = %d, want len(Interfaces) = %d", snap.Summary.InterfaceCount, len(snap.Interfaces))
 	}
 	if snap.Summary.ZoneCount != 2 {
 		t.Fatalf("ZoneCount = %d, want 2", snap.Summary.ZoneCount)

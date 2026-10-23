@@ -122,6 +122,12 @@ func (m *Manager) prepareSnapshotForApply(snap *ConfigSnapshot) {
 		slog.Info("userspace: snapshot interface rows revalidated at apply",
 			"refreshed", refreshed, "dropped", dropped)
 		m.rebuildDerivedSectionsAfterRevalidate(snap)
+		// #16056: revalidation may have dropped rows the summary still
+		// counts (and rebuildDerivedSectionsAfterRevalidate returns
+		// early on a config-less snapshot, whose rows it keeps as
+		// revalidated). The helper refuses a summary/section mismatch,
+		// so the count follows the rows actually published.
+		snap.Summary.InterfaceCount = len(snap.Interfaces)
 	}
 }
 
@@ -214,9 +220,15 @@ func (m *Manager) rebuildDerivedSectionsAfterRevalidate(snap *ConfigSnapshot) {
 	collisions := quarantineCollidingZones(snap)
 	if len(collisions) > 0 {
 		snap.zoneIDCollisions = collisions
-		snap.Summary.ZoneCount = len(snap.Zones)
-		snap.Summary.PolicyCount = len(snap.Policies)
 	}
+	// #16056: the helper refuses a summary/section mismatch, so every
+	// section this rebuild may have resized (Interfaces above, Zones and
+	// Policies via quarantine) re-derives its summary count here,
+	// unconditionally — the pre-quarantine retained count cannot ride
+	// through a quarantine that shrank the published section.
+	snap.Summary.InterfaceCount = len(snap.Interfaces)
+	snap.Summary.ZoneCount = len(snap.Zones)
+	snap.Summary.PolicyCount = len(snap.Policies)
 	sameZones := len(snap.Zones) == len(publishedZonesBefore)
 	if sameZones {
 		for i := range snap.Zones {

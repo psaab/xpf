@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "e401dcac807f13c49ac351f135edce91a505eff092d03dafa7e05f64ab828147"
+	snapshotShapeGolden8892 = "cf98a6a5f065a05ef721a71ed53f0b040a4e5043a8e67ec8ddc067f446fcfdb9"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -604,7 +604,11 @@ const (
 	// this Go digest, but the field never serializes and no helper can
 	// observe it; the c3001a08… digest below therefore includes both
 	// that drift and the #16142 AppID retype, still at ProtocolVersion 66.
-	snapshotShapeVersion8892 = 67
+	// Version 68 (#16056): SnapshotSummary interface_count/zone_count
+	// now count the built sections and the helper refuses a mismatch;
+	// no new wire field, so the golden below is unchanged in shape but
+	// the version pin moves with ProtocolVersion.
+	snapshotShapeVersion8892 = 68
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

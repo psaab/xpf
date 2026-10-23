@@ -308,10 +308,17 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		AppCatalog:            appCatalog,
 		Config:                cfg,
 		Summary: SnapshotSummary{
-			HostName:       cfg.System.HostName,
-			DataplaneType:  cfg.System.DataplaneType,
-			InterfaceCount: len(cfg.Interfaces.Interfaces),
-			ZoneCount:      len(cfg.Security.Zones),
+			HostName:      cfg.System.HostName,
+			DataplaneType: cfg.System.DataplaneType,
+			// #16056: InterfaceCount/ZoneCount count the BUILT sections
+			// the helper installs (interfaces is every published row,
+			// including unit and bind-only tunnel rows; zones is the
+			// pre-quarantine build, reconciled to post-quarantine below
+			// whenever a collision drops a zone). The helper refuses a
+			// summary/section mismatch, so the counts must describe the
+			// sections, not the authored config maps.
+			InterfaceCount: len(interfaces),
+			ZoneCount:      len(zones),
 			// #3625: PolicyCount is the total number of policy RULES the
 			// dataplane will enforce — one per built PolicyRuleSnapshot,
 			// spanning every zone-pair set's rules plus global policies.
@@ -364,11 +371,18 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 		collectStaticRouteCIDRMaskRejections(cfg)...)
 	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
 		collectBindlessSelectorCIDRMaskRejections(cfg)...)
-	if len(snap.zoneIDCollisions) > 0 {
-		// Keep the operator-facing counts equal to what is actually published.
-		snap.Summary.ZoneCount = len(snap.Zones)
-		snap.Summary.PolicyCount = len(snap.Policies)
-	}
+	// #16056: reconcile every summary count to the post-quarantine
+	// sections actually published, unconditionally — not only when a
+	// collision dropped a zone. The helper refuses a summary/section
+	// mismatch, so a count left at its pre-quarantine value would refuse
+	// a legitimate quarantined snapshot. Interface rows are not mutated
+	// by quarantine (only unzoned in place), so len(interfaces) already
+	// equals len(snap.Interfaces); re-deriving it here keeps the summary
+	// welded to the published sections at the single post-quarantine
+	// point.
+	snap.Summary.InterfaceCount = len(snap.Interfaces)
+	snap.Summary.ZoneCount = len(snap.Zones)
+	snap.Summary.PolicyCount = len(snap.Policies)
 	// HARDENING (#15742/#15937): a full snapshot whose published policies
 	// disagree with the effective POST-QUARANTINE policy set is the
 	// 670274c712 defect shape — rules vanish between lowering and the

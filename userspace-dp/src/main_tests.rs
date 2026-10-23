@@ -1844,6 +1844,11 @@ fn apply_snapshot_same_plan_clearing_defer_workers_reconcile_abort_fails_closed_
         // snapshot was accepted even though its zoned interface referenced an
         // UNDEFINED zone (a non-buildable config) — the fail-open this fix
         // closes.
+        summary: crate::protocol::snapshot::SnapshotSummary {
+            interface_count: 1,
+            zone_count: 1,
+            ..crate::protocol::snapshot::SnapshotSummary::default()
+        },
         zones: vec![ZoneSnapshot {
             name: "lan".to_string(),
             id: 1,
