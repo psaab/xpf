@@ -514,6 +514,7 @@ fn cached_flow_decision_invalid_reason_inner(
     {
         return Some(CachedDecisionInvalid::FabricIngressDiscardNowLocal);
     }
+
     // #16270 (cache supersession): a cached ForwardCandidate whose
     // egress RG is known (>0) but is NOT forwarding-active locally
     // right now must not be served locally — its RG has left this
@@ -548,17 +549,8 @@ fn cached_flow_decision_invalid_reason_inner(
     // ForwardCandidate | FabricRedirect; FabricRedirect is judged
     // by the arms below) — MissingNeighbor/LocalDelivery are never
     // cached, so no other disposition needs this arm.
-    if resolution.disposition == ForwardingDisposition::ForwardCandidate
-        && !ha_state.is_empty()
-    {
-        let egress_rg = owner_rg_for_resolution(forwarding, resolution);
-        if egress_rg > 0
-            && !ha_state
-                .get(&egress_rg)
-                .is_some_and(|group| group.is_forwarding_active(now_secs))
-        {
-            return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
-        }
+    if forward_candidate_egress_departed(forwarding, ha_state, now_secs, resolution) {
+        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
     }
     // RG-stamped redirect hits are the common split-RG cache case. Once the
     // cached owner RG becomes locally active again, invalidate immediately and
@@ -723,6 +715,93 @@ fn cached_flow_decision_invalid_reason_inner(
         return Some(CachedDecisionInvalid::FabricIngressLocalWins);
     }
     None
+}
+/// #16217 (Wire18): the single egress-RG departure predicate behind the
+/// `ForwardCandidateEgressDeparted` supersession arm AND the flow-cache
+/// lookup-fence admission — a cached `ForwardCandidate` whose egress RG is
+/// known (>0, tunnel-aware via `owner_rg_for_resolution`) and is not
+/// forwarding-active locally right now (absent or inactive), on a clustered
+/// node (non-empty HA map). A locally-active egress never qualifies, an
+/// unknown egress (rg 0) never qualifies, and a standalone node (empty map)
+/// never qualifies, so all three stay bit-identical. The lookup fence
+/// evaluates this against the entry's stamp owner (it has no
+/// `ForwardingState`); the hit-stage revalidation evaluates it against the
+/// live FIB egress attribution — both must agree that departure, not the
+/// fence, owns the eviction.
+pub(in crate::afxdp) fn forward_candidate_egress_departed(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: ForwardingResolution,
+) -> bool {
+    resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && !ha_state.is_empty()
+        && {
+            let egress_rg = owner_rg_for_resolution(forwarding, resolution);
+            egress_rg > 0
+                && !ha_state
+                    .get(&egress_rg)
+                    .is_some_and(|group| group.is_forwarding_active(now_secs))
+        }
+}
+
+/// #16217 (Wire18, B2): re-validate a fabric-established (adopted) mark
+/// against the RG ownership in the HA snapshot the caller judges with.
+/// The mark was stamped when the adoption gate proved (for the exact
+/// tuple) that this node owns the egress RG post-takeover; that proof is
+/// what the exemption stands on, so the exemption may only be honoured
+/// while the judged snapshot still shows this node owning that RG.
+///
+/// Temporal contract: the adopting worker's snapshot LAGS the gate — at
+/// the adoption instant it still reads the egress RG inactive (that lag
+/// is exactly why the adoption resolve needed `fabric_adopted = true`),
+/// so a bare `revalidate(...) == false` in that instant does NOT lapse
+/// the adoption: the gate's proof, not the lagging snapshot's, is the
+/// ownership evidence for the adoption window. The callers implement
+/// the lapse on the DEPARTURE side, judged on the same live snapshot
+/// the hit revalidation uses:
+///   * hit stage — the mark suppresses only the lagging-snapshot
+///     `EnforceChanged` demotion and only while
+///     `forward_candidate_egress_departed` is false; once departure
+///     holds (snapshot caught up to a failback) ordinary revalidation
+///     supersedes the entry whatever the validator spells it (enforce
+///     runs first and masks the departure arm on enforce-demoting
+///     shapes) and the flow re-resolves toward FabricRedirect.
+///   * session-hit site — the adopted context is
+///     `revalidate_fabric_established(marked row's stored decision)`:
+///     the stored decision names the egress the adoption resolve
+///     produced, and once the judged snapshot no longer shows that RG
+///     locally active the context lapses and the re-resolve runs
+///     unadopted (HA-demote + fabric conversion).
+/// Invariant: stale-window demotion ⇒ exemption; genuine departure ⇒
+/// conversion. There is no post-window snapshot in which a departed
+/// egress keeps the exemption.
+///
+/// Returns `true` (proof holds) for a marked entry whose egress RG is
+/// forwarding-active in the judged snapshot, and for a marked
+/// `FabricRedirect` (no local egress RG to depart — the redirect arms
+/// judge it). Returns `false` for unmarked entries, for a marked
+/// candidate whose egress RG is departed in the judged snapshot, and
+/// for an unknown egress RG (0 — adoption proved ownership of a NAMED
+/// RG; an entry that no longer names one cannot keep the proof).
+pub(in crate::afxdp) fn revalidate_fabric_established(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    fabric_established: bool,
+    resolution: ForwardingResolution,
+) -> bool {
+    if !fabric_established {
+        return false;
+    }
+    if resolution.disposition == ForwardingDisposition::FabricRedirect {
+        return true;
+    }
+    let egress_rg = owner_rg_for_resolution(forwarding, resolution);
+    egress_rg > 0
+        && ha_state
+            .get(&egress_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
 }
 
 pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(

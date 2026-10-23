@@ -694,3 +694,68 @@ ForwardCandidate whose egress RG departed must re-resolve to
 FabricRedirect (or be fabric-redirected) instead of re-serving
 locally forever. That is the next leg; do not merge as the
 aged-failover cure.
+
+## Lookup-fence admission + mark revalidation (FZFixWire18)
+
+Proven (FZFixWire17, cell45/cell46): on fw0 the cached entries are
+preempted by `FlowCache::lookup` fences (`LookupRgEpoch` 4 +
+`LookupLease` 2 post-FO; `enforce_changed=0`, zero redirect arms)
+BEFORE `ForwardCandidateEgressDeparted` (`forwarding/ha.rs`) can fire —
+the hit stage is never reached, the slow path re-serves/re-seeds the
+same ForwardCandidate locally, and all four streams blackhole from
+FO+1 s.
+
+Fix part 1 (fence site, `flow_cache.rs::lookup_with_observed_bytes`):
+the epoch/lease fences no longer evict a cached `ForwardCandidate`
+whose stamp-owner RG has departed active service — admitted shapes are
+exactly: owner absent (lease-carrying stamp, stamp lease lapsed),
+owner `active == false`, or owner lease-lapsed with NO current runtime
+lease (`current_lease == 0`, the fw0 failover lease-drop; `active` may
+still read true in the lagging snapshot). Shortened-but-live runtime
+leases keep the #14943 fail-closed fence (the four pre-existing
+`14943`/`expired_owner_rg_lease` cells stay green unmodified), as do
+ownerless entries, standalone (empty map), and non-candidate
+dispositions. The admitted entry reaches `stage_flow_cache_hit`, where
+decision revalidation supersedes it (`PostHit…Departed` /
+`PostHitEnforceChanged`) and falls through to the slow-path re-resolve
+— HA-demote + `redirect_session_via_fabric_if_needed_at` →
+`FabricRedirect`, conversion intact (pinned end-to-end in the test).
+Fence eviction tallies therefore read the PostHit supersession arm,
+not `lookup_rg_epoch`/`lookup_lease`, for these entries.
+
+Fix part 2 (B2, mark revalidation): the `fabric_established` mark is a
+claim re-validated against CURRENT RG ownership on every hit, never a
+sticky exemption. Cache side: the suppression covers ONLY the
+lagging-window `EnforceChanged` demotion (the read the adoption
+resolve itself bypassed); the `ForwardCandidateEgressDeparted` arm is
+no longer suppressed. Session side: `session_hit_fabric_adopted` now
+requires `revalidate_fabric_established` over the marked row's stored
+decision (`fabric_established_decision_for_wire_at`) — locally-active
+egress RG keeps the context; a departed egress lapses it and the
+re-resolve runs unadopted (HA-demote + fabric conversion, i.e.
+failback converts again). Shared helpers in `forwarding/ha.rs`:
+`forward_candidate_egress_departed` (single departure predicate: the
+supersession arm and the fence admission) and
+`revalidate_fabric_established`.
+
+Tests (drive the lookup-fence path, not a direct decision hand-off):
+`lookup_fence_departed_candidate_reaches_hit_stage_16217` — production
+`stage_flow_cache_hit` with BOTH fences failing (epoch bumped 3→4,
+runtime lease dropped, stamp lease lapsed) falls through with exactly
+one PostHit supersession and ZERO fence-arm movement, then the
+unadopted slow-path enforce+convert yields `FabricRedirect`; controls
+(locally-active RG still fenced; ownerless entry still fenced).
+`adopted_mark_revalidates_ownership_each_hit_16217` — failback state:
+the session-context helper lapses the mark, departure predicate
+agrees, unadopted re-resolve HA-demotes and converts to
+`FabricRedirect`; ownership-holding and unmarked pins.
+`cargo test 16217` 28/28; `16270`/`16223`/`16215`/`16216`/`16269`/
+`16222` + `policy_revalidation` 160/160 combined;
+`session::`+`forwarding::`+`flow_cache` 1121 passed with exactly the 5
+pre-existing failures of the unmodified head
+(`matched_family_pairs_are_still_admitted_7520`,
+`live_flow_cache_callsite_selected_admitted_clone_reaches_target_6304`,
+`gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615`,
+`tcp_seq_15753`, `session_decision_typed_snat_layout_11064`).
+Live aged P4 TWICE + failback: see the PR comment (this section's
+build). Do not merge as the aged-failover cure on unit evidence alone.

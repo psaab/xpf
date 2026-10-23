@@ -2658,8 +2658,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // subsequent packet cannot die on the ha_inactive terminal
                 // the adoption resolve bypassed. Non-adopted flows compute
                 // `false` here and stay fail-closed bit-identically.
+                //
+                // #16217 (Wire18, B2): the LOCAL-MARK arm is re-validated
+                // against CURRENT RG ownership on every hit — the marked
+                // row's stored decision must still name an egress RG that
+                // is forwarding-active locally (`revalidate_fabric_established`).
+                // Once that RG departs again (failback), the mark no longer
+                // exempts: the re-resolve runs unadopted, HA-demotes, and
+                // the fabric converter redirects to the new owner (convert
+                // again). The live-gate arms below are inherently current
+                // (the gate re-proves Established + ownership per packet)
+                // and are unchanged.
                 let session_hit_fabric_adopted = flow.as_ref().is_some_and(|flow| {
-                    sessions.fabric_established_for_wire_at(&flow.forward_key, now_ns)
+                    sessions
+                        .fabric_established_decision_for_wire_at(&flow.forward_key, now_ns)
+                        .is_some_and(|marked_decision| {
+                            crate::afxdp::forwarding::revalidate_fabric_established(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
+                                true,
+                                marked_decision.resolution,
+                            )
+                        })
                         || (fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
                             && sessions.shared_established_for_wire_at(

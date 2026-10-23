@@ -1443,6 +1443,10 @@ struct SessionEntry {
     /// non-adopted rows never carry this flag and stay fail-closed. Set ONLY
     /// by `mark_fabric_established` from the poll adoption site (and by the
     /// adoption resolve's own materialization); never on an HA wire.
+    /// #16217 (Wire18, B2): the mark is a CLAIM, re-validated on every hit
+    /// against CURRENT RG ownership (`revalidate_fabric_established` on the
+    /// row's stored decision) — once the egress RG departs again the claim
+    /// lapses and the flow converts toward the fabric again (failback).
     fabric_established: bool,
 }
 

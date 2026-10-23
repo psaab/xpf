@@ -351,17 +351,23 @@ pub(super) struct FlowCacheEntry {
     /// (no resolved next-hop, e.g. a fabric/local disposition); such a flow
     /// is never neighbor-stale.
     pub(super) neighbor_shard: u16,
-    /// #16217 (fabric adoption): this entry was seeded by the fabric-adoption
-    /// resolve — the adoption gate (`fabric_adoption_established_for_wire`)
-    /// had already proven, for this exact wire tuple, an Established session
-    /// and this node as the RG owner post-takeover. Cache-hit revalidation
-    /// must not evict such an entry on the `EnforceChanged` arm: the receiving
-    /// worker's HA snapshot may still read the egress RG inactive (the exact
-    /// stale-snapshot shape the adoption resolve bypasses), so evicting here
-    /// only re-runs the same demotion on the session-hit path. Sticky for the
-    /// entry's life; only ever set at seed time from the adoption outcome
-    /// (`stage_flow_cache_seed(fabric_established = true)`), never by an
-    /// ordinary slow-path resolve — non-adopted flows stay fail-closed.
+    /// #16217 (fabric adoption): this entry's session was proven
+    /// fabric-established (adopted) — the adoption gate
+    /// (`fabric_adoption_established_for_wire`) proved, for this exact wire
+    /// tuple, an Established session with this node as RG owner
+    /// post-takeover. Stamped at seed time from the adoption outcome
+    /// (`stage_flow_cache_seed(fabric_established = true)`) and RE-VALIDATED
+    /// on every cache hit by the hit stage against CURRENT RG ownership
+    /// (`revalidate_fabric_established`): the proof is stale the moment the
+    /// egress RG leaves this node again, so on failback the entry converts
+    /// again instead of serving the adopted ForwardCandidate locally
+    /// forever. While the proof holds, cache-hit revalidation must not evict
+    /// the entry on the `EnforceChanged` arm and the lookup fences must not
+    /// preempt it: the receiving worker's HA snapshot may still read the
+    /// egress RG inactive (the exact stale-snapshot shape the adoption
+    /// resolve bypasses), so evicting only re-runs the same demotion on the
+    /// session-hit path. Never set by an ordinary slow-path resolve —
+    /// non-adopted flows stay fail-closed.
     pub(super) fabric_established: bool,
 }
 
@@ -1511,7 +1517,55 @@ impl FlowCache {
                 // of never. Mirrors the worker session-expiry gate.
                 let owner = entry.stamp.owner_rg_id;
                 let current_epoch = rg_epochs[rg_epoch_index(owner)].load(Ordering::Relaxed);
-                // #16217: a fabric-established (adopted) entry is exempt from
+                // #16217 (fence preemption, FZFixWire17/Wire18): a cached
+                // `ForwardCandidate` whose egress RG has DEPARTED this node
+                // must NOT be fenced away here. The lookup fences
+                // (rg_epoch / lease) fire at the failover for exactly these
+                // entries, but a fence carries no decision: the slow path
+                // then re-serves / re-seeds the same candidate locally and
+                // the flow blackholes on a non-owner WAN egress (fw0 post-FO:
+                // lookup_rg_epoch/lease evictions, enforce_changed=0, zero
+                // redirect arms). Admit such an entry to the hit stage,
+                // whose decision revalidation
+                // (`cached_flow_decision_invalid_reason_for_flow`) owns the
+                // `ForwardCandidateEgressDeparted` arm and falls through to
+                // the slow-path re-resolve that HA-demotes and
+                // fabric-redirects to the new owner.
+                //
+                // Departure is judged on the entry's STAMP OWNER (the
+                // seed-time flow owner RG — the lookup has no live FIB;
+                // the hit stage re-derives the precise egress RG): stamp
+                // owner > 0, clustered map non-empty, and the RG is gone
+                // from active service: ABSENT (lease-carrying entries
+                // only), INACTIVE (`active == false`), or lease-lapsed
+                // with NO current runtime lease (`current_lease == 0` and
+                // the stamp carried a lease). The lease-gone arm is what
+                // the fw0 cell proves: at the failover the lease drops to
+                // 0 while `active` may still read true in the lagging
+                // snapshot. Guards: a SHORTENED-but-live runtime lease
+                // (current lease > 0, merely earlier than the stamp — the
+                // #14943 renewed-short / genuinely-expired-runtime shapes
+                // whose stamp is still in force) is NOT departure and
+                // keeps the fail-closed fence, as does a locally-active RG
+                // with a live lease, an unknown owner (rg 0), a standalone
+                // node (empty map), and every non-candidate disposition. A
+                // marked (adopted) entry is unaffected — its exemption
+                // below still wins. Deny entries carry no ForwardCandidate
+                // and are never admitted.
+                let fence_departed_candidate = entry.decision.resolution.disposition
+                    == ForwardingDisposition::ForwardCandidate
+                    && !ha_state.is_empty()
+                    && owner > 0
+                    && match ha_state.get(&owner) {
+                        None => entry.stamp.owner_rg_lease_until != 0
+                            && now_secs > entry.stamp.owner_rg_lease_until,
+                        Some(group) => {
+                            !group.active
+                                || (entry.stamp.owner_rg_lease_until != 0
+                                    && !group.is_forwarding_active(now_secs)
+                                    && FlowCacheStamp::current_lease_until(owner, ha_state) == 0)
+                        }
+                    };
                 // the RG-epoch/lease lookup fences: the adoption gate already
                 // proved this node owns the egress RG, and the epoch bump +
                 // lease drop AT the failover are exactly the fences that
@@ -1521,6 +1575,15 @@ impl FlowCache {
                 // scheduler) still apply.
                 if entry.fabric_established {
                     // skip epoch + lease fences for adopted entries
+                } else if fence_departed_candidate {
+                    // #16217 (Wire18): admit a departed-egress candidate to
+                    // the hit stage — its decision revalidation owns the
+                    // supersession and the FabricRedirect re-resolve. The
+                    // entry is NOT evicted here and the packet is counted
+                    // as a candidate hit below; the hit stage reclassifies
+                    // it to the PostHit supersession arm when it falls
+                    // through (and serves it only if the egress RG is in
+                    // fact locally active after all).
                 } else if current_epoch != entry.stamp.owner_rg_epoch {
                     self.entries[entry_idx] = None;
                     self.note_eviction(FlowCacheEvictionArm::LookupRgEpoch);
@@ -1545,7 +1608,9 @@ impl FlowCache {
                 // `cached_flow_decision_valid` re-checks HA against the
                 // same live map on the production path.
                 let current_lease = FlowCacheStamp::current_lease_until(owner, ha_state);
-                if !entry.fabric_established && entry.stamp.owner_rg_lease_until != 0
+                if !entry.fabric_established
+                    && !fence_departed_candidate
+                    && entry.stamp.owner_rg_lease_until != 0
                     && !ha_state.is_empty()
                     && (current_lease == 0 || now_secs > current_lease)
                 {
@@ -1600,6 +1665,41 @@ impl FlowCache {
             }
         }
         self.misses += 1;
+        None
+    }
+
+    /// #16217 (Wire18, B2): side-effect-free read of the entry the hit
+    /// stage would consult, for the fabric-established revalidation the
+    /// hit stage runs BEFORE the mutating lookup. No tallies, no LRU or
+    /// lease re-stamp, no eviction: the caller only needs the cached
+    /// decision (egress RG) and the adoption mark so it can re-derive
+    /// whether the adoption proof still holds under CURRENT RG ownership
+    /// (`revalidate_fabric_established`). Identity matches the lookup's:
+    /// same key, same physical ingress (binding-substituted), same
+    /// logical (VLAN) ingress. Generation/fence validity is deliberately
+    /// NOT judged here — a fenced entry simply yields no revalidated
+    /// mark, which is fail-closed for the exemption.
+    pub(super) fn peek_entry(
+        &self,
+        key: &crate::session::SessionKey,
+        lookup: FlowCacheLookup,
+    ) -> Option<&FlowCacheEntry> {
+        let ingress_ifindex = if self.binding_ifindex != 0 {
+            self.binding_ifindex
+        } else {
+            lookup.ingress_ifindex
+        };
+        let set = Self::set_index(key, ingress_ifindex);
+        let base = set * FLOW_CACHE_WAYS;
+        for way in 0..FLOW_CACHE_WAYS {
+            if let Some(entry) = &self.entries[base + way]
+                && entry.key == *key
+                && entry.ingress_ifindex == ingress_ifindex
+                && entry.logical_ingress_ifindex == lookup.logical_ingress_ifindex
+            {
+                return Some(entry);
+            }
+        }
         None
     }
 
