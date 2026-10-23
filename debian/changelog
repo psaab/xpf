@@ -77,6 +77,11 @@ xpf (0.0.0) unstable; urgency=medium
     clear-by-interface can no longer delete a sibling unit's sessions
     and flow-export sampling no longer judges both units by one
     sibling's name (daemon buildIfNames projects the same table).
+  * Gate the #15947 LocalDelivery RST-invalidate collection on
+    may_revoke: a foreign arrival's RST no longer queues a teardown
+    deleting another actor's host-bound session.
+
+xpf (0.0.0) unstable; urgency=medium
   * Complete the remaining #15947 arms: rst-invalidate teardown now
     releases the SNAT/NAT64 pool port and emits the forward Close
     (pair-aware teardown), host-bound RSTs invalidate their session,

@@ -574,6 +574,50 @@ fn ssh(flags: u8, arrival: i32) -> (Vec<u8>, UserspaceDpMeta) {
     tcp(REAL, LAN_ADDRESS, 40000, 22, flags, arrival)
 }
 
+
+/// #15947 (H29-01 LocalDelivery arm, fold): a FOREIGN arrival's RST must
+/// not tear down another actor's host-bound session. The LocalDelivery
+/// RST-invalidate collection sits before the host-inbound/lo0/junos-host
+/// gates, so it is gated on `may_revoke` — the same authority the deny
+/// branches require before revoking. The owner RST is the positive
+/// control: with the knob on it DOES invalidate (the collected teardown
+/// is visible in the binding scratch the poll body leaves behind; the
+/// lifecycle drain that executes it is worker-loop machinery this
+/// descriptor driver does not run).
+#[test]
+fn foreign_rst_cannot_invalidate_host_bound_session_15947() {
+    let mut fw = forwarding(WAN_ONLY);
+    fw.tcp_rst_invalidate_session = true;
+    let mut sessions = host_bound_ssh_session(&fw);
+    // Foreign (dmz) RST on lan's host-bound session: hits, but may not act.
+    let mut dmz = binding(DMZ_IFINDEX);
+    let foreign = drive_on(&mut dmz, &fw, &mut sessions, ssh(TCP_RST, DMZ_IFINDEX));
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz RST must HIT lan's host-bound session"
+    );
+    assert!(
+        dmz.scratch.scratch_rst_teardowns.is_empty(),
+        "a foreign RST must not queue an rst-invalidate teardown for \
+         another actor's session (pre-fix this queued unconditionally)"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        1,
+        "the host-bound session survives a foreign RST"
+    );
+    // Positive control: the OWNER's RST (lan, may_revoke) does queue it.
+    let mut lan = binding(LAN_IFINDEX);
+    let owner = drive_on(&mut lan, &fw, &mut sessions, ssh(TCP_RST, LAN_IFINDEX));
+    assert_eq!(owner.session_hit, 1, "control: the owner's RST hits");
+    assert_eq!(
+        lan.scratch.scratch_rst_teardowns.len(),
+        1,
+        "control: an owner RST with rst-invalidate-session on queues \
+         exactly one teardown, or the empty foreign queue above \
+         measures nothing"
+    );
+}
 /// The owner control and the foreign packets use SEPARATE tables on purpose.
 /// Before #9563 the owner's own first ACK tore this host-bound session down,
 /// through the #8356 re-derivation judging it by a zone pair. The re-derivation
