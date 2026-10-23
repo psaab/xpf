@@ -1879,7 +1879,7 @@ func (s *Store) loadRollbackHistory() {
 		// placed the prepared future bytes at this position (PendingHash).
 		skewSlotValid := false
 		if pendingSkew {
-			if valid, ts, comment := rollbackSkewSlotAdmission(snap, pendingSkew, i, rollbackSlotHash(data)); valid {
+			if valid, ts, comment := rollbackSkewSlotAdmission(snap, pendingSkew, i, rollbackSlotHash(data), identity, identityOK); valid {
 				skewSlotValid = true
 				if !ts.IsZero() || comment != "" {
 					slotTimestamp = ts

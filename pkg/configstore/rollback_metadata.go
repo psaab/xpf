@@ -91,15 +91,16 @@ type rollbackSlotMetadataEntry struct {
 	CurrentHash      string    `json:"current_hash,omitempty"`
 	CurrentTimestamp time.Time `json:"current_timestamp,omitempty"`
 	CurrentComment   string    `json:"current_comment,omitempty"`
-	// Rewritten (#16064 fold 5) records, at preparation time, whether this
-	// slot position will be rewritten by the in-flight commit's history save
-	// with bytes that differ positionally OR will be newly created. It is
-	// the durable rewritten-slot set: at boot, a slot whose bytes match both
-	// PendingHash and CurrentHash takes PENDING attrs iff Rewritten is true
-	// (its rewrite landed with equal bytes), else CURRENT attrs (untouched).
-	// Computed by the writer from (old slot bytes != future bytes) ||
-	// slot file absent; boot cannot re-derive it from hashes alone.
-	Rewritten bool `json:"rewritten,omitempty"`
+	// PendingDevice/PendingInode/PendingModTime (#16064 fold 6) are the slot
+	// file identity RECORDED AT PREPARATION for this index. Every slot save
+	// is temp+rename, so a landed rewrite always installs a new inode (and
+	// new mtime): at load, identity != recorded preparation identity proves
+	// THIS slot's rewrite landed, while identity == recorded proves it did
+	// not — per-slot landed detection for the equal-content case, where
+	// hashes cannot distinguish landed from untouched.
+	PendingDevice  uint64    `json:"pending_device,omitempty"`
+	PendingInode   uint64    `json:"pending_inode,omitempty"`
+	PendingModTime time.Time `json:"pending_mod_time,omitempty"`
 }
 
 const (
@@ -492,16 +493,14 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, descr
 		} else {
 			preparedEntry.CurrentHash = rollbackSlotHash([]byte(rollbackTombstoneMarker))
 		}
-		// Fold 5 rewritten-slot set: entry 0 is slot 1 of the future save,
-		// which saveRollbackFiles always rewrites (future[0] is the previous
-		// active). Deeper slots are rewritten exactly when their future bytes
-		// differ from the current slot file bytes; absent = newly created.
-		if i == 0 {
-			preparedEntry.Rewritten = true
-		} else if oldData, rerr := ReadBoundedFile(s.rollbackPath(i+1), MaxConfigSize); rerr == nil {
-			preparedEntry.Rewritten = rollbackSlotHash(oldData) != rollbackSlotHash(data)
-		} else {
-			preparedEntry.Rewritten = true
+		// Fold 6: record THIS slot's file identity at preparation time.
+		// saveRollbackFiles rewrites every slot via temp+rename, so at load
+		// a different inode proves this slot landed; the recorded identity
+		// (0 when the file does not exist yet) proves it did not.
+		if id, ok := rollbackSlotIdentityForPath(s.rollbackPath(i + 1)); ok {
+			preparedEntry.PendingDevice = id.Device
+			preparedEntry.PendingInode = id.Inode
+			preparedEntry.PendingModTime = id.ModTime
 		}
 		prepared[i] = preparedEntry
 	}
@@ -518,25 +517,33 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, descr
 // slot's 1-based index and content hash, it reports whether the slot survives
 // at its pre-shift position and which attributes it carries.
 func rollbackSkewSlotAdmission(snap rollbackMetadataSnapshot, pendingSkew bool, i int,
-	slotHash string) (valid bool, ts time.Time, comment string) {
-	// identityOK from the loader is intentionally not consulted here: the
-	// Rewritten set recorded at preparation is the durable authority for the
-	// equal-content case; file identity cannot reveal an equal-byte rewrite.
+	slotHash string, identity rollbackSlotIdentity, identityOK bool) (valid bool, ts time.Time, comment string) {
 	if !pendingSkew {
 		return false, time.Time{}, ""
 	}
 	metadata := snap.Entries
-	// Fold 5: the preparation's Rewritten flag is the durable rewritten-slot
-	// set. For bytes matching both hashes (equal-content slot), Rewritten
-	// decides: true = the rewrite landed with equal bytes -> PENDING attrs;
-	// false = positionally untouched -> CURRENT attrs. For bytes matching
-	// only one hash, that hash's attrs apply (current checked first so the
-	// equal case falls through to the Rewritten decision).
+	// Fold 6 landed detection: every slot save is temp+rename, so a landed
+	// rewrite installs a NEW inode. For bytes matching both hashes
+	// (equal-content slot), compare the load-time identity against the
+	// identity recorded at preparation: differs (or preparation identity
+	// was 0/absent and a file now exists) = THIS slot landed -> PENDING
+	// attrs; identical = untouched -> CURRENT attrs. Identity unavailable
+	// at load (identityOK=false) withholds the pending upgrade fail-closed.
 	if i-1 < len(metadata) && metadata[i-1].CurrentHash != "" &&
 		slotHash == metadata[i-1].CurrentHash {
-		if metadata[i-1].PendingHash != "" && slotHash == metadata[i-1].PendingHash &&
-			metadata[i-1].Rewritten {
-			return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
+		if metadata[i-1].PendingHash != "" && slotHash == metadata[i-1].PendingHash {
+			rec := rollbackSlotIdentity{Device: metadata[i-1].PendingDevice, Inode: metadata[i-1].PendingInode, ModTime: metadata[i-1].PendingModTime}
+			landed := false
+			if identityOK {
+				if rec.Inode == 0 {
+					landed = true // file absent at preparation, exists now
+				} else {
+					landed = identity.Device != rec.Device || identity.Inode != rec.Inode || !identity.ModTime.Equal(rec.ModTime)
+				}
+			}
+			if landed {
+				return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
+			}
 		}
 		return true, metadata[i-1].CurrentTimestamp, metadata[i-1].CurrentComment
 	}
@@ -579,7 +586,7 @@ func rollbackSkewSlotAdmission(snap rollbackMetadataSnapshot, pendingSkew bool, 
 // pendingOK is the certified-skew gate; when it is false nothing admits.
 func classifyRollbackSlotBytes(pendingOK bool, snap rollbackMetadataSnapshot, pos int,
 	slotHash string) (admit, viaPending bool) {
-	valid, _, _ := rollbackSkewSlotAdmission(snap, pendingOK, pos+1, slotHash)
+	valid, _, _ := rollbackSkewSlotAdmission(snap, pendingOK, pos+1, slotHash, rollbackSlotIdentity{}, false)
 	if !valid {
 		return false, false
 	}

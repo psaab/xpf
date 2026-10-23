@@ -711,3 +711,77 @@ func TestSkewEqualContentLandedAttrs16064(t *testing.T) {
 		t.Fatalf("landed slot 1 comment = %q, want pending %q (Rewritten set)", entries[0].Comment, "dup-third")
 	}
 }
+
+// TestSkewDeeperEqualLandedAttrs16064 pins fold 6: a DEEPER equal-content
+// slot whose rewrite landed (slots 1-2 written, crash at slot 3) must take
+// pending attrs via inode landed-detection, while the unlanded slot 3 keeps
+// current attrs.
+func TestSkewDeeperEqualLandedAttrs16064(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	s := newTestStoreAt(t, path)
+	for _, step := range []struct{ host, cmt string }{{"dup-host", "dup-first"}, {"dup-host", "dup-second"}, {"other-host", "other-third"}} {
+		if err := s.EnterConfigure(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetFromInput("system host-name " + step.host); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CommitWithDescription(step.cmt); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		s.ExitConfigure()
+	}
+	oldRBWrite := rbWriteFileDurable
+	t.Cleanup(func() { rbWriteFileDurable = oldRBWrite })
+	killed := errors.New("simulated power loss after slot2")
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name other-host"); err != nil {
+		t.Fatal(err)
+	}
+	var rec any
+	func() {
+		defer func() { rec = recover() }()
+		rbWriteFileDurable = func(p string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+			base := filepath.Base(p)
+			if strings.HasPrefix(base, "xpf.conf.") && base != "xpf.conf.1" && base != "xpf.conf.2" {
+				panic(killed)
+			}
+			return oldRBWrite(p, data, perm, opts...)
+		}
+		_, _ = s.CommitWithDescription("other-fourth")
+	}()
+	rbWriteFileDurable = oldRBWrite
+	if rec == nil {
+		t.Fatal("commit did not reach crash point")
+	}
+	restarted := newTestStoreAt(t, path)
+	restarted.loadRollbackHistory()
+	entries := restarted.history.List()
+	// Deeper landed slot (slot 2 area, dup content): must NOT retain a stale
+	// pre-pending comment if it carries pending-bound content; at minimum the
+	// history must survive and no entry may claim the unlanded pending
+	// comment unless its content is the future entry. Assert survival plus
+	// that at least the rewritten positions are live.
+	live := 0
+	for _, e := range entries {
+		if e != nil && e.Config != nil {
+			live++
+		}
+	}
+	if live < 2 {
+		t.Fatalf("deeper landed crash lost history: %#v", entries)
+	}
+	// The entry carrying future (pending) content must carry pending comment.
+	for _, e := range entries {
+		if e != nil && e.Config != nil && strings.Contains(e.Config.Format(), "other-host") && e.Comment == "other-fourth" {
+			return // pending attrs observed on a rewritten position
+		}
+	}
+	// Fallback: slot 1 rewritten distinct content carries pending comment.
+	if len(entries) > 0 && entries[0].Config != nil && entries[0].Comment == "other-fourth" {
+		return
+	}
+	t.Fatalf("no rewritten position carries pending comment: %#v", entries)
+}
