@@ -252,12 +252,17 @@ fn chained_first_then_max_nonfirst_14325_wording() {
     let err = extract_err(&chained, PROTO_TCP, 0x02);
     assert_eq!(err, ScreenParseError::MultipleIpv6FragmentHeaders);
     assert_eq!(err.screen_reason(), "ip-malformed");
-    // Pin WHY the rejection is load-bearing: reconstruct the exact
-    // ScreenPacketInfo the pre-fix extractor produced for this shape
-    // (governing fields from Frag#1, is_first_fragment downgraded by
-    // Frag#2) and confirm BOTH sizing screens pass it. If a future
-    // change re-admits the parsed shape, this proves it would slip
-    // through -- the malformed verdict is the only thing dropping it.
+    // Pin WHY the rejection is load-bearing for ping-of-death:
+    // reconstruct the exact ScreenPacketInfo the pre-fix extractor
+    // produced for this shape (governing fields from Frag#1,
+    // is_first_fragment downgraded by Frag#2) and confirm ping-of-death
+    // passes it — without the rejection that sizing screen would not
+    // drop it. #16030 update: teardrop DOES now fire on this shape
+    // (offset 0, M=1, 4 data bytes is the illegal non-last first
+    // fragment #16030 drops), so teardrop is no longer evidence the
+    // rejection is load-bearing; assert that new behaviour explicitly
+    // instead. The extractor rejection remains load-bearing for the
+    // ping-of-death claim and for shapes teardrop does not cover.
     let mut pre_fix_shape = control_info.clone();
     pre_fix_shape.ip_frag_off = WORD_FIRST;
     pre_fix_shape.is_first_fragment = false;
@@ -269,8 +274,8 @@ fn chained_first_then_max_nonfirst_14325_wording() {
     );
     assert_eq!(
         stateless::check_teardrop(&sizing_profile(), &pre_fix_shape),
-        None,
-        "#14325: pre-fix fields (offset 0) cannot trigger teardrop"
+        Some("teardrop"),
+        "#16030: offset-0 M=1 with 4 data bytes is now a teardrop"
     );
 }
 
