@@ -6415,16 +6415,15 @@ fn nat_reverse_1n_collision_preserves_displaced_return_path() {
          the aggregate collision counter bumps twice for this one flow-pair",
     );
 
-    // A reply on K resolves to a LIVE forward session. Both validate — the
-    // wire tuple is genuinely ambiguous under no-PAT interface SNAT — so the
-    // multimap returns the first-installed S1 deterministically instead of
-    // "whatever was written last".
+    // #16014: a reply on K is AMBIGUOUS while both live — both validate and
+    // share one domain, so first-wins rewrites for the wrong internal host.
+    // The multimap still preserves both handles (below): survivor resolves.
     assert_eq!(
         table
             .find_forward_nat_match(&reply, |_| reply.routing_domain)
             .map(|m| m.key),
-        Some(s1.clone()),
-        "reply on K resolves to the first-installed forward session",
+        None,
+        "reply on K with two live same-domain candidates must drop ambiguous (#16014)",
     );
 
     // RED-on-revert: close S2 (the LAST-installed). The single-value map

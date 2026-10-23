@@ -938,7 +938,9 @@ mod lookup;
 pub(crate) use install::PMechInstallPlan;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
-pub(crate) use lookup::{Defer, ExportWalkOutcome, IpsecReplyAliasLookup, SeqVerdict, SessionQuery};
+pub(crate) use lookup::{
+    Defer, ExportWalkOutcome, ForwardNatMatchLookup, IpsecReplyAliasLookup, SeqVerdict, SessionQuery,
+};
 use lookup::TcpStatePropagation;
 
 /// #7212: the `(config generation, logical ingress interface)` pair a session's

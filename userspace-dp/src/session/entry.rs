@@ -537,6 +537,10 @@ pub(crate) enum ForwardNatExpiryProbe {
     Live(ForwardSessionMatch),
     IdleCrossed,
     Absent,
+    /// #16014: a second distinct candidate passed — terminal ambiguity,
+    /// distinct from `Absent` so callers never fall through to a shared
+    /// fallback. Kept separate from `Absent` for expiry classification.
+    Ambiguous,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1855,6 +1855,89 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
     assert_eq!(hit.metadata, entry.metadata);
 }
 
+/// #16014 fold: locally-AMBIGUOUS ordinary lookup must NOT fall through to
+/// the shared fallback (nonzero domain). Local same-domain DNAT twins prove
+/// two owners; a shared candidate must not mint a reverse session.
+#[test]
+fn ambiguous_local_reverse_lookup_blocks_shared_fallback_16014() {
+    const DOMAIN: u32 = 100_014;
+    let nat = NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
+        ..NatDecision::default()
+    };
+    let mut forward1 = test_key();
+    forward1.routing_domain = DOMAIN;
+    forward1.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+    forward1.dst_port = 80;
+    let mut forward2 = forward1.clone();
+    forward2.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
+    let mut decision = test_decision();
+    decision.nat = nat;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN);
+    let mut sessions = SessionTable::new();
+    for f in [&forward1, &forward2] {
+        assert!(sessions.install_with_protocol(
+            f.clone(), decision, test_metadata(), 1_000_000_000, PROTO_TCP, TCP_FLAG_ACK,
+        ));
+    }
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = SharedSessionOwnerRgIndexes::default();
+    let entry = SyncedSessionEntry {
+        key: forward1.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    publish_shared_session(
+        &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &owner_indexes, &entry,
+    );
+    let mut reply = reverse_session_key(&forward1, nat);
+    reply.routing_domain = DOMAIN;
+    // Expiry-aware path (session_glue uses _at in production).
+    assert!(
+        lookup_forward_nat_across_scopes_at(
+            &sessions, &shared_nat_sessions, &forwarding, &owner_indexes, &reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained, 1_000_000_000,
+        ).is_none(),
+        "ambiguous local (expiry) must block shared fallback"
+    );
+    // No-timestamp path.
+    assert!(
+        lookup_forward_nat_across_scopes(
+            &sessions, &shared_nat_sessions, &forwarding, &owner_indexes, &reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        ).is_none(),
+        "ambiguous local (no-ts) must block shared fallback"
+    );
+    // Control: single local candidate still resolves.
+    let mut single = SessionTable::new();
+    assert!(single.install_with_protocol(
+        forward1.clone(), decision, test_metadata(), 1_000_000_000, PROTO_TCP, TCP_FLAG_ACK,
+    ));
+    assert!(
+        lookup_forward_nat_across_scopes(
+            &single, &shared_nat_sessions, &forwarding, &owner_indexes, &reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        ).is_some(),
+        "single local candidate must still resolve (control)"
+    );
+}
+
 /// Local reverse lookup must use the forward egress routing domain while
 /// preserving the independent arrival-zone check.
 #[test]
