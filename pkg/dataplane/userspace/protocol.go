@@ -483,7 +483,12 @@ const (
 	// helper ignores the counts and would install a snapshot whose
 	// interfaces/zones section was dropped while the summary retained
 	// it — unbinding all workers and persisting as baseline.
-	ProtocolVersion = 68
+	// v68 -> v69 (#16023): FlowSnapshot.require_authenticated_fabric_stamps
+	// and FabricSnapshot.link_authenticated gate stamp honouring. A v68
+	// helper ignores both and would honour a forged stamp on an
+	// unauthenticated fabric the operator required authenticated — a
+	// fail-open the exact-equality fence must refuse.
+	ProtocolVersion = 69
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1216,14 +1221,15 @@ type AddressBookSnapshot struct {
 }
 
 type FlowSnapshot struct {
-	AllowDNSReply               bool `json:"allow_dns_reply,omitempty"`
-	AllowEmbeddedICMP           bool `json:"allow_embedded_icmp,omitempty"`
-	AllowUnstampedFabricIngress bool `json:"allow_unstamped_fabric_ingress,omitempty"`
-	TCPMSSAllTCP                int  `json:"tcp_mss_all_tcp,omitempty"`
-	TCPMSSIPsecVPN              int  `json:"tcp_mss_ipsec_vpn,omitempty"`
-	TCPMSSGreIn                 int  `json:"tcp_mss_gre_in,omitempty"`
-	TCPMSSGreOut                int  `json:"tcp_mss_gre_out,omitempty"`
-	TCPSessionTimeout           int  `json:"tcp_session_timeout,omitempty"` // seconds, 0=default
+	AllowDNSReply                    bool `json:"allow_dns_reply,omitempty"`
+	AllowEmbeddedICMP                bool `json:"allow_embedded_icmp,omitempty"`
+	AllowUnstampedFabricIngress      bool `json:"allow_unstamped_fabric_ingress,omitempty"`
+	RequireAuthenticatedFabricStamps bool `json:"require_authenticated_fabric_stamps,omitempty"`
+	TCPMSSAllTCP                     int  `json:"tcp_mss_all_tcp,omitempty"`
+	TCPMSSIPsecVPN                   int  `json:"tcp_mss_ipsec_vpn,omitempty"`
+	TCPMSSGreIn                      int  `json:"tcp_mss_gre_in,omitempty"`
+	TCPMSSGreOut                     int  `json:"tcp_mss_gre_out,omitempty"`
+	TCPSessionTimeout                int  `json:"tcp_session_timeout,omitempty"` // seconds, 0=default
 	// #7342: the three `security flow tcp-session` windows #6539 recorded as
 	// having no wire carrier. Seconds, 0=unset (the helper keeps its default).
 	// `omitempty` + Rust `serde(default)` is the repo's skew-tolerant additive
@@ -1613,6 +1619,11 @@ type FabricSnapshot struct {
 	// defaults an absent field to true (fail-open), so dropping it on down
 	// would defeat the failover.
 	Up bool `json:"up"`
+	// LinkAuthenticated is the #16023 operator attestation (chassis cluster
+	// fabric-interface-authenticated) that this fabric link is
+	// link-authenticated (MACsec/802.1X). NOT omitempty mirrors Up: an
+	// unauthenticated link must serialize false, not drop the field.
+	LinkAuthenticated bool `json:"link_authenticated"`
 }
 
 // FlowExportSnapshot captures flow monitoring/export configuration for the

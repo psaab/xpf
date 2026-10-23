@@ -884,6 +884,9 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 	if node.FindChild("allow-unstamped-fabric-ingress") != nil {
 		sec.Flow.AllowUnstampedFabricIngress = true
 	}
+	if node.FindChild("require-authenticated-fabric-stamps") != nil {
+		sec.Flow.RequireAuthenticatedFabricStamps = true
+	}
 
 	// gre-performance-acceleration
 	if node.FindChild("gre-performance-acceleration") != nil {

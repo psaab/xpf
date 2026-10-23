@@ -945,6 +945,7 @@ fn queue_planner_includes_fabric_parent_interface() {
             local_mac: String::new(),
             peer_mac: String::new(),
             up: true,
+            link_authenticated: false,
         }],
         ..Default::default()
     };
@@ -985,6 +986,7 @@ fn queue_planner_deduplicates_fabric_parent_already_in_interfaces() {
             local_mac: String::new(),
             peer_mac: String::new(),
             up: true,
+            link_authenticated: false,
         }],
         ..Default::default()
     };

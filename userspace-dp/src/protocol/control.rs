@@ -308,7 +308,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // count the BUILT interfaces/zones sections (post-quarantine for zones)
 // and the helper refuses a summary/section mismatch; a v67 helper
 // ignores the counts and would install a dropped-section snapshot.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 68;
+// v68 -> v69 (#16023): FlowSnapshot.require_authenticated_fabric_stamps
+// and FabricSnapshot.link_authenticated gate stamp honouring. A v68
+// helper ignores both and would honour a forged stamp on an
+// unauthenticated fabric the operator required authenticated.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 69;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

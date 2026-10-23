@@ -806,6 +806,7 @@ fn stamped_fabric_ptb_forwarding(mtu: usize) -> ForwardingState {
         peer_mac: FW_MAC,
         local_mac: EGRESS_SRC_MAC,
         up: true,
+        link_authenticated: false,
     });
     fwd
 }

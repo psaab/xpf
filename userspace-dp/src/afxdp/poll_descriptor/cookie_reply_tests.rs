@@ -465,6 +465,7 @@ fn stamped_fabric_syn_cookie_reply_suppresses_unreachable_syn_ack_12319() {
         peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     let mut pipeline = tx_pipeline(
         SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
@@ -503,6 +504,7 @@ fn stamped_fabric_cookie_forwarding() -> (ForwardingState, [u8; 6]) {
         peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     let scope_id = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(
         7,

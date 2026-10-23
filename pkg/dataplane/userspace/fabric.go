@@ -88,10 +88,12 @@ func buildFabricSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) []Fa
 	type fabricInput struct {
 		name string
 		peer string
+		// linkAuthenticated is the #16023 operator attestation for this link.
+		linkAuthenticated bool
 	}
 	inputs := []fabricInput{
-		{name: cc.FabricInterface, peer: cc.FabricPeerAddress},
-		{name: cc.Fabric1Interface, peer: cc.Fabric1PeerAddress},
+		{name: cc.FabricInterface, peer: cc.FabricPeerAddress, linkAuthenticated: cc.FabricLinkAuthenticated},
+		{name: cc.Fabric1Interface, peer: cc.Fabric1PeerAddress, linkAuthenticated: cc.Fabric1LinkAuthenticated},
 	}
 	var out []FabricSnapshot
 	seen := make(map[string]struct{}, len(inputs))
@@ -118,18 +120,19 @@ func buildFabricSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) []Fa
 		}
 		peerMAC := buildFabricPeerMAC(overlayIfindex, parentIfindex, in.peer, parseMACOrNil(parentMAC), fabricPeerMACConstraint(in.peer))
 		out = append(out, FabricSnapshot{
-			Name:             in.name,
-			ParentInterface:  parentName,
-			ParentLinuxName:  parentLinux,
-			ParentIfindex:    parentIfindex,
-			ParentUnbindable: fabricParentUnbindable(cfg, parentName, parentLinux, liveXfrm),
-			OverlayLinux:     overlayLinux,
-			OverlayIfindex:   overlayIfindex,
-			RXQueues:         rxQueues,
-			PeerAddress:      in.peer,
-			LocalMAC:         parentMAC,
-			PeerMAC:          peerMAC,
-			Up:               fabricParentUp(parentLinux),
+			Name:              in.name,
+			ParentInterface:   parentName,
+			ParentLinuxName:   parentLinux,
+			ParentIfindex:     parentIfindex,
+			ParentUnbindable:  fabricParentUnbindable(cfg, parentName, parentLinux, liveXfrm),
+			OverlayLinux:      overlayLinux,
+			OverlayIfindex:    overlayIfindex,
+			RXQueues:          rxQueues,
+			PeerAddress:       in.peer,
+			LocalMAC:          parentMAC,
+			PeerMAC:           peerMAC,
+			Up:                fabricParentUp(parentLinux),
+			LinkAuthenticated: in.linkAuthenticated,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

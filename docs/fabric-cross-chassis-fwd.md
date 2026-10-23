@@ -1434,3 +1434,41 @@ and classifier boundaries). The
 pre-L3 MAC acceptance control in
 `userspace-dp/src/afxdp/tests_named_pre_l3_10498.rs` pairs group Ethernet MACs
 with actual IP multicast/broadcast UDP instead of unicast IP.
+
+## Fabric stamp link-authentication requirement (#16023)
+
+ZP-01: the V1/V2 stamp is a public FNV-fold / deterministic scope id, so a
+third L2 speaker on a switched fabric VLAN can clone the stamp of a
+currently-active zone (dst = fabric `local_mac`, learnable) and, in both
+split-RG and all-RGs-local (#15916) placements, receive the adjudication a
+legitimate punt receives. #10105 chose document-and-constrain (private L2
+MUST) with no dataplane enforcement; #16023 adds the opt-in enforcement
+half without changing the wire format (per-packet HMAC remains deferred
+for the reasons in the #10105 section: no wire room, replay/epoch state):
+
+- `security flow require-authenticated-fabric-stamps` (off by default)
+  carries `require_authenticated_fabric_stamps` on the snapshot (protocol
+  v69 fences a v68 helper that would ignore it and fail open).
+- `chassis cluster fabric-interface-authenticated` /
+  `fabric1-interface-authenticated` attest that the operator plant
+  provides link authentication (MACsec / 802.1X; xpf implements neither)
+  on that fabric link; the builder carries it as
+  `FabricSnapshot.link_authenticated` (serialized `false`, not omitted).
+- Dataplane V0 gate (`zone_encoded_fabric_stamp_disposition`, before
+  V1a/V1b): with the requirement on, a stamp on an unattested link is
+  `Invalid` — the existing stage-9 terminal drop, counted as
+  `xpf_userspace_fabric_invalid_stamp_drops_total`. This covers V1 and
+  V2 (both route through the disposition), both placements, and therefore
+  every downstream consumer (session-miss policy/NAT, #15916 promotion,
+  fragment, IKE host-inbound) — no consumer can promote an Invalid stamp.
+- Unstamped fabric handling is unchanged (#11061 family): Absent stays
+  Absent; only recognised stamps are gated.
+- Strict compile warns when the requirement is set but no fabric link is
+  attested (every stamp will drop — fail-closed, but almost certainly not
+  what the operator meant).
+
+Decisive regression: `forged_stamp_drops_when_link_authentication_required_16023`
+(e2e, both placements: no session, no forward, `invalid_fabric_stamp_drops=1`)
+plus `zone_encoded_fabric_stamp_requires_link_authentication_16023`
+(unit dispositions incl. attested controls). Live-cluster third-host proof
+on a switched fabric VLAN is still owed before acceptance.

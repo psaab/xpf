@@ -1843,6 +1843,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"flow allow-dns-reply",
 		"flow allow-embedded-icmp",
 		"flow allow-unstamped-fabric-ingress",
+		"flow require-authenticated-fabric-stamps",
 		"flow force-ip-reassembly",
 		"flow gre-performance-acceleration",
 		"flow power-mode-disable",

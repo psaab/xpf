@@ -713,6 +713,18 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 			"security flow allow-unstamped-fabric-ingress configured — rolling-upgrade window only: unstamped fabric arrivals bypass routing-instance tenant isolation via legacy MAIN handling; remove once all peers emit zone-encoded stamps (#11061)")
 	}
 
+	// #16023: require-authenticated without any authenticated fabric link
+	// drops every stamp (fail-closed by design) — surface it so an operator
+	// who set the requirement but forgot the attestation sees why punts die.
+	if cfg.Security.Flow.RequireAuthenticatedFabricStamps {
+		cc := cfg.Chassis.Cluster
+		authenticated := cc != nil && ((cc.FabricInterface != "" && cc.FabricLinkAuthenticated) || (cc.Fabric1Interface != "" && cc.Fabric1LinkAuthenticated))
+		if !authenticated {
+			warnings = append(warnings,
+				"security flow require-authenticated-fabric-stamps configured but no fabric link is attested link-authenticated (chassis cluster fabric-interface-authenticated / fabric1-interface-authenticated) — every V1/V2 fabric stamp will drop as invalid until a fabric link is attested (#16023)")
+		}
+	}
+
 	// #4233/#4234: `security policies policy-rematch [extensive]` is typed and
 	// recorded (compiler_security_policy.go). The Junos-DEFAULT deletion-clear
 	// ships (#4234): a session admitted by a policy that a commit DELETES is

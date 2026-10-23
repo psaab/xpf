@@ -217,6 +217,7 @@ fn stamped_fabric_reject_forwarding() -> ForwardingState {
         peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     forwarding
 }
@@ -2084,6 +2085,7 @@ fn stamped_fabric_policy_reject_suppresses_tcp_rst_and_logs_deny_12051() {
         peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     let mut counters = BatchCounters::default();
     deny_reply_and_emit(

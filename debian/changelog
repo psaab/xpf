@@ -1805,3 +1805,14 @@ xpf (0.0.0) unstable; urgency=medium
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
 
 
+xpf (0.0.0) unstable; urgency=medium
+
+  * Fabric: opt-in link-authentication requirement for zone stamps
+    (#16023). `security flow require-authenticated-fabric-stamps` plus
+    `chassis cluster fabric-interface-authenticated` /
+    `fabric1-interface-authenticated` (operator MACsec/802.1X attestation)
+    make the dataplane drop V1/V2 stamps on unattested fabric links as
+    Invalid in both split-RG and all-RGs-local placements, closing the
+    third-L2-speaker clone of the public FNV zone stamp. Default off
+    preserves #10105 document-and-constrain; snapshot protocol v69 fences
+    a v68 helper that would ignore the requirement and fail open.

@@ -121,6 +121,7 @@ pub(in crate::afxdp) fn build_fabric_link_or_skip(
         // prefer an UP fabric. An old daemon that omits the wire field defaults
         // to true (fail-open) via `FabricSnapshot::default_true`.
         up: fabric.up,
+        link_authenticated: fabric.link_authenticated,
     })
 }
 
@@ -348,12 +349,16 @@ pub(in crate::afxdp) fn fabric_for_ingress(
 ///   legitimately stamped, which kills the host-inbound variant's
 ///   `mgmt` claim.
 ///
-/// What this deliberately does NOT try to stop: on a SHARED fabric
-/// segment with a live RG split, an attacker can clone the exact stamp
-/// shape of a currently-legitimate punt (remote-RG zone, unicast dst) —
+/// What this deliberately does NOT try to stop (unless #16023
+/// require-authenticated mode is on): on a SHARED fabric segment with a
+/// live RG split, an attacker can clone the exact stamp shape of a
+/// currently-legitimate punt (remote-RG zone, unicast dst) —
 /// indistinguishable from the real thing at L2. That residual is closed
 /// only by a direct-attached or MACsec fabric; see
-/// `docs/fabric-cross-chassis-fwd.md` (#6458 section).
+/// `docs/fabric-cross-chassis-fwd.md` (#6458 section). With
+/// `require_authenticated_fabric_stamps` the V0 gate below drops stamps
+/// on links not attested link-authenticated, so the clone drops as
+/// Invalid in both split-RG and all-RGs-local placements.
 ///
 /// Hot-path: runs only for frames that already matched the fabric-ingress
 /// + magic + zone-exists gates in
@@ -416,6 +421,14 @@ pub(in crate::afxdp) fn zone_encoded_fabric_stamp_disposition(
     };
     // V1a: the redirect is always unicast to our fabric link's MAC.
     if frame_dst_mac != fabric.local_mac.as_slice() {
+        return FabricStampDisposition::Invalid;
+    }
+    // #16023 V0 (link authentication): when the operator required
+    // authenticated stamps, a stamp on a link not attested
+    // link-authenticated (MACsec/802.1X) is indistinguishable from a
+    // third-speaker clone and is Invalid. Checked before V1b so an
+    // unauthenticated link never reaches RG/promotion logic.
+    if forwarding.require_authenticated_fabric_stamps && !fabric.link_authenticated {
         return FabricStampDisposition::Invalid;
     }
     // V1b: the claimed zone must be RG-bound. An absent/empty entry

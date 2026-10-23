@@ -151,12 +151,14 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 		// `?` help and tab completion, the only two `chassis cluster`
 		// statements of which that was true.
 		// TestChassisClusterSchemaAndSplitterAgree_7448 now binds the two sets.
-		"fabric1-interface":             {desc: "Second fabric link interface for session sync and cross-chassis forwarding", args: 1, placeholder: "<interface>", children: nil},
-		"fabric1-peer-address":          {desc: "Cluster peer IP address on the second fabric link", args: 1, placeholder: "<address>", children: nil},
-		"configuration-synchronize":     {desc: "Synchronize committed configuration from primary to secondary", children: nil},
-		"nat-state-synchronization":     {desc: "NAT state synchronization (accepted for Junos compatibility; no runtime effect)", children: nil},
-		"ipsec-session-synchronization": {desc: "Synchronize IPsec SAs to the cluster peer", children: nil},
-		"dhcp-lease-synchronization":    {desc: "Synchronize DHCP-server leases to the cluster peer (held on standby, seeded into Kea on takeover)", children: nil},
+		"fabric1-interface":               {desc: "Second fabric link interface for session sync and cross-chassis forwarding", args: 1, placeholder: "<interface>", children: nil},
+		"fabric1-peer-address":            {desc: "Cluster peer IP address on the second fabric link", args: 1, placeholder: "<address>", children: nil},
+		"fabric-interface-authenticated":  {desc: "Attest the fabric link is link-authenticated by the operator plant (MACsec/802.1X); with security flow require-authenticated-fabric-stamps, stamps on this link may be honoured (#16023)", children: nil},
+		"fabric1-interface-authenticated": {desc: "Attest the second fabric link is link-authenticated by the operator plant (MACsec/802.1X) (#16023)", children: nil},
+		"configuration-synchronize":       {desc: "Synchronize committed configuration from primary to secondary", children: nil},
+		"nat-state-synchronization":       {desc: "NAT state synchronization (accepted for Junos compatibility; no runtime effect)", children: nil},
+		"ipsec-session-synchronization":   {desc: "Synchronize IPsec SAs to the cluster peer", children: nil},
+		"dhcp-lease-synchronization":      {desc: "Synchronize DHCP-server leases to the cluster peer (held on standby, seeded into Kea on takeover)", children: nil},
 		// Milliseconds, xpf extension (default 30, pkg/vrrp/vrrp.go).
 		// Both bounds are runtime-derived from the VRRPv3 encoding:
 		// the ms value is integer-divided to centiseconds

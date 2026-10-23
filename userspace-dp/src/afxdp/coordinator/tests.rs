@@ -3889,6 +3889,7 @@ fn queue_warm_pass_warms_fabric_peer_over_parent_ifindex() {
         peer_mac: [0; 6],
         local_mac: [0; 6],
         up: true,
+        link_authenticated: false,
     });
     coord.queue_warm_pass(false);
     let item = rx.try_recv().expect("fabric peer warm item");
@@ -4012,6 +4013,7 @@ fn fabric_link_superseded_by_snapshots_only_on_same_parent_different_peer_5686()
         peer_mac: [2, 0, 0, 0, 0, 2],
         local_mac: [2, 0xbf, 0x72, 0, 0, 1],
         up: true,
+        link_authenticated: false,
     };
     // Same parent, DIFFERENT peer → superseded.
     assert!(fabric_link_superseded_by_snapshots(
