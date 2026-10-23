@@ -5269,6 +5269,51 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 );
                                 miss_local_input_policers = policers;
                                 if verdict == MissLocalPolicerVerdict::Drop {
+                                    // #15949 fold 3 (Opus): the screen
+                                    // verdict was already computed above;
+                                    // a red policer drop pre-empts the
+                                    // screen branch below, but the screen
+                                    // audit must not be lost. When the
+                                    // packet is ALSO a screen drop, emit
+                                    // and count the ScreenDrop here (the
+                                    // drop reason stays the policer DENY
+                                    // below). alarm-without-drop keeps
+                                    // its log-only semantics: the alarm
+                                    // fires, no drop is counted (the
+                                    // packet still drops — on the
+                                    // policer, not the screen).
+                                    if let Some(reason) = new_flow_screen_reason {
+                                        if screen.alarm_without_drop(from_zone) {
+                                            emit_screen_alarm_event(
+                                                worker_ctx.event_stream,
+                                                &screen_pkt,
+                                                meta,
+                                                from_zone_id,
+                                                reason,
+                                                event_now_ns_from_secs(now_secs),
+                                            );
+                                            crate::afxdp::flood_counters::record_zone_flood_alarm(
+                                                &worker_ctx.forwarding.flood_counter_slot_map,
+                                                from_zone_id,
+                                                reason,
+                                            );
+                                            screen.record_alarm_without_drop();
+                                        } else {
+                                            emit_screen_drop_event(
+                                                worker_ctx.event_stream,
+                                                &screen_pkt,
+                                                meta,
+                                                from_zone_id,
+                                                reason,
+                                                event_now_ns_from_secs(now_secs),
+                                            );
+                                            telemetry.counters.record_screen_drop(
+                                                reason,
+                                                from_zone_id,
+                                                &worker_ctx.forwarding.flood_counter_slot_map,
+                                            );
+                                        }
+                                    }
                                     if let Some(mut cached_log) = input_filter_eval.cached_log {
                                         cached_log.log_match.action =
                                             crate::filter::FilterAction::Discard;

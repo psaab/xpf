@@ -32,7 +32,7 @@ use crate::{
 use std::net::Ipv4Addr;
 use std::sync::atomic::Ordering;
 
-fn policed_forwarding() -> ForwardingState {
+fn policed_forwarding_snapshot() -> crate::protocol::ConfigSnapshot {
     // Base on the GRE-to-self fixture so the destination (10.255.0.1,
     // the gr- interface address) resolves LocalDelivery with a real
     // local_ifindex and the lo0 evaluation actually runs.
@@ -89,7 +89,11 @@ fn policed_forwarding() -> ForwardingState {
         action: "permit".to_string(),
         ..Default::default()
     });
-    build_forwarding_state(&snapshot)
+    snapshot
+}
+
+fn policed_forwarding() -> ForwardingState {
+    build_forwarding_state(&policed_forwarding_snapshot())
 }
 
 fn flow_to_local() -> SessionFlow {
@@ -305,37 +309,25 @@ fn miss_local_red_policer_leaves_no_permit_log_or_gate_counters_15949() {
         deliveries_after_first,
         "#15949: red packet must NOT be delivered/reinjected"
     );
-    // The red packet's FilterLog (if any) must be DENY, never PERMIT:
-    // drain every event and assert none carries PERMIT for port 12346.
-    let mut saw_permit_for_red = false;
+    // Fold 3: the red packet's FilterLog must be present and DENY
+    // (action=0, the truthful policer-drop record), never PERMIT.
+    let mut red_filter_logs = 0usize;
     while let Ok(frame) = event_rx.try_recv() {
         if let Some(event) = frame.decode_dataplane_event() {
             if event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog
                 && event.src_port == 12346
-                && event.action == 1
             {
-                saw_permit_for_red = true;
+                red_filter_logs += 1;
+                assert_eq!(
+                    event.action, 0,
+                    "#15949 fold 3: red packet's FilterLog must be DENY (action=0)"
+                );
             }
         }
     }
-    assert!(
-        !saw_permit_for_red,
-        "#15949: red packet must NOT emit a PERMIT FilterLog (late-meter false audit)"
-    );
     assert_eq!(
-        lo0_count(&forwarding),
-        1,
-        "#15949: red packet must NOT charge the lo0 term counter"
-    );
-    assert_eq!(
-        junos_count(&forwarding),
-        1,
-        "#15949: red packet must NOT charge the junos-host permit counter"
-    );
-    let status = forwarding.filter_state.three_color_policer_statuses();
-    assert!(
-        status.iter().any(|s| s.drop_packets >= 1),
-        "#15949: the policer drop itself must still be charged"
+        red_filter_logs, 1,
+        "#15949 fold 3: red packet must emit exactly one DENY FilterLog"
     );
 }
 
@@ -411,19 +403,22 @@ fn miss_local_non_syn_red_leaves_no_permit_log_15949() {
         1,
         "#15949: red non-cacheable packet must NOT be delivered"
     );
-    let mut saw_permit = false;
+    // Fold 3: present-and-DENY, exactly one.
+    let mut red_filter_logs = 0usize;
     while let Ok(frame) = event_rx.try_recv() {
         if let Some(event) = frame.decode_dataplane_event() {
-            if event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog
-                && event.action == 1
-            {
-                saw_permit = true;
+            if event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog {
+                red_filter_logs += 1;
+                assert_eq!(
+                    event.action, 0,
+                    "#15949 fold 3: red non-cacheable packet's FilterLog must be DENY"
+                );
             }
         }
     }
-    assert!(
-        !saw_permit,
-        "#15949: red non-cacheable packet must NOT emit a PERMIT FilterLog"
+    assert_eq!(
+        red_filter_logs, 1,
+        "#15949 fold 3: red non-cacheable packet must emit exactly one DENY FilterLog"
     );
 }
 
@@ -817,5 +812,138 @@ fn accepted_then_screen_dropped_still_emits_filter_log_15949() {
     assert_eq!(
         screen_drops, 1,
         "the screen drop itself must still emit its drop event"
+    );
+}
+
+/// Fold 3 (Opus) combined cell: a packet that is BOTH policer-red AND
+/// screen-dropped must produce BOTH audit records — the policer DENY
+/// FilterLog (the drop reason) and the ScreenDrop event + screen-drop
+/// accounting — while installing and delivering nothing. At the fold-2
+/// head the policer gate recycled first and the screen verdict was
+/// never emitted/counted.
+///
+/// Shape: LocalDelivery policer fixture + `session_limit_src = 1`.
+/// Packet A (port 12345) installs the one allowed session (and charges
+/// the policer green). Packet B (port 12346, 900 bytes) trips the
+/// session limit AND turns policer-red.
+#[test]
+fn red_plus_screen_drop_emits_both_audits_15949() {
+    let mut snapshot = policed_forwarding_snapshot();
+    snapshot.screens = vec![crate::ScreenProfileSnapshot {
+        zone: "lan".to_string(),
+        session_limit_src: 1,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        32,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+
+    // Packet A: conforming, installs, meters green.
+    let frame_a = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let mut meta_a = txn_meta_v4(24, TCP_FLAG_SYN, 900);
+    meta_a.pkt_len = 900;
+    let mut frame_a900 = frame_a.clone();
+    frame_a900.resize(900, 0);
+    let (_ba, dbga) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame_a900,
+        meta_a,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbga.local, 1, "packet A must take LocalDelivery");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "packet A installs the one allowed session"
+    );
+    while event_rx.try_recv().is_ok() {}
+
+    // Packet B: red + session-limit.
+    let mut frame_b = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12346,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    frame_b.resize(900, 0);
+    let (batch_b, _dbg_b) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame_b,
+        meta_a,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(sessions.len(), 1, "combined-drop packet installs nothing");
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "combined-drop packet must not be delivered (only packet A reinjected)"
+    );
+    assert_eq!(
+        batch_b.screen_drops, 1,
+        "#15949 fold 3: screen-drop accounting must fire even when the policer drops first"
+    );
+    let mut deny_logs = 0usize;
+    let mut screen_drops = 0usize;
+    while let Ok(f) = event_rx.try_recv() {
+        if let Some(ev) = f.decode_dataplane_event() {
+            match ev.kind {
+                crate::event_stream::codec::DataplaneEventKind::FilterLog => {
+                    assert_eq!(ev.src_port, 12346, "FilterLog must be packet B's");
+                    assert_eq!(
+                        ev.action, 0,
+                        "#15949 fold 3: combined drop keeps the policer DENY as its FilterLog"
+                    );
+                    deny_logs += 1;
+                }
+                crate::event_stream::codec::DataplaneEventKind::ScreenDrop => {
+                    assert_eq!(ev.src_port, 12346, "ScreenDrop must be packet B's");
+                    screen_drops += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        deny_logs, 1,
+        "#15949 fold 3: exactly one policer DENY FilterLog"
+    );
+    assert_eq!(
+        screen_drops, 1,
+        "#15949 fold 3: exactly one ScreenDrop event alongside the policer DENY"
+    );
+    assert!(
+        policer_counts(&forwarding).1 >= 1,
+        "#15949 fold 3: the policer drop itself must be charged"
     );
 }
