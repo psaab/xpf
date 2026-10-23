@@ -261,10 +261,11 @@ per-leg evidence lives in `docs/log/16215.md`, `docs/log/16222.md`,
 **Acceptance (unchanged, never met live):** all-node0 posture
 (RG0/RG1/RG2 primary on node0, asserted by the harness before
 traffic), P4 iperf3 60 s to `172.16.80.200:5211`, RG1 fw0→fw1 at
-**30 s measured stream age**, **zero** aggregate (`[SUM]`) and
-per-stream zero intervals, and a zero delta in
-`xpf_userspace_snat_revoked_sessions_total` on both nodes across the
-cell (pre- and post-failover samples). Clean master `2c8575b70e`
+**30 s measured stream age at the RG transition instant**, **zero**
+aggregate (`[SUM]`) and per-stream zero intervals, and a zero delta
+in `xpf_userspace_snat_revoked_sessions_total` on both nodes
+between the **stream-start** baseline and the post-failover sample
+(a pre-failover baseline would hide the ~28 s revocation leg).
 fails it: the source tables record **130 zero intervals** for that
 arm — the column is headed "Zero SUM intervals" in some tables and
 left unqualified in others, and 130 exceeds the ~30 aggregate
@@ -387,15 +388,19 @@ substitute the reply decision for the stored forward decision.
   `scripts/userspace-ha-failover-validation.sh --aged-failover`
   (port 5211, P4 60 s): it asserts RG0/RG1/RG2 are all primary on
   node0 before traffic, stamps the actual stream start once
-  `start_iperf` proves the client live, and issues the RG1 failover
-  only when the **measured** stream age reaches 30 s — not after a
-  fixed sum of sync/observe sleeps. `MAX_ZERO_INTERVALS` is forced
-  to 0 (per-stream and preflight zero budgets already default to 0),
-  and the `xpf_userspace_snat_revoked_sessions_total` delta across
-  the cell must be 0 on both nodes (an unavailable metric fails the
-  gate, it does not skip it). A failover issued inside the 20 s
-  opening window or the first conntrack-refresh cycle is not
-  evidence.
+  `start_iperf` proves the client live, and schedules the RG1
+  transition to **land** at 30 s measured stream age: it times an
+  identical 8-call CLI snapshot pass (`capture_cycle_state`)
+  immediately beforehand and sleeps only the remainder, then stamps
+  the age again at confirmed ownership — failing closed if the
+  snapshot lead already overshoots 30 s. The 60 s stream keeps 30 s
+  of post-transition traffic. `MAX_ZERO_INTERVALS` is forced to 0
+  (per-stream and preflight zero budgets already default to 0), and
+  the `xpf_userspace_snat_revoked_sessions_total` delta from the
+  stream-start baseline must be 0 on both nodes (an unavailable
+  metric fails the gate, it does not skip it). A failover issued
+  inside the 20 s opening window or the first conntrack-refresh
+  cycle is not evidence.
 - **Twice on loss.** No leg is "fixed live" on one run; every leg
   above was required to fail twice on the same build before the
   next leg was named, and the cure must pass with the identical

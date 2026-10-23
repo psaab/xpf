@@ -45,8 +45,8 @@ AGED_AGE="${AGED_AGE:-30}"
 IPERF_PORT="${IPERF_PORT:-5201}"
 AGED_STREAM_STARTED_AT=""
 AGED_FAILOVER_AT_AGE=""
-AGED_SNAT_PRE_FW0=""
-AGED_SNAT_PRE_FW1=""
+AGED_SNAT_START_FW0=""
+AGED_SNAT_START_FW1=""
 AGED_SNAT_POST_FW0=""
 AGED_SNAT_POST_FW1=""
 TRANSITION_SAMPLE_SECONDS="${TRANSITION_SAMPLE_SECONDS:-10}"
@@ -1105,9 +1105,9 @@ aged_capture_snat_revoked() {
 		fail "aged-failover: xpf_userspace_snat_revoked_sessions_total unavailable on fw1 (${when})"
 		return 1
 	fi
-	if [[ "$when" == "pre-failover" ]]; then
-		AGED_SNAT_PRE_FW0="$fw0_count"
-		AGED_SNAT_PRE_FW1="$fw1_count"
+	if [[ "$when" == "stream-start" ]]; then
+		AGED_SNAT_START_FW0="$fw0_count"
+		AGED_SNAT_START_FW1="$fw1_count"
 	else
 		AGED_SNAT_POST_FW0="$fw0_count"
 		AGED_SNAT_POST_FW1="$fw1_count"
@@ -1116,41 +1116,72 @@ aged_capture_snat_revoked() {
 }
 
 aged_assert_snat_revoked_zero_delta() {
-	if [[ -z "$AGED_SNAT_PRE_FW0" || -z "$AGED_SNAT_PRE_FW1" || -z "$AGED_SNAT_POST_FW0" || -z "$AGED_SNAT_POST_FW1" ]]; then
-		fail "aged-failover: snat_revoked samples incomplete (pre fw0=${AGED_SNAT_PRE_FW0:-?} fw1=${AGED_SNAT_PRE_FW1:-?}; post fw0=${AGED_SNAT_POST_FW0:-?} fw1=${AGED_SNAT_POST_FW1:-?})"
+	# Baseline is the STREAM-START sample, not a pre-failover sample:
+	# the #16215 revocation leg fired at ~28s stream age, before the
+	# failover command, so a pre-failover baseline would hide it.
+	if [[ -z "$AGED_SNAT_START_FW0" || -z "$AGED_SNAT_START_FW1" || -z "$AGED_SNAT_POST_FW0" || -z "$AGED_SNAT_POST_FW1" ]]; then
+		fail "aged-failover: snat_revoked samples incomplete (stream-start fw0=${AGED_SNAT_START_FW0:-?} fw1=${AGED_SNAT_START_FW1:-?}; post fw0=${AGED_SNAT_POST_FW0:-?} fw1=${AGED_SNAT_POST_FW1:-?})"
 		return 1
 	fi
-	if [[ "$AGED_SNAT_POST_FW0" == "$AGED_SNAT_PRE_FW0" && "$AGED_SNAT_POST_FW1" == "$AGED_SNAT_PRE_FW1" ]]; then
-		pass "aged-failover: snat_revoked delta 0 on both nodes (fw0 ${AGED_SNAT_PRE_FW0}->${AGED_SNAT_POST_FW0}, fw1 ${AGED_SNAT_PRE_FW1}->${AGED_SNAT_POST_FW1})"
+	if [[ "$AGED_SNAT_POST_FW0" == "$AGED_SNAT_START_FW0" && "$AGED_SNAT_POST_FW1" == "$AGED_SNAT_START_FW1" ]]; then
+		pass "aged-failover: snat_revoked delta 0 on both nodes since stream start (fw0 ${AGED_SNAT_START_FW0}->${AGED_SNAT_POST_FW0}, fw1 ${AGED_SNAT_START_FW1}->${AGED_SNAT_POST_FW1})"
 		return 0
 	fi
-	fail "aged-failover: snat_revoked increased (fw0 ${AGED_SNAT_PRE_FW0}->${AGED_SNAT_POST_FW0}, fw1 ${AGED_SNAT_PRE_FW1}->${AGED_SNAT_POST_FW1}); gate requires delta 0 on both nodes"
+	fail "aged-failover: snat_revoked increased since stream start (fw0 ${AGED_SNAT_START_FW0}->${AGED_SNAT_POST_FW0}, fw1 ${AGED_SNAT_START_FW1}->${AGED_SNAT_POST_FW1}); gate requires delta 0 on both nodes"
 	return 1
 }
 
-aged_wait_until_stream_age() {
-	local now elapsed remaining
+aged_stream_age_now() {
+	if [[ -z "$AGED_STREAM_STARTED_AT" ]]; then
+		return 1
+	fi
+	printf '%s\n' "$(( $(date +%s) - AGED_STREAM_STARTED_AT ))"
+}
+
+# The RG transition does not happen when the caller starts the
+# failover: run_failover_phase first pays for the pre-transition CLI
+# snapshots (capture_cycle_state = 8 CLI calls across both nodes)
+# plus the failover command itself before RG ownership moves.
+# Measure that lead ONCE, immediately before the transition, by
+# timing an identical 8-call snapshot pass, then sleep only the
+# remainder so the transition lands at AGED_AGE. Fail closed if the
+# lead already overshoots the target age.
+aged_schedule_transition_at_stream_age() {
+	local lead_start lead_elapsed age remaining
 	if [[ -z "$AGED_STREAM_STARTED_AT" ]]; then
 		fail "aged-failover: stream start was not measured"
 		return 1
 	fi
-	now="$(date +%s)"
-	elapsed=$((now - AGED_STREAM_STARTED_AT))
-	remaining=$((AGED_AGE - elapsed))
+	lead_start="$(date +%s)"
+	capture_cycle_state 1 "failover-lead-measure"
+	lead_elapsed=$(( $(date +%s) - lead_start ))
+	age="$(aged_stream_age_now)" || { fail "aged-failover: stream start was not measured"; return 1; }
+	remaining=$(( AGED_AGE - age - lead_elapsed ))
+	if (( remaining < 0 )); then
+		fail "aged-failover: measured snapshot lead ${lead_elapsed}s already overshoots target transition age ${AGED_AGE}s (stream age ${age}s); cannot land the RG transition at ${AGED_AGE}s"
+		return 1
+	fi
 	if (( remaining > 0 )); then
-		info "aged-failover: stream age ${elapsed}s; waiting ${remaining}s to fail over at measured age ${AGED_AGE}s"
+		info "aged-failover: stream age ${age}s, snapshot lead ${lead_elapsed}s; waiting ${remaining}s so the RG transition lands at measured age ${AGED_AGE}s"
 		if ! cycle_sleep "$remaining"; then
-			fail "aged-failover: iperf3 exited before measured stream age ${AGED_AGE}s"
+			fail "aged-failover: iperf3 exited before the scheduled RG transition"
 			return 1
 		fi
 	fi
-	now="$(date +%s)"
-	AGED_FAILOVER_AT_AGE=$((now - AGED_STREAM_STARTED_AT))
+	AGED_FAILOVER_AT_AGE="$(aged_stream_age_now)" || return 1
+	info "aged-failover: issuing RG transition at measured stream age ${AGED_FAILOVER_AT_AGE}s (target ${AGED_AGE}s, snapshot lead ${lead_elapsed}s)"
+	return 0
+}
+
+# Record the stream age at the instant RG ownership is confirmed
+# moved (the transition instant), not at command issue.
+aged_note_transition_landed() {
+	AGED_FAILOVER_AT_AGE="$(aged_stream_age_now)" || return 1
 	if (( AGED_FAILOVER_AT_AGE < AGED_AGE )); then
-		fail "aged-failover: failover would fire at measured stream age ${AGED_FAILOVER_AT_AGE}s (< ${AGED_AGE}s)"
+		fail "aged-failover: RG transition landed at measured stream age ${AGED_FAILOVER_AT_AGE}s (< ${AGED_AGE}s target)"
 		return 1
 	fi
-	pass "aged-failover: failing over at measured stream age ${AGED_FAILOVER_AT_AGE}s (target ${AGED_AGE}s)"
+	pass "aged-failover: RG transition landed at measured stream age ${AGED_FAILOVER_AT_AGE}s (target ${AGED_AGE}s)"
 	return 0
 }
 
@@ -1467,6 +1498,9 @@ run_failover_phase() {
 	capture_cycle_state "$cycle" "${phase}-pre"
 	run_vm "$from_vm" "cli -c \"request chassis cluster failover redundancy-group ${RG} node ${to_node}\" >/tmp/userspace-rg${RG}-${phase}-cycle${cycle}.out"
 	wait_for_rg_owner "$RG" "$to_node" "$FAILOVER_WAIT" || die "RG${RG} did not move to ${to_name} during cycle ${cycle} ${phase}"
+	if (( AGED_FAILOVER == 1 && cycle == 1 )); then
+		aged_note_transition_landed || true
+	fi
 	pass "cycle ${cycle} ${phase}: RG${RG} moved to ${to_name}"
 	ACTIVE_FW="$(wait_for_userspace_rg_owner "$RG" "$to_vm")" ||
 		die "userspace forwarding did not settle on ${to_name}" \
@@ -1686,13 +1720,17 @@ if (( AGED_FAILOVER == 1 )); then
 	if (( TOTAL_CYCLES != 1 )); then
 		die "--aged-failover requires a single failover cycle (TOTAL_CYCLES=1)"
 	fi
-	# Never-again gate for #16217: time the failover against the
-	# measured stream start above, so the streams have actually aged
-	# past the 20s TCP opening window and the 10s conntrack-refresh
-	# cycle when RG1 moves. Pre-failover zeros still fail via
-	# validate_whole_run_metrics (MAX_PREFLIGHT_* defaults are 0).
-	aged_capture_snat_revoked "pre-failover" || true
-	aged_wait_until_stream_age || true
+	# Never-again gate for #16217: schedule the RG transition so it
+	# LANDS at AGED_AGE measured stream age. The scheduler measures
+	# the 8-call pre-transition snapshot lead immediately beforehand
+	# and sleeps only the remainder; run_failover_phase re-pays that
+	# lead, issues the command, and aged_note_transition_landed
+	# stamps the age at confirmed ownership. The stream-start
+	# snat_revoked baseline (captured at stream start) is compared
+	# against the post-failover sample — a pre-failover baseline
+	# would hide the ~28s revocation leg. Pre-failover zeros still
+	# fail via validate_whole_run_metrics (MAX_PREFLIGHT_* are 0).
+	aged_schedule_transition_at_stream_age || true
 	run_failover_phase 1 "$SOURCE_NODE" "$TARGET_NODE" "failover" 1
 	aged_capture_snat_revoked "post-failover" || true
 	aged_assert_snat_revoked_zero_delta || true
