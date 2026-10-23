@@ -58,7 +58,6 @@ pub(in crate::afxdp) use debug_state::{
 pub(in crate::afxdp) use latency::{
     bucket_index_for_ns, tx_batch_bucket, DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS,
     TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
-    DRAIN_HIST_BUCKETS, TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS, bucket_index_for_ns,
 };
 // Only `binding_state/tests/latency_buckets.rs` consumes this
 // re-export (via the `use super::*;` chain); gate on `cfg(test)` so
@@ -1084,19 +1083,13 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // sentinels; offsets advance by 48 bytes, size unchanged.
 // #16242 adds the batch histograms to the owner profile before both
 // sentinels; offsets advance by 192 bytes, size grows by 192 bytes.
-const _: [(); 2880] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2736] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2865] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
-// #16215 adds one unconditional u64 snat_revoked_sessions counter before
-// both sentinels; offsets advance by 8 bytes, size unchanged.
-// #16220 adds seventeen unconditional u64 per-arm flow-cache eviction
-// counters before both sentinels.
-// #16269 adds the eighteenth arm; offsets advance by 8 bytes, size unchanged.
-// #16270 (cache supersession) adds the nineteenth arm; offsets advance
-// by 8 bytes, size unchanged.
-const _: [(); 2880] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2704] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2833] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// Composed sentinel (master histograms + this branch's per-arm
+// eviction counters and snat_revoked counter, all before both
+// sentinels): compiler-verified values.
+const _: [(); 3072] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2896] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3025] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+
 impl BindingLiveState {
     pub(super) fn new() -> Self {
         Self {

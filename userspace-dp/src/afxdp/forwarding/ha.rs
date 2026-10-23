@@ -499,6 +499,25 @@ fn cached_flow_decision_invalid_reason_inner(
     install_table: Option<&str>,
     resolution: ForwardingResolution,
 ) -> Option<CachedDecisionInvalid> {
+    // #16217: a cached ForwardCandidate whose egress RG has departed
+    // this node is superseded BEFORE enforce demotion is judged.
+    // Enforce re-derives HAInactive for exactly these entries whenever
+    // the egress row still exists, so judging enforce first masks the
+    // departure arm (live fw0 post-FO: enforce_changed=5,
+    // forward_candidate_egress_departed=0) and mis-attributes the
+    // eviction. Departure is the ownership fact; enforce is its
+    // downstream spelling. The guard is unchanged: only a KNOWN
+    // egress RG (>0, tunnel-aware) that is absent/inactive on a
+    // clustered node qualifies; locally-active, unknown (rg 0), and
+    // standalone (empty map) shapes never fire and stay bit-identical.
+    // ForwardCandidate is the only cacheable locally-egressing
+    // disposition, so no other disposition needs this arm. Evict so
+    // the slow path re-resolves: HA enforcement demotes the fresh
+    // resolution and the fabric converter redirects it to the new
+    // owner.
+    if forward_candidate_egress_departed(forwarding, ha_state, now_secs, resolution) {
+        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
+    }
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
         return Some(CachedDecisionInvalid::EnforceChanged);
     }
@@ -513,44 +532,6 @@ fn cached_flow_decision_invalid_reason_inner(
         && discard_route_cluster_terminal_now_local(forwarding, ha_state, now_secs, &resolution)
     {
         return Some(CachedDecisionInvalid::FabricIngressDiscardNowLocal);
-    }
-
-    // #16270 (cache supersession): a cached ForwardCandidate whose
-    // egress RG is known (>0) but is NOT forwarding-active locally
-    // right now must not be served locally — its RG has left this
-    // node (failover) or was never active here, so the stored
-    // decision transmits on a non-owner WAN egress forever (the
-    // aged-failover blackhole: fw0 kept WAN-TXing ForwardCandidate
-    // egress=14/RG1 tuples after RG1 moved to fw1). This is placed
-    // here, deliberately independent of `enforce_ha_resolution_snapshot`
-    // above: on the live build that check did NOT evict these
-    // entries (enforce_changed stayed 0 post-failover in the cell
-    // stats — the stored resolution is re-judged against the same
-    // FIB row and the HAInactive demotion did not fire for these
-    // cache hits), so the supersession must stand on its own
-    // egress-RG test rather than relying on the enforce rewrite.
-    // Evict so the slow path re-resolves: HA enforcement demotes
-    // the fresh resolution and the fabric converter redirects it
-    // to the new owner.
-    //
-    // Guard (acceptance): only when the egress RG is KNOWN and not
-    // active — `owner_rg_for_resolution` > 0 (a real EgressInterface
-    // / tunnel-endpoint row names the RG) and that RG is absent
-    // from `ha_state` or not forwarding-active. A locally-active
-    // egress is bit-identical (the arm never fires), an unknown
-    // egress (rg 0: standalone, pre-RETH-propagation, or missing
-    // row) is never touched here (the #16220 EnforceChanged arm
-    // above owns that clustered-node shape), and an empty HA map
-    // (standalone) can never fire because every known RG reads as
-    // absent — so the explicit `!ha_state.is_empty()` keeps a
-    // standalone node's ForwardCandidates bit-identical too.
-    // ForwardCandidate is the only cacheable locally-egressing
-    // forward disposition (`from_forward_decision` admits only
-    // ForwardCandidate | FabricRedirect; FabricRedirect is judged
-    // by the arms below) — MissingNeighbor/LocalDelivery are never
-    // cached, so no other disposition needs this arm.
-    if forward_candidate_egress_departed(forwarding, ha_state, now_secs, resolution) {
-        return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
     }
     // RG-stamped redirect hits are the common split-RG cache case. Once the
     // cached owner RG becomes locally active again, invalidate immediately and
@@ -716,18 +697,18 @@ fn cached_flow_decision_invalid_reason_inner(
     }
     None
 }
-/// #16217 (Wire18): the single egress-RG departure predicate behind the
+/// #16217: the single egress-RG departure predicate behind the
 /// `ForwardCandidateEgressDeparted` supersession arm AND the flow-cache
-/// lookup-fence admission — a cached `ForwardCandidate` whose egress RG is
+/// lookup-fence admission -- a cached `ForwardCandidate` whose egress RG is
 /// known (>0, tunnel-aware via `owner_rg_for_resolution`) and is not
 /// forwarding-active locally right now (absent or inactive), on a clustered
 /// node (non-empty HA map). A locally-active egress never qualifies, an
 /// unknown egress (rg 0) never qualifies, and a standalone node (empty map)
-/// never qualifies, so all three stay bit-identical. The lookup fence
-/// evaluates this against the entry's stamp owner (it has no
-/// `ForwardingState`); the hit-stage revalidation evaluates it against the
-/// live FIB egress attribution — both must agree that departure, not the
-/// fence, owns the eviction.
+/// never qualifies, so all three stay bit-identical. Both the lookup fence
+/// and the hit-stage revalidation evaluate it against the live FIB egress
+/// attribution (`owner_rg_for_resolution` on the cached resolution), NOT
+/// the stamp-owner RG -- both must agree that departure, not the fence,
+/// owns the eviction.
 pub(in crate::afxdp) fn forward_candidate_egress_departed(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -752,30 +733,29 @@ pub(in crate::afxdp) fn forward_candidate_egress_departed(
 /// what the exemption stands on, so the exemption may only be honoured
 /// while the judged snapshot still shows this node owning that RG.
 ///
-/// Temporal contract: the adopting worker's snapshot LAGS the gate — at
-/// the adoption instant it still reads the egress RG inactive (that lag
-/// is exactly why the adoption resolve needed `fabric_adopted = true`),
-/// so a bare `revalidate(...) == false` in that instant does NOT lapse
-/// the adoption: the gate's proof, not the lagging snapshot's, is the
-/// ownership evidence for the adoption window. The callers implement
-/// the lapse on the DEPARTURE side, judged on the same live snapshot
-/// the hit revalidation uses:
-///   * hit stage — the mark suppresses only the lagging-snapshot
-///     `EnforceChanged` demotion and only while
-///     `forward_candidate_egress_departed` is false; once departure
-///     holds (snapshot caught up to a failback) ordinary revalidation
-///     supersedes the entry whatever the validator spells it (enforce
-///     runs first and masks the departure arm on enforce-demoting
-///     shapes) and the flow re-resolves toward FabricRedirect.
-///   * session-hit site — the adopted context is
-///     `revalidate_fabric_established(marked row's stored decision)`:
-///     the stored decision names the egress the adoption resolve
-///     produced, and once the judged snapshot no longer shows that RG
-///     locally active the context lapses and the re-resolve runs
-///     unadopted (HA-demote + fabric conversion).
-/// Invariant: stale-window demotion ⇒ exemption; genuine departure ⇒
-/// conversion. There is no post-window snapshot in which a departed
-/// egress keeps the exemption.
+/// Temporal contract: the adopting worker's snapshot LAGS the gate --
+/// at the adoption instant it still reads the egress RG inactive (that
+/// lag is exactly why the adoption resolve needed `fabric_adopted =
+/// true`), so a bare `revalidate(...) == false` in that instant does
+/// NOT by itself lapse the adoption: the gate's proof, not the
+/// lagging snapshot's, is the ownership evidence for the adoption
+/// window. The lapse is enforced on the DEPARTURE side, judged on
+/// the same live snapshot the hit revalidation uses:
+///   * hit stage -- the mark suppresses only the lagging-snapshot
+///     `EnforceChanged` demotion; the departure arm is checked
+///     BEFORE enforce, so once departure holds (snapshot caught up
+///     to a failback, or the egress row vanished) the departed arm
+///     supersedes the entry whatever the validator would otherwise
+///     spell it and the flow re-resolves toward FabricRedirect.
+///   * session-hit site -- the marked-row context qualifies only on
+///     fabric-link ingress (the adoption site's own arrival
+///     identity); positive non-ownership is enforced at the gate
+///     and at the cache hit above, and once the flow re-resolves
+///     after failback under a caught-up snapshot it runs unadopted
+///     (HA-demote + fabric conversion).
+/// Invariant: stale-window demotion -> exemption; genuine departure
+/// -> conversion. There is no post-window snapshot in which a
+/// departed egress keeps the exemption.
 ///
 /// Returns `true` (proof holds) for a marked entry whose egress RG is
 /// forwarding-active in the judged snapshot, and for a marked

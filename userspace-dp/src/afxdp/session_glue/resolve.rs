@@ -459,7 +459,7 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
         // #16217: a fabric-adopted ForwardCandidate must not die on
         // the ha_inactive terminal (see `fabric_adopted_resolution`).
         let enforced_resolution = if fabric_adopted {
-            fabric_adopted_resolution(forwarding, looked_up_resolution, enforced_resolution)
+            fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution)
         } else {
             enforced_resolution
         };
@@ -731,7 +731,7 @@ fabric_adopted: bool,) -> Option<ResolvedFlowSessionDecision> {
     );
     // #16217: same adopted-ForwardCandidate exemption as the hit arm.
     let enforced_resolution = if fabric_adopted {
-        fabric_adopted_resolution(forwarding, looked_up_resolution, enforced_resolution)
+        fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution)
     } else {
         enforced_resolution
     };
@@ -872,10 +872,14 @@ ingress_zone: u16,) -> ForwardingResolution {
 /// false` at every other callsite), so the fail-closed terminal
 /// stands for them bit-identically. HAInactive with unknown ownership
 /// (egress RG 0: resolution never named an owner) stays terminal even
-/// for adopted flows — adoption proved session establishment, not
-/// route ownership.
+/// for adopted flows -- adoption proved session establishment, not
+/// route ownership. Positive non-ownership is enforced at the
+/// adoption gate and on every subsequent hit, not by re-imposing the
+/// lagging snapshot's terminal here.
 pub(in crate::afxdp) fn fabric_adopted_resolution(
     forwarding: &ForwardingState,
+    _ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    _now_secs: u64,
     looked_up: ForwardingResolution,
     enforced: ForwardingResolution,
 ) -> ForwardingResolution {
@@ -888,7 +892,23 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
     if looked_up.disposition != ForwardingDisposition::ForwardCandidate {
         return enforced;
     }
-    if super::forwarding::owner_rg_for_resolution(forwarding, looked_up) <= 0 {
+    // #16217 (GLM N1): adoption proved session establishment, not route
+    // ownership. Restore the candidate only when its egress RG is
+    // KNOWN (>0) and this node is not PROVEN a non-owner of it:
+    // restore when the RG is forwarding-active locally, OR when the
+    // gate's ownership evidence is the only fresh proof and the
+    // worker snapshot has not caught up (the adoption window -- the
+    // HA demotion this helper exists to bypass is itself proof the
+    // snapshot lags). Restore is refused only when ownership is
+    // positively disproven for a NAMED egress: the egress row is
+    // absent from the FIB (unknown egress, rg 0 via a missing row)
+    // -- there adoption proved establishment, not a route. A named
+    // egress RG that a clustered snapshot shows peer-owned is judged
+    // at the gate (`fabric_adoption_gate_for_wire`) and at every
+    // later hit (`revalidate_fabric_established`); this one-shot
+    // restore may not re-impose the lagging snapshot's terminal.
+    let egress_rg = super::forwarding::owner_rg_for_resolution(forwarding, looked_up);
+    if egress_rg <= 0 {
         return enforced;
     }
     looked_up

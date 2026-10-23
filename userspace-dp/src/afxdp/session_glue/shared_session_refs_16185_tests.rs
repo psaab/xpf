@@ -286,6 +286,8 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
             leak_incarnation: 0,
             tcp_flags: 0x10,
             generation: 0,
+            fwd_packets: 0,
+            rev_packets: 0,
         },
     );
     let peer_queue = Arc::new(Mutex::new(VecDeque::new()));

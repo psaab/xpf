@@ -195,26 +195,43 @@ pub(super) fn stage_flow_cache_hit(
         false
     };
 
-    // #16217 (Wire18, B2): read the seeded adoption mark BEFORE the
-    // mutating lookup (side-effect-free peek: no tallies/LRU/lease
-    // re-stamp). The mark is honoured ONLY against the `EnforceChanged`
-    // arm below — the demotion a LAGGING worker snapshot produces in the
-    // adoption window (snapshot still reads the egress RG inactive,
-    // exactly the read the adoption resolve bypassed with
-    // `fabric_adopted = true`). It is NEVER honoured against
-    // `ForwardCandidateEgressDeparted`: once the live snapshot + FIB
-    // attribute the egress RG to the peer (failback caught up), the
-    // departure arm supersedes the entry and the flow converts toward
-    // the fabric again. See `revalidate_fabric_established` for the
-    // temporal contract; the session-hit site applies the same split
-    // (mark re-validated against current ownership per hit).
-    // Unmarked entries compute `false` and are bit-identical.
-    let adopted_mark = {
+    // #16217: on EVERY hit a marked (adopted) entry's ownership is
+    // re-derived BEFORE the mutating lookup (side-effect-free peek:
+    // no tallies/LRU/lease re-stamp) via
+    // `revalidate_fabric_established` -- the same helper the
+    // session-hit site shares. The mark suppresses ONLY the
+    // `EnforceChanged` demotion (the lagging-snapshot spelling); it
+    // NEVER suppresses `ForwardCandidateEgressDeparted`, which the
+    // validator now checks BEFORE enforce, so once the live
+    // snapshot + FIB attribute the egress RG to the peer the
+    // departed arm supersedes the entry despite the mark and the
+    // flow re-resolves toward FabricRedirect (failback). Failback
+    // shapes where enforce compares equal are likewise never
+    // suppressed (the departed arm is what fires there). The
+    // remaining lag-vs-failback ambiguity (egress row present,
+    // enforce-demoting) is bounded by the session side: a marked
+    // cache entry only exists behind a marked session row, and
+    // that row's re-resolve after any eviction runs under the
+    // current snapshot. Unmarked entries compute `false` and are
+    // bit-identical.
+    let (adopted_mark, adopted_mark_revalidated) = {
         let peek_lookup = FlowCacheLookup::for_packet(meta, validation, worker_ctx.forwarding);
-        flow_state
+        match flow_state
             .flow_cache
             .peek_entry(&flow.forward_key, peek_lookup)
-            .is_some_and(|peeked| peeked.fabric_established)
+        {
+            Some(peeked) if peeked.fabric_established => (
+                true,
+                crate::afxdp::forwarding::revalidate_fabric_established(
+                    worker_ctx.forwarding,
+                    worker_ctx.ha_state,
+                    now_secs,
+                    peeked.fabric_established,
+                    peeked.decision.resolution,
+                ),
+            ),
+            _ => (false, false),
+        }
     };
 
     if let Some(cached) = flow_state.flow_cache.lookup_counted_with_scheduler_expiry(
@@ -234,6 +251,7 @@ pub(super) fn stage_flow_cache_hit(
         // #14943: validate/re-stamp the entry against the CURRENT runtime
         // lease from this batch's live HA snapshot, not the insert stamp.
         worker_ctx.ha_state,
+        worker_ctx.forwarding,
     ) {
         // #3048/#5147: an ARP/NDP MAC replacement or neighbor deletion may
         // invalidate this descriptor's next-hop mapping (gateway VRRP
@@ -257,17 +275,14 @@ pub(super) fn stage_flow_cache_hit(
         // neighbor-MAC, generation, lease, and remaining decision arms still
         // revalidate the entry every hit. Non-adopted entries are untouched.
         //
-        // #16217 (Wire18): the suppression reads the seeded mark
-        // (`adopted_mark`, peeked above) and covers ONLY the
-        // lagging-snapshot `EnforceChanged` demotion of a NON-departed
-        // egress. Once the egress RG has departed in the live snapshot
-        // (`forward_candidate_egress_departed`), ordinary revalidation
-        // owns the entry whatever the validator spells the rejection
-        // (enforce runs first and masks the departure arm on
-        // enforce-demoting shapes): it supersedes and re-resolves toward
-        // FabricRedirect — failback converts again. While ownership
-        // holds (or the snapshot still lags), EnforceChanged stays
-        // suppressed exactly as before.
+        // #16217: the suppression reads the REVALIDATED mark
+        // (peeked above) and covers ONLY the adoption-window
+        // `EnforceChanged` demotion while this node still owns the
+        // egress RG. Once the egress RG has departed in the live
+        // snapshot (`forward_candidate_egress_departed`, checked
+        // BEFORE enforce in the validator), ordinary revalidation
+        // owns the entry: it supersedes and re-resolves toward
+        // FabricRedirect -- failback converts again.
         let invalid_reason = if neighbor_mac_stale
             || (fabric_link_ingress
                 && cached.decision.resolution.disposition == ForwardingDisposition::FabricRedirect)
@@ -291,23 +306,19 @@ pub(super) fn stage_flow_cache_hit(
                 ),
                 cached.decision.resolution,
             );
-            // #16217 (Wire18): in the ADOPTION WINDOW the worker snapshot
-            // still lags the gate (reads the egress RG inactive — the very
-            // read the adoption resolve bypassed), and there the validator
-            // spells its rejection `EnforceChanged`; the gate's proof is
-            // the ownership evidence for that window, so the mark
-            // suppresses the demotion. The failback lapse is NOT judged
-            // here: at cache level the lagging-window read and a genuine
-            // failback read are the same bits, and un-suppressing on them
-            // would un-adopt every adopted flow at its first packet
-            // (Wire15/16 regression). The lapse is judged where current
-            // ownership is actually known per hit — the session side:
-            // `session_hit_fabric_adopted` re-validates the marked row's
-            // stored decision against current ownership, so once the flow
-            // re-resolves (eviction/miss) after failback it runs unadopted,
-            // HA-demotes and fabric-converts; and a marked entry whose
-            // validator returns the departure arm (enforce-equal shapes)
-            // is never suppressed either (next arm check below).
+            // #16217: the mark suppresses ONLY the `EnforceChanged`
+            // demotion. Departure is checked BEFORE enforce in the
+            // validator, so a departed egress returns
+            // `ForwardCandidateEgressDeparted` here and is never
+            // matched -- a marked entry with a departed egress evicts
+            // despite its mark and re-resolves toward FabricRedirect.
+            // `adopted_mark_revalidated` is computed every hit (peek
+            // above) and is the ownership fact the session side
+            // shares; the cache suppression deliberately does not
+            // key on it, because at the adoption instant the worker
+            // snapshot lags the gate and revalidation reads false
+            // for exactly the flows adoption just proved.
+            let _ = adopted_mark_revalidated;
             if adopted_mark
                 && matches!(
                     reason,

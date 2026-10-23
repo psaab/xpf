@@ -4013,6 +4013,8 @@ impl SessionTable {
             self.pressure_shed_unreplied.remove(&undo.shed_forward_key);
         }
         had_deferred
+    }
+
     /// #16217 (GLM B1): did the deferred probe completion for `key`
     /// transition the handshake stage into Established? Consumes the
     /// record. The flow-cache hit path restamps shared-map evidence

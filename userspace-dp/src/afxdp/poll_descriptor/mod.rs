@@ -2659,28 +2659,27 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // the adoption resolve bypassed. Non-adopted flows compute
                 // `false` here and stay fail-closed bit-identically.
                 //
-                // #16217 (Wire18, B2): the LOCAL-MARK arm is re-validated
-                // against CURRENT RG ownership on every hit — the marked
-                // row's stored decision must still name an egress RG that
-                // is forwarding-active locally (`revalidate_fabric_established`).
-                // Once that RG departs again (failback), the mark no longer
-                // exempts: the re-resolve runs unadopted, HA-demotes, and
-                // the fabric converter redirects to the new owner (convert
-                // again). The live-gate arms below are inherently current
+                // #16217: the LOCAL-MARK arm qualifies only on fabric-link
+                // ingress for a marked row (the same physical-arrival
+                // identity the adoption site required) -- a marked row hit
+                // on ordinary ingress never exempts. Ownership itself is
+                // NOT re-imposed here from the lagging worker snapshot:
+                // at the adoption instant that snapshot still reads the
+                // egress RG inactive (the lag the adoption resolve
+                // bypasses), so a snapshot revalidation would un-adopt
+                // every adopted flow at its first session hit. Positive
+                // non-ownership is enforced at the adoption gate and on
+                // every flow-cache hit (`adopted_mark_revalidated`); once
+                // the flow re-resolves after failback under a caught-up
+                // snapshot it runs unadopted. The live-gate arms below are inherently current
                 // (the gate re-proves Established + ownership per packet)
                 // and are unchanged.
                 let session_hit_fabric_adopted = flow.as_ref().is_some_and(|flow| {
-                    sessions
-                        .fabric_established_decision_for_wire_at(&flow.forward_key, now_ns)
-                        .is_some_and(|marked_decision| {
-                            crate::afxdp::forwarding::revalidate_fabric_established(
-                                worker_ctx.forwarding,
-                                worker_ctx.ha_state,
-                                now_secs,
-                                true,
-                                marked_decision.resolution,
-                            )
-                        })
+                    (fabric_link_ingress
+                        && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                        && sessions
+                            .fabric_established_decision_for_wire_at(&flow.forward_key, now_ns)
+                            .is_some())
                         || (fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
                             && sessions.shared_established_for_wire_at(
@@ -2690,7 +2689,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ))
                         || (fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
-                            && crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+                            && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
                                 sessions,
                                 worker_ctx.shared_sessions,
                                 worker_ctx.shared_forward_wire_sessions,
@@ -4276,19 +4278,27 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // reverse-only never adopt (fail-closed).
                         //
                         // #16217 (ha_inactive leg): the gate's proof
-                        // (Established + this node is the RG owner
-                        // post-takeover) IS the HA-activity proof for
-                        // this packet, so the resolve runs with
-                        // `fabric_adopted = true`: a ForwardCandidate
-                        // it produces must not be terminated as
-                        // HAInactive/ClusterTerminalHAInactive by the
-                        // receiving worker's HA enforcement (the last
-                        // resolution the adopted tuples died on live).
+                        // (Established + this node is the forwarding-
+                        // active owner of the egress RG, verified by
+                        // `fabric_adoption_gate_for_wire` against the
+                        // live FIB + HA snapshot) IS the HA-activity
+                        // proof for this packet, so the resolve runs
+                        // with `fabric_adopted = true`: a
+                        // ForwardCandidate it produces must not be
+                        // terminated as HAInactive/
+                        // ClusterTerminalHAInactive by the receiving
+                        // worker's HA enforcement (the last resolution
+                        // the adopted tuples died on live), and
+                        // `fabric_adopted_resolution` re-checks that
+                        // ownership before restoring any candidate.
                         // Non-adopted resolves keep the fail-closed
                         // terminal bit-identically.
                         let adopted = if fabric_link_ingress
                             && !crate::tcp_flags::has_syn(meta.tcp_flags)
-                            && crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+                            && crate::afxdp::shared_ops::fabric_adoption_gate_for_wire(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
                                 sessions,
                                 worker_ctx.shared_sessions,
                                 worker_ctx.shared_forward_wire_sessions,
@@ -4300,20 +4310,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             resolve_flow_session_decision_with_conntrack_and_payload(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
-                                    conntrack_v4_fd,
-                                    conntrack_v6_fd,
-                                    worker_ctx.shared_sessions,
-                                    worker_ctx.shared_nat_sessions,
-                                    worker_ctx.shared_forward_wire_sessions,
-                                    &worker_ctx.shared_owner_rg_indexes,
-                                    worker_ctx.peer_worker_commands,
-                                    worker_ctx.worker_commands_by_id,
+                                    crate::afxdp::session_glue::SharedSessionRefs {
+                                        sessions: worker_ctx.shared_sessions,
+                                        nat_sessions: worker_ctx.shared_nat_sessions,
+                                        forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
+                                        owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
+                                        peer_worker_commands: worker_ctx.peer_worker_commands,
+                                        worker_commands_by_id: worker_ctx.worker_commands_by_id,
+                                        conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                        tick: crate::afxdp::session_glue::Tick { ns: now_ns, secs: now_secs },
+                                    },
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
                                     worker_ctx.dynamic_neighbors,
                                     flow,
-                                    now_ns,
-                                    now_secs,
                                     meta.protocol,
                                     meta.tcp_flags,
                                     tcp_payload_len(packet_frame, meta),
