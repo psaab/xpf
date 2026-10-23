@@ -44,6 +44,7 @@ func normalizeCompactStanzas(tree *ConfigTree) int {
 		return 0
 	}
 	changed := normalizeCompactStanzasWithScope(tree, compactNormalizeInScope)
+	changed += normalizeElidedSecurityIdentity16296(tree.Children)
 	return changed + normalizePackedStaticRouteQualifiedNextHop(tree)
 }
 

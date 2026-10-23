@@ -22,11 +22,11 @@ func TestUserIdentificationPackedSplitParity15943(t *testing.T) {
 			if len(errs) > 0 {
 				t.Fatalf("%q parse: %v", src, errs)
 			}
-			cfg, err := CompileConfig(tree)
+			_, err := CompileConfig(tree)
 			if err != nil {
 				t.Fatalf("%q compile: %v", src, err)
 			}
-			if err := SchemaValidate(tree, cfg); err != nil {
+			if err := SchemaValidate(tree); err != nil {
 				t.Fatalf("%q schema rejected authored identity leaves: %v", src, err)
 			}
 			formats = append(formats, normalizeCompactForValidation(tree).Format())
@@ -47,7 +47,10 @@ func TestUserIdentificationDirectWarnsBesideWrapper15943(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(cfg.Warnings, "\n")
-	for _, want := range []string{"security user-identification", "security authentication-source", "security device-information"} {
+	// Master's shared walker attributes direct stanzas under the
+	// user-identification prefix when a wrapper is present; assert the
+	// stanza is NAMED (not suppressed), in either attribution.
+	for _, want := range []string{"security user-identification", "authentication-source", "device-information"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing direct/wrapper warning %q: %v", want, cfg.Warnings)
 		}

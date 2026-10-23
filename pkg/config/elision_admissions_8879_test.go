@@ -1322,6 +1322,14 @@ func TestUnadmittedTopLevelPairsAreAdjudicated8925(t *testing.T) {
 		// packedBodyChildren, which is what keeps `snmp client-list` out of the
 		// #2419 divergence inventory.
 		"snmp client-list": reasonNoBody,
+		// #16296 rebase: master's new `security pki` stanza. Measured at
+		// this head: braced compiles the CA profile, elided compiles to
+		// no PKI (silent drop). Admitting it was measured and REVERTED --
+		// it widens the depth-2 un-admitted population and disturbs the
+		// compact census classifications, a master-era change beyond this
+		// PR's identity scope. Registered declined so the drop is named,
+		// not silent in the registry; admission is follow-up work.
+		"security pki": "declined: measured DROP on elision at rebase head (braced compiles CA profile, elided compiles none); admission reverted as out-of-scope master drift, follow-up required",
 		// #15943 security identity pairs were initially registered here, but
 		// fold-2 admitted them to compactNormalizeInScope (leaf preservation),
 		// so they correctly leave this un-admitted population.

@@ -18,7 +18,7 @@ func TestSecurityUserIdentificationAcceptedOnly15943(t *testing.T) {
 	if err != nil {
 		t.Fatalf("security user-identification must compile: %v", err)
 	}
-	if serr := SchemaValidate(tree, cfg); serr != nil {
+	if serr := SchemaValidate(tree); serr != nil {
 		t.Fatalf("SchemaValidate rejected security user-identification: %v", serr)
 	}
 	joined := strings.Join(cfg.Warnings, "\n")
