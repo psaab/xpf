@@ -83,6 +83,14 @@ type rollbackSlotMetadataEntry struct {
 	// attributes at this or any other position.
 	PendingTimestamp time.Time `json:"pending_timestamp,omitempty"`
 	PendingComment   string    `json:"pending_comment,omitempty"`
+	// CurrentHash/CurrentTimestamp/CurrentComment (#16064 fold 3) snapshot the
+	// CURRENT on-disk slot bytes at this index and their owning history
+	// entry's attributes, captured during preparation independently of the
+	// committed Hash field. Bound to CurrentHash exactly: a slot admitted
+	// via CurrentHash carries CurrentTimestamp/CurrentComment.
+	CurrentHash      string    `json:"current_hash,omitempty"`
+	CurrentTimestamp time.Time `json:"current_timestamp,omitempty"`
+	CurrentComment   string    `json:"current_comment,omitempty"`
 }
 
 const (
@@ -393,10 +401,18 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, descr
 	if limit > 0 && len(futureEntries) > limit {
 		futureEntries = futureEntries[:limit]
 	}
+	preparedLen := len(futureEntries)
+	if hl := len(s.history.List()); hl > preparedLen {
+		preparedLen = hl
+	}
 	recoveredSkew := snap.NextActiveHash != "" && snap.NextActiveHash == guardedConfigHash(s.active) &&
 		snap.ActiveHash != guardedConfigHash(s.active)
-	prepared := make([]rollbackSlotMetadataEntry, len(futureEntries))
-	for i, entry := range futureEntries {
+	prepared := make([]rollbackSlotMetadataEntry, preparedLen)
+	for i := 0; i < preparedLen; i++ {
+		var entry *HistoryEntry
+		if i < len(futureEntries) {
+			entry = futureEntries[i]
+		}
 		data := []byte(rollbackTombstoneMarker)
 		if entry != nil && entry.Config != nil {
 			data = []byte(entry.Config.Format())
@@ -421,18 +437,27 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, descr
 			// Committed = CURRENT slots in recovered (pre-shift) positions:
 			// slot 1 = previous committed entry 0, slot i = history[i-2],
 			// stamped with that entry's committed attributes.
-			if i == 0 {
-				if len(snap.Entries) > 0 {
+			// Fold 3: snapshot EVERY current slot (hash + attrs) in recovered
+			// pre-shift positions, sourced from the in-memory history that
+			// the loader itself just verified: disk slot k holds history[k-1]
+			// with that entry's attributes. Entry index here is future index
+			// (entry 0 = new slot 1 = previous active generation), so disk
+			// slot i+1 holds history[i] and preparedEntry for future[i] must
+			// carry history[i]'s hash+attrs as its committed binding.
+			{
+				histList := s.history.List()
+				if i == 0 && len(snap.Entries) > 0 {
+					// Slot 1 currently holds the previous committed entry 0.
 					preparedEntry.Hash = snap.Entries[0].Hash
 					preparedEntry.Timestamp = snap.Entries[0].Timestamp
 					preparedEntry.Comment = snap.Entries[0].Comment
+				} else if i-1 < len(histList) && histList[i-1] != nil && histList[i-1].Config != nil {
+					preparedEntry.Hash = rollbackSlotHash([]byte(histList[i-1].Config.Format()))
+					preparedEntry.Timestamp = histList[i-1].Timestamp
+					preparedEntry.Comment = histList[i-1].Comment
+				} else {
+					preparedEntry.Hash = rollbackSlotHash([]byte(rollbackTombstoneMarker))
 				}
-			} else if histList := s.history.List(); i-1 < len(histList) && histList[i-1] != nil && histList[i-1].Config != nil {
-				preparedEntry.Hash = rollbackSlotHash([]byte(histList[i-1].Config.Format()))
-				preparedEntry.Timestamp = histList[i-1].Timestamp
-				preparedEntry.Comment = histList[i-1].Comment
-			} else {
-				preparedEntry.Hash = rollbackSlotHash([]byte(rollbackTombstoneMarker))
 			}
 			// Current-slot identity for the committed binding.
 			if identity, ok := rollbackSlotIdentityForPath(s.rollbackPath(i + 1)); ok {
@@ -447,6 +472,16 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, descr
 		if entry != nil {
 			preparedEntry.PendingTimestamp = entry.Timestamp
 			preparedEntry.PendingComment = entry.Comment
+		}
+		// Fold 3: snapshot current slot bytes for EVERY entry, sourced from
+		// the production current-slot history in EVERY state: slot i+1's
+		// current content is history[i], independent of committed Hash.
+		if histList := s.history.List(); i < len(histList) && histList[i] != nil && histList[i].Config != nil {
+			preparedEntry.CurrentHash = rollbackSlotHash([]byte(histList[i].Config.Format()))
+			preparedEntry.CurrentTimestamp = histList[i].Timestamp
+			preparedEntry.CurrentComment = histList[i].Comment
+		} else {
+			preparedEntry.CurrentHash = rollbackSlotHash([]byte(rollbackTombstoneMarker))
 		}
 		prepared[i] = preparedEntry
 	}
@@ -471,6 +506,12 @@ func rollbackSkewSlotAdmission(snap rollbackMetadataSnapshot, pendingSkew bool, 
 	if i-1 < len(metadata) && metadata[i-1].PendingHash != "" &&
 		slotHash == metadata[i-1].PendingHash {
 		return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
+	}
+	// Fold 3 snapshot edge: current on-disk bytes at this index, captured at
+	// preparation time independently of the committed Hash chain.
+	if i-1 < len(metadata) && metadata[i-1].CurrentHash != "" &&
+		slotHash == metadata[i-1].CurrentHash {
+		return true, metadata[i-1].CurrentTimestamp, metadata[i-1].CurrentComment
 	}
 	// Fallback mapping (pre-shift chain): the crashed commit's predecessor
 	// list is [old active, old slot1, old slot2, ...] = [snap.ActiveHash,
