@@ -114,8 +114,10 @@ pub(super) fn zone_pair_for_flow_with_override(
 /// NoRoute may still carry a logical egress identity — for example, a tunnel
 /// whose outer destination has no route. Use that identity to select the policy
 /// gate: a nonzero logical egress evaluates its configured zone (and denies
-/// zone 0), while `egress_ifindex == 0` has no zone to adjudicate and preserves
-/// the existing default-policy behavior for kernel delegation.
+/// zone 0), while `egress_ifindex == 0` adjudicates the known ingress's
+/// exact-pair DENY/REJECT rules deny-only plus the egress-unconstrained
+/// tiers (`to-zone any`, both-any, unscoped-to `junos-global`; #16021)
+/// and falls back to the default policy only when none of them matches.
 ///
 pub(in crate::afxdp) fn noroute_policy_denial(
     policy: &crate::policy::PolicyState,
@@ -229,10 +231,13 @@ pub(in crate::afxdp) fn noroute_policy_denial_at(
 ///     ForwardCandidate gate and the #4024 MissingNeighbor arm.
 ///
 /// A base NoRoute resolution has `egress_ifindex: 0`, so it has no egress
-/// identity and preserves the default-policy decision. Tunnel resolution may
-/// remap an outer NoRoute onto a nonzero logical egress; that case evaluates
-/// the logical zone, and resolved zone 0 is denied rather than defaulted.
-/// #3110 still makes zone 0 ineligible for zone-pair and `junos-global` rules.
+/// identity: it adjudicates the known ingress's exact-pair DENY/REJECT
+/// rules deny-only plus the egress-unconstrained tiers (#16021) and
+/// preserves the default-policy decision only when none matches. Tunnel
+/// resolution may remap an outer NoRoute onto a nonzero logical egress; that
+/// case evaluates the logical zone, and resolved zone 0 is denied rather
+/// than defaulted. #3110 still makes zone 0 ineligible for exact-pair
+/// permits, the `from-zone any` tier and egress-scoped `junos-global` rules.
 pub(in crate::afxdp) fn noroute_policy_denial_gated(
     forwarding: &ForwardingState,
     from_zone_id: u16,
@@ -581,6 +586,10 @@ mod tests_noroute_adjudication_7480;
 #[cfg(test)]
 #[path = "tests_noroute_capped_import_9054.rs"]
 mod tests_noroute_capped_import_9054;
+// #16021: NoRoute adjudicates the egress-unconstrained tiers.
+#[cfg(test)]
+#[path = "tests_noroute_unresolved_16021.rs"]
+mod tests_noroute_unresolved_16021;
 // #9522 Phase 0: selected lookup-semantic coverage for the route FIB (parity
 // corpus for a future LPM cutover; test-only, no production change).
 #[cfg(test)]

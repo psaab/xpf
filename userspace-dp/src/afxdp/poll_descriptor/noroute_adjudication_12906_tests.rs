@@ -391,9 +391,9 @@ fn fabric_stamp_is_bound_to_the_owner_rg_12906() {
     // (c) A BASE NoRoute has no egress identity, so its owner RG is unknown
     // (0) and the stamp never survives the gate — even with RG 1 active.
     // Its unzoned fabric ingress keeps the fail-closed #6682 deny, while a
-    // ZONED ingress keeps the #7480 availability contract: the interface's
-    // own zone forms the from-zone and the unresolved egress keeps the
-    // default-policy decision.
+    // ZONED ingress adjudicates its known-ingress deny rules (#16021 fold):
+    // this fixture's lan->wan deny for the translated destination now fires
+    // deny-only on the zero-identity shape too.
     let base = noroute_policy_adjudication(
         &state,
         &active_rg1(now_secs),
@@ -436,10 +436,13 @@ fn fabric_stamp_is_bound_to_the_owner_rg_12906() {
     );
     assert_eq!(zoned_base.from_zone_id, TEST_LAN_ZONE_ID);
     assert_eq!(zoned_base.to_zone_id, 0);
-    assert!(
-        zoned_base.denial.is_none(),
-        "a zero-identity NoRoute on a zoned ingress keeps its default-policy \
-         decision (#7480 availability cell)"
+    let zoned_denial = zoned_base.denial.expect(
+        "the known ingress's exact-pair deny must adjudicate a base \
+         NoRoute deny-only (#16021 fold)",
+    );
+    assert_eq!(
+        zoned_denial.policy_id, 4242,
+        "the denial must attribute to the lan->wan translated-dst deny"
     );
 }
 
