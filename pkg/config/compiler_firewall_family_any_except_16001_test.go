@@ -230,6 +230,70 @@ firewall {
 	}
 }
 
+// Fold (PR #16342, Opus): a term carrying a SPECIFIC positive literal
+// alongside an opposite-family sole-`except` list must NOT be marked.
+// The resolver is positive-wins for that direction (#3359): the literal
+// is preserved as the scope and the `except` list is dropped, so no
+// empty-except match-all ever forms. Over-refusing it would discard a
+// candidate whose uncovered arm is a plain constrained positive match.
+// A match-any literal (0.0.0.0/0) composes INTO the sole-except form
+// (#4338) and must STAY marked — the control half of the fixture.
+func TestUncoveredFamilyExceptSpecificLiteralExempt16001(t *testing.T) {
+	build := func(srcAddr string) *ConfigTree {
+		return parseHierText(t, `
+policy-options {
+    prefix-list mgmt-v6 {
+        2001:db8::/32;
+    }
+}
+firewall {
+    family any {
+        filter mixed {
+            term t {
+                from {
+                    source-address `+srcAddr+`;
+                    source-prefix-list mgmt-v6 except;
+                }
+                then accept;
+            }
+        }
+    }
+}
+`)
+	}
+	// Specific v4 literal + v6-only except: positive-wins on both arms.
+	cfg, err := CompileConfigLenient(build("10.0.0.0/8"))
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	for pool, filters := range map[string]map[string]*FirewallFilter{
+		"inet": cfg.Firewall.FiltersInet, "inet6": cfg.Firewall.FiltersInet6,
+	} {
+		f := filters["mixed"]
+		if f == nil || len(f.Terms) != 1 {
+			t.Fatalf("%s pool must carry the mixed filter, got %+v", pool, f)
+		}
+		if f.Terms[0].UncoveredFamilyExcept16001 {
+			t.Fatalf("specific-literal + except term must NOT be marked (%s pool): the resolver preserves the literal (positive-wins, #3359)", pool)
+		}
+		if len(f.Terms[0].SourceAddresses) != 1 || f.Terms[0].SourceAddresses[0] != "10.0.0.0/8" {
+			t.Fatalf("the specific literal must survive compilation (%s pool), got %v", pool, f.Terms[0].SourceAddresses)
+		}
+	}
+	// Control: match-any literal + same except composes to sole-except
+	// (#4338), so the uncovered (inet) arm STAYS marked.
+	cfg2, err := CompileConfigLenient(build("0.0.0.0/0"))
+	if err != nil {
+		t.Fatalf("CompileConfigLenient (match-any control): %v", err)
+	}
+	if !cfg2.Firewall.FiltersInet["mixed"].Terms[0].UncoveredFamilyExcept16001 {
+		t.Fatal("match-any literal + v6-only except must STAY marked on the uncovered inet arm (#4338 compose)")
+	}
+	if cfg2.Firewall.FiltersInet6["mixed"].Terms[0].UncoveredFamilyExcept16001 {
+		t.Fatal("the covered inet6 arm of the match-any control must NOT be marked")
+	}
+}
+
 // Strict commit still rejects outright (the marker is a tolerant-path
 // channel only; a strict config never carries it because compile fails).
 func TestUncoveredFamilyExceptStrictStillRejects16001(t *testing.T) {

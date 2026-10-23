@@ -9802,7 +9802,11 @@ packet of the uncovered family. Only the sole-`except` uncovered case is
 poisoned: a single-family **positive** list merely under-blocks (its arm
 matches nothing and falls through, the posture the committing binary
 already had), so warn-but-apply remains correct there, as do mixed-family
-and matched-family `except` lists. No wire or Rust change: the compiled
+and matched-family `except` lists. A direction carrying a SPECIFIC
+positive literal alongside the `except` list is likewise exempt: the
+resolver is positive-wins there (#3359), the literal is preserved as the
+scope, and no match-all forms (a match-any literal composes into the
+sole-except form, #4338, and stays poisoned). No wire or Rust change: the compiled
 snapshot is rejected on the existing `from_unrepresentable` marker before
 the matcher runs, and a defined-empty `except` list (authored match-all)
 keeps its semantics. Fail-on-revert:

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -1512,6 +1513,12 @@ func firewallPrefixListFamilies(nodes []*Node) map[string]plFamily {
 // posture the committing binary already had), so warn-but-apply stays
 // correct there. See markUncoveredFamilyExcept16001.
 //
+// Fold (PR #16342): a direction carrying a SPECIFIC positive literal
+// alongside the except list is exempt — the resolver is positive-wins
+// there (#3359), the literal is preserved as the scope, and no
+// empty-except match-all forms. A match-any literal (0.0.0.0/0, ::/0,
+// any) composes INTO the sole-except form (#4338) and stays poisoned.
+//
 // The traversal mirrors compileFirewall's family/filter/term/from walk:
 // `from` statements are found with firewallTermFromNodes and each is
 // lowered with packedBody under the from-schema (#14682) — the SAME
@@ -1584,6 +1591,15 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 						var posFam, excFam [2]plFamily
 						var hasPos, hasExc [2]bool
 						var dirNames [2][]string
+						// #16001 fold: a SPECIFIC positive literal in a
+						// direction makes the resolver positive-wins
+						// (ResolveFilterPrefixListAddrs, #3359): the
+						// `except` list is dropped and the literal is the
+						// scope, so there is no empty-except match-all to
+						// poison. A match-any literal (0.0.0.0/0, ::/0,
+						// any) composes INTO the sole-except form (#4338)
+						// and does NOT exempt. Index 0=source, 1=dest.
+						var hasSpecificLiteral [2]bool
 						fromNodes, _ := firewallTermFromNodes(termInst.node, termSchema)
 						for _, fromNode := range fromNodes {
 							for _, child := range packedBody(fromNode, fromSchema).Children {
@@ -1626,6 +1642,25 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 										}
 									}
 									continue
+								}
+								// #16001 fold: record a SPECIFIC positive
+								// literal in this direction (see
+								// hasSpecificLiteral). Read with the same
+								// reader compileFilterFrom uses
+								// (firewallAddressValues strips a literal
+								// `except` modifier, whose shape is owned
+								// by #11334, so it never counts here).
+								if mname == "source-address" || mname == "destination-address" {
+									ldir := 0
+									if mname == "destination-address" {
+										ldir = 1
+									}
+									vals, _ := firewallAddressValues(child)
+									for _, v := range vals {
+										if filterLiteralSpecific16001(v) {
+											hasSpecificLiteral[ldir] = true
+										}
+									}
 								}
 								if af != "any" || !familyAnySpecificMatches[mname] {
 									continue
@@ -1698,9 +1733,12 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 									return nil, nil, fmt.Errorf("%s", msg)
 								}
 								warnings = append(warnings, msg)
-								if except {
+								if except && !hasSpecificLiteral[dir] {
 									// #16001: this pool's matcher evaluates
-									// `except` over an empty family set.
+									// `except` over an empty family set. A
+									// specific literal in the direction is
+									// positive-wins at the resolver (#3359),
+									// so it is exempt — no match-all forms.
 									uncovered = append(uncovered, uncoveredFamilyExceptSite16001{pool: af, filter: filterInst.name, term: termInst.name})
 								}
 								continue
@@ -1736,8 +1774,10 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 								return nil, nil, fmt.Errorf("%s", msg)
 							}
 							warnings = append(warnings, msg)
-							if except {
-								// #16001: the uncovered arm of the dual-compile.
+							if except && !hasSpecificLiteral[dir] {
+								// #16001: the uncovered arm of the
+								// dual-compile (specific-literal directions
+								// are positive-wins and exempt, see above).
 								pool := "inet6"
 								if fam.hasV6 {
 									pool = "inet"
@@ -1751,6 +1791,26 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 		}
 	}
 	return warnings, uncovered, nil
+}
+
+// filterLiteralSpecific16001 reports whether a literal `from
+// source-address` / `destination-address` value is a SPECIFIC (constraining)
+// positive match, mirroring hasSpecificAddr in
+// validateFilterAddressExceptStrict (#3359/#4338) and addrsAllMatchAny in
+// the userspace resolver: the empty string and `any` are no-constraint
+// placeholders, a /0 CIDR of either family is the match-any universe, and
+// anything else — a bare host or a malformed token the address-literal
+// gate owns — constrains the direction.
+func filterLiteralSpecific16001(v string) bool {
+	if v == "" || v == "any" {
+		return false
+	}
+	_, ipnet, err := net.ParseCIDR(v)
+	if err != nil {
+		return true
+	}
+	ones, _ := ipnet.Mask.Size()
+	return ones != 0
 }
 
 // firewallMatchValues extracts every value carried by a `from` match-criterion
