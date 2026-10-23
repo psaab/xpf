@@ -3567,7 +3567,13 @@ mechanism (PATH C of `docs/research/2239-dhcp-ha-lease-sync/plan.md`):
   chunk types, so a mixed pair loses only over-cap lease pushes (never the
   connection) until both sides upgrade. A lease whose single record cannot
   fit any frame is dropped and counted via `MalformedRecordsDropped`, never
-  emitted over-cap. Cells: `dhcp_lease_chunk_15160_test.go`.
+  emitted over-cap. Cells: `dhcp_lease_chunk_15160_test.go`. The header's
+  `totalLeases` is bounded to `[1, 1<<20]` exactly like `total` (#16036):
+  previously it was only `!=0`-checked, so one chunk announcing
+  `totalLeases=0xFFFFFFFF` sized the completion
+  `make([]SyncLease, 0, totalLeases)` before the count check refused the
+  set; `addChunk` also refuses `received > totalLeases` before that
+  allocation. Cells: `dhcp_chunk_totalleases_16036_test.go`.
 - **Clock invariant** — each lease carries REMAINING LIFETIME, never an
   absolute wall-clock expiry (the channel only syncs a MONOTONIC offset). The
   promoting node re-anchors to its LOCAL clock at seed (`expire = now + remaining`),

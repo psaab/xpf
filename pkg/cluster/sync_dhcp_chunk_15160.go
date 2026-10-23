@@ -99,8 +99,11 @@ func encodeDHCPLeaseChunkPayload(leaseBody []byte, generation uint64, index, tot
 // ok is false for any truncated or internally inconsistent header: index
 // must be < total, total must be in [1, 1<<20] (a real set needs a handful
 // of 16 MiB chunks; the bound keeps a forged total from preallocating
-// assembly state), and totalLeases must be nonzero for a chunked set (an
-// empty set always fits the legacy frame and is never chunked).
+// assembly state), and totalLeases must be in [1, 1<<20] (#16036: an
+// empty set always fits the legacy frame and is never chunked, and the
+// same bound keeps a forged totalLeases — e.g. 0xFFFFFFFF — from sizing
+// the completion make([]SyncLease, 0, totalLeases) in addChunk before
+// the count check refuses the set).
 func decodeDHCPLeaseChunkHeader(payload []byte) (generation uint64, index, total, totalLeases uint32, body []byte, ok bool) {
 	if len(payload) < dhcpChunkHeaderLen {
 		return 0, 0, 0, 0, nil, false
@@ -109,7 +112,7 @@ func decodeDHCPLeaseChunkHeader(payload []byte) (generation uint64, index, total
 	index = binary.LittleEndian.Uint32(payload[8:12])
 	total = binary.LittleEndian.Uint32(payload[12:16])
 	totalLeases = binary.LittleEndian.Uint32(payload[16:20])
-	if generation == 0 || total == 0 || total > 1<<20 || index >= total || totalLeases == 0 {
+	if generation == 0 || total == 0 || total > 1<<20 || index >= total || totalLeases == 0 || totalLeases > 1<<20 {
 		return 0, 0, 0, 0, nil, false
 	}
 	return generation, index, total, totalLeases, payload[dhcpChunkHeaderLen:], true
@@ -165,9 +168,12 @@ func encodeDHCPLeaseChunkFrames(leases []dhcpserver.SyncLease) (bodies [][]byte,
 // addChunk records one decoded chunk in the pending assembly for key and
 // reports the completed lease set when every chunk has arrived (the
 // assembly is then consumed). A chunk that disagrees with the pending
-// assembly on total/totalLeases, or a duplicate index, invalidates the
-// whole generation (dropped, never committed) — a torn or forged stream
-// must not assemble. Caller holds dhcpApplyMu.
+// assembly on total/totalLeases, pushes the accumulated lease count past
+// totalLeases, or duplicates an index invalidates the whole generation
+// (dropped, never committed) — a torn or forged stream must not
+// assemble. The received>totalLeases refusal sits BEFORE the completion
+// allocation so an over-total stream is dropped without ever sizing a
+// slice from the announced total (#16036). Caller holds dhcpApplyMu.
 func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalLeases uint32, leases []dhcpserver.SyncLease) (complete []dhcpserver.SyncLease, closed bool) {
 	if st.pending == nil {
 		st.pending = make(map[dhcpChunkGeneration]*dhcpChunkAssembly)
@@ -197,11 +203,20 @@ func (st *dhcpChunkState) addChunk(key dhcpChunkGeneration, index, total, totalL
 	a.parts[index] = leases
 	a.have++
 	a.received += uint32(len(leases))
+	if a.received > a.totalLeases {
+		// More leases arrived than the generation announced: refuse
+		// before any completion work (#16036).
+		delete(st.pending, key)
+		return nil, false
+	}
 	if a.have < int(a.total) {
 		return nil, false
 	}
-	// Complete: concatenate in index order and verify the announced total.
-	complete = make([]dhcpserver.SyncLease, 0, a.totalLeases)
+	// Complete: size the concatenation by a.received — the lease count
+	// the parts have already proven — never by the announced
+	// totalLeases, and verify the announced total against the result
+	// below (#16036).
+	complete = make([]dhcpserver.SyncLease, 0, a.received)
 	for i := uint32(0); i < a.total; i++ {
 		part, ok := a.parts[i]
 		if !ok {
