@@ -730,7 +730,7 @@ fn teardrop_drops() {
 }
 
 #[test]
-fn teardrop_first_fragment_passes() {
+fn teardrop_first_fragment_illegal_payload_drops_16030() {
     let _state = make_state("trust", default_profile());
     let pkt = ScreenPacketInfo {
         addr_family: libc::AF_INET as u8,
@@ -758,13 +758,21 @@ fn teardrop_first_fragment_passes() {
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     };
-    // First fragment (offset=0) — teardrop only triggers on non-first
+    // #16030 RE-ANCHOR: this fixture is offset=0, MF=1 with a 4-byte
+    // payload (ip_total_len 24 - 20 header) — exactly the illegal
+    // non-last first fragment #16030 drops. The old Pass claim ("teardrop
+    // only triggers on non-first") is the bug. Legal first-fragment
+    // controls (8/multiple-of-8 payload) live in
+    // teardrop_first_fragment_legal_payloads_pass_16030.
     // However no_flag check will trigger first since tcp_flags=0
     // Use a profile with only teardrop enabled
     let mut profile = ScreenProfile::default();
     profile.teardrop = true;
     let mut st = make_state("trust", profile);
-    assert_eq!(st.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
+    assert_eq!(
+        st.check_packet("trust", &pkt, 1),
+        ScreenVerdict::Drop("teardrop")
+    );
 }
 
 #[test]
@@ -915,10 +923,11 @@ fn teardrop_v6_normal_fragment_passes() {
 }
 
 #[test]
-fn teardrop_v6_first_fragment_passes() {
-    // Control: an IPv6 FIRST fragment (offset 0) is never a teardrop even
-    // with a tiny data contribution — teardrop only fires on non-first
-    // fragments. M=1, offset=0.
+fn teardrop_v6_first_fragment_illegal_payload_drops_16030() {
+    // #16030 RE-ANCHOR: offset 0, M=1 with frag_data=4 is the illegal
+    // non-last first fragment #16030 drops; the old "first fragment is
+    // never a teardrop" control described the bug. Legal controls are in
+    // teardrop_first_fragment_legal_payloads_pass_16030. M=1, offset=0.
     let mut profile = ScreenProfile::default();
     profile.teardrop = true;
     let mut state = make_state("trust", profile);
@@ -928,10 +937,13 @@ fn teardrop_v6_first_fragment_passes() {
         PROTO_UDP,
         0,    // offset 0 → first fragment
         true, // MORE_FRAGMENTS
-        12,   // tiny data, but offset==0 so not a teardrop
+        12,   // frag_data=4 at offset 0, M=1 -> #16030 teardrop
         8,
     );
-    assert_eq!(state.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
+    assert_eq!(
+        state.check_packet("trust", &pkt, 1),
+        ScreenVerdict::Drop("teardrop")
+    );
 }
 
 #[test]
@@ -983,6 +995,13 @@ fn icmpv6_fragment_drops() {
         84,
     );
     pkt.is_fragment = true;
+    // #16030: icmp_pkt leaves ip_payload_len/frag_data_off at 0, so
+    // frag_data saturates to 0 and teardrop (earlier in
+    // check_fragment_and_route) would mask the icmp-fragment claim.
+    // Give the fragment a legal 8-byte-multiple data contribution so
+    // only icmp-fragment can fire: payload_len 48, frag_data_off 8.
+    pkt.ip_payload_len = 48;
+    pkt.frag_data_off = 8;
     assert_eq!(
         state.check_packet("trust", &pkt, 1),
         ScreenVerdict::Drop("icmp-fragment")
@@ -8374,6 +8393,188 @@ fn teardrop_eight_byte_fragment_passes_either_way_9426() {
              last one too (more_fragments={more})"
         );
     }
+}
+
+// ===================== #16030: offset-0 non-last fragment =====================
+//
+// Every non-last fragment — including the FIRST (offset 0, MF/M=1) — must
+// carry a payload that is a multiple of 8 bytes (RFC 791 / RFC 8200). The
+// pre-fix `check_teardrop` gated both arms on `frag_offset > 0`, so a first
+// fragment with 4 or 12 payload bytes passed. FAIL-ON-REVERT: restoring the
+// offset gate (or reverting `% 8` to `< 8`, which misses 12) reds the DROP
+// cells below; the PASS controls must stay green (#9426 legal last fragment,
+// legal multiple-of-8 first fragment, non-fragment).
+
+#[test]
+fn teardrop_first_fragment_non_multiple_payload_drops_16030() {
+    for payload in [4u16, 12, 20] {
+        let mut profile = ScreenProfile::default();
+        profile.teardrop = true;
+        let mut state = make_state("trust", profile);
+        let pkt = ipv4_fragment(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+            PROTO_UDP,
+            0,
+            true,
+            20 + payload,
+        );
+        assert!(pkt.is_first_fragment);
+        assert_eq!(
+            state.check_packet("trust", &pkt, 1),
+            ScreenVerdict::Drop("teardrop"),
+            "a NON-LAST first IPv4 fragment carrying {payload} byte(s) is not a \
+             multiple of 8 and must drop (#16030)"
+        );
+    }
+}
+
+#[test]
+fn teardrop_v6_first_fragment_non_multiple_payload_drops_16030() {
+    for payload in [4u16, 12, 20] {
+        let mut profile = ScreenProfile::default();
+        profile.teardrop = true;
+        profile.udp_flood_threshold = 0;
+        let mut state = make_state("trust", profile);
+        let pkt = ipv6_fragment(
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+            IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
+            PROTO_UDP,
+            0,
+            true,
+            8 + payload,
+            8,
+        );
+        assert!(pkt.is_first_fragment);
+        assert_eq!(
+            state.check_packet("trust", &pkt, 1),
+            ScreenVerdict::Drop("teardrop"),
+            "a NON-LAST first IPv6 fragment carrying {payload} byte(s) is not a \
+             multiple of 8 and must drop (#16030)"
+        );
+    }
+}
+
+#[test]
+fn teardrop_non_last_fragment_non_multiple_payload_drops_16030() {
+    for payload in [12u16, 20] {
+        let mut profile = ScreenProfile::default();
+        profile.teardrop = true;
+        let mut state = make_state("trust", profile);
+        let pkt = ipv4_fragment(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+            PROTO_UDP,
+            2,
+            true,
+            20 + payload,
+        );
+        assert_eq!(
+            state.check_packet("trust", &pkt, 1),
+            ScreenVerdict::Drop("teardrop"),
+            "a NON-LAST non-first IPv4 fragment carrying {payload} byte(s) must drop (#16030)"
+        );
+    }
+    for payload in [12u16, 20] {
+        let mut profile = ScreenProfile::default();
+        profile.teardrop = true;
+        profile.udp_flood_threshold = 0;
+        let mut state = make_state("trust", profile);
+        let pkt = ipv6_fragment(
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+            IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
+            PROTO_UDP,
+            2,
+            true,
+            8 + payload,
+            8,
+        );
+        assert_eq!(
+            state.check_packet("trust", &pkt, 1),
+            ScreenVerdict::Drop("teardrop"),
+            "a NON-LAST non-first IPv6 fragment carrying {payload} byte(s) must drop (#16030)"
+        );
+    }
+}
+
+#[test]
+fn teardrop_first_fragment_legal_payloads_pass_16030() {
+    for payload in [8u16, 16, 24] {
+        let mut profile = ScreenProfile::default();
+        profile.teardrop = true;
+        let mut state = make_state("trust", profile);
+        let pkt = ipv4_fragment(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+            PROTO_UDP,
+            0,
+            true,
+            20 + payload,
+        );
+        assert_eq!(
+            state.check_packet("trust", &pkt, 1),
+            ScreenVerdict::Pass,
+            "a NON-LAST first IPv4 fragment carrying {payload} byte(s) (multiple of 8) must pass"
+        );
+    }
+    for payload in [8u16, 16, 24] {
+        let mut profile = ScreenProfile::default();
+        profile.teardrop = true;
+        profile.udp_flood_threshold = 0;
+        let mut state = make_state("trust", profile);
+        let pkt = ipv6_fragment(
+            IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+            IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
+            PROTO_UDP,
+            0,
+            true,
+            8 + payload,
+            8,
+        );
+        assert_eq!(
+            state.check_packet("trust", &pkt, 1),
+            ScreenVerdict::Pass,
+            "a NON-LAST first IPv6 fragment carrying {payload} byte(s) (multiple of 8) must pass"
+        );
+    }
+    for payload in [4u16, 7] {
+        let mut profile = ScreenProfile::default();
+        profile.teardrop = true;
+        let mut state = make_state("trust", profile);
+        let pkt = ipv4_fragment(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+            PROTO_UDP,
+            0,
+            false,
+            20 + payload,
+        );
+        assert_eq!(
+            state.check_packet("trust", &pkt, 1),
+            ScreenVerdict::Pass,
+            "a LAST IPv4 fragment carrying {payload} byte(s) is legal (#9426) and must pass"
+        );
+    }
+}
+
+#[test]
+fn teardrop_first_fragment_zero_payload_drops_16030() {
+    let mut profile = ScreenProfile::default();
+    profile.teardrop = true;
+    let mut state = make_state("trust", profile);
+    let pkt = ipv4_fragment(
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        PROTO_UDP,
+        0,
+        true,
+        20,
+    );
+    assert_eq!(
+        state.check_packet("trust", &pkt, 1),
+        ScreenVerdict::Drop("teardrop"),
+        "a NON-LAST first IPv4 fragment with zero payload must drop (#16030)"
+    );
 }
 
 // ---------------------------------------------------------------------------

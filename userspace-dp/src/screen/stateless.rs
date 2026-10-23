@@ -154,8 +154,9 @@ pub(super) fn check_ping_of_death(
     None
 }
 
-/// Teardrop: a non-first fragment carrying zero / under-length payload, or a
-/// non-first NON-LAST fragment carrying fewer than 8 data bytes.
+/// Teardrop: a non-last fragment whose payload is not a multiple of 8
+/// bytes (including a payload below 8), at ANY fragment offset — plus a
+/// zero/under-length payload on any fragment.
 ///
 /// #9426: the doc used to call `< 8` on any non-first fragment "the classic
 /// overlapping-fragment signature". That was factually wrong twice over, and
@@ -182,8 +183,8 @@ pub(super) fn check_ping_of_death(
 /// one that may legally carry 1-7 bytes; MF = 1 with a sub-8-byte payload
 /// really is malformed. The check now tests it.
 ///
-/// What did NOT change: a non-first fragment with ZERO or under-length payload
-/// is malformed whatever MF says — a last fragment that contributes no data is
+/// What did NOT change: a fragment with ZERO or under-length payload is
+/// malformed whatever MF says — a last fragment that contributes no data is
 /// not a legal tail, it is a fragment with nothing in it — so the #3027 arm and
 /// its IPv6 analogue stay ungated.
 ///
@@ -194,7 +195,7 @@ pub(super) fn check_ping_of_death(
 /// stateless screen and is deliberately out of scope here; what is fixed is the
 /// FALSE POSITIVE, which costs legal traffic on its own.
 ///
-/// #3027: a non-first fragment whose `ip_total_len <= hdr_len` carries
+/// #3027: a fragment whose `ip_total_len <= hdr_len` carries
 /// zero (or, by the field's claimed length, "negative") payload. That is
 /// even more clearly malformed than the classic tiny-but-positive
 /// teardrop signature — exactly the kind of crafted fragment that
@@ -204,7 +205,7 @@ pub(super) fn check_ping_of_death(
 /// teardrop drop.
 ///
 /// #3119: this check was IPv4-only while the sibling `check_ping_of_death`
-/// already screened both families. An IPv6 teardrop (a non-first Fragment
+/// already screened both families. An IPv6 teardrop (a Fragment
 /// extension-header fragment with a tiny data contribution) therefore
 /// bypassed the screen entirely. The IPv6 arm mirrors the
 /// `check_ping_of_death` IPv6 sizing: the Fragment header's offset field
@@ -213,10 +214,23 @@ pub(super) fn check_ping_of_death(
 /// `ip_payload_len - frag_data_off` (the L4/data region after the
 /// extension headers up to and including the 8-byte fragment header).
 /// `saturating_sub` collapses a hostile under-length (`frag_data_off`
-/// larger than the declared `ip_payload_len`) to 0, which is `< 8` and so
-/// is treated as the malformed zero/under-length teardrop case — the IPv6
+/// larger than the declared `ip_payload_len`) to 0, which is treated as the
+/// malformed zero/under-length teardrop case — the IPv6
 /// analogue of the #3027 IPv4 fix. Junos vSRX applies teardrop screening
 /// to both families.
+///
+/// #16030: the pre-fix check gated BOTH arms on `frag_offset > 0`, so a
+/// non-last FIRST fragment (offset 0, MF/M=1) with a payload that is not a
+/// multiple of 8 — e.g. 4 bytes, or 12 bytes — was never dropped, even
+/// though RFC 791 / RFC 8200 require every non-last fragment's payload to
+/// be a multiple of 8. Only the offset gate is removed: the MF-gated
+/// `payload % 8 != 0` test now runs at offset 0 too, which subsumes the old
+/// `payload < 8` case (any positive payload < 8 is a non-multiple of 8).
+/// The zero/under-length arm likewise no longer needs the offset gate:
+/// a non-last fragment with no data is malformed at offset 0 as well.
+/// Legal short LAST fragments (MF/M=0, 1-7 bytes, #9426) stay admitted
+/// because the `% 8` test remains MF-gated; a legal 8-byte (or any
+/// multiple-of-8) first fragment also passes.
 #[inline]
 pub(super) fn check_teardrop(
     profile: &ScreenProfile,
@@ -226,46 +240,40 @@ pub(super) fn check_teardrop(
         return None;
     }
     if pkt.addr_family == libc::AF_INET as u8 {
-        let frag_offset = pkt.ip_frag_off & 0x1FFF;
-        if frag_offset > 0 {
-            let hdr_len = (pkt.ip_ihl as u16) * 4;
-            if pkt.ip_total_len <= hdr_len {
-                // No / negative payload on a non-first fragment — malformed
-                // whatever MF says (#3027). A last fragment contributing zero
-                // data is not a legal tail.
-                return Some("teardrop");
-            }
-            let payload = pkt.ip_total_len - hdr_len;
-            // #9426: only a NON-LAST fragment must be an 8-byte multiple. MF=0
-            // is the last fragment and may legally carry 1-7 bytes.
-            let more_fragments = (pkt.ip_frag_off & 0x2000) != 0;
-            if more_fragments && payload < 8 {
-                return Some("teardrop");
-            }
+        let hdr_len = (pkt.ip_ihl as u16) * 4;
+        if pkt.ip_total_len <= hdr_len {
+            // No / negative payload — malformed whatever MF says (#3027,
+            // #16030: also at offset 0). A last fragment contributing zero
+            // data is not a legal tail.
+            return Some("teardrop");
+        }
+        let payload = pkt.ip_total_len - hdr_len;
+        // #9426 + #16030: only a NON-LAST fragment must carry a multiple
+        // of 8 bytes, at ANY offset including the first fragment. MF=0
+        // is the last fragment and may legally carry 1-7 bytes.
+        let more_fragments = (pkt.ip_frag_off & 0x2000) != 0;
+        if more_fragments && payload % 8 != 0 {
+            return Some("teardrop");
         }
     } else if pkt.addr_family == libc::AF_INET6 as u8 {
-        // IPv6 Fragment header: offset is the upper 13 bits (8-byte
-        // units); `& 0xFFF8` is the byte offset. A non-first fragment has
-        // a non-zero byte offset.
-        let offset_bytes = pkt.ip_frag_off & 0xFFF8;
-        if offset_bytes > 0 {
-            // This fragment's data bytes = payload_len minus the
-            // ext-header bytes preceding the fragment data. saturating_sub
-            // collapses a hostile under-length to 0 (< 8 → teardrop), the
-            // IPv6 analogue of the #3027 zero/negative-payload case.
-            let frag_data = pkt.ip_payload_len.saturating_sub(pkt.frag_data_off);
-            if frag_data == 0 {
-                // Zero / under-length contribution — malformed whatever M says
-                // (#3119's IPv6 analogue of the #3027 case). The v4 arm above
-                // reaches the same state through `ip_total_len <= hdr_len`.
-                return Some("teardrop");
-            }
-            // #9426: as in the v4 arm, only a NON-LAST fragment must be an
-            // 8-byte multiple. The Fragment header's M bit is the low bit.
-            let more_fragments = (pkt.ip_frag_off & 0x1) != 0;
-            if more_fragments && frag_data < 8 {
-                return Some("teardrop");
-            }
+        // This fragment's data bytes = payload_len minus the ext-header
+        // bytes preceding the fragment data. saturating_sub collapses a
+        // hostile under-length to 0, the IPv6 analogue of the #3027
+        // zero/negative-payload case.
+        let frag_data = pkt.ip_payload_len.saturating_sub(pkt.frag_data_off);
+        if frag_data == 0 {
+            // Zero / under-length contribution — malformed whatever M says
+            // (#3119's IPv6 analogue of the #3027 case, #16030: also at
+            // offset 0). The v4 arm above reaches the same state through
+            // `ip_total_len <= hdr_len`.
+            return Some("teardrop");
+        }
+        // #9426 + #16030: as in the v4 arm, only a NON-LAST fragment must
+        // carry a multiple of 8 bytes, at ANY offset including the first
+        // fragment. The Fragment header's M bit is the low bit.
+        let more_fragments = (pkt.ip_frag_off & 0x1) != 0;
+        if more_fragments && frag_data % 8 != 0 {
+            return Some("teardrop");
         }
     }
     None
