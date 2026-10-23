@@ -268,6 +268,10 @@ func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 	appendUnique(&out.systemServicesExcept, b.systemServicesExcept)
 	appendUnique(&out.protocolsExcept, a.protocolsExcept)
 	appendUnique(&out.protocolsExcept, b.protocolsExcept)
+	// #16000: an unknown except operand on either contributor poisons the
+	// unioned dimension, so a sibling's `all` cannot resurrect admission.
+	out.SystemServices = poisonUnknownExceptDimension(out.SystemServices, out.systemServicesExcept, KnownHostInboundSystemServices)
+	out.Protocols = poisonUnknownExceptDimension(out.Protocols, out.protocolsExcept, KnownHostInboundProtocols)
 	out.systemServicesHasAll = a.systemServicesHasAll || b.systemServicesHasAll
 	out.protocolsHasAll = a.protocolsHasAll || b.protocolsHasAll
 	appendUnique(&out.nonCanonicalSystemServices, a.nonCanonicalSystemServices)

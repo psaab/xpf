@@ -67,6 +67,21 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 	}
 	// A malformed descendant poisons its whole admission dimension on tolerant
 	// load, so a dropped nested exclusion can never leave its parent `all` open.
+	// #16000: an unrecognized `except` operand poisons its dimension the same
+	// way. The positive admission is cleared, but the operand itself is kept
+	// in BOTH the positive list and the exclusion provenance: the strict token
+	// gate then still rejects it by name (its pre-#16000 behaviour, pinned by
+	// #10292/#12054), the tolerant token warning still names it, and a later
+	// merge/cross-scope re-filter sees the unknown exclusion and re-poisons
+	// instead of resurrecting the sibling's full admit.
+	servicesUnknownExcept := hostInboundHasUnknownExceptOperand(servicesExcept, KnownHostInboundSystemServices)
+	protocolsUnknownExcept := hostInboundHasUnknownExceptOperand(protocolsExcept, KnownHostInboundProtocols)
+	if servicesUnknownExcept {
+		services = keepUnknownExceptOperandsOnly(services, servicesExcept, KnownHostInboundSystemServices)
+	}
+	if protocolsUnknownExcept {
+		protocols = keepUnknownExceptOperandsOnly(protocols, protocolsExcept, KnownHostInboundProtocols)
+	}
 	if servicesMalformed {
 		services, servicesExcept = nil, nil
 	}
@@ -75,6 +90,10 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 	}
 	hib.SystemServices = hostInboundFilterExcept(services, servicesExcept, false)
 	hib.Protocols = hostInboundFilterExcept(protocols, protocolsExcept, true)
+	// #16000: the operand token sits in the filtered list above so the
+	// strict token gate and tolerant token warning keep naming it; it
+	// admits nothing itself. hasAll is derived from the pre-poison list
+	// below so the except-without-base gate does not misreport the shape.
 	hib.systemServicesExcept = servicesExcept
 	hib.protocolsExcept = protocolsExcept
 	hib.systemServicesHasAll = hostInboundHasAllToken(services)
@@ -202,6 +221,66 @@ func hostInboundHasAllToken(tokens []string) bool {
 	return false
 }
 
+// keepUnknownExceptOperandsOnly reduces a poisoned dimension's positive list
+// to just its unrecognized exclusion operands, plus a retained `any-service`
+// full-admit token. Operands stay positive so the strict token gate and the
+// tolerant token warning keep naming them (the operand already rides the
+// positive list via appendKeys); every other recognized admission (`all`,
+// named services) is dropped so the dimension admits nothing. `any-service`
+// is kept verbatim (pre-#16000 shape) so the #12054 full-admit gate keeps
+// seeing the stanza; stripping it from the effective list happens in the
+// callers via poisonUnknownExceptDimension.
+func keepUnknownExceptOperandsOnly(tokens, except []string, known map[string]bool) []string {
+	var out []string
+	for _, token := range tokens {
+		for _, operand := range except {
+			if token == operand && !known[strings.ToLower(operand)] {
+				out = append(out, token)
+			}
+		}
+		if strings.EqualFold(token, "any-service") {
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+// stripUnknownExceptOperands removes unrecognized exclusion operands from an
+// effective (post-filter) token list, leaving the remaining — unrecognized —
+// positive tokens visible to the strict/tolerant token diagnostics while the
+// recognized admissions stay cleared.
+func stripUnknownExceptOperands(tokens, except []string, known map[string]bool) []string {
+	out := tokens[:0]
+	for _, token := range tokens {
+		unknownOperand := false
+		for _, operand := range except {
+			if token == operand && !known[strings.ToLower(operand)] {
+				unknownOperand = true
+			}
+		}
+		if !unknownOperand {
+			out = append(out, token)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// hostInboundHasUnknownExceptOperand reports whether any exclusion operand is
+// outside the recognized token set for its dimension. Matching is
+// case-insensitive: a wrong-case spelling of a known token (e.g. `SSH`) is
+// non-canonical, which strict rejects separately, not unknown.
+func hostInboundHasUnknownExceptOperand(except []string, known map[string]bool) bool {
+	for _, token := range except {
+		if !known[strings.ToLower(token)] {
+			return true
+		}
+	}
+	return false
+}
+
 func hostInboundNonCanonicalTokens(tokens []string, known map[string]bool) []string {
 	var out []string
 	for _, token := range tokens {
@@ -209,6 +288,27 @@ func hostInboundNonCanonicalTokens(tokens []string, known map[string]bool) []str
 		if token != canonical && known[canonical] {
 			out = append(out, token)
 		}
+	}
+	return out
+}
+
+// poisonUnknownExceptDimension clears every recognized admission from an
+// effective token list when the combined exclusion provenance carries an
+// unrecognized operand (#16000). Unrecognized tokens themselves survive:
+// they admit nothing on either enforcement surface and keep the strict /
+// tolerant token diagnostics naming the operand.
+func poisonUnknownExceptDimension(tokens, except []string, known map[string]bool) []string {
+	if !hostInboundHasUnknownExceptOperand(except, known) {
+		return tokens
+	}
+	out := tokens[:0]
+	for _, token := range tokens {
+		if !known[strings.ToLower(token)] {
+			out = append(out, token)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -369,8 +469,8 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	dst.nonCanonicalSystemServices = append(dst.nonCanonicalSystemServices, src.nonCanonicalSystemServices...)
 	dst.nonCanonicalProtocols = append(dst.nonCanonicalProtocols, src.nonCanonicalProtocols...)
 	dst.UnknownChildren = dedupHostInboundTokens(append(dst.UnknownChildren, src.UnknownChildren...))
-	dst.SystemServices = hostInboundFilterExcept(dst.SystemServices, dst.systemServicesExcept, false)
-	dst.Protocols = hostInboundFilterExcept(dst.Protocols, dst.protocolsExcept, true)
+	dst.SystemServices = poisonUnknownExceptDimension(hostInboundFilterExcept(dst.SystemServices, dst.systemServicesExcept, false), dst.systemServicesExcept, KnownHostInboundSystemServices)
+	dst.Protocols = poisonUnknownExceptDimension(hostInboundFilterExcept(dst.Protocols, dst.protocolsExcept, true), dst.protocolsExcept, KnownHostInboundProtocols)
 	return dst
 }
 
