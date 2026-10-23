@@ -917,8 +917,20 @@ Defined-empty scopes (both vecs empty, #2400/#2506), unconstrained
 directions, and mixed lists pass unchanged; `family any` is owned by the
 Go gate (its pools are compiled per family and checked there).
 
+**Uncovered-family `except` on tolerant load (#16001, EX-4).** A
+sole-`except` scope covering no address of its pool's family (a v4-only
+`except` list dual-compiled into `inet6` under `family any`, or under
+`family inet6`) evaluates `except` over an empty per-family set and
+matches EVERY packet of that family — a fail-open over-accept on `then
+accept`. Go marks exactly the uncovered pool's term
+`UncoveredFamilyExcept16001` and the snapshot builder refuses the
+candidate via `from_unrepresentable` (prior-good retained); both lo0
+mirrors refuse the same way. No Rust change: the compiled snapshot for
+such a term is rejected on the marker before the matcher runs, and a
+defined-empty `except` list (authored match-all) keeps its semantics.
+
 Tests: `cross_family_address_scope_14446_*` in `filter/tests.rs` and
-`*14446` in `compiler_firewall_family_any_prefixlist_4426_test.go`.
+`*14446` / `*16001` in `pkg/config` + builder tests.
 
 The fail-closed contract keys off the RETAINED per-interface fast maps
 (`iface_filter_*_fast`) — the structures the per-interface hot path consults —

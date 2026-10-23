@@ -9789,6 +9789,27 @@ the over-match message, NOT the under-block wording; lenient warn preserving the
 dual-compile; mixed-family, mixed-family-except, and two-list-both-families
 commit; single-family filters with single-family lists not flagged).
 
+**Tolerant load poisons the uncovered `except` arm (#16001, EX-4).** The
+lenient path still warns and boots (#1960), but a sole-`except` scope that
+covers no address of its pool's family no longer installs: the gate returns
+the uncovered (pool, filter, term) sites, `markUncoveredFamilyExcept16001`
+stamps `UncoveredFamilyExcept16001` on exactly that pool's compiled term
+(the `family any` dual-compile now clones the filter per pool so the mark
+cannot leak to the covered arm), and every builder refuses the candidate
+whole — userspace `FromUnrepresentable`, both lo0 mirrors — so prior-good
+state is retained instead of an `except`+`accept` term admitting every
+packet of the uncovered family. Only the sole-`except` uncovered case is
+poisoned: a single-family **positive** list merely under-blocks (its arm
+matches nothing and falls through, the posture the committing binary
+already had), so warn-but-apply remains correct there, as do mixed-family
+and matched-family `except` lists. No wire or Rust change: the compiled
+snapshot is rejected on the existing `from_unrepresentable` marker before
+the matcher runs, and a defined-empty `except` list (authored match-all)
+keeps its semantics. Fail-on-revert:
+`pkg/config/compiler_firewall_family_any_except_16001_test.go`,
+`pkg/dataplane/userspace/filters_uncovered_except_16001_test.go`,
+`pkg/daemon/lo0_uncovered_except_16001_test.go`.
+
 ## Repeated same-type sibling matches (NOT bracketed multi-value)
 
 The dual-AST contract above covers a single leaf carrying a bracketed list

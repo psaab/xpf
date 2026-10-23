@@ -24,7 +24,7 @@ import "fmt"
 // FIRST in compileExpanded, before the base *Config skeleton (P2) and the
 // section dispatch (P4). It is covered by the reusable golden-output gate in
 // compile_golden_4406_test.go.
-func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
+func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, []uncoveredFamilyExceptSite16001, error) {
 	// #1798 free-text control-character gate. Strict (commit /
 	// commit-check): hard-reject. Lenient (load / peer-sync / peer
 	// display): scrub in place on this already-cloned tree and warn.
@@ -38,7 +38,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 				"sanitized control characters in configuration value at %q (#1798)", p))
 		}
 	} else if err := validateNodesControlChars(tree.Children, ""); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #12601: a packed `policy-statement { P term { ... } }` can leave the
@@ -49,7 +49,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// the established #12521 placeholder-and-warning behavior.
 	if !opts.lenientPolicyNamelessTerm12521 {
 		if err := ValidatePolicyNamelessTermsAST12521(tree); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -61,7 +61,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// #10294 warning behavior.
 	if !opts.lenientFirewallRefs {
 		if err := ValidateFirewallNamelessTermsAST12526(tree); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -76,7 +76,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// post-compile.
 	trackWarnings, err := validateVRRPTrackInterfaceAST(tree.Children, "", opts.lenientVRRPTrackDuplicates)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #15046 (A05-04) unknown vrrp-group child gate. vrrp-group was
 	// open-world: the Junos `track { interface … }` container,
@@ -88,7 +88,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// the schema node — that inherits and cannot see Keys-packed runs.
 	vrrpChildWarnings15046, err := validateVRRPGroupChildrenAST15046(tree.Children, "", opts.lenientVRRPGroupChildren15046)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	trackWarnings = append(trackWarnings, vrrpChildWarnings15046...)
 
@@ -111,7 +111,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// the VRRP VIP claim is dropped (still no-brick, #1960).
 	vrrpAuthWarnings, err := validateVRRPAuthenticationAST(tree.Children, "", opts.lenientVRRPAuthentication)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #1979 Layer B Tier 3: tcp-mss range AST pre-walk. tcp-mss carries its
@@ -125,7 +125,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// node loading a legacy out-of-range MSS still boots.
 	mssWarnings, err := validateTCPMSSRanges(tree.Children, "", opts.lenientTCPMSSRange)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3349 security-log stream port range gate. The syslog port lives in two
@@ -138,7 +138,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// still boots.
 	logStreamPortWarnings, err := validateSecurityLogStreamPortsAST(tree.Children, "", opts.lenientLogStreamPort)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3350 security-log stream tls-profile gate. `transport tls-profile <name>`
@@ -153,7 +153,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// peer-synced config still boots (the profile was never applied either way).
 	logTLSProfileWarnings, err := validateSecurityLogStreamTLSProfileAST(tree.Children, "", opts.lenientLogTLSProfile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3420 flow-trace file path-traversal gate. The compiler stores
@@ -168,7 +168,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// runtime, so tracing is simply disabled).
 	flowTraceFileWarnings, err := validateFlowTraceFileAST(tree.Children, "", opts.lenientFlowTraceFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3422 flow-trace flag / packet-filter prefix gate. The compiler copies
@@ -181,7 +181,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	flowTraceFilterWarnings, err := validateFlowTraceFlagsAndFiltersAST(
 		tree.Children, "", opts.lenientFlowTraceFilter)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3424 flow-trace size/files range gate. The compiler stored any positive
@@ -194,7 +194,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	flowTraceSizeWarnings, err := validateFlowTraceSizeFilesAST(
 		tree.Children, "", opts.lenientFlowTraceSizeFiles)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Memberless ranges lose their shared statements during expansion, so
@@ -202,7 +202,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	memberlessRangeFilterWarnings, err := validateMemberlessInterfaceRangeFilters12090(
 		tree.Children, opts.lenientUnsupportedInterfaceStanzas)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #4027 interface-range expansion. Rewrites every `interfaces
@@ -222,7 +222,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// expansion itself, so skipping it IS the protection.
 	ifaceRangeWarnings, ifaceRangeErr := expandInterfaceRanges(tree)
 	if ifaceRangeErr != nil && !opts.lenientInterfaceRangeBudget {
-		return nil, ifaceRangeErr
+		return nil, nil, ifaceRangeErr
 	}
 
 	// #9886 render-unsafe interface-name gate. Runs AFTER the #1798 sanitize
@@ -236,7 +236,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	identityPatternWarnings, err := validateRenderUnsafeInterfaceNamesAST(
 		tree.Children, opts.lenientRenderUnsafeInterfaceNames)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #2008/#10293/#12090 interface silent-drop gate. Runs on the group-
@@ -249,7 +249,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	unsupportedIfaceWarnings, err := validateUnsupportedInterfaceStanzasAST(
 		tree.Children, opts.lenientUnsupportedInterfaceStanzas)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #12090: no `filter` or `simple-filter` spelling under forwarding-options
@@ -258,7 +258,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	forwardingFilterWarnings, err := validateUnsupportedForwardingOptionsFiltersAST(
 		tree.Children, opts.lenientForwardingFilters)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3339/#12220 application / application-set name-collision gate.
@@ -278,7 +278,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	appCollisionWarnings, appCollisionNames, err := validateApplicationNameCollisionsAST(
 		tree.Children, opts.lenientApplicationNameCollisions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if opts.applicationNameCollisions != nil {
 		*opts.applicationNameCollisions = appCollisionNames
@@ -303,13 +303,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// reader has produced its list.
 	selfRepeatWarnings, err := validateMultiLeafSelfRepeat9027(tree, opts.lenientMultiLeafSelfRepeat)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	fwFilterFamilyWarnings, fwColliding, err := validateFirewallFilterFamilyCollisionsAST(
 		tree.Children, opts.lenientFirewallFilterFamilyCollisions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if opts.firewallFilterCollisions != nil {
 		*opts.firewallFilterCollisions = fwColliding
@@ -326,7 +326,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	fwDupTermWarnings, err := validateFirewallFilterDuplicateTermsAST(
 		tree.Children, opts.lenientFirewallFilterFamilyCollisions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, fwDupTermWarnings...)
 
@@ -337,7 +337,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	fwFamilyTokenWarnings, err := validateFirewallFilterFamilyTokensAST(
 		tree.Children, opts.lenientFirewallFilterFamilyCollisions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, fwFamilyTokenWarnings...)
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, selfRepeatWarnings...)
@@ -352,7 +352,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	riChildWarnings, err := validateRoutingInstanceChildTokensAST(
 		tree.Children, opts.lenientRoutingInstanceChildTokens)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, riChildWarnings...)
 
@@ -363,7 +363,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// so a DHCPv4 relay group or server-group NAMED `dhcpv6` still commits.
 	dhcpv6RelayWarnings, err := validateDHCPRelayDHCPv6AST(tree.Children, opts.lenientDHCPRelayDHCPv6)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, dhcpv6RelayWarnings...)
 
@@ -374,7 +374,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// schema; `dhcpv6` is handled by the specific gate above.
 	dhcpRelayChildWarnings, err := validateDHCPRelayChildTokensAST(tree.Children, opts.lenientDHCPRelayChildTokens)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, dhcpRelayChildWarnings...)
 
@@ -389,7 +389,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// persisted config still boots (#1960).
 	eventInertWarnings, err := validateEventOptionsInertAST(tree.Children, opts.lenientEventInert14660)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, eventInertWarnings...)
 
@@ -403,10 +403,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// peer-synced config an older binary silently accepted still BOOTS (#1960).
 	// Runs on the group-expanded, inactive-pruned AST for the same reason as the
 	// collision gate above — only the raw AST still carries the family-any match.
-	fwFilterFamilyAnyWarnings, err := validateFirewallFilterFamilyAnyMatchesAST(
+	fwFilterFamilyAnyWarnings, uncovered16001, err := validateFirewallFilterFamilyAnyMatchesAST(
 		tree.Children, opts.lenientFirewallFilterFamilyAnyMatches)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3096: the #3079 interim NAT rule-set scope reject is LIFTED. A
@@ -442,7 +442,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	bindIfaceWarnings, err := validateSecureTunnelBindInterfaceAST(
 		tree.Children, opts.lenientSecureTunnelBindIface)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #5619 secure-tunnel plaintext advisory. Route-based IPsec decrypts in
@@ -503,7 +503,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	ipsecTSWarnings, err := validateIPsecTrafficSelectorsStrict(
 		tree.Children, opts.lenientIPsecTrafficSelectors)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #5195 (codex-177 A3-b2-F7) reserved IPsec proposal-name gate. The
@@ -523,7 +523,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	reservedProposalNameWarnings, err := validateReservedIPsecProposalNamesAST(
 		tree.Children, opts.lenientReservedProposalSetNames)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3113 security-policy unsupported-match-leaf gate. A policy whose
@@ -544,7 +544,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	policyMatchWarnings, err := validatePolicyMatchLeavesStrict(
 		tree.Children, opts.lenientPolicyMatchLeaves)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3114: reject a security-policy `then permit <child>` carrying an
@@ -563,7 +563,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	policyThenPermitWarnings, err := validatePolicyThenPermitStrict(
 		tree.Children, opts.lenientPolicyThenPermit)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3115: reject any policy whose `then reject` arm carries a child the
@@ -578,7 +578,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	policyThenRejectWarnings, err := validatePolicyThenRejectStrict(
 		tree.Children, opts.lenientPolicyThenReject)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3141: a flat-set `then deny log session-init` collapses the
@@ -595,7 +595,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	policyThenDenyWarnings, err := validatePolicyThenDenyStrict(
 		tree.Children, opts.lenientPolicyThenDeny)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #11342: `then count { alarm ... }` thresholds are not implemented by
@@ -605,41 +605,41 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	policyThenCountAlarmWarnings, err := validatePolicyThenCountAlarmStrict(
 		tree.Children, opts.lenientPolicyThenCountAlarm)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #11367: an ambiguous default-policy choice is strict-rejected and
 	// warned on tolerant ingress; the compiler resolves it to deny-all.
 	defaultPolicyWarnings, err := validateDefaultPolicyBlockCardinality11367(
 		tree.Children, opts.lenientDefaultPolicyBlock11367)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #11821: distinct explicit default-policy stanzas must not last-win.
 	defaultPolicyConflictWarnings, err := validateDefaultPolicyConflicts11821(
 		tree.Children, opts.lenientDefaultPolicyConflict11821)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #12821: distinct action spellings inside one default-policy stanza
 	// must not be reduced to the first token (which can silently permit).
 	defaultPolicyValueWarnings, err := validateDefaultPolicyValues12821(
 		tree.Children, opts.lenientDefaultPolicyConflict11821)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #15998: an invalid default-policy value beside a valid one must not
 	// leave the earlier permit standing (the valid-only censuses miss it).
 	invalidDefaultPolicyWarnings, err := validateInvalidDefaultPolicy15998(
 		tree.Children, opts.lenientDefaultPolicyConflict11821)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #12825: validate the recognized system-wide policy-statistics enum
 	// spellings and reject or fail closed on contradictory duplicate values.
 	policyStatsWarnings, err := validatePolicyStatsSystemWide12825(
 		tree.Children, opts.lenientPolicyStatsSystemWide12825)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #11013: security policies do not implement the firewall filter's
@@ -650,12 +650,12 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	policyThenSiblingWarnings, err := validatePolicyUnsupportedThenSiblings(
 		tree.Children, opts.lenientPolicyThenSiblings)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	policyEnforcementWarnings, err := validatePolicyEnforcementSubtrees(
 		tree.Children, opts.lenientPolicyEnforcementSubtrees)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3044: reject a security policy whose `match` clause omits a required
@@ -684,7 +684,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	policyMissingMatchWarnings, err := validatePolicyRequiredMatchStrict(
 		tree.Children, opts.lenientPolicyMissingMatch, opts.lenientPolicyValuelessMatch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #7525: reject an EMPTY security identity — a zone name, a zone-pair's
@@ -710,7 +710,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	firewallValuelessFromWarnings, err := validateFirewallFilterValuelessFromStrict(
 		tree.Children, opts.lenientFirewallValuelessFrom)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// #12528: is-fragment is a bare flag and flexible-match-range is read only
 	// through its named ranges, so a `then` action fused under either compiles
@@ -721,13 +721,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	firewallFusedThenWarnings, err := validateFirewallFusedThenStrict12528(
 		tree.Children, opts.lenientFirewallFusedThen12528)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	emptyIdentityWarnings, err := validateNonEmptySecurityIdentities(
 		tree.Children, opts.lenientEmptySecurityIdentity)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #9656, #9788: a security-zone statement with no braced body compiles only
@@ -736,7 +736,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	zoneGroupWarnings, err := validateZoneStatementTails9656(
 		tree.Children, opts.lenientZoneStatementTail9656)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #15257: same packed-header fan-out on the RA caller of
@@ -744,7 +744,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	raPackedHeaderWarnings, err := validateRAInterfacePackedHeaders15257(
 		tree.Children, opts.lenientRAInterfacePackedHeader15257)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #3444: reject a `security nat destination rule-set <name> to ...`
@@ -763,7 +763,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	dnatToScopeWarnings, err := validateDNATRuleSetToScopeAST(
 		tree.Children, opts.lenientDNATToScope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #7525: a present NAT from/to clause with no non-empty scope value is not
@@ -773,7 +773,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	natEmptyScopeWarnings, err := validateNATRuleSetEmptyScopesAST(
 		tree.Children, opts.lenientNATEmptyScope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #4881 NAT rule-set mixed-scope-kind gate. A single `from` / source-`to`
@@ -790,7 +790,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	natMixedScopeWarnings, err := validateNATRuleSetMixedScopeAST(
 		tree.Children, opts.lenientNATMixedScope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #5631 (codex-review-181 M23) numeric interface-unit alias gate MOVED to
@@ -820,7 +820,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	chassisIdentityWarnings, err := validateChassisClusterIdentitiesAST(
 		tree.Children, opts.lenientChassisClusterIdentities)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #6782: a RETH `redundant-ether-options redundancy-group` token that is
@@ -839,7 +839,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	rethRGWarnings, err := validateRethRedundancyGroupTokensAST(
 		tree.Children, opts.lenientRethRedundancyGroup)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #5695 (codex-182 M16): a redundancy-group gratuitous-arp-count over the
@@ -859,7 +859,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	monitorWeightWarnings, err := validateMonitorWeightTokensAST(
 		tree.Children, opts.lenientChassisMonitorWeight)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #6588: a redundancy-group FLAG statement (`preempt`,
@@ -872,7 +872,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	rgArityWarnings, err := validateRGNoArgStatementsAST(
 		tree.Children, opts.lenientChassisRGStatementArity)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// The #6662 packed-login-body gate and the #6701 built-in-class-shadow gate
@@ -894,7 +894,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	bareLeafWarnings, err := validateBareLeafInstance9838(
 		tree.Children, opts.lenientBareLeafInstance9838)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	staticRouteQNHWarnings := []string(nil)
@@ -903,13 +903,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 			staticRouteQNHWarnings = append(staticRouteQNHWarnings,
 				fmt.Sprintf("static route qualified-next-hop tail (downgraded to warning on tolerant path): %v", err))
 		} else {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// #14447: conflicting duplicate ssh root-login.
 	rootLoginDupWarnings, err := validateDuplicateRootLoginAST(tree, opts.lenientDuplicateRootLogin14447)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// #10707: open-world routing schemas intentionally remain tolerant of
@@ -971,5 +971,5 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, staticRouteQNHWarnings...)
 	warnings = append(warnings, openWorldRoutingWarnings...)
 	warnings = append(warnings, rootLoginDupWarnings...)
-	return warnings, nil
+	return warnings, uncovered16001, nil
 }

@@ -212,13 +212,14 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		if len(term.UnknownAddresses) > 0 || referencedPrefixListHasMalformedEntry(term, cfg) {
 			snap.AddressUnrepresentable = true
 		}
-		// #9875/#11334/#11451/#11896/#14132: refuse the whole snapshot when a
+		// #9875/#11334/#11451/#11896/#14132/#16001: refuse the whole snapshot when a
 		// `from` predicate is unenforced — either an unrecognized leaf
 		// (term.UnknownFrom, #3307), the recognized-but-unsupported
 		// literal-address `except` construct (#11334), ANY unresolved
-		// prefix-list reference (#11451 except; #14132 positive), or a
-		// value-bearing leaf written with NO operand (#8480) — OR the term
-		// has conflicting terminal actions (#11896; see TerminalActions).
+		// prefix-list reference (#11451 except; #14132 positive), a
+		// value-bearing leaf written with NO operand (#8480), a sole-`except`
+		// prefix-list scope covering no address of this pool's family
+		// (#16001) — OR the term has conflicting terminal actions (#11896).
 		// The strict commit gates reject each shape; on lenient load /
 		// peer-sync the marker makes the Rust filter compiler reject this
 		// candidate snapshot, so reconcile retains the previous good state.
@@ -232,6 +233,7 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		if len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 ||
 			hasUnresolvedPrefixListRef(term.SourcePrefixLists, cfg) ||
 			hasUnresolvedPrefixListRef(term.DestPrefixLists, cfg) ||
+			term.UncoveredFamilyExcept16001 ||
 			config.FilterHasConflictingTerminalActions(term.TerminalActions) {
 			snap.FromUnrepresentable = true
 		}

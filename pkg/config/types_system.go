@@ -1802,6 +1802,22 @@ type FirewallFilterTerm struct {
 	// second field joined it; a DSCP-specific name on a list holding protocol
 	// spellings is the kind of stale label that later gets reasoned from.
 	CrossFamilyMatchSpellings []string
+	// UncoveredFamilyExcept16001 records that this term, in the pool it was
+	// compiled into, carries a sole `except` prefix-list scope (source or
+	// destination) whose resolved prefixes cover NO address of this pool's
+	// family — e.g. a v4-only `except` list dual-compiled into the inet6
+	// pool under `family any`, or a v4-only `except` list under `family
+	// inet6` (#16001, EX-4). On that pool the direction evaluates `except`
+	// over an empty per-family set and matches EVERY packet of the family:
+	// an over-block on `then discard`, a fail-open over-accept on `then
+	// accept`. Strict commit rejects the shape (#4426); on the tolerant
+	// load / peer-sync path the marker makes every dataplane builder refuse
+	// the candidate whole (userspace FromUnrepresentable, both lo0 mirrors)
+	// so prior-good state is retained instead of installing the match-all.
+	// Set by markUncoveredFamilyExcept16001 from the AST gate's verdict —
+	// never derived from the resolved address strings, so a hand-built term
+	// without the marker keeps today's behavior.
+	UncoveredFamilyExcept16001 bool `json:"-"`
 }
 
 // FlexMatchConfig defines a flexible byte-offset match condition.
