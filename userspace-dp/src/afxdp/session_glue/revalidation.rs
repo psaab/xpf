@@ -44,6 +44,73 @@ lo0_filter_changed: bool,) -> usize {
     republished
 }
 
+/// #16026 fold: on a single→multi-zone rotation, PASS rows already in the
+/// pinned steering map stay zoneless until their session ends — the
+/// publish-side demotion in `uses_kernel_local_session_map_entry` only
+/// governs NEW publishes. This sweep walks the worker's live
+/// peer-synced, non-reverse `LocalDelivery` sessions (the exact shape
+/// the kernel-local predicate selects) and republishes each through
+/// `publish_worker_session_map_entry`, which now writes REDIRECT
+/// because `forwarding.has_multiple_zones` is set. `publish_session_rows`
+/// migrates the entry's claims atomically (new REDIRECT row written
+/// before the old PASS claim is released, #9560), so there is no
+/// window with no steering row. Demotion only: a multi→single rotation
+/// leaves existing REDIRECT rows alone until a natural republish.
+///
+/// `allow_replace_local` is recomputed per session from the CURRENT HA
+/// state — a standby-owned session must stay REDIRECT regardless
+/// (#4805) — exactly as the refresh_owner_rgs path computes it, so the
+/// sweep can be driven from the rotation site where `ha_state` and
+/// `loop_now_secs` are both in hand. Returns the number demoted.
+pub(in crate::afxdp) fn demote_kernel_local_sessions_for_multiple_zones(
+    sessions: &SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    became_multi_zone: bool,
+) -> usize {
+    if !became_multi_zone || session_map.fd < 0 {
+        return 0;
+    }
+    let mut demoted = 0usize;
+    sessions.iter_with_origin(|key, decision, metadata, origin| {
+        if !uses_kernel_local_demotion_candidate(key, decision, metadata, origin) {
+            return;
+        }
+        let allow_replace_local =
+            synced_entry_allows_local_replace(ha_state, metadata.owner_rg_id, now_secs);
+        publish_worker_session_map_entry(
+            session_map,
+            forwarding,
+            key,
+            decision,
+            metadata,
+            origin,
+            allow_replace_local,
+        );
+        demoted += 1;
+    });
+    demoted
+}
+
+/// The session shape whose steering row can currently be PASS: the
+/// kernel-local predicate minus the scope flags the caller demotes on.
+fn uses_kernel_local_demotion_candidate(
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    origin: SessionOrigin,
+) -> bool {
+    steering_key_is_publishable(key)
+        && key.discriminator.is_none()
+        && origin.is_peer_synced()
+        && !metadata.is_reverse
+        && decision.resolution.disposition == ForwardingDisposition::LocalDelivery
+        && decision.resolution.tunnel_endpoint_id == 0
+        && decision.install_table_domain == 0
+}
+
 pub(in crate::afxdp) fn purge_sessions_for_input_dscp_filter_revalidation(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
 shared: SharedSessionRefs<'_>,
@@ -350,6 +417,7 @@ pub(crate) fn publish_worker_session_map_entry(
         metadata,
         origin,
         forwarding.has_routing_domains,
+        forwarding.has_multiple_zones,
     );
     if uses_kernel_local && has_lo0_filter {
         // A PASS_TO_KERNEL session-map entry cannot re-run userspace lo0
@@ -375,6 +443,7 @@ pub(crate) fn publish_worker_session_map_entry(
         origin,
         allow_replace_local,
         forwarding.has_routing_domains,
+        forwarding.has_multiple_zones,
     ) {
         publish_live_session_entry(session_map, key, decision.nat, metadata.is_reverse)
     } else {
@@ -392,6 +461,7 @@ pub(crate) fn publish_worker_session_map_entry(
             metadata,
             origin,
             forwarding.has_routing_domains,
+            forwarding.has_multiple_zones,
         )
     };
     if publish_result.is_err() {

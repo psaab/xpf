@@ -118,6 +118,28 @@ fn worker_publish_writes_for(
     session_map_writes()
 }
 
+/// #16026: the worker publish path must read THIS node's
+/// `has_multiple_zones` and demote the same way. Driven through the real
+/// publish path against the recorder, so a call site that hands the
+/// predicate the wrong flag is visible.
+fn worker_publish_writes_multi_zone(has_multiple_zones: bool) -> Vec<SessionMapWriteRecord> {
+    let forwarding = ForwardingState {
+        has_multiple_zones,
+        ..ForwardingState::default()
+    };
+    clear_session_map_writes();
+    publish_worker_session_map_entry(
+        SteeringMap::unshared_for_test(NOT_A_MAP_FD),
+        &forwarding,
+        &host_bound_key(),
+        local_delivery(),
+        &synced_forward_metadata(),
+        SessionOrigin::SyncImport,
+        false,
+    );
+    session_map_writes()
+}
+
 fn pass_to_kernel_writes(writes: &[SessionMapWriteRecord]) -> usize {
     writes
         .iter()
@@ -266,5 +288,105 @@ fn a_keyed_gre_session_is_demoted_on_a_single_instance_node_9517() {
         deletes(&writes),
         0,
         "with no stale kernel-local row deleted first. Writes: {writes:?}"
+    );
+}
+
+/// #16026: the same wiring for the zone arm — the worker publish must
+/// read `has_multiple_zones` from THIS node's forwarding state.
+#[test]
+fn the_worker_publish_reads_this_nodes_multiple_zones_flag_16026() {
+    let single_zone = worker_publish_writes_multi_zone(false);
+    assert_eq!(
+        pass_to_kernel_writes(&single_zone),
+        1,
+        "control: on a single-zone node this session must be published \
+         PASS_TO_KERNEL, or the fixture never reaches the kernel-local \
+         branch. Writes: {single_zone:?}"
+    );
+    let multi_zone = worker_publish_writes_multi_zone(true);
+    assert_eq!(
+        pass_to_kernel_writes(&multi_zone),
+        0,
+        "with multiple zones the 40-byte steering key cannot tell two \
+         zones apart, so a PASS_TO_KERNEL row here would be honoured for \
+         a packet arriving in another zone on a shared netdev. The worker \
+         publish must demote to REDIRECT (#16026). Writes: {multi_zone:?}"
+    );
+    assert!(
+        multi_zone.iter().any(
+            |w| w.key == host_bound_key() && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)
+        ),
+        "the demoted session must still be PUBLISHED, as REDIRECT. \
+         Writes: {multi_zone:?}"
+    );
+    assert_eq!(deletes(&multi_zone), 0, "with no stale row deleted first. Writes: {multi_zone:?}");
+}
+
+/// #16026 fold: a PASS row published under single-zone state must be
+/// demoted when the node rotates to multi-zone — the publish-side flag
+/// alone only governs NEW publishes, so without this sweep the stale
+/// zoneless row lives until its session ends. Drives the REAL sweep
+/// (`demote_kernel_local_sessions_for_multiple_zones`) over a session
+/// table holding one peer-synced LocalDelivery entry, against the
+/// recorder: the sweep must attempt REDIRECT for that key, no PASS,
+/// and the no-transition control must attempt nothing.
+#[test]
+fn single_to_multi_zone_rotation_demotes_published_pass_16026() {
+    use crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD;
+    let mut sessions = SessionTable::new();
+    let key = host_bound_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        local_delivery(),
+        synced_forward_metadata(),
+        SessionOrigin::SyncImport,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_SYN,
+    ));
+    let multi_forwarding = ForwardingState {
+        has_multiple_zones: true,
+        ..ForwardingState::default()
+    };
+    let ha_state = BTreeMap::new();
+
+    // No transition: nothing is republished.
+    clear_session_map_writes();
+    let not_demoted = demote_kernel_local_sessions_for_multiple_zones(
+        &sessions,
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        &multi_forwarding,
+        &ha_state,
+        1,
+        false,
+    );
+    assert_eq!(not_demoted, 0, "no transition must demote nothing");
+    assert!(
+        session_map_writes().is_empty(),
+        "no transition must write nothing, got {:?}",
+        session_map_writes()
+    );
+
+    // Transition: the already-published entry is republished REDIRECT.
+    clear_session_map_writes();
+    let demoted = demote_kernel_local_sessions_for_multiple_zones(
+        &sessions,
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+        &multi_forwarding,
+        &ha_state,
+        1,
+        true,
+    );
+    assert_eq!(demoted, 1, "the one peer-synced LocalDelivery session must demote");
+    let writes = session_map_writes();
+    assert_eq!(
+        pass_to_kernel_writes(&writes),
+        0,
+        "the demotion must not re-write PASS. Writes: {writes:?}"
+    );
+    assert!(
+        writes.iter().any(|w| w.key == key
+            && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
+        "the demotion must republish the entry as REDIRECT. Writes: {writes:?}"
     );
 }

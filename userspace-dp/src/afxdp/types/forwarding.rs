@@ -283,6 +283,18 @@ pub(in crate::afxdp) struct ForwardingState {
     /// overwhelming majority after it — never probes the map at all and its
     /// session identity stays bit-identical to pre-#7160.
     pub(in crate::afxdp) has_routing_domains: bool,
+    /// #16026: true iff the snapshot carries more than one configured
+    /// security zone. The XDP steering key is a bare 5-tuple with no
+    /// zone, so a `PASS_TO_KERNEL` row published for one zone's
+    /// peer-synced LocalDelivery session can be honoured for a packet
+    /// presenting the same tuple in another zone — the shared/ambiguous
+    /// netdev residual the nft ingress-scope re-judgement cannot kill.
+    /// Demoting such rows to REDIRECT on multi-zone nodes routes them
+    /// through `session_hit_authority` (#9519), which judges by live
+    /// arrival zone. Single-bool gate in the #7160 shape: a single-zone
+    /// deployment — the overwhelming majority — never changes its
+    /// publish behaviour at all.
+    pub(in crate::afxdp) has_multiple_zones: bool,
     /// #921: ifindex → zone ID (was `FastMap<i32, String>`). Built
     /// at config-commit time from the snapshot's per-interface
     /// zone NAME via the `zone_name_to_id` lookup. Hot-path callers

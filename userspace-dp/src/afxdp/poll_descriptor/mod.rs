@@ -6161,6 +6161,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta.protocol,
                                     meta.tcp_flags,
                                     worker_ctx.forwarding.has_routing_domains,
+                                    worker_ctx.forwarding.has_multiple_zones,
                                 )
                             {
                                 if let Some((_, _, _, scale)) =
@@ -8235,6 +8236,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.protocol,
                                             meta.tcp_flags,
                                             worker_ctx.forwarding.has_routing_domains,
+                                            worker_ctx.forwarding.has_multiple_zones,
                                         ) {
                                             if let Some((_, _, _, scale)) =
                                                 crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
@@ -8373,6 +8375,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.protocol,
                                             meta.tcp_flags,
                                             worker_ctx.forwarding.has_routing_domains,
+                                            worker_ctx.forwarding.has_multiple_zones,
                                         ) {
                                             if let Some((_, _, _, scale)) =
                                                 crate::afxdp::frame::extract_tcp_seq_ack_window_scale(packet_frame)
@@ -12648,6 +12651,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             pending_decision,
                                             &entry.metadata,
                                             worker_ctx.forwarding.has_routing_domains,
+                                            worker_ctx.forwarding.has_multiple_zones,
                                         )
                                         .is_err()
                                         {

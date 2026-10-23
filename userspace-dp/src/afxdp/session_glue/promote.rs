@@ -228,6 +228,7 @@ fn promote_synced_session_with_conntrack(
             decision,
             &promoted,
             forwarding.has_routing_domains,
+            forwarding.has_multiple_zones,
         )
         .is_err()
         {
