@@ -15995,13 +15995,20 @@ exact, case-sensitive table (`junosApplicationLeavesNotImplemented9603`):
 - `icmp6-type`
 - `icmp6-code`
 - `rpc-program-number`
+- `signature` (#16002)
 - `uuid`
 
-The table is taken from Juniper's SRX grammar, `junos-es-conf-applications@2024-01-01`
-(github.com/Juniper/yang, 24.4R2).
+The first six are taken from Juniper's SRX grammar, `junos-es-conf-applications@2024-01-01`
+(github.com/Juniper/yang, 24.4R2). `signature` is the L7 signature constraint
+(`applications application <name> signature ...`, custom L7 signatures in
+docs/services-application-identification.md: "config schema present, runtime
+is port-only"); no payload pattern is compiled, so beside a retained
+`protocol tcp; destination-port 80;` it stayed armed for every payload on
+port 80 instead of only payloads matching the signature.
 
 So `protocol tcp; destination-port 135; uuid ...;` no longer installs as every
-MS-RPC interface on tcp/135. The table reads every token of the unrecognized
+MS-RPC interface on tcp/135, and `protocol tcp; destination-port 80;
+signature ...;` no longer installs as every payload on tcp/80. The table reads every token of the unrecognized
 run, direct and term, not only its first keyword, so a table statement written
 after an unrecognized keyword in the same statement is still seen. The two DNS ALG translation switches
 (`do-not-translate-A-query-to-AAAA-query` and its reverse) stay out: they change

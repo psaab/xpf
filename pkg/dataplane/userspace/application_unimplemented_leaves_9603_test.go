@@ -27,3 +27,26 @@ func TestUnimplementedJunosStatementRefusesThePolicy9603(t *testing.T) {
 		t.Fatalf("control: a near miss must not refuse the policy; reasons %q", r)
 	}
 }
+
+// #16002 on the wire: an L7 `signature` beside a retained tcp/80 lowers
+// to the sentinel alone (no permissive tcp/80 snapshot), while a near
+// miss keeps tcp/80 installed.
+func TestSignatureBesideRetainedPortRefusesThePolicy16002(t *testing.T) {
+	cfg := lenientHier9571(t, policyText9525(`application a { protocol tcp; destination-port 80; signature custom-http; }`, "a", "permit", "deny-all"))
+	terms := wireTerms9525(t, cfg)
+	if len(terms) != 1 || terms[0].Protocol != unsupportedApplicationSentinel {
+		t.Fatalf("the policy must lower to the __unsupported__ sentinel alone; wire terms: %+v", terms)
+	}
+	reasons := PolicyContentRejectionReasons(cfg, nil)
+	if len(reasons) != 1 || !strings.Contains(reasons[0], `application "a"`) {
+		t.Fatalf("want one mirror reason naming application \"a\"; got %q", reasons)
+	}
+
+	stray := lenientHier9571(t, policyText9525(`application a { protocol tcp; destination-port 80; signatures word; }`, "a", "permit", "deny-all"))
+	if st := wireTerms9525(t, stray); len(st) != 1 || st[0].Protocol != "tcp" || st[0].DestinationPort != "80" {
+		t.Fatalf("control: a near miss is a stray and must leave tcp/80 installed; wire terms: %+v", st)
+	}
+	if r := PolicyContentRejectionReasons(stray, nil); len(r) != 0 {
+		t.Fatalf("control: a near miss must not refuse the policy; reasons %q", r)
+	}
+}
