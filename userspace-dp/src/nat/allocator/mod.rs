@@ -189,6 +189,21 @@ pub(super) fn bounded_persistent_nat_timeout_ns(timeout_ns: u64) -> u64 {
         .min(MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS)
 }
 const MAX_SOURCE_NAT_POOL_TRACKED_FLOWS: usize = 262_144;
+/// #16013: per-source fairness for NEW persistent leases, in one allocator.
+/// `PersistentSourceKey` identifies one lease, but a single host churns leases
+/// by varying its source port/protocol/routing scope, so the pool-global
+/// `max_tracked_flows` cap alone lets one host retain the whole table after
+/// its flows have closed. Charging is keyed by `(src_ip, routing_scope)` —
+/// the pre-NAT source identity the session quota keys on, without the zone —
+/// and counts live AND idle-retained leases: an idle lease still holds its
+/// translated port/address and counts against the pool, so it must count
+/// against its source too. The value mirrors the session layer's default
+/// per-source ceiling (`DEFAULT_MAX_SESSIONS_PER_SOURCE`, 4096). On small
+/// pools the pool cap binds first; on large pools this stops one host from
+/// taking the entire lease table. Spoofability residual: a host that can
+/// forge many source IPs is outside any claimed-source budget; ingress
+/// SAV / zone session quotas remain the bound there (see S2-01).
+pub(super) const MAX_PERSISTENT_LEASES_PER_SOURCE: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct PersistentSourceKey {
@@ -978,6 +993,13 @@ pub(super) struct PortAllocatorLiveState {
     // #15956: `live_by_flow` moved to `PortAllocatorShared::flows`
     // (16 Mutex shards). This struct retains lease/ownership state.
     pub(super) persistent_by_source: FxHashMap<PersistentSourceKey, PersistentLease>,
+    /// #16013: number of leases (live or idle-retained) charged to each
+    /// `(src_ip, routing_scope)` source in this allocator. Maintained ONLY
+    /// by `insert_persistent_lease` / `remove_persistent_lease`, the single
+    /// mutation seam for `persistent_by_source`, so every mint, import,
+    /// carry and removal stays in step. Bounded by the lease table itself:
+    /// one entry per distinct source holding at least one lease.
+    pub(super) persistent_leases_by_source: FxHashMap<(std::net::IpAddr, u32), usize>,
     pub(super) lease_expirations: BTreeSet<(u64, PersistentSourceKey)>,
     pub(super) persistent_permissions: FxHashMap<PersistentSourceKey, PersistentPermissions>,
     pub(super) persistent_by_translated:
@@ -1149,6 +1171,28 @@ impl PortAllocatorLiveState {
         }
     }
 
+    /// #16013: leases (live or idle-retained) charged to one source.
+    pub(super) fn persistent_lease_count_for_source(
+        &self,
+        src_ip: std::net::IpAddr,
+        routing_scope: u32,
+    ) -> usize {
+        self.persistent_leases_by_source
+            .get(&(src_ip, routing_scope))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// #16013: refuse a NEW lease key for `key`'s source when that source is
+    /// at its per-source ceiling. Re-joining an EXISTING key never refuses;
+    /// expired-but-unreclaimed keys still refuse until reclaimed (the caller
+    /// runs its pressure-GC pass first). Call only under the `live` guard.
+    pub(super) fn persistent_source_at_lease_cap(&self, key: &PersistentSourceKey) -> bool {
+        !self.persistent_by_source.contains_key(key)
+            && self.persistent_lease_count_for_source(key.src_ip, key.routing_scope)
+                >= MAX_PERSISTENT_LEASES_PER_SOURCE
+    }
+
     pub(super) fn insert_persistent_lease(
         &mut self,
         key: PersistentSourceKey,
@@ -1166,6 +1210,13 @@ impl PortAllocatorLiveState {
                 },
                 &key,
             );
+        } else {
+            // #16013: a NEW key charges its source; replacing an existing
+            // key under the same source key is count-neutral.
+            *self
+                .persistent_leases_by_source
+                .entry((key.src_ip, key.routing_scope))
+                .or_insert(0) += 1;
         }
         self.persistent_by_translated
             .entry(ReverseIdentityBaseKey {
@@ -1184,6 +1235,21 @@ impl PortAllocatorLiveState {
         key: &PersistentSourceKey,
     ) -> Option<PersistentLease> {
         let lease = self.persistent_by_source.remove(key)?;
+        // #16013: release this source's charge for the removed lease.
+        match self
+            .persistent_leases_by_source
+            .get_mut(&(key.src_ip, key.routing_scope))
+        {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                self.persistent_leases_by_source
+                    .remove(&(key.src_ip, key.routing_scope));
+            }
+            None => debug_assert!(
+                false,
+                "#16013: per-source lease count missing for removed lease"
+            ),
+        }
         self.remove_persistent_address_only_owner(*key, lease);
         self.remove_persistent_reverse_owner(
             ReverseIdentityBaseKey {
@@ -2473,6 +2539,23 @@ impl PortAllocator {
             .copied()
             .sum()
     }
+    /// #16013 test seam: leases charged to one source, and the distinct-source
+    /// count. Lets the fairness cells assert the charge moves on mint/release
+    /// without scanning `persistent_by_source`.
+    #[cfg(test)]
+    pub(super) fn debug_persistent_lease_count_for_source(
+        &self,
+        src_ip: IpAddr,
+        routing_scope: u32,
+    ) -> usize {
+        self.lock_live()
+            .persistent_lease_count_for_source(src_ip, routing_scope)
+    }
+
+    #[cfg(test)]
+    pub(super) fn debug_persistent_source_count(&self) -> usize {
+        self.lock_live().persistent_leases_by_source.len()
+    }
 
     /// Test-only: total occupancy-bitmap WORDS across every pool address.
     /// The #6812 aggregate-budget tests assert a refused / failed pool
@@ -2928,6 +3011,22 @@ impl PortAllocator {
         }
         self.gc_expired_locked(live, now_ns, PRESSURE_GC_BUDGET);
         live.persistent_by_source.len() >= self.shared.max_tracked_flows
+    }
+    /// #16013: per-source twin of `persistent_lease_capacity_reached` — one
+    /// bounded pressure-GC pass, then refuse a NEW lease key whose source is
+    /// at `MAX_PERSISTENT_LEASES_PER_SOURCE`. GC runs first so expired idle
+    /// leases stop charging their source before the refusal is decided.
+    pub(super) fn persistent_source_lease_capacity_reached(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        key: &PersistentSourceKey,
+        now_ns: u64,
+    ) -> bool {
+        if !live.persistent_source_at_lease_cap(key) {
+            return false;
+        }
+        self.gc_expired_locked(live, now_ns, PRESSURE_GC_BUDGET);
+        live.persistent_source_at_lease_cap(key)
     }
 
     /// Free a translated port's occupancy bit, pushing it onto the FIFO
@@ -3450,15 +3549,23 @@ impl PortAllocator {
                 continue;
             }
             let translated_ip = family_addresses.ip_at(rel);
-            if persistent_key.is_some()
-                && live.persistent_by_source.len() >= self.shared.max_tracked_flows
-            {
-                // Lease-table pressure is also budgeted. A full persistent
-                // table gets one global PRESSURE_GC_BUDGET pass before this
-                // address attempt is treated as unavailable.
-                self.gc_expired_locked(&mut live, now_ns, PRESSURE_GC_BUDGET);
-                if live.persistent_by_source.len() >= self.shared.max_tracked_flows {
+            if let Some(key) = persistent_key {
+                // #16013: per-source fairness gate for a FRESH lease. Runs
+                // before any port is claimed on this address attempt so a
+                // refused mint leaves no occupancy bit behind; the existing
+                // pool-global pressure pass below then runs only when this
+                // per-source pass left room.
+                if self.persistent_source_lease_capacity_reached(&mut live, &key, now_ns) {
                     continue;
+                }
+                if live.persistent_by_source.len() >= self.shared.max_tracked_flows {
+                    // Lease-table pressure is also budgeted. A full persistent
+                    // table gets one global PRESSURE_GC_BUDGET pass before this
+                    // address attempt is treated as unavailable.
+                    self.gc_expired_locked(&mut live, now_ns, PRESSURE_GC_BUDGET);
+                    if live.persistent_by_source.len() >= self.shared.max_tracked_flows {
+                        continue;
+                    }
                 }
             }
 
@@ -4919,7 +5026,11 @@ impl PortAllocator {
                 probe_start = port.checked_add(1);
                 continue;
             }
+            // #16013: a fresh deterministic BIB is a new persistent lease for
+            // its source, so the per-source fairness gate applies alongside
+            // the pool-global table cap.
             if live.persistent_by_source.len() >= self.shared.max_tracked_flows
+                || self.persistent_source_lease_capacity_reached(&mut live, &bib_key, now_ns)
                 || !self.shared.flows.admit_one(self.shared.max_tracked_flows)
             {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
@@ -5577,11 +5688,20 @@ impl PortAllocator {
         }
         // A mint's persistent-table capacity check may run pressure GC; do it
         // before any incumbent mutation, so a refusal preserves its state.
+        // #16013: the per-source gate sits beside the pool-global one for the
+        // same reason — a synced mint for an at-cap source is refused before
+        // it can displace the incumbent.
         let mints_persistent_lease =
             persistent.is_some_and(|(key, _)| !live.persistent_by_source.contains_key(&key));
         if mints_persistent_lease && self.persistent_lease_capacity_reached(&mut live, now_ns) {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return false;
+        }
+        if let Some((key, _)) = persistent {
+            if mints_persistent_lease && self.persistent_source_lease_capacity_reached(&mut live, &key, now_ns) {
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
         }
         // Check bitmap ownership before teardown. The one allowed occupied
         // case is the incumbent's own plain-PAT bit, which teardown releases
@@ -5977,12 +6097,21 @@ impl PortAllocator {
         // The persistent-table budget is independent of the live-flow budget:
         // an address-only synced session may mint a lease only if a bounded
         // pressure-GC pass leaves room for its new source key. Joining an
-        // existing lease below does not add a table entry.
+        // existing lease below does not add a table entry. #16013: the same
+        // per-source fairness gate as the local paths.
         if persistent.is_some_and(|(key, _)| !live.persistent_by_source.contains_key(&key))
             && self.persistent_lease_capacity_reached(&mut live, now_ns)
         {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+        }
+        if let Some((key, _)) = persistent {
+            if !live.persistent_by_source.contains_key(&key)
+                && self.persistent_source_lease_capacity_reached(&mut live, &key, now_ns)
+            {
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+            }
         }
         let mut idle_lease_to_deindex: Option<(usize, u64)> = None;
         if let Some((persistent_key, _)) = persistent {
@@ -6968,6 +7097,9 @@ impl PortAllocator {
         // #9158: `live_mode_mismatch` inserts NO lease (see the arm above), so the
         // LEASE-table pressure cap does not apply to it -- gating it here would
         // refuse a flow on behalf of a table it is not about to grow.
+        // #16013: per-source fairness for the same fresh lease, checked after
+        // the pool-global pass so both get their pressure-GC chance; like that
+        // pass it does not apply to a mode-mismatch flow (no lease is minted).
         if !reusing
             && !live_mode_mismatch
             && live.persistent_by_source.len() >= self.shared.max_tracked_flows
@@ -6977,6 +7109,13 @@ impl PortAllocator {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                 return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
             }
+        }
+        if !reusing
+            && !live_mode_mismatch
+            && self.persistent_source_lease_capacity_reached(&mut live, &key, now_ns)
+        {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
 
         let translated = TranslatedTuple {

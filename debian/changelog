@@ -34,6 +34,15 @@ xpf (0.0.0) unstable; urgency=medium
     through that unresolved path so a substituted drop is logged and
     forwarded, not enforced. Strict commit still rejects every bad
     value.
+  * NAT: persistent leases are now charged per source (#16013). The
+    pool allocator refuses a NEW persistent lease once one
+    (src_ip, routing_scope) holds 4096 leases (live or idle-retained),
+    on the local PAT and address-only paths, HA-synced reserves,
+    idle-lease imports, and deterministic NAT64 BIBs; joining an
+    existing lease is unaffected. Previously only the pool-global cap
+    applied, so one host's open/close churn could retain the whole
+    lease table (and a single-address pool's ports) for the 300s-24h
+    idle timeout while other sources were refused.
 
 
 xpf (0.0.0) unstable; urgency=medium
