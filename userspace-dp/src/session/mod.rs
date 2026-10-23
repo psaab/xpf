@@ -1699,6 +1699,31 @@ struct PMechReservationRecord {
     dst_ip: IpAddr,
 }
 
+/// #15947 fold: one session half's exact pre-probe state.
+#[derive(Clone, Copy)]
+struct ProbeHalfUndo {
+    counters: SessionCounters,
+    observed_tcp_flags: u8,
+    observed_tos: u8,
+    established: bool,
+    handshake_pending: bool,
+    syn_ack_first: bool,
+    last_seen_ns: u64,
+    expires_after_ns: u64,
+}
+
+/// #15947 fold: exact undo record for one deferring probe, keyed by
+/// the producer's canonical (stored record) key so a translated-alias
+/// packet identity resolves to the same record on admit and on drop.
+struct ProbeUndo {
+    canonical_key: SessionKey,
+    matched: (SessionKey, ProbeHalfUndo),
+    companion: Option<(SessionKey, ProbeHalfUndo)>,
+    accounting: Option<(SessionKey, ProbeHalfUndo)>,
+    shed_forward_key: SessionKey,
+    shed_was_present: bool,
+}
+
 pub(crate) struct SessionTable {
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
@@ -1803,6 +1828,9 @@ pub(crate) struct SessionTable {
     /// HA transition withheld by a deferring flow-cache probe until the
     /// packet survives output-filter/policer admission.
     pending_probe_state_updates: Vec<(SessionKey, u8, u8)>,
+    /// #15947 fold: exact pre-probe snapshots for deferring probes,
+    /// held only until the cached verdict admits or drops the packet.
+    pending_probe_undo: Vec<ProbeUndo>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2158,6 +2186,7 @@ impl SessionTable {
             demoted_owner_rgs: FxHashSet::default(),
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
             pending_probe_state_updates: Vec::new(),
+            pending_probe_undo: Vec::new(),
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
             reserved_session_slots: 0,
@@ -3684,6 +3713,15 @@ impl SessionTable {
     /// Emit the HA Update withheld by
     /// [`Self::probe_hit_deferring_state_update`] after TX admission.
     pub fn emit_probe_hit_state_update(&mut self, key: &SessionKey) {
+        // #15947 fold: resolve the packet identity to the producer's
+        // canonical stored key first, so a translated-alias admission
+        // publishes (and consumes) the same record the probe queued.
+        let canonical = self
+            .revalidation_record(key)
+            .map(|record| record.key.clone())
+            .unwrap_or_else(|| key.clone());
+        self.pending_probe_undo
+            .retain(|u| u.canonical_key != canonical);
         // Round-3: an intervening admitted flow must not discard another
         // flow's deferred transition. Only consume the pending record when
         // it belongs to this key; a mismatching admission leaves it for
@@ -3691,12 +3729,12 @@ impl SessionTable {
         let pending_matches = self
             .pending_probe_state_updates
             .iter()
-            .any(|(matched_key, _, _)| matched_key == key);
+            .any(|(matched_key, _, _)| matched_key == &canonical);
         if pending_matches {
             let pending = std::mem::take(&mut self.pending_probe_state_updates);
             let mut retained = Vec::with_capacity(pending.len());
             for (matched_key, class_before, handshake_before) in pending {
-                if matched_key == *key {
+                if matched_key == canonical {
                     self.emit_session_state_update(&matched_key, class_before, handshake_before);
                 } else {
                     retained.push((matched_key, class_before, handshake_before));
@@ -3704,6 +3742,99 @@ impl SessionTable {
             }
             self.pending_probe_state_updates = retained;
         }
+    }
+
+    /// Undo a deferring probe whose packet was dropped before TX
+    /// admission (#15947 H29-04 arm 2, fold).
+    ///
+    /// Restores the exact pre-probe snapshots captured by
+    /// `probe_hit_inner` — accounting target (including the
+    /// reverse-only fallback), counters, observed flags/ToS, both
+    /// halves' handshake Booleans, and SYN-pressure index
+    /// membership — and discards the withheld HA Update. Identity
+    /// is resolved through the canonical record, so a
+    /// translated-alias packet key finds the producer's record.
+    /// `len`/`tcp_flags` are retained for call-site symmetry but
+    /// no longer reconstruct anything.
+    ///
+    /// Keepalive exception (fold 2/3): `last_seen_ns` is NOT
+    /// restored — the probe's throttled refresh stands even when
+    /// the packet is dropped, preserving the documented pre-fusion
+    /// keepalive-before-drop behaviour (`probe_hit` doc). But the
+    /// expiry DURATION is restored (fold 3): a re-pended handshake
+    /// must carry its opening duration (snapshot value, incl. any
+    /// per-zone opening override), not the established duration
+    /// completion stamped. Net effect: deadline = kept last_seen +
+    /// restored opening duration. The wheel is re-pushed with the
+    /// kept timestamp so it re-buckets on that deadline.
+    ///
+    /// Returns true when a deferred completion was rolled back. Call
+    /// only for the exact dropped packet, before any later packet is
+    /// admitted on the session; a retransmitted completing ACK
+    /// re-probes and completes (and, if admitted, publishes) normally.
+    pub fn rollback_dropped_probe_hit(
+        &mut self,
+        key: &SessionKey,
+        _len: u64,
+        _tcp_flags: u8,
+    ) -> bool {
+        let canonical = match self.revalidation_record(key) {
+            Some(record) => record.key.clone(),
+            None => key.clone(),
+        };
+        let had_deferred = self
+            .pending_probe_state_updates
+            .iter()
+            .any(|(matched_key, _, _)| matched_key == &canonical);
+        self.pending_probe_state_updates
+            .retain(|(matched_key, _, _)| matched_key != &canonical);
+        let Some(pos) = self
+            .pending_probe_undo
+            .iter()
+            .position(|u| u.canonical_key == canonical)
+        else {
+            return had_deferred;
+        };
+        let undo = self.pending_probe_undo.remove(pos);
+        let restore = |table: &mut Self, half: &(SessionKey, ProbeHalfUndo)| {
+            let (half_key, snap) = half;
+            let mut seen = snap.last_seen_ns;
+            if let Some(entry) = table.entry_by_key_mut(half_key) {
+                entry.counters = snap.counters;
+                entry.observed_tcp_flags = snap.observed_tcp_flags;
+                entry.observed_tos = snap.observed_tos;
+                entry.established = snap.established;
+                entry.handshake_pending = snap.handshake_pending;
+                entry.syn_ack_first = snap.syn_ack_first;
+                // Fold 2/3: last_seen_ns keeps the probe's refreshed
+                // value (keepalive), but expires_after_ns DURATION is
+                // restored from the snapshot — a re-pended handshake
+                // must return to its opening duration (or per-zone
+                // opening override captured in it), not keep the
+                // established duration the completion stamped.
+                entry.expires_after_ns = snap.expires_after_ns;
+                seen = entry.last_seen_ns;
+            }
+            table.push_to_wheel(half_key, seen);
+        };
+        restore(self, &undo.matched);
+        if let Some(companion) = &undo.companion {
+            restore(self, companion);
+        }
+        if let Some(accounting) = &undo.accounting {
+            if accounting.0 != undo.matched.0
+                && undo.companion.as_ref().map(|c| &c.0) != Some(&accounting.0)
+            {
+                restore(self, accounting);
+            }
+        }
+        if undo.shed_was_present {
+            self.pressure_shed_openings
+                .insert(undo.shed_forward_key.clone(), ());
+        } else {
+            self.pressure_shed_openings.remove(&undo.shed_forward_key);
+        }
+        had_deferred
     }
 
     fn probe_hit_inner(
@@ -3724,6 +3855,66 @@ impl SessionTable {
         let mut close_class_before = 0u8;
         let mut canonical_refresh_key: Option<SessionKey> = None;
         let mut reverse_fold: Option<(SessionKey, crate::nat::NatDecision)> = None;
+        // #15947 fold: capture the exact pre-probe state before any
+        // mutation, but only for the deferring arm (the sole caller
+        // that can roll back). Uses the non-counting revalidation
+        // resolver (record_by_key would count a spurious miss and
+        // perturb the #7919 counters the stage tests assert on), so a
+        // translated-alias packet identity keys the record by the
+        // producer's canonical stored key.
+        let mut probe_undo: Option<ProbeUndo> = None;
+        if !emit_state_update {
+            if let Some(record) = self.revalidation_record(key) {
+                let matched_key = record.key.clone();
+                let snap = |e: &SessionEntry| ProbeHalfUndo {
+                    counters: e.counters,
+                    observed_tcp_flags: e.observed_tcp_flags,
+                    observed_tos: e.observed_tos,
+                    established: e.established,
+                    handshake_pending: e.handshake_pending,
+                    syn_ack_first: e.syn_ack_first,
+                    last_seen_ns: e.last_seen_ns,
+                    expires_after_ns: e.expires_after_ns,
+                };
+                let matched_snap = snap(&record.entry);
+                let is_reverse = record.entry.metadata.is_reverse;
+                let nat = record.entry.decision.nat;
+                let companion_key = reverse_session_key(&matched_key, nat);
+                let companion = if companion_key != matched_key {
+                    self.revalidation_record(&companion_key).map(|r| (companion_key.clone(), snap(&r.entry)))
+                } else {
+                    None
+                };
+                let accounting = if is_reverse {
+                    // Mirror probe_hit_inner's reverse fold exactly:
+                    // forward companion if present, else the matched
+                    // reverse entry itself (reverse-only sessions).
+                    if self.revalidation_record(&companion_key).is_some() {
+                        self.revalidation_record(&companion_key)
+                            .map(|r| (companion_key.clone(), snap(&r.entry)))
+                    } else {
+                        Some((matched_key.clone(), matched_snap))
+                    }
+                } else {
+                    Some((matched_key.clone(), matched_snap))
+                };
+                let shed_forward_key = if is_reverse {
+                    companion_key.clone()
+                } else {
+                    matched_key.clone()
+                };
+                let shed_was_present =
+                    self.pressure_shed_openings.contains_key(&shed_forward_key);
+                probe_undo = Some(ProbeUndo {
+                    canonical_key: matched_key.clone(),
+                    matched: (matched_key, matched_snap),
+                    companion,
+                    accounting,
+                    shed_forward_key,
+                    shed_was_present,
+                });
+            }
+        }
         match self.record_by_key_mut(key) {
             Some(record) => {
                 let entry = &mut record.entry;
@@ -3851,6 +4042,14 @@ impl SessionTable {
                 entry.counters.account(true, len);
                 entry.observed_tcp_flags |= tcp_flags;
             }
+        }
+        if let Some(undo) = probe_undo {
+            self.pending_probe_undo
+                .retain(|u| u.canonical_key != undo.canonical_key);
+            if self.pending_probe_undo.len() >= 64 {
+                self.pending_probe_undo.remove(0);
+            }
+            self.pending_probe_undo.push(undo);
         }
         true
     }

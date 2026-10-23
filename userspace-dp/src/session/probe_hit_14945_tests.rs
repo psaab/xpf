@@ -34,6 +34,36 @@ struct ProbeSnapshot {
     expires_after_ns: Option<u64>,
 }
 
+/// #15947 fold 2: a post-rollback snapshot with the keepalive fields
+/// (last_seen_ns only) taken from the CURRENT entry —
+/// rollback deliberately keeps the probe's refresh, so equality is
+/// judged on every other field. `rolled_back_of` projects an expected
+/// pre-probe snapshot into the same shape.
+fn rolled_back(table: &SessionTable, key: &SessionKey) -> ProbeSnapshot {
+    snapshot(table, key).clone_fields_except_keepalive()
+}
+
+fn rolled_back_of(snap: &ProbeSnapshot) -> ProbeSnapshot {
+    // The expectation keeps the PRE-probe keepalive values as a
+    // placeholder; rolled_back() projects the same way.
+    snap.clone_fields_except_keepalive()
+}
+
+impl ProbeSnapshot {
+    fn clone_fields_except_keepalive(&self) -> ProbeSnapshot {
+        ProbeSnapshot {
+            counters: self.counters,
+            observed: self.observed,
+            last_seen_ns: None,
+            established: self.established,
+            handshake_pending: self.handshake_pending,
+            syn_ack_first: self.syn_ack_first,
+            closing: self.closing,
+            expires_after_ns: self.expires_after_ns,
+        }
+    }
+}
+
 fn snapshot(table: &SessionTable, key: &SessionKey) -> ProbeSnapshot {
     let entry = table.entry_by_key(key);
     ProbeSnapshot {
@@ -393,6 +423,347 @@ fn deferred_probe_update_overflow_publishes_oldest_and_latches_resync_15947() {
     assert_eq!(updates.len(), 1, "overflow must publish exactly the evicted oldest");
     assert_eq!(updates[0].key, first_forward.expect("first flow"));
     assert!(table.take_delta_loss(), "overflow must latch resync");
+}
+
+#[test]
+fn dropped_deferring_probe_rolls_back_completion_and_charge_15947() {
+    // #15947 H29-04 arm 2: a completing ACK dropped by the cached
+    // output-filter/policer verdicts must not complete the handshake,
+    // charge the session, or leave a publishable deferred Update.
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    let before = table.session_counters(&forward).expect("forward counters");
+    let before_fwd = snapshot(&table, &forward);
+    let before_rev = snapshot(&table, &reverse);
+    let shed_before = table.pressure_shed_openings.contains_key(&forward);
+    assert!(shed_before, "premise: pending pair is pressure-sheddable");
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    let completed = table.entry_by_key(&forward).expect("forward half");
+    assert!(completed.established && !completed.handshake_pending);
+    assert!(table.rollback_dropped_probe_hit(&forward, 512, TCP_ACK | TCP_PSH));
+    let entry = table.entry_by_key(&forward).expect("forward half");
+    assert!(
+        entry.handshake_pending,
+        "dropped completing ACK must restore the pending handshake"
+    );
+    assert_eq!(
+        table.session_counters(&forward),
+        Some(before),
+        "dropped packet must not charge the session"
+    );
+    assert_eq!(
+        rolled_back(&table, &forward),
+        rolled_back_of(&before_fwd),
+        "R5/fold2: forward half restores exactly except keepalive"
+    );
+    assert_eq!(
+        rolled_back(&table, &reverse),
+        rolled_back_of(&before_rev),
+        "R5/fold2: reverse half restores exactly except keepalive"
+    );
+    // Fold 2: the dropped completing ACK still refreshes liveness —
+    // the probe's last_seen stamp stands, it is not rewound.
+    assert_eq!(table.last_seen_ns(&forward), Some(now + 2 * SEC));
+    // Fold 3: the re-pended half keeps the probe-refreshed last_seen
+    // (asserted above) but must carry its OPENING duration again,
+    // not the established duration completion stamped. Opening is
+    // 20s and established 1800s by default, so the classes are
+    // distinguishable without any override.
+    assert_eq!(
+        Some(entry.expires_after_ns), before_fwd.expires_after_ns,
+        "fold3: forward half must regain its pre-completion (opening) duration"
+    );
+    assert_ne!(
+        entry.expires_after_ns, 1_800_000_000_000u64,
+        "fold3: established duration must not survive re-pending"
+    );
+    let rev_entry = table.entry_by_key(&reverse).expect("reverse half");
+    assert_eq!(
+        Some(rev_entry.expires_after_ns), before_rev.expires_after_ns,
+        "fold3: reverse half must regain its pre-completion (opening) duration"
+    );
+    assert_eq!(
+        table.pressure_shed_openings.contains_key(&forward),
+        shed_before,
+        "R2: rolled-back opening must regain pressure-shed membership"
+    );
+    table.emit_probe_hit_state_update(&forward);
+    assert!(
+        table
+            .drain_deltas(16)
+            .iter()
+            .all(|d| d.kind != SessionDeltaKind::Update),
+        "rolled-back completion must never publish an HA Update"
+    );
+    // A retransmitted completing ACK completes again; when admitted
+    // it publishes exactly one Update.
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 3 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    table.emit_probe_hit_state_update(&forward);
+    let updates: Vec<_> = table
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].key, forward);
+}
+
+#[test]
+fn dropped_completion_restores_zone_opening_duration_15947() {
+    // Fold 3 with a per-zone opening override: the forward half's
+    // ingress zone (TEST_LAN_ZONE_ID from metadata()) carries a 7s
+    // syn-flood opening window, distinct from both the 20s global
+    // opening and the 1800s established durations. A dropped
+    // completing ACK must re-pend on 7s from the kept last_seen.
+    let mut table = SessionTable::new();
+    table.set_opening_overrides(
+        [(crate::test_zone_ids::TEST_LAN_ZONE_ID, 7 * SEC)]
+            .into_iter()
+            .collect(),
+    );
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(table
+        .lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK)
+        .is_some());
+    let _ = table.drain_deltas(16);
+    let before_fwd = snapshot(&table, &forward);
+    assert_eq!(
+        before_fwd.expires_after_ns,
+        Some(7 * SEC),
+        "premise: pending forward half carries the zone opening override"
+    );
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        512,
+        TCP_ACK | TCP_PSH,
+        512,
+        46,
+    ));
+    let completed = table.entry_by_key(&forward).expect("forward half");
+    assert_eq!(
+        completed.expires_after_ns, 1_800_000_000_000u64,
+        "premise: completion stamps the established duration"
+    );
+    assert!(table.rollback_dropped_probe_hit(&forward, 512, TCP_ACK | TCP_PSH));
+    let entry = table.entry_by_key(&forward).expect("forward half");
+    assert!(entry.handshake_pending);
+    assert_eq!(
+        entry.expires_after_ns,
+        7 * SEC,
+        "fold3: re-pended half must regain the ZONE opening duration, \
+         not established (1800s) or global opening (20s)"
+    );
+    assert_eq!(
+        table.last_seen_ns(&forward),
+        Some(now + 2 * SEC),
+        "fold3: last_seen keeps the probe refresh (deadline = kept stamp + zone duration)"
+    );
+}
+
+#[test]
+fn dropped_deferring_probe_unwinds_plain_charge_15947() {
+    // Non-completing packet: rollback un-charges without touching the
+    // established state and reports no completion was rolled back.
+    // R1: the dropped ACK|PSH carries a different DSCP (46 -> ToS 184);
+    // the pre-probe observed tuple (flags from the admitted install
+    // traffic, prior ToS) must survive exactly.
+    let (mut table, forward, _reverse, now) = pair_table();
+    let before = table.session_counters(&forward).expect("forward counters");
+    let before_snap = snapshot(&table, &forward);
+    assert!(table.probe_hit_deferring_state_update(
+        &forward,
+        now + SEC,
+        256,
+        TCP_ACK | TCP_PSH,
+        256,
+        46,
+    ));
+    assert!(!table.rollback_dropped_probe_hit(&forward, 256, TCP_ACK | TCP_PSH));
+    assert_eq!(table.session_counters(&forward), Some(before));
+    assert_eq!(
+        rolled_back(&table, &forward),
+        rolled_back_of(&before_snap),
+        "R1/R5: dropped packet must not erase prior flags/ToS or move state"
+    );
+    // Fold 2 asserts the DIRECTION, not an unconditional stamp: the
+    // probe only refreshes when stale (throttled keepalive). This
+    // fixture probes inside the throttle window, so the correct
+    // kept value is the install stamp — the point is rollback did
+    // not rewind it below the probe's own decision. The stale case
+    // (refresh actually firing) is asserted in the completion cell
+    // via last_seen == probe time after rollback.
+    assert_eq!(table.last_seen_ns(&forward), before_snap.last_seen_ns);
+    let entry = table.entry_by_key(&forward).expect("forward half");
+    assert!(entry.established && !entry.handshake_pending);
+}
+
+#[test]
+fn dropped_reverse_only_probe_unwinds_its_own_charge_15947() {
+    // R3: a reverse-only record (forward companion independently
+    // reaped, the supported single-entry state) is charged on itself
+    // by the probe's fallback; rollback must un-charge that same
+    // entry, not a nonexistent forward companion.
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let forward = key_v4();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_ACK);
+    // Reap only the forward half via the table's own removal path is
+    // not exposed here; install a standalone reverse instead.
+    let mut solo = SessionTable::new();
+    let mut rev_metadata = metadata();
+    rev_metadata.is_reverse = true;
+    assert!(solo.install_with_protocol(
+        reverse.clone(),
+        decision(),
+        rev_metadata,
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    let _ = table.drain_deltas(8);
+    let before = solo.session_counters(&reverse).expect("reverse counters");
+    let before_snap = snapshot(&solo, &reverse);
+    assert!(solo.probe_hit_deferring_state_update(
+        &reverse,
+        now + SEC,
+        256,
+        TCP_ACK | TCP_PSH,
+        256,
+        46,
+    ));
+    assert!(!solo.rollback_dropped_probe_hit(&reverse, 256, TCP_ACK | TCP_PSH));
+    assert_eq!(
+        solo.session_counters(&reverse),
+        Some(before),
+        "R3: reverse-only charge must be unwound on the reverse entry"
+    );
+    assert_eq!(
+        rolled_back(&solo, &reverse),
+        rolled_back_of(&before_snap),
+        "fold2: reverse-only restore except keepalive"
+    );
+}
+
+#[test]
+fn dropped_alias_probe_rolls_back_canonical_completion_15947() {
+    // R4: SYN-ACK-first pair completed by a reverse ACK addressed
+    // through its translated alias (alias != stored reverse key).
+    // Rollback by alias must find the canonical deferred record,
+    // restore both halves pending, and leave nothing publishable;
+    // an admitted retransmission publishes one canonical Update.
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let fwd = key_v4();
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40001),
+        ..crate::nat::NatDecision::default()
+    };
+    let fwd_decision = SessionDecision {
+        resolution: decision().resolution,
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    // SYN-ACK-first: forward installs from SYN|ACK so both halves
+    // start handshake-pending with syn_ack_first on the pair.
+    assert!(table.install_with_protocol(
+        fwd.clone(),
+        fwd_decision.clone(),
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let rev = reverse_session_key(&fwd, nat);
+    let rev_nat = nat.reverse(fwd.src_ip, fwd.dst_ip, fwd.src_port, fwd.dst_port);
+    let rev_decision = SessionDecision {
+        resolution: decision().resolution,
+        nat: rev_nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut rev_metadata = metadata();
+    rev_metadata.is_reverse = true;
+    assert!(table.install_with_protocol(
+        rev.clone(),
+        rev_decision,
+        rev_metadata,
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let _ = table.drain_deltas(16);
+    let alias = crate::session::translated_session_key(&rev, rev_nat);
+    assert_ne!(alias, rev, "premise: alias must differ from stored reverse key");
+    let before_fwd = snapshot(&table, &fwd);
+    let before_rev = snapshot(&table, &rev);
+    assert!(
+        before_fwd.handshake_pending == Some(true),
+        "premise: SYN-ACK-first pair starts pending: {before_fwd:?}"
+    );
+    assert!(table.probe_hit_deferring_state_update(
+        &alias,
+        now + SEC,
+        512,
+        TCP_ACK,
+        0,
+        46,
+    ));
+    assert!(table.rollback_dropped_probe_hit(&alias, 512, TCP_ACK));
+    assert_eq!(
+        rolled_back(&table, &fwd),
+        rolled_back_of(&before_fwd),
+        "R4: forward half restored via alias (except keepalive)"
+    );
+    assert_eq!(
+        rolled_back(&table, &rev),
+        rolled_back_of(&before_rev),
+        "R4: reverse half restored via alias (except keepalive)"
+    );
+    table.emit_probe_hit_state_update(&alias);
+    assert!(
+        table.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update),
+        "R4: rolled-back alias completion must never publish"
+    );
+    assert!(table.probe_hit_deferring_state_update(
+        &alias,
+        now + 2 * SEC,
+        512,
+        TCP_ACK,
+        0,
+        46,
+    ));
+    table.emit_probe_hit_state_update(&alias);
+    let updates: Vec<_> = table
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1, "R4: admitted alias retransmission publishes once");
 }
 /// #14935/#10885: closing gates survive the fusion — an RST-aborted entry
 /// is served (live) but never re-stamped; a FIN-owning direction with

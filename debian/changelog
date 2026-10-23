@@ -1,4 +1,40 @@
 xpf (0.0.0) unstable; urgency=medium
+
+  * Restore the opening expiry duration on the #15947 cache-drop
+    rollback (fold 3): a re-pended handshake regains its snapshot
+    opening duration (including any per-zone override) while keeping
+    the probe-refreshed last_seen, instead of carrying the
+    established duration completion stamped.
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Preserve keepalive on the #15947 cache-drop rollback: restore
+    every pre-probe field except last_seen/expiry, so a dropped
+    cache-served packet still refreshes session liveness as the
+    pre-fusion path did, while charge, completion and HA
+    publication are rolled back.
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Make the #15947 cache-drop rollback an exact inverse: restore
+    pre-probe snapshots (counters, observed flags/ToS, handshake
+    Booleans, timestamps, expiry, SYN-pressure membership) keyed by
+    the canonical session identity, covering reverse-only and
+    translated-alias probes, instead of reconstructing state from
+    the dropped packet's flags.
+
+xpf (0.0.0) unstable; urgency=medium
+  * Undo the flow-cache probe on cached output drops (#15947
+    H29-04 arm 2): a completing ACK dropped by the cached
+    output-filter or policer verdicts had already charged the
+    session and promoted both handshake halves locally, with its
+    HA Update merely withheld. The drop arm now rolls the probe
+    back — un-charge, discard the withheld Update, restore the
+    pending handshake — so a dropped packet leaves no session
+    effect; a retransmitted ACK completes and publishes normally.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Repair the #15995 ancestor-denial surface fixtures: the gRPC, REST
     and CLI suites committed a gateway-less PSK VPN that the #15989
     strict commit gate now rejects at fixture setup, so the
