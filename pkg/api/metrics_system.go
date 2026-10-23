@@ -77,6 +77,11 @@ func (c *xpfCollector) collectDDNSMetrics(ch chan<- prometheus.Metric) {
 		degraded = 1
 	}
 	c.emitConstMetric(ch, c.dhcpDDNSDegraded, prometheus.GaugeValue, degraded)
+	var unsignedActive float64
+	if st.UnsignedNonLoopbackActive {
+		unsignedActive = 1
+	}
+	c.emitConstMetric(ch, c.dhcpDDNSUnsignedActive, prometheus.GaugeValue, unsignedActive)
 	var lastTs float64
 	if !st.LastReconcile.IsZero() {
 		lastTs = float64(st.LastReconcile.Unix())
@@ -122,6 +127,11 @@ func (c *xpfCollector) collectSurfaceADDNSMetrics(ch chan<- prometheus.Metric) {
 		degraded = 1
 	}
 	c.emitConstMetric(ch, c.surfaceADDNSDegraded, prometheus.GaugeValue, degraded)
+	var saUnsigned float64
+	if st.UnsignedNonLoopbackActive {
+		saUnsigned = 1
+	}
+	c.emitConstMetric(ch, c.surfaceADDNSUnsignedActive, prometheus.GaugeValue, saUnsigned)
 }
 
 // collectFlowExportMetrics emits the xpf_flow_export_collector_* family

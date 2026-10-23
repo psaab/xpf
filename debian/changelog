@@ -34,6 +34,21 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * Add DDNS require-tsig opt-in and a live unsigned-posture gauge
+    (#15992): strict commit refuses require-tsig with a non-loopback
+    RFC2136 update-server and no tsig-key (both DHCP and Surface A
+    surfaces; DHCP including a disabled family, which still withdraws
+    persisted records), the backend refuses the UPDATE before
+    sending on the tolerant path, and
+    xpf_dhcp_ddns_unsigned_nonloopback_active /
+    xpf_ddns_surface_a_unsigned_nonloopback_active stay at 1 while
+    the forgeable-rcode posture persists, including owned records
+    pending unsigned cleanup after disable/removal and seeded at
+    restart from persisted ownership. Default unsigned
+    source-IP-ACL publishing is unchanged.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Load an `ascii-text` IPsec PSK that starts with `0x`/`0s` as its
     literal bytes (#15991): the gateway-group secret fold now carries
     each member PSK's authored encoding (pskValue{value, hex}) and

@@ -2751,6 +2751,11 @@ type compileOpts struct {
 	// warns and keeps the daemon bootable, while the netlink reconciler omits
 	// the invalid backup route until corrected (#1960).
 	lenientBackupRouterDst bool
+	// lenientDDNSRequireTSIG (#15992) downgrades the require-tsig gate
+	// (validateDDNSRequireTSIG) from a hard compile error to a warning.
+	// Tolerant load/peer-sync must still boot a require-tsig config that
+	// lacks a key (no-brick); strict commit/commit-check hard-rejects.
+	lenientDDNSRequireTSIG bool
 	// lenientSecureTunnelBindIface (#2933) downgrades the secure-tunnel
 	// bind-interface alias-collision gate (validateSecureTunnelBindInterfaceAST)
 	// from a hard compile error to a cfg.Warnings entry. Two VPNs that bind two
@@ -3865,6 +3870,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRethRGOwnership:                   true,
 		lenientReservedZoneNames:                 true,
 		lenientBackupRouterDst:                   true,
+		lenientDDNSRequireTSIG:                   true,
 		lenientSecureTunnelBindIface:             true,
 		lenientPolicyMatchLeaves:                 true,
 		lenientPolicyThenPermit:                  true,

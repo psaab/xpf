@@ -701,6 +701,7 @@ func mergeDHCPDynamicDNS(dst, src *DHCPDynamicDNSConfig) *DHCPDynamicDNSConfig {
 	if dst.TSIGSecret.Reveal() == "" {
 		dst.TSIGSecret = src.TSIGSecret
 	}
+	dst.RequireTSIG = dst.RequireTSIG || src.RequireTSIG
 	if dst.SourceAddress == "" {
 		dst.SourceAddress = src.SourceAddress
 	}
@@ -767,6 +768,8 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 			switch {
 			case k == "enable":
 				enabled = true
+			case k == "require-tsig":
+				props["require-tsig"] = "true"
 			case k == "ttl" && i+1 < len(n.Keys):
 				if _, ok := props["ttl"]; !ok {
 					props["ttl"] = n.Keys[i+1]
@@ -796,6 +799,7 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 	d.TSIGKeyName = props["tsig-key"]
 	d.TSIGAlgorithm = props["tsig-algorithm"]
 	d.TSIGSecret = NewSecret(props["tsig-secret"])
+	d.RequireTSIG = props["require-tsig"] == "true"
 	d.SourceAddress = props["source-address"]
 	d.DestinationInterface = props["destination-interface"]
 	d.RoutingInstance = props["routing-instance"]
@@ -809,7 +813,7 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 	// `enable` is meaningful (defaults apply), so check the union.
 	if !d.Enabled && d.Domain == "" && d.HostnameSource == "" &&
 		d.ConflictPolicy == "" && d.Backend == "" && d.UpdateServer == "" &&
-		d.TSIGKeyName == "" && d.TSIGAlgorithm == "" && d.TSIGSecret.Reveal() == "" &&
+		d.TSIGKeyName == "" && d.TSIGAlgorithm == "" && d.TSIGSecret.Reveal() == "" && !d.RequireTSIG &&
 		d.SourceAddress == "" && d.DestinationInterface == "" &&
 		d.RoutingInstance == "" && d.TTLSeconds == 0 {
 		return nil

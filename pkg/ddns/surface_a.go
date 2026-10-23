@@ -462,6 +462,26 @@ type SurfaceAManager struct {
 	// it). So this counter tallies deferred passes, not one-shot suppressions.
 	// Guarded by mu.
 	deleteCoowned uint64
+	// unsignedNonLoopbackActive (#15992): current forgeable-rcode posture
+	// from the last reconcile catalog plus owned records pending cleanup.
+	// Guarded by mu.
+	unsignedNonLoopbackActive bool
+	// cleanupUnsignedNonLoopback (#15992): fingerprint -> posture map for
+	// providers that published owned records, captured while the provider
+	// was still in the catalog. After a provider/binding is removed, the
+	// catalog entry may be gone but pending withdrawals (or kept orphan
+	// ownership) still implicate that endpoint, so the gauge consults
+	// this retained posture keyed by the record's stored fingerprint.
+	// Guarded by mu.
+	cleanupUnsignedNonLoopback map[string]bool
+	// cleanupInFlight (#15992): this pass is in progress. Stats() runs
+	// under mu — which Reconcile holds for the whole pass — so a scrape
+	// can only observe the manager between passes; the flag therefore
+	// also covers the degraded early-return and any future lock release:
+	// while set, Stats holds the last completed posture.
+	cleanupInFlight bool
+	// prevUnsignedNonLoopback (#15992): posture at end of last pass.
+	prevUnsignedNonLoopback bool
 
 	// leaseCoowners, when non-nil, returns the wire-RR claims currently owned by
 	// the SEPARATE Surface B DHCP lease surface (Manager.state.records, rdata in
@@ -716,6 +736,7 @@ func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(stri
 		TSIGKeyName:          p.TSIGKeyName,
 		TSIGAlgorithm:        p.TSIGAlgorithm,
 		TSIGSecret:           p.TSIGSecret,
+		RequireTSIG:          p.RequireTSIG,
 		SourceAddress:        p.SourceAddress,
 		DestinationInterface: p.DestinationInterface,
 		RoutingInstance:      p.RoutingInstance,
@@ -849,8 +870,11 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 	// quarantined aside re-reads an absent (clean-empty) store and resumes
 	// publishing.
 	if m.degraded {
+		m.prevUnsignedNonLoopback = m.unsignedNonLoopbackActive
+		m.cleanupInFlight = false
 		return fmt.Errorf("ddns surface-a: reconcile suspended (state degraded): %s", m.degradedReason)
 	}
+	m.cleanupInFlight = true
 
 	// Consume the operator force-now latch (#3276) for THIS pass: a force makes
 	// every configured scope refresh-due so the RG owner re-asserts the wire
@@ -859,6 +883,31 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 	// per-RG gate below still decides which scopes this node may actually write.
 	force := m.forceRefresh
 	m.forceRefresh = false
+
+	// #15992: refresh the forgeable-rcode posture gauge from this pass's
+	// catalog so it stays visible for as long as any non-loopback unsigned
+	// provider is configured, not once per process. The cleanup path is
+	// covered too: capture each catalog provider's posture under its
+	// endpoint fingerprint NOW (while it is still resolvable), then after
+	// the pass (below) keep the gauge set while any owned record's stored
+	// fingerprint retains an unsigned non-loopback posture — including
+	// after the provider/binding is removed and withdrawals (or kept
+	// orphan ownership) still implicate that endpoint.
+	if m.cleanupUnsignedNonLoopback == nil {
+		m.cleanupUnsignedNonLoopback = map[string]bool{}
+	}
+	for _, p := range catalog {
+		if fp := backendFingerprint(p); fp != "" {
+			m.cleanupUnsignedNonLoopback[fp] = providerUnsignedNonLoopback(p)
+		}
+	}
+	m.unsignedNonLoopbackActive = false
+	for _, p := range catalog {
+		if providerUnsignedNonLoopback(p) {
+			m.unsignedNonLoopbackActive = true
+			break
+		}
+	}
 
 	now := m.now()
 	var firstErr error
@@ -1018,6 +1067,16 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 		// redacted config.Secret and the old endpoint is usually gone) — the alarm
 		// tells the operator to clean it up by hand.
 		backend, status, err := m.classifyOwnedBackend(owned, catalog)
+		// #15992 fold: capture the WITHDRAW backend's posture at the
+		// transition — after provider removal/re-keying the withdraw (or
+		// kept orphan) implicates the backend actually used here, which
+		// may be unsigned even though the current catalog is keyed/gone.
+		if status == ownedBackendOK && updaterUnsignedNonLoopback(backend) && owned.BackendFingerprint != "" {
+			if m.cleanupUnsignedNonLoopback == nil {
+				m.cleanupUnsignedNonLoopback = map[string]bool{}
+			}
+			m.cleanupUnsignedNonLoopback[owned.BackendFingerprint] = true
+		}
 		switch status {
 		case ownedBackendProviderGone:
 			m.noteOrphan(owned, "", orphanReasonProviderGone, now)
@@ -1045,6 +1104,24 @@ func (m *SurfaceAManager) Reconcile(ctx context.Context, scopes []SurfaceAScope,
 		noteErr(m.withdrawScopeLocked(ctx, owned, backend, rt, owned.FQDN, 0, now))
 	}
 
+	// #15992 cleanup term: owned records still pending withdrawal/orphan
+	// cleanup at a retained unsigned non-loopback endpoint keep the gauge
+	// set after provider/binding removal, until the last such record goes.
+	// Recompute (not just OR-in): a pass that completes cleanup must clear
+	// a posture the catalog no longer supports.
+	if len(m.state.all()) == 0 {
+		// No ownership: the catalog term above already reflects this pass.
+	} else if !m.unsignedNonLoopbackActive {
+		for _, owned := range m.state.all() {
+			if owned.BackendFingerprint != "" && m.cleanupUnsignedNonLoopback[owned.BackendFingerprint] {
+				m.unsignedNonLoopbackActive = true
+				break
+			}
+		}
+	}
+
+	m.prevUnsignedNonLoopback = m.unsignedNonLoopbackActive
+	m.cleanupInFlight = false
 	if err := m.state.save(); err != nil {
 		slog.Warn("ddns surface-a: persist ownership state failed", "err", err)
 		noteErr(err)
@@ -2470,6 +2547,12 @@ type SurfaceAStats struct {
 	// DegradedReason is a human-readable explanation of Degraded (the load error
 	// plus the quarantine path of the bad file, if any). Empty when not degraded.
 	DegradedReason string
+	// UnsignedNonLoopbackActive (#15992): true while any rfc2136 provider
+	// targets a non-loopback update-server with no TSIG key, or owned
+	// records are still pending cleanup at such an endpoint (including
+	// after provider/binding removal) — the forgeable-rcode posture, as
+	// a live gauge.
+	UnsignedNonLoopbackActive bool
 }
 
 // ForceRefresh arms the operator force-now latch (#3276): the NEXT reconcile
@@ -2490,19 +2573,29 @@ func (m *SurfaceAManager) Stats() SurfaceAStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return SurfaceAStats{
-		Scopes:           len(m.state.records),
-		UpsertOK:         m.upsertOK,
-		UpsertFail:       m.upsertFail,
-		DeleteOK:         m.deleteOK,
-		DeleteFail:       m.deleteFail,
-		Skipped:          m.skipped,
-		BackedOff:        m.backedOff,
-		SkippedNoBackend: m.skippedNoBackend,
-		DeleteCoowned:    m.deleteCoowned,
-		Orphaned:         len(m.orphans),
-		Degraded:         m.degraded,
-		DegradedReason:   m.degradedReason,
+		Scopes:                    len(m.state.records),
+		UpsertOK:                  m.upsertOK,
+		UpsertFail:                m.upsertFail,
+		DeleteOK:                  m.deleteOK,
+		DeleteFail:                m.deleteFail,
+		Skipped:                   m.skipped,
+		BackedOff:                 m.backedOff,
+		SkippedNoBackend:          m.skippedNoBackend,
+		DeleteCoowned:             m.deleteCoowned,
+		Orphaned:                  len(m.orphans),
+		Degraded:                  m.degraded,
+		DegradedReason:            m.degradedReason,
+		UnsignedNonLoopbackActive: m.unsignedPostureLocked(),
 	}
+}
+
+// unsignedPostureLocked holds the last completed posture while a pass
+// is in flight (#15992), so the gauge never dips mid-cleanup.
+func (m *SurfaceAManager) unsignedPostureLocked() bool {
+	if m.cleanupInFlight {
+		return m.prevUnsignedNonLoopback || m.unsignedNonLoopbackActive
+	}
+	return m.unsignedNonLoopbackActive
 }
 
 // buildHostRecord constructs the forward-only A/AAAA record for a Surface A
@@ -2557,4 +2650,58 @@ func familyInt(a netip.Addr) int {
 		return 4
 	}
 	return 6
+}
+
+// NewSurfaceAManagerForTesting builds a SurfaceAManager with an injectable
+// state path, backend, and clock for cross-package tests (e.g. pkg/api
+// gauge wiring). Test-only seam; not for production callers.
+func NewSurfaceAManagerForTesting(statePath string, backend DNSUpdater, now func() time.Time) *SurfaceAManager {
+	return newSurfaceAManagerForTesting(statePath, backend, now)
+}
+
+// SeedUnsignedPosture (#15992) seeds the Surface A unsigned-posture gauge
+// at manager start, before the first reconcile. The owner that has both
+// the freshly constructed manager (persisted ownership already loaded by
+// NewSurfaceAManager) and the boot/active catalog calls it at wiring
+// time, before any reconcile or Stats scrape.
+//
+// Seeded 1 iff persisted Surface A ownership exists AND the cleanup
+// endpoint for that ownership — the provider the first reconcile will
+// consult for withdrawn/orphaned records — is unsigned non-loopback.
+// The catalog passed here is that first-reconcile catalog: a provider
+// REMOVED from it (binding+provider deleted while the daemon was down)
+// leaves only the stored fingerprint, which cannot be decoded back to a
+// server/key posture — so removal-while-down cannot seed (see the
+// fingerprint limitation in the commit); a still-present disabled-by-
+// removal-of-binding provider (in catalog, no scopes) DOES seed, as
+// does any unsigned non-loopback provider in the catalog. Keyed,
+// loopback, or record-free cases seed 0.
+func (m *SurfaceAManager) SeedUnsignedPosture(catalog map[string]*config.DDNSProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cleanupUnsignedNonLoopback == nil {
+		m.cleanupUnsignedNonLoopback = map[string]bool{}
+	}
+	for _, prov := range catalog {
+		if fp := backendFingerprint(prov); fp != "" {
+			m.cleanupUnsignedNonLoopback[fp] = providerUnsignedNonLoopback(prov)
+		}
+	}
+	seeded := false
+	for _, prov := range catalog {
+		if providerUnsignedNonLoopback(prov) {
+			seeded = true
+			break
+		}
+	}
+	if !seeded && len(m.state.all()) > 0 {
+		for _, owned := range m.state.all() {
+			if owned.BackendFingerprint != "" && m.cleanupUnsignedNonLoopback[owned.BackendFingerprint] {
+				seeded = true
+				break
+			}
+		}
+	}
+	m.unsignedNonLoopbackActive = seeded
+	m.prevUnsignedNonLoopback = seeded
 }

@@ -115,6 +115,10 @@ type rfc2136Updater struct {
 	tsigKeyName string // canonical (lowercase, trailing-dot) key name; "" = no TSIG
 	tsigAlgo    string // canonical miekg algorithm name (hmac-sha256. etc)
 	tsigSecret  string // revealed base64 secret
+	// requireTSIG (#15992): when true and no TSIG key is configured, the
+	// updater refuses every non-loopback exchange instead of trusting an
+	// unsigned rcode; loopback servers are exempt, matching the commit gate.
+	requireTSIG bool
 
 	// optional explicit zone lists (plan §11 Q1 follow-up). Always empty in
 	// Inc-2; carried so the additive follow-up wires new leaves in here.
@@ -252,6 +256,106 @@ func normalizeUpdateServer(s string) (string, error) {
 	return net.JoinHostPort(host, "53"), nil
 }
 
+// updateServerIsLoopback reports whether a normalized host:port's host is
+// loopback (127.0.0.0/8, ::1, or "localhost"). A non-literal hostname is
+// non-loopback: xpf cannot prove it resolves only to loopback (#15992).
+func updateServerIsLoopback(server string) bool {
+	host, _, err := net.SplitHostPort(server)
+	if err != nil {
+		host = server
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+// ddnsUnsignedNonLoopback reports whether an enabled rfc2136 policy with
+// this config currently trusts unsigned rcodes from a non-loopback server.
+func ddnsUnsignedNonLoopback(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) bool {
+	if c == nil || !pol.enabled || pol.backend != "rfc2136" {
+		return false
+	}
+	return ddnsConfigUnsignedNonLoopback(c)
+}
+
+// ddnsConfigUnsignedNonLoopback reports whether this config's UPDATE target
+// is a non-loopback server with no TSIG key. It deliberately does NOT check
+// Enabled: a disabled family still sends unsigned cleanup UPDATEs for owned
+// records, so the gauge must stay set while that cleanup authority exists.
+func ddnsConfigUnsignedNonLoopback(c *config.DHCPDynamicDNSConfig) bool {
+	if c == nil || c.UpdateServer == "" || c.TSIGKeyName != "" {
+		return false
+	}
+	backend := c.Backend
+	if backend == "" {
+		backend = "rfc2136"
+	}
+	if backend != "rfc2136" {
+		return false
+	}
+	server, err := normalizeUpdateServer(c.UpdateServer)
+	if err != nil {
+		return false
+	}
+	return !updateServerIsLoopback(server)
+}
+
+// providerUnsignedNonLoopback is the Surface A analogue: an rfc2136 provider
+// targeting a non-loopback update-server with no TSIG key.
+func providerUnsignedNonLoopback(p *config.DDNSProvider) bool {
+	if p == nil || p.UpdateServer == "" || p.TSIGKeyName != "" {
+		return false
+	}
+	backend := p.Backend
+	if backend == "" {
+		backend = "rfc2136"
+	}
+	if backend != "rfc2136" {
+		return false
+	}
+	server, err := normalizeUpdateServer(p.UpdateServer)
+	if err != nil {
+		return false
+	}
+	return !updateServerIsLoopback(server)
+}
+
+// updaterUnsignedNonLoopback reports whether a resolved backend will send
+// unsigned UPDATEs to a non-loopback server. Used for cleanup-path posture:
+// the updater retained for withdrawals carries the endpoint that published
+// the owned records, even after the config that created it is disabled or
+// removed. Non-RFC2136 / nop backends report false.
+func updaterUnsignedNonLoopback(u DNSUpdater) bool {
+	server, keyed, ok := updaterEndpointPosture(u)
+	if !ok || keyed {
+		return false
+	}
+	return !updateServerIsLoopback(server)
+}
+
+// updaterEndpointPosture reports a resolved backend's UPDATE target and
+// whether it signs with TSIG. It unwraps the per-reconcile backend the
+// managers retain for withdrawals. ok=false for nop/non-RFC2136 backends.
+func updaterEndpointPosture(u DNSUpdater) (server string, keyed bool, ok bool) {
+	if u == nil || isNopUpdater(u) {
+		return "", false, false
+	}
+	if pu, isPosture := u.(interface{ DDNSUpdaterEndpoint() (string, bool) }); isPosture {
+		srv, k := pu.DDNSUpdaterEndpoint()
+		return srv, k, true
+	}
+	ru, isRFC := u.(*rfc2136Updater)
+	if !isRFC || ru == nil {
+		return "", false, false
+	}
+	return ru.server, ru.tsigKeyName != "", true
+}
+
 // newRFC2136Updater builds the live backend from a resolved policy plus the
 // raw config (for the TSIG/server fields the policy struct does not carry).
 // onPTRNotAuth/onConflict are the manager's skip counters. A nil client
@@ -300,6 +404,7 @@ func newRFC2136Updater(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig, client dn
 		client:         client,
 		onPTRNotAuth:   onPTRNotAuth,
 		onConflict:     onConflict,
+		requireTSIG:    c.RequireTSIG,
 	}
 	if c.TSIGKeyName != "" {
 		algo, err := canonicalTSIGAlgorithm(c.TSIGAlgorithm)
@@ -1454,6 +1559,15 @@ func (u *rfc2136Updater) validateTSIGResponse(resp *dns.Msg, proto string) error
 func (u *rfc2136Updater) exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	if u.tsigKeyName != "" {
 		m.SetTsig(u.tsigKeyName, u.tsigAlgo, 300, time.Now().Unix())
+	} else if u.requireTSIG && !updateServerIsLoopback(u.server) {
+		// #15992 runtime backstop: a require-tsig config that reached the
+		// backend without a key (tolerant load) must never trust an
+		// unsigned rcode from a non-loopback server — the same loopback
+		// exemption the strict commit gate applies. Refuse before any
+		// UPDATE is sent (exchange only carries RFC 2136 UPDATEs; the
+		// SOA zone-discovery query in querySOA is a separate path), so
+		// no durable ownership is recorded on a forgeable verdict.
+		return nil, fmt.Errorf("ddns: require-tsig is set but no tsig-key is configured for %s; refusing unsigned update", u.server)
 	} else {
 		// #4483: no TSIG key configured. The UPDATE is sent unsigned and the
 		// publish/ownership verdict below keys on an UNAUTHENTICATED, forgeable

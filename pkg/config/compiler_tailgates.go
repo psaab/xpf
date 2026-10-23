@@ -490,5 +490,17 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, loginRegexWarnings15712...)
 
+	// #15992: require-tsig gate — runs last so established diagnostics keep
+	// first-error priority. Strict rejects require-tsig + non-loopback
+	// update-server + no tsig-key; lenient warns (no-brick).
+	if err := validateDDNSRequireTSIG(cfg); err != nil {
+		if opts.lenientDDNSRequireTSIG {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ddns require-tsig (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

@@ -333,6 +333,112 @@ func ddnsAllowlistMalformedTokens(s string) []string {
 	return bad
 }
 
+// ddnsUpdateServerIsLoopback reports whether an update-server's host is
+// loopback (127.0.0.0/8, ::1, or "localhost"). A hostname that is not a
+// literal IP is treated as non-loopback (fail-closed for require-tsig):
+// xpf cannot prove a name resolves only to loopback at commit time.
+func ddnsUpdateServerIsLoopback(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		host = s
+		if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+			host = host[1 : len(host)-1]
+		}
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+// validateDDNSRequireTSIG (#15992) is the strict gate behind the
+// `require-tsig` leaf. When require-tsig is set on an rfc2136 policy whose
+// update-server is non-loopback and no tsig-key is configured, it returns
+// an error — for DISABLED DHCP families too, because they still withdraw
+// persisted records at runtime and the runtime guard refuses those
+// unsigned withdrawals (records would be kept forever). Surface A
+// providers have no enable flag (bindings gate them), so they are
+// already validated unconditionally. The caller downgrades it to a
+// warning on the tolerant path. Default posture (require-tsig unset) is
+// unchanged: unsigned updates to source-IP-ACL servers keep working
+// (warn-only, #4483).
+func validateDDNSRequireTSIG(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	checkDHCP := func(d *DHCPDynamicDNSConfig, label string) error {
+		// #15992 fold: do NOT skip disabled families. A disabled family
+		// still withdraws persisted records at runtime, and the backend
+		// guard refuses those unsigned withdrawals to a non-loopback
+		// server — so a disabled require-tsig family with persisted
+		// ownership would silently keep its records forever if strict
+		// commit let it through. The compiler has no access to the
+		// durable ownership store, so it cannot condition on ownership;
+		// validating every configured family (enabled or not) is the
+		// sound over-approximation: an operator who disables DDNS while
+		// require-tsig is set must either supply a key (so cleanup can
+		// run signed) or remove require-tsig (documented cleanup
+		// exemption is the runtime's unsigned warn, not a silent pass).
+		if d == nil || !d.RequireTSIG {
+			return nil
+		}
+		backend := d.Backend
+		if backend == "" {
+			backend = "rfc2136"
+		}
+		if backend != "rfc2136" || d.UpdateServer == "" || d.TSIGKeyName != "" {
+			return nil
+		}
+		if ddnsUpdateServerIsLoopback(d.UpdateServer) {
+			return nil
+		}
+		verb := "refusing to trust an unsigned, forgeable rcode from a non-loopback server"
+		if !d.Enabled {
+			verb = "the family is disabled but persisted records will still be " +
+				"withdrawn unsigned at runtime, which the require-tsig guard refuses — " +
+				"records would be kept forever"
+		}
+		return fmt.Errorf("%s require-tsig is set but update-server %q has no tsig-key; %s — "+
+			"set tsig-key/tsig-secret or remove require-tsig", label, d.UpdateServer, verb)
+	}
+	if err := checkDHCP(cfg.System.DHCPServer.DynamicDNS, "dhcp dynamic-dns"); err != nil {
+		return err
+	}
+	if err := checkDHCP(cfg.System.DHCPServer.DynamicDNSv6, "dhcpv6 dynamic-dns"); err != nil {
+		return err
+	}
+	if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
+		for name, p := range cfg.System.Services.DynamicDNS.Providers {
+			if p == nil || !p.RequireTSIG {
+				continue
+			}
+			backend := p.Backend
+			if backend == "" {
+				backend = "rfc2136"
+			}
+			if backend != "rfc2136" || p.UpdateServer == "" || p.TSIGKeyName != "" {
+				continue
+			}
+			if ddnsUpdateServerIsLoopback(p.UpdateServer) {
+				continue
+			}
+			return fmt.Errorf("system services dynamic-dns provider %q require-tsig is set but "+
+				"update-server %q has no tsig-key; refusing to trust an unsigned, forgeable "+
+				"rcode from a non-loopback server — set tsig-key/tsig-secret or remove "+
+				"require-tsig", name, p.UpdateServer)
+		}
+	}
+	return nil
+}
+
 // validateSurfaceADDNSWarnings emits WARN-only commit-time messages for the
 // Surface A router/interface-address DDNS bindings + provider catalog (#2691
 // P2). It never returns an error: the typed schema already accepts the leaves,
