@@ -110,19 +110,21 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	// hard-coding is proven below.
 	isisCallRE := regexp.MustCompile(`\.resolveISISRedistribute\(`)
 	isisSelfRE := regexp.MustCompile(`func \(m \*Manager\) resolveISISRedistribute\([^)]*\) string \{\s*return m\.resolveISISRedistributeCluster15158\([^,()]+,\s*[^,()]+,\s*[^,()]+,\s*[^,()]+,\s*false,`)
-	// #15156: chain resolvers forward a literal self into
+	// #15156: the chain resolver forwards its self into
 	// redistChainEntries15156 exactly like the single-export wrappers.
-	// Their <2-defined fallback calls resolveRedistribute(e, po, self, ...)
-	// — proven by chainSelfRE below, not a literal at the call site.
-	chainSelfRE := regexp.MustCompile(`resolveRedistribute\(e, po, self,`)
-	chainCallRE := regexp.MustCompile(`\.resolveRedistributeChain\([^,()]+,\s*[^,()]+,\s*"([a-z0-9]+)",`)
-	chainISISCallRE := regexp.MustCompile(`\.resolveISISRedistributeChain\(`)
-	// #15158: protocols_render.go reaches the chain resolution through
-	// the cluster wrappers, which forward the same literal self. Count
-	// those calls with the same literal-self requirement. The chain
-	// wrappers' own fallback forwards self non-literally, proven by
-	// chainClusterSelfRE below (mirrors chainSelfRE).
+	// Its <2-defined fallback calls
+	// resolveRedistributeCluster15158(e, po, self, ...) — proven by
+	// chainSelfRE below, not a literal at the call site. (#16205
+	// deleted the dead non-cluster resolveRedistributeChain wrapper;
+	// the production chain entry is the Cluster15158 form.)
+	chainSelfRE := regexp.MustCompile(`resolveRedistributeCluster15158\(e, po, self,`)
+	// #15158: protocols_render*.go reaches the chain resolution
+	// through the cluster chain resolver, which forwards the same
+	// literal self. Count those calls with the same literal-self
+	// requirement. Its own fallback forwards self non-literally,
+	// proven by chainSelfRE above.
 	clusterChainCallRE := regexp.MustCompile(`\.resolveRedistributeChainCluster15158\([^,]+,\s*[^,]+,\s*"([a-z0-9]+)",`)
+	chainISISCallRE := regexp.MustCompile(`\.resolveISISRedistributeChain\(`)
 	clusterChainISISCallRE := regexp.MustCompile(`WriteString\(m\.resolveISISRedistributeChainCluster15158\(`)
 	// #15158: BGP bare-token redistribution renders through
 	// resolveRedistributeCluster15158 with literal self "bgp" at the
@@ -139,6 +141,7 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	entriesCallRE := regexp.MustCompile(`\.redistributeEntries\(`)
 	calls, lits := 0, map[string]int{}
 	isisCalls, isisSelfProven, entriesCalls := 0, false, 0
+	chainSelfProven := false
 	qnhCalls, qnhLiteralCalls, qnhSelfProven := 0, 0, false
 	qnhLits := map[string]int{}
 	for _, f := range files {
@@ -149,12 +152,16 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// #15156 fallback inside resolveRedistributeChain forwards self.
-		if chainSelfRE.Match(b) {
-			// Counted via chainCallRE literals at protocols_render.go;
-			// exclude the one non-literal resolveRedistribute call.
-			calls--
-		}
+		// #15156 fallback inside resolveRedistributeChainCluster15158
+		// forwards self non-literally. That fallback reaches
+		// redistributeEntries via resolveRedistributeCluster15158,
+		// so it adds no literal-self call for this census to count;
+		// the production chain call sites in protocols_render*.go
+		// (matched by clusterChainCallRE with a literal self) are
+		// the counted entries. chainSelfRE proves the forwarding
+		// shape: if it does not match somewhere in the package,
+		// fail below rather than silently losing the proof.
+		chainSelfProven = chainSelfProven || chainSelfRE.Match(b)
 		calls += len(callRE.FindAllIndex(b, -1))
 		for _, mm := range litRE.FindAllSubmatch(b, -1) {
 			lits[string(mm[1])]++
@@ -170,10 +177,6 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		}
 		qnhSelfProven = qnhSelfProven || qnhSelfRE.Match(b)
 		entriesCalls += len(entriesCallRE.FindAllIndex(b, -1))
-		for _, mm := range chainCallRE.FindAllSubmatch(b, -1) {
-			lits[string(mm[1])]++
-			calls++
-		}
 		for _, mm := range clusterChainCallRE.FindAllSubmatch(b, -1) {
 			lits[string(mm[1])]++
 			calls++
@@ -197,6 +200,9 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		}
 		calls += isisCalls
 		lits["isis"] += isisCalls
+	}
+	if !chainSelfProven {
+		t.Fatalf("could not prove resolveRedistributeChainCluster15158 forwards its self argument non-literally into resolveRedistributeCluster15158; the #15156 chain fallback shape changed and this census cannot see its router")
 	}
 	if qnhCalls == 0 || !qnhSelfProven {
 		t.Fatalf("found %d QNH addExport calls but could not prove its self parameter reaches redistributeEntries", qnhCalls)

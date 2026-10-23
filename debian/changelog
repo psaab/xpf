@@ -13,6 +13,13 @@ xpf (0.0.0) unstable; urgency=medium
     the same warning, capture_iperf.sh labels its firewall-side
     captures as blind in summary.txt, and a docsref guard test fails
     if the guidance is removed. Docs/skills only; no dataplane change.
+  * Delete the two dead FRR render wrappers
+    generatePolicyOptionsForSection and resolveRedistributeChain
+    (#16205): both were definition-only — production already calls
+    the Cluster15158/15157 inner forms directly. Update the #9510
+    redistribution-AFI canary in the same change to prove the live
+    cluster chain resolver's self-forwarding instead of referencing
+    the deleted wrapper, so the census stays non-vacuous.
 
 xpf (0.0.0) unstable; urgency=medium
 
