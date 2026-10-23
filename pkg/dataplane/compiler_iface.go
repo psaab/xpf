@@ -527,6 +527,15 @@ func reconcileInterfaceAddresses(ifaceName string, desired []string, primaries .
 // carries IFA_F_SECONDARY is deleted and re-added (after its subnet peers
 // are deleted) so the kernel promotes it instead of leaving the primary
 // flip a no-op.
+//
+// #15944 H4-01: a primary that is NOT YET INSTALLED but whose subnet
+// already has a configured peer on the kernel can never promote under
+// the rule above — AddrAdd appends it as IFA_F_SECONDARY behind the
+// incumbent. The planner therefore also deletes the subnet's existing
+// desired peers (they are re-added after the primary, in authored
+// order) so the fresh primary lands first and the kernel marks it
+// primary. Peers are only cycled when the primary itself is missing:
+// a present non-secondary primary plans no churn.
 func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName string, primaries ...string) (del []*netlink.Addr, add []*netlink.Addr, dadfailedCount int) {
 	var primaryV4, primaryV6 string
 	if len(primaries) > 0 {
@@ -571,6 +580,45 @@ func planAddressReconcile(existing []netlink.Addr, desired []string, ifaceName s
 		if _, ok := want[key]; ok && primaryKeys[key] && a.Flags&unix.IFA_F_SECONDARY != 0 {
 			promote[key] = true
 			promoteSubnets[(&net.IPNet{IP: a.IP.Mask(a.IPNet.Mask), Mask: a.IPNet.Mask}).String()] = true
+		}
+	}
+	// #15944 H4-01: fresh-primary promotion. A desired primary absent
+	// from the kernel, with a desired same-subnet peer already present,
+	// would be appended as secondary; mark its subnet for the same
+	// delete-cycle the secondary-primary arm uses.
+	{
+		presentKeys := make(map[string]bool, len(existing))
+		for i := range existing {
+			if existing[i].IPNet != nil {
+				presentKeys[existing[i].IPNet.String()] = true
+			}
+		}
+		for _, prim := range []string{primaryV4, primaryV6} {
+			if prim == "" {
+				continue
+			}
+			pa, err := netlink.ParseAddr(prim)
+			if err != nil || pa.IPNet == nil || pa.IP == nil || pa.IP.To4() == nil {
+				continue
+			}
+			if presentKeys[pa.IPNet.String()] {
+				continue
+			}
+			subnet := (&net.IPNet{IP: pa.IP.Mask(pa.IPNet.Mask), Mask: pa.IPNet.Mask}).String()
+			for i := range existing {
+				a := &existing[i]
+				if a.IP == nil || a.IP.To4() == nil || a.IPNet == nil {
+					continue
+				}
+				if _, ok := want[a.IPNet.String()]; !ok {
+					continue
+				}
+				if (&net.IPNet{IP: a.IP.Mask(a.IPNet.Mask), Mask: a.IPNet.Mask}).String() == subnet {
+					promote[pa.IPNet.String()] = true
+					promoteSubnets[subnet] = true
+					break
+				}
+			}
 		}
 	}
 	present := make(map[string]bool, len(want))
@@ -1841,20 +1889,51 @@ func buildFabricBondModels(cfg *config.Config, result *CompileResult, seen map[s
 			seen[bondName] = true
 			// Collect addresses from fabric interface units
 			var addrs []string
+			var primaryAddr, primaryAddrV6, preferredAddr, preferredAddrV6 string
+			unitMTU := 0
 			for _, unit := range ifCfg.Units {
 				if unit == nil || unit.Disable {
 					continue
 				}
 				addrs = append(addrs, unit.Addresses...)
+				// #15944 H4-04: carry the units' MTU (minimum, the
+				// compile-time fold) and per-family primary/preferred
+				// onto the bond model. The previous shape emitted only
+				// the interface-level MTU, so a unit `mtu` and the
+				// primary/preferred source-selection order never
+				// reached networkd for a fabric bond.
+				if unit.MTU > 0 && (unitMTU == 0 || unit.MTU < unitMTU) {
+					unitMTU = unit.MTU
+				}
+				if v := unit.PrimaryAddressForFamily(false); v != "" && primaryAddr == "" {
+					primaryAddr = v
+				}
+				if v := unit.PrimaryAddressForFamily(true); v != "" && primaryAddrV6 == "" {
+					primaryAddrV6 = v
+				}
+				if v := unit.PreferredAddressForFamily(false); v != "" && preferredAddr == "" {
+					preferredAddr = v
+				}
+				if v := unit.PreferredAddressForFamily(true); v != "" && preferredAddrV6 == "" {
+					preferredAddrV6 = v
+				}
+			}
+			bondMTU := ifCfg.MTU
+			if unitMTU > 0 && (bondMTU == 0 || unitMTU < bondMTU) {
+				bondMTU = unitMTU
 			}
 			result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
-				Name:        bondName,
-				IsBond:      true,
-				BondMode:    "active-backup",
-				Addresses:   addrs,
-				Description: ifCfg.Description,
-				MTU:         ifCfg.MTU,
-				VRFName:     config.ManagementVRFDeviceName,
+				Name:               bondName,
+				IsBond:             true,
+				BondMode:           "active-backup",
+				Addresses:          addrs,
+				PrimaryAddress:     primaryAddr,
+				PrimaryAddressV6:   primaryAddrV6,
+				PreferredAddress:   preferredAddr,
+				PreferredAddressV6: preferredAddrV6,
+				Description:        ifCfg.Description,
+				MTU:                bondMTU,
+				VRFName:            config.ManagementVRFDeviceName,
 			})
 		}
 		// Member interfaces: .network with Bond= referencing the bond
@@ -1958,6 +2037,9 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 
 		// Collect IRB addresses from the referenced interface unit
 		var addrs []string
+		var primaryAddr, primaryAddrV6, preferredAddr, preferredAddrV6 string
+		mtu := 0
+		dhcpv4, dhcpv6, dadDisable := false, false, false
 		if bd.RoutingInterface != "" {
 			// Parse "irb.N" to get unit number
 			parts := strings.SplitN(bd.RoutingInterface, ".", 2)
@@ -1967,15 +2049,41 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 				if irbCfg, ok := cfg.Interfaces.Interfaces[irbName]; ok && irbCfg != nil {
 					if unit, ok := irbCfg.Units[unitNum]; ok && unit != nil && !unit.Disable {
 						addrs = unit.Addresses
+						// #15944 H4-04: carry the IRB unit's MTU,
+						// per-family primary/preferred, DHCP and
+						// DAD-disable onto the bridge model. The
+						// previous shape emitted only addresses, so
+						// those settings silently never reached
+						// networkd for `br-<bd>`.
+						mtu = unit.MTU
+						if mtu == 0 {
+							mtu = irbCfg.MTU
+						}
+						primaryAddr = unit.PrimaryAddressForFamily(false)
+						primaryAddrV6 = unit.PrimaryAddressForFamily(true)
+						preferredAddr = unit.PreferredAddressForFamily(false)
+						preferredAddrV6 = unit.PreferredAddressForFamily(true)
+						dhcpv4 = unit.DHCP
+						dhcpv6 = unit.DHCPv6
+						dadDisable = unit.DADDisable
 					}
 				}
 			}
 		}
 
 		result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
-			Name:      bridgeName,
-			IsBridge:  true,
-			Addresses: addrs,
+			Name:               bridgeName,
+			IsBridge:           true,
+			Addresses:          addrs,
+			PrimaryAddress:     primaryAddr,
+			PrimaryAddressV6:   primaryAddrV6,
+			PreferredAddress:   preferredAddr,
+			PreferredAddressV6: preferredAddrV6,
+			MTU:                mtu,
+			DHCPv4:             dhcpv4,
+			DHCPv6:             dhcpv6,
+			Disable:            false,
+			DADDisable:         dadDisable,
 		})
 	}
 
