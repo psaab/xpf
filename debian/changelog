@@ -77,6 +77,12 @@ xpf (0.0.0) unstable; urgency=medium
     clear-by-interface can no longer delete a sibling unit's sessions
     and flow-export sampling no longer judges both units by one
     sibling's name (daemon buildIfNames projects the same table).
+  * Fix the #15947 RST teardown for a reverse-only survivor: run
+    under the surviving entry's own key, release the forward NAT
+    reservation and emit the forward Close; drop the duplicate
+    Prebuilt mirror copy.
+
+xpf (0.0.0) unstable; urgency=medium
   * Gate the #15947 LocalDelivery RST-invalidate collection on
     may_revoke: a foreign arrival's RST no longer queues a teardown
     deleting another actor's host-bound session.

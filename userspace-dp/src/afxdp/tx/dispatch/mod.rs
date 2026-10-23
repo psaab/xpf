@@ -1176,9 +1176,11 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             // the enqueue consumes the Vec, but copy the bytes only if
             // the sample is actually selected. The pre-fix code cloned
             // the whole frame unconditionally, so every unsampled or
-            // unmirrored Prebuilt TX paid a full frame copy. The TxRequest
-            // below still takes the Vec; `mirror_frame` is materialised
-            // from `prebuilt` only on the selected branch.
+            // unmirrored Prebuilt TX paid a full frame copy. The staged
+            // snapshot IS the single copy (fold 2): `commit` below reads
+            // it via `frame_snapshot`, so no second Vec is materialised
+            // here. Oversize frames snapshot to None and commit records
+            // NoFrame from the (then empty) fallback, as before.
             let mut staged_mirror = stage_sampled_mirror_clone(
                 forwarding,
                 request.meta.ingress_ifindex as i32,
@@ -1188,13 +1190,9 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 request.meta,
                 request.flow_key.as_ref(),
             );
-            let mirror_frame: Vec<u8> = match staged_mirror.as_mut() {
-                Some(staged) if staged.is_selected() => {
-                    snapshot_staged_mirror_clone(staged, prebuilt);
-                    staged.frame_snapshot().map(<[u8]>::to_vec).unwrap_or_default()
-                }
-                _ => Vec::new(),
-            };
+            if let Some(staged) = staged_mirror.as_mut() {
+                snapshot_staged_mirror_clone(staged, prebuilt);
+            }
             let frame_len = prebuilt.len();
             let req = TxRequest {
                 bytes: core::mem::take(prebuilt),
@@ -1259,6 +1257,12 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                 dbg.tx_max_frame = frame_len as u32;
             }
             if let Some(staged) = staged_mirror {
+                // The staged snapshot carries the only copy; the
+                // fallback slice is consulted by commit only when the
+                // snapshot is absent (unselected — commit returns
+                // early — or oversize, where an empty fallback yields
+                // the same NoFrame outcome, since enqueue is skipped
+                // on length either way).
                 commit_staged_mirror_clone(
                     left,
                     ingress_index,
@@ -1269,7 +1273,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                     forwarding,
                     request.ingress_queue_id,
                     staged,
-                    &mirror_frame,
+                    &[],
                     now_ns,
                 );
             }

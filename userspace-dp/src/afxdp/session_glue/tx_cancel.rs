@@ -56,13 +56,38 @@ now_ns: u64,) {
     // allocation exactly once (self-gated on `is_reverse`), drops the
     // BPF/conntrack/shared rows, replicates the delete, and emits the
     // single forward Close — the same contract the idle reap and the
-    // terminal-filter revocation already honour. The decision/metadata
-    // are read from the live entries so a reverse-direction trigger
-    // still tears down the forward half under its own decision.
-    let hit = sessions
+    // terminal-filter revocation already honour. The hit is resolved to
+    // its CANONICAL entry and that entry's OWN key is handed to the pair
+    // teardown (fold 2): when only the reverse companion survives, the
+    // forward key names no live entry, and passing it would run the
+    // teardown under a dead key — the surviving reverse half would be
+    // looked up as its own "companion" under the wrong key/decision and
+    // neither the NAT release keyed on the forward flow nor the forward
+    // Close would fire correctly. `delete_terminal_filtered_session`
+    // itself canonicalises translated aliases and derives the companion
+    // from the entry's own decision, so the reverse-only case tears
+    // down both halves (whichever exist) exactly once.
+    let canonical = sessions
         .entry_with_origin(forward_key)
-        .or_else(|| sessions.entry_with_origin(&reverse_key));
-    if let Some((decision, metadata, origin)) = hit {
+        .map(|hit| (forward_key.clone(), hit))
+        .or_else(|| {
+            sessions
+                .entry_with_origin(&reverse_key)
+                .map(|hit| (reverse_key.clone(), hit))
+        });
+    if let Some((canonical_key, (decision, metadata, origin))) = canonical {
+        let reverse_only = metadata.is_reverse;
+        // Snapshot the surviving reverse half BEFORE the pair teardown
+        // deletes it: if the forward half is already gone, its aggregated
+        // counters (account_packet folds reverse traffic onto the forward
+        // entry while both live, and onto the reverse entry itself once
+        // the forward half is reaped) would otherwise be lost with no
+        // Close at all — the reverse half's own close is suppressed.
+        let reverse_snapshot = if reverse_only {
+            sessions.close_snapshot_for(&canonical_key)
+        } else {
+            None
+        };
         delete_terminal_filtered_session(
             sessions,
             current.bpf_maps.session_map.handle(),
@@ -80,12 +105,72 @@ now_ns: u64,) {
                 tick: Tick { ns: now_ns, secs: 0 },
             },
             forwarding,
-            forward_key,
+            &canonical_key,
             decision,
             &metadata,
             origin,
             worker_id,
         );
+        if reverse_only {
+            // The pair teardown released nothing for the forward flow:
+            // its per-half release self-gates on is_reverse, and the
+            // forward half it would have released is already deleted.
+            // The allocator record is keyed byte-identically to the
+            // reserve: SourceNatFlowKey built from the FORWARD session
+            // key, translated tuple from the forward decision (the
+            // synced.rs reserve / release.rs twin pair). Reconstruct
+            // both from the surviving reverse entry: the forward key is
+            // reverse_session_key of the reverse entry under its own
+            // decision, and the forward decision is NatDecision::reverse
+            // of that decision over the forward tuple.
+            let fwd_key = reverse_session_key(&canonical_key, decision.nat);
+            let fwd_nat = decision.nat.reverse(
+                fwd_key.src_ip,
+                fwd_key.dst_ip,
+                fwd_key.src_port,
+                fwd_key.dst_port,
+            );
+            // The reservation may have been taken untracked (the
+            // coordinator import path holds no worker bit — see
+            // release.rs's Untracked contract and delete_synced.rs's
+            // untracked-release precedent): the for-worker release
+            // would clear a bit nobody holds and leak the port, so the
+            // untracked twin frees it.
+            crate::nat::release_synced_source_nat_allocation_untracked(
+                &forwarding.iface_nat_allocators,
+                &forwarding.source_nat_rules,
+                &fwd_key,
+                fwd_nat,
+                false,
+                now_ns,
+            );
+            crate::nat64::release_nat64_allocation_for_worker(
+                &forwarding.nat64,
+                &fwd_key,
+                fwd_nat,
+                false,
+                now_ns,
+                worker_id,
+            );
+            let mut fwd_metadata = metadata.clone();
+            fwd_metadata.is_reverse = false;
+            let snapshot = reverse_snapshot.unwrap_or_default();
+            let fwd_session_id = snapshot.session_id;
+            sessions.emit_close_delta_with_snapshot(
+                fwd_key,
+                SessionDecision {
+                    resolution: decision.resolution,
+                    nat: fwd_nat,
+                    install_table_domain: decision.install_table_domain,
+                    install_table_check: decision.install_table_check,
+                },
+                fwd_metadata,
+                origin,
+                false,
+                fwd_session_id,
+                snapshot,
+            );
+        }
     } else {
         // No live entry on either half (already reaped this tick):
         // still drop any stale BPF rows so the steering map cannot
