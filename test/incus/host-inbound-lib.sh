@@ -282,7 +282,8 @@ hi_matrix_stable_verdict() {
 #   a bare `ss :port` check can be satisfied by a loopback-only listener
 #   (unreachable to external probers) or by `:220` when asking for `:22`,
 #   while the prober reaches a different socket. So only rows whose LOCAL
-#   address is wildcard (0.0.0.0/[::], never 127.0.0.1/[::1]) with an exact
+#   address is wildcard (0.0.0.0/[::]/* — modern ss prints `*:22`, never
+#   127.0.0.1/[::1]) with an exact
 #   port match count, and every emitted PID must be an owned marker PID
 #   (the caller checks ownership — this helper deliberately does NOT
 #   filter, so a foreign PID is emitted and rejected, never silently
@@ -290,7 +291,7 @@ hi_matrix_stable_verdict() {
 hi_wildcard_socket_pids() {
 	local port="$1"
 	awk -v p="$port" '
-		$4 ~ /^(0\.0\.0\.0|\[::\]):[0-9]+$/ {
+		$4 ~ /^(\*|0\.0\.0\.0|\[::\]):[0-9]+$/ {
 			addrport = $4; sub(/.*:/, "", addrport)
 			if (addrport == p) {
 				line = $0

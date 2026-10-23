@@ -116,6 +116,14 @@ checkpids SS_MULTI_PID_ROW $'1234\n5678' 23 "$SS_OUT"
 checkpids SS_FOREIGN_PID_EMITTED "9999" 220 "$SS_OUT"
 checkpids SS_EMPTY_SS_EMPTY "" 22 ""
 
+# Modern ss prints wildcard listeners as *:port (#16333): the row must
+# match exactly, and *:220 must not satisfy port 22.
+SS_STAR='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 128 *:22 *:* users:(("python3",pid=4242,fd=3))
+LISTEN 0 128 *:220 *:* users:(("other",pid=9999,fd=5))'
+checkpids SS_STAR_WILDCARD_MATCH "4242" 22 "$SS_STAR"
+checkpids SS_STAR_NEAR_MISS_EMPTY "" 22 "$(grep ':220' <<<"$SS_STAR")"
+
 # --- listener presence gate: per-port verdict (#12912) ------------------------
 # hi_socket_ownership_verdict is the per-port gate start_ssh_probe_listener
 # runs before ANY host-inbound cell is scored. THE FIRST ROW is the #12912
@@ -172,6 +180,13 @@ LISTEN 0 16 [::]:22 [::]:* users:(("python3",pid=1022,fd=3))
 LISTEN 0 16 [::]:23 [::]:* users:(("python3",pid=1023,fd=3))'
 checkg GATE_OWNED_22_PASSES PASS 22 "1022" "$GATE_SS_BOTH"
 checkg GATE_OWNED_23_PASSES PASS 23 "1023" "$GATE_SS_BOTH"
+# Modern ss `*:port` spelling satisfies the gate when owned, and a foreign
+# `*` holder still fails (#16333 — `*` must not become fail-open).
+GATE_SS_STAR='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 128 *:22 *:* users:(("python3",pid=1022,fd=3))
+LISTEN 0 128 *:23 *:* users:(("python3",pid=1023,fd=3))'
+checkg GATE_STAR_OWNED_PASSES PASS 23 "1023" "$GATE_SS_STAR"
+checkg GATE_STAR_FOREIGN_FAILS FAIL 23 "1022" "$GATE_SS_STAR"
 
 # --- THE CORE TABLE: every (expectation x observation x control) combination -
 checkv() {
