@@ -4444,11 +4444,15 @@ unrepresentable rather than merely tested against.
   modifier keywords modelled as CHILDREN — the #3872 static-route `next-hop`
   precedent, whose doc comment uses this exact `interface` modifier as its
   example. `valueList` absorbs a trailing token that is neither a sibling nor a
-  known child (the bracket list) while still DESCENDING when the next token names
   a known child (the modifier). xpf parses and ignores every one of those
-  modifiers — as it did before, where the single-value read dropped them — and
-  they are modelled so the grammar has somewhere to park them other than the
-  value list.
+  modifiers except `exclude` — as it did before, where the single-value read
+  dropped them — and they are modelled so the grammar has somewhere to park
+  them other than the value list. Since #16004, `exclude` is honoured:
+  `dhcpGroupInterfaceValues` omits an interface carrying it (modelled child,
+  braced body, bare-block child, bracket body, or a trailing `exclude` token
+  packed onto the Keys tail by the hierarchical flat spelling), so the
+  excluded interface is never handed to Kea; the schema description no longer
+  calls it parsed-not-implemented. Covered by `TestDHCPExclude16004Honoured`.
 
   `dhcpGroupInterfaceValues` then reads `Keys[1:]` when the statement names an
   interface on its own line (any child is then a modifier BODY), and every key of

@@ -23,6 +23,18 @@ xpf (0.0.0) unstable; urgency=medium
 
 xpf (0.0.0) unstable; urgency=medium
 
+  * DHCP: honour `system services dhcp-local-server` /
+    `dhcpv6-local-server group <g> interface <if> exclude` (#16004).
+    The leaf was parsed but silently ignored, so the excluded
+    interface was still handed to Kea in interfaces-config and
+    served. The compiler now omits an interface carrying `exclude`
+    (flat-set, hierarchical, braced-body, bare-block, and bracket
+    spellings, both families); other per-interface modifiers remain
+    parsed-only and are never promoted to interface names.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Snapshot summary counts verified (#16056, A6-06): the Rust
     apply handler now refuses a snapshot whose summary
     interface_count/zone_count disagree with the built sections,

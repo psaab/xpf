@@ -1152,7 +1152,7 @@ COMPARED	system services dhcp-local-server expired-leases-processing unwarned-cy
 unreachable (leaf changed nothing)	system services dhcp-local-server group <*> interface <*> access-profile
 unreachable (leaf changed nothing)	system services dhcp-local-server group <*> interface <*> client-discover-match
 unreachable (leaf changed nothing)	system services dhcp-local-server group <*> interface <*> dynamic-profile
-unreachable (leaf changed nothing)	system services dhcp-local-server group <*> interface <*> exclude
+flag (read, but value-less)	system services dhcp-local-server group <*> interface <*> exclude
 unreachable (leaf changed nothing)	system services dhcp-local-server group <*> interface <*> overrides
 unreachable (leaf changed nothing)	system services dhcp-local-server group <*> interface <*> service-profile
 unreachable (leaf changed nothing)	system services dhcp-local-server group <*> interface <*> short-cycle-protection-lockout-max-time
@@ -1186,7 +1186,7 @@ COMPARED	system services dhcpv6-local-server expired-leases-processing unwarned-
 unreachable (leaf changed nothing)	system services dhcpv6-local-server group <*> interface <*> access-profile
 unreachable (leaf changed nothing)	system services dhcpv6-local-server group <*> interface <*> client-discover-match
 unreachable (leaf changed nothing)	system services dhcpv6-local-server group <*> interface <*> dynamic-profile
-unreachable (leaf changed nothing)	system services dhcpv6-local-server group <*> interface <*> exclude
+flag (read, but value-less)	system services dhcpv6-local-server group <*> interface <*> exclude
 unreachable (leaf changed nothing)	system services dhcpv6-local-server group <*> interface <*> overrides
 unreachable (leaf changed nothing)	system services dhcpv6-local-server group <*> interface <*> service-profile
 unreachable (leaf changed nothing)	system services dhcpv6-local-server group <*> interface <*> short-cycle-protection-lockout-max-time

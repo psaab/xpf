@@ -543,7 +543,9 @@ func compileDHCPLocalServer(node *Node, dhcp *DHCPServerConfig, isV6 bool) error
 				// be mistaken for an interface name here — which matters,
 				// because these names go straight into Kea's
 				// interfaces-config.interfaces and one Kea cannot bind
-				// takes the whole DHCP server down.
+				// takes the whole DHCP server down. #16004: an `exclude`
+				// child REMOVES its interface(s) from this group instead
+				// of being silently ignored; other modifiers stay inert.
 				group.Interfaces = append(group.Interfaces, dhcpGroupInterfaceValues(prop)...)
 			case "pool":
 				poolName := nodeVal(prop)
@@ -3192,40 +3194,120 @@ func compileBridgeDomains(node *Node, bds *[]*BridgeDomainConfig, lenient bool, 
 // discrimination has to be right here by construction, and the property is
 // stated by a dedicated test.
 //
-// The two shapes are told apart by whether the statement names an
-// interface on its own line:
+// The shapes are told apart by whether the statement names an interface
+// on its own line:
 //
 //	interface ge-0/0/0.0                     Keys=[interface ge-0/0/0.0]
 //	interface [ ge-0/0/0.0 ge-0/0/1.0 ]      Keys=[interface ge-0/0/0.0 ge-0/0/1.0]
 //	interface ge-0/0/0.0 { exclude; }        Keys=[interface ge-0/0/0.0]  Children=[exclude]
 //	interface { ge-0/0/0.0; ge-0/0/1.0; }    Keys=[interface]             Children=[ge-0/0/0.0, ge-0/0/1.0]
+//	interface { ge-0/0/0.0 { exclude; } }    Keys=[interface]             Children=[ge-0/0/0.0->[exclude], ge-0/0/1.0]
 //
 // With a name on the Keys tail, the tail IS the value list and any child is
-// a modifier body — read Keys[1:] and ignore the children, which is what
-// the pre-#6696 single-value read did for the modifier case too (it read
-// Keys[1] and dropped the rest of the tail; the modifier was never a
-// value). With NO name on the tail, the statement opened a bare value
-// block, so the children are values: read every KEY of every child, not
-// just each child's name — reading "the children" is not the same as
-// reading every key of each child (the #7126 lesson).
+// a modifier body. With NO name on the tail, the statement opened a bare
+// value block, so the children are values: read every KEY of every child,
+// not just each child's name (the #7126 lesson).
+//
+// The hierarchical parser does NOT descend into the modelled modifier
+// children, so a compact statement packs its whole modifier chain onto
+// the Keys tail: `interface ge-0/0/0.0 exclude upgrade-server 192.0.2.9;`
+// is Keys=[interface ge-0/0/0.0 exclude upgrade-server 192.0.2.9] with no
+// children. dhcpPackedInterfaces parses that chain properly: interface
+// names are the tokens before the first known modifier keyword, each
+// modifier then consumes its schema arity, and a chain containing
+// `exclude` yields no interfaces at all. Modifier keywords and their
+// arguments are never emitted as interface names — the pre-fold reader
+// did exactly that for any chain where `exclude` was not the last token.
+//
+// #16004: `exclude` is honoured, not merely parked. An interface carrying
+// an `exclude` child (or packed `exclude` in its chain) is omitted, in
+// both the named-tail shape (the whole statement is excluded) and the
+// bare-block shape (only that child is excluded). Other modifiers remain
+// ignored.
 func dhcpGroupInterfaceValues(prop *Node) []string {
-	var vals []string
+	if dhcpNodeHasExclude(prop) {
+		return nil
+	}
 	if len(prop.Keys) >= 2 {
-		for _, v := range prop.Keys[1:] {
-			if v != "" {
-				vals = append(vals, v)
-			}
+		vals, excluded := dhcpPackedInterfaces(prop.Keys[1:], prop.Children)
+		if excluded {
+			return nil
 		}
 		return vals
 	}
+	var vals []string
 	for _, child := range prop.Children {
-		for _, k := range child.Keys {
-			if k != "" {
-				vals = append(vals, k)
-			}
+		if dhcpNodeHasExclude(child) {
+			continue
 		}
+		cv, excluded := dhcpPackedInterfaces(child.Keys, child.Children)
+		if excluded {
+			continue
+		}
+		vals = append(vals, cv...)
 	}
 	return vals
+}
+
+// dhcpInterfaceModifierArity is the number of argument tokens each
+// per-interface modifier consumes in a packed Keys chain. It mirrors the
+// `args` declared on the children of dhcpLocalServerGroupSchema's
+// `interface` node; a modifier absent here is not a known keyword, so a
+// token naming it is treated as an interface name (the valueList contract).
+var dhcpInterfaceModifierArity = map[string]int{
+	"access-profile": 1, "client-discover-match": 1, "dynamic-profile": 1,
+	"exclude": 0, "overrides": 0, "service-profile": 1,
+	"short-cycle-protection-lockout-max-time": 1,
+	"short-cycle-protection-lockout-min-time": 1,
+	"trace": 0, "upgrade-server": 1,
+}
+
+// dhcpPackedInterfaces parses one packed interface statement: a token
+// sequence of interface names followed by a modifier chain. It returns
+// the interface names before the first modifier keyword and whether an
+// `exclude` modifier appears anywhere — as a modelled child, or in the
+// packed chain at any position, with its own arguments skipped by arity
+// so a following modifier is still recognised rather than mistaken for
+// an interface name.
+func dhcpPackedInterfaces(tokens []string, children []*Node) (vals []string, excluded bool) {
+	for _, c := range children {
+		if c.Name() == "exclude" {
+			return nil, true
+		}
+	}
+	inModifiers := false
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		arity, isModifier := dhcpInterfaceModifierArity[tok]
+		if !isModifier {
+			if inModifiers {
+				// An unrecognised token inside a modifier chain is
+				// chain garbage, not an interface name: never promote
+				// it into Kea's interface list.
+				continue
+			}
+			if tok != "" {
+				vals = append(vals, tok)
+			}
+			continue
+		}
+		inModifiers = true
+		if tok == "exclude" {
+			return nil, true
+		}
+		i += arity // skip this modifier's arguments
+	}
+	return vals, false
+}
+
+// dhcpNodeHasExclude reports whether n carries an `exclude` modifier,
+// either as a modelled child or anywhere in its packed Keys chain.
+func dhcpNodeHasExclude(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	_, excluded := dhcpPackedInterfaces(n.Keys, n.Children)
+	return excluded
 }
 
 // dhcpLocalServerSchemaNode returns the live `system services
