@@ -1,10 +1,12 @@
 package daemon
 
 import (
-	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/flowexport"
+	"encoding/binary"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/flowexport"
 )
 
 // #16303 F5 daemon integration: the live-counter poll must feed tracked
@@ -78,9 +80,15 @@ func TestFlowLiveFeedDrivesActiveInactive16303(t *testing.T) {
 	if !exp.Tracked(key) {
 		t.Fatal("flow must stay tracked after active interim")
 	}
+	// Real close at cumulative 280/130: the exported close record must
+	// be only the remainder past the interim (210/95 already emitted),
+	// and the flow is forgotten, so a later collect adds nothing.
 	live.fp, live.fb = 280, 28000
 	d.feedFlowLiveCounters(now.Add(62 * time.Second))
+	// Give the close event its lifetime counters.
 	closeBuf := buildSessionCloseRawEventV4(6, [4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200}, 34567, 443, [4]byte{}, 0, trust, untrust)
+	binary.LittleEndian.PutUint64(closeBuf[56:64], 280)
+	binary.LittleEndian.PutUint64(closeBuf[64:72], 28000)
 	if !d.eventReader.ProcessRawEvent(closeBuf) {
 		t.Fatal("close rejected")
 	}
@@ -90,7 +98,9 @@ func TestFlowLiveFeedDrivesActiveInactive16303(t *testing.T) {
 	if due := exp.CollectDueExports(now.Add(200 * time.Second)); len(due) != 0 {
 		t.Fatalf("post-close collect must be empty (no double count), got %+v", due)
 	}
-	if got := waitFlows(t, exp.Stats); got < 1 {
-		t.Fatal("close of live-fed flow must export")
+	// Both the interim and the close remainder flush: Stats counts
+	// records, and the remainder record proves the close exported once.
+	if got := waitFlows(t, exp.Stats); got < 2 {
+		t.Fatalf("exported records = %d, want >=2 (interim + close remainder)", got)
 	}
 }

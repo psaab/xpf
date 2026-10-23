@@ -52,7 +52,9 @@ xpf (0.0.0) unstable; urgency=medium
     single fanout callback, SESSION_CREATE egress-interface attribution,
     service-based timeout wired at TCP close-window callsites, the v67
     protocol-wire fixture/specimen updated, and a 1s live session-counter
-    poll feeding the flow trackers so active/inactive timers advance.
+    poll feeding the flow trackers so active/inactive timers advance;
+    fold 2: real close exports only the unexported remainder past
+    active interims (baseline-atomic CloseFlow) with no double-count.
 
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per

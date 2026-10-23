@@ -199,14 +199,29 @@ func (f *trackedFlow) deltaRecord(now time.Time) FlowRecord {
 // Close removes a flow on real session close and reports whether it was
 // tracked.
 func (t *FlowTracker) Close(key FlowKey) bool {
+	_, _, _, _, tracked := t.CloseWithBaseline(key)
+	return tracked
+}
+
+// CloseWithBaseline atomically forgets a tracked flow AND returns its
+// last-export counter baselines (#16303 fold 2). The real-close export
+// must subtract these from the close event's lifetime counters: an
+// active interim already emitted [0, baseline], so queueing the full
+// lifetime at close would count that span twice. Returning the
+// baseline with the removal keeps the extraction atomic — no window
+// where a concurrent collect could emit the same span again.
+func (t *FlowTracker) CloseWithBaseline(key FlowKey) (lastPackets, lastBytes, lastRevPackets, lastRevBytes uint64, tracked bool) {
 	if !t.enabled() {
-		return false
+		return 0, 0, 0, 0, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	_, ok := t.flows[key]
+	f, ok := t.flows[key]
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
 	delete(t.flows, key)
-	return ok
+	return f.lastPackets, f.lastBytes, f.lastRevPackets, f.lastRevBytes, true
 }
 
 // Keys returns a snapshot of the currently tracked flow keys, so the

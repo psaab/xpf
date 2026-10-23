@@ -986,9 +986,14 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 			// exports its close without consuming another 1-in-N slot;
 			// an unsampled/absent open exports nothing.
 			sampled := false
+			var basePkts, baseBytes, baseRevPkts, baseRevBytes uint64
 			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 && b.groups[k].exp.CloseFlow(key) {
+				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
+					continue
+				}
+				if s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key); s {
 					sampled = true
+					basePkts, baseBytes, baseRevPkts, baseRevBytes = p, by, rp, rb
 				}
 			}
 			if sampled {
@@ -997,8 +1002,9 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 					if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 						continue
 					}
-					b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
-					b.groups[k].exp.ExportSessionClose(rec, sd)
+					// Entry already forgotten by CloseFlow; Export the
+					// unexported remainder only (fold 2 double-count fix).
+					b.groups[k].exp.ExportSessionCloseRemainder(rec, sd, basePkts, baseBytes, baseRevPkts, baseRevBytes)
 				}
 			}
 		}
@@ -1066,9 +1072,14 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
 		if lead.ServesFamily(sd.IsIPv6) {
 			sampled := false
+			var basePkts, baseBytes, baseRevPkts, baseRevBytes uint64
 			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 && b.groups[k].exp.CloseFlow(key) {
+				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
+					continue
+				}
+				if s, p, by, rp, rb := b.groups[k].exp.CloseFlow(key); s {
 					sampled = true
+					basePkts, baseBytes, baseRevPkts, baseRevBytes = p, by, rp, rb
 				}
 			}
 			if sampled {
@@ -1077,8 +1088,7 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 					if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 						continue
 					}
-					b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
-					b.groups[k].exp.ExportSessionClose(rec, sd)
+					b.groups[k].exp.ExportSessionCloseRemainder(rec, sd, basePkts, baseBytes, baseRevPkts, baseRevBytes)
 				}
 			}
 		}

@@ -170,7 +170,21 @@ func (c *exporterCore) buildFlowRecord(rec logging.EventRecord, evt SessionClose
 // and queue the record. includeReverse selects the IPFIX-only biflow
 // counters (see buildFlowRecord).
 func (c *exporterCore) exportSessionClose(rec logging.EventRecord, evt SessionCloseData, includeReverse bool) {
+	c.exportSessionCloseRemainder(rec, evt, includeReverse, 0, 0, 0, 0)
+}
+
+// exportSessionCloseRemainder queues a real-close record carrying only
+// the counters not already emitted by active interims (#16303 fold 2):
+// the close event's lifetime counters minus the tracker's last-export
+// baselines. Close-only exporters pass zero baselines and keep the
+// full lifetime record. Saturating at zero guards a close whose
+// counters raced backwards (helper restart) from wrapping.
+func (c *exporterCore) exportSessionCloseRemainder(rec logging.EventRecord, evt SessionCloseData, includeReverse bool, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64) {
 	fr, stats := c.buildFlowRecord(rec, evt, includeReverse)
+	fr.Packets = satSub(fr.Packets, basePkts)
+	fr.Bytes = satSub(fr.Bytes, baseBytes)
+	fr.RevPackets = satSub(fr.RevPackets, baseRevPkts)
+	fr.RevBytes = satSub(fr.RevBytes, baseRevBytes)
 	if stats.estimatedDurations > 0 {
 		c.estimatedDurations.Add(stats.estimatedDurations)
 	}
@@ -181,6 +195,13 @@ func (c *exporterCore) exportSessionClose(rec logging.EventRecord, evt SessionCl
 		c.routeMaskUnresolved.Add(stats.routeMaskUnresolved)
 	}
 	c.batch.add(fr)
+}
+
+func satSub(v, base uint64) uint64 {
+	if v <= base {
+		return 0
+	}
+	return v - base
 }
 
 // collectDueExports drains due interim/final tracker records into the
@@ -261,21 +282,25 @@ func (c *exporterCore) CollectorHealth() []CollectorHealth {
 func (c *exporterCore) Close() { c.conns.close() }
 
 // CloseFlow forgets a flow on real session close (#15655) and reports
-// whether it had been selected at open. The boolean is the close-side
-// sampling decision: callers must not consume another 1-in-N slot for a
-// flow whose open already made the instance's one decision.
-func (c *exporterCore) CloseFlow(key FlowKey) bool {
+// whether it had been selected at open, together with the tracker's
+// last-export baselines. The booleans/baselines are the close-side
+// sampling + accounting decision: callers must not consume another
+// 1-in-N slot for a flow whose open already made the instance's one
+// decision, and a tracked close must subtract the baselines from the
+// event's lifetime counters so an already-emitted active interim is
+// not counted again (#16303 fold 2).
+func (c *exporterCore) CloseFlow(key FlowKey) (sampled bool, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64) {
 	tracked := false
 	if c.tracker != nil {
-		tracked = c.tracker.Close(key)
+		basePkts, baseBytes, baseRevPkts, baseRevBytes, tracked = c.tracker.CloseWithBaseline(key)
 	}
 	c.sampledMu.Lock()
-	_, sampled := c.sampledFlows[key]
-	if sampled {
+	_, inSampledSet := c.sampledFlows[key]
+	if inSampledSet {
 		delete(c.sampledFlows, key)
 	}
 	c.sampledMu.Unlock()
-	return tracked || sampled
+	return tracked || inSampledSet, basePkts, baseBytes, baseRevPkts, baseRevBytes
 }
 
 // MarkFlowSampledAtOpen records that the instance's single sampling

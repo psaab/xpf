@@ -67,7 +67,7 @@ func TestLiveFeedActiveInactiveNoDoubleCount16303(t *testing.T) {
 	}
 	// Deltas sum to the session totals (200+70+10, 90+35+5): no
 	// double count across interim + final records.
-	if got := e.CloseFlow(key); got {
+	if got, _, _, _, _ := e.CloseFlow(key); got {
 		t.Fatal("close after inactive expiry must report not-tracked (no duplicate final)")
 	}
 }

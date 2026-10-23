@@ -343,9 +343,9 @@ func TestReconcileIPFIXOnlyDoesNotStartV9(t *testing.T) {
 		t.Fatal("#2129: no v9 exporter may start without a `version9` stanza " +
 			"— an IPFIX-only operator must not get an unrequested v9 stream")
 	}
-	if n := d.eventReader.CallbackCount(); n != 1 {
-		t.Fatalf("#2129: IPFIX-only config must register exactly 1 callback "+
-			"(IPFIX), got %d", n)
+	if n := d.eventReader.CallbackCount(); n != 2 {
+		t.Fatalf("#2129: IPFIX-only config must register exactly 2 callbacks "+
+			"(open fanout + IPFIX), got %d", n)
 	}
 }
 
@@ -385,11 +385,11 @@ func TestReconcileBothVersionsUnboundServerNoDoubleExport(t *testing.T) {
 		t.Fatal("#2136: an UNBOUND collector under both versions must NOT also " +
 			"start the v9 exporter — that is the double-export bug")
 	}
-	// Exactly one callback (IPFIX), not two — the wire-level proof of no
-	// double-export to the single collector socket.
-	if n := d.eventReader.CallbackCount(); n != 1 {
-		t.Fatalf("#2136: both-versions unbound server must register exactly 1 "+
-			"callback (IPFIX), got %d — double-export", n)
+	// Exactly the open fanout + IPFIX close callbacks, not a v9 close
+	// callback — the wire-level proof of no double-export.
+	if n := d.eventReader.CallbackCount(); n != 2 {
+		t.Fatalf("#2136: both-versions unbound server must register exactly 2 "+
+			"callbacks (open fanout + IPFIX), got %d — double-export", n)
 	}
 }
 

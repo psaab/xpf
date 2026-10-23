@@ -629,6 +629,12 @@ func (e *Exporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseD
 	e.exportSessionClose(rec, evt, false)
 }
 
+// ExportSessionCloseRemainder queues the close's unexported remainder
+// (lifetime minus active-interim baselines; #16303 fold 2).
+func (e *Exporter) ExportSessionCloseRemainder(rec logging.EventRecord, evt SessionCloseData, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64) {
+	e.exportSessionCloseRemainder(rec, evt, false, basePkts, baseBytes, baseRevPkts, baseRevBytes)
+}
+
 func (e *Exporter) sendTemplates() {
 	e.mu.Lock()
 	seq := e.seq
