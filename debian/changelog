@@ -1,4 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Populate the wire specimens the #16132 completeness gate was red
+    on: control_response_populated now carries the #16133 error_code
+    and error_retry_class fields, the time-wait FlowSnapshot specimen
+    is mapped in the Go gate, and xdp_branch_counters is classified
+    with the other manager-stamped ProcessStatus keys. The Go gate is
+    green again; no manifest or codegen is added. Test-only.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Parameterize wire/connectivity harnesses from the cluster env
     (#16305, #16306, #16307): cluster-env.sh derives LAN/DMZ/WAN
     prefixes, DMZ and mouse-target addresses, PF/VLAN, per-VLAN

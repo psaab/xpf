@@ -3130,6 +3130,8 @@ fn wire_invariant_default_specimens() {
         dump(&ControlResponse {
             ok: true,
             error: "16132-error".into(),
+            error_code: "16132-error-code".into(),
+            error_retry_class: "retry_debt".into(),
             session_counters: vec![SessionCounterRowWire {
                 worker_id: 1,
                 answered: true,
