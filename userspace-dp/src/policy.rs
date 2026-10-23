@@ -1840,6 +1840,18 @@ pub(crate) struct PolicyState {
     /// Zone-pair index: maps `(from_id, to_id)` packed u32 →
     /// indices into `rules`. Avoids scanning unrelated zone-pairs.
     zone_pair_index: FxHashMap<ZonePairKey, Vec<usize>>,
+    /// #16021 fold: exact-pair DENY/REJECT indices keyed by the concrete
+    /// from-zone id, in config order. A NoRoute flow has no egress zone, so
+    /// the exact pair cannot be looked up — but an explicit deny/reject
+    /// written `from-zone <ingress> to-zone <z>` for the known ingress is
+    /// still adjudicated on the packet's L3/L4 identity (the destination
+    /// that would egress `<z>` is exactly the kernel-routable one being
+    /// delegated). Permits are NOT indexed: an exact-pair permit names an
+    /// egress the flow does not have and must not rescue a NoRoute flow.
+    /// Host-scoped pairs (`to-zone junos-host`) are excluded — that is
+    /// self traffic, not transit. Built once per snapshot; the resolved
+    /// path never consults it.
+    exact_pair_deny_by_from: FxHashMap<u16, Vec<usize>>,
     /// #3090: wildcard `from-zone any` index — key = the concrete to-zone id,
     /// value = indices (config order) of rules whose from-zone is the Junos
     /// wildcard `any` and whose to-zone is that concrete zone. Such a rule
@@ -1947,6 +1959,7 @@ impl Default for PolicyState {
             default_action: PolicyAction::Deny,
             rules: Vec::new(),
             zone_pair_index: FxHashMap::default(),
+            exact_pair_deny_by_from: FxHashMap::default(),
             from_any_index: FxHashMap::default(),
             to_any_index: FxHashMap::default(),
             both_any_indices: Vec::new(),
@@ -2671,6 +2684,7 @@ pub(crate) fn parse_policy_state_with_counters(
         default_action,
         rules: Vec::with_capacity(rules.len()),
         zone_pair_index: FxHashMap::default(),
+        exact_pair_deny_by_from: FxHashMap::default(),
         from_any_index: FxHashMap::default(),
         to_any_index: FxHashMap::default(),
         both_any_indices: Vec::new(),
@@ -3162,6 +3176,22 @@ pub(crate) fn parse_policy_state_with_counters(
                         (Some(from_id), Some(to_id)) => {
                             let key = zone_pair_key(from_id, to_id);
                             state.zone_pair_index.entry(key).or_default().push(idx);
+                            // #16021 fold: also index transit DENY/REJECT
+                            // pairs by from-zone for the NoRoute deny-only
+                            // adjudication. Host-scoped pairs are self
+                            // traffic, never NoRoute transit.
+                            if to_id != JUNOS_HOST_ZONE_ID
+                                && matches!(
+                                    state.rules[idx].action,
+                                    PolicyAction::Deny | PolicyAction::Reject
+                                )
+                            {
+                                state
+                                    .exact_pair_deny_by_from
+                                    .entry(from_id)
+                                    .or_default()
+                                    .push(idx);
+                            }
                         }
                         // #3402: either side unresolvable → fail closed. Report
                         // the from-zone first (matches the Go strict gate order
@@ -3790,12 +3820,14 @@ pub(crate) fn evaluate_policy_result_l3_aware_at(
 
 /// Evaluate a flow whose route lookup found no egress interface.
 ///
-/// #16021: a NoRoute flow still adjudicates the egress-unconstrained tiers
-/// (`to-zone any`, both-any, and `junos-global` with an `Any` to-zone scope
-/// whose from-zone scope matches) on its ingress + L3/L4 identity; only an
-/// unmatched NoRoute flow reaches the default-policy decision, so
-/// default-permit can delegate the packet to the kernel. A resolved egress
-/// in zone 0 is denied by `evaluate_policy_result_l3_aware` instead.
+/// #16021: a NoRoute flow still adjudicates the known ingress's
+/// exact-pair DENY/REJECT rules deny-only plus the egress-unconstrained
+/// tiers (`to-zone any`, both-any, and `junos-global` with an `Any`
+/// to-zone scope whose from-zone scope matches) on its ingress + L3/L4
+/// identity; only an unmatched NoRoute flow reaches the default-policy
+/// decision, so default-permit can delegate the packet to the kernel. A
+/// resolved egress in zone 0 is denied by
+/// `evaluate_policy_result_l3_aware` instead.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
     state: &PolicyState,
@@ -3936,30 +3968,36 @@ fn evaluate_policy_result_counted(
     // unzoned egress.
     //
     // #16021 (ZP-07): a NoRoute flow (`egress_resolved == false`, hence
-    // `to_id == 0`) has no egress zone, but it is NOT policy-free. Rules that
-    // do not constrain the egress side can still be adjudicated on the
-    // ingress + L3/L4 identity the packet does carry:
+    // `to_id == 0`) has no egress zone, but it is NOT policy-free. It is
+    // adjudicated on the ingress + L3/L4 identity the packet does carry:
+    //   * deny-only, most specific first: every exact-pair DENY/REJECT
+    //     `from-zone <from> to-zone <z>` for the known ingress (deny-only
+    //     because the fold acceptance is asymmetric — a deny written for
+    //     the destination that would egress `<z>` covers exactly the
+    //     kernel-routable destination being delegated, while an
+    //     exact-pair PERMIT names an egress the flow does not have and
+    //     must not rescue it; cf. #7480),
     //   * `from-zone <from> to-zone any` (to_any, keyed by from_id),
     //   * `from-zone any to-zone any` (both_any),
     //   * `junos-global` rules whose to-zone scope is `Any` and whose
     //     from-zone scope matches `from_id`.
-    // Rules that DO constrain the egress — the exact pair, `from-zone any
-    // to-zone <z>`, and global rules with a concrete to-zone scope — stay
-    // ineligible: they were never evaluated against the real egress zone.
-    // The eligible tiers keep their normal relative precedence
-    // (single-wildcard before both-any before global) and first-match
-    // order, so an explicit egress-unconstrained DENY/REJECT now beats the
-    // implicit default. Previously the whole walk was skipped for
-    // `to_id == 0`, so under `default-policy permit-all` a NoRoute packet
-    // was delegated to the kernel FIB and an explicit trust->untrust deny
-    // was bypassed during a flap / FIB-not-loaded / capped-import window.
-    // An eligible explicit PERMIT likewise decides the flow (kernel
-    // delegation stands); with no eligible match the default still decides.
-    // The from-any/exact-pair tiers remain skipped for `to_id == 0`; a
-    // resolved unzoned egress (`egress_resolved && to_id == 0`) still
-    // denies below, and a zone-0 ingress still denies below (the eligible
-    // lookups are keyed by / scoped to `from_id`, so they cannot fire for
-    // `from_id == 0`).
+    // The remaining egress-constrained shapes stay ineligible: exact-pair
+    // permits, `from-zone any to-zone <z>` (keyed by the unknown egress),
+    // and global rules with a concrete to-zone scope. The tiers keep
+    // their normal relative precedence (exact before single-wildcard
+    // before both-any before global); within the exact tier only DENY/
+    // REJECT matches decide the flow — a matched PERMIT there is skipped
+    // (not counted: it did not adjudicate this flow's egress) and the
+    // walk continues, so a later egress-unconstrained rule or the default
+    // still decides, exactly as if the permit were absent. Previously the
+    // whole walk was skipped for `to_id == 0`, so under `default-policy
+    // permit-all` a NoRoute packet was delegated to the kernel FIB and an
+    // explicit `trust->untrust deny` was bypassed during a flap /
+    // FIB-not-loaded / capped-import window. With no match the default
+    // still decides. A resolved unzoned egress (`egress_resolved &&
+    // to_id == 0`) still denies below, and a zone-0 ingress still denies
+    // below (the eligible lookups are keyed by / scoped to `from_id`, so
+    // they cannot fire for `from_id == 0`).
     //
     // #4569: fragment-association fail-closed. On the FLOWLESS path
     // (l4_present == false) a non-first fragment's post-IP bytes are payload,
@@ -4008,6 +4046,50 @@ fn evaluate_policy_result_counted(
                         RuleMatchOutcome::Matched(mut result) => {
                             // #3073: 1-based handle so the fast path can re-count
                             // every packet of this flow against the same counter.
+                            result.policy_counter_idx = (idx as u32).saturating_add(1);
+                            return apply_frag_deny_override_and_count(
+                                result,
+                                skipped_frag_deny,
+                                &state.rules[idx],
+                                packet_len,
+                                hit_count,
+                            );
+                        }
+                        RuleMatchOutcome::Miss(reason) => {
+                            note_skipped_frag_deny(
+                                &mut skipped_frag_deny,
+                                &state.rules[idx],
+                                idx,
+                                reason,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if unresolved_egress {
+            // #16021 fold: deny-only exact-pair tier. Every configured
+            // pair out of the known ingress is a candidate egress the
+            // kernel may route to; a DENY/REJECT whose L3/L4 matches
+            // adjudicates the flow. Permits are absent from this index —
+            // they neither decide nor count (their egress was never
+            // adjudicated), and the walk continues past them.
+            if let Some(indices) = state.exact_pair_deny_by_from.get(&from_id) {
+                for &idx in indices {
+                    match try_match_rule(
+                        &state.rules[idx],
+                        state,
+                        src_ip,
+                        dst_ip,
+                        protocol,
+                        src_port,
+                        dst_port,
+                        packet_icmp,
+                        l4_present,
+                        scheduler_expired,
+                        !l4_present && skipped_frag_deny.is_none(),
+                    ) {
+                        RuleMatchOutcome::Matched(mut result) => {
                             result.policy_counter_idx = (idx as u32).saturating_add(1);
                             return apply_frag_deny_override_and_count(
                                 result,
@@ -4152,7 +4234,9 @@ fn evaluate_policy_result_counted(
             //
             // #16021: on a NoRoute flow a concrete to-zone scope names an
             // egress the flow does not have, so only `Any`-scoped globals
-            // are eligible; the from-zone scope still applies as usual.
+            // are eligible here; the exact-pair deny-only tier above has
+            // already adjudicated scoped denies for the known ingress.
+            // The from-zone scope still applies as usual.
             let to_ok = if unresolved_egress {
                 matches!(rule.global_to_zone, GlobalZoneScope::Any)
             } else {
