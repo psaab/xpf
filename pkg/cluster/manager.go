@@ -482,6 +482,24 @@ type Manager struct {
 	// (new/rotated key) re-anchors; the identical set does not.
 	controlAuthKeySetDigest string
 
+	// peerEpochReconcileMu serializes the full #16022 reconcile cycle
+	// (mark/load/install) across UpdateConfig, StartHeartbeat and tests.
+	// It is never held across heartbeat admission filesystem I/O; the
+	// durable write path has its own worker lock below.
+	peerEpochReconcileMu sync.Mutex
+	// peerEpochWorkMu guards the asynchronous persistence worker. Workers
+	// are coalesced: at most one runs, requests collapse to a boolean, and
+	// flushNow requests a final snapshot without joining the worker.
+	// peerEpochLastFlush/OK record the latest worker attempt and outcome
+	// for cadence/retry decisions. Guarded by peerEpochWorkMu.
+	peerEpochWorkMu           sync.Mutex
+	peerEpochWorkerRunning    bool
+	peerEpochWorkerDone       chan struct{}
+	peerEpochPersistRequested bool
+	peerEpochFlushNow         bool
+	peerEpochLastFlush        time.Time
+	peerEpochLastFlushOK      bool
+
 	// peerControlKeyID is the #6630 id of the accepted key that last verified
 	// a peer control frame — the running-system evidence that makes
 	// finalizing a rotation safe. An ID, never a key; see controlLinkKeyID.
@@ -831,12 +849,14 @@ func NewManager(nodeID, clusterID int) *Manager {
 // pre-#6169 build — which is operator-actionable. Rate-limited to once per 30s
 // so a 5-10/s heartbeat stream cannot flood the log.
 //
-// THE RECOVERY THIS NAMES IS THE COMPLETE ONE, in order. Restarting xpfd clears
-// the process-scoped latch, but an attacker holding one archived epoch-bearing
-// frame re-arms it against the empty post-restart state — see the arming site
-// in admitAuthed. Rotating the control-link PSK first makes every
-// archived frame fail MAC verification, so it can never reach the latch. An
-// operator told only "restart" would loop.
+// THE RECOVERY THIS NAMES IS THE COMPLETE ONE. Since #16022 the latch is
+// durable and key-set-scoped, so a bare restart no longer clears it — and
+// an attacker holding one archived epoch-bearing frame re-arms it against
+// any empty state anyway (see the arming site in admitAuthed). Rotating
+// the control-link PSK on both nodes retires every capture taken under
+// the old key (they fail MAC verification) AND, because the durable
+// record is scoped to the accepted key set, clears the latch on the next
+// config apply. An operator told only "restart" would loop.
 func (m *Manager) NoteEpochDowngradeHeartbeat() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -847,8 +867,8 @@ func (m *Manager) NoteEpochDowngradeHeartbeat() {
 	slog.Warn("cluster: heartbeat refused — peer stopped signing a boot epoch it previously signed. " +
 		"This is a replayed pre-upgrade capture, or the peer was rolled back to a build older than #6169. " +
 		"If the rollback was intentional: rotate the control-link PSK on BOTH nodes FIRST, then restart " +
-		"xpfd on THIS node to clear the latch. Restarting alone is not enough — a replayed archived " +
-		"epoch frame re-arms the latch, and only rotating the PSK retires that capture")
+		"xpfd on THIS node. Restarting alone no longer clears it (the latch is durable since #16022) — " +
+		"and a replayed archived epoch frame re-arms it in any case; only rotating the PSK retires that capture")
 }
 
 // NodeID returns the local node ID.
@@ -932,6 +952,13 @@ func (m *Manager) controlLinkAuthKey() []byte {
 func (m *Manager) controlLinkAcceptedKeys() [][]byte {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.controlLinkAcceptedKeysLocked()
+}
+
+// controlLinkAcceptedKeysLocked is controlLinkAcceptedKeys for callers
+// already holding m.mu (read or write). StartHeartbeat uses it to make
+// its key snapshot explicit before the #16022 reconcile generation guard.
+func (m *Manager) controlLinkAcceptedKeysLocked() [][]byte {
 	if len(m.controlAuthKey) == 0 && len(m.controlAuthKeyAlt) == 0 {
 		return nil
 	}
@@ -1131,6 +1158,11 @@ func (m *Manager) Stop() {
 	if receiver != nil {
 		receiver.stop()
 	}
+	// #16022: queue a final durable latch/floor snapshot on terminal
+	// teardown, but do not join or perform persistence. Shutdown must not
+	// inherit flock/fsync latency; a crash or SIGKILL before the worker
+	// lands it can restore the previous generation on next boot.
+	m.flushPeerEpochState(true)
 	if !m.joinBootEpochRefine(bootEpochStopJoinBudget) {
 		slog.Warn("cluster: HA boot-epoch refinement still in flight after teardown; "+
 			"proceeding without it (its store is probably wedged — the shutdown path "+

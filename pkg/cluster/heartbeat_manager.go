@@ -152,6 +152,22 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	// until publication below, and the superseded branch closes the sockets.
 	duplicateWatcher := prepareDuplicateIdentityWatcher(m, controlIface, localAddr, vrfDevice, interval)
 
+	// #16022: restore the durable latch/floor BEFORE the receiver can admit
+	// a frame. Read the accepted keys and reconcile while holding m.mu's
+	// read side through the reconcile call's own hbAuth generation check:
+	// if UpdateConfig changes the key set after this snapshot but before
+	// reconcile acquires serialization, the entry generation guard drops
+	// this stale digest instead of installing it.
+	m.mu.RLock()
+	keys := m.controlLinkAcceptedKeysLocked()
+	m.mu.RUnlock()
+	if len(keys) > 0 {
+		additional := []byte(nil)
+		if len(keys) > 1 {
+			additional = keys[1]
+		}
+		m.reconcilePeerEpochState(controlAuthKeySetDigest(keys[0], additional))
+	}
 	m.mu.Lock()
 	// #7257: refuse a start that a teardown superseded. StopHeartbeat bumps
 	// hbEpoch under this same lock, so comparing the entry epoch HERE — in the
@@ -266,6 +282,11 @@ func (m *Manager) StopHeartbeat() {
 	m.hbRestartOwedHold = time.Time{}
 	m.mu.Unlock()
 	m.stopHeartbeat()
+	// #16022: queue a final durable latch/floor snapshot, but never join
+	// the filesystem worker here. A wedged flock/fsync may outlive this
+	// deliberate heartbeat teardown; the next daemon boot may therefore
+	// restore an earlier generation (bounded async persistence risk).
+	m.flushPeerEpochState(true)
 }
 
 // stopHeartbeat is the teardown itself, shared by StopHeartbeat and by the
@@ -1200,9 +1221,12 @@ func (m *Manager) HeartbeatStats() HeartbeatStats {
 //     by `epoch > s.highEpoch`, and the `epoch < s.highEpoch` case is a refusal
 //     arm that writes nothing. A classifier can never see the floor go
 //     backwards.
-//   - The latch is one-way: `epochSeen = true` is the only production
-//     assignment, nothing sets it false, and hbAuth is an embedded value on
-//     Manager that survives heartbeat restart, VRF rebind and UpdateConfig.
+//   - The latch arms one-way in memory (`epochSeen = true` is the only
+//     assignment admitAuthed makes) and is restored at boot from the
+//     key-set-scoped durable record; UpdateConfig clears it only when the
+//     accepted key set itself is cleared or replaced (#16022). hbAuth is an
+//     embedded value on Manager that survives heartbeat restart, VRF rebind
+//     and UpdateConfig under an unchanged key set.
 //
 // NOT promoted: `peerEpochLatched`'s own doc warns it is "A FACT ABOUT THIS
 // STATE, NOT ABOUT CURRENT ENFORCEMENT" — it does not mean epochless frames are

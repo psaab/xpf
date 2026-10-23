@@ -1,5 +1,26 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Cluster: heartbeat anti-replay latch now survives a daemon restart
+    (#16022). The peer epoch-capable latch, boot-epoch floor and its
+    bound sessions are persisted in a generation-ordered, key-set-scoped
+    record alongside ha-boot-epoch. Admission queues one coalescing
+    asynchronous persistence worker; heartbeat and shutdown paths never
+    perform or join filesystem I/O, and guarded writes skip if a newer
+    generation is already on disk. Pre-#16022 a receiver restart cleared
+    the latch/floor, and 65 captured sender
+    incarnations replayed while the peer was down churned the 64-entry
+    ring indefinitely (1625/1625 epochless admitted); the restored latch
+    refuses the epochless set and the restored floor+bindings bound the
+    epoch-bearing one to one finite ascending pass. The record is scoped
+    to the accepted-key-set digest, so rotating the control-link PSK
+    clears it on the next apply — the rollback recovery is now the
+    rotation alone, with no state file to hand-edit; a failed or wedged
+    write fails open to the previous process-scoped behaviour. Rollback
+    recovery text, NoteEpochDowngradeHeartbeat and README residuals
+    updated accordingly.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Sessions: pressure shedding is protocol-symmetric and keyed on
     never-replied state (#16019). Rotating spoofed-source UDP/ICMP
     singles previously filled the session table while only a TCP
