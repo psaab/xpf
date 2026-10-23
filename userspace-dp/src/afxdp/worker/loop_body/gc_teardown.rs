@@ -380,7 +380,7 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
             shared_owner_rg_indexes,
             &shed.key,
             |current| {
-                crate::afxdp::poll_descriptor::is_pressure_shed_shared_opening(current, &shed)
+                crate::afxdp::poll_descriptor::is_pressure_shed_shared_unreplied(current, &shed)
             },
         );
         if matches!(

@@ -441,7 +441,7 @@ fn dropped_deferring_probe_rolls_back_completion_and_charge_15947() {
     let before = table.session_counters(&forward).expect("forward counters");
     let before_fwd = snapshot(&table, &forward);
     let before_rev = snapshot(&table, &reverse);
-    let shed_before = table.pressure_shed_openings.contains_key(&forward);
+    let shed_before = table.pressure_shed_unreplied.contains_key(&forward);
     assert!(shed_before, "premise: pending pair is pressure-sheddable");
     assert!(table.probe_hit_deferring_state_update(
         &forward,
@@ -496,7 +496,7 @@ fn dropped_deferring_probe_rolls_back_completion_and_charge_15947() {
         "fold3: reverse half must regain its pre-completion (opening) duration"
     );
     assert_eq!(
-        table.pressure_shed_openings.contains_key(&forward),
+        table.pressure_shed_unreplied.contains_key(&forward),
         shed_before,
         "R2: rolled-back opening must regain pressure-shed membership"
     );

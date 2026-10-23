@@ -883,7 +883,7 @@ pub(super) fn dns_illegal_reply_drop(
         && dns_reply_qr_set(packet_frame, meta)
 }
 
-pub(super) fn is_pressure_shed_shared_opening(
+pub(super) fn is_pressure_shed_shared_unreplied(
     current: &SyncedSessionEntry,
     shed: &crate::session::PressureShedSession,
 ) -> bool {
@@ -893,6 +893,12 @@ pub(super) fn is_pressure_shed_shared_opening(
     // The install-stamped identity subset fences the incarnation; the
     // comparison runs inside the shared-removal lock, so the entry judged
     // is the entry removed.
+    // #16019: the shared entry carries no reply counters, so the state
+    // arm is protocol-shaped: TCP fences on handshake state 1..=3
+    // (Opening/HandshakePending/SynAckFirstPending, never Established);
+    // non-TCP carries handshake state 0 by construction
+    // (`tcp_handshake_state_wire`) and the session_id/decision/metadata
+    // fence above is the incarnation guard.
     current.session_id == shed.session_id
         && current.decision == shed.decision
         && current.metadata.is_reverse == shed.is_reverse
@@ -904,7 +910,8 @@ pub(super) fn is_pressure_shed_shared_opening(
         && current.metadata.ingress_vlan_id == shed.ingress_vlan_id
         && current.metadata.owner_rg_id == shed.owner_rg_id
         && current.metadata.policy_id == shed.policy_id
-        && matches!(current.tcp_handshake_state, 1..=3)
+        && (current.key.protocol != crate::ip_proto::PROTO_TCP
+            || matches!(current.tcp_handshake_state, 1..=3))
 }
 
 #[inline]
@@ -6869,7 +6876,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // passing preflight makes both installs below
                                     // infallible within this descriptor iteration.
                                     // Once validated policy admits a TCP initial
-                                    // SYN, #10890 sheds local handshake-incomplete
+                                    // SYN, #10890/#16019 sheds local unreplied
                                     // TCP sessions first at 90% capacity; no
                                     // established session is evicted. Any
                                     // remaining refusal follows the normal
@@ -6903,7 +6910,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if needed_sessions == 0 || reuse_fits {
                                             (true, crate::session::PressureShedSessions::new())
                                         } else {
-                                            sessions.can_admit_new_syn(
+                                            sessions.can_admit_new_flow(
                                                 needed_sessions,
                                                 meta.protocol,
                                                 meta.tcp_flags,
@@ -6940,7 +6947,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     worker_ctx.shared_owner_rg_indexes,
                                                     &shed.key,
                                                     |current| {
-                                                        is_pressure_shed_shared_opening(
+                                                        is_pressure_shed_shared_unreplied(
                                                             current, &shed,
                                                         )
                                                     },
@@ -12278,7 +12285,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if reuse_fits {
                                             (true, crate::session::PressureShedSessions::new())
                                         } else {
-                                            sessions.can_admit_new_syn(
+                                            sessions.can_admit_new_flow(
                                                 1,
                                                 meta.protocol,
                                                 meta.tcp_flags,
@@ -12303,7 +12310,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     &worker_ctx.shared_owner_rg_indexes,
                                                     &shed.key,
                                                     |current| {
-                                                        is_pressure_shed_shared_opening(
+                                                        is_pressure_shed_shared_unreplied(
                                                             current, &shed,
                                                         )
                                                     },

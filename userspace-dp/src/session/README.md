@@ -1191,12 +1191,15 @@ packet on a rolled-back SNAT decision, and a refused reverse left a
 one-sided forward session.
 
 The transaction boundary is a preflight. The packet path calls
-`can_admit_new_syn(needed, protocol, tcp_flags)`, which keeps
+`can_admit_new_flow(needed, protocol, tcp_flags)`, which keeps
 `can_admit(needed)` as the hard-cap check and, at the fixed 90%-of-cap
-watermark, may shed local handshake-incomplete TCP sessions before
-rechecking capacity for an initial SYN. Established and peer-owned sessions
-are never pressure victims. This rule is independent of the configured flow
-aging values, which remain unwired.
+watermark, may shed local unreplied sessions (any protocol) before
+rechecking capacity for a qualifying new flow (TCP: initial SYN only).
+Established/replied and peer-owned sessions are never pressure victims
+(#16019: the victim budget is keyed on never-replied state, not on the
+claimed source, so rotating spoofed sources cannot mint fresh quota).
+This rule is independent of the configured flow aging values, which
+remain unwired.
 
 Because the table is single-writer (`&mut`, worker thread; GC and worker
 commands run between poll phases, never mid-descriptor), a passing preflight

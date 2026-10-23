@@ -594,7 +594,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         policy_id: established_replacement.metadata.policy_id,
     };
     assert!(
-        !super::poll_descriptor::is_pressure_shed_shared_opening(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(
             &established_replacement,
             &replacement_shed,
         ),
@@ -620,18 +620,49 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         session_id: opening_replacement.session_id.wrapping_add(1),
     };
     assert!(
-        !super::poll_descriptor::is_pressure_shed_shared_opening(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(
             &opening_replacement,
             &victim_shed,
         ),
         "a same-tuple OPENING replacement with a different session_id must survive the shed"
     );
     assert!(
-        super::poll_descriptor::is_pressure_shed_shared_opening(
+        super::poll_descriptor::is_pressure_shed_shared_unreplied(
             &opening_replacement,
             &replacement_shed,
         ),
         "the victim incarnation itself (same session_id) must still match"
+    );
+    // #16019: a non-TCP shared row carries handshake state 0 by
+    // construction and must still match its own shed victim (the
+    // session_id/decision/metadata fence is the incarnation guard);
+    // a different session_id must not match.
+    let mut udp_shared = opening_replacement.clone();
+    udp_shared.key.protocol = crate::ip_proto::PROTO_UDP;
+    udp_shared.tcp_handshake_state = 0;
+    let udp_shed = crate::session::PressureShedSession {
+        key: udp_shared.key.clone(),
+        session_id: udp_shared.session_id,
+        decision: udp_shared.decision,
+        is_reverse: udp_shared.metadata.is_reverse,
+        ingress_zone: udp_shared.metadata.ingress_zone,
+        egress_zone: udp_shared.metadata.egress_zone,
+        ingress_zone_check: udp_shared.metadata.ingress_zone_check,
+        egress_zone_check: udp_shared.metadata.egress_zone_check,
+        ingress_ifindex: udp_shared.metadata.ingress_ifindex,
+        ingress_vlan_id: udp_shared.metadata.ingress_vlan_id,
+        owner_rg_id: udp_shared.metadata.owner_rg_id,
+        policy_id: udp_shared.metadata.policy_id,
+    };
+    assert!(
+        super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_shared, &udp_shed),
+        "#16019: a non-TCP victim incarnation must match its shed"
+    );
+    let mut udp_other = udp_shed.clone();
+    udp_other.session_id = udp_shared.session_id.wrapping_add(1);
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_shared, &udp_other),
+        "#16019: a non-TCP replacement incarnation must survive the shed"
     );
     if opening_a_removed {
         assert!(sessions.probe_with_origin(&opening_a_reverse).is_none());

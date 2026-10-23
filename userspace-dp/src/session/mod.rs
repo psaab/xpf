@@ -1479,6 +1479,17 @@ pub(crate) struct SessionCounters {
 }
 
 impl SessionCounters {
+    /// #16019: true once any reverse-direction packet was accounted.
+    /// Reverse packets fold onto the forward entry (`account_packet`),
+    /// so this is the exact never-replied signal for non-TCP flows,
+    /// independent of how `established` was seeded at install.
+    #[inline]
+    pub(crate) fn replied(&self) -> bool {
+        self.rev_packets > 0
+    }
+}
+
+impl SessionCounters {
     /// Account a single forwarded packet of `len` bytes in the given
     /// direction. `saturating_add` so a (practically impossible) overflow
     /// pins at `u64::MAX` rather than wrapping a volume counter to a tiny
@@ -1784,10 +1795,10 @@ pub(crate) struct SessionTable {
     key_to_handle: SeededKeyMap<u32>,
     /// Bare five-tuple → lowest live slab handle for delayed-Close identity.
     bare_tuple_index: SeededBareTupleIndex,
-    /// Forward keys for local TCP sessions whose handshake is incomplete.
+    /// Forward keys for local sessions that have not been replied to (TCP handshake incomplete, or no reverse packet for other protocols).
     /// Seeded and maintained with insert, promotion, and removal so pressure
     /// arbitration does not scan the session table.
-    pressure_shed_openings: SeededKeyMap<()>,
+    pressure_shed_unreplied: SeededKeyMap<()>,
     /// #13643: locally removed sessions awaiting tuple-gated teardown after
     /// contention. Replayed at the next admission point to avoid orphaning
     /// allocator holds and kernel/shared rows indefinitely.
@@ -2184,7 +2195,7 @@ impl SessionTable {
             // predictable collision chains. `state` is cloned across maps.
             key_to_handle: HashMap::with_hasher(state.clone()),
             bare_tuple_index: HashMap::with_hasher(state.clone()),
-            pressure_shed_openings: HashMap::with_hasher(state.clone()),
+            pressure_shed_unreplied: HashMap::with_hasher(state.clone()),
             deferred_pressure_shed: PressureShedSessions::new(),
             deferred_conntrack_deletes: DeferredConntrackDeletes::new(),
             nat_reverse_index: HashMap::with_hasher(state.clone()),
@@ -3342,22 +3353,31 @@ impl SessionTable {
     // `self.key_to_handle.get(key).and_then(|h| self.entries.get(*h as usize))`
     // throughout 30+ call sites.
 
-    /// #10890: identifies locally-owned, handshake-incomplete TCP forward
-    /// entries eligible for pressure shedding. Peer imports, transient
-    /// seeds, fabric-ingress rows and reverse companions are not candidates.
+    /// #10890/#16019: identifies locally-owned, never-replied entries
+    /// eligible for pressure shedding. TCP: handshake incomplete.
+    /// Non-TCP: no reverse packet yet (see `SessionCounters::replied`
+    /// — the exact signal, immune to the no-app-timeout seeding
+    /// divergence). Closing entries are never
+    /// victims (they reap on their short close window). Peer imports,
+    /// transient seeds, fabric-ingress rows and reverse companions are
+    /// not candidates.
     #[inline]
-    fn is_pressure_shed_opening(
+    fn is_pressure_shed_unreplied(
         key: &SessionKey,
         entry: &SessionEntry,
         expect_reverse: bool,
     ) -> bool {
-        key.protocol == PROTO_TCP
+        !entry.closing
             && entry.metadata.is_reverse == expect_reverse
             && !entry.metadata.fabric_ingress
-            && (!entry.established || entry.handshake_pending)
             && !entry.origin.is_peer_synced()
             && !entry.origin.is_transient_local_seed()
             && !entry.origin.is_local_tun_origin()
+            && if key.protocol == PROTO_TCP {
+                !entry.established || entry.handshake_pending
+            } else {
+                !entry.counters.replied()
+            }
     }
 
     /// #6297: insert a record into the session slab and advance the
@@ -3371,18 +3391,18 @@ impl SessionTable {
     /// `slot_high_watermark >= 1 + every occupied slot index`, which the
     /// budgeted refresh walk relies on to never skip a live session.
     ///
-    /// #10890: register eligible forward opening records here so every
+    /// #10890: register eligible forward unreplied records here so every
     /// insert path maintains the pressure-shed candidate index.
     #[inline]
     fn insert_record(&mut self, record: SessionRecord) -> usize {
         let opening_key =
-            Self::is_pressure_shed_opening(&record.key, &record.entry, false)
+            Self::is_pressure_shed_unreplied(&record.key, &record.entry, false)
                 .then(|| record.key.clone());
         let bare_tuple = record.key.bare_tuple();
         let raw = self.entries.insert(record);
         let handle: u32 = raw.try_into().expect("slab handle exceeds u32");
         if let Some(key) = opening_key {
-            self.pressure_shed_openings.insert(key, ());
+            self.pressure_shed_unreplied.insert(key, ());
         }
         self.bare_tuple_index
             .entry(bare_tuple)
@@ -3845,10 +3865,10 @@ impl SessionTable {
             }
         }
         if undo.shed_was_present {
-            self.pressure_shed_openings
+            self.pressure_shed_unreplied
                 .insert(undo.shed_forward_key.clone(), ());
         } else {
-            self.pressure_shed_openings.remove(&undo.shed_forward_key);
+            self.pressure_shed_unreplied.remove(&undo.shed_forward_key);
         }
         had_deferred
     }
@@ -3920,7 +3940,7 @@ impl SessionTable {
                     matched_key.clone()
                 };
                 let shed_was_present =
-                    self.pressure_shed_openings.contains_key(&shed_forward_key);
+                    self.pressure_shed_unreplied.contains_key(&shed_forward_key);
                 probe_undo = Some(ProbeUndo {
                     canonical_key: matched_key.clone(),
                     matched: (matched_key, matched_snap),
@@ -4507,8 +4527,8 @@ impl SessionTable {
         if handshake_completed {
             // Completion can be observed from either direction (including the
             // reverse-half ACK path), so retire both possible key orientations.
-            self.pressure_shed_openings.remove(matched_key);
-            self.pressure_shed_openings.remove(&companion_key);
+            self.pressure_shed_unreplied.remove(matched_key);
+            self.pressure_shed_unreplied.remove(&companion_key);
         }
         if rebucket {
             // The companion's lifetime changed; re-bucket it so GC checks the
@@ -4832,22 +4852,22 @@ impl SessionTable {
             // transition-only, so a non-transition emits nothing.
             self.emit_session_state_update(key, close_class_before, handshake_state_before);
         }
-        if protocol == PROTO_TCP {
+        {
             if !metadata.is_reverse {
-                let remains_opening = self
+                let remains_unreplied = self
                     .entry_by_key(key)
-                    .is_some_and(|entry| Self::is_pressure_shed_opening(key, entry, false));
-                if remains_opening {
-                    self.pressure_shed_openings.insert(key.clone(), ());
+                    .is_some_and(|entry| Self::is_pressure_shed_unreplied(key, entry, false));
+                if remains_unreplied {
+                    self.pressure_shed_unreplied.insert(key.clone(), ());
                 } else {
-                    self.pressure_shed_openings.remove(key);
+                    self.pressure_shed_unreplied.remove(key);
                 }
-            } else if handshake_completed {
+            } else if protocol == PROTO_TCP && handshake_completed {
                 // The pressure-shed index is keyed by the forward half even
                 // when the completing ACK updated its reverse companion.
-                self.pressure_shed_openings.remove(key);
+                self.pressure_shed_unreplied.remove(key);
                 let forward_key = reverse_session_key(key, decision.nat);
-                self.pressure_shed_openings.remove(&forward_key);
+                self.pressure_shed_unreplied.remove(&forward_key);
             }
         }
         // #10310/#10985: keep zone-keyed counts balanced across in-place
@@ -5453,7 +5473,7 @@ impl SessionTable {
         // The pressure-shed index contains only forward opening entries.
         // Remove by key here so every terminal and replacement path keeps it
         // paired with the authoritative session record.
-        self.pressure_shed_openings.remove(key);
+        self.pressure_shed_unreplied.remove(key);
         let handle = self.key_to_handle.remove(key)?;
         // Read the record (still in slab) to learn what to clean.
         // `.get` not `.remove` — we'll remove from slab last.
@@ -6235,3 +6255,9 @@ mod probe_hit_14945_tests;
 #[cfg(test)]
 #[path = "l3_reverse_bucket_15087_tests.rs"]
 mod l3_reverse_bucket_15087_tests;
+
+// #16019: rotating spoofed-source UDP/ICMP singles must not starve a
+// second host — protocol-symmetric unreplied pressure shedding.
+#[cfg(test)]
+#[path = "unreplied_pressure_16019_tests.rs"]
+mod unreplied_pressure_16019_tests;

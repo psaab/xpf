@@ -279,12 +279,16 @@ impl SessionTable {
         true
     }
 
-    /// #10890: preflight an already-validated TCP initial SYN. At 90% of this
-    /// worker's cap, reclaim handshake-incomplete local TCP sessions first;
-    /// established and peer-owned sessions are never pressure victims. The
-    /// caller remains responsible for refusing/rolling back the packet if the
-    /// remaining table cannot fit the full install group.
-    pub fn can_admit_new_syn(
+    /// #10890/#16019: preflight an already-validated new flow. At 90% of
+    /// this worker's cap, reclaim unreplied local sessions first;
+    /// established/replied and peer-owned sessions are never pressure
+    /// victims. Protocol-symmetric (#16019): any new flow may shed
+    /// unreplied victims of any protocol, so rotating spoofed-source
+    /// UDP/ICMP singles cannot fill the table while only a TCP SYN
+    /// newcomer earns relief. The caller remains responsible for
+    /// refusing/rolling back the packet if the remaining table cannot
+    /// fit the full install group.
+    pub fn can_admit_new_flow(
         &mut self,
         needed: usize,
         protocol: u8,
@@ -292,11 +296,11 @@ impl SessionTable {
     ) -> (bool, PressureShedSessions) {
         let mut shed_sessions = PressureShedSessions::new();
         let high_watermark = self.max_sessions.saturating_sub(self.max_sessions / 10);
-        if needed == 0
-            || protocol != PROTO_TCP
-            || !is_initial_syn(tcp_flags)
-            || self.len() < high_watermark
-        {
+        // #16019: TCP keeps its initial-SYN-only trigger (a non-SYN TCP
+        // miss retains the hard cap, #10890); non-TCP new flows are
+        // first-packet flows by construction and always qualify.
+        let qualifies = protocol != PROTO_TCP || is_initial_syn(tcp_flags);
+        if needed == 0 || !qualifies || self.len() < high_watermark {
             return (self.can_admit(needed), shed_sessions);
         }
         if needed > self.max_sessions {
@@ -308,7 +312,7 @@ impl SessionTable {
             if shed && self.can_admit(needed) {
                 return (true, shed_sessions);
             }
-            if !self.shed_one_opening_flow(&mut shed_sessions) {
+            if !self.shed_one_unreplied_flow(&mut shed_sessions) {
                 return (self.can_admit(needed), shed_sessions);
             }
             shed = true;
@@ -335,15 +339,16 @@ impl SessionTable {
         self.deferred_conntrack_deletes.append(&mut deletes);
     }
 
-    /// Remove one indexed local opening flow (both halves when the matching
-    /// reverse companion is present). Returns false when no safe victim remains.
-    fn shed_one_opening_flow(&mut self, shed_sessions: &mut PressureShedSessions) -> bool {
+    /// Remove one indexed local unreplied flow (both halves when the
+    /// matching reverse companion is present). Returns false when no
+    /// safe victim remains.
+    fn shed_one_unreplied_flow(&mut self, shed_sessions: &mut PressureShedSessions) -> bool {
         loop {
-            let Some(key) = self.pressure_shed_openings.keys().next().cloned() else {
+            let Some(key) = self.pressure_shed_unreplied.keys().next().cloned() else {
                 return false;
             };
             let candidate = self.entry_by_key(&key).and_then(|entry| {
-                SessionTable::is_pressure_shed_opening(&key, entry, false).then(|| {
+                SessionTable::is_pressure_shed_unreplied(&key, entry, false).then(|| {
                     (
                         entry.decision,
                         entry.metadata.clone(),
@@ -353,26 +358,26 @@ impl SessionTable {
                 })
             });
             let Some((decision, metadata, origin, session_id)) = candidate else {
-                self.pressure_shed_openings.remove(&key);
+                self.pressure_shed_unreplied.remove(&key);
                 continue;
             };
 
             let companion_key = reverse_session_key(&key, decision.nat);
-            let companion_is_opening = if companion_key == key {
+            let companion_is_unreplied = if companion_key == key {
                 None
             } else {
                 self.entry_by_key(&companion_key).and_then(|companion| {
                     (reverse_session_key(&companion_key, companion.decision.nat) == key).then(
-                        || SessionTable::is_pressure_shed_opening(&companion_key, companion, true),
+                        || SessionTable::is_pressure_shed_unreplied(&companion_key, companion, true),
                     )
                 })
             };
-            if companion_is_opening == Some(false) {
+            if companion_is_unreplied == Some(false) {
                 // Do not tear down only one half if its actual companion is
                 // established or peer-owned. The stale/ineligible forward key
                 // is discarded from this cold-path index and other openings
                 // remain eligible.
-                self.pressure_shed_openings.remove(&key);
+                self.pressure_shed_unreplied.remove(&key);
                 continue;
             }
 
@@ -396,7 +401,7 @@ impl SessionTable {
                 owner_rg_id: forward_entry.metadata.owner_rg_id,
                 policy_id: forward_entry.metadata.policy_id,
             });
-            if companion_is_opening == Some(true) {
+            if companion_is_unreplied == Some(true) {
                 if let Some(companion_entry) =
                     self.remove_entry(&companion_key, RemovalKind::Terminal)
                 {

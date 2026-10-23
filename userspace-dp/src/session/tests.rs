@@ -2335,7 +2335,7 @@ fn update_session_mirrors_handshake_transitions_13678() {
         !after_ack.syn_ack_first,
         "#13678: completing ACK must clear syn_ack_first"
     );
-    assert!(!table.pressure_shed_openings.contains_key(&key));
+    assert!(!table.pressure_shed_unreplied.contains_key(&key));
     assert_eq!(
         after_ack.expires_after_ns, table.timeouts.tcp_established_ns,
         "#13678: a completed handshake earns the established window"
@@ -2403,7 +2403,7 @@ fn reverse_ack_completion_removes_pressure_shed_entry_13678() {
     let mut table = SessionTable::new();
     let forward = key_v4();
     let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
-    assert!(table.pressure_shed_openings.contains_key(&forward));
+    assert!(table.pressure_shed_unreplied.contains_key(&forward));
 
     let mut reverse_meta = metadata();
     reverse_meta.is_reverse = true;
@@ -2426,8 +2426,8 @@ fn reverse_ack_completion_removes_pressure_shed_entry_13678() {
         assert_eq!(entry.last_seen_ns, now + 1_000_000);
         assert_eq!(entry.expires_after_ns, table.timeouts.tcp_established_ns);
     }
-    assert!(!table.pressure_shed_openings.contains_key(&forward));
-    assert!(!table.pressure_shed_openings.contains_key(&reverse));
+    assert!(!table.pressure_shed_unreplied.contains_key(&forward));
+    assert!(!table.pressure_shed_unreplied.contains_key(&reverse));
 }
 
 /// #13678 (D12-03, negative guard): a retransmitted SYN-ACK in the installing
@@ -7027,7 +7027,7 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
     let under_reverse =
         install_forward_reverse_pair(&mut below_pressure, &under_pressure, now, TCP_SYN);
     let (under_pressure_admitted, under_pressure_shed) =
-        below_pressure.can_admit_new_syn(2, PROTO_TCP, TCP_SYN);
+        below_pressure.can_admit_new_flow(2, PROTO_TCP, TCP_SYN);
     assert!(under_pressure_admitted);
     assert!(under_pressure_shed.is_empty());
     assert_eq!(below_pressure.len(), 2);
@@ -7073,9 +7073,9 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
     ));
     let _ = table.drain_deltas(16);
     assert_eq!(table.len(), 9);
-    assert_eq!(table.pressure_shed_openings.len(), 2);
+    assert_eq!(table.pressure_shed_unreplied.len(), 2);
 
-    let (non_syn_admitted, non_syn_shed) = table.can_admit_new_syn(2, PROTO_TCP, TCP_ACK);
+    let (non_syn_admitted, non_syn_shed) = table.can_admit_new_flow(2, PROTO_TCP, TCP_ACK);
     assert!(!non_syn_admitted, "a non-initial SYN retains the hard cap");
     assert!(
         non_syn_shed.is_empty(),
@@ -7086,16 +7086,16 @@ fn pressure_sheds_half_open_pair_before_admitting_new_syn() {
         9,
         "non-SYN admission must not mutate the table"
     );
-    assert_eq!(table.pressure_shed_openings.len(), 2);
+    assert_eq!(table.pressure_shed_unreplied.len(), 2);
 
-    let (syn_admitted, shed_sessions) = table.can_admit_new_syn(2, PROTO_TCP, TCP_SYN);
+    let (syn_admitted, shed_sessions) = table.can_admit_new_flow(2, PROTO_TCP, TCP_SYN);
     assert!(
         syn_admitted,
         "a legitimate initial SYN at 90% pressure should free an opening pair"
     );
     assert_eq!(shed_sessions.len(), 2, "return both removed session halves");
     assert_eq!(table.len(), 7, "one opening pair supplies the two slots");
-    assert_eq!(table.pressure_shed_openings.len(), 1);
+    assert_eq!(table.pressure_shed_unreplied.len(), 1);
     let opening_pair_removed = table.entry_by_key(&opening).is_none();
     let pending_pair_removed = table.entry_by_key(&pending).is_none();
     assert_ne!(
@@ -7156,7 +7156,7 @@ fn pressure_shed_index_tracks_handshake_completion() {
     let forward = key_with_port(31_000);
     let now = 1_000_000_000u64;
     let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
-    assert!(table.pressure_shed_openings.contains_key(&forward));
+    assert!(table.pressure_shed_unreplied.contains_key(&forward));
 
     assert!(
         table
@@ -7164,12 +7164,12 @@ fn pressure_shed_index_tracks_handshake_completion() {
             .is_some()
     );
     assert!(
-        table.pressure_shed_openings.contains_key(&forward),
+        table.pressure_shed_unreplied.contains_key(&forward),
         "a SYN-ACK without the final ACK remains pressure-sheddable"
     );
     assert!(table.lookup(&forward, now + 2_000_000, TCP_ACK).is_some());
     assert!(
-        !table.pressure_shed_openings.contains_key(&forward),
+        !table.pressure_shed_unreplied.contains_key(&forward),
         "completed handshakes must leave the pressure-shed index"
     );
 }

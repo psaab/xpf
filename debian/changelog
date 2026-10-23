@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Sessions: pressure shedding is protocol-symmetric and keyed on
+    never-replied state (#16019). Rotating spoofed-source UDP/ICMP
+    singles previously filled the session table while only a TCP
+    initial-SYN newcomer could shed handshake-incomplete victims;
+    now any qualifying new flow (TCP initial SYN, or any non-TCP first
+    packet) at the 90% watermark sheds unreplied local sessions of
+    any protocol, and replied/established flows are never victims.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Fold (#16350): production PAT allocation now skips peer-owned
     candidates during the keyed probe (bounded by addresses x range,
     fail-closed with PoolPeerAddressOverlap on exclusion-exhaustion)
