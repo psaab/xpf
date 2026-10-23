@@ -81,6 +81,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     // TODAY -- but a constant would silently become the wrong answer if that
     // origin ever changed, and every other publish site carries the real flag.
     has_routing_domains: bool,
+    has_multiple_zones: bool,
 ) -> bool {
     if let Some(previous) = sessions.take_synced_local(key) {
         remove_shared_session(
@@ -155,6 +156,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
         decision,
         &local_entry.metadata,
         has_routing_domains,
+        has_multiple_zones,
     )
     .is_err()
     {

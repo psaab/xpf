@@ -5003,6 +5003,7 @@ fn worker_synced_local_delivery_forces_live_redirect_on_standby() {
         SessionOrigin::SyncImport,
         true,
         false,
+        false,
     ));
 }
 
@@ -5013,6 +5014,7 @@ fn worker_synced_local_delivery_keeps_default_publish_on_active_owner() {
         test_local_delivery_decision(),
         &test_metadata(),
         SessionOrigin::SyncImport,
+        false,
         false,
         false,
     ));
@@ -12718,6 +12720,7 @@ fn refresh_owner_rgs_standby_local_delivery_forces_live_redirect_4805() {
             *origin,
             *allow_replace_local,
             false,
+            false,
         ),
         "standby-owned synced LocalDelivery must publish the LIVE REDIRECT entry, \
          not a kernel-local PASS_TO_KERNEL entry (#4805)"
@@ -12784,6 +12787,7 @@ fn refresh_owner_rgs_active_owner_local_delivery_publishes_kernel_local_4805() {
             metadata,
             *origin,
             *allow_replace_local,
+            false,
             false,
         ),
         "owner-active synced LocalDelivery keeps the kernel-local publish path"

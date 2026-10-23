@@ -65,6 +65,19 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
     // The loop below only fills the id-keyed maps (zone_id_to_name /
     // host-inbound / tcp-rst) and emits the #919/#922 skip diagnostics.
     state.zone_name_to_id = crate::policy::zone_name_to_id_from_snapshot(&snapshot.zones);
+    // #16026: more than one configured zone arms the steering-PASS
+    // demotion. Counted on the same admitted set `zone_id_to_name`
+    // carries below (nonzero, non-reserved ids; a duplicate name is the
+    // same zone, a duplicate id with a different name was already
+    // rejected by `reject_duplicate_zone_ids`).
+    state.has_multiple_zones = snapshot
+        .zones
+        .iter()
+        .filter(|zone| zone.id != 0 && !zone.name.is_empty() && zone.id < crate::policy::ZONE_ID_RESERVED_MIN)
+        .map(|zone| zone.id)
+        .collect::<std::collections::HashSet<u16>>()
+        .len()
+        > 1;
     for zone in &snapshot.zones {
         if zone.id == 0 || zone.name.is_empty() {
             continue;

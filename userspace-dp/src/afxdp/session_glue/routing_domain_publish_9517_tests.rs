@@ -118,6 +118,28 @@ fn worker_publish_writes_for(
     session_map_writes()
 }
 
+/// #16026: the worker publish path must read THIS node's
+/// `has_multiple_zones` and demote the same way. Driven through the real
+/// publish path against the recorder, so a call site that hands the
+/// predicate the wrong flag is visible.
+fn worker_publish_writes_multi_zone(has_multiple_zones: bool) -> Vec<SessionMapWriteRecord> {
+    let forwarding = ForwardingState {
+        has_multiple_zones,
+        ..ForwardingState::default()
+    };
+    clear_session_map_writes();
+    publish_worker_session_map_entry(
+        SteeringMap::unshared_for_test(NOT_A_MAP_FD),
+        &forwarding,
+        &host_bound_key(),
+        local_delivery(),
+        &synced_forward_metadata(),
+        SessionOrigin::SyncImport,
+        false,
+    );
+    session_map_writes()
+}
+
 fn pass_to_kernel_writes(writes: &[SessionMapWriteRecord]) -> usize {
     writes
         .iter()
@@ -267,4 +289,35 @@ fn a_keyed_gre_session_is_demoted_on_a_single_instance_node_9517() {
         0,
         "with no stale kernel-local row deleted first. Writes: {writes:?}"
     );
+}
+
+/// #16026: the same wiring for the zone arm — the worker publish must
+/// read `has_multiple_zones` from THIS node's forwarding state.
+#[test]
+fn the_worker_publish_reads_this_nodes_multiple_zones_flag_16026() {
+    let single_zone = worker_publish_writes_multi_zone(false);
+    assert_eq!(
+        pass_to_kernel_writes(&single_zone),
+        1,
+        "control: on a single-zone node this session must be published \
+         PASS_TO_KERNEL, or the fixture never reaches the kernel-local \
+         branch. Writes: {single_zone:?}"
+    );
+    let multi_zone = worker_publish_writes_multi_zone(true);
+    assert_eq!(
+        pass_to_kernel_writes(&multi_zone),
+        0,
+        "with multiple zones the 40-byte steering key cannot tell two \
+         zones apart, so a PASS_TO_KERNEL row here would be honoured for \
+         a packet arriving in another zone on a shared netdev. The worker \
+         publish must demote to REDIRECT (#16026). Writes: {multi_zone:?}"
+    );
+    assert!(
+        multi_zone.iter().any(
+            |w| w.key == host_bound_key() && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)
+        ),
+        "the demoted session must still be PUBLISHED, as REDIRECT. \
+         Writes: {multi_zone:?}"
+    );
+    assert_eq!(deletes(&multi_zone), 0, "with no stale row deleted first. Writes: {multi_zone:?}");
 }

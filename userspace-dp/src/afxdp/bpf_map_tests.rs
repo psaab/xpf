@@ -79,12 +79,14 @@ fn kernel_local_session_map_entry_requires_zero_tunnel_endpoint() {
         &metadata,
         SessionOrigin::SyncImport,
         false,
+        false,
     ));
     assert!(!uses_kernel_local_session_map_entry(
         &plain_key(),
         local_delivery_decision(7),
         &metadata,
         SessionOrigin::SyncImport,
+        false,
         false,
     ));
 }
@@ -107,6 +109,7 @@ fn kernel_local_session_map_entry_rejects_non_kernel_local_cases() {
         &metadata,
         SessionOrigin::SyncImport,
         false,
+        false,
     ));
 
     // Non-peer-synced origin → rejected
@@ -115,6 +118,7 @@ fn kernel_local_session_map_entry_rejects_non_kernel_local_cases() {
         local_delivery_decision(0),
         &metadata,
         SessionOrigin::ForwardFlow,
+        false,
         false,
     ));
 
@@ -126,6 +130,7 @@ fn kernel_local_session_map_entry_rejects_non_kernel_local_cases() {
         local_delivery_decision(0),
         &reverse_metadata,
         SessionOrigin::SyncImport,
+        false,
         false,
     ));
 }
@@ -153,6 +158,7 @@ fn routing_domains_demote_kernel_local_to_redirect_9517() {
             &metadata,
             SessionOrigin::SyncImport,
             false,
+            false,
         ),
         "control: on a single-instance box this exact session IS kernel-local, \
          or the demotion assertion below is vacuous (#9517)"
@@ -164,10 +170,54 @@ fn routing_domains_demote_kernel_local_to_redirect_9517() {
             &metadata,
             SessionOrigin::SyncImport,
             true,
+            false,
         ),
         "with routing domains the steering key aliases across domains, so a \
          PASS_TO_KERNEL row could overwrite another domain's REDIRECT row and \
          bypass zone policy. It must be demoted to REDIRECT (#9517)"
+    );
+}
+
+/// #16026: a multi-zone node never publishes a `PASS_TO_KERNEL` row either.
+///
+/// The steering key carries no zone, so two zones' peer-synced
+/// LocalDelivery sessions with the same 5-tuple share one row, and a PASS
+/// there is honoured for a packet arriving in the OTHER zone — on a
+/// shared/ambiguous netdev the nft ingress-scope re-judgement cannot
+/// recover the discarded zone. The pair is the cell: the SAME decision,
+/// metadata and origin that IS kernel-local on a single-zone box must
+/// NOT be kernel-local once `has_multiple_zones` is set. Only the flag
+/// differs, so the flag is what is bound. Deleting
+/// `!has_multiple_zones &&` from the predicate reds the second assertion
+/// and nothing else.
+#[test]
+fn multiple_zones_demote_kernel_local_to_redirect_16026() {
+    let metadata = synced_forward_metadata();
+    assert!(
+        uses_kernel_local_session_map_entry(
+            &plain_key(),
+            local_delivery_decision(0),
+            &metadata,
+            SessionOrigin::SyncImport,
+            false,
+            false,
+        ),
+        "control: on a single-zone box this exact session IS kernel-local, \
+         or the demotion assertion below is vacuous (#16026)"
+    );
+    assert!(
+        !uses_kernel_local_session_map_entry(
+            &plain_key(),
+            local_delivery_decision(0),
+            &metadata,
+            SessionOrigin::SyncImport,
+            false,
+            true,
+        ),
+        "with multiple zones the steering key aliases across zones, so a \
+         PASS_TO_KERNEL row could be honoured for a packet arriving in \
+         another zone on a shared netdev. It must be demoted to REDIRECT \
+         so the worker's session_hit_authority judges it (#16026)"
     );
 }
 
@@ -194,6 +244,7 @@ fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
             &metadata,
             SessionOrigin::SyncImport,
             false,
+            false,
         ),
         "control: with no discriminator this single-instance session IS kernel-local, \
          or every demotion below is vacuous (#9517)"
@@ -212,6 +263,7 @@ fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
                 local_delivery_decision(0),
                 &metadata,
                 SessionOrigin::SyncImport,
+                false,
                 false,
             ),
             "a {discriminator:?} session shares its 40-byte steering row with every \
@@ -257,6 +309,7 @@ fn fragment_sentinel_never_publishes_a_steering_row_14648() {
                 local_delivery_decision(0),
                 &synced_forward_metadata(),
                 SessionOrigin::SyncImport,
+                false,
                 false
             ),
             "#14648: proto-255 LocalDelivery must never select PASS_TO_KERNEL (family {family})"
@@ -268,6 +321,7 @@ fn fragment_sentinel_never_publishes_a_steering_row_14648() {
             local_delivery_decision(0),
             &synced_forward_metadata(),
             SessionOrigin::SyncImport,
+            false,
             false,
             None,
         )
@@ -285,6 +339,7 @@ fn fragment_sentinel_never_publishes_a_steering_row_14648() {
         local_delivery_decision(0),
         &synced_forward_metadata(),
         SessionOrigin::SyncImport,
+        false,
         false,
         None,
     )

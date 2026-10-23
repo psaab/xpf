@@ -80,6 +80,7 @@ pub(super) fn uses_kernel_local_session_map_entry(
     metadata: &SessionMetadata,
     origin: SessionOrigin,
     has_routing_domains: bool,
+    has_multiple_zones: bool,
 ) -> bool {
     // #9752: stamped sessions never publish kernel-pass (even LocalDelivery
     // ones): the shim row would bypass the worker, so no terminal observation
@@ -87,6 +88,16 @@ pub(super) fn uses_kernel_local_session_map_entry(
     // (default) sessions are unaffected.
     steering_key_is_publishable(key)
         && !has_routing_domains
+        // #16026: the steering key carries no zone either. On a multi-zone
+        // node two zones' peer-synced LocalDelivery sessions with the same
+        // 5-tuple share one row, and a PASS there is honoured for a packet
+        // arriving in the OTHER zone — on a shared/ambiguous netdev the
+        // nft ingress-scope re-judgement cannot recover the discarded
+        // zone. Demote to REDIRECT so `session_hit_authority` (#9519)
+        // judges the hit by its live arrival zone. Same fail-safe
+        // direction and cost as the routing-domain arm above: one extra
+        // helper hop for host-bound traffic, never a dropped packet.
+        && !has_multiple_zones
         && key.discriminator.is_none()
         && origin.is_peer_synced()
         && !metadata.is_reverse
@@ -2374,6 +2385,7 @@ pub(super) fn publish_session_map_entry_for_session(
     decision: SessionDecision,
     metadata: &SessionMetadata,
     has_routing_domains: bool,
+    has_multiple_zones: bool,
 ) -> io::Result<()> {
     publish_session_map_entry_for_session_with_origin(
         map,
@@ -2382,6 +2394,7 @@ pub(super) fn publish_session_map_entry_for_session(
         metadata,
         SessionOrigin::ForwardFlow,
         has_routing_domains,
+        has_multiple_zones,
     )
 }
 
@@ -2392,6 +2405,7 @@ pub(super) fn publish_session_map_entry_for_session_with_origin(
     metadata: &SessionMetadata,
     origin: SessionOrigin,
     has_routing_domains: bool,
+    has_multiple_zones: bool,
 ) -> io::Result<()> {
     publish_session_map_entry_for_session_with_conntrack(
         map,
@@ -2400,6 +2414,7 @@ pub(super) fn publish_session_map_entry_for_session_with_origin(
         metadata,
         origin,
         has_routing_domains,
+        has_multiple_zones,
         None,
     )
 }
@@ -2511,9 +2526,10 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
     // #9517: the SECOND publish site, which does not go through the `lo0`
     // downgrade in `session_glue`. A fix at that site alone is partial.
     has_routing_domains: bool,
+    has_multiple_zones: bool,
     ct: Option<ConntrackCtx<'_>>,
 ) -> io::Result<()> {
-    if uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains) {
+    if uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains, has_multiple_zones) {
         let mut rows: smallvec::SmallVec<[(SessionKey, u8); 2]> = smallvec::SmallVec::new();
         rows.push((key.clone(), USERSPACE_SESSION_ACTION_PASS_TO_KERNEL));
         // For SNATed local-delivery sessions (e.g., ICMP to an interface-NAT

@@ -124,8 +124,9 @@ decision: SessionDecision,
 metadata: &SessionMetadata,
 origin: SessionOrigin,
 allow_replace_local: bool,
-has_routing_domains: bool,) -> bool { allow_replace_local
-    && uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains) }
+has_routing_domains: bool,
+has_multiple_zones: bool,) -> bool { allow_replace_local
+    && uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains, has_multiple_zones) }
 
 pub(in crate::afxdp) fn apply_worker_commands(commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
 sessions: &mut SessionTable,

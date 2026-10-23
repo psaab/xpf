@@ -350,6 +350,7 @@ pub(crate) fn publish_worker_session_map_entry(
         metadata,
         origin,
         forwarding.has_routing_domains,
+        forwarding.has_multiple_zones,
     );
     if uses_kernel_local && has_lo0_filter {
         // A PASS_TO_KERNEL session-map entry cannot re-run userspace lo0
@@ -375,6 +376,7 @@ pub(crate) fn publish_worker_session_map_entry(
         origin,
         allow_replace_local,
         forwarding.has_routing_domains,
+        forwarding.has_multiple_zones,
     ) {
         publish_live_session_entry(session_map, key, decision.nat, metadata.is_reverse)
     } else {
@@ -392,6 +394,7 @@ pub(crate) fn publish_worker_session_map_entry(
             metadata,
             origin,
             forwarding.has_routing_domains,
+            forwarding.has_multiple_zones,
         )
     };
     if publish_result.is_err() {

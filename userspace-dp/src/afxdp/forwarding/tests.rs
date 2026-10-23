@@ -3717,6 +3717,7 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
         PROTO_TCP,
         0x10,
         false,
+        false,
     ));
     assert!(sessions.lookup(&key, 1_000_000, 0x10).is_some());
     // #15950 contract: LocalMiss itself is published for cross-worker
@@ -3836,6 +3837,7 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         2_000_000,
         PROTO_TCP,
         0x10,
+        false,
         false,
     ));
     let shared = shared_sessions.lock().expect("shared lock");
@@ -11731,7 +11733,7 @@ fn local_miss_publishes_to_shared_15950() {
     let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(&state, 11, 80, key.src_ip, PROTO_TCP).expect("local"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     // ingress helper may return wan iface resolution; use generic metadata
     let metadata = SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID, egress_zone: TEST_WAN_ZONE_ID, ingress_zone_check: 0, egress_zone_check: 0, ingress_ifindex: 0, ingress_vlan_id: 0, forward_ingress_vlan_id: None, owner_rg_id: 0, fabric_ingress: false, is_reverse: false, nat64_reverse: None, log_session_init: false, log_session_close: false, policy_id: 0, inactivity_timeout_ns: None, policy_counter_idx: 0, policy_counter: None, nat_scope_ifindex: None };
-    assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::LocalMiss, 1_000_000, PROTO_TCP, 0x10, false));
+    assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::LocalMiss, 1_000_000, PROTO_TCP, 0x10, false, false));
     let shared = shared_sessions.lock().unwrap();
     let entry = shared.get(&key).expect("LocalMiss must be published to shared_sessions (#15950)");
     assert_eq!(entry.origin, SessionOrigin::LocalMiss);
@@ -11751,7 +11753,7 @@ fn helper_fabric_punt_seed_stays_out_of_shared_15950() {
     let key = SessionKey { addr_family: libc::AF_INET as u8, protocol: PROTO_TCP, src_ip: "172.16.80.8".parse().unwrap(), dst_ip: "172.16.80.200".parse().unwrap(), src_port: 40279, dst_port: 5201, discriminator: Default::default(), routing_domain: 0 };
     let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(&state, 11, 80, key.src_ip, PROTO_TCP).expect("local"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata { ingress_zone: TEST_LAN_ZONE_ID, egress_zone: TEST_WAN_ZONE_ID, ingress_zone_check: 0, egress_zone_check: 0, ingress_ifindex: 0, ingress_vlan_id: 0, forward_ingress_vlan_id: None, owner_rg_id: 0, fabric_ingress: false, is_reverse: false, nat64_reverse: None, log_session_init: false, log_session_close: false, policy_id: 0, inactivity_timeout_ns: None, policy_counter_idx: 0, policy_counter: None, nat_scope_ifindex: None };
-    assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::FabricPuntSeed, 1_000_000, PROTO_TCP, 0x10, false));
+    assert!(install_helper_local_session_on_miss(&mut sessions, SteeringMap::unshared_for_test(-1), &shared_sessions, &shared_nat_sessions, &shared_forward_wire_sessions, &shared_owner_rg_indexes, &key, decision, metadata, SessionOrigin::FabricPuntSeed, 1_000_000, PROTO_TCP, 0x10, false, false));
     assert!(shared_sessions.lock().unwrap().get(&key).is_none(), "FabricPuntSeed must never become shared authority");
 }
 

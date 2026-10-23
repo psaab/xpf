@@ -557,6 +557,7 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 forward.decision,
                 &forward.metadata,
                 forwarding.has_routing_domains,
+                forwarding.has_multiple_zones,
             )
             .is_err()
         {
@@ -613,6 +614,7 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 reverse.decision,
                 &reverse.metadata,
                 forwarding.has_routing_domains,
+                forwarding.has_multiple_zones,
             )
             .is_err()
             {
@@ -689,6 +691,7 @@ pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(
             *decision,
             metadata,
             forwarding.has_routing_domains,
+            forwarding.has_multiple_zones,
         )
         .is_ok()
         {
