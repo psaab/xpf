@@ -938,8 +938,16 @@ func compileNPTv6(dp DataPlane, cfg *config.Config) error {
 	count := 0
 
 	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		// #16008: on the tolerant path config compile records static
+		// rule-sets with an undefined from-zone; buildNptv6Snapshots drops
+		// the whole rule-set, so these rules never reach the helper and
+		// must keep warn-and-skip (never hard-error) disposition here.
+		dropped16008 := cfg.LenientNATUndefinedZoneRuleSets[config.NATRuleSetRef{Kind: "static", Name: rs.Name}]
 		for _, rule := range rs.Rules {
-			if !rule.IsNPTv6 || rule.Match == "" || rule.Then == "" {
+			if rule == nil {
 				continue
 			}
 
@@ -969,7 +977,7 @@ func compileNPTv6(dp DataPlane, cfg *config.Config) error {
 			// on it would fail an apply that works today.
 			// #9877: a rule the builder drops for unknown match leaves never
 			// reaches the helper either — same warn-and-skip disposition.
-			installed := !config.NPTv6ScopeUnsupported(rs, rule) && config.StaticNATRuleExcludedReason(rule) == ""
+			installed := !dropped16008 && !config.NPTv6ScopeUnsupported(rs, rule) && config.StaticNATRuleExcludedReason(rule) == ""
 			// #7077 (#6894 r10): the SAME argument applies a second time, and
 			// missing it turned this fix into a regression. "The helper rejects
 			// this" was inferred from Go's own parse failing, but the two
@@ -1104,16 +1112,9 @@ func compileNPTv6(dp DataPlane, cfg *config.Config) error {
 	// carries them rather than this call site:
 	//
 	//   - config.NPTv6OverlapConflict skips rules the snapshot builder DROPS
-	//     (NPTv6ScopeUnsupported), so a dropped rule cannot trigger a hard error
-	//     for a rejection the helper never makes.
-	//   - It skips rules whose prefixes do not parse or whose lengths disagree,
-	//     because the helper refuses those on an earlier arm — reporting them as
-	//     overlaps would name the wrong reason for a correct rejection.
-	//   - It partitions by zone exactly as `zones_conflict` does, so the #5176
-	//     split-horizon configurations the helper installs are NOT rejected.
-	//     (Historically validateNPTv6Strict's overlap check was zone-blind and
-	//     would have failed precisely those configs; #15266 made it zone-aware
-	//     as well, so commit and this pre-pass now agree.)
+	//     (NPTv6ScopeUnsupported, and #16008 tolerant undefined-zone rule-sets
+	//     dropped whole by buildNptv6Snapshots), so a dropped rule cannot
+	//     trigger a hard error for a rejection the helper never makes.
 	if conflict := config.NPTv6OverlapConflict(cfg); conflict != "" {
 		return fmt.Errorf("%s; the userspace helper rejects the whole NPTv6 snapshot "+
 			"on an overlapping prefix pair (#2241), so the apply cannot succeed -- "+

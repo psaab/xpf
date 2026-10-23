@@ -4902,6 +4902,7 @@ func TestStaticNATInetSetSyntax(t *testing.T) {
 func TestNPTv6HierarchicalSyntax(t *testing.T) {
 	input := `
 security {
+    zones { security-zone wan; }
     nat {
         static {
             rule-set nptv6-test {
@@ -4954,7 +4955,7 @@ security {
 }
 
 func TestNPTv6SetSyntax(t *testing.T) {
-	lines := []string{"set security nat static rule-set nptv6-rs from zone untrust", "set security nat static rule-set nptv6-rs rule r1 match destination-address 2602:fd41:0070::/48", "set security nat static rule-set nptv6-rs rule r1 then static-nat nptv6-prefix fd35:1940:0027::/48"}
+	lines := []string{"set security zones security-zone untrust", "set security nat static rule-set nptv6-rs from zone untrust", "set security nat static rule-set nptv6-rs rule r1 match destination-address 2602:fd41:0070::/48", "set security nat static rule-set nptv6-rs rule r1 then static-nat nptv6-prefix fd35:1940:0027::/48"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		path, err := ParseSetCommand(line)
