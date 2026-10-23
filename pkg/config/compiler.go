@@ -738,6 +738,18 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// drops the earlier groups' provenance and can accept a
 	// default-policy conflict the fresh node0 compile rejects); &id runs
 	// the node-scoped pass with vars {"node": "node<id>"}.
+	// #16003: diagnose literal `apply-groups-except` names matching no
+	// defined group, BEFORE expansion removes the groups stanza. Expansion
+	// keeps them a no-op (never an error); this warning, computed on the
+	// pre-expansion clone with the vars each compile flavor will use, is
+	// the only diagnostic. Generic compile mirrors its node0 fallback.
+	var exceptVars16003 map[string]string
+	if nodeID != nil {
+		exceptVars16003 = map[string]string{"node": fmt.Sprintf("node%d", *nodeID)}
+	} else if treeHasNodeVarApplyGroups15031(tree.Children) || treeHasNodeVarExcept16003(tree.Children) {
+		exceptVars16003 = map[string]string{"node": "node0"}
+	}
+	unresolvedExcept16003 := unresolvedApplyGroupsExcept16003(tree, exceptVars16003)
 	usedNodeFallback := false
 	var vars map[string]string
 	if nodeID == nil {
@@ -783,6 +795,9 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	}
 	if usedNodeFallback {
 		cfg.Warnings = append(cfg.Warnings, `apply-groups "${node}" resolved using default node0 context during generic compile`)
+	}
+	for _, name := range unresolvedExcept16003 {
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("apply-groups-except references undefined group %q; the exclusion has no effect (#16003)", name))
 	}
 	// Mark source-action conflicts and widening folds after compilation, when
 	// the LenientContentDropped flag lives on the compiled policy.

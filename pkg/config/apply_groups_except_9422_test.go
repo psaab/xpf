@@ -234,7 +234,8 @@ snmp { location LAB; }`))
 // unlike `apply-groups`, which fails to ADD configuration and therefore has to
 // say so, an exclusion that matches nothing removes nothing — and rejecting it
 // would break a shared cluster config that excludes a `${node}` group defined
-// only in the peer's view.
+// only in the peer's view. #16003: the no-op is no longer SILENT — a literal
+// unresolved name warns exactly once per distinct name on every compile path.
 func TestApplyGroupsExceptUndefinedGroupIsNoOp9422(t *testing.T) {
 	cfg := compile9422(t, parseHierText(t, `groups { G { system { host-name FROM-GROUP; } } }
 apply-groups G;
@@ -242,6 +243,9 @@ system { apply-groups-except NOPE; domain-name example.com; }`))
 	if cfg.System.HostName != "FROM-GROUP" {
 		t.Errorf("an exclusion naming an undefined group suppressed an unrelated group: HostName=%q",
 			cfg.System.HostName)
+	}
+	if got := warningsMentioning(cfg, "#16003"); len(got) != 1 || !strings.Contains(got[0], `"NOPE"`) {
+		t.Fatalf("undefined exclusion must warn once naming NOPE (#16003), got %v", cfg.Warnings)
 	}
 }
 
