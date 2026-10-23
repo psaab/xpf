@@ -1063,6 +1063,9 @@ func hostInboundFullAdmitToken(hib *HostInboundTraffic) string {
 			return svc
 		}
 	}
+	if hib.systemServicesHasFullAdmit {
+		return "any-service"
+	}
 	return ""
 }
 
