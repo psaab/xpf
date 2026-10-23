@@ -23,6 +23,13 @@ attachment or auto-swap to the legacy `xdp_main_prog` path is historical
 fallback behavior only; treat it as a userspace validation failure unless the
 test is explicitly scoped as a legacy eBPF regression.
 
+> **#16111 warning:** in-VM `tcpdump` is blind to AF_XDP fast-path flows
+> (see [failover-testing.md](failover-testing.md), "Observation points").
+> Any capture procedure in this historical archive that runs `tcpdump`
+> inside a firewall VM will report `0 packets captured` for fast-path
+> transit whether or not the flow traversed the node; do not use it as a
+> current failover playbook.
+
 ## Current Userspace HA Gate
 
 The active pass criteria are maintained in

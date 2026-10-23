@@ -223,6 +223,17 @@ cell.
 
 ## Diagnostics
 
+> **#16111 — in-VM `tcpdump` is blind to AF_XDP fast-path flows.** Do not
+> "capture on both nodes" with `tcpdump` (or `monitor traffic`) inside the
+> firewall VMs: XDP redirects fast-path frames to the AF_XDP helper before
+> any AF_PACKET tap, so a live multi-Gbps flow captures
+> `0 packets captured` on `any`, the physical NICs, the `.80` VLAN
+> sub-interfaces, the fabric parents, and `xpf-usp0`/`xpf-usp1`. An empty
+> in-VM pcap does not prove the traffic never arrived. Working observation
+> points are LAN/WAN host captures, the remote-target gRPC capture
+> service, and helper-statistics/session deltas on both nodes; see
+> `testing-docs/failover-testing.md` ("Observation points").
+
 When a test fails, capture from both nodes (read-only `cli show` commands are
 safe to run outside the cell):
 
@@ -235,6 +246,14 @@ for node in "$FW0" "$FW1"; do
     sg incus-admin -c "incus exec $node -- cli -c 'show security flow session destination-prefix 172.16.80.200/32'" | head -10
 done
 ```
+
+Take the same `show chassis cluster data-plane statistics` readings before
+and after the failover event on both nodes and compare the deltas.
+Aggregate counters alone do not prove per-flow traversal on a busy node:
+they discriminate only for an isolated or controlled workload, or when
+corroborated by host/endpoint captures; otherwise use per-flow counters
+or session deltas (`show chassis cluster data-plane flows`,
+`show security flow session`) — see `testing-docs/failover-testing.md`.
 
 ## Known Issues
 
