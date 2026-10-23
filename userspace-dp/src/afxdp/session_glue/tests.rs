@@ -4425,11 +4425,12 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
         candidate,
         "adopted: ClusterTerminalHAInactive-demoted ForwardCandidate is restored"
     );
-    // A MissingNeighbor lookup whose neighbor is still unresolved in
-    // the FIB stays terminal even when adopted (adoption proved
-    // establishment, not that the neighbor has landed). The resolved
-    // recompute is pinned by
-    // `adopted_missing_neighbor_recomputes_forward_candidate_16217`.
+    // A MissingNeighbor lookup with no FIB cover for the target
+    // stays terminal even when adopted (the recompute cannot
+    // produce a candidate). The connected-but-unresolved retryable
+    // shape and the resolved recompute are pinned by
+    // `adopted_missing_neighbor_recomputes_forward_candidate_16217`
+    // and `adopted_cluster_terminal_recomputes_from_fib_16217`.
     let missing = ForwardingResolution {
         disposition: ForwardingDisposition::MissingNeighbor,
         neighbor_mac: None,
@@ -4438,7 +4439,7 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
     assert_eq!(
         fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target),
         demoted,
-        "adopted: still-missing neighbor keeps the HA terminal"
+        "adopted: still-missing neighbor with no FIB cover keeps the HA terminal"
     );
     // An active enforced outcome is kept verbatim.
     assert_eq!(
@@ -4620,8 +4621,10 @@ fn adopted_forward_candidate_bypasses_ha_inactive_terminal_16217() {
 ///
 /// FAIL-ON-REVERT: restore the ForwardCandidate-only gate in
 /// `fabric_adopted_resolution` and the adopted leg resolves
-/// `HAInactive` instead of `ForwardCandidate`; drop the recompute and
-/// the still-missing leg forwards on a neighbor-less candidate.
+/// `HAInactive` instead of `ForwardCandidate`; drop the recompute
+/// and the resolved leg cannot restore; terminalize the
+/// still-missing sub-arm and the connected-but-unresolved leg
+/// keeps `HAInactive` instead of the retryable `MissingNeighbor`.
 #[test]
 fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
     // (a) Pure reclassification, MissingNeighbor arms.
@@ -4646,10 +4649,12 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
     // Neighbor still unresolved in the live FIB (no connected route /
     // neighbor row for the target in this fixture): the recompute
     // cannot produce a candidate, so the terminal stands fail-closed.
+    // (The connected-but-unresolved retryable shape is pinned by
+    // `adopted_cluster_terminal_recomputes_from_fib_16217`.)
     assert_eq!(
         fabric_adopted_resolution(&forwarding, &active_ha(), 1, missing, demoted, &dyn_empty, target),
         demoted,
-        "adopted: still-missing neighbor keeps the HA terminal (fail-closed)"
+        "adopted: still-missing neighbor with no FIB cover keeps the HA terminal (fail-closed)"
     );
     // Neighbor resolved: with the connected /24 + neighbor row the
     // FIB recompute yields the ForwardCandidate and the terminal is
@@ -4853,6 +4858,256 @@ fn adopted_missing_neighbor_recomputes_forward_candidate_16217() {
         Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
         "adopted hit must carry the FIB-resolved neighbor MAC"
     );
+}
+
+/// #16217 (FZDiag27): the stored-terminal shape through the
+/// production session-HIT resolver. The `SyncImport` row the peer
+/// exported carries `ClusterTerminalHAInactive` itself (egress 0,
+/// no next-hop), so the synced-session lookup returns the terminal
+/// verbatim and `owner_rg_for_resolution` reads 0 off it — pre-fix
+/// `fabric_adopted_resolution` fell through and kept the terminal
+/// on every adopted hit (live: hundreds of hits with
+/// `stored == looked == enforced == ClusterTerminalHAInactive`,
+/// zero misses). The adopted restore must now recover the egress
+/// from the live FIB: with the connected /24 published and the
+/// neighbor resolved, the same hit yields the local
+/// `ForwardCandidate` with the FIB MAC. Two fail-closed shapes pin
+/// the retryable leg: with the neighbor NOT yet resolved the
+/// recompute answers `MissingNeighbor` and the adopted hit returns
+/// that (drop-without-terminal — the next retransmit re-enters the
+/// restore), and with NOTHING covering the target the recompute
+/// cannot produce a candidate and the terminal stands.
+///
+/// FAIL-ON-REVERT: drop the ClusterTerminal arm in
+/// `fabric_adopted_resolution` and every adopted leg below resolves
+/// `ClusterTerminalHAInactive`; terminalize the MissingNeighbor
+/// sub-arm and the unresolved leg keeps `HAInactive`.
+#[test]
+fn adopted_cluster_terminal_recomputes_from_fib_16217() {
+    // (a) Pure reclassification, ClusterTerminal arms.
+    let dyn_empty = Arc::new(ShardedNeighborMap::new());
+    let target = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    let terminal = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        ..test_resolution()
+    };
+    // No connected route / neighbor for the target in this fixture:
+    // the FIB recompute cannot produce a candidate, so the terminal
+    // stands fail-closed.
+    assert_eq!(
+        fabric_adopted_resolution(
+            &test_forwarding_state_with_fabric(),
+            &active_ha(),
+            1,
+            terminal,
+            terminal,
+            &dyn_empty,
+            target,
+        ),
+        terminal,
+        "adopted: ClusterTerminal with no FIB cover keeps the terminal (fail-closed)"
+    );
+    // Connected /24 present, neighbor NOT yet resolved: the
+    // recompute answers MissingNeighbor with a known egress RG, so
+    // the adopted hit returns the retryable shape, never the
+    // terminal.
+    let mut forwarding_unresolved = test_forwarding_state_with_fabric();
+    forwarding_unresolved.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    let unresolved = fabric_adopted_resolution(
+        &forwarding_unresolved,
+        &active_ha(),
+        1,
+        terminal,
+        terminal,
+        &dyn_empty,
+        target,
+    );
+    assert_eq!(
+        unresolved.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "adopted: unresolved ClusterTerminal recompute stays retryable MissingNeighbor"
+    );
+    assert_eq!(unresolved.egress_ifindex, 12);
+    assert_eq!(unresolved.neighbor_mac, None);
+    // Neighbor resolved: the recompute yields the ForwardCandidate
+    // and the terminal is restored to it (with the FIB MAC).
+    let mut forwarding_live = forwarding_unresolved.clone();
+    forwarding_live.neighbors.insert(
+        (12, target),
+        NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+    );
+    let restored = fabric_adopted_resolution(
+        &forwarding_live,
+        &active_ha(),
+        1,
+        terminal,
+        terminal,
+        &dyn_empty,
+        target,
+    );
+    assert_eq!(
+        restored.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted: resolved ClusterTerminal recompute restores the ForwardCandidate"
+    );
+    assert_eq!(restored.egress_ifindex, 12);
+    assert_eq!(
+        restored.neighbor_mac,
+        Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
+        "adopted: restored candidate carries the FIB-resolved neighbor MAC"
+    );
+
+    // (b) End-to-end through the production session-HIT resolver:
+    // an Established synced wire session whose STORED resolution is
+    // the cluster terminal itself, under an INACTIVE RG snapshot
+    // (the gate snapshot lag). Without adoption the hit terminates
+    // `ClusterTerminalHAInactive`; with adoption and the FIB
+    // published + neighbor resolved it yields the local
+    // ForwardCandidate; with the neighbor unresolved it yields the
+    // retryable MissingNeighbor.
+    let run_hit = |neighbor_resolved: bool, adopted: bool| {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        let stored = ForwardingResolution {
+            disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            ..test_resolution()
+        };
+        let decision = SessionDecision {
+            resolution: stored,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(key.src_port),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let translated_key = forward_wire_key(&key, decision.nat);
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let entry = SyncedSessionEntry { key: translated_key.clone(),
+        decision,
+        metadata: SessionMetadata { forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None, ..test_metadata() },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4245,
+        tcp_close_class: 0, tcp_handshake_state: established, rev_packets: 1u64, fwd_packets: 1, pptp_call_ids: 0,
+        source_nat_static: None, };
+        let mut forwarding = test_forwarding_state_with_fabric();
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+            host: Ipv4Addr::new(172, 16, 80, 0),
+            ifindex: 12,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        });
+        if neighbor_resolved {
+            forwarding.neighbors.insert(
+                (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+                NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+            );
+        }
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &entry,
+        );
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let peer_worker_commands = Vec::new();
+        let mut ha_state = BTreeMap::new();
+        ha_state.insert(1, inactive_ha_runtime(1));
+        let flow = SessionFlow {
+            src_ip: translated_key.src_ip,
+            dst_ip: translated_key.dst_ip,
+            forward_key: translated_key.clone(),
+        };
+        resolve_flow_session_decision_with_conntrack_and_payload(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            SharedSessionRefs {
+                sessions: &shared_sessions,
+                nat_sessions: &shared_nat_sessions,
+                forward_wire_sessions: &shared_forward_wire_sessions,
+                owner_rg_indexes: &shared_owner_rg_indexes,
+                peer_worker_commands: &peer_worker_commands,
+                worker_commands_by_id: empty_worker_commands_by_id(),
+                conntrack: ConntrackFds { v4: -1, v6: -1 },
+                tick: Tick { ns: 1_000_000, secs: 1 },
+            },
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+        )
+        .expect("wire session should resolve")
+        .decision
+        .resolution
+    };
+    // Fail-closed control: identical hit WITHOUT adoption terminates
+    // (HA enforcement demotes the stored terminal to the drop the
+    // non-adopted path has always produced).
+    assert_eq!(
+        run_hit(true, false).disposition,
+        ForwardingDisposition::HAInactive,
+        "non-adopted stored-terminal hit must stay fail-closed on the terminal"
+    );
+    // Adopted, neighbor resolved: restore to the local candidate.
+    let adopted = run_hit(true, true);
+    assert_eq!(
+        adopted.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted stored-terminal hit must recompute to the local ForwardCandidate"
+    );
+    assert_eq!(adopted.egress_ifindex, 12);
+    assert_eq!(
+        adopted.neighbor_mac,
+        Some([0xde, 0xad, 0xbe, 0xef, 0x80, 0x00]),
+        "adopted hit must carry the FIB-resolved neighbor MAC"
+    );
+    // Adopted, neighbor unresolved: retryable MissingNeighbor, so
+    // the poll path drops this packet without terminalizing the
+    // flow and the next retransmit re-enters the restore.
+    let retryable = run_hit(false, true);
+    assert_eq!(
+        retryable.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "adopted stored-terminal hit with unresolved neighbor must stay retryable"
+    );
+    assert_eq!(retryable.egress_ifindex, 12);
 }
 
 

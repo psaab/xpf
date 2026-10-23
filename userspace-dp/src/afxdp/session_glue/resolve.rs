@@ -887,14 +887,16 @@ ingress_zone: u16,) -> ForwardingResolution {
 /// instead of trusting the stripped shape: a fresh FIB lookup for
 /// the packet destination that yields a `ForwardCandidate` (neighbor
 /// now resolved, egress RG known) restores that candidate verbatim.
-/// If the fresh lookup still answers `MissingNeighbor` (or anything
-/// else), the HA terminal stands — adoption proved establishment and
-/// (via the gate) ownership, not that the neighbor has landed, so a
-/// still-unresolved adopted tuple stays fail-closed rather than
-/// forwarding on a neighbor-less candidate. The recompute is gated
-/// on the looked-up egress RG being known (>0): an unknown egress
-/// (rg 0, incl. the `ClusterTerminalHAInactive` shape whose egress
-/// was zeroed before enforcement) never restores.
+/// If the fresh lookup still answers `MissingNeighbor` with a
+/// known egress RG, the adopted hit returns that retryable shape
+/// instead of the terminal (FZDiag27): adoption proved
+/// establishment and (via the gate) ownership, and the missing
+/// piece is only the neighbor, so the poll path drops this packet
+/// without terminalizing the flow, drives the neighbor probe, and
+/// the next retransmit re-enters this restore once the neighbor
+/// lands. Any other recomputed disposition keeps the HA terminal.
+/// The recompute is gated on the looked-up egress RG being known
+/// (>0): an unknown egress (rg 0) never restores.
 ///
 /// Non-adopted flows never reach this helper (`fabric_adopted ==
 /// false` at every other callsite), so the fail-closed terminal
@@ -904,8 +906,29 @@ ingress_zone: u16,) -> ForwardingResolution {
 /// route ownership. Positive non-ownership is enforced at the
 /// adoption gate and on every subsequent hit, not by re-imposing the
 /// lagging snapshot's terminal here. The `dynamic_neighbors` /
-/// `target` arguments are used ONLY by the MissingNeighbor recompute;
-/// the ForwardCandidate arm ignores them.
+/// `target` arguments are used ONLY by the MissingNeighbor and
+/// ClusterTerminal recomputes; the ForwardCandidate arm ignores
+/// them.
+///
+/// #16217 (FZDiag27): the third adoptable shape is a looked-up
+/// `ClusterTerminalHAInactive` ITSELF. The stored `SyncImport` row
+/// carries the cluster terminal (exported while neither node owned
+/// the egress RG), so the synced-session lookup returns the stored
+/// terminal verbatim: egress 0, no next-hop, and
+/// `owner_rg_for_resolution` reads 0 off it — neither arm above
+/// could ever fire and the fallthrough kept the terminal on every
+/// adopted hit (live: hundreds of hits with
+/// `stored == looked == enforced == ClusterTerminalHAInactive`).
+/// The egress RG is therefore recovered from the FIB, not from the
+/// terminal, with the same recompute as the MissingNeighbor arm.
+/// A recomputed `ForwardCandidate` with a resolved neighbor MAC
+/// and a known egress RG restores; a recomputed `MissingNeighbor`
+/// (egress known, neighbor not yet landed) is returned AS
+/// `MissingNeighbor` — retryable, never re-terminalized — so the
+/// poll path drops this packet without terminalizing the flow and
+/// the next retransmit re-enters this restore; any other
+/// recomputed disposition keeps the HA terminal fail-closed.
+///
 pub(in crate::afxdp) fn fabric_adopted_resolution(
     forwarding: &ForwardingState,
     _ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -946,10 +969,17 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
     if looked_up.disposition == ForwardingDisposition::MissingNeighbor {
         // FZDiag24 arm: HA enforcement stripped the (already
         // neighbor-less) MissingNeighbor to HAInactive. Recompute the
-        // neighbor/egress from the FIB: only a fresh ForwardCandidate
+        // neighbor/egress from the FIB: a fresh ForwardCandidate
         // (neighbor resolved since the look-up that produced
-        // `looked_up`) may replace the terminal. A still-missing
-        // neighbor keeps the terminal fail-closed.
+        // `looked_up`) replaces the terminal. A still-missing
+        // neighbor with a known egress RG is returned AS
+        // MissingNeighbor (retryable, FZDiag27): the poll path drops
+        // this packet without terminalizing the flow, drives the
+        // neighbor probe, and the next retransmit re-enters here —
+        // re-imposing HAInactive would strand the adopted flow on a
+        // terminal for a merely unwarm neighbor. Anything else
+        // (no FIB cover, unknown egress) keeps the terminal
+        // fail-closed.
         let egress_rg = super::forwarding::owner_rg_for_resolution(forwarding, looked_up);
         if egress_rg <= 0 {
             return enforced;
@@ -962,6 +992,44 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
         .resolution;
         if recomputed.disposition == ForwardingDisposition::ForwardCandidate
             && recomputed.neighbor_mac.is_some()
+            && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
+        {
+            return recomputed;
+        }
+        if recomputed.disposition == ForwardingDisposition::MissingNeighbor
+            && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
+        {
+            return recomputed;
+        }
+        return enforced;
+    }
+    if looked_up.disposition == ForwardingDisposition::ClusterTerminalHAInactive {
+        // FZDiag27 arm: the looked-up shape IS the terminal (stored
+        // on the SyncImport row), so it names no egress RG and the
+        // arms above can never fire. Recover the egress from the
+        // live FIB with the same recompute the MissingNeighbor arm
+        // uses, then judge the recomputed shape: a resolved
+        // ForwardCandidate (neighbor MAC present, egress RG known)
+        // restores verbatim — ownership itself stays the adoption
+        // gate's job (fresh authoritative set), exactly as for the
+        // other arms; a still-missing neighbor is returned AS
+        // MissingNeighbor (retryable: the poll path drops this
+        // packet without terminalizing the flow and the next
+        // retransmit re-enters here once the neighbor lands);
+        // anything else keeps the terminal fail-closed.
+        let recomputed = super::forwarding::lookup_forwarding_resolution_with_dynamic(
+            forwarding,
+            dynamic_neighbors,
+            target,
+        )
+        .resolution;
+        if recomputed.disposition == ForwardingDisposition::ForwardCandidate
+            && recomputed.neighbor_mac.is_some()
+            && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
+        {
+            return recomputed;
+        }
+        if recomputed.disposition == ForwardingDisposition::MissingNeighbor
             && super::forwarding::owner_rg_for_resolution(forwarding, recomputed) > 0
         {
             return recomputed;

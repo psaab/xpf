@@ -1,5 +1,25 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Adopted stored-terminal restore (#16217): adopted hits whose
+    looked-up resolution IS ClusterTerminalHAInactive (the stored
+    SyncImport terminal, egress 0) fell through the adopted restore
+    and terminated on every hit. The restore now recomputes the
+    resolution from the live FIB for that shape exactly like the
+    MissingNeighbor arm: a recomputed ForwardCandidate with a
+    resolved neighbor MAC and a known egress RG restores, and a
+    recomputed MissingNeighbor with a known egress RG is returned
+    as the retryable MissingNeighbor (drop-without-terminal, probe
+    + retransmit re-enters) instead of HAInactive — in both the
+    ClusterTerminal and MissingNeighbor arms. Unknown-egress and
+    non-candidate recomputes stay fail-closed. Live aged P4 still
+    fails (29 / 29 SUM zeros, twice on loss); the fw0
+    fabric-delivery leg remains open.
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Adopted MissingNeighbor restore (#16217): post-failover transient
     replies hit the session-HIT with the gate snapshot still reading
     the egress RG inactive, so the look-up answered MissingNeighbor
