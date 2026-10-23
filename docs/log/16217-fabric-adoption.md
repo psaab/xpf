@@ -565,3 +565,67 @@ the aged-failover cure. Cluster restored after each run: clean
 master `2c8575b70e`, helper `2f2f5cbf…b04` both nodes
 (hash-proved), RG0/1/2 node0 primary, target OK, P4 verification
 9.6–16.7 Gbit/s.
+
+## Direct-destination neighbor warm (FZFixWire13, seed completion leg)
+
+Trace of the cell39 residual: on fw1 the helper's dynamic neighbor
+map held no entry for the direct server next-hop 172.16.80.200
+(egress ifindex 14) at the failover instant — fw1 never served the
+flow pre-failover, and the kernel entry on ge-7-0-2.80 had aged to
+FAILED while standby (observed live post-restore: `172.16.50.1 dev
+ge-7-0-2.50 FAILED`, no 172.16.80.200 row at all on fw1, while fw0
+holds it REACHABLE/DELAY). The MissingNeighborSeed path itself is
+sound (probe + one-representative pending_neigh buffer +
+retry_pending_neigh generation-gated replay); it starved because
+nothing ever (re-)drove ARP for that hop on the new owner: the
+coordinator neighbor warmer (`queue_warm_pass`, #1636) walks only
+route next-hops and fabric peers, and a CONNECTED route carries
+`next_hop == None` — the destination IS the hop, and no code named
+it. The gateway 172.16.50.1 is irrelevant here (the server is
+on-link via the connected /24); the seed needs the direct entry.
+
+Fix (seed from the node's own session table, re-driven on RG
+activation): `queue_warm_pass` (coordinator/mod.rs) now also
+enqueues the DIRECT destinations of the shared synced rows this
+node holds — the post-NAT target of each non-reverse, non-tunnel
+forward row that a connected prefix covers, on the row's egress
+(falling back to the covering connected row's ifindex). The same
+per-RG forwarding-active gate, already-resolved skip, dedup, and
+invalid-address filters apply, so standby RGs never warm and
+gateway-routed destinations are never probed on-link.
+`on_rg_promote_active` (the `handle_activated_rgs` tail) already
+clears the per-key rate-limit and forces the pass, so the re-drive
+fires at the takeover instant; steady-state snapshot passes re-warm
+any destination whose entry later expires. No packet-path work is
+added; the walk is over the bounded shared-row set at warm time.
+
+Tests: `cargo test 16217` 24/24 (new
+`queue_warm_pass_warms_direct_shared_destination_16217` — direct
+shared destination warmed alongside the gateway, FAIL-ON-REVERT;
+`queue_warm_pass_skips_gateway_routed_and_reverse_shared_16217`;
+`queue_warm_pass_direct_destination_resolved_and_rg_gates_16217`),
+`queue_warm_pass` 12/12, `16223` 28/28.
+
+Live (build `99.16217.35.dirty`, deb sha256 `0721e004…a48`,
+helper sha256 `d1eb6b28…995b6a6` homogeneous `/proc/<pid>/exe`
+both nodes before traffic; evidence
+`/var/worktrees/fzadopt2/cell40/`, `cell41/`): aged 30 s RG1
+failover P4, all-node0, FO at 30 s — **FAIL, 26 and 25 SUM zero
+intervals (31 s→end), twice on the fix**; no pre-FO zeros.
+Measured progress, not acceptance: the neighbor leg is PROVEN
+closed — fw1's kernel table holds `172.16.80.200 dev ge-7-0-2.80
+lladdr 10:66:6a:8b:91:a4 REACHABLE` from d28 through post in both
+runs (it was absent/FAILED pre-fix), fw1's fw1 Backup holders read
+`Timeout: 1800` at d28 (12 and 16 rows), and fw1 `Neighbor misses`
+reads 0. The remaining blackhole moved one stage later: fw1's
+last resolution for the heavy wire tuples now reads `ha_inactive
+ingress-ifindex=4 egress-ifindex=14 next-hop=172.16.80.200` (was
+`missing_neighbor` in cell39) — the fabric packets now resolve the
+neighbor but are HA-gated/discarded instead of adopted, i.e. the
+adoption gate (or the adopted row's post-adoption HA enforcement)
+still does not serve the aged tuples on the receiving worker. That
+is the next leg; this fix closes the seed-completion/neighbor leg
+only. Do not merge as the aged-failover cure. Cluster restored
+after each run: clean master `2c8575b70e`, helper
+`2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
+target OK, P4 verification 13.3 Gbit/s both runs.

@@ -3883,6 +3883,141 @@ fn queue_warm_pass_respects_snapshot_rate_limit() {
     );
 }
 
+/// #16217 seed completion: a shared row whose destination is served
+/// DIRECTLY (connected prefix, no gateway next-hop) must warm the
+/// destination itself — that is the hop the adopted forward resolution
+/// lands on at takeover (172.16.80.200-class), and the route walk cannot
+/// name it because connected rows carry `next_hop == None`.
+/// FAIL-ON-REVERT: dropping the shared-destination arm leaves only the
+/// gateway item (172.16.80.1) in the queue.
+#[test]
+fn queue_warm_pass_warms_direct_shared_destination_16217() {
+    let (mut coord, rx) = warm_test_coordinator(1);
+    coord.forwarding.connected_v4.push(
+        crate::afxdp::ConnectedRouteV4 {
+            prefix: PrefixV4::from_net("172.16.80.0/24".parse().unwrap()),
+            host: Ipv4Addr::new(172, 16, 80, 8),
+            ifindex: 80,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        },
+    );
+    let mut key = f4_key();
+    key.dst_ip = "172.16.80.200".parse().unwrap();
+    let mut entry = import_entry_9718(&key, 4001);
+    entry.decision.resolution.egress_ifindex = 80;
+    lock_shared_recover(&coord.sessions.synced).insert(key.clone(), entry);
+    coord.queue_warm_pass(false);
+    let mut hops: Vec<IpAddr> = Vec::new();
+    while let Ok(item) = rx.try_recv() {
+        hops.push(item.hop);
+    }
+    assert!(
+        hops.contains(&IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        "direct shared destination must be warmed, got {hops:?}"
+    );
+    assert!(
+        hops.contains(&IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        "gateway hop must still be warmed, got {hops:?}"
+    );
+}
+
+/// #16217: a gateway-routed shared destination (not covered by any
+/// connected prefix) must NOT be probed on-link — the gateway item
+/// covers it, and ARP for a remote host on the local segment would be
+/// wrong. A reverse shared row never warms its (LAN-side) key either.
+#[test]
+fn queue_warm_pass_skips_gateway_routed_and_reverse_shared_16217() {
+    let (mut coord, rx) = warm_test_coordinator(1);
+    coord.forwarding.connected_v4.push(
+        crate::afxdp::ConnectedRouteV4 {
+            prefix: PrefixV4::from_net("172.16.80.0/24".parse().unwrap()),
+            host: Ipv4Addr::new(172, 16, 80, 8),
+            ifindex: 80,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        },
+    );
+    // Gateway-routed: 203.0.113.9 is outside the connected /24.
+    let routed_key = f4_key();
+    let mut routed = import_entry_9718(&routed_key, 4002);
+    routed.decision.resolution.egress_ifindex = 80;
+    lock_shared_recover(&coord.sessions.synced).insert(routed_key, routed);
+    // Reverse row whose key IS on-link: never a forward warm target.
+    let mut rev_key = f4_key();
+    rev_key.dst_ip = "172.16.80.200".parse().unwrap();
+    let mut rev = import_entry_9718(&rev_key, 4003);
+    rev.metadata.is_reverse = true;
+    rev.decision.resolution.egress_ifindex = 80;
+    lock_shared_recover(&coord.sessions.synced).insert(rev_key, rev);
+    coord.queue_warm_pass(false);
+    let mut hops: Vec<IpAddr> = Vec::new();
+    while let Ok(item) = rx.try_recv() {
+        hops.push(item.hop);
+    }
+    assert!(
+        !hops.contains(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
+        "gateway-routed destination must not be probed on-link, got {hops:?}"
+    );
+    assert!(
+        !hops.contains(&IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        "reverse row must not be warmed, got {hops:?}"
+    );
+}
+
+/// #16217: an already-resolved direct destination is skipped (the
+/// enqueue resolved-check), and a destination whose egress RG is not
+/// forwarding-active is skipped by the per-RG gate — the warm must
+/// never fire for a standby RG's hops.
+#[test]
+fn queue_warm_pass_direct_destination_resolved_and_rg_gates_16217() {
+    let (mut coord, rx) = warm_test_coordinator(1);
+    coord.forwarding.connected_v4.push(
+        crate::afxdp::ConnectedRouteV4 {
+            prefix: PrefixV4::from_net("172.16.80.0/24".parse().unwrap()),
+            host: Ipv4Addr::new(172, 16, 80, 8),
+            ifindex: 80,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        },
+    );
+    let mut key = f4_key();
+    key.dst_ip = "172.16.80.200".parse().unwrap();
+    let mut entry = import_entry_9718(&key, 4004);
+    entry.decision.resolution.egress_ifindex = 80;
+    lock_shared_recover(&coord.sessions.synced).insert(key.clone(), entry);
+    // Resolved in the static neighbor map: no warm item.
+    coord.forwarding.neighbors.insert(
+        (80, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry { mac: [0xbb; 6] },
+    );
+    coord.queue_warm_pass(false);
+    let mut hops: Vec<IpAddr> = Vec::new();
+    while let Ok(item) = rx.try_recv() {
+        hops.push(item.hop);
+    }
+    assert!(
+        !hops.contains(&IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        "already-resolved direct destination must be skipped, got {hops:?}"
+    );
+    // RG goes inactive: even unresolved, the gate must skip it.
+    coord.forwarding.neighbors.remove(&(80, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))));
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    coord.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+        1i32,
+        HAGroupRuntime {
+            active: false,
+            watchdog_timestamp: now_secs,
+            lease: HAForwardingLease::Inactive,
+        },
+    )])));
+    coord.queue_warm_pass(true);
+    assert!(
+        rx.try_recv().is_err(),
+        "standby RG direct destination must not be warmed"
+    );
+}
+
 #[test]
 fn queue_warm_pass_warms_fabric_peer_over_parent_ifindex() {
     let (mut coord, rx) = warm_test_coordinator(0);

@@ -1793,6 +1793,74 @@ impl Coordinator {
         for fabric in &snapshot.fabrics {
             enqueue(fabric.parent_ifindex, fabric.peer_addr);
         }
+        // #16217 seed completion: DIRECT on-link destinations of the
+        // shared (synced/promoted) sessions this node holds. A connected
+        // route carries no explicit next-hop (`next_hop == None`), so the
+        // route walk above never enqueues the destination itself — yet on
+        // takeover the adopted forward resolution lands on the DIRECT
+        // server next-hop (e.g. 172.16.80.200 on the connected /24), the
+        // helper's dynamic neighbor map on the new owner may hold no entry
+        // for it (it never served the flow pre-failover; the kernel entry
+        // aged to FAILED while standby), and the MissingNeighborSeed's
+        // single representative packet then times out unresolved: the seed
+        // never forwards and every later fabric packet for the adopted
+        // tuple is discarded after the first. Warming the exact shared-row
+        // destinations (not whole prefixes — the row set is bounded by the
+        // session table) re-drives ARP/ND for precisely the hops the
+        // adopted seeds need, through the same per-RG gate, dedup, and
+        // already-resolved skip as the route hops. On RG activation
+        // `on_rg_promote_active` clears the per-key rate-limit and forces
+        // this pass, so the re-drive fires at the takeover instant rather
+        // than waiting for the next snapshot; steady-state snapshot passes
+        // re-warm any destination whose entry later expires.
+        {
+            let shared = lock_shared_recover(&self.sessions.synced);
+            for entry in shared.values() {
+                if entry.metadata.is_reverse || entry.decision.resolution.tunnel_endpoint_id != 0 {
+                    continue;
+                }
+                let target = entry
+                    .decision
+                    .nat
+                    .rewrite_dst
+                    .unwrap_or(entry.key.dst_ip);
+                // Only a destination the FIB serves DIRECTLY (covered by
+                // a connected prefix on its egress) is its own next-hop;
+                // gateway-routed destinations are covered by the route
+                // walk above and must not be probed on-link.
+                let direct = match target {
+                    IpAddr::V4(ip) => snapshot
+                        .connected_v4
+                        .iter()
+                        .any(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip)),
+                    IpAddr::V6(ip) => snapshot
+                        .connected_v6
+                        .iter()
+                        .any(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip)),
+                };
+                if !direct {
+                    continue;
+                }
+                let egress_ifindex = match entry.decision.resolution.egress_ifindex {
+                    egress if egress > 0 => egress,
+                    _ => match target {
+                        IpAddr::V4(ip) => snapshot
+                            .connected_v4
+                            .iter()
+                            .find(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip))
+                            .map(|row| row.ifindex)
+                            .unwrap_or(0),
+                        IpAddr::V6(ip) => snapshot
+                            .connected_v6
+                            .iter()
+                            .find(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip))
+                            .map(|row| row.ifindex)
+                            .unwrap_or(0),
+                    },
+                };
+                enqueue(egress_ifindex, target);
+            }
+        }
     }
 
     /// #1636: called from the cluster RG-promote path when an RG
