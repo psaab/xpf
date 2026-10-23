@@ -104,12 +104,18 @@ impl Coordinator {
             }
         }
         for (idx, prefix) in self.forwarding.nat64.prefixes.iter().enumerate() {
-            let Some(params) = prefix.deterministic_v6 else { continue };
+            let Some(params) = prefix.deterministic_v6 else {
+                continue;
+            };
             let pool_name = format!("nat64-deterministic-{idx}");
             for mut lease in prefix.port_allocator.export_idle_leases(now_ns) {
                 lease.deterministic = true;
-                lease.deterministic_identity = Some(crate::nat::DeterministicPortedIdentity::V6(params));
-                out.push(PoolIdleLease { pool_name: pool_name.clone(), lease });
+                lease.deterministic_identity =
+                    Some(crate::nat::DeterministicPortedIdentity::V6(params));
+                out.push(PoolIdleLease {
+                    pool_name: pool_name.clone(),
+                    lease,
+                });
             }
         }
         out
@@ -137,13 +143,18 @@ impl Coordinator {
             }
         }
         for (idx, prefix) in self.forwarding.nat64.prefixes.iter().enumerate() {
-            let Some(params) = prefix.deterministic_v6 else { continue };
+            let Some(params) = prefix.deterministic_v6 else {
+                continue;
+            };
             let pool_name = format!("nat64-deterministic-{idx}");
             for mut lease in prefix.port_allocator.export_display_leases(now_ns) {
                 lease.deterministic = true;
                 lease.deterministic_identity =
                     Some(crate::nat::DeterministicPortedIdentity::V6(params));
-                out.push(PoolDisplayLease { pool_name: pool_name.clone(), lease });
+                out.push(PoolDisplayLease {
+                    pool_name: pool_name.clone(),
+                    lease,
+                });
             }
         }
         out
@@ -195,16 +206,75 @@ impl Coordinator {
     ) -> IdleLeaseImportCounts {
         let mut counts = IdleLeaseImportCounts::default();
         for rec in records {
-            if let Some(prefix_idx) = rec.pool_name.strip_prefix("nat64-deterministic-").and_then(|s| s.parse::<usize>().ok()) {
-                let Some(prefix) = self.forwarding.nat64.prefixes.get(prefix_idx) else { counts.skipped_unknown_pool += 1; continue; };
-                let Some(params) = prefix.deterministic_v6 else { counts.skipped_unknown_pool += 1; continue; };
-                if !rec.lease.deterministic || rec.lease.deterministic_identity != Some(crate::nat::DeterministicPortedIdentity::V6(params)) { counts.skipped_identity_busy += 1; continue; }
-                let (IpAddr::V6(src), IpAddr::V4(translated)) = (rec.lease.src_ip, rec.lease.translated_ip) else { counts.skipped_identity_busy += 1; continue; };
+            if let Some(prefix_idx) = rec
+                .pool_name
+                .strip_prefix("nat64-deterministic-")
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                let Some(prefix) = self.forwarding.nat64.prefixes.get(prefix_idx) else {
+                    counts.skipped_unknown_pool += 1;
+                    continue;
+                };
+                let Some(params) = prefix.deterministic_v6 else {
+                    counts.skipped_unknown_pool += 1;
+                    continue;
+                };
+                if !rec.lease.deterministic
+                    || rec.lease.deterministic_identity
+                        != Some(crate::nat::DeterministicPortedIdentity::V6(params))
+                {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                }
+                let (IpAddr::V6(src), IpAddr::V4(translated)) =
+                    (rec.lease.src_ip, rec.lease.translated_ip)
+                else {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                };
                 let addr_index = prefix.pool_v4.iter().position(|a| *a == translated);
-                let Some(idx) = addr_index else { counts.skipped_unknown_address += 1; continue; };
-                if !prefix.port_allocator.deterministic_v6_tuple_matches(params, src, &prefix.pool_v4, idx, translated, rec.lease.translated_port) { counts.skipped_identity_busy += 1; continue; }
-                let outcome = if generation_validated { prefix.port_allocator.import_idle_lease_at_after_generation(&rec.lease, addr_index, 300_000_000_000, now_ns) } else { prefix.port_allocator.import_idle_lease_at(&rec.lease, addr_index, 300_000_000_000, now_ns) };
-                match outcome { IdleLeaseImport::Installed => counts.installed += 1, IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1, IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1, IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1, IdleLeaseImport::SkippedUnknownAddress => counts.skipped_unknown_address += 1, IdleLeaseImport::SkippedPortBusy => counts.skipped_port_busy += 1, IdleLeaseImport::SkippedIdentityBusy => counts.skipped_identity_busy += 1, IdleLeaseImport::SkippedCapacity => counts.skipped_capacity += 1 }
+                let Some(idx) = addr_index else {
+                    counts.skipped_unknown_address += 1;
+                    continue;
+                };
+                if !prefix.port_allocator.deterministic_v6_tuple_matches(
+                    params,
+                    src,
+                    &prefix.pool_v4,
+                    idx,
+                    translated,
+                    rec.lease.translated_port,
+                ) {
+                    counts.skipped_identity_busy += 1;
+                    continue;
+                }
+                let outcome = if generation_validated {
+                    prefix
+                        .port_allocator
+                        .import_idle_lease_at_after_generation_permit_any(
+                            &rec.lease,
+                            addr_index,
+                            300_000_000_000,
+                            now_ns,
+                        )
+                } else {
+                    prefix.port_allocator.import_idle_lease_at(
+                        &rec.lease,
+                        addr_index,
+                        300_000_000_000,
+                        now_ns,
+                    )
+                };
+                match outcome {
+                    IdleLeaseImport::Installed => counts.installed += 1,
+                    IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1,
+                    IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,
+                    IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1,
+                    IdleLeaseImport::SkippedUnknownAddress => counts.skipped_unknown_address += 1,
+                    IdleLeaseImport::SkippedPortBusy => counts.skipped_port_busy += 1,
+                    IdleLeaseImport::SkippedIdentityBusy => counts.skipped_identity_busy += 1,
+                    IdleLeaseImport::SkippedCapacity => counts.skipped_capacity += 1,
+                }
                 continue;
             }
             // #14638 remaining validation: a deterministic-shaped lease must
@@ -247,19 +317,56 @@ impl Coordinator {
                 counts.skipped_identity_busy += 1;
                 continue;
             }
+            // #16017 fold 3: generation validation proves provenance, not
+            // local permit consent. The wildcard is authorized only when a
+            // rule sharing this allocator permits AnyRemoteHost under the
+            // record's scope; otherwise the import installs demoted and a
+            // later sync under an AnyRemoteHost rule restamps it.
+            let permit_any_authorized = self
+                .forwarding
+                .source_nat_rules
+                .iter()
+                .filter(|candidate| {
+                    candidate.pool_mode
+                        && candidate.persistent_nat
+                        && candidate
+                            .pool_allocator
+                            .same_allocator(&rule.pool_allocator)
+                })
+                .any(|candidate| {
+                    candidate.persistent_nat_permit
+                        == crate::nat::PersistentNatPermit::AnyRemoteHost
+                        && candidate.persistent_rule_scope(
+                            &candidate.from_zone.clone(),
+                            &candidate.to_zone.clone(),
+                            &candidate.to_zone.clone(),
+                            &crate::nat::NatScopeCtx::default(),
+                        ) == lease.egress_scope
+                });
             let outcome = if generation_validated {
-                rule.pool_allocator.import_idle_lease_at_after_generation(
-                    lease,
-                    rule.pool_index_of(lease.translated_ip),
-                    rule.persistent_nat_timeout_ns,
-                    now_ns,
-                )
+                if permit_any_authorized {
+                    rule.pool_allocator
+                        .import_idle_lease_at_after_generation_permit_any(
+                            lease,
+                            rule.pool_index_of(lease.translated_ip),
+                            rule.persistent_nat_timeout_ns,
+                            now_ns,
+                        )
+                } else {
+                    rule.pool_allocator.import_idle_lease_at_after_generation(
+                        lease,
+                        rule.pool_index_of(lease.translated_ip),
+                        rule.persistent_nat_timeout_ns,
+                        now_ns,
+                    )
+                }
             } else {
-                rule.pool_allocator.import_idle_lease_at(
+                rule.pool_allocator.import_idle_lease_with_permit(
                     lease,
                     rule.pool_index_of(lease.translated_ip),
                     rule.persistent_nat_timeout_ns,
                     now_ns,
+                    permit_any_authorized,
                 )
             };
             if matches!(outcome, IdleLeaseImport::Installed)

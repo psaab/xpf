@@ -310,7 +310,9 @@ impl PortAllocator {
         now_ns: u64,
     ) -> IdleLeaseImport {
         let addr_index = pool_addresses.iter().position(|a| *a == rec.translated_ip);
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false)
+        // Test/direct helper: no local rule context, treated as a
+        // permit-authorized import at the current epoch.
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false, true)
     }
 
     pub(crate) fn import_idle_lease_at(
@@ -320,7 +322,31 @@ impl PortAllocator {
         local_timeout_ns: u64,
         now_ns: u64,
     ) -> IdleLeaseImport {
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false)
+        self.import_idle_lease_with_permit(rec, addr_index, local_timeout_ns, now_ns, false)
+    }
+
+    /// #16017 fold 3: production import carrying whether the pool's local
+    /// rule still permits AnyRemoteHost for the record's egress scope.
+    /// `permit_any_authorized=false` installs/merges the lease demoted:
+    /// exact remotes are kept, `any_remote` is stamped epoch 0 so only a
+    /// later permit-change sync under an AnyRemoteHost rule (or a fresh
+    /// local mint) can re-authorize the wildcard.
+    pub(crate) fn import_idle_lease_with_permit(
+        &self,
+        rec: &IdleLeaseRecord,
+        addr_index: Option<usize>,
+        local_timeout_ns: u64,
+        now_ns: u64,
+        permit_any_authorized: bool,
+    ) -> IdleLeaseImport {
+        self.import_idle_lease_inner(
+            rec,
+            addr_index,
+            local_timeout_ns,
+            now_ns,
+            false,
+            permit_any_authorized,
+        )
     }
 
     pub(crate) fn import_idle_lease_at_after_generation(
@@ -330,7 +356,21 @@ impl PortAllocator {
         local_timeout_ns: u64,
         now_ns: u64,
     ) -> IdleLeaseImport {
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true)
+        // Generation validation proves the record's generation, not that
+        // the tightened local rule still permits the wildcard.
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true, false)
+    }
+
+    /// Fold 3: generation-validated import whose local rule permits the
+    /// wildcard for this record's egress scope.
+    pub(crate) fn import_idle_lease_at_after_generation_permit_any(
+        &self,
+        rec: &IdleLeaseRecord,
+        addr_index: Option<usize>,
+        local_timeout_ns: u64,
+        now_ns: u64,
+    ) -> IdleLeaseImport {
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true, true)
     }
 
     #[cfg(test)]
@@ -342,7 +382,7 @@ impl PortAllocator {
         now_ns: u64,
     ) -> IdleLeaseImport {
         let addr_index = pool_addresses.iter().position(|a| *a == rec.translated_ip);
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true)
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true, true)
     }
 
     fn import_idle_lease_inner(
@@ -352,6 +392,7 @@ impl PortAllocator {
         local_timeout_ns: u64,
         now_ns: u64,
         generation_validated: bool,
+        permit_any_authorized: bool,
     ) -> IdleLeaseImport {
         if local_timeout_ns < super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
             || rec.remaining_ns == 0
@@ -530,12 +571,16 @@ impl PortAllocator {
                     if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
                         let was_any_remote = bucket.any_remote;
                         bucket.any_remote |= rec.permit_any_remote;
-                        if bucket.any_remote && !was_any_remote && generation_validated {
-                            // Fold 2: only a generation-validated import may
-                            // re-authorize a grant after a permit change. A
-                            // generation-less (stale-generation) import is
-                            // demoted: remotes merge, any_remote does not
-                            // regain authorization at the new epoch.
+                        if bucket.any_remote
+                            && !was_any_remote
+                            && generation_validated
+                            && permit_any_authorized
+                        {
+                            // Fold 3: only a generation-validated import
+                            // under a local rule that still permits the
+                            // wildcard may re-authorize after a permit
+                            // change. Generation validation alone proves
+                            // record provenance, not local permit consent.
                             bucket.permit_change_authorized = true;
                             bucket.any_remote_permit_epoch = 0;
                             bucket.authorized_epoch = self.persistent_permit_epoch();
@@ -618,8 +663,14 @@ impl PortAllocator {
                 remotes: rec.permitted_remotes.iter().copied().collect(),
                 mint_from_zone: None,
                 any_remote_permit_epoch: 0,
-                permit_change_authorized: true,
-                authorized_epoch: if generation_validated || self.persistent_permit_epoch() <= 1 { self.persistent_permit_epoch() } else { 0 },
+                permit_change_authorized: permit_any_authorized,
+                authorized_epoch: if permit_any_authorized
+                    && (generation_validated || self.persistent_permit_epoch() <= 1)
+                {
+                    self.persistent_permit_epoch()
+                } else {
+                    0
+                },
             },
         );
         live.persistent_permissions.insert(key, permissions);
