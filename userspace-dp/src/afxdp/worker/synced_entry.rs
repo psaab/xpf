@@ -66,6 +66,12 @@ pub(crate) struct SyncedSessionEntry {
     /// this entry's pair is only read when re-exporting a peer-originated
     /// session this node adopted.
     pub(crate) pptp_call_ids: u64,
+    /// #16019 fold 2: reverse-direction packet count from the live
+    /// entry at publish/materialize time (0 for hand-built/imported
+    /// rows that carry no counters). The pressure-shed shared fence
+    /// requires `rev_packets > 0` as reply proof — reverse-row
+    /// existence alone is published at install and proves nothing.
+    pub(crate) rev_packets: u64,
 }
 
 impl SyncedSessionEntry {

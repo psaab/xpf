@@ -8,8 +8,10 @@ xpf (0.0.0) unstable; urgency=medium
     packet) at the 90% watermark sheds unreplied local sessions of
     any protocol, and replied/established flows are never victims.
     Fold: victim reply evidence is node-level (shared-map reverse
-    row + peer-synced fence), not just the shedding worker's counters,
-    and the stale-candidate scan per admission is bounded.
+    row rev counter > 0 + peer-synced fence), not just the shedding
+    worker's counters or reverse-row existence; retained victims have
+    their queued Close delta cancelled and deferred sheds recheck the
+    reply predicate; the stale-candidate scan per admission is bounded.
 
 xpf (0.0.0) unstable; urgency=medium
 

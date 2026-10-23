@@ -291,6 +291,7 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
         tcp_close_class: entry.tcp_close_class,
         tcp_handshake_state: entry.tcp_handshake_state,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: entry.source_nat_static,
     })
 }
@@ -611,6 +612,7 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
             tcp_close_class: 0,
             tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
             pptp_call_ids: 0,
+            rev_packets: 0,
             source_nat_static: reverse.aux.source_nat_static,
         };
         publish_shared_session(

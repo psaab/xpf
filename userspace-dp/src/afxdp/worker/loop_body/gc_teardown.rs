@@ -373,6 +373,21 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
         return;
     };
     for shed in shed_sessions {
+        // #16019 fold 2: recheck the reply predicate at retry time — a
+        // victim retained by later reply evidence (shared reverse row
+        // rev counter, or a locally re-materialized entry that has now
+        // seen a reply) must not be torn down by a stale deferred shed.
+        if !shed.is_reverse
+            && (sessions.session_replied(&shed.key)
+                || crate::afxdp::shared_ops::shared_session_replied(
+                    shared_sessions,
+                    &shed.key,
+                    shed.decision.nat,
+                ))
+        {
+            sessions.cancel_pending_close(&shed.key, shed.session_id);
+            continue;
+        }
         let shared_removal = crate::afxdp::shared_ops::remove_shared_session_if(
             shared_sessions,
             shared_nat_sessions,

@@ -112,6 +112,7 @@ fn entry(key: SessionKey, origin: SessionOrigin, session_id: u64) -> SyncedSessi
         tcp_close_class: 0,
         tcp_handshake_state: 0,
         pptp_call_ids: 0,
+        rev_packets: 0,
         source_nat_static: None,
     }
 }

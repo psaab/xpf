@@ -6937,14 +6937,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .iter()
                                         .map(|shed| shed.key.clone())
                                         .collect();
-                                    // #16019 fold: node-level reply evidence.
-                                    // Local removal already happened on worker-local
-                                    // counters; before tearing down shared/BPF/NAT
-                                    // authority, retain any victim whose reverse row
-                                    // exists in the shared map (a sibling worker may
-                                    // account its replies) — its local rows are gone
-                                    // but shared authority must not be destroyed for
-                                    // a flow another worker still serves.
+                                    // #16019 fold 2: node-level reply evidence.
+                                    // Local removal already happened; before tearing
+                                    // down shared/BPF/NAT authority, retain any victim
+                                    // with reply proof (rev counter > 0 on the shared
+                                    // reverse row, or local reverse accounting) and
+                                    // cancel its still-queued Close delta, else the
+                                    // flush would delete shared/BPF and replicate
+                                    // sibling deletes for a live flow.
                                     let replied_sheds: Vec<bool> = pressure_shed_sessions
                                         .iter()
                                         .map(|shed| {
@@ -6964,6 +6964,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             pressure_shed_sessions.into_iter().enumerate()
                                         {
                                             if replied_sheds[shed_idx] {
+                                                // Suppress the enqueued Close so its
+                                                // flush cannot delete shared/BPF or
+                                                // replicate sibling deletes (#16019 fold 2).
+                                                sessions.cancel_pending_close(
+                                                    &shed.key,
+                                                    shed.session_id,
+                                                );
                                                 continue;
                                             }
                                             // Remove shared authority before this
@@ -7578,6 +7585,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .handshake_state_wire,
                                             pptp_call_ids: sessions
                                                 .pptp_call_ids_wire_for(&flow.forward_key),
+                                            rev_packets: sessions
+                                                .rev_packets_wire_for(&flow.forward_key),
                                         };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
@@ -7977,6 +7986,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .expect("installed forward session info")
                                                 .handshake_state_wire,
                                             pptp_call_ids: 0,
+                                            rev_packets: 0,
                                             source_nat_static: None,
                                         };
                                         publish_shared_session(
@@ -12329,7 +12339,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .iter()
                                         .map(|shed| shed.key.clone())
                                         .collect();
-                                    // #16019 fold: node-level reply evidence (see
+                                    // #16019 fold 2: node-level reply evidence (see
                                     // the ForwardCandidate shed site).
                                     let replied_sheds: Vec<bool> = pressure_shed_sessions
                                         .iter()
@@ -12350,6 +12360,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             pressure_shed_sessions.into_iter().enumerate()
                                         {
                                             if replied_sheds[shed_idx] {
+                                                sessions.cancel_pending_close(
+                                                    &shed.key,
+                                                    shed.session_id,
+                                                );
                                                 continue;
                                             }
                                             let shared_removal =
@@ -12612,6 +12626,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .expect("installed neighbor seed info")
                                                 .handshake_state_wire,
                                             pptp_call_ids: 0,
+                                        rev_packets: 0,
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,

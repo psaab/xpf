@@ -1,25 +1,31 @@
 use super::*;
 
 /// #16019 fold: node-level reply evidence for the pressure-shed
-/// victim check. The shared map is the only store every worker
-/// consults: if a reverse companion row exists there, the flow has
-/// been published bidirectionally and a sibling worker may be
-/// accounting its reverse packets — the shedding worker's local
-/// counters (which see only packets hashed to it) must not be the
-/// sole evidence. The caller combines this with the shared row's
-/// `tcp_handshake_state`/`origin` under the removal lock; this
-/// helper is the pre-removal existence probe keyed on the reverse
-/// tuple derived from the victim's own NAT decision.
+/// victim check. Reverse-row EXISTENCE is not reply proof — both
+/// companions are published at install, before any reply packet.
+/// Proof is the reverse row's accounted reverse-packet count:
+/// `SyncedSessionEntry::rev_packets`, stamped from the live entry at
+/// publish/materialize time (`rev_packets_wire_for`) and folded from
+/// the forward entry's counters, so whichever worker accounted the
+/// reply leaves `rev_packets > 0` on the shared reverse row every
+/// worker consults. TCP rows instead fence on handshake state
+/// (Established = 4) inside `is_pressure_shed_shared_unreplied`;
+/// this helper covers the non-TCP arm keyed on the reverse tuple
+/// derived from the victim's own NAT decision.
 pub(in crate::afxdp) fn shared_session_replied(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     forward_key: &SessionKey,
     nat: crate::nat::NatDecision,
 ) -> bool {
+    if forward_key.protocol == crate::ip_proto::PROTO_TCP {
+        return false;
+    }
     let reverse_key = crate::session::reverse_session_key(forward_key, nat);
     if reverse_key == *forward_key {
         return false;
     }
-    lookup_shared_session(shared_sessions, &reverse_key).is_some()
+    lookup_shared_session(shared_sessions, &reverse_key)
+        .is_some_and(|entry| entry.rev_packets > 0)
 }
 
 pub(in crate::afxdp) fn lookup_shared_session(

@@ -403,6 +403,7 @@ pub(crate) fn build_synced_session_entry(
         tcp_close_class: req.tcp_close_class,
         tcp_handshake_state: req.tcp_handshake_state,
         pptp_call_ids: req.pptp_call_ids,
+        rev_packets: 0,
         key,
         decision: crate::session::SessionDecision {
             resolution: afxdp::ForwardingResolution {

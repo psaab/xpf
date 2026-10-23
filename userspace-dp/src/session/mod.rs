@@ -3643,6 +3643,15 @@ impl SessionTable {
             .is_some_and(|entry| entry.counters.replied())
     }
 
+    /// #16019 fold 2: the live entry's reverse-packet count for the
+    /// shared-row stamp. Reverse packets fold onto the forward entry,
+    /// so this is the reply evidence the shared reverse row carries.
+    pub(crate) fn rev_packets_wire_for(&self, key: &SessionKey) -> u64 {
+        self.entry_by_key(key)
+            .map(|entry| entry.counters.rev_packets)
+            .unwrap_or(0)
+    }
+
     /// #13965: the live PPTP call-id pair for this key's handle.
     pub(crate) fn pptp_call_ids_wire_for(&self, key: &SessionKey) -> u64 {
         match key.discriminator {
@@ -5341,6 +5350,26 @@ impl SessionTable {
         }
         self.delta_drained = self.delta_drained.saturating_add(out.len() as u64);
         out
+    }
+
+    /// #16019 fold 2: cancel a still-queued Close delta for `key` with
+    /// exactly `session_id`. Pressure shedding removes the local rows
+    /// and enqueues a Close; when node-level reply evidence then
+    /// retains the victim, the queued Close would otherwise flush and
+    /// delete shared/BPF authority plus replicate sibling deletes for
+    /// a live flow. Returns true when a matching Close was removed.
+    /// Only the first match is cancelled (one shed enqueues one Close
+    /// per forward key); other deltas keep FIFO order.
+    pub(crate) fn cancel_pending_close(&mut self, key: &SessionKey, session_id: u64) -> bool {
+        let Some(pos) = self.deltas.iter().position(|delta| {
+            delta.kind == SessionDeltaKind::Close
+                && delta.key == *key
+                && delta.session_id == session_id
+        }) else {
+            return false;
+        };
+        self.deltas.remove(pos);
+        true
     }
 
     /// Requeue drained deltas at the front when a tuple gate could not be

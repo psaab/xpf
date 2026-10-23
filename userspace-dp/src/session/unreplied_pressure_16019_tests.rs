@@ -310,3 +310,47 @@ fn shed_scan_is_bounded_under_stale_candidate_flood_16019() {
         assert!(table.entry_by_key(key).is_some());
     }
 }
+
+#[test]
+fn cancel_pending_close_removes_only_matching_shed_close_16019() {
+    // #16019 fold 2: the retained victim's still-queued Close must be
+    // cancelled by (key, session_id) so its flush cannot delete
+    // shared/BPF or replicate sibling deletes; other closes survive.
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    table.set_max_sessions_for_test(10);
+    let mut keys = Vec::new();
+    for i in 0..5u8 {
+        let key = udp_key((10, 0, 0, 100 + i), 40_000 + i as u16);
+        install_pair_protocol(&mut table, &key, now);
+        keys.push(key);
+    }
+    let _ = table.drain_deltas(16);
+    let (admitted, shed) = table.can_admit_new_flow(2, PROTO_UDP, 0);
+    assert!(admitted);
+    assert_eq!(shed.len(), 2);
+    let victim = shed.iter().find(|s| !s.is_reverse).expect("forward shed");
+    // Wrong id cancels nothing.
+    assert!(!table.cancel_pending_close(&victim.key, victim.session_id.wrapping_add(1)));
+    assert_eq!(
+        table.drain_deltas(16).iter().filter(|d| d.kind == SessionDeltaKind::Close).count(),
+        1,
+        "close still queued after wrong-id cancel"
+    );
+    // Re-shed scenario: cancel with the exact id removes it.
+    let mut table2 = SessionTable::new();
+    table2.set_max_sessions_for_test(10);
+    for i in 0..5u8 {
+        let key = udp_key((10, 0, 0, 100 + i), 40_000 + i as u16);
+        install_pair_protocol(&mut table2, &key, now);
+    }
+    let _ = table2.drain_deltas(16);
+    let (_, shed2) = table2.can_admit_new_flow(2, PROTO_UDP, 0);
+    let victim2 = shed2.iter().find(|s| !s.is_reverse).expect("forward shed");
+    assert!(table2.cancel_pending_close(&victim2.key, victim2.session_id));
+    assert_eq!(
+        table2.drain_deltas(16).iter().filter(|d| d.kind == SessionDeltaKind::Close).count(),
+        0,
+        "retained victim's close must be suppressed"
+    );
+}
