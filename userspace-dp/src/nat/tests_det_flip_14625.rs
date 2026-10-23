@@ -95,11 +95,8 @@ fn det_release_after_flip_is_reclaimable_14625() {
         vec![20000, 20001, 20002, 20003],
         "fixture: deterministic block must claim the whole range in order"
     );
-
-    // Spend the PAT fresh cursor, as PAT allocations interleaved with /
-    // preceding the deterministic occupancy would. After this, PAT can
-    // only be served from the recycle FIFO.
-    alloc.debug_set_cursor(0, 4);
+    // #16011: no PAT cursor to spend; the other three ports stay
+    // occupied, so the released port is the only PAT-claimable offset.
 
     // --- Mode flip: `port deterministic` removed. The allocator is
     // reused (same key), deterministic sessions drain. Release ONE
@@ -121,7 +118,7 @@ fn det_release_after_flip_is_reclaimable_14625() {
     let reclaimed = pat_claim(&alloc, 50_000);
     assert_eq!(
         reclaimed,
-        Ok(20000),
+        Ok(released_port),
         "a deterministic port freed after a deterministic->PAT flip must be \
          reclaimable by PAT; a clear bit that claim() cannot reach is stranded \
          capacity (#14625)"
@@ -135,13 +132,13 @@ fn det_release_after_flip_is_reclaimable_14625() {
     let pat_flow = flow(50_000, Ipv4Addr::new(8, 8, 8, 8));
     let pat_tuple = super::allocator::TranslatedTuple {
         ip: IpAddr::V4(POOL),
-        port: 20000,
+        port: released_port,
     };
     assert!(alloc.release_flow(pat_flow, pat_tuple, 3_000, NatHolder::Untracked));
     let control = pat_claim(&alloc, 50_001);
     assert_eq!(
         control,
-        Ok(20000),
+        Ok(released_port),
         "PAT control: a PAT port freed through the recycle path must be \
          reclaimable through the FIFO, unchanged by #14625"
     );
@@ -153,16 +150,13 @@ fn pat_control_recycles_without_flip_14625() {
     // reclaim returns the freed port. This must pass before and after.
     let alloc = PortAllocator::new(1, PORT_LOW, PORT_HIGH);
     let first = pat_claim(&alloc, 60_000).expect("first PAT claim");
-    assert_eq!(first, 20000);
+    assert!((PORT_LOW..=PORT_HIGH).contains(&first), "#16011: first PAT port in range, got {first}");
     let f = flow(60_000, Ipv4Addr::new(8, 8, 8, 8));
     let t = super::allocator::TranslatedTuple {
         ip: IpAddr::V4(POOL),
         port: first,
     };
     assert!(alloc.release_flow(f, t, 2_000, NatHolder::Untracked));
-    // Cursor has only advanced by one, so the next claim takes a fresh
-    // port -- that is the pre-existing PAT behaviour, pinned here so the
-    // flip test's cursor-spent fixture is not confused with it.
     let second = pat_claim(&alloc, 60_001).expect("second PAT claim");
-    assert_eq!(second, 20001);
+    assert!((PORT_LOW..=PORT_HIGH).contains(&second), "#16011: second keyed claim in range, got {second}");
 }

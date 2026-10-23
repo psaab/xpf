@@ -1,5 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
 
+* NAT PAT port allocation is no longer predictable (#16011,
+    RFC 6056): pool PAT claims, the interface-mode PAT walk and the
+    stateless try-next-port path now start from a keyed hash of the
+    flow tuple under a per-boot secret drawn from the OS CSPRNG, with
+    a bounded fail-closed probe; the monotonic sequential cursor is
+    removed. Deterministic CGNAT block allocation keeps its
+    documented lowest-free-in-block contract, and freed-port recycle
+    remains FIFO-queued.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Screen: tolerant bad numerics no longer zero syn-flood subfields or
     limit-session (#16006, A3-M3). A bad syn-flood
     alarm/source/destination-threshold or timeout now keeps its Junos

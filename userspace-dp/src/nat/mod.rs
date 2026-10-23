@@ -40,13 +40,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod allocator;
+mod destination;
 #[cfg(test)]
 pub(crate) mod gap_barrier_11478;
-mod destination;
 // #8121: idle persistent-NAT lease export/import — the population session
 // sync provably cannot reach (a lease with zero flows has no session).
 mod idle_lease_sync_8121;
-pub(crate) use idle_lease_sync_8121::{DeterministicPortedIdentity, DisplayLeaseRecord, IdleLeaseImport, IdleLeaseRecord};
+pub(crate) use idle_lease_sync_8121::{
+    DeterministicPortedIdentity, DisplayLeaseRecord, IdleLeaseImport, IdleLeaseRecord,
+};
 // #6751 PR 2/3: the node-lifetime interface-mode translated-identity registry.
 mod iface_registry;
 mod source;
@@ -98,12 +100,6 @@ pub(crate) fn normalize_nat_prefix_len(s: &str) -> String {
 
 // (#4409, pure code motion); each is a `#[path]` child module of `nat`.
 #[cfg(test)]
-#[path = "tests_source.rs"]
-mod tests_source;
-#[cfg(test)]
-#[path = "tests_static.rs"]
-mod tests_static;
-#[cfg(test)]
 #[path = "tests_destination.rs"]
 mod tests_destination;
 #[cfg(test)]
@@ -121,19 +117,37 @@ mod tests_persistent_admission_8447;
 #[cfg(test)]
 #[path = "tests_pool.rs"]
 mod tests_pool;
+#[cfg(test)]
+#[path = "tests_source.rs"]
+mod tests_source;
+#[cfg(test)]
+#[path = "tests_static.rs"]
+mod tests_static;
 // #7560 residual: the derived report gate (nat64 omitted a field from its own).
 #[cfg(test)]
 mod tests_reseed_report_gate_7560;
 // #7481: the Rust half of the shared NAT match-prefix corpus differential.
 #[cfg(test)]
-#[path = "tests_prefix_corpus_7481.rs"]
-mod tests_prefix_corpus_7481;
+#[path = "tests_aggregate_budget.rs"]
+mod tests_aggregate_budget;
+#[cfg(test)]
+#[path = "tests_counter.rs"]
+mod tests_counter;
+#[cfg(test)]
+#[path = "tests_dnat_proto.rs"]
+mod tests_dnat_proto;
 #[cfg(test)]
 #[path = "tests_iface.rs"]
 mod tests_iface;
 #[cfg(test)]
+#[path = "tests_iface_pool_drain_7717.rs"]
+mod tests_iface_pool_drain_7717;
+#[cfg(test)]
 #[path = "tests_iface_pool_overlap_7717.rs"]
 mod tests_iface_pool_overlap_7717;
+#[cfg(test)]
+#[path = "tests_l4_match.rs"]
+mod tests_l4_match;
 #[cfg(test)]
 #[path = "tests_pool_overlap_6979.rs"]
 mod tests_pool_overlap_6979;
@@ -144,23 +158,11 @@ mod tests_pool_overlap_8115;
 #[path = "tests_pool_shared_notrans_pat_10190.rs"]
 mod tests_pool_shared_notrans_pat_10190;
 #[cfg(test)]
-#[path = "tests_iface_pool_drain_7717.rs"]
-mod tests_iface_pool_drain_7717;
-#[cfg(test)]
-#[path = "tests_counter.rs"]
-mod tests_counter;
-#[cfg(test)]
-#[path = "tests_dnat_proto.rs"]
-mod tests_dnat_proto;
+#[path = "tests_prefix_corpus_7481.rs"]
+mod tests_prefix_corpus_7481;
 #[cfg(test)]
 #[path = "tests_scope.rs"]
 mod tests_scope;
-#[cfg(test)]
-#[path = "tests_l4_match.rs"]
-mod tests_l4_match;
-#[cfg(test)]
-#[path = "tests_aggregate_budget.rs"]
-mod tests_aggregate_budget;
 // #15948: NAT allocator/scope regression cells (H31-01/02/03).
 #[cfg(test)]
 #[path = "tests_15948.rs"]
@@ -207,31 +209,35 @@ mod tests_addr_only_persistent_idle_14671;
 // #10018: PersistentSourceKey must include routing scope so overlapping
 // subscribers in different VRFs cannot share a persistent NAT lease.
 #[cfg(test)]
+#[path = "tests_persistent_inbound_reader_15936.rs"]
+mod tests_persistent_inbound_reader_15936;
+#[cfg(test)]
+#[path = "tests_persistent_nonzone_15133.rs"]
+mod tests_persistent_nonzone_15133;
+#[cfg(test)]
 #[path = "tests_persistent_scope_10018.rs"]
 mod tests_persistent_scope_10018;
 #[cfg(test)]
 #[path = "tests_persistent_zone_14322.rs"]
 mod tests_persistent_zone_14322;
 #[cfg(test)]
-#[path = "tests_persistent_nonzone_15133.rs"]
-mod tests_persistent_nonzone_15133;
-#[cfg(test)]
 #[path = "tests_synced_persistent_zones_15676.rs"]
 mod tests_synced_persistent_zones_15676;
+// #16011: RFC 6056 keyed PAT port selection.
 #[cfg(test)]
-#[path = "tests_persistent_inbound_reader_15936.rs"]
-mod tests_persistent_inbound_reader_15936;
+#[path = "tests_16011.rs"]
+mod tests_16011;
 // #9874: authored-but-empty source-NAT match poison (fail-closed drop).
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]
 mod tests_empty_match_poison_9874;
 // #15110: persistent siblings must carry as lease joins on a pool reseed.
 #[cfg(test)]
-#[path = "tests_reseed_persistent_siblings_15110.rs"]
-mod tests_reseed_persistent_siblings_15110;
-#[cfg(test)]
 #[path = "tests_flowless_index_15116.rs"]
 mod tests_flowless_index_15116;
+#[cfg(test)]
+#[path = "tests_reseed_persistent_siblings_15110.rs"]
+mod tests_reseed_persistent_siblings_15110;
 // #15790 (G33-01): multi-port same-external-IP static NAT must keep
 // every port key in the `dnat_by_dst` index (entry-extend, not
 // insert), and the `snat` / `nat_local_match_possible` probes must be
@@ -286,52 +292,75 @@ pub(crate) struct NatScopeCtx<'a> {
     pub(crate) routing_domain: u32,
 }
 
+#[cfg(test)]
+pub(crate) use allocator::PersistentLeaseDebugState;
+pub(crate) use allocator::allocator_capacity;
 pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentSourceKey,
     PortAllocator, PortAllocatorSnapshot, SourceNatReservationSnapshot, deterministic_indices_v4,
     sticky_pool_index,
 };
-#[cfg(test)]
-pub(crate) use allocator::PersistentLeaseDebugState;
 pub(crate) use destination::{DnatKey, DnatLookup, DnatTable, DnatValue};
 pub(crate) use iface_registry::{
-    conflicts_with_local_control_tuple, INTERFACE_SNAT_IDENTITY_EXHAUSTION,
-    INTERFACE_SNAT_PAT_COLLISIONS, INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION,
-    INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS, InterfaceNatAllocators,
+    INTERFACE_SNAT_IDENTITY_EXHAUSTION, INTERFACE_SNAT_PAT_COLLISIONS,
+    INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION, INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS,
+    InterfaceNatAllocators, conflicts_with_local_control_tuple,
 };
-pub(crate) use allocator::allocator_capacity;
 pub(crate) use source::{
     MAX_POOL_PREFIX_HOSTS,
+    PersistentNatPermit,
     // #8115 R3: the peer index type, the allocator-level query, and the
     // cross-feature wiring pass NAT64 needs.
-    PoolAddressOwners, nat64_refuse_if_interface_owns, nat64_refuse_if_peer_owns, nat64_refuse_if_static_owns,
-    peer_owns_identity_in, static_owns_wire_identity,
-    sync_interface_overlap_peers, wire_nat64_overlap_peers, wire_static_overlap_peers, PersistentNatPermit,
-    SourceNatFailure, SourceNatFailureReason, SourceNatFlowKey, SourceNatLookup, SourceNatRule,
+    PoolAddressOwners,
+    SourceNatFailure,
+    SourceNatFailureReason,
+    SourceNatFlowKey,
+    SourceNatLookup,
+    SourceNatRule,
+    SyncedNatZones,
+    SyncedSourceNatDomains,
+    allocate_nat64_pool_port,
+    allocate_nat64_pool_port_deterministic_v6,
     flowless_source_nat_rule_possible,
-    SyncedNatZones, SyncedSourceNatDomains, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
-    match_source_nat_result_for_tuple, match_source_nat_result_for_tuple_with_icmp,
+    match_source_nat_result_for_tuple,
+    match_source_nat_result_for_tuple_with_icmp,
+    nat64_refuse_if_interface_owns,
+    nat64_refuse_if_peer_owns,
+    nat64_refuse_if_static_owns,
     parse_source_nat_rules,
-    parse_source_nat_rules_with_previous, release_nat64_pool_port,
+    parse_source_nat_rules_with_previous,
+    peer_owns_identity_in,
+    release_nat64_pool_port,
     release_persistent_inbound_for_session,
-    release_source_nat_allocation_for_worker, release_synced_source_nat_allocation_untracked,
-    reserve_nat64_pool_port, reserve_nat64_pool_port_capture_and_replace,
+    release_source_nat_allocation_for_worker,
+    release_synced_source_nat_allocation_untracked,
+    reserve_nat64_pool_port,
+    reserve_nat64_pool_port_capture_and_replace,
     reserve_synced_source_nat_allocation_for_worker,
     // #6600: the coordinator's pre-publish reservation and its rollback. NOT
     // test-only, unlike the untracked entry points below — these are the
     // production import path.
     reserve_synced_source_nat_allocation_untracked,
-    reserve_synced_source_nat_allocation_untracked_with_holder_snapshot, retained_pool_index_map,
+    reserve_synced_source_nat_allocation_untracked_with_holder_snapshot,
+    retained_pool_index_map,
     retained_pool_index_map_v4,
-    rollback_persistent_inbound_for_session, rollback_source_nat_allocation_for_worker,
+    rollback_persistent_inbound_for_session,
+    rollback_source_nat_allocation_for_worker,
+    static_owns_wire_identity,
+    sync_interface_overlap_peers,
+    wire_nat64_overlap_peers,
+    wire_static_overlap_peers,
 };
 // #6211 F2: test-only untracked entry points (see their doc comments).
 // #9902 review: the address-only `match_source_nat*` wrappers allocate
 // Untracked, so they ride the same gate — a production caller would silently
 // mint single-holder allocations.
 pub(crate) use source::retire_worker_from_pool_rules;
-pub(crate) use source::{candidate_source_nat_translations, source_nat_translation_matches, source_nat_tuple_translation_possible};
+pub(crate) use source::{
+    candidate_source_nat_translations, source_nat_translation_matches,
+    source_nat_tuple_translation_possible,
+};
 #[cfg(test)]
 pub(crate) use source::{
     match_source_nat, match_source_nat_result, release_source_nat_allocation,
@@ -708,8 +737,6 @@ impl NatCounterStore {
     /// #4718: aggregate parse/validation failure count across all NAT builders.
     #[cfg(test)]
     pub(crate) fn parse_errors(&self) -> u64 {
-        self.source_parse_errors()
-            + self.destination_parse_errors()
-            + self.static_parse_errors()
+        self.source_parse_errors() + self.destination_parse_errors() + self.static_parse_errors()
     }
 }
