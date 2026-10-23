@@ -185,6 +185,13 @@ pub(super) fn enqueue_deny_reply(
     false
 }
 
+/// #16007: never synthesize a reply for a tiny first fragment whose TCP
+/// flags are unknown; the stamped flags/seq bytes are not proven TCP
+/// header fields, and the admission drop must remain a silent drop.
+/// The caller passes the COMPUTED `meta_l4_flags_unknown` verdict (shim
+/// bit OR worker frame re-derivation), not the raw meta bit: with an
+/// old shim the bit is always 0, so testing the bit alone would let
+/// the exact frame this guard exists for queue a RST.
 /// #11304: synthesize Junos `tcp-rst` for a non-SYN TCP transit session miss.
 /// Called from the strict-SYN fail-closed branch, before the packet is recycled;
 /// unlike a policy `reject`, this emits no policy-deny event or reject counter.
@@ -203,9 +210,11 @@ pub(super) fn enqueue_session_miss_rst(
     flow: &SessionFlow,
     counters: &mut BatchCounters,
     from_zone_id: u16,
+    tcp_flags_unknown: bool,
 ) -> bool {
     if meta.protocol != PROTO_TCP
         || flow.forward_key.protocol != PROTO_TCP
+        || tcp_flags_unknown
         || crate::tcp_flags::has_syn(meta.tcp_flags)
         || crate::tcp_flags::has_rst(meta.tcp_flags)
         || !forwarding.zone_tcp_rst_enabled(from_zone_id)

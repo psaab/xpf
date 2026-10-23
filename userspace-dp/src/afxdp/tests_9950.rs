@@ -1997,6 +1997,7 @@ fn f035_enforcement_order_armed_screen_9950() {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: 0x10, // ACK: benign.
+        tcp_flags_unknown: false,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 33333,
@@ -2024,6 +2025,7 @@ fn f035_enforcement_order_armed_screen_9950() {
     // the TCP-flag screens never see them.
     let tail = ScreenPacketInfo {
         tcp_flags: 0x03, // SYN|FIN smuggled in the overlapping bytes.
+        tcp_flags_unknown: false,
         is_first_fragment: false,
         ip_frag_off: 0x0001,
         ..base.clone()

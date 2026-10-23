@@ -1730,3 +1730,6 @@ mod tests_13084_ipv6_wg_pad;
 #[cfg(test)]
 #[path = "tests_14129_chained_frag.rs"]
 mod tests_14129_chained_frag;
+#[cfg(test)]
+#[path = "tests_16007_tiny_frag.rs"]
+mod tests_16007_tiny_frag;

@@ -49,6 +49,14 @@ pub(super) fn check_tcp_flag_screens(
     if pkt.is_fragment && !pkt.is_first_fragment {
         return None;
     }
+    // #16007 defense in depth: flags UNKNOWN (tiny first fragment) must
+    // never be read as a proven flag set — neither to fire `syn-frag`
+    // on a SYN nobody saw, nor to false-fire `no-flag` on tf==0. The
+    // extractor already fails closed on this shape, so this only binds
+    // hand-built packets (and any future extractor caller that forgets).
+    if pkt.tcp_flags_unknown && pkt.is_first_fragment {
+        return Some("syn-frag");
+    }
     let tf = pkt.tcp_flags;
 
     if profile.syn_fin && (tf & TCP_SYN) != 0 && (tf & TCP_FIN) != 0 {

@@ -7064,3 +7064,77 @@ fn stage_ipsec_ambiguous_scope_parity_16047() {
         "FIXTURE: V1 co-moved stamp must classify Ambiguous"
     );
 }
+
+/// #16007 decisive regression: an 8-byte first fragment (MF=1, offset=0,
+/// declared L4 = 8B so the TCP flags byte at L4+13 is outside the
+/// declared datagram, with a SYN hiding in capture slack). It carries a
+/// real flow (ports inside the declared end), so it takes the FLOW
+/// screen path — where before the fix flags=0 was read as proven:
+/// syn-frag could not fire. Now the extractor fails closed and the live
+/// stage drops it. The offset-1 second fragment is flowless and legal,
+/// so it passes the same syn-frag-only profile.
+fn tiny_first_fragment_frame_16007() -> Vec<u8> {
+    let mut frame = ipv4_fragment_frame(0x2000, PROTO_TCP, 8);
+    let l4 = 14 + 20;
+    frame[l4..l4 + 2].copy_from_slice(&12345u16.to_be_bytes());
+    frame[l4 + 2..l4 + 4].copy_from_slice(&443u16.to_be_bytes());
+    frame.resize(frame.len() + 12, 0);
+    frame[l4 + 12] = 0x50;
+    frame[l4 + 13] = 0x02; // SYN in capture slack only
+    frame
+}
+
+#[test]
+fn tiny_first_fragment_dropped_by_live_screen_stage_16007() {
+    let frame = tiny_first_fragment_frame_16007();
+    let mut meta = ipv4_fragment_meta(&frame, PROTO_TCP);
+    meta.tcp_flags_unknown = 1;
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        forward_key: crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+            src_port: 12345,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        ScreenProfile {
+            syn_frag: true,
+            ..ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+    let (dropped, drops) = run_stage_screen(&mut screen, &frame, meta, Some(&flow));
+    assert!(
+        dropped && drops == 1,
+        "#16007: tiny first fragment must drop at live screen stage"
+    );
+    // Control: legal offset-1 second fragment passes syn-frag-only profile.
+    let frame2 = ipv4_fragment_frame(0x2001, PROTO_TCP, 8);
+    let meta2 = ipv4_fragment_meta(&frame2, PROTO_TCP);
+    let mut profiles2 = FxHashMap::default();
+    profiles2.insert(
+        "lan".to_string(),
+        ScreenProfile {
+            syn_frag: true,
+            ..ScreenProfile::default()
+        },
+    );
+    let mut screen2 = ScreenState::new();
+    screen2.update_profiles(profiles2);
+    let (dropped2, drops2) = run_stage_screen(&mut screen2, &frame2, meta2, None);
+    assert!(
+        !dropped2 && drops2 == 0,
+        "#16007 control: legal second fragment passes syn-frag-only profile"
+    );
+}
+

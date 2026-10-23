@@ -53,6 +53,7 @@ fn tcp_pkt(src: IpAddr, dst: IpAddr, src_port: u16, dst_port: u16, flags: u8) ->
         },
         protocol: PROTO_TCP,
         tcp_flags: flags,
+        tcp_flags_unknown: false,
         src_ip: src,
         dst_ip: dst,
         src_port,
@@ -85,6 +86,7 @@ fn icmp_pkt(src: IpAddr, dst: IpAddr, pkt_len: u16) -> ScreenPacketInfo {
         },
         protocol: proto,
         tcp_flags: 0,
+        tcp_flags_unknown: false,
         src_ip: src,
         dst_ip: dst,
         src_port: 0,
@@ -113,6 +115,7 @@ fn udp_pkt(src: IpAddr, dst: IpAddr) -> ScreenPacketInfo {
         },
         protocol: PROTO_UDP,
         tcp_flags: 0,
+        tcp_flags_unknown: false,
         src_ip: src,
         dst_ip: dst,
         src_port: 5000,
@@ -429,6 +432,7 @@ fn ipv4_fragment(
         addr_family: libc::AF_INET as u8,
         protocol,
         tcp_flags: 0,
+        tcp_flags_unknown: false,
         src_ip: src,
         dst_ip: dst,
         src_port: 0,
@@ -570,6 +574,7 @@ fn ipv6_fragment(
         addr_family: libc::AF_INET6 as u8,
         protocol,
         tcp_flags: 0,
+        tcp_flags_unknown: false,
         src_ip: src,
         dst_ip: dst,
         src_port: 0,
@@ -705,6 +710,7 @@ fn teardrop_drops() {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_ACK, // use ACK to avoid no-flag check
+        tcp_flags_unknown: false,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
         src_port: 1234,
@@ -736,6 +742,7 @@ fn teardrop_first_fragment_illegal_payload_drops_16030() {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: 0,
+        tcp_flags_unknown: false,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
         src_port: 1234,
@@ -5829,7 +5836,12 @@ fn extract_info_from_ipv4_frame() {
     frame[20] = 0x20; // flags=MF, offset=0
     frame[21] = 0x00;
 
-    let info = extract_screen_info(
+    // #16007: total_len=20 declares ZERO L4 bytes on an MF first
+    // fragment, so the TCP flags byte is outside the declared datagram
+    // even though the caller stamped TCP_SYN. This is no longer a
+    // parseable "valid IPv4 frame" for screen purposes: it must fail
+    // closed as syn-frag rather than trust the stamped SYN.
+    let err = extract_screen_info(
         &frame,
         libc::AF_INET as u8,
         PROTO_TCP,
@@ -5841,12 +5853,10 @@ fn extract_info_from_ipv4_frame() {
         80,
         14,
     )
-    .expect("valid IPv4 frame parses");
+    .expect_err("header-only MF first fragment must fail closed");
 
-    assert_eq!(info.ip_ihl, 5);
-    assert_eq!(info.ip_total_len, 20);
-    assert!(info.is_fragment); // MF bit set
-    assert_eq!(info.protocol, PROTO_TCP);
+    assert_eq!(err, ScreenParseError::TinyFirstFragmentFlagsUnknown);
+    assert_eq!(err.screen_reason(), "syn-frag");
 }
 
 // ================================================================
@@ -6642,6 +6652,7 @@ fn flowless_icmp_pkt(src: IpAddr, dst: IpAddr) -> ScreenPacketInfo {
         addr_family: af,
         protocol: proto,
         tcp_flags: 0,
+        tcp_flags_unknown: false,
         src_ip: src,
         dst_ip: dst,
         src_port: 0,
@@ -6673,6 +6684,7 @@ fn flowless_nonfirst_fragment(src: IpAddr, dst: IpAddr, protocol: u8) -> ScreenP
         addr_family: libc::AF_INET as u8,
         protocol,
         tcp_flags: 0,
+        tcp_flags_unknown: false,
         src_ip: src,
         dst_ip: dst,
         src_port: 0,

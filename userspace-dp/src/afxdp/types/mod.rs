@@ -628,7 +628,10 @@ pub(super) struct UserspaceDpMeta {
     pub(super) meta_flags: u8,
     pub(super) dscp: u8,
     pub(super) dscp_rewrite: u8,
-    pub(super) reserved: u16,
+    /// #16007: 1 when `tcp_flags` is UNKNOWN (tiny first fragment whose
+    /// declared datagram ends before the flags byte at L4+13); 0 = proven.
+    pub(super) tcp_flags_unknown: u8,
+    pub(super) reserved: u8,
     pub(super) flow_src_port: u16,
     pub(super) flow_dst_port: u16,
     pub(super) flow_src_addr: [u8; 16],
@@ -648,6 +651,7 @@ const _: [(); 20] = [(); std::mem::offset_of!(UserspaceDpMeta, ingress_zone)];
 const _: [(); 24] = [(); std::mem::offset_of!(UserspaceDpMeta, routing_table)];
 const _: [(); 36] = [(); std::mem::offset_of!(UserspaceDpMeta, addr_family)];
 const _: [(); 40] = [(); std::mem::offset_of!(UserspaceDpMeta, dscp)];
+const _: [(); 42] = [(); std::mem::offset_of!(UserspaceDpMeta, tcp_flags_unknown)];
 const _: [(); 80] = [(); std::mem::offset_of!(UserspaceDpMeta, config_generation)];
 
 #[repr(C)]
@@ -787,6 +791,7 @@ impl From<ForwardPacketMeta> for UserspaceDpMeta {
             meta_flags: meta.meta_flags,
             dscp: meta.dscp,
             dscp_rewrite: 0,
+            tcp_flags_unknown: 0,
             reserved: 0,
             flow_src_port: meta.flow_src_port,
             flow_dst_port: meta.flow_dst_port,

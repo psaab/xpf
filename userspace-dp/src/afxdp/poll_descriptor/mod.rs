@@ -5634,26 +5634,46 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // mid-stream ACK/data, while strict-syn-check
                         // overrides it. `tcp-rst` answers only non-SYN misses
                         // dropped here; an inbound RST is never answered.
-                        // Counted in the aggregate `screen_drops` flow-statistics
-                        // tally (no per-reason ordinal — that array mirrors the
-                        // Junos SCREEN checks, and this is a flow tcp-session
-                        // control; it joins the syn-cookie / icmp-fragment
-                        // aggregate-only class). No per-packet event is emitted:
-                        // a non-SYN session-miss flood must not become a log
-                        // storm.
+                        // Proven non-SYN drops are counted as
+                        // `strict-syn-check` in the aggregate `screen_drops`
+                        // tally. A #16007 flags-unknown drop instead uses
+                        // the existing `syn-frag` per-reason counter: the
+                        // packet is a first fragment whose unseen flags are
+                        // precisely the syn-frag screen's subject, so
+                        // fallback admission (when stage 10 did not drop
+                        // it first) must not hide it in the strict-SYN tally.
+                        // No per-packet event is emitted: a non-SYN
+                        // session-miss flood must not become a log storm.
                         // #10729 X2-F6: evaluate the SYN gate on the flowless
                         // effective protocol — a v6+AH non-SYN must not be
                         // dropped as a TCP miss (it is flowless proto 51, and
                         // v4+AH never reaches this gate as TCP).
                         let syn_protocol =
                             crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
-                        if matches!(
+                        // #16007: a tiny first fragment's flags are UNKNOWN,
+                        // so it fails closed on LocalDelivery too — the one
+                        // disposition the proven-flags gate exempts. A proven
+                        // non-SYN LocalDelivery packet still reaches the
+                        // local stack (peer RST/FIN for firewall-originated
+                        // flows); an unseen-flags fragment is not proven
+                        // anything, and delivering it would hand the kernel
+                        // a first fragment whose SYN lives only in the
+                        // reassembled datagram. Scoped to UNKNOWN only, so
+                        // the deliberate LocalDelivery exemption is intact
+                        // for every packet whose flags were actually read.
+                        let tcp_flags_unknown =
+                            crate::afxdp::icmp::meta_l4_flags_unknown(packet_frame, meta);
+                        if (matches!(
                             decision.resolution.disposition,
                             ForwardingDisposition::ForwardCandidate
                                 | ForwardingDisposition::MissingNeighbor
-                        ) && strict_syn_check_drops_new_flow_tunnel(
+                        ) || (tcp_flags_unknown
+                            && decision.resolution.disposition
+                                == ForwardingDisposition::LocalDelivery))
+                            && strict_syn_check_drops_new_flow_tunnel(
                             syn_protocol,
                             meta.tcp_flags,
+                            tcp_flags_unknown,
                             worker_ctx.forwarding.tcp_no_syn_check,
                             worker_ctx.forwarding.tcp_strict_syn_check,
                             worker_ctx.forwarding.tcp_no_syn_check_in_tunnel,
@@ -5671,9 +5691,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow,
                                 telemetry.counters,
                                 from_zone_id,
+                                tcp_flags_unknown,
                             );
                             telemetry.counters.record_screen_drop(
-                                "strict-syn-check",
+                                if tcp_flags_unknown {
+                                    "syn-frag"
+                                } else {
+                                    "strict-syn-check"
+                                },
                                 from_zone_id,
                                 &worker_ctx.forwarding.flood_counter_slot_map,
                             );
@@ -5943,6 +5968,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 resolution,
                                 meta.protocol,
                                 meta.tcp_flags,
+                                crate::afxdp::icmp::meta_l4_flags_unknown(packet_frame, meta),
                             )
                             && !(flow.forward_key.protocol == PROTO_UDP
                                 && crate::afxdp::wg::decap::is_wg_listener_tuple(

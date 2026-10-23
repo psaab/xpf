@@ -17,13 +17,22 @@ use super::*;
 pub(in crate::afxdp) static LOCAL_DELIVERY_IFINDEX0: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// #16007: `tcp_flags_unknown` declines to cache — an unseen flags byte
+/// is not a proven initial SYN, so no helper-local session may be seeded
+/// off a tiny first fragment. The packet itself is still delivered to
+/// the local stack (declining to cache never drops); only the screen /
+/// admission drop in `poll_descriptor` stops the fragment outright.
 pub(in crate::afxdp) fn should_cache_local_delivery_session_on_miss(
     state: &ForwardingState,
     resolution_target: IpAddr,
     resolution: ForwardingResolution,
     protocol: u8,
     tcp_flags: u8,
+    tcp_flags_unknown: bool,
 ) -> bool {
+    if tcp_flags_unknown && matches!(protocol, PROTO_TCP) {
+        return false;
+    }
     if resolution.disposition != ForwardingDisposition::LocalDelivery {
         return false;
     }

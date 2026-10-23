@@ -1279,6 +1279,81 @@ fn deny_reply_zone_tcp_rst_policy_deny_is_silent_11304() {
     assert!(pipeline.pending_tx_local.is_empty());
 }
 
+/// #16007: a flags-unknown tiny first fragment must not be answered
+/// with a synthesized RST: its stamped flags/seq are not proven TCP
+/// header fields. The verdict passed in is the COMPUTED predicate
+/// (shim bit OR frame re-derivation), so both stamp generations are
+/// covered: (a) new shim, bit set; (b) old shim, bit always 0 but the
+/// frame itself declares a tiny first fragment — the regression this
+/// fold closes, where the bit-only guard queued a RST. The
+/// known-flags controls still reply.
+#[test]
+fn session_miss_rst_unknown_flags_is_silent_16007() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_tcp_rst.insert(5, true);
+
+    // (a) New shim: bit set, computed verdict true.
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    frame[47] = 0x10;
+    meta.tcp_flags = 0x10;
+    meta.tcp_flags_unknown = 1;
+    assert!(crate::afxdp::icmp::meta_l4_flags_unknown(&frame, meta));
+    let mut pipeline = tx_pipeline(SYN_COOKIE_REPLY_PENDING_RESERVE * 2, SYN_COOKIE_REPLY_PENDING_RESERVE + 1);
+    let mut counters = BatchCounters::default();
+    let sent = enqueue_session_miss_rst(
+        &mut pipeline, &forwarding, None, 5, &frame, meta, &flow, &mut counters, 5, true,
+    );
+    assert!(!sent, "#16007(a): shim-bit unknown must not get a RST reply");
+    assert!(pipeline.pending_tx_local.is_empty());
+    assert_eq!(counters.policy_reject_sent, 0);
+
+    // (b) Old shim: bit 0, but the FRAME is an 8-byte first fragment
+    // (MF=1/offset 0, declared total_len covers only 8 L4 bytes; a SYN
+    // sits in capture slack at TCP+13). The frame-derived verdict must
+    // be true and the reply must stay silent. Pre-fold this queued a
+    // RST because the guard read only meta.tcp_flags_unknown.
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    // Turn the fixture into an MF first fragment declaring 20+8 bytes.
+    frame[14 + 6] = 0x20; // MF=1, offset=0
+    frame[14 + 7] = 0x00;
+    frame[14 + 2..14 + 4].copy_from_slice(&28u16.to_be_bytes()); // total_len = 20 IP + 8 L4
+    frame[47] = 0x02; // SYN visible only in slack past declared end
+    meta.tcp_flags = 0;
+    meta.tcp_flags_unknown = 0; // old shim never sets the bit
+    meta.pkt_len = frame.len() as u16;
+    let computed = crate::afxdp::icmp::meta_l4_flags_unknown(&frame, meta);
+    assert!(computed, "#16007(b): frame-derived verdict must see the tiny first fragment");
+    let mut pipeline = tx_pipeline(SYN_COOKIE_REPLY_PENDING_RESERVE * 2, SYN_COOKIE_REPLY_PENDING_RESERVE + 1);
+    let mut counters = BatchCounters::default();
+    let sent = enqueue_session_miss_rst(
+        &mut pipeline, &forwarding, None, 5, &frame, meta, &flow, &mut counters, 5, computed,
+    );
+    assert!(!sent, "#16007(b): old-shim frame-derived unknown must not get a RST reply");
+    assert!(pipeline.pending_tx_local.is_empty());
+    assert_eq!(counters.policy_reject_sent, 0);
+
+    // (c) Control: same unfragmented packet, known flags — computed
+    // verdict false and the RST reply is still enqueued.
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    frame[47] = 0x10;
+    meta.tcp_flags = 0x10;
+    meta.tcp_flags_unknown = 0;
+    let computed = crate::afxdp::icmp::meta_l4_flags_unknown(&frame, meta);
+    assert!(!computed, "control: unfragmented ACK has known flags");
+    let mut pipeline = tx_pipeline(SYN_COOKIE_REPLY_PENDING_RESERVE * 2, SYN_COOKIE_REPLY_PENDING_RESERVE + 1);
+    let mut counters = BatchCounters::default();
+    let sent = enqueue_session_miss_rst(
+        &mut pipeline, &forwarding, None, 5, &frame, meta, &flow, &mut counters, 5, computed,
+    );
+    assert!(sent, "control: known non-SYN miss must still get tcp-rst reply");
+}
+
 /// #11304: a plain TCP `deny` stays silent when no ingress zone has
 /// `tcp-rst` enabled; explicit `then reject` remains an active reply.
 #[test]

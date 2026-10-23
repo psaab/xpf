@@ -28,6 +28,12 @@ pub(crate) struct ScreenPacketInfo {
     pub dst_ip: IpAddr,
     pub src_port: u16, // host byte order
     pub dst_port: u16, // host byte order
+    /// #16007: the TCP flags byte lies outside this packet's declared
+    /// datagram (tiny first fragment), so `tcp_flags == 0` is UNKNOWN.
+    /// Flag screens and SYN-flood/cookie logic must fail closed, never
+    /// read the zero as "no flags set" (which would also false-fire
+    /// `no-flag` on a packet whose flags were never seen).
+    pub tcp_flags_unknown: bool,
     pub tcp_seq: u32,
     pub tcp_ack: u32,
     pub tcp_mss: u16,
@@ -230,6 +236,15 @@ pub(crate) enum ScreenParseError {
     /// zone it drops as `ip-malformed` before reaching the session /
     /// policy path, so the forward is never on the screened path.
     MultipleIpv6FragmentHeaders,
+    /// #16007: a TCP FIRST fragment whose declared datagram ends before
+    /// the TCP flags byte (L4+14) — e.g. the minimum legal 8-byte first
+    /// fragment. Its flags are UNKNOWN, so `syn-frag` cannot be judged
+    /// and neither can the SYN-flood / SYN-cookie gates keyed on the
+    /// same byte. Fail closed like the other unparseable shapes; the
+    /// reason is `syn-frag` because a first fragment with unseen flags
+    /// is exactly the fragmentation shape that screen exists for, and
+    /// operators counting it must not see it folded into `ip-malformed`.
+    TinyFirstFragmentFlagsUnknown,
 }
 
 impl ScreenParseError {
@@ -245,6 +260,7 @@ impl ScreenParseError {
             ScreenParseError::TruncatedIpv6ExtChain => "ip-malformed",
             ScreenParseError::TruncatedIpv4Header => "ip-malformed",
             ScreenParseError::MultipleIpv6FragmentHeaders => "ip-malformed",
+            ScreenParseError::TinyFirstFragmentFlagsUnknown => "syn-frag",
         }
     }
 }

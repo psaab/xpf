@@ -415,7 +415,7 @@ mod tcp_syn_check_tests {
         no_syn_check: bool,
         strict_syn_check: bool,
     ) -> bool {
-        if strict_syn_check_drops_new_flow(PROTO_TCP, flags, no_syn_check, strict_syn_check) {
+        if strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, no_syn_check, strict_syn_check) {
             return false;
         }
         table.install_with_protocol_with_origin(
@@ -443,7 +443,7 @@ mod tcp_syn_check_tests {
             TCP_RST | TCP_ACK,
         ] {
             assert!(
-                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false),
+                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false, false),
                 "non-SYN TCP flags 0x{flags:02x} must drop on a default-policy miss"
             );
         }
@@ -452,11 +452,11 @@ mod tcp_syn_check_tests {
         // routing, but closing SYNs must never seed an immediately-closing
         // session.
         assert!(!strict_syn_check_drops_new_flow(
-            PROTO_TCP, TCP_SYN, false, false
+            PROTO_TCP, TCP_SYN, false, false, false
         ));
         assert!(!strict_syn_check_drops_new_flow(
             PROTO_TCP,
-            TCP_SYN | TCP_ACK,
+            TCP_SYN | TCP_ACK, false,
             false,
             false
         ));
@@ -467,7 +467,7 @@ mod tcp_syn_check_tests {
             TCP_SYN | TCP_ACK | TCP_RST,
         ] {
             assert!(
-                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false),
+                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false, false),
                 "closing SYN flags 0x{flags:02x} must drop"
             );
         }
@@ -478,7 +478,7 @@ mod tcp_syn_check_tests {
         let mut table = SessionTable::new();
         for (port, flags) in [(40400, TCP_ACK), (40401, TCP_ACK | TCP_PSH)] {
             assert!(
-                !strict_syn_check_drops_new_flow(PROTO_TCP, flags, true, false),
+                !strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, true, false),
                 "no-syn-check must admit non-closing TCP flags 0x{flags:02x}"
             );
             assert!(
@@ -494,7 +494,7 @@ mod tcp_syn_check_tests {
             (40405, TCP_FIN | TCP_ACK),
         ] {
             assert!(strict_syn_check_drops_new_flow(
-                PROTO_TCP, flags, true, false
+                PROTO_TCP, flags, false, true, false
             ));
             assert!(
                 !install_on_miss_with_checks(&mut table, tcp_key(port), flags, true, false),
@@ -504,7 +504,7 @@ mod tcp_syn_check_tests {
         // Explicit strict mode has precedence if both knobs are configured.
         assert!(strict_syn_check_drops_new_flow(
             PROTO_TCP,
-            TCP_ACK | TCP_PSH,
+            TCP_ACK | TCP_PSH, false,
             true,
             true
         ));
@@ -518,11 +518,11 @@ mod tcp_syn_check_tests {
     #[test]
     fn tunnel_no_syn_check_admits_only_tunnel_midstream_15753() {
         // Tunnel ACK admitted only when is_tunnel && knob set.
-        assert!(!strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, true, true));
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, true, false), "non-tunnel must still drop");
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, true), "tunnel without knob drops");
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, true, true, true), "strict overrides tunnel opt-out");
-        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_RST, false, false, true, true), "closing tunnel still drops");
+        assert!(!strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, true, true));
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, true, false), "non-tunnel must still drop");
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, false, false, true), "tunnel without knob drops");
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_ACK, false, false, true, true, true), "strict overrides tunnel opt-out");
+        assert!(strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, TCP_RST, false, false, false, true, true), "closing tunnel still drops");
     }
 
     #[test]
@@ -711,7 +711,7 @@ mod tcp_syn_check_tests {
                 assert!(
                     !strict_syn_check_drops_new_flow(
                         crate::ip_proto::PROTO_AH,
-                        flags,
+                        flags, false,
                         no_syn,
                         strict
                     ),
@@ -721,3 +721,34 @@ mod tcp_syn_check_tests {
         }
     }
 }
+
+/// #16007: flags-UNKNOWN fails closed in every admission mode.
+#[cfg(test)]
+mod tiny_frag_flags_unknown_tests_16007 {
+    use super::super::session_admission::{
+        strict_syn_check_drops_new_flow, strict_syn_check_drops_new_flow_tunnel,
+    };
+    use crate::ip_proto::PROTO_TCP;
+    use crate::tcp_flags::{TCP_ACK, TCP_SYN};
+
+    #[test]
+    fn unknown_flags_drop_in_all_modes_16007() {
+        for (no_syn, strict) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert!(
+                strict_syn_check_drops_new_flow(PROTO_TCP, 0, true, no_syn, strict),
+                "unknown flags must drop (no_syn={no_syn} strict={strict})"
+            );
+            assert!(
+                strict_syn_check_drops_new_flow_tunnel(PROTO_TCP, 0, true, no_syn, strict, true, true),
+                "unknown flags must drop even with tunnel opt-out"
+            );
+        }
+        // Even a stamped SYN is not proven when unknown is set.
+        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN, true, true, false));
+        // Controls: known flags keep prior semantics.
+        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN, false, false, false));
+        assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_ACK, false, true, false));
+        assert!(strict_syn_check_drops_new_flow(PROTO_TCP, TCP_ACK, false, false, false));
+    }
+}
+

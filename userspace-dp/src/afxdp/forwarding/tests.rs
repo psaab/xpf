@@ -3279,7 +3279,7 @@ fn tcp_ack_session_miss_does_not_cache_interface_nat_local_delivery() {
         resolution,
         PROTO_TCP,
         0x10,
-    ));
+    false,));
 }
 
 #[test]
@@ -3298,7 +3298,7 @@ fn tcp_syn_session_miss_still_caches_interface_nat_local_delivery() {
         resolution,
         PROTO_TCP,
         0x02,
-    ));
+    false,));
 }
 
 /// #4487 (residual of P6 / #4400): a bare TCP RST / FIN on the LocalDelivery
@@ -3345,7 +3345,7 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
                 resolution,
                 PROTO_TCP,
                 0x04,
-            ),
+            false,),
             "bare RST must not seed a host-local session"
         );
         assert!(
@@ -3355,7 +3355,7 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
                 resolution,
                 PROTO_TCP,
                 0x01,
-            ),
+            false,),
             "bare FIN must not seed a host-local session"
         );
         // FIN|ACK (0x11) and RST|ACK (0x14) — already declined by the #2151
@@ -3366,14 +3366,14 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
             resolution,
             PROTO_TCP,
             0x11,
-        ));
+        false,));
         assert!(!should_cache_local_delivery_session_on_miss(
             &state,
             target.parse().expect("v4"),
             resolution,
             PROTO_TCP,
             0x14,
-        ));
+        false,));
         // PRESERVED: a bare SYN (0x02) to a firewall host service still seeds
         // the session — a legitimate inbound connection open is unaffected.
         assert!(
@@ -3383,7 +3383,7 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
                 resolution,
                 PROTO_TCP,
                 0x02,
-            ),
+            false,),
             "a SYN to a host service must still create a session"
         );
         // SYN|ACK remains valid for a firewall-originated flow, but adding
@@ -3393,8 +3393,8 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
             target.parse().expect("v4"),
             resolution,
             PROTO_TCP,
-            0x12
-        ));
+            0x12,
+        false,));
         for flags in [0x13, 0x16, 0x17] {
             assert!(
                 !should_cache_local_delivery_session_on_miss(
@@ -3403,7 +3403,7 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
                     resolution,
                     PROTO_TCP,
                     flags,
-                ),
+                false,),
                 "closing SYN flags 0x{flags:02x} must not seed a host-local session"
             );
         }
@@ -3425,7 +3425,7 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
         transit,
         PROTO_TCP,
         0x02,
-    ));
+    false,));
 }
 
 /// #4539 (gate-consistency hardening; subsumes #2151 + #4487): the
@@ -3478,7 +3478,7 @@ fn non_handshake_tcp_session_miss_does_not_cache_local_delivery() {
                     resolution,
                     PROTO_TCP,
                     flags,
-                ),
+                false,),
                 "non-handshake first packet ({label}, 0x{flags:02x}) must not seed a host-local session"
             );
         }
@@ -3492,7 +3492,7 @@ fn non_handshake_tcp_session_miss_does_not_cache_local_delivery() {
                     resolution,
                     PROTO_TCP,
                     flags,
-                ),
+                false,),
                 "a handshake first packet ({label}, 0x{flags:02x}) must still seed a session"
             );
         }
@@ -3510,7 +3510,7 @@ fn non_handshake_tcp_session_miss_does_not_cache_local_delivery() {
                     resolution,
                     PROTO_TCP,
                     flags,
-                ),
+                false,),
                 "{label} (0x{flags:02x}) must remain declined"
             );
         }
@@ -3527,7 +3527,7 @@ fn non_handshake_tcp_session_miss_does_not_cache_local_delivery() {
                         resolution,
                         proto,
                         flags,
-                    ),
+                    false,),
                     "non-TCP proto {proto} LocalDelivery must cache regardless of the tcp_flags byte (0x{flags:02x})"
                 );
             }
@@ -3631,7 +3631,7 @@ fn tcp_ack_session_miss_does_not_cache_ingress_local_delivery() {
         resolution,
         PROTO_TCP,
         0x10,
-    ));
+    false,));
 }
 
 #[test]
@@ -3651,7 +3651,7 @@ fn tcp_syn_session_miss_still_caches_ingress_local_delivery() {
         resolution,
         PROTO_TCP,
         0x02,
-    ));
+    false,));
 }
 
 #[test]
@@ -11768,3 +11768,43 @@ fn nat_only_vip_in_connected_subnet_keeps_ifindex0_15966r() {
     assert_eq!(r.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(r.local_ifindex, 0, "NAT-only VIP in a connected subnet must keep ifindex 0");
 }
+
+#[test]
+fn unknown_flags_never_cache_local_delivery_16007() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let resolution = interface_nat_local_resolution_on_session_miss(
+        &state,
+        "172.16.80.8".parse().expect("v4"),
+        PROTO_TCP,
+        None,
+    )
+    .expect("tcp nat local delivery");
+    // A stamped SYN with unknown flags is not a proven SYN.
+    assert!(!should_cache_local_delivery_session_on_miss(
+        &state,
+        "172.16.80.8".parse().expect("v4"),
+        resolution,
+        PROTO_TCP,
+        0x02,
+        true,
+    ));
+    // Control: proven SYN still caches.
+    assert!(should_cache_local_delivery_session_on_miss(
+        &state,
+        "172.16.80.8".parse().expect("v4"),
+        resolution,
+        PROTO_TCP,
+        0x02,
+        false,
+    ));
+    // Non-TCP unaffected by unknown (gate is TCP-only).
+    assert!(should_cache_local_delivery_session_on_miss(
+        &state,
+        "172.16.80.8".parse().expect("v4"),
+        resolution,
+        17,
+        0,
+        true,
+    ));
+}
+
