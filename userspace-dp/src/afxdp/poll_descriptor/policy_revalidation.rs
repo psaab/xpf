@@ -1277,8 +1277,18 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // Scope-independent translations (no rewrite, NAT64) and rows that DO
     // record a scope are judged normally below, so a withdrawn/rescoped
     // rule still revokes whenever a scope was actually recorded.
-    let scope_dependent =
-        forward_decision.nat.rewrite_src.is_some() || forward_decision.nat.rewrite_dst.is_some();
+    // #15948 (H32-04): NAT64 and NPTv6 are judged by their own
+    // prefix/geometry validators below, not by interface scope, so a
+    // rewrite alone must not classify them scope-dependent — but only
+    // for fabric rows, the population manufactured with no scope.
+    // Non-fabric identity-less rows (legacy peer / HA import) keep the
+    // pre-existing exemption: their NPTv6 type bit does not survive
+    // the HA wire, so they are indistinguishable from plain SNAT and
+    // the NAT64 validator's own legacy arm handles them.
+    let scope_dependent = (!forward_decision.nat.nat64 && !forward_decision.nat.nptv6
+        || !forward_metadata.fabric_ingress)
+        && (forward_decision.nat.rewrite_src.is_some()
+            || forward_decision.nat.rewrite_dst.is_some());
     // Only rows whose ingress identity is structurally absent (fabric
     // (0,0) stamp or identity-less import) get the keep; locally-authored
     // rows have a derivable scope and are judged normally.

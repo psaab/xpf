@@ -60,6 +60,7 @@ use super::allocator::{
     PersistentPermissionScope, PersistentPermissions, PersistentSourceKey, PortAllocator,
     TranslatedTuple,
 };
+use super::source::SourceNatFlowKey;
 use std::sync::LazyLock;
 
 static EMPTY_PERMISSION_SCOPE: LazyLock<PersistentPermissionScope> = LazyLock::new(PersistentPermissionScope::default);
@@ -412,13 +413,113 @@ impl PortAllocator {
                         );
                     }
                 }
-                let current = live.persistent_permissions.entry(key).or_default();
-                let total = current.scopes.values().map(|g| g.remotes.len()).sum::<usize>();
-                let bucket = current.scopes.entry(rec.egress_scope).or_default();
-                let additions = rec.permitted_remotes.iter().filter(|r| !bucket.remotes.contains(r)).count();
-                if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
-                    bucket.any_remote |= rec.permit_any_remote;
-                    bucket.remotes.extend(rec.permitted_remotes.iter().copied());
+                // #15948 (H31-02): merge through the same contention +
+                // owner-count discipline as the fresh path. Check the
+                // incoming grants against OTHER leases first; a
+                // contended merge must not mutate permissions or counts.
+                let translated = TranslatedTuple {
+                    ip: rec.translated_ip,
+                    port: rec.translated_port,
+                };
+                let merge_busy = if rec.permit_any_remote {
+                    if rec.address_only {
+                        live.import_idle_address_only_contended(rec.protocol, translated, None)
+                    } else {
+                        live.import_idle_pat_address_only_contended(rec.protocol, translated, None)
+                    }
+                } else {
+                    rec.permitted_remotes.iter().any(|remote| {
+                        if rec.address_only {
+                            live.import_idle_address_only_contended(
+                                rec.protocol,
+                                translated,
+                                Some(*remote),
+                            )
+                        } else {
+                            live.import_idle_pat_address_only_contended(
+                                rec.protocol,
+                                translated,
+                                Some(*remote),
+                            )
+                        }
+                    })
+                };
+                // The existing lease's own idle grants are already in the
+                // counts map; contention against ITSELF is not busy. Only
+                // refuse when another lease/flow owns the identity: the
+                // helper above cannot exclude self, so re-check via the
+                // scoped predicate when this lease is address-only idle.
+                let merge_busy = merge_busy
+                    && !(existing.address_only
+                        && existing.active_flows == 0
+                        && existing.inbound_flows == 0
+                        && !rec.permitted_remotes.iter().any(|remote| {
+                            let f = SourceNatFlowKey {
+                                protocol: rec.protocol,
+                                src_ip: rec.src_ip,
+                                dst_ip: remote.0,
+                                src_port: rec.src_port,
+                                dst_port: remote.1,
+                                routing_scope: rec.routing_scope,
+                            };
+                            live.persistent_address_only_contended_except(
+                                &f,
+                                translated,
+                                Some(key),
+                            )
+                        }));
+                if merge_busy && !(existing.address_only && existing.active_flows == 0) {
+                    return IdleLeaseImport::SkippedIdentityBusy;
+                }
+                if merge_busy && existing.address_only {
+                    // For address-only, contended_except is authoritative:
+                    // busy only if it says so for some incoming remote.
+                    let busy = rec.permit_any_remote
+                        || rec.permitted_remotes.iter().any(|remote| {
+                            let f = SourceNatFlowKey {
+                                protocol: rec.protocol,
+                                src_ip: rec.src_ip,
+                                dst_ip: remote.0,
+                                src_port: rec.src_port,
+                                dst_port: remote.1,
+                                routing_scope: rec.routing_scope,
+                            };
+                            live.persistent_address_only_contended_except(
+                                &f,
+                                translated,
+                                Some(key),
+                            )
+                        });
+                    if busy {
+                        return IdleLeaseImport::SkippedIdentityBusy;
+                    }
+                }
+                let before_keys = if existing.address_only && !existing.revoked {
+                    live.persistent_address_only_owner_keys(&key, &existing)
+                } else {
+                    Vec::new()
+                };
+                {
+                    let current = live.persistent_permissions.entry(key).or_default();
+                    let total = current.scopes.values().map(|g| g.remotes.len()).sum::<usize>();
+                    let bucket = current.scopes.entry(rec.egress_scope).or_default();
+                    let additions = rec
+                        .permitted_remotes
+                        .iter()
+                        .filter(|r| !bucket.remotes.contains(r))
+                        .count();
+                    if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
+                        bucket.any_remote |= rec.permit_any_remote;
+                        bucket.remotes.extend(rec.permitted_remotes.iter().copied());
+                    }
+                }
+                if existing.address_only && !existing.revoked {
+                    let after_keys = live.persistent_address_only_owner_keys(&key, &existing);
+                    for owner_key in after_keys {
+                        if !before_keys.contains(&owner_key) {
+                            live.increment_persistent_address_only_owner(owner_key);
+                        }
+                    }
                 }
             }
             return IdleLeaseImport::SkippedExisting;

@@ -3005,3 +3005,49 @@ fn nat64_15956_extent_migrates_with_buffer_across_threads() {
     assert_eq!(len, cap, "extended on owner thread without re-fill");
     let _ = fills;
 }
+
+/// #15948 (H33-03): NAT64 builders must clamp TCP MSS to the configured
+/// all-tcp ceiling in both directions. A v6 SYN with MSS 1440 under
+/// all-tcp 1300 must emerge as a v4 SYN with MSS 1300; the v4 SYN-ACK
+/// reply path (MSS 1460) must emerge as v6 with MSS 1300.
+#[test]
+fn nat64_mss_clamped_both_directions_15948() {
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let forwarding = ForwardingState {
+        tcp_mss_all_tcp: 1300,
+        ..ForwardingState::default()
+    };
+    // Forward: v6 SYN (MSS 1440) -> v4.
+    let syn = build_ipv6_tcp_syn_with_mss(client, synthetic, 40000, 443, 1440);
+    let fwd_nat = Nat64State::forward_decision(pool, server, 40001);
+    let built = build_nat64_forwarded_frame(
+        &syn,
+        nat64_forward_meta(),
+        &icmp_test_decision(fwd_nat),
+        None,
+        false,
+        &forwarding,
+    )
+    .expect("NAT64 forward SYN must build");
+    assert_eq!(built_ipv4_mss(&built), 1300, "forward NAT64 SYN MSS must clamp 1440 -> 1300");
+    assert!(tcp_checksum_ok_ipv4(&built[14..]), "clamped forward checksum valid");
+    // Reverse: v4 SYN-ACK (MSS 1460) -> v6.
+    let mut synack = build_ipv4_tcp_syn_with_mss(server, pool, 443, 40001, 1460);
+    // build_ipv4_tcp_syn_with_mss emits SYN only; add ACK bit for realism.
+    synack[14 + 20 + 13] = crate::tcp_flags::TCP_SYN | crate::tcp_flags::TCP_ACK;
+    let rev_nat = fwd_nat.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 40000, 443);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let rbuilt = build_nat64_forwarded_frame(
+        &synack,
+        nat64_reverse_meta(),
+        &icmp_test_decision(rev_nat),
+        Some(&info),
+        false,
+        &forwarding,
+    )
+    .expect("NAT64 reverse SYN-ACK must build");
+    assert_eq!(built_ipv6_mss(&rbuilt), 1300, "reverse NAT64 SYN-ACK MSS must clamp 1460 -> 1300");
+}

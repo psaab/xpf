@@ -2399,6 +2399,7 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         TEST_WAN_ZONE_ID,
         11,
         50,
+        None,
         true,
         decision,
         None,

@@ -751,7 +751,7 @@ struct ReverseIdentityHostKey {
 /// Scoped keys for idle address-only persistent leases. Unlike live reverse
 /// owners, these leases have no flow entry to index them.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum PersistentAddressOnlyOwnerKey {
+pub(super) enum PersistentAddressOnlyOwnerKey {
     Exact(AddressOnlyReverseKey),
     Host(ReverseIdentityHostKey),
     HostWildcard(ReverseIdentityHostKey),
@@ -953,7 +953,7 @@ impl PortAllocatorLiveState {
         }
     }
 
-    fn increment_persistent_address_only_owner(&mut self, key: PersistentAddressOnlyOwnerKey) {
+    pub(super) fn increment_persistent_address_only_owner(&mut self, key: PersistentAddressOnlyOwnerKey) {
         let count = self
             .persistent_address_only_owner_counts
             .entry(key)
@@ -971,7 +971,7 @@ impl PortAllocatorLiveState {
         }
     }
 
-    fn persistent_address_only_owner_keys(&self, key: &PersistentSourceKey, lease: &PersistentLease) -> Vec<PersistentAddressOnlyOwnerKey> {
+    pub(super) fn persistent_address_only_owner_keys(&self, key: &PersistentSourceKey, lease: &PersistentLease) -> Vec<PersistentAddressOnlyOwnerKey> {
         if !lease.address_only || lease.revoked { return Vec::new(); }
         // #14322: derive from stored permission buckets; key.remote is always None.
         let base = ReverseIdentityBaseKey { protocol: key.protocol, translated_ip: lease.translated.ip, translated_port: lease.translated.port };
@@ -1155,7 +1155,7 @@ impl PortAllocatorLiveState {
     /// any remote. Live leases are excluded — their flows hold live
     /// `address_only_owners` tokens the caller checks exactly. The
     /// candidate's own lease never blocks its rejoin.
-    fn persistent_address_only_contended_except(
+    pub(super) fn persistent_address_only_contended_except(
         &self,
         flow: &SourceNatFlowKey,
         translated: TranslatedTuple,
@@ -4109,7 +4109,15 @@ impl PortAllocator {
                                 promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
                             }
                             slot.active_flows = slot.active_flows.saturating_add(1);
-                            slot.expires_at_ns = now_ns.saturating_add(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+                            // #15948 (H31-03): an already-active lease is
+                            // not in the idle-expiry index, so its expiry
+                            // must not move without re-keying. Only the
+                            // idle->active transition (index entry just
+                            // removed above) may refresh it.
+                            if was_idle {
+                                slot.expires_at_ns =
+                                    now_ns.saturating_add(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
+                            }
                         }
                         live.live_by_flow.insert(flow, LiveAllocation { translated: lease.translated, persistent_key: Some(bib_key), addr_index: ip_idx, deterministic: true, address_only: false, promotion_timeout_ns, holders: holder.bit() });
                         live.record_pat_owner(&flow, lease.translated);
@@ -4269,7 +4277,10 @@ impl PortAllocator {
                     holders: holder.bit(),
                 },
             );
-            Self::insert_lease_expiration_locked(&mut live, ip_idx, expires_at_ns, bib_key);
+            // #15948 (H31-03): a freshly minted BIB is ACTIVE
+            // (active_flows=1); it must not enter the idle-expiry index.
+            // release/rollback re-arms the index when the last flow
+            // completes, exactly as the sibling PAT/persistent mints do.
             live.record_pat_owner(&flow, translated);
             self.shared
                 .allocations_total
@@ -6728,11 +6739,14 @@ impl SourceNatReservationSnapshot {
             }
         }
         let mut live = self.allocator.lock_live();
-        let Some(current) = live.live_by_flow.get(&self.flow).copied() else {
-            return false;
-        };
-        if current.translated != replacement {
-            return false;
+        // #15948 (H31-01): after a sole-holder rollback_flow the flow
+        // entry is already unlinked, so absence is the expected
+        // sole-holder shape, not a refusal. A present entry must still
+        // name the replacement; a different tuple means retaken.
+        if let Some(current) = live.live_by_flow.get(&self.flow).copied() {
+            if current.translated != replacement {
+                return false;
+            }
         }
         if let Some((key, previous_lease_rec)) = previous_lease {
             let Some(cur_lease) = live.persistent_by_source.get(&key).copied() else {
@@ -6759,9 +6773,12 @@ impl SourceNatReservationSnapshot {
             let _ = now_ns;
             return true;
         }
-        if live.live_by_flow.contains_key(&self.flow) {
-            return false;
-        }
+        // #15948 (H31-01): the caller rolled the replacement back before
+        // calling here, so for a sole-holder replacement live_by_flow no
+        // longer names it — the non-persistent tail below is exactly the
+        // arm that must run. The pre-lock check above already refused a
+        // retaken occupancy bit; a still-present entry here can only be
+        // the not-yet-unlinked replacement, which this tail replaces.
         if owns_old_bit
             && !self
                 .allocator

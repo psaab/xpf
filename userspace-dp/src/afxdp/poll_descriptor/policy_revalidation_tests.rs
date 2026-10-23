@@ -6943,3 +6943,114 @@ fn prefix_group_config_order_discriminators_15934() {
         "prefix translate-first (stored = first) must survive (#15934 GLM8)"
     );
 }
+
+/// #15948 (H32-04): a fabric NAT64 session with no recorded scope must
+/// still be judged by NAT64 geometry — withdrawing the geometry revokes
+/// even though nat_scope_ifindex is None. Pre-fix scope_dependent
+/// classified every NAT64 rewrite scope-dependent and kept it forever.
+#[test]
+fn fabric_nat64_scopeless_revoked_when_geometry_withdrawn_15948() {
+    use std::net::Ipv6Addr;
+    let sub: Ipv6Addr = "2001:db8:0:5::".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+    let pool_ip = Ipv4Addr::new(198, 51, 100, 1);
+    let key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: IpAddr::V6(sub),
+        dst_ip: IpAddr::V6(dst),
+        src_port: 40001,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: crate::nat::NatDecision {
+            rewrite_src: Some(IpAddr::V4(pool_ip)),
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            rewrite_src_port: Some(4000),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: true,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: true,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        forward_ingress_vlan_id: None,
+        nat_scope_ifindex: None,
+    };
+    let flow = SessionFlow { src_ip: key.src_ip, dst_ip: key.dst_ip, forward_key: key.clone() };
+    let run = |nat64: crate::nat64::Nat64State| {
+        let mut forwarding = ForwardingState::default();
+        forwarding.nat64 = nat64;
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            metadata.clone(),
+            SessionOrigin::SyncImport,
+            1_000_000,
+            6,
+            0x02,
+        ));
+        sessions.set_forwarding_revalidation_gen(2, 2);
+        source_nat_revocation_on_session_hit(
+            &forwarding,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            SessionOrigin::SyncImport,
+            None,
+            None,
+            1_000_000_000,
+            None,
+        )
+    };
+    let live = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+        name: "n64-15948".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["198.51.100.1".to_string()],
+        ..Default::default()
+    }]);
+    assert!(run(live).is_none(), "live NAT64 geometry must survive");
+    let withdrawn = crate::nat64::Nat64State::from_snapshots(&[]);
+    assert!(
+        run(withdrawn).is_some(),
+        "#15948: withdrawn NAT64 geometry must revoke a scopeless fabric session"
+    );
+}

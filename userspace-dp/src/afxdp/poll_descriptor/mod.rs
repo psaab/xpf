@@ -11829,6 +11829,48 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // never probe-loops a denied flow. Buffer-and-translate
                                 // parity (zero cold-start loss) is a deferred follow-up.
                                 if nat64_dst_v4.is_some() {
+                                    // #15948 (H36-02): the fail-closed
+                                    // drop must still trigger resolution
+                                    // of the v4 egress hop, throttled
+                                    // per (neigh_if, next_hop) exactly
+                                    // like the early sites, or no actor
+                                    // ever probes and every packet repeats
+                                    // this no-op. The throttle record
+                                    // above already bounds the window;
+                                    // fire only when it admits.
+                                    if let Some(next_hop) = decision.resolution.next_hop {
+                                        let key = (neigh_if, next_hop);
+                                        if !binding.pending_neigh.contains_key(&key)
+                                            && !probe_throttled(
+                                                &binding.resolver_enqueue_throttle,
+                                                &key,
+                                                now_ns,
+                                            )
+                                        {
+                                            if let Some(resolver) = worker_ctx.neighbor_resolver {
+                                                try_enqueue_resolver(
+                                                    resolver,
+                                                    &mut binding.resolver_enqueue_throttle,
+                                                    &worker_ctx.forwarding.ifindex_to_name,
+                                                    key,
+                                                    now_ns,
+                                                );
+                                            }
+                                            if let Some(name) = worker_ctx
+                                                .forwarding
+                                                .ifindex_to_name
+                                                .get(&neigh_if)
+                                                .map(String::as_str)
+                                            {
+                                                if trigger_kernel_arp_probe(name, neigh_if, next_hop) {
+                                                    worker_ctx.dynamic_neighbors.record_neighbor_probe(
+                                                        key,
+                                                        monotonic_nanos(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
                                     telemetry.dbg.nat64_missing_neigh_drop += 1;
                                     break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                 }
@@ -12083,6 +12125,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // record where the flow actually arrived.
                                         meta.ingress_ifindex,
                                         meta.ingress_vlan_id,
+                                        ingress_nat_scope_ifindex,
                                         packet_fabric_ingress,
                                         pending_decision,
                                         // #10267: preserve the policy-matched
