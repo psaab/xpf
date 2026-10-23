@@ -1039,6 +1039,23 @@ starve session installs. All seed/read errors are fail-open (logged + counted
 by the daemon; serving is never blocked). Test seams:
 `SetLeaseSyncSeamsForTesting` injects a stub dialer + paths.
 
+**Control-socket peer verification (#16058).** The lease-sync client dials
+Kea's control socket by pathname, so pathname alone cannot authenticate
+the server: a wrong/squatted server on that path would otherwise be trusted
+as Kea, and sanitization cannot authenticate the wrong server — fabricated
+leases would flow into HA lease sync (and lease-add commands would flow
+out). `defaultKeaDialer` therefore verifies `SO_PEERCRED` on every connect,
+before a single command byte is written: the peer uid must be the resolved
+Kea runtime user (`_kea`/`kea`, the #2450 lookup), root, or this daemon's
+own euid (mirroring the reinject fix #16052 and the helper-socket check
+#9003); any other peer — and any connection whose credentials cannot be
+read — is refused with `errUntrustedKeaPeer` and the exchange falls back
+to the memfile. `WaitControlSocket{4,6}` re-verifies for custom dialers so
+a connectable squatter is never reported Kea-ready. The decision
+(`keaPeerTrustErrorAs`) is split from the syscall shell (`readKeaPeerUID`)
+so the hostile foreign-uid arm is testable unprivileged; see
+`lease_sync_peercred_16058_test.go`.
+
 **Cluster enablement fixes (#4647, found via the #2261 live smoke).** The
 memfile loader itself was correct; two bugs in the surrounding daemon-side
 enablement plumbing (`pkg/daemon`) meant the feature never engaged with the
