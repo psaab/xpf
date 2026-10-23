@@ -48,6 +48,10 @@ xpf (0.0.0) unstable; urgency=medium
     tracking for v9+IPFIX with counter-fed timeout export, RG ownership via
     RethRGOwners, per-interface sampling fail-closed/alias fixes, degraded
     NDP/PASS_TO_KERNEL/WG parity, and build-time-zero ifindex retention.
+    Fold (#16303): one sampling decision per flow at SESSION_OPEN via a
+    single fanout callback, SESSION_CREATE egress-interface attribution,
+    service-based timeout wired at TCP close-window callsites, and the
+    v67 protocol-wire fixture/specimen updated.
 
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per

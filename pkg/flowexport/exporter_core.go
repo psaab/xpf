@@ -34,6 +34,7 @@ package flowexport
 // copy per flow unnoticed.
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +66,14 @@ type exporterCore struct {
 	// tracker enforces active/inactive timeouts (#15655); nil means
 	// close-only export.
 	tracker *FlowTracker
+	// sampledFlows remembers flows selected at SESSION_OPEN when this
+	// exporter has no active/inactive tracker (tracker == nil). Without
+	// it, a close-only exporter could not distinguish "open was sampled"
+	// from "open was not sampled" without consuming a second 1-in-N slot
+	// at close. Keys are deleted on close, so the set is bounded by live
+	// sampled sessions for this exporter.
+	sampledMu    sync.Mutex
+	sampledFlows map[FlowKey]struct{}
 
 	batch flowBatch
 	conns *collectorConns
@@ -251,11 +260,45 @@ func (c *exporterCore) CollectorHealth() []CollectorHealth {
 // Close shuts down all collector connections.
 func (c *exporterCore) Close() { c.conns.close() }
 
-// CloseFlow forgets a tracked flow on real session close (#15655).
-func (c *exporterCore) CloseFlow(key FlowKey) {
+// CloseFlow forgets a flow on real session close (#15655) and reports
+// whether it had been selected at open. The boolean is the close-side
+// sampling decision: callers must not consume another 1-in-N slot for a
+// flow whose open already made the instance's one decision.
+func (c *exporterCore) CloseFlow(key FlowKey) bool {
+	tracked := false
 	if c.tracker != nil {
-		c.tracker.Close(key)
+		tracked = c.tracker.Close(key)
 	}
+	c.sampledMu.Lock()
+	_, sampled := c.sampledFlows[key]
+	if sampled {
+		delete(c.sampledFlows, key)
+	}
+	c.sampledMu.Unlock()
+	return tracked || sampled
+}
+
+// MarkFlowSampledAtOpen records that the instance's single sampling
+// decision selected this flow at SESSION_OPEN. Tracked flows already
+// carry that fact in the tracker; close-only exporters use this set.
+func (c *exporterCore) MarkFlowSampledAtOpen(key FlowKey) {
+	if c.tracker != nil {
+		return
+	}
+	c.sampledMu.Lock()
+	if c.sampledFlows == nil {
+		c.sampledFlows = make(map[FlowKey]struct{})
+	}
+	c.sampledFlows[key] = struct{}{}
+	c.sampledMu.Unlock()
+}
+
+// ForgetFlowSampledAtOpen drops an open-side selection without treating
+// it as a close export decision (used when an exporter is retired).
+func (c *exporterCore) ForgetFlowSampledAtOpen(key FlowKey) {
+	c.sampledMu.Lock()
+	delete(c.sampledFlows, key)
+	c.sampledMu.Unlock()
 }
 
 // TrackFlowOpen registers a flow for active/inactive tracking (#15655);
@@ -280,10 +323,14 @@ func (c *exporterCore) TouchFlow(key FlowKey, now time.Time, packets, bytes uint
 	}
 }
 
-// Tracked reports whether key is currently tracked.
+// Tracked reports whether key is currently tracked or was selected at
+// open by a close-only exporter.
 func (c *exporterCore) Tracked(key FlowKey) bool {
-	if c.tracker == nil {
-		return false
+	if c.tracker != nil && c.tracker.Has(key) {
+		return true
 	}
-	return c.tracker.Has(key)
+	c.sampledMu.Lock()
+	_, ok := c.sampledFlows[key]
+	c.sampledMu.Unlock()
+	return ok
 }

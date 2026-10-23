@@ -785,7 +785,7 @@ impl SessionTable {
                     // #7342: CLOSING vs TIME_WAIT is decided by the FIN-direction
                     // pair this entry has accumulated, through the one shared
                     // formula.
-                    tcp_close_window_ns(entry.tcp_close_class(), &timeouts)
+                    tcp_close_window_for_entry(entry, &timeouts)
                 } else {
                     // #3227/#10889: re-apply the per-app idle timeout on every
                     // refresh only after the protocol's promotion gate opens.
@@ -955,7 +955,7 @@ impl SessionTable {
                 return;
             }
             entry.last_seen_ns = now_ns;
-            entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
+            entry.expires_after_ns = tcp_close_window_for_entry(entry, &timeouts);
             (
                 record.key.clone(),
                 TcpStatePropagation {

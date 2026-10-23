@@ -113,7 +113,7 @@ func TestSessionCloseSingleInstanceMultiFamilyDoesNotCrossFan_6811(t *testing.T)
 		}
 	}
 
-	// Feed an IPv4 SESSION_CLOSE.
+	// Feed an IPv4 SESSION_OPEN then its SESSION_CLOSE.
 	payload := buildSessionCloseRawEventV4(
 		6, // TCP
 		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200},
@@ -121,9 +121,7 @@ func TestSessionCloseSingleInstanceMultiFamilyDoesNotCrossFan_6811(t *testing.T)
 		[4]byte{172, 16, 80, 8}, 40000,
 		2, 3, // trust -> untrust
 	)
-	if !d.eventReader.ProcessRawEvent(payload) {
-		t.Fatal("ProcessRawEvent rejected a valid SESSION_CLOSE payload")
-	}
+	feedOpenThenClose15946(t, d, payload)
 
 	// The inet group MUST export it — without this the cell passes against a
 	// build that exports nothing at all, which is a silent loss of flow data

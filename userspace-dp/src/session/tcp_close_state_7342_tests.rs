@@ -8,7 +8,7 @@
 //
 // Loaded as a sibling submodule via `#[path]` from session/mod.rs.
 
-use super::tests::{install_forward_reverse_pair, key_v4, tcp_key_v6};
+use super::tests::{install_forward_reverse_pair, install_forward_reverse_pair_with_app_timeout, key_v4, tcp_key_v6};
 use super::*;
 use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST};
 
@@ -419,4 +419,88 @@ fn time_wait_state_flags_15946() {
     );
     // reset unaffected
     assert_eq!(tcp_close_window_ns(TcpCloseClass::Reset, &t), TCP_RST_TIMEOUT_NS);
+}
+
+/// #16303: service-based ageout must reach the real lookup path. Distinct
+/// windows: established 1800s (in configured()), closing 7s, TIME_WAIT
+/// 150s, app 900s. With session-ageout, TIME_WAIT reaps on the APP window
+/// (900s), not global established; with apply-to-half-closed also set,
+/// one FIN (Closing) uses the app window too. Without the flags the old
+/// windows are untouched, and RST always keeps its fixed window.
+#[test]
+fn time_wait_ageout_uses_service_timeout_through_lookup_16303() {
+    const APP_NS: u64 = 900_000_000_000;
+    for (ageout, half_closed, want_after_one_fin, want_after_two_fins) in [
+        (
+            false,
+            false,
+            CLOSING_SECS * 1_000_000_000,
+            TIME_WAIT_SECS * 1_000_000_000,
+        ),
+        (true, false, CLOSING_SECS * 1_000_000_000, APP_NS),
+        (
+            false,
+            true,
+            TIME_WAIT_SECS * 1_000_000_000,
+            TIME_WAIT_SECS * 1_000_000_000,
+        ),
+        (true, true, APP_NS, APP_NS),
+    ] {
+        let forward = key_v4();
+        let mut table = SessionTable::new();
+        let mut timeouts = configured();
+        timeouts.tcp_established_ns = 1800_000_000_000;
+        timeouts.tcp_time_wait_session_ageout = ageout;
+        timeouts.tcp_time_wait_apply_to_half_closed = half_closed;
+        table.set_timeouts(timeouts);
+        let now = 1_000_000_000u64;
+        let reverse = install_forward_reverse_pair_with_app_timeout(
+            &mut table, &forward, now, TCP_ACK, APP_NS,
+        );
+
+        assert!(table.lookup(&forward, now + 1_000_000, TCP_FIN).is_some());
+        for (label, key) in [("forward", &forward), ("reverse", &reverse)] {
+            let e = table.entry_by_key(key).expect("entry after first fin");
+            assert_eq!(
+                e.expires_after_ns, want_after_one_fin,
+                "{label}: one FIN (ageout={ageout}, half={half_closed})"
+            );
+        }
+        assert!(table.lookup(&reverse, now + 2_000_000, TCP_FIN).is_some());
+        for (label, key) in [("forward", &forward), ("reverse", &reverse)] {
+            let e = table.entry_by_key(key).expect("entry after second fin");
+            assert_eq!(
+                e.expires_after_ns, want_after_two_fins,
+                "{label}: two FINs (ageout={ageout}, half={half_closed})"
+            );
+        }
+        // RST keeps the fixed window regardless of flags.
+        assert!(table.lookup(&forward, now + 3_000_000, TCP_RST).is_some());
+        let e = table.entry_by_key(&forward).expect("entry after rst");
+        assert_eq!(
+            e.expires_after_ns, TCP_RST_TIMEOUT_NS,
+            "RST must keep its fixed window"
+        );
+    }
+
+    // GC: an ageout TIME_WAIT entry expires after the app window, not
+    // after global established. Drive well past 900s but before 1800s.
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    let mut timeouts = configured();
+    timeouts.tcp_established_ns = 1800_000_000_000;
+    timeouts.tcp_time_wait_session_ageout = true;
+    table.set_timeouts(timeouts);
+    let now = 1_000_000_000u64;
+    let reverse =
+        install_forward_reverse_pair_with_app_timeout(&mut table, &forward, now, TCP_ACK, APP_NS);
+    assert!(table.lookup(&forward, now + 1_000_000, TCP_FIN).is_some());
+    assert!(table.lookup(&reverse, now + 2_000_000, TCP_FIN).is_some());
+    let reap_ns = now + 2_000_000 + APP_NS + SESSION_GC_INTERVAL_NS_FOR_TEST + 1;
+    table.last_gc_ns = reap_ns - SESSION_GC_INTERVAL_NS_FOR_TEST;
+    let expired = table.expire_stale_entries(reap_ns);
+    assert!(
+        !expired.is_empty(),
+        "TIME_WAIT must expire on the 900s service window"
+    );
 }

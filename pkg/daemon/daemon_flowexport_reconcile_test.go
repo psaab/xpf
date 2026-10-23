@@ -195,9 +195,9 @@ func TestReconcileFlowExporterNoCallbackLeak(t *testing.T) {
 		}
 		d.reconcileFlowExporters(ipfixSamplingConfig(coll, 100))
 	}
-	// Exactly one v9 callback + one IPFIX callback.
-	if n := d.eventReader.CallbackCount(); n != 2 {
-		t.Fatalf("expected exactly 2 callbacks (v9 + ipfix), got %d — callback leak", n)
+	// Exactly one open fanout callback + one v9 callback + one IPFIX callback.
+	if n := d.eventReader.CallbackCount(); n != 3 {
+		t.Fatalf("expected exactly 3 callbacks (open + v9 + ipfix), got %d — callback leak", n)
 	}
 }
 

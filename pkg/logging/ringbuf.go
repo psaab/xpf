@@ -750,11 +750,12 @@ func (er *EventReader) logEvent(data []byte) {
 		rec.CloseReason = closeReasonName(closeReasonCode)
 	}
 
-	// #2749: the SESSION_CLOSE class-of-service / interface-attribution block
-	// rides the additive [144:152] slots. Read it ONLY on a close frame that
-	// actually carries the extended length, so a short legacy (144-byte) frame
-	// or a non-close event leaves the fields at their 0 ("unknown") default.
-	if evt.EventType == eventTypeSessionClose && len(data) >= rawEventExtSize {
+	// #2749/#16303: the class-of-service / interface-attribution block
+	// rides the additive [144:152] slots. Read it on session frames that
+	// actually carry the extended length (close always; create since
+	// #16303 stamps its egress ifindex there), so a short legacy frame
+	// leaves the fields at their 0 ("unknown") default.
+	if (evt.EventType == eventTypeSessionClose || evt.EventType == eventTypeSessionOpen) && len(data) >= rawEventExtSize {
 		rec.TOS = data[rawEventTOSOffset]
 		rec.TCPControlBits = data[rawEventTCPBitOffset]
 		rec.EgressIfindex = binary.LittleEndian.Uint32(
@@ -1162,6 +1163,12 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 			rec.EgressIfindex = binary.LittleEndian.Uint32(
 				data[rawEventEgressOffset : rawEventEgressOffset+4])
 		}
+	}
+	if evt.EventType == eventTypeSessionOpen && len(data) >= rawEventExtSize {
+		// #16303: SESSION_CREATE stamps its resolved egress ifindex in
+		// the same additive slot; ToS/flags stay close-only observations.
+		rec.EgressIfindex = binary.LittleEndian.Uint32(
+			data[rawEventEgressOffset : rawEventEgressOffset+4])
 	}
 	if evt.EventType != eventTypeSessionClose {
 		rec.SessionPkts = 0

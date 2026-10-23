@@ -573,7 +573,11 @@ type Daemon struct {
 	flowHash    [32]byte
 	flowHashSet bool
 	flowCBOnce  sync.Once
-	flowReconMu sync.Mutex
+	// #16303: the single SESSION_OPEN fanout callback. Separate from the
+	// two protocol close callbacks so an open is sampled once even when
+	// both exporter families are registered on the same EventReader.
+	flowOpenCBOnce sync.Once
+	flowReconMu    sync.Mutex
 	// #3742: last NetFlow v9 exporter build error. Set (under flowReconMu)
 	// when a reconcile's NewExporter build failed and the OLD exporters were
 	// kept running so export stayed up; cleared on the next successful

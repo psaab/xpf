@@ -1121,6 +1121,17 @@ func (ec *ExportConfig) ShouldExportIfaceDaemon(inZone, outZone uint16, isIPv6 b
 	return ec.sampleAfterEligible()
 }
 
+// SampledForOpen reports whether this instance selected a newly opened
+// flow, consuming exactly one sampling slot. It is deliberately separate
+// from ShouldExportIfaceDaemon: a close for a sampled flow must not make
+// a second sampling decision (and consume another slot) merely to export
+// the final record. Callers persist the open decision by tracking the
+// flow; CloseFlow then removes that state whether or not the close is
+// exported by the tracker path.
+func (ec *ExportConfig) SampledForOpen(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) bool {
+	return ec.ShouldExportIfaceDaemon(inZone, outZone, isIPv6, inIface, outIface)
+}
+
 // FlowDirection derives the NetFlow/IPFIX flowDirection (IE 61) for a flow
 // from the per-zone sampling-direction configuration for the flow's own
 // address family (#3270, per-family since #14608). Ingress wins ties.

@@ -167,21 +167,19 @@ func TestSessionCloseSamplingPerFamily14608(t *testing.T) {
 				}
 			})
 
-			if !d.eventReader.ProcessRawEvent(payload) {
-				t.Fatal("ProcessRawEvent rejected a valid IPv6 SESSION_CLOSE payload")
-			}
+			// #16303: sampling is decided at SESSION_OPEN. Feed the open
+			// twin first; the close then reuses that one decision.
+			feedOpenThenClose15946(t, d, payload)
 			if probe.Type != "SESSION_CLOSE" {
 				t.Fatalf("decoded record type = %q, want SESSION_CLOSE", probe.Type)
 			}
 
 			if tc.wantExport {
-				// Rate 2: first close may be sampled out; feed a second
-				// so one must land. The record fans out only to the
-				// IPv6 group (GroupIsV6), which may not be groups[0] —
-				// aggregate Stats across all groups of each bundle.
-				if !d.eventReader.ProcessRawEvent(payload) {
-					t.Fatal("ProcessRawEvent rejected second IPv6 SESSION_CLOSE")
-				}
+				// Rate 2: the first open may be sampled out; feed a
+				// second open/close pair so one must land. The record
+				// fans out only to the IPv6 group (GroupIsV6), which may
+				// not be groups[0] — aggregate Stats across all groups.
+				feedOpenThenClose15946(t, d, payload)
 				sumV9 := func() (uint64, uint64) {
 					var f, p uint64
 					for _, g := range b.groups {
@@ -229,15 +227,14 @@ func TestSessionCloseSamplingPerFamily14608(t *testing.T) {
 							s.Instance, s.Protocol, s)
 					}
 				}
-				// Control: an IPv4 trust->untrust close at the same
-				// zones IS eligible (rate 2: second call lands), proving
+				// Control: an IPv4 trust->untrust open/close at the same
+				// zones IS eligible (rate 2: second open lands), proving
 				// the deny above is family-scoped, not zone-scoped.
 				v4 := buildSessionCloseRawEventV4(6,
 					[4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200},
 					12345, 443, [4]byte{}, 0, trust, untrust)
-				if !d.eventReader.ProcessRawEvent(v4) || !d.eventReader.ProcessRawEvent(v4) {
-					t.Fatal("ProcessRawEvent rejected IPv4 SESSION_CLOSE control")
-				}
+				feedOpenThenClose15946(t, d, v4)
+				feedOpenThenClose15946(t, d, v4)
 				if got := waitFlows(t, b.firstExp().Stats); got < 1 {
 					t.Fatalf("v9 exporter exported %d IPv4 control flows, want >= 1", got)
 				}

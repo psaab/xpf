@@ -430,6 +430,13 @@ impl EventFrame {
         policy_generation: u64,
         ingress_ifindex: u32,
         application_id: u16,
+        // #16303: the session's resolved EGRESS ifindex at admission,
+        // from the same forwarding resolution the close frame stamps.
+        // Written at the additive [144:152] block's [148:152] slot so a
+        // production SESSION_OPEN can name its output interface; without
+        // it, output-only sampled flows could never be tracked at open.
+        // A 0 keeps the "unknown egress" sentinel.
+        egress_ifindex: u32,
         // #4915: the dataplane's STABLE session id (the `SessionEntry.session_id`
         // assigned at install, threaded onto the open `SessionDelta`). Written LE
         // at [152:160] so the SESSION_CREATE record carries the SAME id its
@@ -506,6 +513,12 @@ impl EventFrame {
         // [134] close reason — 0 (a create has none).
         // [135] #2508 SYSLOG gate — #15946: reflects log_session_init.
         buf[base + 135] = if log_syslog { RT_FLOW_LOG_SYSLOG } else { 0 };
+        // #16303: [148:152] egress ifindex (LE u32) — the same additive
+        // slot the close frame stamps, so the Go decoder can resolve the
+        // open's output interface for per-interface sampling. [144:148]
+        // (ToS/flags/direction/reserved on a close) stay 0 on a create:
+        // no traffic has been observed yet.
+        buf[base + 148..base + 152].copy_from_slice(&egress_ifindex.to_le_bytes());
         // #4915: [152:160] the dataplane's stable session id (LE u64), the same
         // value the matching SESSION_CLOSE frame carries. The Go decoder reads it
         // only when the frame carries it (len >= 160).

@@ -851,6 +851,25 @@ pub(crate) fn tcp_close_window_ns(class: TcpCloseClass, timeouts: &SessionTimeou
     tcp_close_window_ns_with_app(class, timeouts, None)
 }
 
+/// #16303: production close-window entry point. Every caller that has a
+/// session entry MUST use this form so `time-wait-state session-ageout`
+/// receives the entry's service-based (per-application) inactivity
+/// timeout instead of silently falling back to the global established
+/// window. `session_timeout_ns` keeps using the no-app wrapper for its
+/// packet-flag branch: a single closing packet cannot establish
+/// TIME_WAIT, and #3227 forbids extending a closing reap from that path.
+#[inline]
+pub(crate) fn tcp_close_window_for_entry(
+    entry: &SessionEntry,
+    timeouts: &SessionTimeouts,
+) -> u64 {
+    tcp_close_window_ns_with_app(
+        entry.tcp_close_class(),
+        timeouts,
+        entry.metadata.inactivity_timeout_ns,
+    )
+}
+
 /// #15946: close window with the per-session service-based timeout.
 /// `session-ageout` makes TIME_WAIT (and, with apply-to-half-closed,
 /// CLOSING) age on the established/app window; an explicit TW
@@ -4266,7 +4285,7 @@ impl SessionTable {
                 // ONE fin.
                 entry.fin_peer |= fin;
                 entry.last_seen_ns = now_ns;
-                entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
+                entry.expires_after_ns = tcp_close_window_for_entry(entry, &timeouts);
                 rebucket = true;
             }
         }
@@ -4554,7 +4573,7 @@ impl SessionTable {
                 record.entry.syn_ack_first = false;
             }
             record.entry.expires_after_ns = if record.entry.closing {
-                tcp_close_window_ns(record.entry.tcp_close_class(), &self.timeouts)
+                tcp_close_window_for_entry(&record.entry, &self.timeouts)
             } else {
                 // #3227: a real-traffic refresh re-stamps the idle window from
                 // the (possibly updated) metadata's per-app override.

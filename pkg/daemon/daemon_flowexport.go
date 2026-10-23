@@ -20,17 +20,20 @@
 // primitive (no per-callback removal), and the same EventReader carries
 // callbacks for the trace writer too. A naive stop/start reconcile
 // would therefore leak a closure (closed over a now-closed exporter) on
-// every commit. Instead we register a single stable indirection
-// callback per family exactly once (flowCBOnce / ipfixCBOnce) that
-// reads the live (exporter, config) pair from an atomic.Pointer bundle;
-// reconcile swaps the bundle atomically. The resolved *ExportConfig is
-// held by pointer everywhere — in the bundle, by the session-close
-// callback's ShouldExport, AND inside the exporter (#2224) — so there is
-// exactly ONE live 1-in-N sampleCounter per family. ExportConfig embeds
-// that counter as an atomic.Uint64; passing it by value would copy the
-// atomic (a go-vet "copies lock value" failure) and fork the counter,
-// silently re-seeding the modulo cadence the moment any caller sampled
-// off the copy.
+// every commit. Instead we register stable indirection callbacks exactly
+// once that read the live (exporter, config) pair from atomic.Pointer
+// bundles; reconcile swaps the bundles atomically. SESSION_OPEN has its
+// own single fanout callback (#16303): EventReader invokes every
+// callback for every record, so routing opens through both protocol
+// callbacks sampled each open twice in dual-format deployments. The
+// resolved *ExportConfig is held by pointer everywhere — in the bundle,
+// by the callbacks' sampling decision, AND inside the exporter (#2224)
+// — so there is exactly ONE live 1-in-N sampleCounter per instance and
+// protocol. ExportConfig embeds that counter as an atomic.Uint64;
+// passing it by value would copy the atomic (a go-vet "copies lock
+// value" failure) and fork the counter, silently re-seeding the modulo
+// cadence the moment any caller sampled off the copy.
+
 package daemon
 
 import (
@@ -45,6 +48,17 @@ import (
 	"github.com/psaab/xpf/pkg/flowexport"
 	"github.com/psaab/xpf/pkg/logging"
 )
+
+// ensureFlowExportOpenCallback registers the single SESSION_OPEN fanout
+// callback the first time either exporter family publishes groups.
+func (d *Daemon) ensureFlowExportOpenCallback() {
+	if d == nil || d.eventReader == nil {
+		return
+	}
+	d.flowOpenCBOnce.Do(func() {
+		d.eventReader.AddCallback(d.flowExportOpenCallback)
+	})
+}
 
 // v9Group is one running NetFlow v9 template-group exporter and its
 // resolved config (#2461). One flow-server template => one group => one
@@ -284,6 +298,7 @@ func (d *Daemon) reconcileV9Exporter(cfg *config.Config) bool {
 		d.flowFailedGroups = failed
 		return true
 	}
+	d.ensureFlowExportOpenCallback()
 	d.flowCBOnce.Do(func() {
 		d.eventReader.AddCallback(d.flowExportCallback)
 	})
@@ -606,6 +621,7 @@ func (d *Daemon) reconcileIPFIXExporter(cfg *config.Config) bool {
 		d.ipfixFailedGroups = failed
 		return true
 	}
+	d.ensureFlowExportOpenCallback()
 	d.ipfixCBOnce.Do(func() {
 		d.eventReader.AddCallback(d.ipfixExportCallback)
 	})
@@ -813,11 +829,12 @@ func (d *Daemon) IPFIXExportError() error {
 // emits an instance's groups consecutively) so the shared per-instance
 // counter advances exactly once per eligible flow.
 func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
-	// #15655: track session opens so active/inactive timeouts can emit
-	// interim/final records for long-lived flows. Close handling below
-	// forgets the tracker entry (the close record itself carries totals).
+	// #16303: SESSION_OPEN sampling is owned by the single fanout
+	// callback below, not by each protocol callback. EventReader invokes
+	// every registered callback for every record, so letting both the v9
+	// and IPFIX callbacks call trackFlowOpen consumed each instance's
+	// 1-in-N counter twice in dual-format deployments.
 	if rec.Type == "SESSION_OPEN" {
-		d.trackFlowOpen(rec)
 		return
 	}
 	if rec.Type != "SESSION_CLOSE" {
@@ -857,32 +874,32 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 	i := 0
 	for i < len(b.groups) {
 		inst := b.groups[i].ec.InstanceName
-		// First group of this instance carries the shared per-instance state.
 		lead := b.groups[i].ec
-		// Determine the contiguous run of groups for this instance.
 		j := i
 		for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 			j++
 		}
-		// Family attribution then the single per-instance sampling decision.
-		eligible := lead.ServesFamily(sd.IsIPv6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
 		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
-		if eligible {
-			sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+		if lead.ServesFamily(sd.IsIPv6) {
+			// #16303: the close does not make a second sampling decision.
+			// CloseFlow reports (and forgets) the one decision made at
+			// SESSION_OPEN for this exporter. A sampled open therefore
+			// exports its close without consuming another 1-in-N slot;
+			// an unsampled/absent open exports nothing.
+			sampled := false
 			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
-					continue
+				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 && b.groups[k].exp.CloseFlow(key) {
+					sampled = true
 				}
-				// #15946: feed cumulative counters before close forgets.
-				b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
-				b.groups[k].exp.ExportSessionClose(rec, sd)
-				b.groups[k].exp.CloseFlow(key)
 			}
-		} else {
-			// #15946: unsampled close still forgets its (sampled) open.
-			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 {
-					b.groups[k].exp.CloseFlow(key)
+			if sampled {
+				sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+				for k := i; k < j; k++ {
+					if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
+						continue
+					}
+					b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
+					b.groups[k].exp.ExportSessionClose(rec, sd)
 				}
 			}
 		}
@@ -890,10 +907,22 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 	}
 }
 
+// flowExportOpenCallback is the ONLY EventReader callback that consumes
+// SESSION_OPEN sampling decisions. It is registered once when the first
+// exporter family starts (see ensureFlowExportOpenCallback) and fans the
+// record to whichever v9/IPFIX bundles are currently published. Keeping
+// opens out of both protocol callbacks prevents dual-format deployments
+// from evaluating (and counting) the same open twice.
+func (d *Daemon) flowExportOpenCallback(rec logging.EventRecord, raw []byte) {
+	if rec.Type != "SESSION_OPEN" {
+		return
+	}
+	d.trackFlowOpen(rec)
+}
+
 // ipfixExportCallback is the IPFIX equivalent of flowExportCallback.
 func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 	if rec.Type == "SESSION_OPEN" {
-		d.trackFlowOpen(rec)
 		return
 	}
 	if rec.Type != "SESSION_CLOSE" {
@@ -935,22 +964,22 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 		for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 			j++
 		}
-		eligible := lead.ServesFamily(sd.IsIPv6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
 		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
-		if eligible {
-			sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+		if lead.ServesFamily(sd.IsIPv6) {
+			sampled := false
 			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
-					continue
+				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 && b.groups[k].exp.CloseFlow(key) {
+					sampled = true
 				}
-				b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
-				b.groups[k].exp.ExportSessionClose(rec, sd)
-				b.groups[k].exp.CloseFlow(key)
 			}
-		} else {
-			for k := i; k < j; k++ {
-				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 {
-					b.groups[k].exp.CloseFlow(key)
+			if sampled {
+				sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+				for k := i; k < j; k++ {
+					if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
+						continue
+					}
+					b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
+					b.groups[k].exp.ExportSessionClose(rec, sd)
 				}
 			}
 		}
@@ -958,11 +987,13 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 	}
 }
 
-// trackFlowOpen is the shared SESSION_OPEN tracker feed (#15946 H14-03/H42-03).
-// Both callbacks call it, so IPFIX-only deployments track opens (previously
-// only the v9 callback did). Opens are gated per-instance exactly as closes:
-// family + ShouldExportIface (which consumes the 1-in-N slot once per
-// instance, mirroring close). Template carries NAT/ifindex/TOS/flags.
+// trackFlowOpen is the shared SESSION_OPEN tracker feed (#15946
+// H14-03/H42-03, single-decision fold #16303). It is invoked only by
+// flowExportOpenCallback, so each published instance evaluates an open
+// exactly once regardless of how many protocol callbacks EventReader
+// also invokes. SampledForOpen consumes that one slot; the exporter
+// remembers the selection (tracker entry, or the close-only sampled
+// set) so the matching close exports without a second decision.
 func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 	srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
 	key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
@@ -989,9 +1020,10 @@ func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 				j++
 			}
-			if lead.ServesFamily(isV6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
+			if lead.ServesFamily(isV6) && lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
 				for k := i; k < j; k++ {
 					if b.groups[k].ec.GroupIsV6 == isV6 {
+						b.groups[k].exp.MarkFlowSampledAtOpen(key)
 						b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
 					}
 				}
@@ -1007,9 +1039,10 @@ func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
 			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 				j++
 			}
-			if lead.ServesFamily(isV6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
+			if lead.ServesFamily(isV6) && lead.SampledForOpen(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
 				for k := i; k < j; k++ {
 					if b.groups[k].ec.GroupIsV6 == isV6 {
+						b.groups[k].exp.MarkFlowSampledAtOpen(key)
 						b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
 					}
 				}

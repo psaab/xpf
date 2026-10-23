@@ -420,6 +420,43 @@ pub(in crate::session) fn install_forward_reverse_pair(
     reverse
 }
 
+/// #16303: pair install with a per-application inactivity timeout on both
+/// halves, for service-based TIME_WAIT ageout coverage.
+pub(in crate::session) fn install_forward_reverse_pair_with_app_timeout(
+    table: &mut SessionTable,
+    forward: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+    app_timeout_ns: u64,
+) -> SessionKey {
+    let mut fwd_metadata = metadata();
+    fwd_metadata.inactivity_timeout_ns = Some(app_timeout_ns);
+    assert!(table.install_with_protocol(
+        forward.clone(),
+        decision(),
+        fwd_metadata,
+        now_ns,
+        PROTO_TCP,
+        tcp_flags,
+    ));
+    let reverse = reverse_key_of(forward);
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    reverse_metadata.inactivity_timeout_ns = Some(app_timeout_ns);
+    assert!(table.install_with_protocol(
+        reverse.clone(),
+        decision(),
+        reverse_metadata,
+        now_ns,
+        PROTO_TCP,
+        tcp_flags,
+    ));
+    let _ = table.drain_deltas(8);
+    reverse
+}
+
 #[test]
 fn session_lookup_hits_after_install() {
     let mut table = SessionTable::new();
