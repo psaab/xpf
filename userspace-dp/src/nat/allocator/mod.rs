@@ -156,9 +156,9 @@ impl PortAllocator {
         self.shared.flows.shard_guard(flow)
     }
 }
-use occupancy::{AddressOccupancy, RecycleRing, pat_secret};
+use occupancy::{AddressOccupancy, RecycleRing, occupancy_next_probe, pat_keyed_offset, pat_mix, pat_secret};
 #[cfg(test)]
-pub(super) use occupancy::{pat_keyed_offset, pat_mix};
+pub(super) use occupancy::{pat_keyed_offset as pat_keyed_offset_for_test, pat_mix as pat_mix_for_test};
 
 use super::source::{PersistentNatPermit, SourceNatFlowKey};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1690,6 +1690,13 @@ struct PortAllocatorShared {
     // #15956: sharded live-flow map (flows.rs, Mutex shards).
     flows: flows::LiveFlowMap,
     live: RwLock<PortAllocatorLiveState>,
+    /// FOLD (#16350 fold-2): set when the most recent (per-allocator,
+    /// racy best-effort) claim probe skipped at least one excluded
+    /// candidate. Lets the non-persistent caller report
+    /// PoolPeerAddressOverlap instead of AllocatorExhausted when the
+    /// probe advanced past a peer-owned port into exhaustion. Reset at
+    /// the start of every allocate_translation*_inner call.
+    probe_excluded_hit: std::sync::atomic::AtomicBool,
     allocations_total: AtomicU64,
     reuses_total: AtomicU64,
     exhaustion_total: AtomicU64,
@@ -1790,6 +1797,7 @@ impl Default for PortAllocator {
                 occupancy: Vec::new(),
                 flows: flows::LiveFlowMap::new(),
                 live: RwLock::new(PortAllocatorLiveState::default()),
+                probe_excluded_hit: std::sync::atomic::AtomicBool::new(false),
                 allocations_total: AtomicU64::new(0),
                 reuses_total: AtomicU64::new(0),
                 exhaustion_total: AtomicU64::new(0),
@@ -1897,6 +1905,7 @@ impl PortAllocator {
                 occupancy,
                 flows: flows::LiveFlowMap::new(),
                 live: RwLock::new(PortAllocatorLiveState::new(num_addresses)),
+                probe_excluded_hit: std::sync::atomic::AtomicBool::new(false),
                 allocations_total: AtomicU64::new(0),
                 reuses_total: AtomicU64::new(0),
                 exhaustion_total: AtomicU64::new(0),
@@ -2787,6 +2796,12 @@ impl PortAllocator {
     /// field is folded through the splitmix finalizer so no single-field
     /// delta survives; the per-boot secret is applied inside
     /// `pat_keyed_offset` / `AddressOccupancy::claim`.
+    /// FOLD (#16350 fold-2): did the last allocation probe skip an
+    /// excluded (peer-owned) candidate? See `probe_excluded_hit`.
+    pub(super) fn probe_excluded_hit(&self) -> bool {
+        self.shared.probe_excluded_hit.load(Ordering::Relaxed)
+    }
+
     pub(super) fn pat_key(flow: &SourceNatFlowKey) -> u64 {
         let mut h = pat_mix(u64::from(flow.protocol) ^ 0x1601_0001);
         fn ip_fold(h: &mut u64, ip: IpAddr) {
@@ -3002,6 +3017,7 @@ impl PortAllocator {
             mint_from_zone,
             holder,
             egress_scope,
+            &|_, _| false,
         );
         if persistent_nat {
             let counter = if out.is_ok() {
@@ -3012,6 +3028,52 @@ impl PortAllocator {
             counter.fetch_add(1, Ordering::Relaxed);
         }
         out
+    }
+
+    /// FOLD (#16350 fold-2): zones + probe-exclusions variant.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn allocate_translation_with_exclusions_and_zones(
+        &self,
+        flow: SourceNatFlowKey,
+        family_addresses: PoolAddressFamily<'_>,
+        family_offset: usize,
+        address_persistent: bool,
+        persistent_nat: bool,
+        persistent_nat_permit: super::source::PersistentNatPermit,
+        persistent_nat_timeout_ns: u64,
+        now_ns: u64,
+        holder: NatHolder,
+        egress_scope: u32,
+        mint_from_zone: Option<&str>,
+        excluded: &dyn Fn(usize, u16) -> bool,
+    ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
+        let out = self.allocate_translation_inner_with_zones(flow, family_addresses, family_offset, address_persistent, persistent_nat, persistent_nat_permit, persistent_nat_timeout_ns, now_ns, mint_from_zone, holder, egress_scope, excluded);
+        if persistent_nat {
+            let counter = if out.is_ok() {
+                &self.shared.persistent_admitted_total
+            } else {
+                &self.shared.persistent_declined_total
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        out
+    }
+
+    pub(super) fn allocate_translation_with_exclusions(
+        &self,
+        flow: SourceNatFlowKey,
+        family_addresses: PoolAddressFamily<'_>,
+        family_offset: usize,
+        address_persistent: bool,
+        persistent_nat: bool,
+        persistent_nat_permit: super::source::PersistentNatPermit,
+        persistent_nat_timeout_ns: u64,
+        now_ns: u64,
+        holder: NatHolder,
+        egress_scope: u32,
+        excluded: &dyn Fn(usize, u16) -> bool,
+    ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
+        self.allocate_translation_inner_with_zones(flow, family_addresses, family_offset, address_persistent, persistent_nat, persistent_nat_permit, persistent_nat_timeout_ns, now_ns, None, holder, egress_scope, excluded)
     }
 
     fn allocate_translation_inner_with_zones(
@@ -3032,6 +3094,7 @@ impl PortAllocator {
         // and the read-only fragment probe pass.
         holder: NatHolder,
         egress_scope: u32,
+        excluded: &dyn Fn(usize, u16) -> bool,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         if self.port_low == 0 || self.port_high == 0 || self.port_low > self.port_high {
             return Err(super::source::SourceNatFailureReason::InvalidPortRange);
@@ -3045,6 +3108,7 @@ impl PortAllocator {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
+        self.shared.probe_excluded_hit.store(false, Ordering::Relaxed);
 
         // ---- Non-persistent hot path: lock-free port claim, tiny map lock. ----
         //
@@ -3066,8 +3130,23 @@ impl PortAllocator {
                     continue;
                 };
                 let mut rejected_ports = Vec::new();
+                // FOLD (#16350 fold-2/3): excluded + rejected candidates
+                // advance the probe key (pat_key ^ attempt), never retry
+                // the same keyed port, and never enter the bitmap claim.
+                let mut claim_attempt: u64 = 0;
                 'ports: loop {
-                    let Some(port) = occ.claim(Self::pat_key(&flow)) else {
+                    let attempt = claim_attempt;
+                    claim_attempt += 1;
+                    let ex = |off: u32| {
+                        let port = occ.port_of(off).unwrap_or(0);
+                        let is_excluded = excluded(abs, port);
+                        if is_excluded {
+                            self.shared.probe_excluded_hit.store(true, Ordering::Relaxed);
+                        }
+                        is_excluded || rejected_ports.contains(&port)
+                    };
+                    let claim = occ.claim_filtered(Self::pat_key(&flow) ^ occupancy_next_probe(attempt), &ex);
+                    let Some(port) = claim else {
                         for rejected_port in rejected_ports.drain(..) {
                             self.free_translated_port(abs, rejected_port);
                         }
@@ -3228,6 +3307,7 @@ impl PortAllocator {
             holder,
             egress_scope,
             mint_from_zone,
+            excluded,
         )
     }
 
@@ -3255,6 +3335,7 @@ impl PortAllocator {
         holder: NatHolder,
         egress_scope: u32,
         mint_from_zone: Option<&str>,
+        excluded: &dyn Fn(usize, u16) -> bool,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let family_len = family_addresses.len();
         // #15956 fold: shard-first re-check before the write lock.
@@ -3382,8 +3463,22 @@ impl PortAllocator {
             }
 
             let mut rejected_ports = Vec::new();
+            let mut claim_attempt: u64 = 0;
             'ports: loop {
-                let mut port = self.shared.occupancy[abs].claim(Self::pat_key(&flow));
+                let attempt = claim_attempt;
+                claim_attempt += 1;
+                let ex = |off: u32| {
+                    let port = self.shared.occupancy[abs].port_of(off).unwrap_or(0);
+                    let is_excluded = excluded(abs, port);
+                    if is_excluded {
+                        self.shared.probe_excluded_hit.store(true, Ordering::Relaxed);
+                    }
+                    is_excluded || rejected_ports.contains(&port)
+                };
+                let mut port = self.shared.occupancy[abs].claim_filtered(
+                    Self::pat_key(&flow) ^ occupancy_next_probe(attempt),
+                    &ex,
+                );
                 if port.is_none() {
                     // Pressure handling is budgeted, not strict O(1). A
                     // non-address-persistent full family can visit each
@@ -3391,7 +3486,11 @@ impl PortAllocator {
                     // PRESSURE_GC_BUDGET expiry checks for that selected
                     // address before declaring exhaustion.
                     self.gc_expired_for_addr_locked(&mut live, abs, now_ns, PRESSURE_GC_BUDGET);
-                    port = self.shared.occupancy[abs].claim(Self::pat_key(&flow));
+                    port = self.shared.occupancy[abs].claim_filtered(
+                        Self::pat_key(&flow) ^ occupancy_next_probe(claim_attempt),
+                        &ex,
+                    );
+                    claim_attempt += 1;
                 }
                 let Some(port) = port else {
                     for rejected_port in rejected_ports.drain(..) {

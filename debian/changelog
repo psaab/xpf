@@ -1,6 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
-* NAT PAT port allocation is no longer predictable (#16011,
+  * Fold (#16350): production PAT allocation now skips peer-owned
+    candidates during the keyed probe (bounded by addresses x range,
+    fail-closed with PoolPeerAddressOverlap on exclusion-exhaustion)
+    instead of mint/rollback retrying the same port; NAT64 gained the
+    same exclusion entry point, and the keyed helpers compile in
+    production builds (not only under cfg(test)).
+
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * NAT PAT port allocation is no longer predictable (#16011,
     RFC 6056): pool PAT claims, the interface-mode PAT walk and the
     stateless try-next-port path now start from a keyed hash of the
     flow tuple under a per-boot secret drawn from the OS CSPRNG, with

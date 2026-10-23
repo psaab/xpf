@@ -72,6 +72,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// for an address-only record: #6528's `unlink_live_allocation_locked` clears
 /// the reverse-identity token and frees NO port bit for an `address_only`
 /// allocation, which is exactly what this mint claimed.
+
+/// FOLD (#16350 fold-2): pure overlap predicate behind
+/// [`reject_peer_owned_identity`] — true when a peer pool / interface
+/// allocator / static external already owns this wire identity.
+/// No rollback side effect, so the retry loop can consult it BEFORE
+/// publishing (via allocator exclusions) as well as after.
+fn pat_identity_excluded(
+    rule: &SourceNatRule,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+    iface_allocs: Option<&InterfaceNatAllocators>,
+) -> bool {
+    let peer = peer_owns_wire_identity(rule, flow, translated);
+    let iface = match (iface_allocs, rule.iface_overlap_owners.as_deref()) {
+        (Some(ia), Some(o)) => {
+            std::sync::atomic::fence(Ordering::SeqCst);
+            o.interface_holds(flow, translated, &rule.pool_allocator)
+                || super::nat64_ports::direct_iface_owns(ia, flow, translated)
+        }
+        (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
+        _ => false,
+    };
+    let static_owns = static_owns_wire_identity(
+        rule.static_externals.as_deref(),
+        translated.ip,
+        translated.port,
+    );
+    peer || iface || static_owns
+}
+
 fn reject_peer_owned_address_only_identity(
     rule: &SourceNatRule,
     flow: SourceNatFlowKey,
@@ -116,24 +146,7 @@ fn reject_peer_owned_identity(
     holder: NatHolder,
     iface_allocs: Option<&InterfaceNatAllocators>,
 ) -> Option<SourceNatLookup> {
-    let peer = peer_owns_wire_identity(rule, flow, translated);
-    let iface = match (iface_allocs, rule.iface_overlap_owners.as_deref()) {
-        (Some(ia), Some(o)) => {
-            std::sync::atomic::fence(Ordering::SeqCst);
-            o.interface_holds(flow, translated, &rule.pool_allocator)
-                || super::nat64_ports::direct_iface_owns(ia, flow, translated)
-        }
-        (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
-        _ => false,
-    };
-    // #14368: a static external covering this tuple publishes it
-    // unconditionally, so refuse alongside the peer/iface checks.
-    let static_owns = static_owns_wire_identity(
-        rule.static_externals.as_deref(),
-        translated.ip,
-        translated.port,
-    );
-    if !peer && !iface && !static_owns {
+    if !pat_identity_excluded(rule, flow, translated, iface_allocs) {
         return None;
     }
     rule.pool_allocator
@@ -144,11 +157,6 @@ fn reject_peer_owned_identity(
     )))
 }
 
-/// TEST-ONLY address-only wrapper: allocates as `NatHolder::Untracked`
-/// (single-holder contract). Production flow matching threads an explicit
-/// worker holder through `match_source_nat_result_for_tuple` — a production
-/// caller of this wrapper would silently mint untracked allocations, so the
-/// compiler refuses it (#9902 review).
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn match_source_nat(
@@ -1044,7 +1052,23 @@ fn match_source_nat_result_for_tuple_inner(
                         }
                     }
                 }
-                let translated = match rule.pool_allocator.allocate_translation_with_zones(
+                // FOLD (#16350 fold-2): peer-owned candidates are
+                // excluded DURING the keyed probe (address resolved per
+                // candidate index), so a rejection advances the probe
+                // instead of re-minting the same deterministic port and
+                // rolling back. Post-mint reject stays as the race net.
+                let v4_excluded = |addr_idx: usize, port: u16| {
+                    let Some(&ip) = rule.pool_addresses_v4.get(addr_idx) else {
+                        return false;
+                    };
+                    pat_identity_excluded(
+                        rule,
+                        flow,
+                        TranslatedTuple { ip: IpAddr::V4(ip), port },
+                        Some(iface_allocs),
+                    )
+                };
+                let translated = match rule.pool_allocator.allocate_translation_with_exclusions_and_zones(
                     flow,
                     PoolAddressFamily::V4(&rule.pool_addresses_v4),
                     0,
@@ -1056,16 +1080,25 @@ fn match_source_nat_result_for_tuple_inner(
                     holder,
                     flow_egress_scope,
                     Some(from_zone),
+                    &v4_excluded,
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {
+                        // FOLD (#16350 fold-2): probe advanced past a
+                        // peer-owned candidate into exhaustion => the
+                        // overlap is the terminal reason, not generic
+                        // exhaustion (single-port overlap cells).
+                        let reason = if reason == SourceNatFailureReason::AllocatorExhausted && rule.pool_allocator.probe_excluded_hit() {
+                            SourceNatFailureReason::PoolPeerAddressOverlap
+                        } else { reason };
                         return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
                             rule, reason,
                         ));
                     }
                 };
                 // #6979 F6: refuse an identity a peer pool over the same
-                // address already owns.
+                // address already owns (race net; normally unreachable
+                // because the probe already excluded it).
                 if let Some(failure) = reject_peer_owned_identity(
                     rule,
                     flow,
@@ -1199,7 +1232,26 @@ fn match_source_nat_result_for_tuple_inner(
                         }
                     }
                 }
-                let translated = match rule.pool_allocator.allocate_translation_with_zones(
+                // FOLD (#16350 fold-2): see the v4 arm — exclusions
+                // resolve the candidate address via the absolute index.
+                let v6_excluded = |addr_idx: usize, port: u16| {
+                    let Some(rel) = addr_idx.checked_sub(v6_offset) else {
+                        return false;
+                    };
+                    let Some(&ip) = rule.pool_addresses_v6.get(rel) else {
+                        return false;
+                    };
+                    pat_identity_excluded(
+                        rule,
+                        flow,
+                        TranslatedTuple {
+                            ip: IpAddr::V6(ip),
+                            port,
+                        },
+                        Some(iface_allocs),
+                    )
+                };
+                let translated = match rule.pool_allocator.allocate_translation_with_exclusions_and_zones(
                     flow,
                     PoolAddressFamily::V6(&rule.pool_addresses_v6),
                     v6_offset,
@@ -1211,16 +1263,20 @@ fn match_source_nat_result_for_tuple_inner(
                     holder,
                     flow_egress_scope,
                     Some(from_zone),
+                    &v6_excluded,
                 ) {
                     Ok(translated) => translated,
                     Err(reason) => {
+                        let reason = if reason == SourceNatFailureReason::AllocatorExhausted && rule.pool_allocator.probe_excluded_hit() {
+                            SourceNatFailureReason::PoolPeerAddressOverlap
+                        } else { reason };
                         return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
                             rule, reason,
                         ));
                     }
                 };
                 // #6979 F6: refuse an identity a peer pool over the same
-                // address already owns.
+                // address already owns (race net).
                 if let Some(failure) = reject_peer_owned_identity(
                     rule,
                     flow,

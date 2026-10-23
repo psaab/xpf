@@ -67,6 +67,17 @@ pub(in crate::nat) fn pat_mix(mut x: u64) -> u64 {
 /// translated port learns nothing about the next flow's port without
 /// the secret. `range == 0` yields 0 (callers guard range first).
 #[inline]
+/// FOLD (#16350 fold-2): probe-advance mixer. Attempt `n` folds into
+/// the claim key so a rejection/exclusion advances to an unrelated
+/// keyed start instead of retrying the same port. Attempt 0 is the
+/// identity (callers XOR with 0-equivalent? see note) — callers pass
+/// `attempt` and this returns the XOR delta; attempt 0 returns 0.
+#[inline]
+pub(in crate::nat::allocator) fn occupancy_next_probe(attempt: u64) -> u64 {
+    if attempt == 0 { 0 } else { pat_mix(attempt.wrapping_mul(0x9e37_79b9_7f4a_7c15)) }
+}
+
+#[inline]
 pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32 {
     if range == 0 {
         return 0;
@@ -337,20 +348,50 @@ impl AddressOccupancy {
     /// offset tried at most once) and fail-closed (None only after
     /// every offset was tried or the address is provably full).
     pub(in crate::nat::allocator) fn claim(&self, key: u64) -> Option<u16> {
-        self.claim_seeded(key, pat_secret())
-            }
+        self.claim_filtered(key, &|_| false)
+    }
+
+    /// Claim with caller exclusions applied DURING the probe.
+    ///
+    /// FOLD (#16350 fold-3): `excluded` is consulted for every probed
+    /// candidate *in probe order* before its bitmap CAS, so rejected
+    /// offsets are never claimed at all. Total work is bounded by
+    /// `range` probes plus at most `range` exclusion calls in order —
+    /// independent of how many exclusions exist (no repeated scan per
+    /// exclusion, so exclusion-heavy pools cannot go quadratic).
+    /// Occupied and excluded offsets consume probe budget alike.
+    pub(in crate::nat::allocator) fn claim_filtered(
+        &self,
+        key: u64,
+        excluded: &dyn Fn(u32) -> bool,
+    ) -> Option<u16> {
+        self.claim_seeded_filtered(key, pat_secret(), excluded)
+    }
 
     /// Seed-pinned core of [`Self::claim`] for deterministic tests.
     pub(in crate::nat::allocator) fn claim_seeded(&self, key: u64, secret: u64) -> Option<u16> {
+        self.claim_seeded_filtered(key, secret, &|_| false)
+    }
+
+    /// Seed-pinned core of [`Self::claim_filtered`] for deterministic tests.
+    pub(in crate::nat::allocator) fn claim_seeded_filtered(
+        &self,
+        key: u64,
+        secret: u64,
+        excluded: &dyn Fn(u32) -> bool,
+    ) -> Option<u16> {
         if self.range == 0 {
             return None;
-            }
+        }
         if self.occupied.load(Ordering::Relaxed) >= self.range {
             return None;
         }
         let start = pat_keyed_offset(secret, key, self.range);
         for i in 0..self.range {
             let offset = start.wrapping_add(i) % self.range;
+            if excluded(offset) {
+                continue;
+            }
             if self.claim_offset(offset) {
                 return self.port_of(offset);
             }
@@ -358,6 +399,9 @@ impl AddressOccupancy {
                 return None;
             }
         }
+        // All offsets occupied/excluded at probe time. A concurrent free
+        // may have queued a ring token meanwhile; only a non-excluded
+        // token can satisfy this claim in the recycled phase below.
 
         // Recycled phase: FIFO drain (oldest-freed first). A popped port whose
         // bit is already set collided with an out-of-band occupant and is
@@ -436,6 +480,14 @@ impl AddressOccupancy {
         let mut pops = 0u64;
         while let Some(port) = recycle.queue.pop_front() {
             pops += 1;
+            // FOLD (#16350 fold-3): an excluded recycled port is retained
+            // (re-queued), never claimed for this flow.
+            if let Some(off) = self.offset_of(port) {
+                if excluded(off) {
+                    retained.push((port, off));
+                    continue;
+                }
+            }
             // An out-of-range (stale) port yields None and is DROPPED: it owns
             // no bit, so it was never marked and there is nothing to unmark.
             if let Some(offset) = self.offset_of(port) {

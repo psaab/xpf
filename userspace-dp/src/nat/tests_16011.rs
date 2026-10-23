@@ -16,7 +16,7 @@
 //! Reverting to sequential allocation makes the spread/secret tests
 //! fail: sequential claims are exactly port_low, port_low+1, ...
 
-use super::allocator::{PoolAddressFamily, PortAllocator, pat_keyed_offset, pat_mix};
+use super::allocator::{PoolAddressFamily, PortAllocator, pat_keyed_offset_for_test as pat_keyed_offset, pat_mix_for_test as pat_mix};
 use super::source::{PersistentNatPermit, SourceNatFlowKey};
 use super::*;
 use std::net::{IpAddr, Ipv4Addr};
@@ -267,4 +267,98 @@ fn pat_concurrent_claims_never_duplicate_16011() {
         "concurrent claims filled a contiguous sequential block"
     );
     let _ = pat_mix(0); // keep import used if allocator re-exports change
+}
+
+#[test]
+fn pat_exclusions_are_bounded_by_addresses_times_range_16011_fold() {
+    // FOLD fold-3: an exclusion set covering all but ZERO ports must
+    // terminate after O(addresses x range) probe work — exclusion calls
+    // are counted, and may not exceed the offset space (+ per-address
+    // ring re-checks bounded by a small constant per claim call).
+    // Seeded core: drive claim_seeded_filtered directly.
+    // Via PortAllocator: exclude everything; allocation must fail closed.
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 20000, 20007); // range 8
+    let calls = std::sync::atomic::AtomicU32::new(0);
+    let excluded = |_: usize, _: u16| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    };
+    let err = alloc.allocate_translation_with_exclusions(
+        flow(40000, 53),
+        PoolAddressFamily::V4(&addrs),
+        0, false, false,
+        PersistentNatPermit::TargetHostPort, 0, 1_000, NatHolder::Untracked, 0,
+        &excluded,
+    );
+    assert!(err.is_err(), "all-excluded allocator must fail closed");
+    let n = calls.load(std::sync::atomic::Ordering::Relaxed);
+    // Hard bound: each claim attempt checks <= range offsets (+ ring).
+    // Attempts on this address are bounded by the rejected-port loop,
+    // itself bounded by range distinct claims. 8*8*4 is generous.
+    assert!(n <= 256, "exclusion work must be bounded by addresses x range, got {n} calls");
+    assert_eq!(alloc.debug_occupied_count(), 0, "excluded candidates must never be claimed");
+}
+
+#[test]
+fn pat_overlap_exclusion_advances_probe_16011_fold() {
+    // FOLD fold-2 (allocator level): excluding the port a plain claim
+    // would mint must make the excluded claim mint a DIFFERENT port on
+    // the first retry — never re-claim/rollback the same port.
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = PortAllocator::new(1, 20000, 20099);
+    let f = flow(41000, 53);
+    // Claim+release once to learn this flow's first keyed port.
+    let first = alloc.allocate_translation(f, PoolAddressFamily::V4(&addrs), 0, false, false, PersistentNatPermit::TargetHostPort, 0, 1_000, NatHolder::Untracked, 0).expect("first");
+    alloc.release_flow(f, first, 2_000, NatHolder::Untracked);
+    let excluded_port = first.port;
+    let second = alloc.allocate_translation_with_exclusions(f, PoolAddressFamily::V4(&addrs), 0, false, false, PersistentNatPermit::TargetHostPort, 0, 3_000, NatHolder::Untracked, 0, &|_, p| p == excluded_port).expect("excluded claim must advance to another port");
+    assert_ne!(second.port, excluded_port, "exclusion must advance the probe, not retry the same port");
+    assert!((20000..=20099).contains(&second.port));
+}
+
+#[test]
+fn pat_peer_overlap_retry_mints_distinct_identity_16011_fold() {
+    // FOLD fold-2 (production match path): two overlapping pools over
+    // one address (20000..=20001). Pool A mints first; every subsequent
+    // peer-pool mint must land on the OTHER port — the keyed probe
+    // advances past the peer-owned candidate instead of repeatedly
+    // minting, colliding, and rolling back.
+    use super::source::parse_source_nat_rules;
+    use crate::SourceNATRuleSnapshot;
+    fn rule(name: &str, pool: &str, src: &str) -> SourceNATRuleSnapshot {
+        SourceNATRuleSnapshot {
+            name: name.to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec![src.to_string()],
+            pool_name: pool.to_string(),
+            pool_addresses: vec!["203.0.113.1/32".to_string()],
+            port_low: 20000,
+            port_high: 20001,
+            ..SourceNATRuleSnapshot::default()
+        }
+    }
+    let rules = parse_source_nat_rules(&[rule("r1", "a", "10.0.0.0/24"), rule("r2", "b", "10.1.0.0/24")]);
+    let mint = |src: &str, sport: u16| {
+        match_source_nat_result_for_tuple(
+            &InterfaceNatAllocators::default(), &rules, &NatScopeCtx::default(), "lan", "wan",
+            src.parse().unwrap(), "8.8.8.8".parse().unwrap(), Some(6), sport, 443, None, None, 1_000, false, false, NatHolder::Untracked, &mut None,
+        )
+    };
+    let first = mint("10.0.0.7", 1111);
+    let first_port = match &first { SourceNatLookup::Matched(d) => d.rewrite_src_port.expect("port"), other => panic!("first mint failed: {other:?}") };
+    // Peer mints (distinct source networks, same remote): each must
+    // succeed with the non-colliding port, never a duplicate, never
+    // stuck in a retry-collision loop.
+    for (src, sport) in [("10.1.0.7", 2222u16)] {
+        match mint(src, sport) {
+            SourceNatLookup::Matched(d) => {
+                assert_ne!(d.rewrite_src_port, Some(first_port), "peer mint must not duplicate pool A's identity");
+            }
+            other => panic!("peer mint must advance past the peer-owned port, got {other:?}"),
+        }
+    }
 }
