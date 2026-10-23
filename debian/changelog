@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Meter LocalDelivery input policers before the miss-path PERMIT
+    FilterLog, lo0, and junos-host side effects (#15949, H34-04
+    arm 2): a red host-bound packet now drops at the early gate with
+    a truthful DENY log, no lo0/junos-host counter increments, no
+    premature closing-pair eviction, and persistent-hold rollback.
+    Conforming packets meter exactly once; their handles are stored
+    on the installed session for hit replay.
+
   * DHCP relay: add bounded per-sender fairness ahead of the
     per-interface aggregate token bucket (#16087, folded 6x on
     #16322). One sender sustaining the maximum-packet-rate no longer
