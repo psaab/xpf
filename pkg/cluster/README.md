@@ -1480,10 +1480,16 @@ peer liveness (`lastSeen`) or drive election.
     Since #16022 the latch, the epoch floor and the per-value session bindings
     are ALSO persisted across a full daemon restart, in
     `/var/lib/xpf/ha-peer-epoch` alongside this node's own `ha-boot-epoch`:
-    the record is `{key-set digest, floor, bound sessions}`, written off the
-    accept path by a sender-tick flush (and on `StopHeartbeat`), and restored
-    by the `UpdateConfig` apply that a daemon boot performs before the
-    heartbeat starts. See `heartbeat_epoch_persist.go`.
+    the record is `{generation, key-set digest, floor, bound sessions}`.
+    Admission bumps the generation and queues one coalescing asynchronous
+    worker; heartbeat ticks only request/reap, and `StopHeartbeat`/`Stop`
+    queue a final snapshot without joining filesystem I/O. The record is
+    restored under a serialized reconcile by the `UpdateConfig` apply that a
+    daemon boot performs before the heartbeat starts (and again before a
+    receiver publishes). Final writes hold the sidecar flock across a
+    read/generation-check/write cycle, so an older concurrent Manager skips
+    rather than overwrites a newer generation. See
+    `heartbeat_epoch_persist.go`.
 
     **Why: the pre-#16022 restart window was the hole.** With the latch and
     floor only in memory, a receiver daemon restart cleared both, and 65
@@ -1511,15 +1517,15 @@ peer liveness (`lastSeen`) or drive election.
     out across reboots. #16022's record answers each charge in shape: it is
     scoped to the accepted-key-set digest (a rotation stops it matching, so
     the recovery stays "rotate the PSK", with no file to hand-edit); the
-    write is NOT on the accept path and a failed or wedged write fails open
-    to the pre-#16022 process-scoped behaviour (admission never waits on
-    storage, a healthy peer is never refused over a disk fault); and the
-    cross-process lock is the flush's bounded sidecar flock, not a lock the
-    receive path takes. The cost that remains is a bounded crash window — a
-    crash inside one flush interval (10s) loses at most that interval's
-    latch/floor advance — and the no-attacker rollback now needs the PSK
-    rotation rather than a bare restart, which the rejection warning already
-    prescribed first.
+    write is NOT on the accept, heartbeat, or shutdown path and a failed or
+    wedged write fails open to the pre-#16022 process-scoped behaviour
+    (admission/heartbeat/shutdown never wait on storage, a healthy peer is
+    never refused over a disk fault); and cross-process locking lives only
+    on the async worker. The cost that remains is a crash/SIGKILL before the
+    queued generation lands: at most the latest not-yet-persisted advance
+    is lost, after which the next genuine frame re-arms. The no-attacker
+    rollback now needs the PSK rotation rather than a bare restart, which
+    the rejection warning already prescribed first.
 
     **"The genuine frame always dominates" is FALSE as an unqualified claim,
     and this section used to make it.** It holds exactly while the sender is

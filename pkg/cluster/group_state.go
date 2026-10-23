@@ -207,13 +207,24 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		// re-keying starts unlatched (the migration window) instead of
 		// resurrecting a latch armed under a retired key.
 		m.hbAuth.mu.Lock()
+		m.hbAuth.peerEpochReconcileGeneration++
 		m.hbAuth.clearPeerEpochLocked()
 		m.hbAuth.peerEpochKeySetDigest = ""
 		m.hbAuth.peerEpochPersistChecked = false
+		m.hbAuth.peerEpochCheckedGeneration = 0
 		m.hbAuth.mu.Unlock()
 		clearPeerEpochState(peerEpochStatePath)
 	} else {
 		digest := controlAuthKeySetDigest(m.controlAuthKey, m.controlAuthKeyAlt)
+		// Bump the reconcile generation whenever the accepted set textual
+		// digest changes, before reconcile can run. A concurrent
+		// StartHeartbeat reconcile snapshots this value and refuses to
+		// install if it moved during its file read.
+		m.hbAuth.mu.Lock()
+		if m.hbAuth.peerEpochKeySetDigest != digest {
+			m.hbAuth.peerEpochReconcileGeneration++
+		}
+		m.hbAuth.mu.Unlock()
 		if digest != m.controlAuthKeySetDigest || m.controlAuthKeyConfiguredAt.IsZero() {
 			now := fabricAuthGraceNow()
 			anchor := now

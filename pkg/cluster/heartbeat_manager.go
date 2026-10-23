@@ -153,12 +153,15 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	duplicateWatcher := prepareDuplicateIdentityWatcher(m, controlIface, localAddr, vrfDevice, interval)
 
 	// #16022: restore the durable latch/floor BEFORE the receiver can admit
-	// a frame. UpdateConfig normally reconciles on the boot apply, but a
-	// Manager whose key was installed without one (unit fixtures, future
-	// embedders) must not admit its first epochless replay against a latch
-	// that is sitting in the file unrestored. Idempotent per key set: a
-	// heartbeat restart after the boot apply costs one lock.
-	if keys := m.controlLinkAcceptedKeys(); len(keys) > 0 {
+	// a frame. Read the accepted keys and reconcile while holding m.mu's
+	// read side through the reconcile call's own hbAuth generation check:
+	// if UpdateConfig changes the key set after this snapshot but before
+	// reconcile acquires serialization, the entry generation guard drops
+	// this stale digest instead of installing it.
+	m.mu.RLock()
+	keys := m.controlLinkAcceptedKeysLocked()
+	m.mu.RUnlock()
+	if len(keys) > 0 {
 		additional := []byte(nil)
 		if len(keys) > 1 {
 			additional = keys[1]
@@ -279,8 +282,10 @@ func (m *Manager) StopHeartbeat() {
 	m.hbRestartOwedHold = time.Time{}
 	m.mu.Unlock()
 	m.stopHeartbeat()
-	// #16022: land the durable latch/floor before teardown completes, so a
-	// clean restart does not depend on the last sender tick having flushed.
+	// #16022: queue a final durable latch/floor snapshot, but never join
+	// the filesystem worker here. A wedged flock/fsync may outlive this
+	// deliberate heartbeat teardown; the next daemon boot may therefore
+	// restore an earlier generation (bounded async persistence risk).
 	m.flushPeerEpochState(true)
 }
 

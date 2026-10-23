@@ -482,20 +482,23 @@ type Manager struct {
 	// (new/rotated key) re-anchors; the identical set does not.
 	controlAuthKeySetDigest string
 
-	// peerEpochFlushMu serializes the #16022 durable-latch flush against
-	// itself: the sender-tick flush and the StopHeartbeat flush can race,
-	// and two writers taking the file lock in turn would each write a
-	// correct record, but serializing here keeps the snapshot/write/clear
-	// owed sequence atomic against the other flusher. Never held while
-	// m.mu or hbAuth.mu is held across the write — the snapshot is taken
-	// under hbAuth.mu, the lock is released, then the file is written.
-	peerEpochFlushMu sync.Mutex
-	// peerEpochLastFlush is when the last flush was ATTEMPTED (success or
-	// failure), and peerEpochLastFlushOK whether it landed. They gate the
-	// sender tick so a wedged store is not retried at heartbeat rate.
-	// Guarded by peerEpochFlushMu.
-	peerEpochLastFlush   time.Time
-	peerEpochLastFlushOK bool
+	// peerEpochReconcileMu serializes the full #16022 reconcile cycle
+	// (mark/load/install) across UpdateConfig, StartHeartbeat and tests.
+	// It is never held across heartbeat admission filesystem I/O; the
+	// durable write path has its own worker lock below.
+	peerEpochReconcileMu sync.Mutex
+	// peerEpochWorkMu guards the asynchronous persistence worker. Workers
+	// are coalesced: at most one runs, requests collapse to a boolean, and
+	// flushNow requests a final snapshot without joining the worker.
+	// peerEpochLastFlush/OK record the latest worker attempt and outcome
+	// for cadence/retry decisions. Guarded by peerEpochWorkMu.
+	peerEpochWorkMu           sync.Mutex
+	peerEpochWorkerRunning    bool
+	peerEpochWorkerDone       chan struct{}
+	peerEpochPersistRequested bool
+	peerEpochFlushNow         bool
+	peerEpochLastFlush        time.Time
+	peerEpochLastFlushOK      bool
 
 	// peerControlKeyID is the #6630 id of the accepted key that last verified
 	// a peer control frame — the running-system evidence that makes
@@ -949,6 +952,13 @@ func (m *Manager) controlLinkAuthKey() []byte {
 func (m *Manager) controlLinkAcceptedKeys() [][]byte {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.controlLinkAcceptedKeysLocked()
+}
+
+// controlLinkAcceptedKeysLocked is controlLinkAcceptedKeys for callers
+// already holding m.mu (read or write). StartHeartbeat uses it to make
+// its key snapshot explicit before the #16022 reconcile generation guard.
+func (m *Manager) controlLinkAcceptedKeysLocked() [][]byte {
 	if len(m.controlAuthKey) == 0 && len(m.controlAuthKeyAlt) == 0 {
 		return nil
 	}
@@ -1148,11 +1158,10 @@ func (m *Manager) Stop() {
 	if receiver != nil {
 		receiver.stop()
 	}
-	// #16022: land the durable latch/floor on the terminal teardown too.
-	// Bounded like every write in this area: persistPeerEpochState's flock
-	// acquire has its own budget, and a wedged store fails open (the flush
-	// logs and Stop proceeds), so this cannot stall shutdown past that
-	// budget.
+	// #16022: queue a final durable latch/floor snapshot on terminal
+	// teardown, but do not join or perform persistence. Shutdown must not
+	// inherit flock/fsync latency; a crash or SIGKILL before the worker
+	// lands it can restore the previous generation on next boot.
 	m.flushPeerEpochState(true)
 	if !m.joinBootEpochRefine(bootEpochStopJoinBudget) {
 		slog.Warn("cluster: HA boot-epoch refinement still in flight after teardown; "+

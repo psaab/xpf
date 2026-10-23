@@ -21,9 +21,16 @@ package cluster
 // WHAT PERSISTS. Alongside this node's own ha-boot-epoch file: the
 // accepted-key-SET-scoped record
 //
-//	ha-peer-epoch: <floor> <session>... <digest>\n
+//	ha-peer-epoch: <generation> <floor> <session>... <digest>\n
 //
-// where digest is controlAuthKeySetDigest over the accepted key set (the
+// Generation is a process-local sequence that is re-seeded above any
+// persisted value on reconcile and advances on every in-memory state
+// advance, binding at an unchanged floor included. Within a live process it
+// orders every snapshot; during final durable writes, the sidecar flock holds
+// for a read/check/write cycle so an older overlapping process cannot stamp
+// a stale snapshot over a newer record.
+//
+// The digest is controlAuthKeySetDigest over the accepted key set (the
 // #15262 fabric-grace construction: HMAC-keyed, domain-tagged, never the
 // key). The file holds the latch bit implicitly — a record exists only if
 // an epoch-bearing frame was accepted under that key set — the floor, and
@@ -55,26 +62,30 @@ package cluster
 //
 //   - "A durable write on the accept path, with no good failure policy."
 //     The write does NOT land before the frame is accepted, and is not on
-//     the accept path at all. admitAuthed only notes, under its existing
-//     lock and with no I/O, that the durable record is behind; a periodic
-//     sender-tick flush (peerEpochPersistInterval) plus a stop-time flush
-//     write it later. The failure policy is therefore decidable: a failed
-//     or wedged write degrades to exactly the pre-#16022 process-scoped
-//     behaviour — the in-memory latch and floor are untouched, admission
-//     never waits on storage, and the flush retries on the next tick. The
-//     residual window is bounded and stated: a crash inside one flush
-//     interval loses at most that interval's latch/floor advance, and a
-//     same-key epochless capture taken inside it replays after the crash
-//     until the peer's next genuine frame re-arms. That is strictly
-//     narrower than the pre-#16022 window, which every daemon restart
-//     opened in full.
-//   - "Cross-process locking on that path." Locking is off the accept
-//     path entirely. The flush takes the same sidecar flock discipline as
-//     the sender's own boot-epoch file (withEpochFileLock: bounded
-//     acquire, fail-closed skip), so two overlapping daemon incarnations
-//     serialize their flushes instead of interleaving a read-modify-write;
-//     a lock that cannot be taken skips the flush and leaves the in-memory
-//     state authoritative.
+//     the accept, heartbeat-send, or shutdown path at all. admitAuthed only
+//     bumps a generation and requests persistence under its existing lock;
+//     one coalescing worker per Manager owns every later read/check/write.
+//     Sender ticks request a flush and reap it only with a nonblocking
+//     check; heartbeat and Manager teardown request a final flush and do
+//     NOT join the worker, so flock/fsync latency up to and beyond the 3s
+//     lock budget can never stall heartbeats or shutdown. Failure degrades
+//     to exactly the pre-#16022 process-scoped behaviour — the in-memory
+//     latch and floor are untouched, admission never waits on storage, and
+//     the worker retries at most once per second. The residual window is a
+//     crash or SIGKILL before the latest queued generation lands: that
+//     interval's latch/floor advance may be lost, after which the peer's
+//     next genuine frame re-arms. A clean heartbeat/Manager stop does not
+//     guarantee durable landing; it only queues the best available final
+//     snapshot. That is strictly narrower than the pre-#16022 window, which
+//     every daemon restart opened in full.
+//   - "Cross-process locking on that path." Locking is on the persistence
+//     worker only. Final writes use the same sidecar flock discipline as
+//     the sender's own boot-epoch file, and the flock covers a complete
+//     read/generation-check/write cycle. Two overlapping daemon
+//     incarnations serialize there; an older manager that somehow obtains
+//     the lock after a newer record exists sees the higher generation and
+//     skips rather than overwriting it. A contended or otherwise failed
+//     lock leaves the in-memory state authoritative and the request owed.
 //   - "It strictly worsens the legitimate rollback." A bare restart no
 //     longer clears the latch — that is the point of the fix — but the
 //     recovery procedure does not become "delete the right file": because
@@ -113,32 +124,32 @@ import (
 // bootEpochPath.
 var peerEpochStatePath = "/var/lib/xpf/ha-peer-epoch"
 
-// peerEpochPersistInterval bounds how stale the durable record may be:
-// the sender-tick flush re-writes it at most this often, and only when
-// admitAuthed has marked it behind. Ten seconds is chosen against the
-// crash window it defines, not against the heartbeat cadence — the write
-// is one small durable file, off the accept path, and a shorter interval
-// would buy a narrower crash window at the cost of an fsync every few
-// heartbeats for the life of the daemon.
+// peerEpochPersistInterval bounds how stale the durable record may be.
+// It is retained as the successful-write cadence: a generation advance
+// does not request a filesystem attempt until this much time has elapsed
+// since the last attempt. Ten seconds defines the worst ordinary backlog
+// handed to the asynchronous worker, not heartbeat latency — requests
+// only bump coalescing state and never wait for this interval or the I/O.
 const peerEpochPersistInterval = 10 * time.Second
 
-// peerEpochPersistRetryInterval is the sender-tick retry cadence after a
-// failed flush (unwritable dir, contended lock). Shorter than the success
-// cadence because a failed write means the durable record is NOT advancing
-// while the in-memory one is; the retry is one bounded lock attempt plus
-// one small write, and only runs while a persist is owed.
+// peerEpochPersistRetryInterval is the worker's minimum spacing after a
+// failed persistence attempt. A wedged store is retried at most once per
+// second by the dedicated worker, never from a heartbeat send/stop path.
 const peerEpochPersistRetryInterval = time.Second
 
-// peerEpochPersistDue reports whether the durable record is behind the
-// in-memory latch/floor AND the interval gate allows a write now. It is
-// the sender tick's only question, and it is cheap: two atomic loads and,
-// on the not-due path, nothing else.
-//
-// lastFlush is stamped on ATTEMPT, not on success — a store that fails
-// every write must not be retried at heartbeat rate (5-10 Hz of flock
-// attempts against a wedged /var). A failed attempt therefore backs off to
-// peerEpochPersistRetryInterval; a successful one to
-// peerEpochPersistInterval.
+// peerEpochPersistHookForTest, when non-nil, is invoked once per durable
+// write attempt after that attempt's snapshot has been frozen and before
+// the sidecar flock is acquired. Tests use it to prove heartbeat/Stop calls
+// return while even the pre-lock portion of persistence is parked. The
+// worker waits for the hook's function to return; requesters do not.
+// Production never replaces it.
+var peerEpochPersistHookForTest func()
+
+// peerEpochPersistDue reports whether a due request may hand work to the
+// asynchronous persistence worker now. lastAttempt is stamped before each
+// worker attempt, not on success — a store that fails every write must not
+// be retried at heartbeat rate. A failed attempt backs off to
+// peerEpochPersistRetryInterval; a successful one to peerEpochPersistInterval.
 func peerEpochPersistDue(dirty bool, lastFlush, now time.Time, lastOK bool) bool {
 	if !dirty {
 		return false
@@ -153,13 +164,23 @@ func peerEpochPersistDue(dirty bool, lastFlush, now time.Time, lastOK bool) bool
 	return !now.Before(lastFlush.Add(gap))
 }
 
-// formatPeerEpochState renders the durable record: floor, then the
-// sessions bound at that floor, then the accepted-key-set digest, one
-// line. The digest is last so the variable-length session list needs no
-// count field; parsing takes the final field as the digest and every
-// field between the floor and it as a session.
-func formatPeerEpochState(floor uint64, sessions []uint64, digest string) string {
+type peerEpochSnapshot struct {
+	generation uint64
+	floor      uint64
+	sessions   []uint64
+	digest     string
+	path       string
+}
+
+// formatPeerEpochState renders one durable record: generation, floor, the
+// sessions bound at that floor, then the accepted-key-set digest. The digest
+// is last so the variable-length session list needs no count field; parsing
+// takes the final field as digest and every field between floor and it as a
+// bound session.
+func formatPeerEpochState(generation, floor uint64, sessions []uint64, digest string) string {
 	var b strings.Builder
+	b.WriteString(strconv.FormatUint(generation, 10))
+	b.WriteByte(' ')
 	b.WriteString(strconv.FormatUint(floor, 10))
 	for _, s := range sessions {
 		b.WriteByte(' ')
@@ -178,80 +199,86 @@ func formatPeerEpochState(floor uint64, sessions []uint64, digest string) string
 // 0), which is the migration-safe direction: a node that cannot prove the
 // peer emits epochs under THIS key set must accept epochless frames until
 // it can, or a wiped /var would refuse a healthy pre-upgrade peer forever.
-func parsePeerEpochState(body, digest string) (floor uint64, sessions []uint64, ok bool) {
+func parsePeerEpochState(body, digest string) (generation, floor uint64, sessions []uint64, ok bool) {
 	if digest == "" {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
 	fields := strings.Fields(strings.TrimSpace(body))
-	if len(fields) < 2 || fields[len(fields)-1] != digest {
-		return 0, nil, false
+	if len(fields) < 3 || fields[len(fields)-1] != digest {
+		return 0, 0, nil, false
 	}
-	floor, err := strconv.ParseUint(fields[0], 10, 64)
+	generation, err := strconv.ParseUint(fields[0], 10, 64)
+	if err != nil || generation == 0 {
+		return 0, 0, nil, false
+	}
+	floor, err = strconv.ParseUint(fields[1], 10, 64)
 	if err != nil || !epochUsableAsFloor(floor) {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
-	if len(fields)-2 > heartbeatEpochSessionsPerEpoch {
-		return 0, nil, false
+	if len(fields)-3 > heartbeatEpochSessionsPerEpoch {
+		return 0, 0, nil, false
 	}
-	for _, f := range fields[1 : len(fields)-1] {
+	for _, f := range fields[2 : len(fields)-1] {
 		s, err := strconv.ParseUint(f, 10, 64)
 		if err != nil {
-			return 0, nil, false
+			return 0, 0, nil, false
 		}
 		sessions = append(sessions, s)
 	}
-	return floor, sessions, true
+	return generation, floor, sessions, true
 }
 
 // loadPeerEpochState reads the durable record for digest. A missing file
 // is the normal first-boot case, not an error worth logging.
-func loadPeerEpochState(path, digest string) (floor uint64, sessions []uint64, ok bool) {
+func loadPeerEpochState(path, digest string) (generation, floor uint64, sessions []uint64, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, nil, false
+		return 0, 0, nil, false
 	}
 	return parsePeerEpochState(string(data), digest)
 }
 
-// persistPeerEpochState durably records floor/sessions for digest.
-// Best-effort and off the accept path: a failure is logged and otherwise
-// ignored, because the in-memory latch/floor remain authoritative and the
-// next tick retries. A post-rename fsync failure means the record IS
-// visible to the next read, so it is not reported as a failure to persist
-// (the same posture as persistFabricAuthGraceAnchor).
-//
-// The write runs under the boot-epoch file lock for path, so two
-// overlapping daemon incarnations serialize instead of interleaving;
-// withEpochFileLock declines (skips fn) when the lock cannot be taken, in
-// which case this reports false and the caller keeps the persist owed.
-func persistPeerEpochState(path string, floor uint64, sessions []uint64, digest string) bool {
-	if digest == "" || !epochUsableAsFloor(floor) {
-		return false
+// persistPeerEpochState writes snapshot only if its generation is newer
+// than the record currently on disk. The sidecar flock covers the entire
+// read/check/write cycle: a competing process is either before us (we read
+// its generation and win only if ours is higher) or after us (it reads ours
+// under its subsequent lock and skips if older). withEpochFileLock is
+// fail-closed — fn does not run when the bounded flock cannot be acquired —
+// so a contended lock reports skipped, not success.
+func persistPeerEpochState(snapshot peerEpochSnapshot) (written, skippedNewer bool) {
+	if snapshot.digest == "" || snapshot.generation == 0 || !epochUsableAsFloor(snapshot.floor) {
+		return false, false
 	}
-	wrote := false
-	withEpochFileLock(path, func() {
-		if err := fsatomic.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
-			slog.Warn("cluster: peer epoch state dir create failed; the downgrade latch stays process-scoped until a later flush (#16022)",
-				"path", path, "err", err)
+	if hook := peerEpochPersistHookForTest; hook != nil {
+		hook()
+	}
+	withEpochFileLock(snapshot.path, func() {
+		if generation, _, _, ok := loadPeerEpochState(snapshot.path, snapshot.digest); ok && generation >= snapshot.generation {
+			skippedNewer = true
 			return
 		}
-		body := formatPeerEpochState(floor, sessions, digest)
-		if err := fsatomic.WriteFileDurable(path, []byte(body), 0o644); err != nil {
+		if err := fsatomic.MkdirAllDurable(filepath.Dir(snapshot.path), 0o755); err != nil {
+			slog.Warn("cluster: peer epoch state dir create failed; the downgrade latch stays process-scoped until the async worker retries (#16022)",
+				"path", snapshot.path, "err", err)
+			return
+		}
+		body := formatPeerEpochState(snapshot.generation, snapshot.floor, snapshot.sessions, snapshot.digest)
+		if err := fsatomic.WriteFileDurable(snapshot.path, []byte(body), 0o644); err != nil {
 			var postRename *fsatomic.PostRenameSyncError
 			if errors.As(err, &postRename) {
 				slog.Warn("cluster: peer epoch state persisted but its durability is UNKNOWN "+
 					"(the post-rename directory fsync failed; the value IS visible to the next read) (#16022)",
-					"path", path, "err", err)
-				wrote = true
+					"path", snapshot.path, "err", err)
+				written = true
 				return
 			}
-			slog.Warn("cluster: peer epoch state persist failed; the downgrade latch stays process-scoped until a later flush (#16022)",
-				"path", path, "err", err)
+			slog.Warn("cluster: peer epoch state persist failed; the downgrade latch stays process-scoped until the async worker retries (#16022)",
+				"path", snapshot.path, "err", err)
 			return
 		}
-		wrote = true
+		written = true
 	})
-	return wrote
+	return written, skippedNewer
 }
 
 // clearPeerEpochState removes the durable record. Called when the accepted
@@ -299,7 +326,9 @@ func (s *heartbeatAuthState) restorePeerEpochLocked(floor uint64, sessions []uin
 // clearPeerEpochLocked drops the latch, floor and bindings in memory
 // (#16022: the accepted key set was cleared or replaced, so the restored
 // record no longer scopes to the live keys). The durable file is handled
-// by the caller (UpdateConfig), which owns the key-set transition.
+// by the caller (UpdateConfig), which owns the key-set transition. The
+// generation is deliberately preserved: it must remain monotonic within
+// this process so a pre-clear snapshot cannot later look new.
 func (s *heartbeatAuthState) clearPeerEpochLocked() {
 	s.epochSeen = false
 	s.highEpoch = 0
@@ -307,21 +336,50 @@ func (s *heartbeatAuthState) clearPeerEpochLocked() {
 	s.peerEpochPersistOwed = false
 }
 
-// reconcilePeerEpochState restores the durable latch/floor for digest
-// (#16022). s.hbAuth.mu must NOT be held. Called from UpdateConfig (key-set
-// reconciliation) and from StartHeartbeat (a fixture or embedder that set
-// the key without UpdateConfig). It is idempotent per digest: once checked,
-// a later call with the same digest returns without touching the file, so a
-// live floor raised in this process is never clobbered by a stale record.
-// A different digest drops the in-memory state first — it was armed under
-// keys this node no longer accepts.
+// reconcilePeerEpochState restores the durable latch/floor for digest.
+// hbAuth.mu must NOT be held on entry. The outer Manager serialization in
+// reconcilePeerEpochStateSerialized is held for the complete marker/load/
+// install cycle: marking checked before reading would let a concurrent
+// StartHeartbeat admit against an unrestored (or stale-key) latch, while
+// reading before installing without that serialization would let an older
+// reconcile overwrite a newer key-set generation. The generation check
+// below therefore runs again after peerEpochReconcileMu is acquired.
 func (m *Manager) reconcilePeerEpochState(digest string) {
 	if m == nil {
 		return
 	}
+	m.peerEpochReconcileMu.Lock()
+	defer m.peerEpochReconcileMu.Unlock()
+	// Generation guard at entry: a digest that was current when a racing
+	// call was queued may no longer be the Manager's accepted digest by
+	// the time serialization is acquired. controlAuthKeySetDigest is
+	// maintained as part of UpdateConfig, which may already hold m.mu at
+	// this call site; do not take m.mu here (Go's RWMutex cannot upgrade
+	// a caller-held write lock). The field is only replaced under m.mu
+	// and digest strings are immutable, so this read is race-free for the
+	// stale-vs-current decision; the authoritative check remains the
+	// hbAuth reconcile generation re-check inside the serialized cycle.
+	current := m.controlAuthKeySetDigest
+	if current != "" && current != digest {
+		s := &m.hbAuth
+		s.mu.Lock()
+		if s.peerEpochKeySetDigest == digest {
+			s.clearPeerEpochLocked()
+			s.peerEpochPersistChecked = false
+			s.peerEpochCheckedGeneration = 0
+		}
+		s.mu.Unlock()
+		return
+	}
+	m.reconcilePeerEpochStateSerialized(digest)
+}
+
+func (m *Manager) reconcilePeerEpochStateSerialized(digest string) {
 	s := &m.hbAuth
 	s.mu.Lock()
-	if s.peerEpochPersistChecked && s.peerEpochKeySetDigest == digest {
+	gen := s.peerEpochReconcileGeneration
+	if s.peerEpochPersistChecked && s.peerEpochKeySetDigest == digest &&
+		s.peerEpochCheckedGeneration == gen && gen != 0 {
 		s.mu.Unlock()
 		return
 	}
@@ -329,22 +387,40 @@ func (m *Manager) reconcilePeerEpochState(digest string) {
 		s.clearPeerEpochLocked()
 	}
 	s.peerEpochKeySetDigest = digest
-	s.peerEpochPersistChecked = true
-	// Capture whether the latch was already armed, so a record matching
-	// the live floor does not replace live bindings with stale ones.
+	// Do not mark checked yet. The file read below is outside hbAuth.mu,
+	// but still inside peerEpochReconcileMu, so no other reconcile can
+	// install a competing key set. admit paths see checked=false and the
+	// flush refuses to overwrite before the restore decision.
+	s.peerEpochPersistChecked = false
+	s.peerEpochCheckedGeneration = 0
 	curSeen := s.epochSeen
 	s.mu.Unlock()
-	floor, sessions, ok := loadPeerEpochState(peerEpochStatePath, digest)
-	if !ok {
-		return
+
+	generation, floor, sessions, ok := loadPeerEpochState(peerEpochStatePath, digest)
+	if generation == ^uint64(0) {
+		// Refuse to manufacture generation 0 after overflow. This is
+		// unreachable under realistic increments; preserving checked=false
+		// below is rejected at install time instead.
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Re-check under the lock: a concurrent reconcile for the same digest
-	// may have already restored, or live frames may have advanced the
-	// state past the record. Restore only into a state the record
-	// dominates or matches; never lower a live floor.
-	if s.highEpoch > floor {
+	// Generation re-check after acquiring the serialization: UpdateConfig
+	// bumps peerEpochReconcileGeneration under hbAuth.mu before releasing
+	// the key-update critical section, and reconcile holds the outer Mu for
+	// its whole cycle, so by the time we are here any concurrent key-set
+	// transition has either completed (and its reconcile follows ours) or
+	// not yet started. If the digest changed while the outer lock was
+	// somehow unavailable to an internal caller, leave unchecked/owed so
+	// the newer reconcile wins rather than installing this stale record.
+	if s.peerEpochKeySetDigest != digest || s.peerEpochReconcileGeneration != gen || generation == ^uint64(0) {
+		return
+	}
+	if generation > s.peerEpochPersistGeneration {
+		s.peerEpochPersistGeneration = generation
+	}
+	s.peerEpochPersistChecked = true
+	s.peerEpochCheckedGeneration = gen
+	if !ok || s.highEpoch > floor {
 		return
 	}
 	if s.highEpoch == floor && (curSeen || s.epochSeen) {
@@ -353,83 +429,198 @@ func (m *Manager) reconcilePeerEpochState(digest string) {
 	s.restorePeerEpochLocked(floor, sessions)
 }
 
-// flushPeerEpochState writes the durable latch/floor record when it is
-// behind (#16022). force bypasses the interval gate (stop-time flush).
-// It never blocks admission: the snapshot is taken under hbAuth.mu, the
-// lock is released, and the file write happens afterwards. If the state
-// advanced during the write, peerEpochPersistOwed is left set so a later
-// tick writes the newer record.
-func (m *Manager) flushPeerEpochState(force bool) {
+func (m *Manager) peerEpochSnapshotLocked() (peerEpochSnapshot, bool) {
+	s := &m.hbAuth
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.peerEpochPersistChecked || s.peerEpochKeySetDigest == "" {
+		return peerEpochSnapshot{}, false
+	}
+	if !s.epochSeen {
+		if s.highEpoch != 0 {
+			slog.Warn("cluster: peer epoch snapshot skipped for an unarmed latch with a non-zero floor; the durable record is left as-is (#16022)",
+				"floor", s.highEpoch)
+		}
+		s.peerEpochPersistOwed = false
+		return peerEpochSnapshot{}, false
+	}
+	if s.peerEpochPersistGeneration == 0 {
+		s.peerEpochPersistGeneration = 1
+	}
+	return peerEpochSnapshot{
+		generation: s.peerEpochPersistGeneration,
+		floor:      s.highEpoch,
+		sessions:   s.peerEpochBoundSessionsLocked(),
+		digest:     s.peerEpochKeySetDigest,
+		path:       peerEpochStatePath,
+	}, true
+}
+
+// requestPeerEpochPersist coalesces advances into the sole worker. It
+// performs no I/O, allocation-heavy snapshot, filesystem call, or wait on
+// a running worker. Repeated requests while queued are one request.
+func (m *Manager) requestPeerEpochPersist(flushNow bool) {
 	if m == nil {
 		return
 	}
-	m.peerEpochFlushMu.Lock()
-	defer m.peerEpochFlushMu.Unlock()
-	now := time.Now()
-	s := &m.hbAuth
-	s.mu.Lock()
-	digest := s.peerEpochKeySetDigest
-	owed := s.peerEpochPersistOwed
-	checked := s.peerEpochPersistChecked
-	floor := s.highEpoch
-	seen := s.epochSeen
-	sessions := s.peerEpochBoundSessionsLocked()
-	s.mu.Unlock()
-	if digest == "" || !checked {
+	m.peerEpochWorkMu.Lock()
+	if flushNow {
+		m.peerEpochFlushNow = true
+	}
+	m.peerEpochPersistRequested = true
+	if m.peerEpochWorkerRunning {
+		m.peerEpochWorkMu.Unlock()
 		return
 	}
-	if !seen {
-		// Nothing has ever armed the latch under this key set; there is no
-		// record to write. (A cleared key set is handled by UpdateConfig,
-		// which removes the file; this is the never-armed case.)
-		if floor != 0 {
-			slog.Warn("cluster: peer epoch flush skipped for an unarmed latch with a non-zero floor; the durable record is left as-is (#16022)",
-				"floor", floor)
-		}
-		s.mu.Lock()
-		s.peerEpochPersistOwed = false
-		s.mu.Unlock()
-		return
-	}
-	if !force && !peerEpochPersistDue(owed, m.peerEpochLastFlush, now, m.peerEpochLastFlushOK) {
-		return
-	}
-	m.peerEpochLastFlush = now
-	if !persistPeerEpochState(peerEpochStatePath, floor, sessions, digest) {
-		m.peerEpochLastFlushOK = false
-		return
-	}
-	m.peerEpochLastFlushOK = true
-	s.mu.Lock()
-	// Clear owed only if the state has not advanced past the snapshot.
-	if s.highEpoch == floor && s.highEpochSessionCount == len(sessions) {
-		same := true
-		for i, sess := range sessions {
-			if s.highEpochSessions[i] != sess {
-				same = false
-				break
-			}
-		}
-		if same {
-			s.peerEpochPersistOwed = false
-		}
-	}
-	s.mu.Unlock()
+	m.peerEpochWorkerRunning = true
+	done := make(chan struct{}, 1)
+	m.peerEpochWorkerDone = done
+	m.peerEpochWorkMu.Unlock()
+	go m.peerEpochPersistWorker(done)
 }
 
-// maybeFlushPeerEpochState is the sender tick's flush trigger (#16022).
-// Cheap when nothing is owed: one lock, two field reads.
+func (m *Manager) peerEpochReapDone() bool {
+	if m == nil {
+		return true
+	}
+	m.peerEpochWorkMu.Lock()
+	if !m.peerEpochWorkerRunning {
+		m.peerEpochWorkMu.Unlock()
+		return true
+	}
+	done := m.peerEpochWorkerDone
+	m.peerEpochWorkMu.Unlock()
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// maybeFlushPeerEpochState queues a persistence request if one is owed.
+// It is safe on heartbeat tick paths: its only operations are short locks,
+// a nonblocking channel reap and, when starting the sole worker, one
+// goroutine launch. It never performs or joins filesystem I/O.
 func (m *Manager) maybeFlushPeerEpochState() {
 	if m == nil {
 		return
 	}
+	m.peerEpochReapDone()
 	s := &m.hbAuth
 	s.mu.Lock()
 	owed := s.peerEpochPersistOwed
+	checked := s.peerEpochPersistChecked
 	s.mu.Unlock()
-	if owed {
-		m.flushPeerEpochState(false)
+	if owed && checked {
+		m.requestPeerEpochPersist(false)
 	}
+}
+
+// flushPeerEpochState requests a final async write. Despite its historical
+// name, it never joins or performs persistence. Stop paths call this and
+// return while the worker is parked in (or before) filesystem I/O.
+func (m *Manager) flushPeerEpochState(force bool) {
+	if m == nil {
+		return
+	}
+	m.peerEpochReapDone()
+	if force {
+		m.requestPeerEpochPersist(true)
+		return
+	}
+	m.maybeFlushPeerEpochState()
+}
+
+func (m *Manager) peerEpochPersistWorker(done chan struct{}) {
+	defer func() {
+		m.peerEpochWorkMu.Lock()
+		m.peerEpochWorkerRunning = false
+		m.peerEpochWorkerDone = nil
+		m.peerEpochPersistRequested = false
+		m.peerEpochWorkMu.Unlock()
+		done <- struct{}{}
+	}()
+	for {
+		m.peerEpochWorkMu.Lock()
+		force := m.peerEpochFlushNow
+		m.peerEpochFlushNow = false
+		requested := m.peerEpochPersistRequested
+		m.peerEpochPersistRequested = false
+		last, lastOK := m.peerEpochLastFlush, m.peerEpochLastFlushOK
+		m.peerEpochWorkMu.Unlock()
+		if !requested {
+			return
+		}
+		if !force {
+			if remaining := peerEpochRemaining(last, lastOK, time.Now()); remaining > 0 {
+				timer := time.NewTimer(remaining)
+				<-timer.C
+			}
+		}
+
+		snapshot, ok := m.peerEpochSnapshotLocked()
+		if !ok {
+			continue
+		}
+		m.peerEpochWorkMu.Lock()
+		m.peerEpochLastFlush = time.Now()
+		m.peerEpochWorkMu.Unlock()
+
+		written, skipped := persistPeerEpochState(snapshot)
+		m.peerEpochWorkMu.Lock()
+		m.peerEpochLastFlushOK = written || skipped
+		m.peerEpochWorkMu.Unlock()
+		if written || skipped {
+			s := &m.hbAuth
+			s.mu.Lock()
+			if s.peerEpochKeySetDigest == snapshot.digest && s.peerEpochPersistGeneration == snapshot.generation {
+				s.peerEpochPersistOwed = false
+			}
+			s.mu.Unlock()
+		}
+
+		// Coalesce work that arrived during I/O. A new generation is always
+		// another request. An unchanged failed generation gets a scheduled
+		// retry inside this worker invocation: lastFlushOK is now false, so
+		// the next cycle waits peerEpochPersistRetryInterval rather than
+		// spinning. If that retry also fails, the following cycle repeats
+		// at the same worker-owned cadence while requests remain owed; no
+		// heartbeat or stop caller ever waits for it.
+		s := &m.hbAuth
+		s.mu.Lock()
+		owed := s.peerEpochPersistOwed
+		checked := s.peerEpochPersistChecked
+		advanced := s.peerEpochPersistGeneration != snapshot.generation || s.peerEpochKeySetDigest != snapshot.digest
+		s.mu.Unlock()
+		m.peerEpochWorkMu.Lock()
+		if owed && checked && (advanced || !written) {
+			m.peerEpochPersistRequested = true
+		}
+		if !m.peerEpochPersistRequested {
+			m.peerEpochWorkMu.Unlock()
+			return
+		}
+		m.peerEpochWorkMu.Unlock()
+	}
+}
+
+func peerEpochRemaining(last time.Time, lastOK bool, now time.Time) time.Duration {
+	if last.IsZero() {
+		return 0
+	}
+	gap := peerEpochPersistInterval
+	if !lastOK {
+		gap = peerEpochPersistRetryInterval
+	}
+	d := last.Add(gap).Sub(now)
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 // SetPeerEpochStatePathForTesting redirects the durable peer-epoch record

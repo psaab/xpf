@@ -462,8 +462,9 @@ type heartbeatAuthState struct {
 	//   - The write is NOT on the accept path and does NOT land before the
 	//     frame is accepted. admitAuthed sets peerEpochPersistOwed under
 	//     this lock and performs no I/O; a sender-tick flush
-	//     (Manager.flushPeerEpochState) writes the record afterwards, and
-	//     Manager.StopHeartbeat flushes on teardown. The failure policy the
+	//     (Manager.flushPeerEpochState) only queues it for the async worker,
+	//     and the stop paths queue a final snapshot as well — neither stop
+	//     joins the filesystem. The failure policy the
 	//     old pricing said did not exist is therefore: fail-open to the
 	//     pre-#16022 process-scoped behaviour. A wedged fsync delays the
 	//     durable record, never refuses a healthy peer, and never stalls
@@ -527,23 +528,38 @@ type heartbeatAuthState struct {
 	epochSeen bool
 
 	// peerEpochKeySetDigest is the accepted-key-set digest the durable
-	// record was last loaded from or flushed under ("" = no key set, or
+	// record was last loaded from or queued under ("" = no key set, or
 	// not yet reconciled). admitAuthed cannot compute it — it has no key —
-	// so Manager.UpdateConfig and the sender-tick flush maintain it under
-	// s.mu; a change means the restored record no longer scopes to the
-	// live key set and must be reconciled before it is read as this peer's
-	// latch. See heartbeat_epoch_persist.go.
+	// so Manager.UpdateConfig/StartHeartbeat reconcile it under s.mu; a
+	// change means the restored record no longer scopes to the live key
+	// set and must be reconciled before it is read as this peer's latch.
+	// See heartbeat_epoch_persist.go.
 	peerEpochKeySetDigest string
+	// peerEpochPersistGeneration orders every latch/floor/bindings version
+	// in this process. It is seeded above the generation found on disk at
+	// reconcile, then bumped whenever admitted epoch state changes, even at
+	// the same floor. Async snapshots carry it; a durable write whose
+	// generation is not newer than the on-disk generation is skipped.
+	peerEpochPersistGeneration uint64
+	// peerEpochReconcileGeneration is bumped under s.mu whenever the
+	// accepted key set changes. reconcilePeerEpochState snapshots it
+	// before its unlocked file read and refuses to install if it moved or
+	// the digest no longer matches, closing concurrent-StartHeartbeat races.
+	peerEpochReconcileGeneration uint64
+	// peerEpochCheckedGeneration is the reconcile generation for which
+	// peerEpochPersistChecked was set. Checked alone is insufficient after
+	// a key transition clears/restores under the same textual digest path.
+	peerEpochCheckedGeneration uint64
 	// peerEpochPersistOwed records that the in-memory latch/floor/bindings
 	// have advanced past the durable record. Set under s.mu by admitAuthed
-	// (no I/O on the accept path); cleared by a successful flush.
+	// (no I/O on the accept path); cleared by the async worker only for
+	// the exact generation it wrote or found already superseded on disk.
 	peerEpochPersistOwed bool
 	// peerEpochPersistChecked records that this process has reconciled the
 	// in-memory state against the durable record for the CURRENT key-set
-	// digest (restored it, or found none). Without it a flush would
+	// digest and reconcile generation. Without it the async writer could
 	// overwrite a not-yet-loaded record with empty state, and a restore
-	// arriving after live frames would clobber the live floor with a
-	// stale one. Guarded by s.mu.
+	// arriving after live frames could clobber the live floor. Guarded by s.mu.
 	peerEpochPersistChecked bool
 
 	// epochlessAdmitted counts authenticated heartbeats ADMITTED without a boot

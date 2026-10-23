@@ -2,10 +2,12 @@ xpf (0.0.0) unstable; urgency=medium
 
   * Cluster: heartbeat anti-replay latch now survives a daemon restart
     (#16022). The peer epoch-capable latch, boot-epoch floor and its
-    bound sessions are persisted in a key-set-scoped record alongside
-    ha-boot-epoch, written off the accept path (sender-tick flush and
-    teardown flush) and restored on the boot config apply. Pre-#16022 a
-    receiver restart cleared the latch/floor, and 65 captured sender
+    bound sessions are persisted in a generation-ordered, key-set-scoped
+    record alongside ha-boot-epoch. Admission queues one coalescing
+    asynchronous persistence worker; heartbeat and shutdown paths never
+    perform or join filesystem I/O, and guarded writes skip if a newer
+    generation is already on disk. Pre-#16022 a receiver restart cleared
+    the latch/floor, and 65 captured sender
     incarnations replayed while the peer was down churned the 64-entry
     ring indefinitely (1625/1625 epochless admitted); the restored latch
     refuses the epochless set and the restored floor+bindings bound the

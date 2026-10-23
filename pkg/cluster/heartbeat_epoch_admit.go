@@ -399,6 +399,9 @@ func (s *heartbeatAuthState) admitAuthed(hasEpoch bool, epoch, session, counter 
 	// What the frame DOES get is the thing it was rejected for: it reaches the
 	// monotonic lastSeen update, so a peer that restarted while this node's
 	// clock is slow stays alive instead of being declared dead in ~500ms.
+	seenBefore := s.epochSeen
+	bindingsBefore := s.highEpochSessionCount
+	boundBefore := s.highEpochSessions
 	if !declineRaise {
 		s.epochSeen = true
 	}
@@ -414,15 +417,25 @@ func (s *heartbeatAuthState) admitAuthed(hasEpoch bool, epoch, session, counter 
 	} else {
 		// epoch == s.highEpoch: admissibility was decided above, so this either
 		// re-affirms a session already bound or consumes a free slot.
+		// A clock-skew decline also reaches this branch: it does not arm or
+		// raise, but it DOES spend the durable per-value session budget, so
+		// that spend must advance the generation and mark persistence owed.
+		// Otherwise a restart restores the pre-decline bindings and hands
+		// the declined session a fresh equality slot the live process had
+		// already denied it.
 		s.bindEpochSession(session, false)
 	}
-	// #16022: the latch/floor/bindings advanced; the durable record is
-	// behind. No I/O here — the sender-tick flush and the stop flush write
-	// it (heartbeat_epoch_persist.go). Marking owed on EVERY admitted
-	// epoch-bearing frame, not only on a raise, is deliberate: a binding
-	// consumed at an unchanged floor is exactly what a restart must not
-	// hand back to a replay.
-	if !declineRaise {
+	// #16022: any actual latch/floor/bindings advance — decline-raise
+	// binding consumption included, mere re-affirmation excluded — bumps the
+	// monotonic generation and marks the async record owed. No I/O here.
+	// A raise always rebinds (bindingsChanged); the seenBefore term covers
+	// a first arming whose binding was already present in a test fixture.
+	bindingsChanged := s.highEpochSessionCount != bindingsBefore || s.highEpochSessions != boundBefore
+	if bindingsChanged || (s.epochSeen && !seenBefore) {
+		s.peerEpochPersistGeneration++
+		if s.peerEpochPersistGeneration == 0 {
+			s.peerEpochPersistGeneration = 1
+		}
 		s.peerEpochPersistOwed = true
 	}
 	return true, ""
