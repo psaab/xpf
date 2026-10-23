@@ -41,6 +41,10 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return fmt.Errorf("%s", hiWarnings[0])
 	}
 	cfg.Warnings = append(cfg.Warnings, hiWarnings...)
+	// #16018 (A7-03): VRRP bypasses the host-inbound gate via AF_PACKET —
+	// WARN-only on every path (never a strict reject, since VRRP keeps
+	// working; the point is to surface that the zone deny does not gate it).
+	cfg.Warnings = append(cfg.Warnings, validateHostInboundVRRPBypassWarnings(cfg)...)
 
 	// #1814 typed-config track warnings (both strict and lenient paths):
 	// track-interface without any priority-cost (no effect),

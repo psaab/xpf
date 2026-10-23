@@ -328,9 +328,25 @@ learned for that address family; the `Manager.RXDropStats()` counter
 every advert from an unrecognized source. A rate-limited warning is emitted at
 most once per instance per 10 seconds. With no previously learned source, a
 priority-0/255 advert is reported as unrecognized; the first nonzero advert
-establishes a source baseline. This is detection only: VRRP election behavior
-is unchanged, and unauthenticated traffic can spoof a learned source or change
-the baseline with an ordinary advert.
+establishes a source baseline.
+
+Since #16018, once a master source is learned and still fresh (within the
+master-down horizon), priority-0/255 adverts from a different source are
+dropped: they do not arm the backup 1 ms takeover, do not demote a master,
+and do not replace the learned identity; the counter above still increments.
+A genuine priority-0 from the learned source still takes over in ~1 ms.
+Cold-start (no learned source) and stale-master records keep normal RFC
+behaviour, so first election and silent-master-death rescue are unaffected.
+When a stale record accepts a new owner's advert, the learned source hands
+over with it — refreshing freshness alone would drop the new owner's own
+resign/demotion while the record looks fresh.
+Ordinary priorities (1–254) are not gated — a higher-priority advert from
+any source still wins the election — and unauthenticated traffic can still
+spoof the learned source itself (the protocol floor). Commit with a VRRP
+group (or active RETH-derived VRRP) on a zone interface whose effective
+`host-inbound-traffic protocols` omits `vrrp` warns that native VRRP is
+received via AF_PACKET before netfilter input and therefore bypasses that
+zone denial (#16018 A7-03); the warning is WARN-only on every path.
 
 ## Failover timing (CLAUDE.md authoritative)
 
