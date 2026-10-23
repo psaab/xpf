@@ -12703,8 +12703,12 @@ reserved for whole-dataplane selection where a rewrite shim
   Prometheus gauge (`xpf_dhcp_ddns_unsigned_nonloopback_active` /
   `xpf_ddns_surface_a_unsigned_nonloopback_active`), and the valueless
   `require-tsig` leaf (both DDNS surfaces) opts into fail-closed: strict
-  commit refuses a non-loopback `update-server` with no `tsig-key`, and the
-  backend refuses the UPDATE before sending if such a config arrives via
+  commit refuses a non-loopback `update-server` with no `tsig-key` — on
+  DHCP including a DISABLED family, which still withdraws persisted
+  records at runtime (the backend refuses those unsigned withdrawals
+  too, so committing it would keep records forever; supply a key so
+  cleanup runs signed, or remove `require-tsig`) — and the backend
+  refuses the UPDATE before sending if such a config arrives via
   tolerant load. Default (no `require-tsig`) keeps unsigned source-IP-ACL
   publishing working. `tsig-secret` is
   SENSITIVE: it is redacted in `DHCPDynamicDNSConfig.String()` (logging) AND,

@@ -58,6 +58,42 @@ func TestRFC2136RequireTSIGRefusesUnsigned15992(t *testing.T) {
 	}
 }
 
+// TestRFC2136RequireTSIGRefusesUnsignedDelete15992 pins the runtime half
+// of the disabled-family contract: DeleteLease (the cleanup UPDATE) is
+// refused exactly like UpsertLease, so strict commit (fold-4) is what
+// prevents a persisted record from being kept forever — the runtime
+// never silently falls back to an unsigned withdrawal.
+func TestRFC2136RequireTSIGRefusesUnsignedDelete15992(t *testing.T) {
+	srv := newFakeDNSServer(t, nil)
+	var ptr, conf int
+	u := testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
+		Enabled: true, Domain: "example.com", RequireTSIG: true,
+	}, &ptr, &conf)
+	u.server = "192.0.2.53:53"
+	err := u.DeleteLease(context.Background(), recV4("laptop.example.com", "10.0.1.5", 300))
+	if err == nil {
+		t.Fatal("require-tsig updater without a key withdrew on an unsigned rcode (#15992)")
+	}
+	if !strings.Contains(err.Error(), "require-tsig") {
+		t.Fatalf("refusal must name require-tsig, got: %v", err)
+	}
+	if got := len(srv.recorded()); got != 0 {
+		t.Fatalf("refusal must happen before any wire UPDATE, server saw %d", got)
+	}
+	// Loopback delete is exempt, matching the commit gate.
+	srv2 := newFakeDNSServer(t, nil)
+	var ptr2, conf2 int
+	u2 := testUpdater(t, srv2, &config.DHCPDynamicDNSConfig{
+		Enabled: true, Domain: "example.com", RequireTSIG: true,
+	}, &ptr2, &conf2)
+	if err := u2.UpsertLease(context.Background(), recV4("laptop.example.com", "10.0.1.5", 300)); err != nil {
+		t.Fatalf("loopback publish precondition: %v", err)
+	}
+	if err := u2.DeleteLease(context.Background(), recV4("laptop.example.com", "10.0.1.5", 300)); err != nil {
+		t.Fatalf("loopback require-tsig delete must proceed unsigned: %v", err)
+	}
+}
+
 // TestDDNSUnsignedNonLoopbackPosture15992 pins the live alarm predicate:
 // non-loopback unsigned is active; loopback, keyed, and disabled are not.
 func TestDDNSUnsignedNonLoopbackPosture15992(t *testing.T) {

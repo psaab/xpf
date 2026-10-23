@@ -147,3 +147,67 @@ func TestDDNSUpdateServerIsLoopback15992(t *testing.T) {
 		}
 	}
 }
+
+// TestDDNSRequireTSIGStrictRejectsDisabled15992 pins fold-4: a DISABLED
+// DHCP family with require-tsig + non-loopback + no key must refuse
+// strict commit (it still withdraws persisted records at runtime, and
+// the runtime guard refuses those unsigned withdrawals — committing it
+// would keep records forever). Tolerant load warns; controls commit.
+func TestDDNSRequireTSIGStrictRejectsDisabled15992(t *testing.T) {
+	cases := []struct {
+		name    string
+		lines   []string
+		wantErr bool
+	}{
+		{"disabled v4 no enable leaf", []string{
+			"set system services dhcp-local-server dynamic-dns update-server 192.0.2.53",
+			"set system services dhcp-local-server dynamic-dns require-tsig",
+		}, true},
+		{"disabled v6 no enable leaf", []string{
+			"set system services dhcpv6-local-server dynamic-dns update-server 2001:db8::53",
+			"set system services dhcpv6-local-server dynamic-dns require-tsig",
+		}, true},
+		{"disabled loopback control", []string{
+			"set system services dhcp-local-server dynamic-dns update-server 127.0.0.1",
+			"set system services dhcp-local-server dynamic-dns require-tsig",
+		}, false},
+		{"disabled keyed control", []string{
+			"set system services dhcp-local-server dynamic-dns update-server 192.0.2.53",
+			"set system services dhcp-local-server dynamic-dns tsig-key k1",
+			"set system services dhcp-local-server dynamic-dns tsig-secret c2VjcmV0",
+			"set system services dhcp-local-server dynamic-dns require-tsig",
+		}, false},
+		{"disabled no require-tsig control", []string{
+			"set system services dhcp-local-server dynamic-dns update-server 192.0.2.53",
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, tc.lines))
+			if tc.wantErr && err == nil {
+				t.Fatal("strict commit accepted disabled require-tsig without a key (#15992 fold-4)")
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "require-tsig") {
+				t.Fatalf("rejection must name require-tsig, got: %v", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("strict commit rejected control: %v", err)
+			}
+			if tc.wantErr {
+				cfg, lerr := CompileConfigLenient(buildTree(t, tc.lines))
+				if lerr != nil {
+					t.Fatalf("tolerant load rejected disabled require-tsig (no-brick): %v", lerr)
+				}
+				found := false
+				for _, w := range cfg.Warnings {
+					if strings.Contains(w, "require-tsig") {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("tolerant load produced no require-tsig warning; warnings=%v", cfg.Warnings)
+				}
+			}
+		})
+	}
+}

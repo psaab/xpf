@@ -1966,8 +1966,10 @@ type DHCPDynamicDNSConfig struct {
 	TSIGAlgorithm string
 	TSIGSecret    Secret
 	// RequireTSIG (#15992) rejects a strict commit with a non-loopback
-	// update-server but no tsig-key. Default (false) preserves unsigned
-	// source-IP-ACL BIND publishing.
+	// update-server but no tsig-key — including a DISABLED family, which
+	// still withdraws persisted records at runtime (whose unsigned
+	// withdrawals the backend guard also refuses). Default (false)
+	// preserves unsigned source-IP-ACL BIND publishing.
 	RequireTSIG bool
 	// SourceAddress / DestinationInterface / RoutingInstance scope the RFC
 	// 2136 UPDATE TRANSPORT (#2691 P1b / #2665). In a multi-WAN / VRF
