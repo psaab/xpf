@@ -193,7 +193,6 @@ pub(crate) fn reserve_synced_source_nat_allocation(
     );
 }
 
-
 /// #15111: acquire the inbound persistent hold for a synced inbound session.
 /// Mirrors `release_persistent_inbound_for_session`: the synced decision
 /// carries only `rewrite_dst`, so the outbound reserve body (gated on
@@ -215,7 +214,9 @@ pub(crate) fn acquire_persistent_inbound_for_synced(
     if is_reverse || nat.rewrite_src.is_some() {
         return;
     }
-    let Some(internal_ip) = nat.rewrite_dst else { return; };
+    let Some(internal_ip) = nat.rewrite_dst else {
+        return;
+    };
     if nat.nat64 || nat.nptv6 {
         return;
     }
@@ -227,7 +228,11 @@ pub(crate) fn acquire_persistent_inbound_for_synced(
         remote: None,
     };
     for rule in rules {
-        if rule.pool_mode && rule.pool_allocator.acquire_persistent_inbound(lease_key, now_ns) {
+        if rule.pool_mode
+            && rule
+                .pool_allocator
+                .acquire_persistent_inbound(lease_key, now_ns)
+        {
             break;
         }
     }
@@ -348,7 +353,6 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapsho
     }
     (reserved, previous_holders)
 }
-
 
 /// Returns whether this node can own a peer-synced source-NAT translation.
 /// `true` means a source-NAT reservation was taken or is unnecessary (a reverse
@@ -617,19 +621,17 @@ fn reserve_synced_source_nat_allocation_with_holder(
         // #6751: no rule's pool owns the translated address. #7581 established
         // that this is NOT a refusal; it is the shape interface-mode SNAT
         // ALWAYS produces, and this is where it acquires a domain of its own.
-        SyncedReserveOutcome::NothingToReserve => {
-            reserve_synced_interface_identity(
-                iface_allocs,
-                rules,
-                flow,
-                rewrite_src,
-                nat,
-                now_ns,
-                holder,
-                capture_previous_holders,
-                previous_holders,
-            )
-        }
+        SyncedReserveOutcome::NothingToReserve => reserve_synced_interface_identity(
+            iface_allocs,
+            rules,
+            flow,
+            rewrite_src,
+            nat,
+            now_ns,
+            holder,
+            capture_previous_holders,
+            previous_holders,
+        ),
         // `Reserved` publishes; `Refused` (a pool-owning candidate DECLINED —
         // a different live allocation owns the identity, #6600) does NOT, and
         // must NOT fall through to the interface domain, or two domains would
@@ -967,12 +969,9 @@ fn reserve_synced_on_first_pool_owner<'a>(
             if let Some(det) = rule.deterministic_v4 {
                 let in_domain = match (flow.src_ip, rewrite_src) {
                     (IpAddr::V4(src_v4), IpAddr::V4(translated_v4)) => {
-                        deterministic_indices_v4(&det, src_v4).is_some_and(
-                            |(ip_idx, _)| {
-                                rule.pool_addresses_v4.get(ip_idx)
-                                    == Some(&translated_v4)
-                            },
-                        )
+                        deterministic_indices_v4(&det, src_v4).is_some_and(|(ip_idx, _)| {
+                            rule.pool_addresses_v4.get(ip_idx) == Some(&translated_v4)
+                        })
                     }
                     _ => false,
                 };
@@ -1045,7 +1044,10 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 // removes only the replacement. The tuple is the wire's
                 // preserved identity: (rewrite_src, flow.src_port).
                 {
-                    let pre = TranslatedTuple { ip: rewrite_src, port: flow.src_port };
+                    let pre = TranslatedTuple {
+                        ip: rewrite_src,
+                        port: flow.src_port,
+                    };
                     if stop_at_first_owner
                         && (peer_owns_wire_identity(rule, flow, pre)
                             || super::nat64_ports::iface_owns_for_pool(iface_allocs, flow, pre)
@@ -1076,12 +1078,14 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     return SyncedReserveOutcome::Refused;
                 }
                 if rule.persistent_nat {
-                    rule.pool_allocator.record_synced_persistent_permission_with_zones(
-                        flow,
-                        rule.persistent_nat_permit,
-                        flow_egress_scope,
-                        Some(eff_from_zone),
-                    );
+                    rule.pool_allocator
+                        .record_synced_persistent_permission_with_zones(
+                            flow,
+                            rule.persistent_nat_permit,
+                            flow_egress_scope,
+                            Some(eff_from_zone),
+                            rule.persistent_permit_epoch,
+                        );
                 }
                 return SyncedReserveOutcome::Reserved;
             }
@@ -1133,16 +1137,16 @@ fn reserve_synced_on_first_pool_owner<'a>(
         // pool-failure arm yields, never to the interface domain.
         if let Some(det) = rule.deterministic_v4 {
             let in_domain = match (flow.src_ip, rewrite_src) {
-                (IpAddr::V4(src_v4), IpAddr::V4(translated_v4)) => rule
-                    .pool_allocator
-                    .deterministic_v4_tuple_matches(
+                (IpAddr::V4(src_v4), IpAddr::V4(translated_v4)) => {
+                    rule.pool_allocator.deterministic_v4_tuple_matches(
                         det,
                         src_v4,
                         &rule.pool_addresses_v4,
                         addr_index,
                         translated_v4,
                         rewrite_src_port,
-                    ),
+                    )
+                }
                 _ => false,
             };
             if !in_domain {
@@ -1177,9 +1181,12 @@ fn reserve_synced_on_first_pool_owner<'a>(
         // `reserve_address_only_persistent` does. That landed as #8132; the two
         // arms now build `persistent` identically and differ only in which
         // reserve they hand it to.
-        let persistent = rule
-            .persistent_nat
-            .then(|| (flow.persistent_source_key(rule.persistent_nat_permit), rule.persistent_nat_timeout_ns));
+        let persistent = rule.persistent_nat.then(|| {
+            (
+                flow.persistent_source_key(rule.persistent_nat_permit),
+                rule.persistent_nat_timeout_ns,
+            )
+        });
         let translated = TranslatedTuple {
             ip: rewrite_src,
             port: rewrite_src_port,
@@ -1234,12 +1241,14 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 return SyncedReserveOutcome::Refused;
             }
             if rule.persistent_nat {
-                rule.pool_allocator.record_synced_persistent_permission_with_zones(
-                    flow,
-                    rule.persistent_nat_permit,
-                    flow_egress_scope,
-                    Some(eff_from_zone),
-                );
+                rule.pool_allocator
+                    .record_synced_persistent_permission_with_zones(
+                        flow,
+                        rule.persistent_nat_permit,
+                        flow_egress_scope,
+                        Some(eff_from_zone),
+                        rule.persistent_permit_epoch,
+                    );
             }
             return SyncedReserveOutcome::Reserved;
         }

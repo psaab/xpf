@@ -62,7 +62,8 @@ use super::allocator::{
 };
 use std::sync::LazyLock;
 
-static EMPTY_PERMISSION_SCOPE: LazyLock<PersistentPermissionScope> = LazyLock::new(PersistentPermissionScope::default);
+static EMPTY_PERMISSION_SCOPE: LazyLock<PersistentPermissionScope> =
+    LazyLock::new(PersistentPermissionScope::default);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeterministicPortedIdentity {
@@ -187,30 +188,38 @@ impl PortAllocator {
             })
             .flat_map(|(key, lease)| {
                 let permissions = live.persistent_permissions.get(key);
-                let mut buckets: Vec<(u32, &PersistentPermissionScope)> = permissions.map(|set| set.scopes.iter().map(|(s, g)| (*s, g)).collect()).unwrap_or_default();
-                if buckets.is_empty() { buckets.push((0, &EMPTY_PERMISSION_SCOPE)); }
+                let mut buckets: Vec<(u32, &PersistentPermissionScope)> = permissions
+                    .map(|set| set.scopes.iter().map(|(s, g)| (*s, g)).collect())
+                    .unwrap_or_default();
+                if buckets.is_empty() {
+                    buckets.push((0, &EMPTY_PERMISSION_SCOPE));
+                }
                 buckets.sort_unstable_by_key(|(s, _)| *s);
-                buckets.into_iter().map(move |(egress_scope, grants)| {
-                    let mut permitted_remotes: Vec<(IpAddr, u16)> = grants.remotes.iter().copied().collect();
-                    permitted_remotes.sort_unstable();
-                    IdleLeaseRecord {
-                        protocol: key.protocol,
-                        src_ip: key.src_ip,
-                        src_port: key.src_port,
-                        routing_scope: key.routing_scope,
-                        egress_scope,
-                        remote: None,
-                        permit_any_remote: grants.any_remote,
-                        permitted_remotes,
-                        translated_ip: lease.translated.ip,
-                        translated_port: lease.translated.port,
-                        address_only: lease.address_only,
-                        deterministic: lease.deterministic,
-                        deterministic_identity: lease.deterministic_identity,
-                        remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
-                        timeout_ns: lease.timeout_ns,
-                    }
-                }).collect::<Vec<_>>()
+                buckets
+                    .into_iter()
+                    .map(move |(egress_scope, grants)| {
+                        let mut permitted_remotes: Vec<(IpAddr, u16)> =
+                            grants.remotes.iter().copied().collect();
+                        permitted_remotes.sort_unstable();
+                        IdleLeaseRecord {
+                            protocol: key.protocol,
+                            src_ip: key.src_ip,
+                            src_port: key.src_port,
+                            routing_scope: key.routing_scope,
+                            egress_scope,
+                            remote: None,
+                            permit_any_remote: grants.any_remote,
+                            permitted_remotes,
+                            translated_ip: lease.translated.ip,
+                            translated_port: lease.translated.port,
+                            address_only: lease.address_only,
+                            deterministic: lease.deterministic,
+                            deterministic_identity: lease.deterministic_identity,
+                            remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
+                            timeout_ns: lease.timeout_ns,
+                        }
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -239,12 +248,23 @@ impl PortAllocator {
         live.persistent_by_source
             .iter()
             .filter(|(_, lease)| {
-                !lease.revoked && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
+                !lease.revoked
+                    && (lease.active_flows > 0
+                        || lease.inbound_flows > 0
+                        || lease.expires_at_ns > now_ns)
             })
             .map(|(key, lease)| {
                 let permissions = live.persistent_permissions.get(key);
-                let permit_any_remote = permissions.is_some_and(|set| set.scopes.values().any(|g| g.any_remote));
-                let mut permitted_remotes: Vec<(IpAddr, u16)> = permissions.map(|set| set.scopes.values().flat_map(|g| g.remotes.iter().copied()).collect()).unwrap_or_default();
+                let permit_any_remote =
+                    permissions.is_some_and(|set| set.scopes.values().any(|g| g.any_remote));
+                let mut permitted_remotes: Vec<(IpAddr, u16)> = permissions
+                    .map(|set| {
+                        set.scopes
+                            .values()
+                            .flat_map(|g| g.remotes.iter().copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 permitted_remotes.sort_unstable();
                 permitted_remotes.dedup();
                 DisplayLeaseRecord {
@@ -290,7 +310,9 @@ impl PortAllocator {
         now_ns: u64,
     ) -> IdleLeaseImport {
         let addr_index = pool_addresses.iter().position(|a| *a == rec.translated_ip);
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false)
+        // Test/direct helper: no local rule context, treated as a
+        // permit-authorized import at the current epoch.
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false, true)
     }
 
     pub(crate) fn import_idle_lease_at(
@@ -300,7 +322,31 @@ impl PortAllocator {
         local_timeout_ns: u64,
         now_ns: u64,
     ) -> IdleLeaseImport {
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false)
+        self.import_idle_lease_with_permit(rec, addr_index, local_timeout_ns, now_ns, false)
+    }
+
+    /// #16017 fold 3: production import carrying whether the pool's local
+    /// rule still permits AnyRemoteHost for the record's egress scope.
+    /// `permit_any_authorized=false` installs/merges the lease demoted:
+    /// exact remotes are kept, `any_remote` is stamped epoch 0 so only a
+    /// later permit-change sync under an AnyRemoteHost rule (or a fresh
+    /// local mint) can re-authorize the wildcard.
+    pub(crate) fn import_idle_lease_with_permit(
+        &self,
+        rec: &IdleLeaseRecord,
+        addr_index: Option<usize>,
+        local_timeout_ns: u64,
+        now_ns: u64,
+        permit_any_authorized: bool,
+    ) -> IdleLeaseImport {
+        self.import_idle_lease_inner(
+            rec,
+            addr_index,
+            local_timeout_ns,
+            now_ns,
+            false,
+            permit_any_authorized,
+        )
     }
 
     pub(crate) fn import_idle_lease_at_after_generation(
@@ -310,7 +356,21 @@ impl PortAllocator {
         local_timeout_ns: u64,
         now_ns: u64,
     ) -> IdleLeaseImport {
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true)
+        // Generation validation proves the record's generation, not that
+        // the tightened local rule still permits the wildcard.
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true, false)
+    }
+
+    /// Fold 3: generation-validated import whose local rule permits the
+    /// wildcard for this record's egress scope.
+    pub(crate) fn import_idle_lease_at_after_generation_permit_any(
+        &self,
+        rec: &IdleLeaseRecord,
+        addr_index: Option<usize>,
+        local_timeout_ns: u64,
+        now_ns: u64,
+    ) -> IdleLeaseImport {
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true, true)
     }
 
     #[cfg(test)]
@@ -322,7 +382,7 @@ impl PortAllocator {
         now_ns: u64,
     ) -> IdleLeaseImport {
         let addr_index = pool_addresses.iter().position(|a| *a == rec.translated_ip);
-        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true)
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true, true)
     }
 
     fn import_idle_lease_inner(
@@ -332,6 +392,7 @@ impl PortAllocator {
         local_timeout_ns: u64,
         now_ns: u64,
         generation_validated: bool,
+        permit_any_authorized: bool,
     ) -> IdleLeaseImport {
         if local_timeout_ns < super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
             || rec.remaining_ns == 0
@@ -370,7 +431,10 @@ impl PortAllocator {
         if fenced {
             return IdleLeaseImport::SkippedClearFenced;
         }
-        let expired_existing = live.persistent_by_source.get(&key).is_some_and(|l| l.active_flows == 0 && l.expires_at_ns <= now_ns);
+        let expired_existing = live
+            .persistent_by_source
+            .get(&key)
+            .is_some_and(|l| l.active_flows == 0 && l.expires_at_ns <= now_ns);
         if expired_existing {
             self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
         }
@@ -471,9 +535,9 @@ impl PortAllocator {
                 // remote.
                 let idle_pat_busy = (widen_any
                     && live.idle_pat_lease_covers(translated, &key, None))
-                    || new_remotes.iter().any(|remote| {
-                        live.idle_pat_lease_covers(translated, &key, Some(*remote))
-                    });
+                    || new_remotes
+                        .iter()
+                        .any(|remote| live.idle_pat_lease_covers(translated, &key, Some(*remote)));
                 let merge_busy = (widen_any && (contended(None) && any_contended_by_other))
                     || idle_pat_busy
                     || new_remotes.iter().any(|remote| {
@@ -493,7 +557,11 @@ impl PortAllocator {
                 };
                 {
                     let current = live.persistent_permissions.entry(key).or_default();
-                    let total = current.scopes.values().map(|g| g.remotes.len()).sum::<usize>();
+                    let total = current
+                        .scopes
+                        .values()
+                        .map(|g| g.remotes.len())
+                        .sum::<usize>();
                     let bucket = current.scopes.entry(rec.egress_scope).or_default();
                     let additions = rec
                         .permitted_remotes
@@ -501,7 +569,22 @@ impl PortAllocator {
                         .filter(|r| !bucket.remotes.contains(r))
                         .count();
                     if total.saturating_add(additions) <= MAX_PERSISTENT_PERMITTED_REMOTES {
+                        let was_any_remote = bucket.any_remote;
                         bucket.any_remote |= rec.permit_any_remote;
+                        if bucket.any_remote
+                            && !was_any_remote
+                            && generation_validated
+                            && permit_any_authorized
+                        {
+                            // Fold 3: only a generation-validated import
+                            // under a local rule that still permits the
+                            // wildcard may re-authorize after a permit
+                            // change. Generation validation alone proves
+                            // record provenance, not local permit consent.
+                            bucket.permit_change_authorized = true;
+                            bucket.any_remote_permit_epoch = 0;
+                            bucket.authorized_epoch = self.persistent_permit_epoch();
+                        }
                         bucket.remotes.extend(rec.permitted_remotes.iter().copied());
                     }
                 }
@@ -544,11 +627,7 @@ impl PortAllocator {
         } else {
             rec.permitted_remotes.iter().any(|remote| {
                 if rec.address_only {
-                    live.import_idle_address_only_contended(
-                        rec.protocol,
-                        translated,
-                        Some(*remote),
-                    )
+                    live.import_idle_address_only_contended(rec.protocol, translated, Some(*remote))
                 } else {
                     live.import_idle_pat_address_only_contended(
                         rec.protocol,
@@ -577,7 +656,23 @@ impl PortAllocator {
         // the bucket must exist when indexing runs (mirrors removal, which
         // reads the stored map before dropping it).
         let mut permissions = PersistentPermissions::default();
-        permissions.scopes.insert(rec.egress_scope, PersistentPermissionScope { any_remote: rec.permit_any_remote, remotes: rec.permitted_remotes.iter().copied().collect(), mint_from_zone: None });
+        permissions.scopes.insert(
+            rec.egress_scope,
+            PersistentPermissionScope {
+                any_remote: rec.permit_any_remote,
+                remotes: rec.permitted_remotes.iter().copied().collect(),
+                mint_from_zone: None,
+                any_remote_permit_epoch: 0,
+                permit_change_authorized: permit_any_authorized,
+                authorized_epoch: if permit_any_authorized
+                    && (generation_validated || self.persistent_permit_epoch() <= 1)
+                {
+                    self.persistent_permit_epoch()
+                } else {
+                    0
+                },
+            },
+        );
         live.persistent_permissions.insert(key, permissions);
         live.insert_persistent_lease(
             key,

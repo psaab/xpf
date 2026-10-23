@@ -41,8 +41,11 @@ fn allocate(alloc: &PortAllocator, addrs: &[Ipv4Addr], src_port: u16, now_ns: u6
             false,
             PersistentNatPermit::TargetHostPort,
             0,
+            0,
             now_ns,
-            crate::nat::NatHolder::Untracked, 0)
+            crate::nat::NatHolder::Untracked,
+            0,
+        )
         .expect("free range must allocate");
 }
 
@@ -209,8 +212,11 @@ fn live_lock_counting_does_not_disturb_allocation_results() {
             false,
             PersistentNatPermit::TargetHostPort,
             0,
+            0,
             1_000,
-            crate::nat::NatHolder::Untracked, 0)
+            crate::nat::NatHolder::Untracked,
+            0,
+        )
         .expect("free range must allocate");
     assert_eq!(translated.ip, IpAddr::V4(pool_ip));
     assert!(
@@ -235,7 +241,7 @@ fn live_lock_counting_does_not_disturb_allocation_results() {
 /// allocation would block on the same mutex the guard holds.
 #[test]
 fn distinct_flow_allocation_does_not_block_on_held_shard_15956() {
-    use super::allocator::{live_shard_index_for_test, LIVE_SHARDS_FOR_TEST};
+    use super::allocator::{LIVE_SHARDS_FOR_TEST, live_shard_index_for_test};
     let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
     let addrs = [pool_ip];
     let alloc = Arc::new(PortAllocator::new(1, 1024, 65535));
@@ -271,6 +277,7 @@ fn distinct_flow_allocation_does_not_block_on_held_shard_15956() {
                     false,
                     PersistentNatPermit::TargetHostPort,
                     0,
+                    0,
                     2_000,
                     crate::nat::NatHolder::Untracked,
                     0,
@@ -289,7 +296,11 @@ fn distinct_flow_allocation_does_not_block_on_held_shard_15956() {
     );
     drop(guard);
     worker.join().expect("worker must not panic");
-    assert_eq!(alloc.live_flow_count(), 2, "both flows tracked across shards");
+    assert_eq!(
+        alloc.live_flow_count(),
+        2,
+        "both flows tracked across shards"
+    );
 }
 
 /// #15956: the exact cap spans shards — filling to max_tracked_flows
@@ -313,11 +324,15 @@ fn cross_shard_cap_is_exact_15956() {
         false,
         PersistentNatPermit::TargetHostPort,
         0,
+        0,
         2_000,
         crate::nat::NatHolder::Untracked,
         0,
     );
-    assert!(err.is_err(), "fifth flow over the cross-shard cap must exhaust");
+    assert!(
+        err.is_err(),
+        "fifth flow over the cross-shard cap must exhaust"
+    );
     // Release one and exactly one more fits.
     let t = alloc
         .allocate_translation(
@@ -327,6 +342,7 @@ fn cross_shard_cap_is_exact_15956() {
             false,
             false,
             PersistentNatPermit::TargetHostPort,
+            0,
             0,
             3_000,
             crate::nat::NatHolder::Untracked,
@@ -357,6 +373,7 @@ fn retire_worker_completes_persistent_lease_15956() {
             false,
             true,
             PersistentNatPermit::TargetHostPort,
+            0,
             60_000_000_000,
             1_000,
             crate::nat::NatHolder::Worker(0),
@@ -366,13 +383,20 @@ fn retire_worker_completes_persistent_lease_15956() {
     let before = alloc
         .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
         .expect("lease must exist while the flow is live");
-    assert_eq!(before.active_flows, 1, "fixture: lease must start with one active flow");
+    assert_eq!(
+        before.active_flows, 1,
+        "fixture: lease must start with one active flow"
+    );
     assert_eq!(
         alloc.retire_worker(0, 2_000),
         1,
         "retiring the sole holder must free exactly the one record"
     );
-    assert_eq!(alloc.live_flow_count(), 0, "the retired flow's record must be gone");
+    assert_eq!(
+        alloc.live_flow_count(),
+        0,
+        "the retired flow's record must be gone"
+    );
     let after = alloc
         .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
         .expect("the idle lease record itself survives completion");
@@ -415,6 +439,7 @@ fn new_flow_allocation_completes_under_held_live_read_15956() {
                     false,
                     false,
                     PersistentNatPermit::TargetHostPort,
+                    0,
                     0,
                     2_000,
                     crate::nat::NatHolder::Untracked,
@@ -460,24 +485,46 @@ fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
             .expect("address-only fill must succeed");
     }
     assert_eq!(alloc.live_flow_count(), 9, "fixture: cap-1");
-    assert_eq!(alloc.debug_admission_count(), 9, "admission counter tracks the fill");
+    assert_eq!(
+        alloc.debug_admission_count(),
+        9,
+        "admission counter tracks the fill"
+    );
 
     // Displaced incumbent for the restore racer: reserve T1,
     // capture-replace with T2, roll T2 back (sole holder), so
     // restore_displaced must re-insert T1 into an ABSENT slot.
     let flow = pool_flow(42000);
-    let t1 = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 1024 };
-    let t2 = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 1025 };
+    let t1 = crate::nat::allocator::TranslatedTuple {
+        ip: IpAddr::V4(pool_ip),
+        port: 1024,
+    };
+    let t2 = crate::nat::allocator::TranslatedTuple {
+        ip: IpAddr::V4(pool_ip),
+        port: 1025,
+    };
     assert!(alloc.reserve_flow(flow, t1, 0, false, 1_000, crate::nat::NatHolder::Untracked));
     let mut snapshot = None;
     assert!(alloc.reserve_flow_maybe_persistent(
-        flow, t2, 0, false, 2_000, crate::nat::NatHolder::Untracked, None, true, &mut snapshot,
+        flow,
+        t2,
+        0,
+        false,
+        2_000,
+        crate::nat::NatHolder::Untracked,
+        None,
+        true,
+        &mut snapshot,
     ));
     let snapshot = Arc::new(snapshot.expect("capture must produce a snapshot"));
     assert!(alloc.rollback_flow(flow, t2, 3_000, crate::nat::NatHolder::Untracked));
     // The reserve+rollback above netted zero; still cap-1. The
     // T2 reserve consumed a slot and its rollback released it.
-    assert_eq!(alloc.live_flow_count(), 9, "fixture: back to cap-1 before the race");
+    assert_eq!(
+        alloc.live_flow_count(),
+        9,
+        "fixture: back to cap-1 before the race"
+    );
     assert_eq!(alloc.debug_admission_count(), 9);
 
     // Racer A: fast-path allocate a NEW flow (distinct shard
@@ -506,6 +553,7 @@ fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
                     false,
                     PersistentNatPermit::TargetHostPort,
                     0,
+                    0,
                     4_000,
                     crate::nat::NatHolder::Untracked,
                     0,
@@ -533,7 +581,11 @@ fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
         10,
         "tracked count must land exactly ON the cap, never above"
     );
-    assert_eq!(alloc.debug_admission_count(), 10, "admission counter must equal the tracked count after the race");
+    assert_eq!(
+        alloc.debug_admission_count(),
+        10,
+        "admission counter must equal the tracked count after the race"
+    );
     // The loser can be told apart and retried after a release:
     // release whichever won, then the other path admits.
     if a_ok {
@@ -546,20 +598,28 @@ fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
                 false,
                 PersistentNatPermit::TargetHostPort,
                 0,
+                0,
                 5_000,
                 crate::nat::NatHolder::Untracked,
                 0,
             )
             .expect("winner re-allocate returns existing");
         assert!(alloc.release_flow(fast_flow, t, 6_000, crate::nat::NatHolder::Untracked));
-        assert!(snapshot.restore_displaced(t2, 7_000), "restore admits after the winner releases");
+        assert!(
+            snapshot.restore_displaced(t2, 7_000),
+            "restore admits after the winner releases"
+        );
     } else {
         assert_eq!(alloc.debug_live_flow_translated(&flow), Some(t1));
         assert!(alloc.release_flow(flow, t1, 6_000, crate::nat::NatHolder::Untracked));
         allocate(&alloc, &addrs, 43000, 7_000);
     }
     assert_eq!(alloc.live_flow_count(), 10);
-    assert_eq!(alloc.debug_admission_count(), 10, "admission counter must not leak across release/re-admit");
+    assert_eq!(
+        alloc.debug_admission_count(),
+        10,
+        "admission counter must not leak across release/re-admit"
+    );
 }
 
 /// #15956 fold 3: a synced persistent reserve that loses the
@@ -589,7 +649,10 @@ fn synced_persistent_reserve_admit_loser_mints_no_lease_15956() {
     // Synced persistent reserve for a new source at full cap:
     // must refuse (false) BEFORE minting.
     let flow = pool_flow(44000);
-    let translated = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 1024 };
+    let translated = crate::nat::allocator::TranslatedTuple {
+        ip: IpAddr::V4(pool_ip),
+        port: 1024,
+    };
     let key = flow.persistent_source_key(PersistentNatPermit::TargetHostPort);
     let _ = key;
     let mut snapshot = None;
@@ -604,9 +667,20 @@ fn synced_persistent_reserve_admit_loser_mints_no_lease_15956() {
         false,
         &mut snapshot,
     );
-    assert!(!admitted, "synced persistent reserve at full cap must refuse");
-    assert_eq!(alloc.live_flow_count(), 10, "loser must not add a tracked record");
-    assert_eq!(alloc.debug_admission_count(), 10, "loser must not leak an admission slot");
+    assert!(
+        !admitted,
+        "synced persistent reserve at full cap must refuse"
+    );
+    assert_eq!(
+        alloc.live_flow_count(),
+        10,
+        "loser must not add a tracked record"
+    );
+    assert_eq!(
+        alloc.debug_admission_count(),
+        10,
+        "loser must not leak an admission slot"
+    );
     assert!(
         alloc
             .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
@@ -620,7 +694,10 @@ fn synced_persistent_reserve_admit_loser_mints_no_lease_15956() {
 
     // Free one slot; the same reserve now mints + admits cleanly.
     let f0 = pool_flow(41000);
-    let t0 = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 41000 };
+    let t0 = crate::nat::allocator::TranslatedTuple {
+        ip: IpAddr::V4(pool_ip),
+        port: 41000,
+    };
     assert!(alloc.release_flow(f0, t0, 6_000, crate::nat::NatHolder::Untracked));
     let mut snapshot2 = None;
     assert!(
@@ -640,7 +717,10 @@ fn synced_persistent_reserve_admit_loser_mints_no_lease_15956() {
     let lease = alloc
         .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
         .expect("winner mints the lease");
-    assert_eq!(lease.active_flows, 1, "winner's lease has exactly its one active flow");
+    assert_eq!(
+        lease.active_flows, 1,
+        "winner's lease has exactly its one active flow"
+    );
     assert_eq!(alloc.live_flow_count(), 10);
     assert_eq!(alloc.debug_admission_count(), 10);
     let _ = addrs;

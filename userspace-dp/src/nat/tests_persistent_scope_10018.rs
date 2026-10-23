@@ -71,9 +71,12 @@ fn allocate_pat(
         false,
         true,
         permit,
+        0,
         TIMEOUT_NS,
         now_ns,
-        NatHolder::Untracked, 0)
+        NatHolder::Untracked,
+        0,
+    )
 }
 
 fn reserve_addr_only(
@@ -87,9 +90,12 @@ fn reserve_addr_only(
         0,
         false,
         PersistentNatPermit::AnyRemoteHost,
+        0,
         TIMEOUT_NS,
         NS_PER_SEC,
-        NatHolder::Untracked, 0)
+        NatHolder::Untracked,
+        0,
+    )
 }
 
 /// THE KEY CELL. One subscriber 5-tuple in two routing scopes must be two
@@ -186,9 +192,21 @@ fn cross_vrf_overlapping_subscribers_get_distinct_pat_leases_10018() {
         routing_scope: 2,
         ..vrf1
     };
-    let t1 = allocate_pat(&alloc, &pool, vrf1, PersistentNatPermit::AnyRemoteHost, 1_000)
+    let t1 = allocate_pat(
+        &alloc,
+        &pool,
+        vrf1,
+        PersistentNatPermit::AnyRemoteHost,
+        1_000,
+    )
         .expect("the first VRF must mint");
-    let t2 = allocate_pat(&alloc, &pool, vrf2, PersistentNatPermit::AnyRemoteHost, 1_000)
+    let t2 = allocate_pat(
+        &alloc,
+        &pool,
+        vrf2,
+        PersistentNatPermit::AnyRemoteHost,
+        1_000,
+    )
         .expect("the second VRF must mint rather than reuse");
     assert_ne!(
         (t1.ip, t1.port),
@@ -349,9 +367,21 @@ fn idle_lease_sync_carries_scope_and_matches_it_on_import_10018() {
         routing_scope: 2,
         ..scope1
     };
-    let t1 = allocate_pat(&active, &addrs, scope1, PersistentNatPermit::AnyRemoteHost, 1_000)
+    let t1 = allocate_pat(
+        &active,
+        &addrs,
+        scope1,
+        PersistentNatPermit::AnyRemoteHost,
+        1_000,
+    )
         .expect("scope 1 must mint");
-    let t2 = allocate_pat(&active, &addrs, scope2, PersistentNatPermit::AnyRemoteHost, 1_000)
+    let t2 = allocate_pat(
+        &active,
+        &addrs,
+        scope2,
+        PersistentNatPermit::AnyRemoteHost,
+        1_000,
+    )
         .expect("scope 2 must mint");
     assert_ne!(
         (t1.ip, t1.port),
@@ -426,10 +456,7 @@ fn idle_lease_sync_carries_scope_and_matches_it_on_import_10018() {
 /// RED pre-#10018: the two-address second flow is denied.
 #[test]
 fn address_only_cross_vrf_probes_the_free_sibling_10018() {
-    let pool = [
-        Ipv4Addr::new(203, 0, 113, 1),
-        Ipv4Addr::new(203, 0, 113, 2),
-    ];
+    let pool = [Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(203, 0, 113, 2)];
     let alloc = PortAllocator::new(pool.len(), 1024, 65535);
     let scope1 = gre_flow("10.0.1.100", "8.8.8.8", 1);
     let scope2 = SourceNatFlowKey {

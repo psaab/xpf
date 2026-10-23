@@ -224,6 +224,10 @@ mod tests_persistent_scope_10018;
 #[cfg(test)]
 #[path = "tests_persistent_zone_14322.rs"]
 mod tests_persistent_zone_14322;
+// #16017: persistent permit tightening revokes stored any-remote grants.
+#[cfg(test)]
+#[path = "tests_persistent_permit_16017.rs"]
+mod tests_persistent_permit_16017;
 #[cfg(test)]
 #[path = "tests_synced_persistent_zones_15676.rs"]
 mod tests_synced_persistent_zones_15676;

@@ -44,9 +44,12 @@ fn persistent_alloc(
             false,
             true, // persistent_nat
             PersistentNatPermit::TargetHostPort,
+            0,
             TIMEOUT_NS,
             1_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .map(|_| ())
         .map_err(|_| ())
 }
@@ -96,8 +99,11 @@ fn a_non_persistent_allocation_moves_neither_counter_8447() {
             false, // NOT persistent
             PersistentNatPermit::TargetHostPort,
             0,
+            0,
             1_000,
-            NatHolder::Untracked, 0)
+            NatHolder::Untracked,
+            0,
+        )
         .expect("control: an ordinary pool allocation must succeed");
     let snap = alloc.snapshot();
     assert_eq!(

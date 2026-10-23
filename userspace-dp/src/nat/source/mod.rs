@@ -239,6 +239,8 @@ pub(crate) struct SourceNatRule {
     /// #2823: the three-way persistent-NAT remote scope (was a binary
     /// `permit_any_remote_host` bool).
     pub(crate) persistent_nat_permit: PersistentNatPermit,
+    /// #16017: reuse-allocator permit version (see `PortAllocator::sync_persistent_permit_scopes`).
+    pub(crate) persistent_permit_epoch: u64,
     pub(crate) persistent_nat_inactivity_timeout_secs: i64,
     pub(crate) persistent_nat_timeout_ns: u64,
     pub(crate) pool_addresses_v4: Vec<Ipv4Addr>,
@@ -950,7 +952,14 @@ fn resolve_pool_allocators(
         }
         if let Some(existing) = pool_allocators.get(&key) {
             rule.pool_allocator = existing.clone();
+            // #16017: sibling already bumped this shared allocator; share its version.
+            rule.persistent_permit_epoch = existing.persistent_permit_epoch();
             continue;
+        }
+        if previous_allocators.contains_key(&key) {
+            // #16017: reuse-allocator permit version, shared across rules naming this pool.
+            rule.persistent_permit_epoch =
+                previous_allocators[&key].next_persistent_permit_epoch();
         }
         let charge = pending.charge();
         if let Some(existing) = previous_allocators.get(&key) {
@@ -1032,6 +1041,41 @@ fn resolve_pool_allocators(
                 // otherwise break (the match path is safe either way — it
                 // short-circuits on pool_failure first).
                 rule.deterministic_v4 = None;
+            }
+        }
+    }
+
+    // #16017: re-derive reused allocators' any-remote grants under the new permit.
+    {
+        let mut synced: Vec<usize> = Vec::new();
+        for i in 0..out.len() {
+            if !out[i].persistent_nat || !out[i].pool_mode {
+                continue;
+            }
+            let alloc_ptr = out[i].pool_allocator.debug_shared_identity();
+            if synced.contains(&alloc_ptr) {
+                continue;
+            }
+            synced.push(alloc_ptr);
+            let mut scopes: Vec<(u32, PersistentNatPermit, u64)> = Vec::new();
+            for rule in out.iter() {
+                if rule.pool_allocator.debug_shared_identity() != alloc_ptr {
+                    continue;
+                }
+                if !rule.persistent_nat || !rule.pool_mode {
+                    continue;
+                }
+                let from = rule.from_zone.clone();
+                let to = rule.to_zone.clone();
+                let scope = rule.persistent_rule_scope(&from, &to, &to, &NatScopeCtx::default());
+                scopes.push((
+                    scope,
+                    rule.persistent_nat_permit,
+                    rule.persistent_permit_epoch,
+                ));
+            }
+            if !scopes.is_empty() {
+                out[i].pool_allocator.sync_persistent_permit_scopes(&scopes);
             }
         }
     }
@@ -1465,8 +1509,17 @@ pub(crate) fn candidate_source_nat_translations(
 ) -> Result<Vec<NatDecision>, SourceNatFailure> {
     for rule in rules {
         if rule.matches(
-            scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, src_port, dst_port,
-            false, packet_icmp,
+            scope,
+            from_zone,
+            to_zone,
+            src_ip,
+            dst_ip,
+            false,
+            protocol,
+            src_port,
+            dst_port,
+            false,
+            packet_icmp,
         ) == L4Match::NoMatch
         {
             continue;
@@ -1509,8 +1562,7 @@ pub(crate) fn candidate_source_nat_translations(
                         ));
                     }
                     if let Some(det) = rule.deterministic_v4 {
-                        let Some((ip_idx, _)) =
-                            crate::nat::deterministic_indices_v4(&det, src_v4)
+                        let Some((ip_idx, _)) = crate::nat::deterministic_indices_v4(&det, src_v4)
                         else {
                             return Err(SourceNatFailure::for_rule(
                                 rule,
@@ -1635,8 +1687,8 @@ pub(crate) fn source_nat_translation_matches(
             // take the portless branch merely because a reconstructed
             // decision lost its type/code. The portless branch is only for
             // translations that never allocated an identifier/port.
-            let icmp_query_pat = matches!(protocol, PROTO_ICMP | PROTO_ICMPV6)
-                && translated_src_port.is_some();
+            let icmp_query_pat =
+                matches!(protocol, PROTO_ICMP | PROTO_ICMPV6) && translated_src_port.is_some();
             if rule.no_translation
                 || (!icmp_query_pat
                     && !crate::ip_proto::has_l4_ports(protocol)
@@ -1684,9 +1736,8 @@ pub(crate) fn source_nat_translation_matches(
             // port-less protocol); accepting it because the ORIGINAL
             // `src_port` happens to fall in the new PAT range would keep a
             // translation the current PAT rule never allocated (#14128).
-            return translated_src_port.is_some_and(|port| {
-                (rule.pool_port_low..=rule.pool_port_high).contains(&port)
-            });
+            return translated_src_port
+                .is_some_and(|port| (rule.pool_port_low..=rule.pool_port_high).contains(&port));
         }
         return false;
     }
@@ -1758,9 +1809,7 @@ fn flowless_source_nat_l4_possible(
             (Some(want_type), want_code, Some((got_type, got_code))) => {
                 got_type == want_type && want_code.is_none_or(|want| want == got_code)
             }
-            (Some(_), _, None) => {
-                protocol_unknown || matches!(protocol, PROTO_ICMP | PROTO_ICMPV6)
-            }
+            (Some(_), _, None) => protocol_unknown || matches!(protocol, PROTO_ICMP | PROTO_ICMPV6),
         };
         icmp_possible
             && (term.ports.is_empty()

@@ -59,6 +59,7 @@ fn reserve_persistent(
         0,
         false,
         permit,
+        0,
         TIMEOUT_NS,
         now_ns,
         NatHolder::Untracked,
@@ -71,7 +72,11 @@ fn h1_idle(permit: PersistentNatPermit) -> (PortAllocator, Vec<Ipv4Addr>, Transl
     let alloc = PortAllocator::new(pool.len(), 1024, 65535);
     let h1 = tcp_flow("10.0.1.1", 4000, REMOTE, 443);
     let t1 = reserve_persistent(&alloc, &pool, h1, permit, NOW).expect("H1 mints");
-    assert_eq!(t1.ip, IpAddr::V4(A1), "fixture: first mint is round-robin A1");
+    assert_eq!(
+        t1.ip,
+        IpAddr::V4(A1),
+        "fixture: first mint is round-robin A1"
+    );
     assert_eq!(t1.port, 4000);
     assert!(
         alloc.release_flow(h1, t1, NOW2, NatHolder::Untracked),

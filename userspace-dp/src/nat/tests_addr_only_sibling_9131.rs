@@ -60,9 +60,12 @@ fn reserve(
         0,
         address_persistent,
         PersistentNatPermit::AnyRemoteHost,
+        0,
         TIMEOUT_NS,
         NS_PER_SEC,
-        NatHolder::Untracked, 0)
+        NatHolder::Untracked,
+        0,
+    )
 }
 
 /// THE FIX. Three port-less flows over a TWO-address pool, `address-persistent`
@@ -268,7 +271,11 @@ fn a_same_scope_reused_lease_stays_pinned_9131() {
         "reusing a pinned lease must keep the original translated tuple"
     );
     let owners = alloc.debug_address_only_owners();
-    assert_eq!(owners.len(), 2, "the two remote reverse identities are both live");
+    assert_eq!(
+        owners.len(),
+        2,
+        "the two remote reverse identities are both live"
+    );
     assert!(
         owners
             .iter()
@@ -436,10 +443,7 @@ fn persistent_addr_only_fresh_subscribers_use_both_pool_addresses_13684() {
         to_zone: "wan".to_string(),
         source_addresses: vec!["0.0.0.0/0".to_string()],
         pool_name: "np-pool-dist".to_string(),
-        pool_addresses: vec![
-            "203.0.113.10/32".to_string(),
-            "203.0.113.11/32".to_string(),
-        ],
+        pool_addresses: vec!["203.0.113.10/32".to_string(), "203.0.113.11/32".to_string()],
         port_low: 1024,
         port_high: 65535,
         pool_no_translation: true,

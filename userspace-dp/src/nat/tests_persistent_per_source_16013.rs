@@ -24,7 +24,7 @@
 //! invariant without minting thousands of leases.
 
 use super::allocator::{
-    NatHolder, PoolAddressFamily, PortAllocator, MAX_PERSISTENT_LEASES_PER_SOURCE,
+    MAX_PERSISTENT_LEASES_PER_SOURCE, NatHolder, PoolAddressFamily, PortAllocator,
 };
 use super::idle_lease_sync_8121::{IdleLeaseImport, IdleLeaseRecord};
 use super::source::{PersistentNatPermit, SourceNatFlowKey};
@@ -63,6 +63,7 @@ fn mint(
             false,
             true,
             PersistentNatPermit::TargetHostPort,
+            0,
             TIMEOUT_NS,
             now_ns,
             NatHolder::Untracked,
@@ -268,6 +269,7 @@ fn address_only_leases_charge_their_source_16013() {
                 0,
                 false,
                 PersistentNatPermit::AnyRemoteHost,
+                0,
                 TIMEOUT_NS,
                 NOW,
                 NatHolder::Untracked,

@@ -49,6 +49,7 @@ fn pat_claim(alloc: &PortAllocator, src_port: u16) -> Result<u16, SourceNatFailu
             false,
             PersistentNatPermit::TargetHostPort,
             0,
+            0,
             1_000,
             NatHolder::Untracked,
             // #14802: non-persistent PAT claim; egress scope only buckets
@@ -150,7 +151,10 @@ fn pat_control_recycles_without_flip_14625() {
     // reclaim returns the freed port. This must pass before and after.
     let alloc = PortAllocator::new(1, PORT_LOW, PORT_HIGH);
     let first = pat_claim(&alloc, 60_000).expect("first PAT claim");
-    assert!((PORT_LOW..=PORT_HIGH).contains(&first), "#16011: first PAT port in range, got {first}");
+    assert!(
+        (PORT_LOW..=PORT_HIGH).contains(&first),
+        "#16011: first PAT port in range, got {first}"
+    );
     let f = flow(60_000, Ipv4Addr::new(8, 8, 8, 8));
     let t = super::allocator::TranslatedTuple {
         ip: IpAddr::V4(POOL),
@@ -158,5 +162,8 @@ fn pat_control_recycles_without_flip_14625() {
     };
     assert!(alloc.release_flow(f, t, 2_000, NatHolder::Untracked));
     let second = pat_claim(&alloc, 60_001).expect("second PAT claim");
-    assert!((PORT_LOW..=PORT_HIGH).contains(&second), "#16011: second keyed claim in range, got {second}");
+    assert!(
+        (PORT_LOW..=PORT_HIGH).contains(&second),
+        "#16011: second keyed claim in range, got {second}"
+    );
 }
