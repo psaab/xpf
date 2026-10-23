@@ -174,7 +174,7 @@ func TestClusterVRFBindingWarnsForPublishedStripped12168(t *testing.T) {
 }
 
 func TestUnboundControlTransportStartsHeartbeatSocket11384(t *testing.T) {
-	if local := resolveClusterInterfaceAddr("lo", "127.0.0.1", ""); local == "" {
+	if local := resolveClusterInterfaceAddr(nil, "lo", "127.0.0.1", ""); local == "" {
 		t.Skip("loopback has no usable IPv4 address")
 	}
 

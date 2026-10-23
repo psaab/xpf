@@ -38,7 +38,17 @@ func (d *Daemon) transportVRFBinding(warn bool, transportIfaces ...string) strin
 		if iface == "" {
 			continue
 		}
+		// #15944 H23-02: resolve the authored Junos ref to its kernel
+		// ifname before the membership/kernel lookups below — the
+		// "/"→"-"-only LinuxIfName handles neither unit/VLAN netdevs
+		// nor device-map aliases, so a unit-suffixed control/fabric
+		// interface never matched its VRF member entry.
 		linuxName := config.LinuxIfName(iface)
+		if d.store != nil {
+			if active := d.store.ActiveConfig(); active != nil {
+				linuxName = active.ResolveKernelIfName(iface)
+			}
+		}
 		if !members[linuxName] {
 			if warn && (len(members) > 0 || config.IsManagementIfName(iface)) {
 				slog.Warn("cluster transport interface is not a management VRF member; leaving sockets unbound to VRF",

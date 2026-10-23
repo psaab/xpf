@@ -28,6 +28,23 @@ var interfaceAddrsByName = func(kernelName string) ([]net.Addr, error) {
 	return iface.Addrs()
 }
 
+// clusterInterfaceAddrsByName resolves an AUTHORED Junos interface ref
+// (e.g. "ge-0/0/0.0", a unit-suffixed or device-map-aliased spelling) to
+// its addresses. #15944 H23-02: the ref is first mapped to its Linux
+// kernel ifname via cfg.ResolveKernelIfName — the same mapping
+// resolveInterfaceAddrsDegraded (#5714) uses — because
+// net.InterfaceByName expects the kernel name ("ge-0-0-0"), and passing
+// the authored spelling verbatim never matched, degrading heartbeat /
+// sync address selection to the fallback. A nil cfg (tests, hand-built
+// callers) resolves with LinuxIfName only.
+var clusterInterfaceAddrsByName = func(cfg *config.Config, ifname string) ([]net.Addr, error) {
+	kernelName := config.LinuxIfName(ifname)
+	if cfg != nil {
+		kernelName = cfg.ResolveKernelIfName(ifname)
+	}
+	return interfaceAddrsByName(kernelName)
+}
+
 // resolveInterfaceAddrs returns one bind host per address family present on
 // the interface identified by the AUTHORED Junos ref (e.g. "ge-0/0/0.0"): the
 // first usable IPv4 address and the first usable IPv6 address, IPv4 first.
@@ -335,14 +352,17 @@ func selectClusterBindAddr(addrs []net.Addr, peerAddr, fallback string) string {
 // resolveClusterInterfaceAddr returns a usable control/fabric bind address for
 // the named interface. It prefers the same address family as the configured
 // peer and skips unscoped link-local IPv6 addresses.
-func resolveClusterInterfaceAddr(ifname, peerAddr, fallback string) string {
-	iface, err := net.InterfaceByName(ifname)
+//
+// #15944 H23-02: cfg resolves the authored Junos ref to its kernel
+// ifname before the lookup (see clusterInterfaceAddrsByName); a nil cfg
+// keeps the LinuxIfName-only behaviour for hand-built callers.
+func resolveClusterInterfaceAddr(cfg *config.Config, ifname, peerAddr, fallback string) string {
+	addrs, err := clusterInterfaceAddrsByName(cfg, ifname)
 	if err != nil {
 		slog.Warn("cluster interface not found, using fallback", "interface", ifname, "fallback", fallback)
 		return fallback
 	}
-	addrs, err := iface.Addrs()
-	if err != nil || len(addrs) == 0 {
+	if len(addrs) == 0 {
 		slog.Warn("cluster interface has no addresses, using fallback", "interface", ifname, "fallback", fallback)
 		return fallback
 	}
