@@ -1877,6 +1877,12 @@ impl PortAllocator {
     pub(super) fn flows_get(&self, flow: &SourceNatFlowKey) -> Option<LiveAllocation> {
         self.shared.flows.get(flow)
     }
+
+    /// Fold 2 test seam: current shared admission-counter value.
+    #[cfg(test)]
+    pub(super) fn debug_admission_count(&self) -> usize {
+        self.shared.flows.admission_count()
+    }
     /// #15133: inbound lookup keyed by the ADMITTING RULE's normalized
     /// effective scope (see `SourceNatRule::persistent_rule_scope`). This is
     /// the production entry point: an interface-, routing-instance- or
@@ -2370,7 +2376,7 @@ impl PortAllocator {
         addr_index: usize,
         deterministic: bool,
     ) {
-        self.shared.flows.insert_in_shard(
+        let _ = self.shared.flows.try_insert_in_shard(
             &mut live.shard,
             flow,
             LiveAllocation {
@@ -2382,6 +2388,7 @@ impl PortAllocator {
                 promotion_timeout_ns: None,
                 holders: NatHolder::Untracked.bit(),
             },
+            usize::MAX,
         );
         live.record_pat_owner(&flow, translated);
     }
@@ -3080,10 +3087,9 @@ impl PortAllocator {
             self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
             return Ok(existing);
         }
-        if self.shared.flows.len() >= self.shared.max_tracked_flows {
-            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
-            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
-        }
+        // Fold 2: the len() check is NOT the admission — two
+        // shards at cap-1 could both pass it. The atomic admit
+        // below (after the permission refusal) is.
 
         let mut persistent_key =
             persistent_nat.then(|| flow.persistent_source_key(persistent_nat_permit));
@@ -3102,6 +3108,15 @@ impl PortAllocator {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                 return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
             }
+        }
+        // Fold 2: claim the tracked-flow slot atomically before
+        // any insert on this path (lease-reuse join or fresh
+        // mint below both consume it; removal of the record
+        // releases it). Racers on other shards lose here, not
+        // at a stale len() read.
+        if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
         if let Some(key) = persistent_key {
             match self.reuse_existing_lease_locked(
@@ -3254,6 +3269,7 @@ impl PortAllocator {
             }
         }
 
+        self.shared.flows.unadmit_one();
         self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
         Err(super::source::SourceNatFailureReason::AllocatorExhausted)
     }
@@ -4091,7 +4107,7 @@ impl PortAllocator {
                 probe_start = port.checked_add(1);
                 continue;
             }
-            if self.shared.flows.len() >= self.shared.max_tracked_flows {
+            if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                 drop(live);
                 self.free_translated_port(ip_idx, port);
@@ -4313,7 +4329,7 @@ impl PortAllocator {
                         // too — the claimed-port reuse branch below already
                         // enforces this cap; the full-block branch must not
                         // bypass it.
-                        if self.shared.flows.len() >= self.shared.max_tracked_flows {
+                        if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
                             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                             return Err(SourceNatFailureReason::AllocatorExhausted);
                         }
@@ -4409,7 +4425,7 @@ impl PortAllocator {
                     && !lease.revoked
                     && (lease.active_flows > 0 || lease.inbound_flows > 0 || lease.expires_at_ns > now_ns)
                 {
-                    if self.shared.flows.len() >= self.shared.max_tracked_flows {
+                    if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
                         drop(live);
                         self.free_translated_port(ip_idx, port);
                         return Err(SourceNatFailureReason::AllocatorExhausted);
@@ -4469,8 +4485,8 @@ impl PortAllocator {
                 probe_start = port.checked_add(1);
                 continue;
             }
-            if self.shared.flows.len() >= self.shared.max_tracked_flows
-                || live.persistent_by_source.len() >= self.shared.max_tracked_flows
+            if live.persistent_by_source.len() >= self.shared.max_tracked_flows
+                || !self.shared.flows.admit_one(self.shared.max_tracked_flows)
             {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                 drop(live);
@@ -5190,7 +5206,7 @@ impl PortAllocator {
                         persistent_key,
                     );
                 }
-                self.shared.flows.insert_in_shard(
+                if !self.shared.flows.try_insert_in_shard(
                     &mut live.shard,
                     flow,
                     LiveAllocation {
@@ -5202,7 +5218,26 @@ impl PortAllocator {
                         promotion_timeout_ns: None,
                         holders: holder.bit(),
                     },
-                );
+                    self.shared.max_tracked_flows,
+                ) {
+                    // Fold 2: admission lost to a racer on another
+                    // shard — undo the lease join above (refcount;
+                    // the idle-edge expiry entry is re-registered
+                    // from the copied lease) and refuse.
+                    if let Some(slot) = live.persistent_by_source.get_mut(&persistent_key) {
+                        slot.active_flows = slot.active_flows.saturating_sub(1);
+                    }
+                    if was_idle {
+                        Self::insert_lease_expiration_locked(
+                            &mut live,
+                            lease.addr_index,
+                            lease.expires_at_ns,
+                            persistent_key,
+                        );
+                    }
+                    self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
                 live.record_pat_owner(&flow, translated);
                 *previous_snapshot = live.previous_snapshot();
 
@@ -5281,7 +5316,7 @@ impl PortAllocator {
             );
             persistent_key
         });
-        self.shared.flows.insert_in_shard(
+        if !self.shared.flows.try_insert_in_shard(
             &mut live.shard,
             flow,
             LiveAllocation {
@@ -5296,7 +5331,16 @@ impl PortAllocator {
                 promotion_timeout_ns: None,
                 holders: holder.bit(),
             },
-        );
+            self.shared.max_tracked_flows,
+        ) {
+            // Fold 2: admission lost — give the reserved bitmap
+            // bit back and refuse (any lease minted just above is
+            // left idle for GC, exactly as a post-mint refusal
+            // before this fold left it).
+            self.free_translated_port(addr_index, translated.port);
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         live.record_pat_owner(&flow, translated);
         *previous_snapshot = live.previous_snapshot();
         true
@@ -5508,6 +5552,14 @@ impl PortAllocator {
             self.unlink_live_allocation_captured(&mut live, &flow, existing);
             Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
+        // Fold 2: claim the tracked slot atomically BEFORE the
+        // owner/lease commit below (the earlier len() check is
+        // not atomic across shards). On loss, nothing has been
+        // committed except an incumbent unlink (snapshot-held).
+        if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+        }
         live.insert_address_only_owner(rkey, flow);
         // #8132: join the source's lease, or mint it on the first session for
         // that source. `active_flows` starts at 1 and is DERIVED from imports
@@ -5714,18 +5766,21 @@ impl PortAllocator {
                 && !excluded(preserved)
                 && !live.address_only_owners.contains_key(&rkey_for(preserved))
             {
-                self.insert_interface_record_locked(
+                if self.insert_interface_record_locked(
                     &mut live,
                     &mut __shard,
                     flow,
                     translated_ip,
                     preserved,
                     holder,
-                );
-                return Ok(InterfaceIdentity {
-                    port: preserved,
-                    patted: false,
-                });
+                ) {
+                    return Ok(InterfaceIdentity {
+                        port: preserved,
+                        patted: false,
+                    });
+                }
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return Err(super::source::SourceNatFailureReason::InterfaceRegistryCap);
             }
         }
         // The preserved identity is owned by a DIFFERENT flow: this is the
@@ -5775,18 +5830,21 @@ impl PortAllocator {
                 {
                     continue;
                 }
-                self.insert_interface_record_locked(
+                if self.insert_interface_record_locked(
                     &mut live,
                     &mut __shard,
                     flow,
                     translated_ip,
                     candidate,
                     holder,
-                );
-                return Ok(InterfaceIdentity {
-                    port: candidate,
-                    patted: true,
-                });
+                ) {
+                    return Ok(InterfaceIdentity {
+                        port: candidate,
+                        patted: true,
+                    });
+                }
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return Err(super::source::SourceNatFailureReason::InterfaceRegistryCap);
             }
             // #4676 discipline: yield between chunks so a full-cycle probe
             // cannot hold the mutex against every other worker's admission.
@@ -5869,13 +5927,16 @@ impl PortAllocator {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return InterfaceDomainReserve::RegistryCap;
         }
-        self.insert_interface_record_captured(
+        if !self.insert_interface_record_captured(
             &mut live,
             flow,
             translated_ip,
             translated_port,
             holder,
-        );
+        ) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return InterfaceDomainReserve::RegistryCap;
+        }
         *previous_snapshot = live.previous_snapshot();
         InterfaceDomainReserve::Owned
     }
@@ -5916,8 +5977,8 @@ impl PortAllocator {
         translated_ip: IpAddr,
         translated_port: u16,
         holder: NatHolder,
-    ) {
-        self.insert_interface_record_locked(&mut live.live, &mut live.shard, flow, translated_ip, translated_port, holder);
+    ) -> bool {
+        self.insert_interface_record_locked(&mut live.live, &mut live.shard, flow, translated_ip, translated_port, holder)
     }
 
     fn insert_interface_record_locked(
@@ -5928,7 +5989,12 @@ impl PortAllocator {
         translated_ip: IpAddr,
         translated_port: u16,
         holder: NatHolder,
-    ) {
+    ) -> bool {
+        // Fold 2: claim the slot atomically BEFORE publishing
+        // the owner token; callers refuse/skip on false.
+        if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
+            return false;
+        }
         live.insert_address_only_owner(
             AddressOnlyReverseKey::for_flow(&flow, translated_ip, translated_port),
             flow,
@@ -5955,6 +6021,7 @@ impl PortAllocator {
         self.shared
             .allocations_total
             .fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     /// #6226: reserve a non-deterministic, non-persistent ADDRESS-ONLY token
@@ -6071,7 +6138,7 @@ impl PortAllocator {
                 continue;
             }
             live.insert_address_only_owner(rkey, flow);
-            self.shared.flows.insert_in_shard(
+            if !self.shared.flows.try_insert_in_shard(
                 &mut __shard,
                 flow,
                 LiveAllocation {
@@ -6095,7 +6162,14 @@ impl PortAllocator {
                     promotion_timeout_ns: None,
                     holders: holder.bit(),
                 },
-            );
+                self.shared.max_tracked_flows,
+            ) {
+                // Fold 2: admission lost — retract the owner
+                // token just published and report exhaustion.
+                live.remove_address_only_owner(&rkey);
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+            }
             self.shared
                 .allocations_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -6434,6 +6508,12 @@ impl PortAllocator {
         };
         let expires_at_ns = now_ns.saturating_add(timeout_ns);
 
+        // Fold 2: claim the tracked slot atomically BEFORE the
+        // owner/lease commit below.
+        if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+        }
         // Commit this flow's reverse-identity token (freed per flow on teardown).
         live.insert_address_only_owner(rkey, flow);
 
@@ -7108,8 +7188,12 @@ impl SourceNatReservationSnapshot {
         // no same-flow insert can race past it; on refusal the
         // bitmap bit reserved above is handed back.
         let slot_present = __shard.map.contains_key(&self.flow);
+        // Fold 2: the slot claim is the shared atomic admission
+        // counter, not a len() read — a fast-path insert on
+        // another shard at cap-1 races this fetch_add, and
+        // exactly one of the two wins.
         if !slot_present
-            && self.allocator.shared.flows.len() >= self.allocator.shared.max_tracked_flows
+            && !self.allocator.shared.flows.admit_one(self.allocator.shared.max_tracked_flows)
         {
             if owns_old_bit {
                 self.allocator.free_translated_port(previous.addr_index, previous.translated.port);

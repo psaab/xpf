@@ -8,10 +8,20 @@
 //! stays in the retained `live` mutex (not on the non-persistent
 //! new-flow hot path).
 //!
-//! Cap exactness: `live_flow_count` is the exact sum of shard
-//! lengths, bumped only on actual insert/remove under the shard
-//! write lock, so the `>= max_tracked_flows` check under that lock
-//! never overshoots and never falsely exhausts (#4676 F4).
+//! Cap exactness (fold 2): the shared ADMISSION counter is the
+//! one atomic every new-slot path must win before inserting —
+//! `admit_one` does `fetch_add(1)` and rolls back when the
+//! result exceeds `max_tracked_flows`, so two paths on
+//! DIFFERENT shards (e.g. a displaced restore and a fast-path
+//! insert, both at cap-1) cannot both pass a `len()` check and
+//! overshoot. Replacements of an existing key consume no slot
+//! and never touch the counter. `len()` (the exact tracked
+//! count, bumped only on actual insert/remove under a shard
+//! lock) remains the value `live_flow_count` reports; the
+//! admission counter is >= it by at most the in-flight admits
+//! between `fetch_add` and insert, each of which either lands
+//! or rolls back. Never overshoots, never falsely exhausts
+//! once in-flight admits settle (#4676 F4).
 //! Holder-mask mutation stays under the shard write lock.
 //! Lock order: the retained `live` mutex (`RwLock`) is only ever
 //! taken BEFORE a shard, never while holding one, and writers
@@ -56,6 +66,12 @@ pub(in crate::nat) struct LiveFlowShard {
 pub(in crate::nat::allocator) struct LiveFlowMap {
     pub(in crate::nat::allocator) shards: Vec<Mutex<LiveFlowShard>>,
     pub(in crate::nat::allocator) count: AtomicUsize,
+    /// Fold 2: shared atomic admission counter (see module doc).
+    /// Incremented ONLY by `admit_one`, decremented ONLY by a
+    /// successful record removal (`remove_in_shard`) or an
+    /// `unadmit_one` rollback of an admission whose insert
+    /// never landed.
+    admission: AtomicUsize,
 }
 
 impl Default for LiveFlowMap {
@@ -71,7 +87,38 @@ impl LiveFlowMap {
                 .map(|_| Mutex::new(LiveFlowShard::default()))
                 .collect(),
             count: AtomicUsize::new(0),
+            admission: AtomicUsize::new(0),
         }
+    }
+
+    /// Current admission-counter value (test seam: proves the
+    /// counter settles back to the tracked count, never leaks).
+    pub(in crate::nat::allocator) fn admission_count(&self) -> usize {
+        self.admission.load(Ordering::Relaxed)
+    }
+
+
+    /// Fold 2: atomically claim one tracked-flow slot against
+    /// `max_tracked`. `fetch_add` first; if the claim takes the
+    /// counter PAST the cap, roll it back and refuse. Two
+    /// racers on different shards at cap-1: exactly one wins.
+    /// The winner MUST insert the record promptly (same lock
+    /// discipline as its caller) — removal of the admitted
+    /// record is the release (see `remove_in_shard`).
+    pub(in crate::nat::allocator) fn admit_one(&self, max_tracked: usize) -> bool {
+        if self.admission.fetch_add(1, Ordering::Relaxed) >= max_tracked {
+            self.admission.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// Fold 2: roll back a successful `admit_one` whose insert
+    /// did NOT land (caller abandoned the admission). Exactly
+    /// one rollback per admit; never call after the record was
+    /// inserted (its removal releases instead).
+    pub(in crate::nat::allocator) fn unadmit_one(&self) {
+        self.admission.fetch_sub(1, Ordering::Relaxed);
     }
 
     pub(in crate::nat::allocator) fn shard_guard<'a>(
@@ -101,12 +148,12 @@ impl LiveFlowMap {
         self.count.load(Ordering::Relaxed)
     }
 
-    /// Exact-cap admission under a HELD shard guard: the count
-    /// cannot move for THIS flow's key while the guard is held,
-    /// and every other insert bumps it only under its own shard,
-    /// so `len() >= max` here can never be raced past by a
-    /// same-flow insert. Returns false (cap reached) without
-    /// inserting. Replacing an existing key always succeeds.
+    /// Exact-cap admission under a HELD shard guard (fold 2):
+    /// replacing an existing key consumes no slot and always
+    /// succeeds; a NEW key must first win the shared atomic
+    /// admission counter (`admit_one`), so racers on different
+    /// shards at cap-1 cannot both insert. Returns false (cap
+    /// reached) without inserting.
     pub(in crate::nat::allocator) fn try_insert_in_shard(
         &self,
         shard: &mut LiveFlowShard,
@@ -118,7 +165,7 @@ impl LiveFlowMap {
             shard.map.insert(flow, alloc);
             return true;
         }
-        if self.count.load(Ordering::Relaxed) >= max_tracked {
+        if !self.admit_one(max_tracked) {
             return false;
         }
         shard.map.insert(flow, alloc);
@@ -159,6 +206,9 @@ impl LiveFlowMap {
         prev
     }
 
+    /// Remove under a HELD shard guard: removing an actual
+    /// record releases BOTH the tracked count and the admission
+    /// slot it was admitted with (fold 2 pairing).
     pub(in crate::nat::allocator) fn remove_in_shard(
         &self,
         shard: &mut LiveFlowShard,
@@ -167,6 +217,7 @@ impl LiveFlowMap {
         let prev = shard.map.remove(flow);
         if prev.is_some() {
             self.count.fetch_sub(1, Ordering::Relaxed);
+            self.admission.fetch_sub(1, Ordering::Relaxed);
         }
         prev
     }

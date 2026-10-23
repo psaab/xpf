@@ -436,3 +436,128 @@ fn new_flow_allocation_completes_under_held_live_read_15956() {
     worker.join().expect("worker must not panic");
     assert_eq!(alloc.live_flow_count(), 1);
 }
+
+/// #15956 fold 2: exact-cap race across shards. At cap-1, a
+/// fast-path insert (thread A) and a displaced restore (thread B)
+/// — different flows, different shards — must NOT both admit:
+/// exactly one wins the shared atomic admission counter, the
+/// tracked count never exceeds the cap, and after the winner
+/// releases, the loser path admits exactly one more. With the
+/// pre-fold `len()`-check-then-insert, both racers pass at cap-1
+/// and the count overshoots to cap+1.
+#[test]
+fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
+    use std::sync::{Arc, Barrier};
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    // 10 ports -> cap 10. Fill 9 with address-only records (no
+    // bitmap bits, so both racers' port/bit prechecks pass).
+    let alloc = Arc::new(PortAllocator::new(1, 1024, 1033));
+    for i in 0..9u16 {
+        let f = pool_flow(41000 + i);
+        alloc
+            .reserve_address_only(f, IpAddr::V4(pool_ip), 0, crate::nat::NatHolder::Untracked)
+            .expect("address-only fill must succeed");
+    }
+    assert_eq!(alloc.live_flow_count(), 9, "fixture: cap-1");
+    assert_eq!(alloc.debug_admission_count(), 9, "admission counter tracks the fill");
+
+    // Displaced incumbent for the restore racer: reserve T1,
+    // capture-replace with T2, roll T2 back (sole holder), so
+    // restore_displaced must re-insert T1 into an ABSENT slot.
+    let flow = pool_flow(42000);
+    let t1 = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 1024 };
+    let t2 = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 1025 };
+    assert!(alloc.reserve_flow(flow, t1, 0, false, 1_000, crate::nat::NatHolder::Untracked));
+    let mut snapshot = None;
+    assert!(alloc.reserve_flow_maybe_persistent(
+        flow, t2, 0, false, 2_000, crate::nat::NatHolder::Untracked, None, true, &mut snapshot,
+    ));
+    let snapshot = Arc::new(snapshot.expect("capture must produce a snapshot"));
+    assert!(alloc.rollback_flow(flow, t2, 3_000, crate::nat::NatHolder::Untracked));
+    // The reserve+rollback above netted zero; still cap-1. The
+    // T2 reserve consumed a slot and its rollback released it.
+    assert_eq!(alloc.live_flow_count(), 9, "fixture: back to cap-1 before the race");
+    assert_eq!(alloc.debug_admission_count(), 9);
+
+    // Racer A: fast-path allocate a NEW flow (distinct shard
+    // from the restore flow — assert the premise).
+    let fast_flow = pool_flow(43000);
+    {
+        use super::allocator::live_shard_index_for_test;
+        assert_ne!(
+            live_shard_index_for_test(&fast_flow),
+            live_shard_index_for_test(&flow),
+            "fixture: racers must be on different shards or the race is not cross-shard"
+        );
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    let racer_a = {
+        let alloc = Arc::clone(&alloc);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            alloc
+                .allocate_translation(
+                    fast_flow,
+                    PoolAddressFamily::V4(&addrs),
+                    0,
+                    false,
+                    false,
+                    PersistentNatPermit::TargetHostPort,
+                    0,
+                    4_000,
+                    crate::nat::NatHolder::Untracked,
+                    0,
+                )
+                .is_ok()
+        })
+    };
+    let racer_b = {
+        let alloc = Arc::clone(&alloc);
+        let barrier = Arc::clone(&barrier);
+        let snapshot = Arc::clone(&snapshot);
+        std::thread::spawn(move || {
+            barrier.wait();
+            snapshot.restore_displaced(t2, 4_000)
+        })
+    };
+    let a_ok = racer_a.join().expect("fast racer must not panic");
+    let b_ok = racer_b.join().expect("restore racer must not panic");
+    assert!(
+        a_ok ^ b_ok,
+        "exactly one racer may admit at cap-1 (fast={a_ok}, restore={b_ok}); both passing overshoots the cap"
+    );
+    assert_eq!(
+        alloc.live_flow_count(),
+        10,
+        "tracked count must land exactly ON the cap, never above"
+    );
+    assert_eq!(alloc.debug_admission_count(), 10, "admission counter must equal the tracked count after the race");
+    // The loser can be told apart and retried after a release:
+    // release whichever won, then the other path admits.
+    if a_ok {
+        let t = alloc
+            .allocate_translation(
+                fast_flow,
+                PoolAddressFamily::V4(&addrs),
+                0,
+                false,
+                false,
+                PersistentNatPermit::TargetHostPort,
+                0,
+                5_000,
+                crate::nat::NatHolder::Untracked,
+                0,
+            )
+            .expect("winner re-allocate returns existing");
+        assert!(alloc.release_flow(fast_flow, t, 6_000, crate::nat::NatHolder::Untracked));
+        assert!(snapshot.restore_displaced(t2, 7_000), "restore admits after the winner releases");
+    } else {
+        assert_eq!(alloc.debug_live_flow_translated(&flow), Some(t1));
+        assert!(alloc.release_flow(flow, t1, 6_000, crate::nat::NatHolder::Untracked));
+        allocate(&alloc, &addrs, 43000, 7_000);
+    }
+    assert_eq!(alloc.live_flow_count(), 10);
+    assert_eq!(alloc.debug_admission_count(), 10, "admission counter must not leak across release/re-admit");
+}
