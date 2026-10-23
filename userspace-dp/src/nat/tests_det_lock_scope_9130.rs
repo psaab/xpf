@@ -419,7 +419,7 @@ fn an_idempotency_race_gives_the_claimed_port_back_recycled_9130() {
     let src = Ipv4Addr::new(100, 64, 0, 1);
     let flow = v4_flow(src, 40000);
 
-    let mut guard = alloc.debug_live();
+    let mut guard = alloc.debug_capture(&flow);
     let worker = {
         let alloc = Arc::clone(&alloc);
         let entered = Arc::clone(&entered);
@@ -448,7 +448,7 @@ fn an_idempotency_race_gives_the_claimed_port_back_recycled_9130() {
         ip: IpAddr::V4(POOL_V4),
         port: 9999,
     };
-    PortAllocator::debug_insert_live_locked(&mut guard, flow, winner, 0, true);
+    alloc.debug_insert_live_locked(&mut guard, flow, winner, 0, true);
     drop(guard);
     let out = worker
         .join()
