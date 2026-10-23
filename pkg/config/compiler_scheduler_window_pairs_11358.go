@@ -114,12 +114,18 @@ func (c *schedulerWeekdayContributors12238) splitFlagWindow() bool {
 // (#12238), weekday all-day with a complete time window (#12643), and daily
 // all-day with a complete time window (#12745), because the scheduler runtime
 // evaluates all-day before time bounds.
-func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string, error) {
+//
+// On the tolerant (lenient) path it also returns the scheduler names that
+// carry any finding (#16010): the caller marks those compiled schedulers
+// Unresolvable so the runtime fails closed instead of resolving the
+// conflict widest (all-day wins over the window). Strict compilation
+// returns the error and no names.
+func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string, []string, error) {
 	if tree == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if !hasSchedulerWindowCandidate11358(tree) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	findings := make(map[schedulerWindowKey11358]schedulerWindowFinding11358)
 	for _, nodeID := range []int{0, 1} {
@@ -131,7 +137,7 @@ func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string
 		collectSchedulerWindowPairFindings11358(view, findings)
 	}
 	if len(findings) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	keys := make([]schedulerWindowKey11358, 0, len(findings))
@@ -180,11 +186,37 @@ func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string
 				key.scheduler))
 		}
 		if !lenient {
-			return nil, fmt.Errorf("%s", message)
+			return nil, nil, fmt.Errorf("%s", message)
 		}
 		warnings = append(warnings, message)
 	}
-	return warnings, nil
+	unresolvable := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if _, ok := seen[key.scheduler]; ok {
+			continue
+		}
+		seen[key.scheduler] = struct{}{}
+		unresolvable = append(unresolvable, key.scheduler)
+	}
+	return warnings, unresolvable, nil
+}
+
+// markSchedulersUnresolvable16010 stamps SchedulerConfig.Unresolvable on
+// every compiled scheduler named by the tolerant scheduler-window-pair
+// gate (#16010). The runtime evaluator fails closed for those schedulers,
+// so a permit gated by a conflicting all-day+window scheduler never
+// resolves widest. Names with no compiled scheduler are ignored (the
+// gate unions node0/node1 views; a peer-only name may not compile here).
+func markSchedulersUnresolvable16010(cfg *Config, names []string) {
+	if cfg == nil || len(names) == 0 {
+		return
+	}
+	for _, name := range names {
+		if sched := cfg.Schedulers[name]; sched != nil {
+			sched.Unresolvable = true
+		}
+	}
 }
 
 // hasSchedulerWindowCandidate11358 avoids cloning and expanding unrelated

@@ -716,7 +716,7 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// peer-only group supplies separately, could escape commit validation and
 	// reach the other node through sync. Fragments merged into an existing
 	// weekday statement are diagnosed as one statement (#12643).
-	schedulerWindowWarnings11358, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
+	schedulerWindowWarnings11358, schedulerUnresolvable16010, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
 		tree, opts.lenientSchedulerWindowPairs11358)
 	if schedulerWindowErr11358 != nil {
 		return nil, schedulerWindowErr11358
@@ -788,6 +788,10 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// the LenientContentDropped flag lives on the compiled policy.
 	markDirectTerminalActionConflicts11063(cfg, directActionConflicts)
 	markFoldWidenedPolicies9571(cfg, foldWidened)
+	// #16010: on the tolerant path the scheduler-window-pair gate warns
+	// instead of rejecting; mark the conflicting schedulers unresolvable
+	// so the runtime fails closed rather than resolving all-day widest.
+	markSchedulersUnresolvable16010(cfg, schedulerUnresolvable16010)
 	cfg.Warnings = append(cfg.Warnings, tunnelIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
