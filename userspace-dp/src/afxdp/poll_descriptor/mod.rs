@@ -2651,6 +2651,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // authority-scoped translation decision; preserve that provenance
                 // through the missing-neighbor fail-closed fence below.
                 let mut fragment_association_hit = false;
+                // #16217: adopted/serving context for the session-hit
+                // re-resolve below. A row marked fabric-established at
+                // adoption (or a tuple the adoption gate still qualifies)
+                // re-resolves with the adopted HA-enforcement exemption, so a
+                // subsequent packet cannot die on the ha_inactive terminal
+                // the adoption resolve bypassed. Non-adopted flows compute
+                // `false` here and stay fail-closed bit-identically.
+                let session_hit_fabric_adopted = flow.as_ref().is_some_and(|flow| {
+                    sessions.fabric_established_for_wire_at(&flow.forward_key, now_ns)
+                        || (fabric_link_ingress
+                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                            && sessions.shared_established_for_wire_at(
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &flow.forward_key,
+                            ))
+                        || (fabric_link_ingress
+                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
+                            && crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
+                                &worker_ctx.shared_owner_rg_indexes,
+                                &flow.forward_key,
+                                now_ns,
+                            ))
+                });
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if !owner_syn_reuse
                         && let Some(mut resolved) =
@@ -2681,7 +2708,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ha_startup_grace_until_secs,
                                 worker_id,
                                 unique_unstamped_fabric_nat_match.take(),
-                                false,
+                                // #16217: adopted/serving flows keep the
+                                // adopted HA-enforcement exemption on every
+                                // subsequent session-hit re-resolve.
+                                session_hit_fabric_adopted,
                             )
                     {
                         // #10597 G5: a queued WireGuard record may only enter
@@ -4294,6 +4324,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         if let Some(resolved) = adopted {
                             telemetry.counters.session_misses += 1;
                             telemetry.dbg.session_miss += 1;
+                            // #16217: mark the session fabric-established at
+                            // adoption so every subsequent packet (flow-cache
+                            // hit revalidation and session-hit re-resolve)
+                            // keeps the adopted exemption instead of dying on
+                            // the ha_inactive terminal. Marks the gate's
+                            // local serving row and the row this resolve
+                            // materialized (its resolved key).
+                            sessions.mark_fabric_established_for_wire(&flow.forward_key, now_ns);
+                            sessions.mark_fabric_established_for_wire(&resolved.key, now_ns);
                             resolved.decision
                         } else {
                         telemetry.counters.session_misses += 1;
@@ -10734,6 +10773,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_secs,
                                 admission_to_zone,
                                 apply_nat_on_fabric,
+                                // #16217: adopted/serving flows seed the
+                                // cache with the fabric-established mark so
+                                // hit revalidation keeps serving them.
+                                session_hit_fabric_adopted,
                                 &neighbor_epoch_snapshot,
                                 worker_ctx,
                             );

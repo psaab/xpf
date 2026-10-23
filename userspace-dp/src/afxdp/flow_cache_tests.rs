@@ -132,6 +132,7 @@ fn make_entry(
         // #5147: default to no dynamic-neighbor dependency; tests that
         // exercise MAC-change eviction set `neighbor_shard` explicitly.
         neighbor_shard: NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     }
 }
 

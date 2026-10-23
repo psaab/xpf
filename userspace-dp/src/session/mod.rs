@@ -1435,6 +1435,15 @@ struct SessionEntry {
     /// True only when BOTH directions offered WSOPT (RFC 7323 requires
     /// bilateral negotiation before either window field is scaled).
     tcp_ws_negotiated: bool,
+    /// #16217 (fabric adoption): this row was materialized/served by the
+    /// fabric-adoption path — the adoption gate proved the tuple Established
+    /// with this node as RG owner post-takeover. Session-hit re-resolves for
+    /// an adopted row run with the adopted HA-enforcement exemption (the
+    /// receiving worker's HA snapshot may still read the egress RG inactive);
+    /// non-adopted rows never carry this flag and stay fail-closed. Set ONLY
+    /// by `mark_fabric_established` from the poll adoption site (and by the
+    /// adoption resolve's own materialization); never on an HA wire.
+    fabric_established: bool,
 }
 
 /// Snapshot of one live half after a policy rebind. The worker uses this

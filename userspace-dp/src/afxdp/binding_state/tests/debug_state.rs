@@ -350,6 +350,7 @@ fn active_flow_debug_test_entry(
         neighbor_mac_epoch: 0,
         // #5147: no dynamic-neighbor dependency in this test entry.
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     }
 }
 

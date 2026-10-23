@@ -241,6 +241,7 @@ fn cache_seed(
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     });
 }
 

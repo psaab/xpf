@@ -165,6 +165,7 @@ mod flow_cache_invalidation_tests {
             neighbor_mac_epoch: 0,
             // #5147: no dynamic-neighbor dependency in this test entry.
             neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+            fabric_established: false,
         });
     }
 

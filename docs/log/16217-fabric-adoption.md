@@ -629,3 +629,68 @@ only. Do not merge as the aged-failover cure. Cluster restored
 after each run: clean master `2c8575b70e`, helper
 `2f2f5cbf…b04` both nodes (hash-proved), RG0/1/2 node0 primary,
 target OK, P4 verification 13.3 Gbit/s both runs.
+
+## Subsequent-packet adopted exemption (FZFixWire16)
+
+Terminal site (per FZFixWire15): Wire14 (`6c27d4acc3`) exempted only the
+one-shot adoption resolve. Adopted tuples still died on SUBSEQUENT packets:
+(1) flow-cache hit revalidation (`flow_cache_hit.rs`) evicted the cached
+ForwardCandidate via `cached_flow_decision_invalid_reason_for_flow` ->
+`forwarding/ha.rs` `EnforceChanged` when the receiving worker's HA snapshot
+demoted it to HAInactive; (2) the session-hit re-resolve
+(`poll_descriptor/mod.rs`, the `flow` hit arm) called the resolver with
+`fabric_adopted=false`, so `enforce_session_ha_resolution` re-wrote
+HAInactive and no downstream rescue applies on fabric-link ingress.
+
+Fix: a fabric-established mark on both stores. `SessionEntry.fabric_established`
+(session/mod.rs) + `fabric_established_for_wire_at` /
+`mark_fabric_established_for_wire` (session/lookup.rs: canonical key via the
+forward-wire alias — ambiguity fails closed — or the wire-keyed row; only
+non-reverse, non-closing, Established, pending-cleared, non-idle-crossed rows
+qualify/mark). `FlowCacheEntry.fabric_established` (flow_cache.rs), stamped at
+seed time via `stage_flow_cache_seed(fabric_established)`. The poll adoption
+site marks the session at adoption (gate row + resolved row); the session-hit
+site computes `session_hit_fabric_adopted` (session mark OR live gate) and
+passes it to the resolver and to the cache seed. The hit path suppresses ONLY
+the `EnforceChanged` eviction for marked entries — neighbor-MAC, generation,
+lease, and every other decision arm still revalidate each hit. Non-adopted
+flows carry no mark anywhere and stay fail-closed bit-identically.
+
+Tests: new `adopted_flow_survives_subsequent_packet_revalidation_16217`
+drives the real subsequent-packet path — packet 1 the production adoption
+resolve (adopted ForwardCandidate + adoption marks), packet 2 the live
+`stage_flow_cache_hit` under a stale (RG1-inactive) HA snapshot (marked entry
+Consumed, EnforceChanged arm unmoved; unmarked control evicts), packet 3 the
+session-hit re-resolve with the mark-derived adopted context
+(ForwardCandidate; non-adopted control HAInactive). FAIL-ON-REVERT for each
+leg. `cargo test 16217` 26/26; `session::`+`forwarding::`+`flow_cache`
+1119 passed with the same 5 failures as the unmodified head
+(`matched_family_pairs_are_still_admitted_7520`,
+`live_flow_cache_callsite_selected_admitted_clone_reaches_target_6304`,
+`gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615`,
+`tcp_seq_15753`, `session_decision_typed_snat_layout_11064` — pre-existing).
+
+Live: see the PR comment for the aged table (runs on build
+99.16217.37.dirty). Cluster restored clean master after each run.
+
+Live update (FZFixWire16 runs): build `99.16217.37.dirty` (helper
+`df760c40…`, then tail-fixed rebuild `1b08e66e…`, both homogeneous
+`/proc/<pid>/exe` on both nodes before traffic; evidence
+`cell45-run1/`, `cell45-run2/`): aged 30 s RG1 failover P4 — **FAIL,
+25 SUM zero intervals (31 s→end) in BOTH runs**; no pre-FO zeros;
+`snat_revoked` 0 on both nodes at every sample. Narrowing: on the
+fix build fw1's `enforce_changed=0` (the prescribed eviction arm is
+dead), yet fw1's last resolution still reads `ha_inactive
+ingress-ifindex=4 flow=172.16.80.8:<sport>->172.16.80.200:5211` and
+fw0 keeps serving all four streams from its flow cache post-FO
+(21.7M hits, zero redirect arms) — the heavy tuples never reach
+fw1's adoption gate at all, because fw0's cached ForwardCandidate
+entries are never superseded toward the fabric on this build (the
+lookup rg_epoch/lease fences evict a handful, the slow path
+re-serves/re-seeds locally, and no FabricRedirect is ever produced
+for them). The adopted-exemption legs are therefore necessary but
+not sufficient: the remaining blackhole is fw0-side — a cached
+ForwardCandidate whose egress RG departed must re-resolve to
+FabricRedirect (or be fabric-redirected) instead of re-serving
+locally forever. That is the next leg; do not merge as the
+aged-failover cure.

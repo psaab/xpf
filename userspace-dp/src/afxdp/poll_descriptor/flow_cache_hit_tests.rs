@@ -391,6 +391,7 @@ fn cached_entry() -> FlowCacheEntry {
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
+        fabric_established: false,
     }
 }
 
@@ -1346,7 +1347,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         .expect("cached decision carries a neighbor MAC");
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: live_mac },
+        NeighborEntry { mac: live_mac },
     );
     let mut worker_ctx = fixture.worker_ctx();
     let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
@@ -1369,6 +1370,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         None,
         0,
         0,
+        false,
         false,
         &neighbor_epoch_snapshot,
         &worker_ctx,
@@ -1406,6 +1408,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         None,
         0,
         0,
+        false,
         false,
         &neighbor_epoch_snapshot,
         &worker_ctx,
@@ -4066,7 +4069,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
     let mac_b = [0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b];
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_a },
+        NeighborEntry { mac: mac_a },
     );
     assert!(
         fixture
@@ -4100,6 +4103,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
                 0,
                 0,
                 false,
+                false,
                 neighbor_epoch_snapshot,
                 &worker_ctx,
             );
@@ -4129,7 +4133,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
     // The first learn after removal does not advance the shard epoch.
     fixture.dynamic_neighbors.insert_if_changed(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_b },
+        NeighborEntry { mac: mac_b },
     );
     let live_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     assert_eq!(
@@ -4211,7 +4215,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
     let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_a },
+        NeighborEntry { mac: mac_a },
     );
     assert!(
         fixture
@@ -4264,6 +4268,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
                 0,
                 0,
                 false,
+                false,
                 neighbor_epoch_snapshot,
                 &worker_ctx,
             );
@@ -4292,7 +4297,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
 
     fixture.dynamic_neighbors.insert_if_changed(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_b },
+        NeighborEntry { mac: mac_b },
     );
     let live_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     assert_eq!(
@@ -5914,5 +5919,296 @@ fn forward_candidate_egress_departed_falls_through_16270() {
         run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
         0,
         "locally-active control must not move the supersession arm"
+    );
+}
+
+/// #16217 (FZFixWire15): the subsequent-packet path for an adopted flow.
+/// Packet 1 is the adoption resolve itself (driven through the production
+/// resolver with `fabric_adopted = true`, exactly as the poll adoption
+/// callsite runs it): it must yield the local ForwardCandidate, mark the
+/// session fabric-established, and seed a fabric-established cache entry.
+/// Packet 2 is an ordinary cache hit whose revalidation would demote the
+/// cached ForwardCandidate to HAInactive (`EnforceChanged`) under the
+/// receiving worker's stale HA snapshot: the adopted entry must be SERVED
+/// (Consumed), not evicted. Packet 3 is the session-hit re-resolve after a
+/// (hypothetical) eviction: the adopted context computed from the session
+/// mark must again yield ForwardCandidate. Control: the identical flow
+/// without adoption evicts on `EnforceChanged` and resolves HAInactive.
+/// FAIL-ON-REVERT: drop the hit-path exemption, the seed mark, or the
+/// session-hit adopted context and packet 2 evicts / packet 3 terminates.
+#[test]
+fn adopted_flow_survives_subsequent_packet_revalidation_16217() {
+    // ── Packet 1: adoption resolve (production resolver, adopted) ──
+    let mut sessions = crate::session::SessionTable::new();
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 55068,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    };
+    let wire_key = crate::session::forward_wire_key(&key, nat);
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net(
+            Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap(),
+        ),
+        host: Ipv4Addr::new(172, 16, 80, 0),
+        ifindex: EGRESS_IFINDEX,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: EGRESS_IFINDEX,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x01],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+            primary_v6: None,
+        },
+    );
+    forwarding.neighbors.insert(
+        (EGRESS_IFINDEX, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry { mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00] },
+    );
+    // Receiving-worker HA snapshot: RG1 reads INACTIVE (the stale shape).
+    let mut ha_state = BTreeMap::new();
+    ha_state.insert(
+        1,
+        HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    // Established synced session for the wire tuple (the adoption premise).
+    let synced_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            source_ifindex: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let entry = SyncedSessionEntry {
+        key: wire_key.clone(),
+        decision: synced_decision,
+        metadata: SessionMetadata {
+            ingress_zone: TEST_TRUST_ZONE_ID,
+            egress_zone: TEST_UNTRUST_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        leak_incarnation: 0,
+        origin: crate::session::SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x18,
+        generation: 0,
+        session_id: 4243,
+        tcp_close_class: 0,
+        tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(),
+        rev_packets: 1,
+        fwd_packets: 1,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+    let shared_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_nat_sessions = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_forward_wire_sessions =
+        Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    assert!(
+        crate::afxdp::shared_ops::fabric_adoption_established_for_wire(
+            &sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key,
+            1_000_000,
+        ),
+        "premise: adoption gate must qualify the Established wire tuple"
+    );
+    let flow = SessionFlow { src_ip: wire_key.src_ip, dst_ip: wire_key.dst_ip, forward_key: wire_key.clone() };
+    let dynamic_neighbors = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
+    let peer_worker_commands: Vec<Arc<std::sync::Mutex<std::collections::VecDeque<WorkerCommand>>>> = Vec::new();
+    let resolve = |sessions: &mut crate::session::SessionTable, adopted: bool| {
+        crate::afxdp::session_glue::resolve_flow_session_decision_with_conntrack_and_payload(
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            1_000_000,
+            1,
+            PROTO_TCP,
+            0x18,
+            0,
+            21,
+            0,
+            true,
+            true,
+            0,
+            0,
+            None,
+            adopted,
+        )
+        .expect("wire session should resolve")
+    };
+    // Control (fail-closed): without adoption the same resolve terminates.
+    let mut control_sessions = crate::session::SessionTable::new();
+    assert_eq!(
+        resolve(&mut control_sessions, false).decision.resolution.disposition,
+        ForwardingDisposition::HAInactive,
+        "non-adopted control must stay fail-closed on the HA terminal"
+    );
+    // Adopted resolve yields the local candidate; mark at adoption (the
+    // poll adoption site's two marks: gate row + resolved row).
+    let adopted = resolve(&mut sessions, true);
+    assert_eq!(
+        adopted.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "adopted resolve must yield the local ForwardCandidate"
+    );
+    sessions.mark_fabric_established_for_wire(&wire_key, 1_000_000);
+    sessions.mark_fabric_established_for_wire(&adopted.key, 1_000_000);
+    // The transient resolve may leave no local row to mark (production lands
+    // it via the poll Owner-verdict purge/promote); install the resolved
+    // serving row directly when absent, as that landing does, then mark it.
+    if sessions.entry_with_origin(&adopted.key).is_none() {
+        assert!(sessions.install_with_protocol_with_origin(
+            adopted.key.clone(),
+            adopted.decision.clone(),
+            adopted.metadata.clone(),
+            crate::session::SessionOrigin::WorkerLocalImport,
+            1_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        sessions.mark_fabric_established_for_wire(&adopted.key, 1_000_000);
+        sessions.mark_fabric_established_for_wire(&wire_key, 1_000_000);
+    }
+    assert!(
+        sessions.fabric_established_for_wire_at(&wire_key, 1_000_000),
+        "adoption must mark the session fabric-established for subsequent packets"
+    );
+    // ── Packet 2: cache hit -> EnforceChanged revalidation ──
+    // Seed the cache exactly as the adoption forward would (forward seed
+    // with the adopted mark), then drive the live hit stage under the same
+    // stale HA snapshot. The cached decision's egress (EGRESS_IFINDEX) is
+    // RG1 in the hit fixture, so enforce demotes it: EnforceChanged.
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture.forwarding.egress.get_mut(&EGRESS_IFINDEX).expect("egress").redundancy_group = 1;
+    fixture.ha_state.insert(
+        1,
+        HAGroupRuntime { active: false, watchdog_timestamp: 1, lease: HAForwardingLease::Inactive },
+    );
+    let mut adopted_entry = cached_entry();
+    adopted_entry.fabric_established = true;
+    // The transient resolve may leave no local row to mark (production lands
+    // it via the poll Owner-verdict purge/promote); install the resolved
+    // serving row directly when absent, as that landing does, then mark it.
+    if sessions.entry_with_origin(&adopted.key).is_none() {
+        assert!(sessions.install_with_protocol_with_origin(
+            adopted.key.clone(),
+            adopted.decision.clone(),
+            adopted.metadata.clone(),
+            crate::session::SessionOrigin::WorkerLocalImport,
+            1_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        sessions.mark_fabric_established_for_wire(&adopted.key, 1_000_000);
+        sessions.mark_fabric_established_for_wire(&wire_key, 1_000_000);
+    }
+    assert!(
+        sessions.fabric_established_for_wire_at(&wire_key, 1_000_000),
+        "adoption must mark the session fabric-established for subsequent packets"
+    );
+    let run = run_stage_seeded(&fixture, &frame, meta, adopted_entry, 0, StageSeed::default());
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "#16217: adopted cache entry must be SERVED on the subsequent packet, not evicted by EnforceChanged"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize],
+        0,
+        "adopted entry must not move the EnforceChanged eviction arm"
+    );
+    // Control: the identical entry WITHOUT the adoption mark evicts.
+    let mut plain_entry = cached_entry();
+    plain_entry.metadata.owner_rg_id = 1;
+    plain_entry.stamp.owner_rg_id = 1;
+    let run = run_stage_seeded(&fixture, &frame, meta, plain_entry, 0, StageSeed::default());
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "non-adopted control entry must still evict and fall through (fail-closed)"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitEnforceChanged as usize]
+            + run.flow_cache_evictions_by_arm[crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted as usize],
+        1,
+        "non-adopted control must attribute exactly one supersession eviction"
+    );
+    // ── Packet 3: session-hit re-resolve with the adopted context ──
+    // The poll session-hit site computes `session_hit_fabric_adopted` from
+    // the session mark (plus the gate); here the mark alone must carry it.
+    let adopted_ctx = sessions.fabric_established_for_wire_at(&wire_key, 1_000_000);
+    assert!(adopted_ctx, "session-hit adopted context must derive from the adoption mark");
+    let hit = resolve(&mut sessions, adopted_ctx);
+    assert_eq!(
+        hit.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "session-hit re-resolve of an adopted flow must not die on ha_inactive"
     );
 }

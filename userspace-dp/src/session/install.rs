@@ -726,6 +726,7 @@ impl SessionTable {
                 tcp_window_scale: None,
                 tcp_syn_seen: false,
                 tcp_ws_negotiated: false,
+                fabric_established: false,
                 last_icmp_error_tat: 0,
             },
         };
@@ -1118,6 +1119,7 @@ impl SessionTable {
                 tcp_window_scale: None,
                 tcp_syn_seen: false,
                 tcp_ws_negotiated: false,
+                fabric_established: false,
                 // #9901 (F-077): a re-imported copy starts with a FULL error
                 last_icmp_error_tat: 0,
             },
