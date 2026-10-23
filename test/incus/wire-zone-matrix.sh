@@ -430,9 +430,9 @@ DMZ_HOST="${DMZ_HOST:-xpf-zone-matrix-dmz}"
 TRUST_HOST="${TRUST_HOST#*:}"
 UNTRUST_HOST="${UNTRUST_HOST#*:}"
 DMZ_HOST="${DMZ_HOST#*:}"
-TRUST_ADDR="${TRUST_ADDR:-${LAN_HOST_IP:-10.0.61.102}}"
-UNTRUST_ADDR="${UNTRUST_ADDR:-${MOUSE_TARGET_V4:-172.16.80.201}}"
-DMZ_ADDR="${DMZ_ADDR:-172.16.50.201}"
+TRUST_ADDR="${TRUST_ADDR:-${LAN_HOST_IP}}"
+UNTRUST_ADDR="${UNTRUST_ADDR:-${MOUSE_TARGET_V4}}"
+# DMZ_ADDR comes from cluster-env.sh (derived from the cluster env).
 PROBE_PORT="${PROBE_PORT:-55001}"
 CONTROL_PORT_BASE="${CONTROL_PORT_BASE:-55100}"
 DENY_BURST="${DENY_BURST:-2200}"       # 1100 at each payload size
@@ -476,9 +476,9 @@ restore_routes() {
     ((ROUTES_MUTATED)) || return 0
     local host prefix key old now
     for host in "$UNTRUST_HOST" "$DMZ_HOST"; do
-        for prefix in 10.0.61.0/24 172.16.50.0/24 172.16.80.0/24; do
-            [[ "$host" == "$UNTRUST_HOST" && "$prefix" == "172.16.80.0/24" ]] && continue
-            [[ "$host" == "$DMZ_HOST" && "$prefix" == "172.16.50.0/24" ]] && continue
+        for prefix in "$LAN_PREFIX4" "$DMZ_PREFIX4" "$WAN_PREFIX4"; do
+            [[ "$host" == "$UNTRUST_HOST" && "$prefix" == "$WAN_PREFIX4" ]] && continue
+            [[ "$host" == "$DMZ_HOST" && "$prefix" == "$DMZ_PREFIX4" ]] && continue
             key="$host|$prefix"; old="${ROUTE_SNAPSHOT[$key]:-}"
             $SG "incus exec ${INCUS_REMOTE}:${host} -- ip route del ${prefix}" >/dev/null 2>&1 || true
             if [[ -n "$old" ]] && ! $SG "incus exec ${INCUS_REMOTE}:${host} -- ip route replace ${old}" >/dev/null 2>&1; then
@@ -642,7 +642,7 @@ if grep -q "$POLICY_PREFIX\|$APP_NAME\|$BROKEN_POLICY" <<<"$POLICY_SNAP$APP_SNAP
 # Provision and identify the actual third-zone endpoint, then put only the
 # destination-network routes needed for reverse directions through the DUT.
 MOUSE_TARGET_NAME="$DMZ_HOST" MOUSE_TARGET_V4="$DMZ_ADDR" \
-MOUSE_TARGET_V6="2001:559:8585:50::201" MOUSE_TARGET_PF="mlx0" MOUSE_TARGET_VLAN="50" \
+MOUSE_TARGET_V6="$DMZ_TARGET_V6" MOUSE_TARGET_PF="$DMZ_TARGET_PF" MOUSE_TARGET_VLAN="$DMZ_TARGET_VLAN" \
 $SG "bash ${SCRIPT_DIR}/mouse-target-setup.sh up" >/dev/null 2>&1 || fail_void no-prober
 for host in "${HOSTS[@]}"; do
     if ! $SG "incus exec ${INCUS_REMOTE}:${host} -- sh -c 'command -v tcpdump'" >/dev/null 2>&1; then
@@ -667,22 +667,22 @@ route_is_clear() {
     out="$($SG "incus exec ${INCUS_REMOTE}:${host} -- ip -4 route show ${prefix}" 2>/dev/null)" || return 1
     [[ -z "$out" ]]
 }
-save_route "$UNTRUST_HOST" 10.0.61.0/24 || fail_void harness-void
-save_route "$UNTRUST_HOST" 172.16.50.0/24 || fail_void harness-void
-save_route "$DMZ_HOST" 10.0.61.0/24 || fail_void harness-void
-save_route "$DMZ_HOST" 172.16.80.0/24 || fail_void harness-void
-route_is_clear "$UNTRUST_HOST" 10.0.61.0/24 || fail_void env-void
-route_is_clear "$UNTRUST_HOST" 172.16.50.0/24 || fail_void env-void
-route_is_clear "$DMZ_HOST" 10.0.61.0/24 || fail_void env-void
-route_is_clear "$DMZ_HOST" 172.16.80.0/24 || fail_void env-void
-if $SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace 10.0.61.0/24 via 172.16.80.8" >/dev/null 2>&1; then
+save_route "$UNTRUST_HOST" "$LAN_PREFIX4" || fail_void harness-void
+save_route "$UNTRUST_HOST" "$DMZ_PREFIX4" || fail_void harness-void
+save_route "$DMZ_HOST" "$LAN_PREFIX4" || fail_void harness-void
+save_route "$DMZ_HOST" "$WAN_PREFIX4" || fail_void harness-void
+route_is_clear "$UNTRUST_HOST" "$LAN_PREFIX4" || fail_void env-void
+route_is_clear "$UNTRUST_HOST" "$DMZ_PREFIX4" || fail_void env-void
+route_is_clear "$DMZ_HOST" "$LAN_PREFIX4" || fail_void env-void
+route_is_clear "$DMZ_HOST" "$WAN_PREFIX4" || fail_void env-void
+if $SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace ${LAN_PREFIX4} via ${WAN_GW80_4}" >/dev/null 2>&1; then
     ROUTES_MUTATED=1
 else
     fail_void no-prober
 fi
-$SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace 172.16.50.0/24 via 172.16.80.8" >/dev/null 2>&1 || fail_void no-prober
-$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace 10.0.61.0/24 via 172.16.50.8" >/dev/null 2>&1 || fail_void no-prober
-$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace 172.16.80.0/24 via 172.16.50.8" >/dev/null 2>&1 || fail_void no-prober
+$SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace ${DMZ_PREFIX4} via ${WAN_GW80_4}" >/dev/null 2>&1 || fail_void no-prober
+$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace ${LAN_PREFIX4} via ${DMZ_GW4}" >/dev/null 2>&1 || fail_void no-prober
+$SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace ${WAN_PREFIX4} via ${DMZ_GW4}" >/dev/null 2>&1 || fail_void no-prober
 
 # Create the DMZ zone and owned control application/policies. The six
 # directions are represented explicitly in the config, while the default

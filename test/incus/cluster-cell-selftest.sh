@@ -227,9 +227,11 @@ source "$2/ha-assurance-lib.sh"
 source "$1"
 SCRIPT_DIR="$2"
 FW0=fw0 FW1=fw1 CLUSTER_LAN_HOST=lan
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$2/../.." && pwd)}"
+export PROJECT_ROOT
 WAN_GW4=10.0.0.1 LAN_HOST_IP=172.16.80.10 LAN_VIP4=172.16.80.1
-LAN_VIP6=2001:559:8585:80::1 IPERF_TARGET4=1.1.1.1
-IPERF_TARGET6=2606:4700:4700::1111
+LAN_VIP6=2001:559:8585:80::1 IPERF_TARGET4=172.16.80.211
+IPERF_TARGET6=2001:559:8585:80::211
 PASS=0 FAIL=0 VOID=0
 info() { :; }
 pass() { printf '  PASS  %s\n' "$*"; PASS=$((PASS + 1)); }
@@ -278,37 +280,37 @@ incus() {
 	*"mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1"*)
 		printf ' 1.|-- 2001:db8::1 0.0%% 1 1.0 1.0 1.0 1.0 0.0\n 2.|-- ??? 100.0%% 1 0.0 0.0 0.0 0.0 0.0\n'
 		;;
-	*"ip route get 172.16.80.200"*)
+	*"ip route get 172.16.80.211"*)
 		if [[ "$TEST_MODE" == route-void ]]; then
 			printf 'route query failed\n'
 			return 2
 		elif [[ "$TEST_MODE" == route-local-fail ]]; then
-			printf 'local 172.16.80.200 dev lo src 172.16.80.200\n'
+			printf 'local 172.16.80.211 dev lo src 172.16.80.211\n'
 		else
-			printf '172.16.80.200 dev eth0 src 10.0.0.1\n'
+			printf '172.16.80.211 via 10.0.63.1 dev eth0 src 10.0.63.102 uid 0\n    cache\n'
 		fi
 		;;
-	*"ip -6 route get 2001:559:8585:80::200"*)
-		printf '2001:559:8585:80::200 dev eth0 src 2001:db8::1\n'
+	*"ip -6 route get 2001:559:8585:80::211"*)
+		printf '2001:559:8585:80::211 via fe80::1 dev eth0 src 2001:db8::1\n    cache\n'
 		;;
-	*"ping -c 2 -W 1 172.16.80.200"*)
+	*"ping -c 2 -W 1 172.16.80.211"*)
 		if [[ "$TEST_MODE" == ping-fail ]]; then
 			printf '2 packets transmitted, 0 received, 100%% packet loss\n'
 			return 1
 		fi
 		printf '2 packets transmitted, 2 received, 0%% packet loss\n'
 		;;
-	*"ping -6 -c 2 -W 1 2001:559:8585:80::200"*)
+	*"ping -6 -c 2 -W 1 2001:559:8585:80::211"*)
 		printf '2 packets transmitted, 2 received, 0%% packet loss\n'
 		;;
-	*"ip neigh show 172.16.80.200 dev "*)
-		printf '172.16.80.200 lladdr 00:11:22:33:44:55 REACHABLE\n'
+	*"ip neigh show 172.16.80.211 dev "*)
+		printf '172.16.80.211 lladdr 00:11:22:33:44:55 REACHABLE\n'
 		;;
-	*"ip -6 neigh show 2001:559:8585:80::200 dev "*)
+	*"ip -6 neigh show 2001:559:8585:80::211 dev "*)
 		if [[ "$TEST_MODE" == neighbor-fail ]]; then
-			printf '2001:559:8585:80::200 lladdr 00:11:22:33:44:66 STALE\n'
+			printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:66 STALE\n'
 		else
-			printf '2001:559:8585:80::200 lladdr 00:11:22:33:44:55 STALE\n'
+			printf '2001:559:8585:80::211 lladdr 00:11:22:33:44:55 STALE\n'
 		fi
 		;;
 	*)

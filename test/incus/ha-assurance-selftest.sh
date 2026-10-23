@@ -843,6 +843,22 @@ ROUTE_LOCAL='local 172.16.80.200 dev lo src 172.16.80.200'
 assert_helper_value eth0 ha_route_device "${ROUTE_GOOD}"
 assert_helper_status 0 ha_route_lookup_verdict 0 "${ROUTE_GOOD}"
 assert_helper_status 1 ha_route_lookup_verdict 0 "${ROUTE_LOCAL}"
+# #16307: `ip route get` may append a trailing `cache` continuation line
+# (optionally flagged) for the one route entry; both parsers must accept
+# it, while a second route line or a non-trailing cache line stays VOID.
+ROUTE_CACHE=$'172.16.80.211 via 10.0.63.1 dev eth0 src 10.0.63.102 uid 0\n    cache'
+ROUTE_CACHE_FLAGS=$'172.16.80.211 via 10.0.63.1 dev eth0 src 10.0.63.102 uid 0\n    cache <mc>'
+ROUTE_CACHE6=$'2001:559:8585:80::211 via fe80::1 dev eth0 src 2001:db8::1\n    cache'
+ROUTE_CACHE_LOCAL=$'local 172.16.80.211 dev lo src 172.16.80.211\n    cache'
+for route in "$ROUTE_CACHE" "$ROUTE_CACHE_FLAGS" "$ROUTE_CACHE6"; do
+	assert_helper_value eth0 ha_route_device "$route"
+	assert_helper_status 0 ha_route_lookup_verdict 0 "$route"
+done
+assert_helper_status 1 ha_route_lookup_verdict 0 "$ROUTE_CACHE_LOCAL"
+assert_helper_status 2 ha_route_lookup_verdict 0 $'cache\n172.16.80.211 dev eth0 src 10.0.63.102'
+assert_helper_status 2 ha_route_device $'cache\n172.16.80.211 dev eth0 src 10.0.63.102'
+assert_helper_status 2 ha_route_lookup_verdict 0 "${ROUTE_CACHE}"$'\n172.16.80.200 dev eth1'
+assert_helper_status 2 ha_route_device "${ROUTE_CACHE}"$'\n172.16.80.200 dev eth1'
 assert_helper_status 2 ha_route_lookup_verdict 1 'route query failed'
 assert_helper_status 2 ha_route_lookup_verdict 0 'unparseable route output'
 ROUTE_DEVICE_MISSING='172.16.80.200 src 10.0.0.1'

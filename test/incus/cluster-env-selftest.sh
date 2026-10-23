@@ -63,6 +63,36 @@ eq "loss LAN_HOST_IP"      "$(resolve LAN_HOST_IP)"      "10.0.61.102"
 eq "loss IPERF_TARGET4"    "$(resolve IPERF_TARGET4)"    "172.16.80.200"
 eq "loss IPERF_TARGET6"    "$(resolve IPERF_TARGET6)"    "2001:559:8585:80::200"
 
+# ── Case A2: tcp/udp envs derive their own wire addressing (#16305/#16306) ─
+# Group12/wire gates must measure each cluster's own targets: tcp .210,
+# udp .211, never the loss .200/.201 literals. DMZ (VLAN-50) probers reuse
+# the iperf target octet + 1 (the mouse-target octet); the policy-deny
+# sink is that same mouse target on VLAN 80.
+for spec in "tcp 10.0.62 210" "udp 10.0.63 211"; do
+	read -r cname lanpfx octet <<<"$spec"
+	envfile="BPFRX_CLUSTER_ENV=test/incus/${cname}-userspace-cluster.env"
+	eq "${cname} LAN_PREFIX4"   "$(resolve LAN_PREFIX4 "$envfile")"   "${lanpfx}.0/24"
+	eq "${cname} DMZ_ADDR"      "$(resolve DMZ_ADDR "$envfile")"      "172.16.50.$((octet + 1))"
+	eq "${cname} DMZ_TARGET_V6" "$(resolve DMZ_TARGET_V6 "$envfile")" "2001:559:8585:50::$((octet + 1))"
+	eq "${cname} MOUSE_TARGET_V4" "$(resolve MOUSE_TARGET_V4 "$envfile")" "172.16.80.${octet}"
+	eq "${cname} MOUSE_TARGET_REF" "$(resolve MOUSE_TARGET_REF "$envfile")" "${cname}:xpf-mouse-target"
+	eq "${cname} IPERF_TARGET4" "$(resolve IPERF_TARGET4 "$envfile")" "172.16.80.${octet}"
+	eq "${cname} DMZ_GW4"       "$(resolve DMZ_GW4 "$envfile")"       "172.16.50.$((octet - 200))"
+	eq "${cname} WAN_GW80_4"    "$(resolve WAN_GW80_4 "$envfile")"    "172.16.80.$((octet - 200))"
+	eq "${cname} IPERF_TARGET6" "$(resolve IPERF_TARGET6 "$envfile")" "2001:559:8585:80::${octet}"
+done
+# Loss derivation must reproduce the historical literals exactly.
+eq "loss LAN_PREFIX4"     "$(resolve LAN_PREFIX4)"     "10.0.61.0/24"
+eq "loss DMZ_ADDR"        "$(resolve DMZ_ADDR)"        "172.16.50.201"
+eq "loss DMZ_TARGET_V6"   "$(resolve DMZ_TARGET_V6)"   "2001:559:8585:50::201"
+eq "loss MOUSE_TARGET_V4" "$(resolve MOUSE_TARGET_V4)" "172.16.80.201"
+eq "loss MOUSE_TARGET_REF" "$(resolve MOUSE_TARGET_REF)" "loss:xpf-mouse-target"
+eq "loss DMZ_TARGET_PF"   "$(resolve DMZ_TARGET_PF)"   "mlx0"
+eq "loss DMZ_GW4"         "$(resolve DMZ_GW4)"         "172.16.50.8"
+eq "loss WAN_GW80_4"      "$(resolve WAN_GW80_4)"      "172.16.80.8"
+eq "loss WAN_VIP4 (not the gateway)" "$(resolve WAN_VIP4)" "172.16.50.6"
+eq "loss DMZ_TARGET_VLAN" "$(resolve DMZ_TARGET_VLAN)" "50"
+
 # #5024 guards: the LAN host must NOT be the unreachable legacy default,
 # and it must carry the loss: remote (a bare name hits the wrong remote).
 lan="$(resolve CLUSTER_LAN_HOST)"
