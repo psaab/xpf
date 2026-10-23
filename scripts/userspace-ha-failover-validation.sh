@@ -42,6 +42,13 @@ MAX_RETRANSMITS_PER_GBPS="${MAX_RETRANSMITS_PER_GBPS:-}"
 POST_FAILOVER_OBSERVE="${POST_FAILOVER_OBSERVE:-10}"
 AGED_FAILOVER=0
 AGED_AGE="${AGED_AGE:-30}"
+IPERF_PORT="${IPERF_PORT:-5201}"
+AGED_STREAM_STARTED_AT=""
+AGED_FAILOVER_AT_AGE=""
+AGED_SNAT_PRE_FW0=""
+AGED_SNAT_PRE_FW1=""
+AGED_SNAT_POST_FW0=""
+AGED_SNAT_POST_FW1=""
 TRANSITION_SAMPLE_SECONDS="${TRANSITION_SAMPLE_SECONDS:-10}"
 MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA="${MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA:-512}"
 MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA="${MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA:-512}"
@@ -90,6 +97,9 @@ fi
 # 25 SUM zero intervals); do not let a caller's looser default pass.
 if (( AGED_FAILOVER == 1 )); then
 	MAX_ZERO_INTERVALS=0
+fi
+if (( AGED_FAILOVER == 1 )); then
+	IPERF_PORT=5211
 fi
 
 # shellcheck disable=SC1090
@@ -975,7 +985,7 @@ validate_target_reachability() {
 	# Some targets drop the first probe while ARP/NDP settles. Fall back to a
 	# TCP handshake against the iperf3 server so failover validation does not
 	# fail before the actual RG transition is exercised.
-	if run_host "timeout 3 bash -lc 'echo > /dev/tcp/${IPERF_TARGET}/5201' >${tcp_log} 2>&1"; then
+	if run_host "timeout 3 bash -lc 'echo > /dev/tcp/${IPERF_TARGET}/${IPERF_PORT}' >${tcp_log} 2>&1"; then
 		return 0
 	fi
 	return 1
@@ -1032,7 +1042,7 @@ start_iperf() {
 	local attempt
 	for attempt in 1 2 3; do
 		run_host "systemctl stop ${REMOTE_IPERF_UNIT} >/dev/null 2>&1 || true; systemctl reset-failed ${REMOTE_IPERF_UNIT} >/dev/null 2>&1 || true; pkill -9 iperf3 2>/dev/null || true; rm -f ${REMOTE_IPERF_LOG}"
-		run_host "systemd-run --quiet --unit ${REMOTE_IPERF_UNIT%.service} /bin/sh -c $(printf %q "exec iperf3 --json-stream --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > ${REMOTE_IPERF_LOG} 2>/dev/null")"
+		run_host "systemd-run --quiet --unit ${REMOTE_IPERF_UNIT%.service} /bin/sh -c $(printf %q "exec iperf3 --json-stream --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -p ${IPERF_PORT} -P ${IPERF_STREAMS} > ${REMOTE_IPERF_LOG} 2>/dev/null")"
 		sleep 8
 		if ! run_host "pgrep -x iperf3 >/dev/null"; then
 			info "iperf3 exited on attempt ${attempt}, retrying"
@@ -1042,6 +1052,106 @@ start_iperf() {
 		return 0
 	done
 	return 1
+}
+
+aged_assert_all_node0_posture() {
+	local status rg owner failures=0
+	if [[ "$SOURCE_NODE" != "0" || "$TARGET_NODE" != "1" ]]; then
+		fail "aged-failover: all-node0 cell requires SOURCE_NODE=0 and TARGET_NODE=1 (got ${SOURCE_NODE}->${TARGET_NODE})"
+		return 1
+	fi
+	status="$(run_vm "$FW0" 'cli -c "show chassis cluster status"' 2>/dev/null || true)"
+	if [[ -z "$status" ]]; then
+		fail "aged-failover: cluster status unavailable for all-node0 posture check"
+		return 1
+	fi
+	for rg in 0 1 2; do
+		owner="$(awk -v rg="$rg" '
+			$0 ~ ("Redundancy group: " rg " ") { in_rg=1; next }
+			in_rg && /^Redundancy group:/ { in_rg=0 }
+			in_rg && /primary/ { print $1; exit }
+		' <<<"$status")"
+		if [[ "$owner" != "node0" ]]; then
+			fail "aged-failover: RG${rg} primary is ${owner:-unknown}, expected node0 in all-node0 posture"
+			failures=1
+		fi
+	done
+	if (( failures == 0 )); then
+		pass "aged-failover: RG0/RG1/RG2 all primary on node0 before traffic"
+		return 0
+	fi
+	return 1
+}
+
+aged_snat_revoked_count() {
+	local vm="$1"
+	local metrics value
+	metrics="$(run_vm "$vm" 'curl -s --max-time 5 http://127.0.0.1:8080/metrics' 2>/dev/null || true)"
+	value="$(awk '$1 == "xpf_userspace_snat_revoked_sessions_total" { print $2; found=1 } END { if (!found) print "" }' <<<"$metrics")"
+	if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+		return 1
+	fi
+	printf '%s\n' "$value"
+}
+
+aged_capture_snat_revoked() {
+	local when="$1"
+	local fw0_count fw1_count
+	if ! fw0_count="$(aged_snat_revoked_count "$FW0")"; then
+		fail "aged-failover: xpf_userspace_snat_revoked_sessions_total unavailable on fw0 (${when})"
+		return 1
+	fi
+	if ! fw1_count="$(aged_snat_revoked_count "$FW1")"; then
+		fail "aged-failover: xpf_userspace_snat_revoked_sessions_total unavailable on fw1 (${when})"
+		return 1
+	fi
+	if [[ "$when" == "pre-failover" ]]; then
+		AGED_SNAT_PRE_FW0="$fw0_count"
+		AGED_SNAT_PRE_FW1="$fw1_count"
+	else
+		AGED_SNAT_POST_FW0="$fw0_count"
+		AGED_SNAT_POST_FW1="$fw1_count"
+	fi
+	info "aged-failover: snat_revoked ${when}: fw0=${fw0_count} fw1=${fw1_count}"
+}
+
+aged_assert_snat_revoked_zero_delta() {
+	if [[ -z "$AGED_SNAT_PRE_FW0" || -z "$AGED_SNAT_PRE_FW1" || -z "$AGED_SNAT_POST_FW0" || -z "$AGED_SNAT_POST_FW1" ]]; then
+		fail "aged-failover: snat_revoked samples incomplete (pre fw0=${AGED_SNAT_PRE_FW0:-?} fw1=${AGED_SNAT_PRE_FW1:-?}; post fw0=${AGED_SNAT_POST_FW0:-?} fw1=${AGED_SNAT_POST_FW1:-?})"
+		return 1
+	fi
+	if [[ "$AGED_SNAT_POST_FW0" == "$AGED_SNAT_PRE_FW0" && "$AGED_SNAT_POST_FW1" == "$AGED_SNAT_PRE_FW1" ]]; then
+		pass "aged-failover: snat_revoked delta 0 on both nodes (fw0 ${AGED_SNAT_PRE_FW0}->${AGED_SNAT_POST_FW0}, fw1 ${AGED_SNAT_PRE_FW1}->${AGED_SNAT_POST_FW1})"
+		return 0
+	fi
+	fail "aged-failover: snat_revoked increased (fw0 ${AGED_SNAT_PRE_FW0}->${AGED_SNAT_POST_FW0}, fw1 ${AGED_SNAT_PRE_FW1}->${AGED_SNAT_POST_FW1}); gate requires delta 0 on both nodes"
+	return 1
+}
+
+aged_wait_until_stream_age() {
+	local now elapsed remaining
+	if [[ -z "$AGED_STREAM_STARTED_AT" ]]; then
+		fail "aged-failover: stream start was not measured"
+		return 1
+	fi
+	now="$(date +%s)"
+	elapsed=$((now - AGED_STREAM_STARTED_AT))
+	remaining=$((AGED_AGE - elapsed))
+	if (( remaining > 0 )); then
+		info "aged-failover: stream age ${elapsed}s; waiting ${remaining}s to fail over at measured age ${AGED_AGE}s"
+		if ! cycle_sleep "$remaining"; then
+			fail "aged-failover: iperf3 exited before measured stream age ${AGED_AGE}s"
+			return 1
+		fi
+	fi
+	now="$(date +%s)"
+	AGED_FAILOVER_AT_AGE=$((now - AGED_STREAM_STARTED_AT))
+	if (( AGED_FAILOVER_AT_AGE < AGED_AGE )); then
+		fail "aged-failover: failover would fire at measured stream age ${AGED_FAILOVER_AT_AGE}s (< ${AGED_AGE}s)"
+		return 1
+	fi
+	pass "aged-failover: failing over at measured stream age ${AGED_FAILOVER_AT_AGE}s (target ${AGED_AGE}s)"
+	return 0
 }
 
 recent_interval_metric() {
@@ -1536,8 +1646,19 @@ capture_vm_state "$SOURCE_VM" "before-source"
 capture_vm_state "$TARGET_VM" "before-target"
 wait_for_session_sync_idle "pre-traffic"
 
-info "starting iperf3 ${IPERF_TARGET} -P${IPERF_STREAMS} -t${IPERF_DURATION}"
+info "starting iperf3 ${IPERF_TARGET}:${IPERF_PORT} -P${IPERF_STREAMS} -t${IPERF_DURATION}"
+if (( AGED_FAILOVER == 1 )); then
+	aged_assert_all_node0_posture || true
+fi
 start_iperf || die "iperf3 failed to start"
+if (( AGED_FAILOVER == 1 )); then
+	# Actual stream start is proven by start_iperf's live-process check
+	# (its 8s settle is included in the measured age). All later waits
+	# are computed from this timestamp, never from fixed SYNC_WAIT /
+	# PRE_FAILOVER_OBSERVE arithmetic.
+	AGED_STREAM_STARTED_AT="$(date +%s)"
+	aged_capture_snat_revoked "stream-start" || true
+fi
 pass "iperf3 started"
 
 source_count="$(session_count "$SOURCE_VM")"
@@ -1565,21 +1686,16 @@ if (( AGED_FAILOVER == 1 )); then
 	if (( TOTAL_CYCLES != 1 )); then
 		die "--aged-failover requires a single failover cycle (TOTAL_CYCLES=1)"
 	fi
-	# Never-again gate for #16217: streams must AGE past the 20s TCP
-	# opening window and the 10s conntrack-refresh cycle before the
-	# failover, otherwise a young-flow pass hides every leg of the
-	# aged-failover chain (see docs/ha-failover-status.md). The
-	# pre-failover health window above only observes ~10s, so wait
-	# out the remainder here; pre-failover zeros still fail via
+	# Never-again gate for #16217: time the failover against the
+	# measured stream start above, so the streams have actually aged
+	# past the 20s TCP opening window and the 10s conntrack-refresh
+	# cycle when RG1 moves. Pre-failover zeros still fail via
 	# validate_whole_run_metrics (MAX_PREFLIGHT_* defaults are 0).
-	aged_wait=$(( AGED_AGE - PRE_FAILOVER_OBSERVE - SYNC_WAIT ))
-	if (( aged_wait > 0 )); then
-		info "aged-failover: letting streams age ${aged_wait}s more (target age ${AGED_AGE}s) before RG${RG} failover"
-		if ! cycle_sleep "$aged_wait"; then
-			fail "aged-failover: iperf3 exited before streams reached ${AGED_AGE}s of age"
-		fi
-	fi
+	aged_capture_snat_revoked "pre-failover" || true
+	aged_wait_until_stream_age || true
 	run_failover_phase 1 "$SOURCE_NODE" "$TARGET_NODE" "failover" 1
+	aged_capture_snat_revoked "post-failover" || true
+	aged_assert_snat_revoked_zero_delta || true
 elif (( STEADY_ONLY == 1 )); then
 	info "steady-only mode: skipping RG${RG} failover"
 elif (( TOTAL_CYCLES == 1 )); then

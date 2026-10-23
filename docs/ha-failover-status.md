@@ -258,12 +258,21 @@ per-leg evidence lives in `docs/log/16215.md`, `docs/log/16222.md`,
 `docs/log/16270-cache-supersession.md`, and
 `docs/log/16217-fabric-adoption.md` on that branch.
 
-**Acceptance (unchanged, never met live):** all-node0 posture, P4
-iperf3 60 s to `172.16.80.200:5211`, RG1 fw0→fw1 at **30 s stream
-age**, **zero** SUM and per-stream zero intervals, `snat_revoked=0`
-on both nodes at every sample. Clean master `2c8575b70e` fails it
-with 130 SUM zero intervals; the PR head fails it with 25, all from
-failover+1 s. A young-flow failover pass proves none of this.
+**Acceptance (unchanged, never met live):** all-node0 posture
+(RG0/RG1/RG2 primary on node0, asserted by the harness before
+traffic), P4 iperf3 60 s to `172.16.80.200:5211`, RG1 fw0→fw1 at
+**30 s measured stream age**, **zero** aggregate (`[SUM]`) and
+per-stream zero intervals, and a zero delta in
+`xpf_userspace_snat_revoked_sessions_total` on both nodes across the
+cell (pre- and post-failover samples). Clean master `2c8575b70e`
+fails it: the source tables record **130 zero intervals** for that
+arm — the column is headed "Zero SUM intervals" in some tables and
+left unqualified in others, and 130 exceeds the ~30 aggregate
+intervals a 60 s run has after the failover, so that number is a
+per-stream/line count, **not** 130 aggregate intervals; do not quote
+it as a SUM baseline. The comparable aggregate signature on the PR
+head is 25 SUM zero intervals (31 s→end), all from failover+1 s. A
+young-flow failover pass proves none of this.
 
 The chain, in the order each leg was proven and closed (each fix is
 necessary, none is sufficient; the residual always moved one stage
@@ -376,10 +385,17 @@ substitute the reply decision for the stored forward decision.
 
 - **Aged cell, not young cell.** The harness gate is
   `scripts/userspace-ha-failover-validation.sh --aged-failover`
-  (P4 60 s, RG1 failover at 30 s stream age, `MAX_ZERO_INTERVALS`
-  forced to 0; per-stream and preflight zero budgets already
-  default to 0). A failover issued inside the 20 s opening window
-  or the first conntrack-refresh cycle is not evidence.
+  (port 5211, P4 60 s): it asserts RG0/RG1/RG2 are all primary on
+  node0 before traffic, stamps the actual stream start once
+  `start_iperf` proves the client live, and issues the RG1 failover
+  only when the **measured** stream age reaches 30 s — not after a
+  fixed sum of sync/observe sleeps. `MAX_ZERO_INTERVALS` is forced
+  to 0 (per-stream and preflight zero budgets already default to 0),
+  and the `xpf_userspace_snat_revoked_sessions_total` delta across
+  the cell must be 0 on both nodes (an unavailable metric fails the
+  gate, it does not skip it). A failover issued inside the 20 s
+  opening window or the first conntrack-refresh cycle is not
+  evidence.
 - **Twice on loss.** No leg is "fixed live" on one run; every leg
   above was required to fail twice on the same build before the
   next leg was named, and the cure must pass with the identical
