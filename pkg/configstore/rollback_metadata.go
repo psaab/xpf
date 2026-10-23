@@ -34,14 +34,17 @@ import (
 //
 // Next-active preparation (#16064): immediately before WriteActive, Commit
 // durably writes rollback preparation metadata. Its primary active binding
-// still describes the current history, while next_active_* describes the
+// still describes the current history, while next_active_hash describes the
 // committed tree that is about to become active. PendingHash on each entry
-// names the post-commit slot at that same position. If power is lost after
-// the active rename, history slots retain their old bytes but load at their
-// old pre-shift positions; each is admitted only when its hash equals the
+// names the post-commit slot content at that same position, and
+// PendingTimestamp/PendingComment carry that future entry's attributes, so a
+// partially rewritten slot is restored with ITS OWN timestamp/comment rather
+// than borrowing another position's. If power is lost after the active
+// rename, history slots retain their old bytes but load at their old
+// pre-shift positions; each is admitted only when its hash equals the
 // previous committed entry at index-1 (or the previous active hash for slot
-// 1). If power is lost after some slot rewrites, those rewritten slots also
-// retain pre-shift indices and are admitted from PendingHash. Active identity
+// 1). If power is lost after some slot rewrites, those rewritten slots are
+// admitted from PendingHash with their pending attributes. Active identity
 // mismatch alone therefore no longer mass-tombstones byte-verifiable history;
 // unrelated active content and unmatched bytes still fail closed. A normal
 // completed commit publishes current metadata with all preparation fields
@@ -56,7 +59,9 @@ type rollbackMetadataFile struct {
 	Entries       []rollbackSlotMetadataEntry `json:"entries"`
 	// NextActiveHash is the guarded hash of the committed tree whose active
 	// rename this preparation record immediately precedes (#16064). It certifies
-	// the one-generation skew only when the durable active.json hash matches it.
+	// the one-generation skew whenever the durable active.json hash matches it,
+	// including when it equals ActiveHash (same-content commit): the active
+	// file identity still moved, so the skew is real.
 	NextActiveHash string `json:"next_active_hash,omitempty"`
 }
 
@@ -72,6 +77,12 @@ type rollbackSlotMetadataEntry struct {
 	// this same slot position during a prepared in-flight commit. It lets boot
 	// recover partially rewritten history without shifting positions.
 	PendingHash string `json:"pending_hash,omitempty"`
+	// PendingTimestamp/PendingComment (#16064) are the history attributes of
+	// the FUTURE entry whose content PendingHash names. A slot admitted via
+	// PendingHash must be stamped with these, not with the committed entry's
+	// attributes at this or any other position.
+	PendingTimestamp time.Time `json:"pending_timestamp,omitempty"`
+	PendingComment   string    `json:"pending_comment,omitempty"`
 }
 
 const (
@@ -134,8 +145,16 @@ func (s *Store) writeRollbackMetadataGeneration(generation uint64, entries []rol
 
 func (s *Store) writeRollbackMetadataGenerationNext(generation uint64,
 	entries []rollbackSlotMetadataEntry, nextActiveHash string) error {
+	return s.writeRollbackMetadataGenerationNextBound(generation, entries, nextActiveHash, "")
+}
+
+func (s *Store) writeRollbackMetadataGenerationNextBound(generation uint64,
+	entries []rollbackSlotMetadataEntry, nextActiveHash, boundActiveHash string) error {
 	path := s.rollbackMetadataPath()
 	activeHash, activeIdentity := s.rollbackActiveBindingForWrite()
+	if boundActiveHash != "" {
+		activeHash = boundActiveHash
+	}
 	data, err := json.MarshalIndent(rollbackMetadataFile{
 		Version:        rollbackMetadataVersion,
 		Generation:     generation,
@@ -338,14 +357,17 @@ func (s *Store) readRollbackMetadataSnapshotFull() rollbackMetadataSnapshot {
 }
 
 // prepareRollbackForCommit durably publishes current history plus the #16064
-// next-active dual binding BEFORE WriteActive. The post-push order is
-// [previous active, current history...]. Slot 1 of that order will hold the
-// previous active tree; slot i>1 will hold current history slot i-1. The
+// next-active dual binding BEFORE WriteActive. futureEntries mirrors the
+// caller's post-push history: [previous active, current history...]. The
 // committed Hash fields stay bound to the pre-commit sidecar that boot may
-// still be holding, and PendingHash describes only a partially completed
-// future history rewrite. Generation remains the committed generation.
-// Skipped when there is no primary binding to preserve (fresh or legacy DB).
-func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree) error {
+// still be holding, and PendingHash/PendingTimestamp/PendingComment describe
+// the future entry at each position so a partially completed rewrite can be
+// recovered with its own attributes. Generation remains the committed
+// generation. A recovered (skew-loaded) store re-arms preparation on its
+// next commit because the sidecar's identity is stale but its hash binding
+// still matches s.active. Skipped only when there is no primary binding to
+// preserve (fresh or legacy DB, or the sidecar names a different active).
+func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree, description string) error {
 	if s.filePath == "" || s.db == nil || s.active == nil || committedTree == nil {
 		return nil
 	}
@@ -353,67 +375,139 @@ func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree) error
 	if snap.Generation == 0 || snap.ActiveHash == "" || snap.Identity.Inode == 0 {
 		return nil
 	}
-	if snap.ActiveHash != guardedConfigHash(s.active) {
+	// #16064 fold: a skew-recovered store's sidecar still names the PREVIOUS
+	// active hash while s.active is the certified next active. That mismatch
+	// is precisely the re-arm case and must not skip preparation.
+	if snap.ActiveHash != guardedConfigHash(s.active) &&
+		!(snap.NextActiveHash != "" && snap.NextActiveHash == guardedConfigHash(s.active)) {
 		return nil
 	}
-	futureEntries := []*HistoryEntry{{Config: s.active.Clone()}}
+	// The caller's in-memory history is already the authority in both the
+	// clean and skew-recovered states; committed sidecar entries break their
+	// binding if a prior crash consumed entries (e.g. an admitted tombstone
+	// at the tail), which is exactly the re-arm case (#16064 fold 3). Every
+	// entry here is therefore rebuilt fresh from format bytes.
+	futureEntries := []*HistoryEntry{{Config: s.active.Clone(), Timestamp: time.Now(), Comment: description}}
 	futureEntries = append(futureEntries, s.history.List()...)
 	limit := s.history.MaxSize()
 	if limit > 0 && len(futureEntries) > limit {
 		futureEntries = futureEntries[:limit]
 	}
+	recoveredSkew := snap.NextActiveHash != "" && snap.NextActiveHash == guardedConfigHash(s.active) &&
+		snap.ActiveHash != guardedConfigHash(s.active)
 	prepared := make([]rollbackSlotMetadataEntry, len(futureEntries))
 	for i, entry := range futureEntries {
 		data := []byte(rollbackTombstoneMarker)
 		if entry != nil && entry.Config != nil {
 			data = []byte(entry.Config.Format())
 		}
-		preparedEntry := rollbackSlotMetadataEntry{}
+		preparedEntry := rollbackSlotMetadataEntry{
+			Generation: snap.Generation,
+		}
+		// Committed Hash/attrs describe the sidecar slot at THIS index as
+		// the loader's chain will read it: future[0]'s predecessor is the
+		// committed active, future[i]'s predecessor is committed[i-1].
+		// Preserve the sidecar's committed binding verbatim; only the
+		// loader's skew path may reinterpret it, never the writer.
 		if i < len(snap.Entries) {
-			preparedEntry = snap.Entries[i]
+			preparedEntry.Hash = snap.Entries[i].Hash
+			preparedEntry.Timestamp = snap.Entries[i].Timestamp
+			preparedEntry.Comment = snap.Entries[i].Comment
+			preparedEntry.Device = snap.Entries[i].Device
+			preparedEntry.Inode = snap.Entries[i].Inode
+			preparedEntry.ModTime = snap.Entries[i].ModTime
+		}
+		if recoveredSkew {
+			// Committed = CURRENT slots in recovered (pre-shift) positions:
+			// slot 1 = previous committed entry 0, slot i = history[i-2],
+			// stamped with that entry's committed attributes.
+			if i == 0 {
+				if len(snap.Entries) > 0 {
+					preparedEntry.Hash = snap.Entries[0].Hash
+					preparedEntry.Timestamp = snap.Entries[0].Timestamp
+					preparedEntry.Comment = snap.Entries[0].Comment
+				}
+			} else if histList := s.history.List(); i-1 < len(histList) && histList[i-1] != nil && histList[i-1].Config != nil {
+				preparedEntry.Hash = rollbackSlotHash([]byte(histList[i-1].Config.Format()))
+				preparedEntry.Timestamp = histList[i-1].Timestamp
+				preparedEntry.Comment = histList[i-1].Comment
+			} else {
+				preparedEntry.Hash = rollbackSlotHash([]byte(rollbackTombstoneMarker))
+			}
+			// Current-slot identity for the committed binding.
+			if identity, ok := rollbackSlotIdentityForPath(s.rollbackPath(i + 1)); ok {
+				preparedEntry.Device = identity.Device
+				preparedEntry.Inode = identity.Inode
+				preparedEntry.ModTime = identity.ModTime
+			} else {
+				preparedEntry.Device, preparedEntry.Inode, preparedEntry.ModTime = 0, 0, time.Time{}
+			}
 		}
 		preparedEntry.PendingHash = rollbackSlotHash(data)
+		if entry != nil {
+			preparedEntry.PendingTimestamp = entry.Timestamp
+			preparedEntry.PendingComment = entry.Comment
+		}
 		prepared[i] = preparedEntry
 	}
-	return s.writeRollbackMetadataGenerationNext(
-		snap.Generation, prepared, guardedConfigHash(committedTree))
+	boundActive := snap.ActiveHash
+	if recoveredSkew {
+		boundActive = guardedConfigHash(s.active)
+	}
+	return s.writeRollbackMetadataGenerationNextBound(
+		snap.Generation, prepared, guardedConfigHash(committedTree), boundActive)
 }
 
-// classifyRollbackSlotBytes applies the #16064 generation-skew rules to slot
-// pos (0-based), whose on-disk bytes hash to slotHash, during boot of the
-// certified next-active generation (pendingOK). It reports whether the bytes
-// may be admitted in their CURRENT pre-shift position. pendingOK == false
-// means the caller is not on the certified skew path (it never reaches this
-// helper with admission intent). While pendingOK is true the verdicts are:
+// rollbackSkewSlotAdmission is the production #16064 loader gate: given the
+// sidecar snapshot, whether the certified pending skew is in effect, and a
+// slot's 1-based index and content hash, it reports whether the slot survives
+// at its pre-shift position and which attributes it carries.
+func rollbackSkewSlotAdmission(snap rollbackMetadataSnapshot, pendingSkew bool, i int,
+	slotHash string) (valid bool, ts time.Time, comment string) {
+	if !pendingSkew {
+		return false, time.Time{}, ""
+	}
+	metadata := snap.Entries
+	if i-1 < len(metadata) && metadata[i-1].PendingHash != "" &&
+		slotHash == metadata[i-1].PendingHash {
+		return true, metadata[i-1].PendingTimestamp, metadata[i-1].PendingComment
+	}
+	want := ""
+	if i == 1 {
+		want = snap.ActiveHash
+	} else if i-2 < len(metadata) {
+		want = metadata[i-2].Hash
+	}
+	if want == "" || slotHash != want {
+		return false, time.Time{}, ""
+	}
+	if ts, c, found := rollbackMetadataTimestampForSlot(metadata, i-1); found {
+		return true, ts, c
+	}
+	return true, time.Time{}, ""
+}
+
+// classifyRollbackSlotBytes characterizes rollbackSkewSlotAdmission's
+// hash-edge decisions for table tests:
 //
-//   - future == committed[pos-1] with pendingHash == future's hash at this
-//     position: a slot whose rewrite landed still carries the predecessor
-//     committed hash chain (rewritten slot i holds old slot i-1's bytes) —
-//     admitted as forward-certified.
-//   - committed[pos] itself with pending[pos-1] stepped past: the slot that
-//     steps one past the shift carries its own committed hash but no forward
-//     edge reaches it, so it is admitted ONLY when pendingPreShift does not
-//     bar it AND slotGenerationValid actually authorizes this position.
+//   - pending[pos] (the prepared future content hash) admits, stamped with
+//     pending attributes;
+//   - the pre-shift chain (active hash at pos 0, committed[pos-1] after)
+//     admits, stamped with committed attributes;
+//   - anything else refuses.
 //
-// consumedByStep bars every verdict once an earlier backward step has been
-// consumed, so one consumed hash cannot certify two slots. The helper is the
-// classifier characterization of the inline gate in loadRollbackHistory; the
-// inline gate implements the same three binding checks directly.
-func classifyRollbackSlotBytes(pendingOK, slotGenerationValid, pendingPreShift, consumedByStep bool,
-	committed []string, pending []string, pos int, slotHash string) (admit, forward bool) {
-	if !pendingOK || consumedByStep {
+// pendingOK is the certified-skew gate; when it is false nothing admits.
+func classifyRollbackSlotBytes(pendingOK bool, snap rollbackMetadataSnapshot, pos int,
+	slotHash string) (admit, viaPending bool) {
+	valid, _, _ := rollbackSkewSlotAdmission(snap, pendingOK, pos+1, slotHash)
+	if !valid {
 		return false, false
 	}
-	if pos >= 1 && pos-1 < len(committed) && pos < len(pending) &&
-		committed[pos-1] != "" && pending[pos] != "" &&
-		slotHash == committed[pos-1] && slotHash == pending[pos] {
+	if pos < len(snap.Entries) && snap.Entries[pos].PendingHash != "" &&
+		slotHash == snap.Entries[pos].PendingHash {
 		return true, true
 	}
-	if pos < len(committed) && committed[pos] != "" && slotHash == committed[pos] &&
-		!pendingPreShift && slotGenerationValid {
-		return true, false
-	}
-	return false, false
+	return true, false
 }
 
 func (s *Store) rollbackActivePath() string {

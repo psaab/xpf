@@ -260,7 +260,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	// #16064: publish the old-history/next-active dual binding before the active
 	// rename. This is best-effort history protection only; active.json remains
 	// canonical and a preparation write failure must not reject the commit.
-	if err := s.prepareRollbackForCommit(committedTree); err != nil {
+	if err := s.prepareRollbackForCommit(committedTree, description); err != nil {
 		slog.Warn("failed to prepare rollback metadata for commit", "err", err)
 	}
 	if err := s.writeActive(committedTree); err != nil {
@@ -699,7 +699,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	runCommitConfirmedCrashHook(commitConfirmedStageRecord)
 	// #16064: same best-effort rollback preparation as the plain commit path,
 	// after the durable confirm record and immediately before active rename.
-	if err := s.prepareRollbackForCommit(committedTree); err != nil {
+	if err := s.prepareRollbackForCommit(committedTree, ""); err != nil {
 		slog.Warn("failed to prepare rollback metadata for commit confirmed", "err", err)
 	}
 	if err := s.writeActive(committedTree); err != nil {
@@ -1812,7 +1812,7 @@ func (s *Store) loadRollbackHistory() {
 	// sidecar still binds the previous active hash, while active.json now holds
 	// the recorded next-active hash. Any other mismatch remains fail-closed.
 	nextActiveCertifiesDisk := snap.NextActiveHash != "" && currentActiveOK &&
-		snap.NextActiveHash == currentActiveHash && metadataActiveHash != currentActiveHash
+		snap.NextActiveHash == currentActiveHash
 	generationMismatch := strictMismatch && !migrationAlias && !nextActiveCertifiesDisk
 	pendingSkew := strictMismatch && nextActiveCertifiesDisk
 	for i := 1; i <= s.history.MaxSize(); i++ {
@@ -1879,23 +1879,9 @@ func (s *Store) loadRollbackHistory() {
 		// placed the prepared future bytes at this position (PendingHash).
 		skewSlotValid := false
 		if pendingSkew {
-			slotHash := rollbackSlotHash(data)
-			if i-1 < len(metadata) && metadata[i-1].PendingHash != "" &&
-				slotHash == metadata[i-1].PendingHash {
+			if valid, ts, comment := rollbackSkewSlotAdmission(snap, pendingSkew, i, rollbackSlotHash(data)); valid {
 				skewSlotValid = true
-			} else {
-				want := ""
-				if i == 1 {
-					want = metadataActiveHash
-				} else if i-2 < len(metadata) {
-					want = metadata[i-2].Hash
-				}
-				if want != "" && slotHash == want {
-					skewSlotValid = true
-				}
-			}
-			if skewSlotValid {
-				if ts, comment, ok := rollbackMetadataTimestampForSlot(metadata, i-1); ok {
+				if !ts.IsZero() || comment != "" {
 					slotTimestamp = ts
 					slotComment = comment
 				}
