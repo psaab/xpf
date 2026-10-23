@@ -289,9 +289,48 @@ func TestDHCPExclude16004Honoured(t *testing.T) {
 		{"bracket with exclude body excluded", func() *ConfigTree {
 			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface [ ge-0/0/0.0 ge-0/0/1.0 ] { exclude; } } } } }")
 		}, ""},
+		// Modifier chains (#16347 fold): the hierarchical parser packs the
+		// whole chain onto Keys, so `exclude` is not last and a following
+		// modifier's keyword/argument must not become interface names.
+		{"hier exclude then upgrade-server", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 exclude upgrade-server 192.0.2.9; } } } }")
+		}, ""},
+		{"hier upgrade-server then exclude", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 upgrade-server 192.0.2.9 exclude; } } } }")
+		}, ""},
+		{"hier exclude then trace flag", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 exclude trace; } } } }")
+		}, ""},
+		{"hier exclude chain sibling survives", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 exclude upgrade-server 192.0.2.9; interface ge-0/0/1.0; } } } }")
+		}, "ge-0/0/1.0"},
+		{"hier upgrade then exclude then trace", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 upgrade-server 192.0.2.9 exclude trace; } } } }")
+		}, ""},
+		{"hier upgrade only no promotion", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 upgrade-server 192.0.2.9; } } } }")
+		}, "ge-0/0/0.0"},
+		{"hier access-profile then exclude", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 access-profile prof exclude; } } } }")
+		}, ""},
+		{"flat set exclude then upgrade-server", func() *ConfigTree {
+			return setTree6696(t, `set system services dhcp-local-server group g1 interface ge-0/0/0.0 exclude upgrade-server 192.0.2.9`)
+		}, ""},
+		{"braced exclude and upgrade body", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface ge-0/0/0.0 { exclude; upgrade-server 192.0.2.9; } } } } }")
+		}, ""},
+		{"bare block packed exclude chain", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface { ge-0/0/0.0 exclude upgrade-server 192.0.2.9; ge-0/0/1.0; } } } } }")
+		}, "ge-0/0/1.0"},
+		{"bracket hier exclude then upgrade", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcp-local-server { group g1 { interface [ ge-0/0/0.0 ge-0/0/1.0 ] exclude upgrade-server 192.0.2.9; } } } }")
+		}, ""},
 		{"v6 flat set exclude", func() *ConfigTree {
 			return setTree6696(t, `set system services dhcpv6-local-server group g1 interface ge-0/0/0.0 exclude`, `set system services dhcpv6-local-server group g1 interface ge-0/0/1.0`)
-		}, ""}, // v4 groups empty; v6 asserted below via strict cfg
+		}, ""}, // v4 groups empty; v6 asserted below on strict AND tolerant
+		{"v6 hier exclude then upgrade chain", func() *ConfigTree {
+			return parseHierText(t, "system { services { dhcpv6-local-server { group g1 { interface ge-0/0/0.0 exclude upgrade-server 2001:db8::9; interface ge-0/0/1.0; } } } }")
+		}, ""}, // v4 groups empty; v6 asserted below on strict AND tolerant
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,20 +339,25 @@ func TestDHCPExclude16004Honoured(t *testing.T) {
 			if g := groups["g1"]; g != nil {
 				got = strings.Join(g.Interfaces, ",")
 			}
-			// The v6 row has no v4 group; its want is checked on v6 below.
-			if tc.name == "v6 flat set exclude" {
-				cfg, err := CompileConfig(tc.build())
-				if err != nil {
-					t.Fatalf("strict compile: %v", err)
-				}
-				var v6got string
-				if cfg.System.DHCPServer.DHCPv6LocalServer != nil {
-					if g := cfg.System.DHCPServer.DHCPv6LocalServer.Groups["g1"]; g != nil {
-						v6got = strings.Join(g.Interfaces, ",")
+			// The v6 rows have no v4 group; check v6 on BOTH paths.
+			if strings.HasPrefix(tc.name, "v6 ") {
+				for _, path := range []struct {
+					name string
+					comp func(*ConfigTree) (*Config, error)
+				}{{"strict", CompileConfig}, {"tolerant", CompileConfigLenient}} {
+					cfg, err := path.comp(tc.build())
+					if err != nil {
+						t.Fatalf("%s compile: %v", path.name, err)
 					}
-				}
-				if v6got != "ge-0/0/1.0" {
-					t.Fatalf("v6 Interfaces=%q, want [ge-0/0/1.0] — exclude not honoured (#16004)", v6got)
+					var v6got string
+					if cfg.System.DHCPServer.DHCPv6LocalServer != nil {
+						if g := cfg.System.DHCPServer.DHCPv6LocalServer.Groups["g1"]; g != nil {
+							v6got = strings.Join(g.Interfaces, ",")
+						}
+					}
+					if v6got != "ge-0/0/1.0" {
+						t.Fatalf("%s v6 Interfaces=%q, want [ge-0/0/1.0] — exclude not honoured (#16004)", path.name, v6got)
+					}
 				}
 				return
 			}
