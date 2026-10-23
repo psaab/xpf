@@ -34,6 +34,36 @@ struct ProbeSnapshot {
     expires_after_ns: Option<u64>,
 }
 
+/// #15947 fold 2: a post-rollback snapshot with the keepalive fields
+/// (last_seen_ns, expires_after_ns) taken from the CURRENT entry —
+/// rollback deliberately keeps the probe's refresh, so equality is
+/// judged on every other field. `rolled_back_of` projects an expected
+/// pre-probe snapshot into the same shape.
+fn rolled_back(table: &SessionTable, key: &SessionKey) -> ProbeSnapshot {
+    snapshot(table, key).clone_fields_except_keepalive()
+}
+
+fn rolled_back_of(snap: &ProbeSnapshot) -> ProbeSnapshot {
+    // The expectation keeps the PRE-probe keepalive values as a
+    // placeholder; rolled_back() projects the same way.
+    snap.clone_fields_except_keepalive()
+}
+
+impl ProbeSnapshot {
+    fn clone_fields_except_keepalive(&self) -> ProbeSnapshot {
+        ProbeSnapshot {
+            counters: self.counters,
+            observed: self.observed,
+            last_seen_ns: None,
+            established: self.established,
+            handshake_pending: self.handshake_pending,
+            syn_ack_first: self.syn_ack_first,
+            closing: self.closing,
+            expires_after_ns: None,
+        }
+    }
+}
+
 fn snapshot(table: &SessionTable, key: &SessionKey) -> ProbeSnapshot {
     let entry = table.entry_by_key(key);
     ProbeSnapshot {
@@ -434,8 +464,19 @@ fn dropped_deferring_probe_rolls_back_completion_and_charge_15947() {
         Some(before),
         "dropped packet must not charge the session"
     );
-    assert_eq!(snapshot(&table, &forward), before_fwd, "R5: forward half must restore exactly");
-    assert_eq!(snapshot(&table, &reverse), before_rev, "R5: reverse half must restore exactly");
+    assert_eq!(
+        rolled_back(&table, &forward),
+        rolled_back_of(&before_fwd),
+        "R5/fold2: forward half restores exactly except keepalive"
+    );
+    assert_eq!(
+        rolled_back(&table, &reverse),
+        rolled_back_of(&before_rev),
+        "R5/fold2: reverse half restores exactly except keepalive"
+    );
+    // Fold 2: the dropped completing ACK still refreshes liveness —
+    // the probe's last_seen stamp stands, it is not rewound.
+    assert_eq!(table.last_seen_ns(&forward), Some(now + 2 * SEC));
     assert_eq!(
         table.pressure_shed_openings.contains_key(&forward),
         shed_before,
@@ -490,10 +531,18 @@ fn dropped_deferring_probe_unwinds_plain_charge_15947() {
     assert!(!table.rollback_dropped_probe_hit(&forward, 256, TCP_ACK | TCP_PSH));
     assert_eq!(table.session_counters(&forward), Some(before));
     assert_eq!(
-        snapshot(&table, &forward),
-        before_snap,
+        rolled_back(&table, &forward),
+        rolled_back_of(&before_snap),
         "R1/R5: dropped packet must not erase prior flags/ToS or move state"
     );
+    // Fold 2 asserts the DIRECTION, not an unconditional stamp: the
+    // probe only refreshes when stale (throttled keepalive). This
+    // fixture probes inside the throttle window, so the correct
+    // kept value is the install stamp — the point is rollback did
+    // not rewind it below the probe's own decision. The stale case
+    // (refresh actually firing) is asserted in the completion cell
+    // via last_seen == probe time after rollback.
+    assert_eq!(table.last_seen_ns(&forward), before_snap.last_seen_ns);
     let entry = table.entry_by_key(&forward).expect("forward half");
     assert!(entry.established && !entry.handshake_pending);
 }
@@ -538,7 +587,11 @@ fn dropped_reverse_only_probe_unwinds_its_own_charge_15947() {
         Some(before),
         "R3: reverse-only charge must be unwound on the reverse entry"
     );
-    assert_eq!(snapshot(&solo, &reverse), before_snap);
+    assert_eq!(
+        rolled_back(&solo, &reverse),
+        rolled_back_of(&before_snap),
+        "fold2: reverse-only restore except keepalive"
+    );
 }
 
 #[test]
@@ -608,8 +661,16 @@ fn dropped_alias_probe_rolls_back_canonical_completion_15947() {
         46,
     ));
     assert!(table.rollback_dropped_probe_hit(&alias, 512, TCP_ACK));
-    assert_eq!(snapshot(&table, &fwd), before_fwd, "R4: forward half restored via alias");
-    assert_eq!(snapshot(&table, &rev), before_rev, "R4: reverse half restored via alias");
+    assert_eq!(
+        rolled_back(&table, &fwd),
+        rolled_back_of(&before_fwd),
+        "R4: forward half restored via alias (except keepalive)"
+    );
+    assert_eq!(
+        rolled_back(&table, &rev),
+        rolled_back_of(&before_rev),
+        "R4: reverse half restored via alias (except keepalive)"
+    );
     table.emit_probe_hit_state_update(&alias);
     assert!(
         table.drain_deltas(16).iter().all(|d| d.kind != SessionDeltaKind::Update),

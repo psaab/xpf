@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Preserve keepalive on the #15947 cache-drop rollback: restore
+    every pre-probe field except last_seen/expiry, so a dropped
+    cache-served packet still refreshes session liveness as the
+    pre-fusion path did, while charge, completion and HA
+    publication are rolled back.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Make the #15947 cache-drop rollback an exact inverse: restore
     pre-probe snapshots (counters, observed flags/ToS, handshake
     Booleans, timestamps, expiry, SYN-pressure membership) keyed by

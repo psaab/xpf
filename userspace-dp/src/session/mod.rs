@@ -3750,20 +3750,26 @@ impl SessionTable {
     /// Restores the exact pre-probe snapshots captured by
     /// `probe_hit_inner` — accounting target (including the
     /// reverse-only fallback), counters, observed flags/ToS, both
-    /// halves' handshake Booleans, timestamps and expiry durations,
-    /// and SYN-pressure index membership — and discards the withheld
-    /// HA Update. Identity is resolved through `record_by_key`, so a
-    /// translated-alias packet key finds the producer's canonical
-    /// record. `len`/`tcp_flags` are retained for call-site symmetry
-    /// but no longer reconstruct anything.
+    /// halves' handshake Booleans, and SYN-pressure index
+    /// membership — and discards the withheld HA Update. Identity
+    /// is resolved through the canonical record, so a
+    /// translated-alias packet key finds the producer's record.
+    /// `len`/`tcp_flags` are retained for call-site symmetry but
+    /// no longer reconstruct anything.
+    ///
+    /// Keepalive exception (fold 2): `last_seen_ns` and
+    /// `expires_after_ns` are NOT restored. The probe's throttled
+    /// keepalive refresh stands even when the packet is dropped,
+    /// preserving the documented pre-fusion keepalive-before-drop
+    /// behaviour for cache-served packets (`probe_hit` doc): a
+    /// dropped packet still proves the peer is alive, it just must
+    /// not charge, complete, or publish. The wheel is re-pushed
+    /// with the entry's current (kept) timestamp.
     ///
     /// Returns true when a deferred completion was rolled back. Call
     /// only for the exact dropped packet, before any later packet is
     /// admitted on the session; a retransmitted completing ACK
     /// re-probes and completes (and, if admitted, publishes) normally.
-    /// The throttled keepalive refresh is part of the snapshot, so it
-    /// is restored too; this supersedes the pre-fusion
-    /// keepalive-before-drop behaviour for cache-served packets only.
     pub fn rollback_dropped_probe_hit(
         &mut self,
         key: &SessionKey,
@@ -3790,7 +3796,7 @@ impl SessionTable {
         let undo = self.pending_probe_undo.remove(pos);
         let restore = |table: &mut Self, half: &(SessionKey, ProbeHalfUndo)| {
             let (half_key, snap) = half;
-            let seen = snap.last_seen_ns;
+            let mut seen = snap.last_seen_ns;
             if let Some(entry) = table.entry_by_key_mut(half_key) {
                 entry.counters = snap.counters;
                 entry.observed_tcp_flags = snap.observed_tcp_flags;
@@ -3798,8 +3804,9 @@ impl SessionTable {
                 entry.established = snap.established;
                 entry.handshake_pending = snap.handshake_pending;
                 entry.syn_ack_first = snap.syn_ack_first;
-                entry.last_seen_ns = snap.last_seen_ns;
-                entry.expires_after_ns = snap.expires_after_ns;
+                // Fold 2 keepalive exception: last_seen_ns and
+                // expires_after_ns keep the probe's refreshed values.
+                seen = entry.last_seen_ns;
             }
             table.push_to_wheel(half_key, seen);
         };
