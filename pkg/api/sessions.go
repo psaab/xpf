@@ -1205,13 +1205,10 @@ func uint32ToIP(v uint32) net.IP {
 	return ip
 }
 
-// sessionEgressKey identifies a FIB-resolved egress interface (ifindex +
-// VLAN), mirroring the gRPC sessionEgressKey used to resolve a session's
-// egress interface name (#3419 M4).
-type sessionEgressKey struct {
-	ifindex uint32
-	vlanID  uint16
-}
+// sessionEgressKey is config.SessionIfaceKey (#16065): the derivation
+// is shared with the CLI, gRPC and daemon tables so no surface can
+// resolve a unit's device differently.
+type sessionEgressKey = config.SessionIfaceKey
 
 // sessionView holds the enrichment context shared across a single session
 // list/iteration: zone/policy/app name maps, the zone->first-interface and
@@ -1296,39 +1293,17 @@ func (s *Server) ifindexLookup() func(string) (int, error) {
 	}
 }
 
-// buildSessionIfaceNames maps a session's {parent netdev ifindex, 802.1Q VLAN
-// id} to the Junos config name of that logical unit. BOTH directions of the
-// session filter read it: the egress side keys on the recorded FIB result, the
-// ingress side on the recorded ingress binding (#6960). Mirrors grpcapi.
-//
-// RangeInterfaces/RangeUnits skip present-but-nil InterfaceConfig/
-// InterfaceUnit slots admitted by the tolerant load / HA config-sync path
-// (#3494/#5068); a raw range nil-derefs and panics the in-process daemon
-// during a REST session query (#5813).
+// buildSessionIfaceNames maps a session's {unit-device ifindex, 802.1Q
+// VLAN id} to the Junos config name of that logical unit, through
+// config.SessionIfaceNames (#16065): each unit keys on its OWN kernel
+// device instead of the parent netdev, and a key two different units
+// share (wg0.0/wg0.1 on the one WireGuard TUN, both VID 0) is refused
+// rather than naming one sibling for both. BOTH directions of the
+// session filter read it: the egress side keys on the recorded FIB
+// result, the ingress side on the recorded ingress binding (#6960).
+// Mirrors grpcapi.
 func buildSessionIfaceNames(cfg *config.Config, lookupIfindex func(string) (int, error)) map[sessionEgressKey]string {
-	names := make(map[sessionEgressKey]string)
-	config.RangeInterfaces(cfg, func(ifName string, ifc *config.InterfaceConfig) {
-		resolvedParent := config.LinuxIfName(strings.SplitN(cfg.ResolveReth(ifName), ".", 2)[0])
-		parentIfindex, err := lookupIfindex(resolvedParent)
-		if err != nil {
-			return
-		}
-		config.RangeUnits(ifc, func(_ int, unit *config.InterfaceUnit) {
-			displayName := ifName
-			if unit.Number != 0 || unit.VlanID != 0 {
-				displayName = fmt.Sprintf("%s.%d", ifName, unit.Number)
-			}
-			vlanID := uint16(unit.VlanID)
-			if vlanID == 0 && unit.Number > 0 {
-				vlanID = uint16(unit.Number)
-			}
-			key := sessionEgressKey{ifindex: uint32(parentIfindex), vlanID: vlanID}
-			if _, exists := names[key]; !exists {
-				names[key] = displayName
-			}
-		})
-	})
-	return names
+	return config.SessionIfaceNames(cfg, lookupIfindex)
 }
 
 // sessionQuery holds the parsed REST session filter predicates. It mirrors
@@ -1592,7 +1567,7 @@ func sessionIngressIfaceIdentity(ingressIfindex uint32, ingressVlanID uint16, in
 	if ingressIfindex == 0 {
 		return "", false
 	}
-	ifName := egressIfaces[sessionEgressKey{ifindex: ingressIfindex, vlanID: ingressVlanID}]
+	ifName := egressIfaces[sessionEgressKey{Ifindex: ingressIfindex, VlanID: ingressVlanID}]
 	if ifName == "" {
 		return "", false
 	}
@@ -1617,7 +1592,7 @@ func resolveSessionIngressIfaces(ingressIfindex uint32, ingressVlanID uint16, in
 // egress zone (#6960). Mirrors grpcapi.
 func resolveSessionEgressIfaces(fibIfindex uint32, fibVlanID uint16, egressZone uint16, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string) []string {
 	if fibIfindex != 0 {
-		if ifName, ok := egressIfaces[sessionEgressKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := egressIfaces[sessionEgressKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return []string{ifName}
 		}
 	}
@@ -1650,7 +1625,7 @@ func sessionIngressIfaceDisplay(ingressIfindex uint32, ingressVlanID uint16, ing
 // else the egress zone's single bound interface, else "". Mirrors grpcapi.
 func sessionEgressIfaceDisplay(fibIfindex uint32, fibVlanID uint16, egressZone uint16, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string) string {
 	if fibIfindex != 0 {
-		if ifName, ok := egressIfaces[sessionEgressKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := egressIfaces[sessionEgressKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return ifName
 		}
 	}

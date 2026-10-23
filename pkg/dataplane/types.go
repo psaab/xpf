@@ -235,9 +235,10 @@ type SessionValue struct {
 	//
 	// It is meaningful ONLY alongside a
 	// non-zero IngressIfindex: the pair {IngressIfindex, IngressVlanID} is
-	// exactly the sessionIfaceKey the CLI already resolves the EGRESS
-	// interface name by (buildSessionEgressIfaces keys on the PARENT netdev
-	// ifindex + the unit's VLAN), so the ingress side reuses that one map and
+	// exactly the SessionIfaceKey the CLI already resolves the EGRESS
+	// interface name by (config.SessionIfaceNames keys each unit on its
+	// OWN kernel device — the VLAN child included — plus the wire VID,
+	// #16065), so the ingress side reuses that one map and
 	// two VLAN units of a single trunk NIC do not alias onto each other.
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
@@ -718,9 +719,10 @@ type SessionValueV6 struct {
 	//
 	// It is meaningful ONLY alongside a
 	// non-zero IngressIfindex: the pair {IngressIfindex, IngressVlanID} is
-	// exactly the sessionIfaceKey the CLI already resolves the EGRESS
-	// interface name by (buildSessionEgressIfaces keys on the PARENT netdev
-	// ifindex + the unit's VLAN), so the ingress side reuses that one map and
+	// exactly the SessionIfaceKey the CLI already resolves the EGRESS
+	// interface name by (config.SessionIfaceNames keys each unit on its
+	// OWN kernel device — the VLAN child included — plus the wire VID,
+	// #16065), so the ingress side reuses that one map and
 	// two VLAN units of a single trunk NIC do not alias onto each other.
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16

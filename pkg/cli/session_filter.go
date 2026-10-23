@@ -66,12 +66,13 @@ type sessionFilter struct {
 	// `clear` — the interface never matched anything, so a filtered show
 	// undercounted and a filtered clear left sessions behind.
 	zoneIfaces map[uint16][]string // zone ID → all bound interface names
-	// ifaceNamesByKey resolves a {parent netdev ifindex, 802.1Q VLAN id} pair
-	// to the Junos config interface name of that logical unit. Built once by
-	// buildSessionEgressIfaces. #4983: BOTH directions read it — the egress
-	// side keys on the session's FIB result, the ingress side on the session's
-	// recorded ingress binding — so one map defines one interface identity for
-	// the whole filter.
+	// ifaceNamesByKey resolves a {unit-device ifindex, 802.1Q VLAN id} pair
+	// to the Junos config interface name of that logical unit (#16065:
+	// config.SessionIfaceNames keys each unit on its OWN kernel device).
+	// Built once by buildSessionEgressIfaces. #4983: BOTH directions read
+	// it — the egress side keys on the session's FIB result, the ingress
+	// side on the session's recorded ingress binding — so one map defines
+	// one interface identity for the whole filter.
 	ifaceNamesByKey map[sessionIfaceKey]string
 }
 
@@ -569,7 +570,7 @@ func (f *sessionFilter) ingressIfaceIdentity(ingressIfindex uint32, ingressVlanI
 	if ingressIfindex == 0 {
 		return "", false
 	}
-	ifName := f.ifaceNamesByKey[sessionIfaceKey{ifindex: ingressIfindex, vlanID: ingressVlanID}]
+	ifName := f.ifaceNamesByKey[sessionIfaceKey{Ifindex: ingressIfindex, VlanID: ingressVlanID}]
 	if ifName == "" {
 		return "", false
 	}
@@ -640,7 +641,7 @@ func (f *sessionFilter) ingressIfaceDisplay(ingressIfindex uint32, ingressVlanID
 // all of its siblings on either column of a row.
 func (f *sessionFilter) egressIfaceDisplay(fibIfindex uint32, fibVlanID uint16, egressZone uint16) string {
 	if fibIfindex != 0 {
-		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return ifName
 		}
 	}
@@ -688,7 +689,7 @@ func soleZoneIface(zoneMembers []string) string {
 // silently missed sessions egressing on any interface but the first).
 func (f *sessionFilter) resolveEgressIfaces(fibIfindex uint32, fibVlanID uint16, egressZone uint16) []string {
 	if fibIfindex != 0 {
-		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return []string{ifName}
 		}
 	}

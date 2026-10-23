@@ -26,6 +26,13 @@ import (
 // entries and RETH (resolved to the local physical member's ifindex,
 // rendered under the reth unit name).
 //
+// #16065: the map is now config.SessionIfNamesByIfindex, the session
+// tables' shared derivation. A device claimed by two DIFFERENT unit
+// names (this fixture's lo device, claimed by lo.0 as "lo" and by
+// reth0.0 as "reth0") is refused rather than first-wins named, so the
+// Junos-spelling test below pins the refusal and the uniquely-claimed
+// kernel control keeps the #15094 resolution assertion.
+//
 // RED-on-revert: restoring LinkByName(ifName) with the authored name
 // reds every Junos-spelled cell below — only the kernel-spelled control
 // ("lo") stays green, which is exactly the pre-fix behaviour.
@@ -108,10 +115,23 @@ func TestIngressIfNamesJunosSpelling15094(t *testing.T) {
 
 	// An event arriving on the loopback ifindex (the RETH's local
 	// member device) must render under the operator-facing name.
-	// The surviving leg per the issue: an event on the interface
-	// renders packet-incoming-interface with the Junos name. The
-	// parent entry for the RETH member device is keyed by the
-	// member's kernel ifindex; the RETH unit 0 collapses onto it.
+	// #16065: the table is the session table's projection — reth0
+	// unit 0 and lo unit 0 both claim {loIdx, 0} under DIFFERENT
+	// display names ("reth0" vs "lo"), so the shared key is REFUSED
+	// and neither name is stored. The pre-#16065 first-wins builder
+	// named it "reth0"; the refusal is the honest answer (the device
+	// is claimed by two units the event cannot distinguish), and it
+	// is pinned directly in TestBuildIfNamesRefusesSharedWireGuard16065
+	// for the TUN shape. Here the surviving assertion is the one the
+	// #15094 fix actually owns: a unit that UNIQUELY claims its
+	// device still resolves. That is the kernel-spelled control in
+	// the next test; this fixture's RETH claim is now ambiguous, so
+	// assert the refusal explicitly rather than the old winner.
+	names := buildIfNames(cfg)
+	if name, ok := names[loIdx]; ok {
+		t.Fatalf("#16065: loopback ifindex %d is claimed by both reth0.0 (as \"reth0\") "+
+			"and lo.0 (as \"lo\") — the shared key must be refused, got %q", loIdx, name)
+	}
 	if !er.ProcessRawEvent(rawEvent15094(loIdx)) {
 		t.Fatal("ProcessRawEvent rejected the fixture frame")
 	}
@@ -119,15 +139,9 @@ func TestIngressIfNamesJunosSpelling15094(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("buffer holds %d records, want 1 (syslog-gate offset wrong?)", len(recs))
 	}
-	got := recs[0].IngressIface
-	if got == "" {
-		t.Fatal("#15094: event on Junos-spelled interface resolved IngressIface=\"\" — " +
-			"the ifindex->name map has no entry because LinkByName was called with the authored name")
-	}
-	// The rendered name must be operator-facing (Junos form), not the
-	// kernel spelling: RT_FLOW goldens render "ge-0/0/0.0"-style names.
-	if got != "reth0" {
-		t.Fatalf("IngressIface = %q, want operator-facing %q (kernel/member spellings must not leak into RT_FLOW)", got, "reth0")
+	if recs[0].IngressIface != "" {
+		t.Fatalf("ambiguous ifindex must resolve nameless, got %q — a first-wins sibling "+
+			"name is the #16065 defect", recs[0].IngressIface)
 	}
 }
 
