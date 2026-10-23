@@ -2139,6 +2139,12 @@ pub(crate) struct SessionTable {
     /// attacker-keyed side tables; entries are dropped with their
     /// session via `remove_entry`. Node-local, never synced.
     node_served_stamps: SeededKeyMap<(u8, u64)>,
+    /// #16217 (ct-slice HA emit): per-forward-key emit marks for the
+    /// ct-slice stage/count Update vehicle. One entry per forward row
+    /// this worker's ct-slice has collected; bounded by the forward
+    /// table size, seeded like `node_served_stamps`, and dropped with
+    /// its session via `remove_entry`. Node-local, never synced.
+    ct_slice_emit_marks: SeededKeyMap<CtSliceEmitMark>,
     /// #9856: terminal-removal harvests awaiting export (`remove_entry`
     /// with `RemovalKind::Terminal`). Drained every tick by the worker
     /// loop (`take_tombstones_into`) — pushed when a window is open,
@@ -2289,7 +2295,8 @@ impl SessionTable {
             icmp_error_side_tats: HashMap::with_hasher(state.clone()),
             // #16223: node-served evidence stamps share the seeded
             // attacker-keyed placement (tuple-keyed, cross-worker read).
-            node_served_stamps: HashMap::with_hasher(state),
+            node_served_stamps: HashMap::with_hasher(state.clone()),
+            ct_slice_emit_marks: HashMap::with_hasher(state),
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
             // until `set_session_id_namespace` is called at worker setup.
@@ -4740,6 +4747,162 @@ impl SessionTable {
         );
     }
 
+    /// #16217 (ct-slice HA emit): queue ONE stage/count Update for
+    /// `forward_key` when the ct-slice restamp has just advanced this
+    /// node's shared row for it. This is the ONLY vehicle that can
+    /// carry fw0's restamped wire=4 + `rev>0` evidence to fw1: fw0's
+    /// split forward half never locally transitions (its completion
+    /// is served on fw1/fabric), so the transition-only
+    /// `emit_session_state_update_inner` never fires for it, and the
+    /// shared-map restamp is node-local by construction.
+    ///
+    /// Trigger (rate-limited per row, once per stage transition per
+    /// node — the restamp IS the transition detector on fw0):
+    /// - the row's shared stage first reaches `Established` (wire=4)
+    ///   with `rev>0` counts on the shared row, OR
+    /// - the row's counts first become `rev>0` while its stage is
+    ///   still below `Established` (the evidence the peer's scoped
+    ///   adoption arm (b) reads: HandshakePending + rev>0 + fwd>0).
+    /// A key already emitted at wire=4 stays silent on later slices;
+    /// a key whose stage/counts regress (new incarnation) re-arms.
+    /// Closing / reverse / zero-count rows never emit.
+    ///
+    /// Origin gate mirrors `emit_session_state_update_inner`: TUN
+    /// stays silent; a pure HA-peer replica (`SyncImport` /
+    /// `SharedMaterialize`) stays silent UNLESS this is the
+    /// stage-advancement-only carve-out (stage alone advances to
+    /// Established, close class unchanged) — for a `SyncImport` row
+    /// on fw0 that carve-out is exactly this emit, since fw0 holds
+    /// the authoritative shared row for a session it owns. A
+    /// `WorkerLocalImport` replica announces only with a carried id,
+    /// as before. The emitted delta carries the FORWARD entry's live
+    /// counters and the shared-evidence Established stamp, exactly
+    /// as the transition Update would have.
+    ///
+    /// Returns true when an Update was queued.
+    pub(crate) fn emit_ct_slice_state_update(
+        &mut self,
+        forward_key: &SessionKey,
+        shared_stage_wire: u8,
+        shared_rev_packets: u64,
+        shared_fwd_packets: u64,
+    ) -> bool {
+        let established = TcpHandshakeState::Established.to_wire();
+        let pending = TcpHandshakeState::HandshakePending.to_wire();
+        // Fail-closed evidence: only an actual reverse count counts,
+        // and the scoped adoption arm additionally needs fwd>0. A
+        // stage below Opening (0/legacy) with rev>0 still counts as
+        // count-first evidence only when the local row is at least
+        // HandshakePending (a SYN-ACK crossed); never launder an
+        // unanswered SYN (wire 1) into peer evidence.
+        let stage_advances = shared_stage_wire == established && shared_rev_packets > 0;
+        let counts_first = shared_rev_packets > 0
+            && shared_fwd_packets > 0
+            && shared_stage_wire >= pending
+            && shared_stage_wire < established;
+        if !stage_advances && !counts_first {
+            return false;
+        }
+        let Some(forward) = self.entry_by_key(forward_key) else {
+            return false;
+        };
+        if forward.metadata.is_reverse || forward.closing {
+            return false;
+        }
+        // Rate-limit: once per stage transition per node. Re-arm on
+        // regression so a re-pended / reincarnated row can emit again.
+        {
+            let mark = self
+                .ct_slice_emit_marks
+                .entry(forward_key.clone())
+                .or_default();
+            if shared_stage_wire < mark.stage_wire {
+                *mark = CtSliceEmitMark::default();
+            }
+            if shared_rev_packets == 0 && mark.rev_emitted {
+                // Counts regressed (should not happen — restamps are
+                // max-only — but never let a stale mark suppress a
+                // future first-rev emit).
+                mark.rev_emitted = false;
+            }
+            let want_stage = stage_advances && mark.stage_wire < established;
+            let want_rev = counts_first && !mark.rev_emitted;
+            if !want_stage && !want_rev {
+                return false;
+            }
+            if want_stage {
+                mark.stage_wire = established;
+                mark.rev_emitted = true;
+            }
+            if want_rev {
+                mark.rev_emitted = true;
+                if mark.stage_wire < shared_stage_wire {
+                    mark.stage_wire = shared_stage_wire;
+                }
+            }
+        }
+        let forward = self.entry_by_key(forward_key).expect("forward checked above");
+        // Peer-synced silence, mirroring emit_session_state_update_inner:
+        // this emit IS the stage-advancement-only carve-out when the
+        // shared stage reaches Established (close class unchanged by
+        // construction — closing rows returned above). Count-first
+        // emits (stage still pending) are NOT a stage advancement, so
+        // pure peer replicas stay silent for them: fw1 must not echo
+        // fw0's evidence back. Locally-authored / serving rows
+        // (ForwardFlow, WorkerLocalImport with carried id,
+        // SharedPromote, ...) may emit either arm.
+        if forward.origin.is_local_tun_origin() {
+            return false;
+        }
+        if forward.origin.is_peer_synced() {
+            let carried = forward.origin == SessionOrigin::WorkerLocalImport
+                && self.session_id_carried_from_another_worker(forward.session_id);
+            if !stage_advances && !carried {
+                return false;
+            }
+        }
+        let class_wire = forward.tcp_close_class_wire();
+        if class_wire != 0 {
+            return false;
+        }
+        let shared = NodeServedEvidence {
+            rev_packets_any: shared_rev_packets,
+            served_completed: stage_advances,
+            ..NodeServedEvidence::default()
+        };
+        let completed = self.completion_evidence_with_shared(forward_key, shared)
+            || stage_advances;
+        let delta = SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Update,
+            key: forward_key.clone(),
+            decision: forward.decision,
+            metadata: forward.metadata.clone(),
+            policy_generation: forward.policy_generation,
+            origin: forward.origin,
+            fabric_redirect_sync: false,
+            created_ns: forward.created_ns,
+            last_seen_ns: forward.last_seen_ns,
+            counters: forward.counters,
+            observed_tos: forward.observed_tos,
+            observed_tcp_flags: forward.observed_tcp_flags,
+            session_id: forward.session_id,
+            bulk_resync: false,
+            is_admission: false,
+            tcp_close_class: class_wire,
+            purge_retirement: false,
+            tcp_handshake_state: if completed {
+                established
+            } else {
+                forward.tcp_handshake_state_wire(forward_key.protocol)
+            },
+            pptp_call_ids: self.pptp_call_ids_wire_for(forward_key),
+            source_nat_static: forward.source_nat_static,
+        };
+        self.push_delta(delta);
+        true
+    }
+
     fn emit_session_state_update_inner(
         &mut self,
         matched_key: &SessionKey,
@@ -6125,6 +6288,7 @@ impl SessionTable {
             .is_some_and(|e| e.metadata.is_reverse)
         {
             self.node_served_stamps.remove(key);
+            self.ct_slice_emit_marks.remove(key);
         }
         // The pressure-shed index contains only forward opening entries.
         // Remove by key here so every terminal and replacement path keeps it

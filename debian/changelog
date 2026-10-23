@@ -1,5 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Carry fw0's restamped Established evidence to the peer on an HA
+    Update (#16217): the conntrack-refresh slice restamps fw0's
+    shared rows to wire=4 with reverse counts, but that evidence
+    lived only in fw0's node-local shared maps — HA emission is
+    transition-only and fw0's split forward half never locally
+    transitions, so fw1 imported rev=0/stage-pending forever and its
+    adoption gate never qualified. The slice now queues one
+    stage/count Update per collected row when its shared stage
+    advances to Established (or its counts first show rev>0),
+    rate-limited once per stage transition per node, reusing the
+    shared-evidence Update vehicle; fw1's import then stamps
+    rev>0 + wire=4 so promotion and the adoption gate qualify.
+
+ -- xpf maintainers <noreply@anthropic.com>  Fri, 23 Oct 2026 00:00:00 +0000
+
+xpf (99.16217.47.dirty) unstable; urgency=medium
+
   * Stamp backup-served counters and judge adoption on fresh RG
     ownership (#16217): the conntrack-refresh slice now stamps every
     forward pair's own live counters (any origin, incl. SyncImport

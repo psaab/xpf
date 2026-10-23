@@ -144,6 +144,29 @@ pub(crate) struct ExpireHaContext<'a> {
 /// (`SessionTable::note_node_served_handshake`). A default/zero value
 /// means no node-level proof, and the classic local gates then apply
 /// unchanged.
+/// #16217 (ct-slice HA emit): per-forward-key rate-limit state for the
+/// ct-slice stage/count Update vehicle. The restamp on fw0 advances
+/// its shared rows to wire=4 with `rev>0` counters, but that evidence
+/// lives only in fw0's node-local shared maps — no HA delta carries
+/// it (emission is transition-only and fw0's split forward half never
+/// locally transitions). The ct-slice therefore queues one Update per
+/// stage transition per node for each collected forward key: the
+/// FIRST emit for a key at wire=4 (`Established`) and, when the row
+/// is not yet at wire=4, the first emit once its counts first show
+/// `rev>0`. Steady-state slices for an already-emitted key stay
+/// silent (no periodic spam); a key that regresses below the emitted
+/// stage (new incarnation / re-pend) re-arms. Bounded by the session
+/// table's forward-row count; entries die with their session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CtSliceEmitMark {
+    /// Highest handshake wire this key has emitted an Update for
+    /// (0 = never; 4 = Established emitted).
+    pub(crate) stage_wire: u8,
+    /// Whether an Update carrying `rev>0` has been emitted for this
+    /// key since it was last armed.
+    pub(crate) rev_emitted: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NodeServedEvidence {
     /// Handshake wire state for the tuple (0 = absent/legacy,

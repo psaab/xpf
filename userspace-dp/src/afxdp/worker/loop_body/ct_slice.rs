@@ -17,7 +17,7 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 pub(super) fn run_ct_slice(
-    sessions: &crate::session::SessionTable,
+    sessions: &mut crate::session::SessionTable,
     forwarding: &mut Arc<ForwardingState>,
     loop_now_ns: u64,
     conntrack_v4_fd: c_int,
@@ -150,10 +150,11 @@ pub(super) fn run_ct_slice(
                 collected.push(pair);
             }
         }
-        crate::afxdp::shared_ops::restamp_shared_handshakes_established(
-            shared_sessions,
-            &collected,
-        );
+        let canonical_transitioned =
+            crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+                shared_sessions,
+                &collected,
+            );
         // #16217: the collected pairs' ACTUAL fwd+rev counts (folded
         // by their serving workers; the promotion above only moved
         // the stage) must ride onto the shared rows, or the peer's
@@ -178,11 +179,56 @@ pub(super) fn run_ct_slice(
         // #16217: advance the forward-wire KEY ALIAS slot beside the
         // canonical restamp so a completed fabric pair reads
         // Established under the NAT'd tuple too.
-        crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
+        let alias_transitioned = crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
             shared_sessions,
             shared_forward_wire_sessions,
             &collected,
         );
+        // #16217 (ct-slice HA emit): the restamps above advanced
+        // THIS node's shared rows, but no HA delta carries that
+        // evidence — emission is transition-only and fw0's split
+        // forward half never locally transitions, so fw1's imported
+        // rows kept the Open-time stage/counts forever (FZDiag20/23:
+        // fw0 shared rev=103505, fw1 rev=0, no delta in 60 s). Queue
+        // a stage/count Update for each collected forward row whose
+        // shared stage transitioned to Established, or whose counts
+        // first show rev>0, reusing the shared-evidence Update
+        // vehicle. Rate-limited per row inside
+        // `emit_ct_slice_state_update` (once per stage transition
+        // per node; the restamp's transition list is the detector,
+        // and already-at-wire=4 rows are not re-detected, so
+        // steady-state slices stay silent). Counts are read AFTER
+        // the restamps so the Update carries wire=4 + rev counts;
+        // the alias-transitioned rows are already canonical-
+        // transitioned or alias-only, so the union is drained once.
+        {
+            let mut emit_keys: Vec<(SessionKey, crate::nat::NatDecision)> =
+                canonical_transitioned.clone();
+            for pair in &alias_transitioned {
+                if !emit_keys.contains(pair) {
+                    emit_keys.push(pair.clone());
+                }
+            }
+            // Rows that did not transition stage may still have
+            // crossed rev>0 for the first time on the count stamps
+            // above; the per-row mark inside the emit is the gate,
+            // so offer every collected row and let it decide.
+            for pair in &collected {
+                if !emit_keys.contains(pair) {
+                    emit_keys.push(pair.clone());
+                }
+            }
+            for (key, nat) in &emit_keys {
+                let (stage, fwd, rev) =
+                    crate::afxdp::shared_ops::shared_row_stage_and_counts(
+                        shared_sessions,
+                        shared_forward_wire_sessions,
+                        key,
+                        *nat,
+                    );
+                sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
+            }
+        }
     }
     // Check if fabric links were updated by the coordinator (e.g. after
     // RG failover when peer MAC was resolved). If so, rebuild the

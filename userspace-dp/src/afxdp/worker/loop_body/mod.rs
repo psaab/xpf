@@ -1574,7 +1574,7 @@ pub(crate) fn worker_loop(
         );
         // #13075: conntrack-refresh slice + fabric/WG drains (ct_slice.rs).
         run_ct_slice(
-            &sessions,
+            &mut sessions,
             &mut forwarding,
             loop_now_ns,
             conntrack_v4_fd,
