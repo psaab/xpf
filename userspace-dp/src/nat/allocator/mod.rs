@@ -5253,7 +5253,20 @@ impl PortAllocator {
         // A synced session may mint a fresh persistent lease only while the
         // persistent table has room. Existing leases returned through the
         // join path above and do not consume another entry.
+        // Fold 3: claim the tracked-flow slot BEFORE the bitmap
+        // reserve and BEFORE the lease mint below. The mint
+        // creates a lease with `active_flows = 1` that is in no
+        // expiry index; if admission were only discovered lost
+        // at the insert (fold 2), that lease could never drain
+        // or be reclaimed. Admitting here means a loser never
+        // mints at all. (The bitmap reserve right after can
+        // still refuse — that path un-admits.)
+        if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         if !self.shared.occupancy[addr_index].reserve(translated.port) {
+            self.shared.flows.unadmit_one();
             return false;
         }
         // #7360: the FIRST session for this source mints the lease the rest will
@@ -5316,7 +5329,7 @@ impl PortAllocator {
             );
             persistent_key
         });
-        if !self.shared.flows.try_insert_in_shard(
+        self.shared.flows.insert_admitted_in_shard(
             &mut live.shard,
             flow,
             LiveAllocation {
@@ -5331,16 +5344,7 @@ impl PortAllocator {
                 promotion_timeout_ns: None,
                 holders: holder.bit(),
             },
-            self.shared.max_tracked_flows,
-        ) {
-            // Fold 2: admission lost — give the reserved bitmap
-            // bit back and refuse (any lease minted just above is
-            // left idle for GC, exactly as a post-mint refusal
-            // before this fold left it).
-            self.free_translated_port(addr_index, translated.port);
-            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
+        );
         live.record_pat_owner(&flow, translated);
         *previous_snapshot = live.previous_snapshot();
         true

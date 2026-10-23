@@ -561,3 +561,87 @@ fn restore_and_fast_insert_race_at_cap_minus_one_admits_exactly_one_15956() {
     assert_eq!(alloc.live_flow_count(), 10);
     assert_eq!(alloc.debug_admission_count(), 10, "admission counter must not leak across release/re-admit");
 }
+
+/// #15956 fold 3: a synced persistent reserve that loses the
+/// tracked-flow admission race must NOT leave a minted lease
+/// behind. The fold-2 loser minted the lease (`active_flows=1`,
+/// in no expiry index) and then discovered the loss at insert —
+/// that lease could never drain or be GC-reclaimed. Fold 3
+/// admits BEFORE the mint, so the loser never mints: after the
+/// refusal there is no lease for the source at all (not an
+/// active one, not an idle one), the bitmap bit is unreserved,
+/// and a retry after a slot frees mints cleanly.
+#[test]
+fn synced_persistent_reserve_admit_loser_mints_no_lease_15956() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    // Cap 10; fill all 10 tracked slots with address-only records.
+    let alloc = PortAllocator::new(1, 1024, 1033);
+    for i in 0..10u16 {
+        let f = pool_flow(41000 + i);
+        alloc
+            .reserve_address_only(f, IpAddr::V4(pool_ip), 0, crate::nat::NatHolder::Untracked)
+            .expect("address-only fill must succeed");
+    }
+    assert_eq!(alloc.live_flow_count(), 10);
+    assert_eq!(alloc.debug_admission_count(), 10);
+
+    // Synced persistent reserve for a new source at full cap:
+    // must refuse (false) BEFORE minting.
+    let flow = pool_flow(44000);
+    let translated = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 1024 };
+    let key = flow.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    let _ = key;
+    let mut snapshot = None;
+    let admitted = alloc.reserve_flow_maybe_persistent(
+        flow,
+        translated,
+        0,
+        false,
+        5_000,
+        crate::nat::NatHolder::Worker(0),
+        Some((key, 60_000_000_000)),
+        false,
+        &mut snapshot,
+    );
+    assert!(!admitted, "synced persistent reserve at full cap must refuse");
+    assert_eq!(alloc.live_flow_count(), 10, "loser must not add a tracked record");
+    assert_eq!(alloc.debug_admission_count(), 10, "loser must not leak an admission slot");
+    assert!(
+        alloc
+            .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
+            .is_none(),
+        "admit loser must mint NO lease — a minted active_flows=1 lease is unindexed and unreclaimable (fold 3)"
+    );
+    assert!(
+        !alloc.debug_is_port_occupied(0, translated.port),
+        "loser must not leave the bitmap bit reserved"
+    );
+
+    // Free one slot; the same reserve now mints + admits cleanly.
+    let f0 = pool_flow(41000);
+    let t0 = crate::nat::allocator::TranslatedTuple { ip: IpAddr::V4(pool_ip), port: 41000 };
+    assert!(alloc.release_flow(f0, t0, 6_000, crate::nat::NatHolder::Untracked));
+    let mut snapshot2 = None;
+    assert!(
+        alloc.reserve_flow_maybe_persistent(
+            flow,
+            translated,
+            0,
+            false,
+            7_000,
+            crate::nat::NatHolder::Worker(0),
+            Some((key, 60_000_000_000)),
+            false,
+            &mut snapshot2,
+        ),
+        "reserve must succeed once a slot frees"
+    );
+    let lease = alloc
+        .debug_persistent_lease_for_flow(&flow, PersistentNatPermit::TargetHostPort)
+        .expect("winner mints the lease");
+    assert_eq!(lease.active_flows, 1, "winner's lease has exactly its one active flow");
+    assert_eq!(alloc.live_flow_count(), 10);
+    assert_eq!(alloc.debug_admission_count(), 10);
+    let _ = addrs;
+}

@@ -168,9 +168,28 @@ impl LiveFlowMap {
         if !self.admit_one(max_tracked) {
             return false;
         }
-        shard.map.insert(flow, alloc);
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.insert_admitted_in_shard(shard, flow, alloc);
         true
+    }
+
+    /// Insert a NEW key whose tracked-flow slot was ALREADY
+    /// claimed via `admit_one` by the caller (fold 3: paths that
+    /// must admit before creating lease state). Bumps only the
+    /// tracked count — the admission slot is the caller's claim,
+    /// released when this record is removed. Must not be used
+    /// for a key already present (that is a replacement and
+    /// would strand the caller's claim).
+    pub(in crate::nat::allocator) fn insert_admitted_in_shard(
+        &self,
+        shard: &mut LiveFlowShard,
+        flow: SourceNatFlowKey,
+        alloc: LiveAllocation,
+    ) {
+        let prev = shard.map.insert(flow, alloc);
+        debug_assert!(prev.is_none(), "admitted insert must be a new key");
+        if prev.is_none() {
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Counted shard write guard for the #4800 telemetry pair:
