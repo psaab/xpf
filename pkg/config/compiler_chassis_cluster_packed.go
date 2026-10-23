@@ -82,16 +82,18 @@ var clusterStatements = map[string]int{
 	"redundancy-group": 1,
 
 	// Valueless flags: the token after them genuinely opens a statement.
-	"control-link-recovery":         0,
-	"strict-session-auth":           0,
-	"configuration-synchronize":     0,
-	"nat-state-synchronization":     0,
-	"ipsec-session-synchronization": 0,
-	"dhcp-lease-synchronization":    0,
-	"hitless-restart":               0,
-	"no-reth-vrrp":                  0,
-	"private-rg-election":           0,
-	"no-private-rg-election":        0,
+	"control-link-recovery":           0,
+	"strict-session-auth":             0,
+	"configuration-synchronize":       0,
+	"nat-state-synchronization":       0,
+	"ipsec-session-synchronization":   0,
+	"dhcp-lease-synchronization":      0,
+	"fabric-interface-authenticated":  0,
+	"fabric1-interface-authenticated": 0,
+	"hitless-restart":                 0,
+	"no-reth-vrrp":                    0,
+	"private-rg-election":             0,
+	"no-private-rg-election":          0,
 	// Accepted for Junos compatibility and never compiled (schema_chassis.go
 	// documents it as ignored). Registered anyway: an unregistered keyword is
 	// not inert, it FOLDS onto whatever statement precedes it on a packed

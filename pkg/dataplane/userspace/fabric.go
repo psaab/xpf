@@ -59,6 +59,14 @@ func buildFabricSnapshots(cfg *config.Config) []FabricSnapshot {
 // m.lastSnapshot.Config, the same config the stored rows were built from, so a
 // new parent netdev cannot appear without a config change — and a config change
 // arrives through a full apply, which re-derives both halves anyway.
+//
+// #16023: LinkAuthenticated is deliberately NOT aligned. It is CONFIG
+// authority (the operator's chassis-cluster attestation as compiled into
+// m.lastSnapshot.Config), freshly derived by buildFabricSnapshotsFrom on
+// every sample — including a delete of fabric-interface-authenticated,
+// which therefore arrives here already false. Carrying the stored value
+// forward (as ParentUnbindable is carried) would keep a revoked attestation
+// alive through every SyncFabricState refresh until the next full apply.
 func alignFabricVerdicts(fresh []FabricSnapshot, applied *ConfigSnapshot) []FabricSnapshot {
 	if applied == nil || len(fresh) == 0 {
 		return fresh
@@ -88,10 +96,12 @@ func buildFabricSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) []Fa
 	type fabricInput struct {
 		name string
 		peer string
+		// linkAuthenticated is the #16023 operator attestation for this link.
+		linkAuthenticated bool
 	}
 	inputs := []fabricInput{
-		{name: cc.FabricInterface, peer: cc.FabricPeerAddress},
-		{name: cc.Fabric1Interface, peer: cc.Fabric1PeerAddress},
+		{name: cc.FabricInterface, peer: cc.FabricPeerAddress, linkAuthenticated: cc.FabricLinkAuthenticated},
+		{name: cc.Fabric1Interface, peer: cc.Fabric1PeerAddress, linkAuthenticated: cc.Fabric1LinkAuthenticated},
 	}
 	var out []FabricSnapshot
 	seen := make(map[string]struct{}, len(inputs))
@@ -118,18 +128,19 @@ func buildFabricSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) []Fa
 		}
 		peerMAC := buildFabricPeerMAC(overlayIfindex, parentIfindex, in.peer, parseMACOrNil(parentMAC), fabricPeerMACConstraint(in.peer))
 		out = append(out, FabricSnapshot{
-			Name:             in.name,
-			ParentInterface:  parentName,
-			ParentLinuxName:  parentLinux,
-			ParentIfindex:    parentIfindex,
-			ParentUnbindable: fabricParentUnbindable(cfg, parentName, parentLinux, liveXfrm),
-			OverlayLinux:     overlayLinux,
-			OverlayIfindex:   overlayIfindex,
-			RXQueues:         rxQueues,
-			PeerAddress:      in.peer,
-			LocalMAC:         parentMAC,
-			PeerMAC:          peerMAC,
-			Up:               fabricParentUp(parentLinux),
+			Name:              in.name,
+			ParentInterface:   parentName,
+			ParentLinuxName:   parentLinux,
+			ParentIfindex:     parentIfindex,
+			ParentUnbindable:  fabricParentUnbindable(cfg, parentName, parentLinux, liveXfrm),
+			OverlayLinux:      overlayLinux,
+			OverlayIfindex:    overlayIfindex,
+			RXQueues:          rxQueues,
+			PeerAddress:       in.peer,
+			LocalMAC:          parentMAC,
+			PeerMAC:           peerMAC,
+			Up:                fabricParentUp(parentLinux),
+			LinkAuthenticated: in.linkAuthenticated,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

@@ -3889,6 +3889,7 @@ fn queue_warm_pass_warms_fabric_peer_over_parent_ifindex() {
         peer_mac: [0; 6],
         local_mac: [0; 6],
         up: true,
+        link_authenticated: false,
     });
     coord.queue_warm_pass(false);
     let item = rx.try_recv().expect("fabric peer warm item");
@@ -4004,6 +4005,99 @@ fn refresh_fabric_links_replacement_leaves_other_parent_untouched_5686() {
 }
 
 #[test]
+
+// #16023: revoking `fabric-interface-authenticated` must force
+// link_authenticated=false on the surviving fabric entry even when the
+// new build cannot re-resolve the link (preserve path) — and on the
+// fresh-build row the merge leaves in place. Refresh-authored snapshots
+// (SyncFabricState / update_fabrics) carry the CURRENT config's flag
+// because Go re-derives it every sample, so a delete arrives already
+// false; this cell drives that exact shape through refresh_fabric_links.
+// Fail-on-revert: drop the #16023 re-stamp in snapshot_refresh.rs and the
+// first assert keeps the stale `true`.
+
+// #16023: a same-plan snapshot refresh (config change via apply_snapshot)
+// whose new build cannot re-resolve the fabric must still revoke: the
+// preserved link and any new-build entry surviving the merge (incl. an
+// overlay-aliased entry the parent-keyed merge skipped) lose
+// link_authenticated. Runs through refresh_runtime_snapshot_inner, the
+// production path. Fail-on-revert: drop the #16023 re-stamp and the
+// surviving entry keeps the stale `true`.
+#[test]
+fn refresh_runtime_snapshot_revocation_clears_link_authenticated_16023() {
+    // Fixture snapshot: one fabric (parent 80, overlay 1080), attested.
+    let make = |generation: u64, link_authenticated: bool| {
+        let mut snap = fabric_snap_5686(80, "10.99.0.2", "02:00:00:00:00:02");
+        snap.link_authenticated = link_authenticated;
+        crate::ConfigSnapshot {
+            version: crate::CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation,
+            fabrics: vec![snap],
+            ..Default::default()
+        }
+    };
+    let mut coord = Coordinator::new();
+    coord.refresh_runtime_snapshot(&make(1, true)).expect("attested apply");
+    assert_eq!(coord.forwarding.fabrics.len(), 1);
+    assert!(coord.forwarding.fabrics[0].link_authenticated, "attested apply must carry true");
+    // Revoked apply: the fabric row is still configured but UNRESOLVED
+    // (empty peer_mac) so populate_fabrics skips it and the preserve/merge
+    // path decides the surviving entry's flag.
+    let mut revoked = fabric_snap_5686(80, "10.99.0.2", "");
+    revoked.link_authenticated = false;
+    let mut snap = make(2, false);
+    snap.fabrics = vec![revoked];
+    coord.refresh_runtime_snapshot(&snap).expect("revoked apply");
+    assert_eq!(coord.forwarding.fabrics.len(), 1, "working link must survive unresolved revoked apply");
+    assert!(
+        !coord.forwarding.fabrics[0].link_authenticated,
+        "revoked snapshot must force link_authenticated=false on the surviving entry (#16023)"
+    );
+    assert!(
+        coord.ha.fabrics.load().iter().all(|f| !f.link_authenticated),
+        "ha.fabrics must not retain a revoked attestation after snapshot refresh (#16023)"
+    );
+    let view = coord.ha.runtime.load_full();
+    assert!(
+        view.forwarding().fabrics.iter().all(|f| !f.link_authenticated),
+        "runtime view must not retain a revoked attestation (#16023)"
+    );
+}
+
+#[test]
+fn refresh_fabric_links_revocation_clears_link_authenticated_16023() {
+    let parent = 80i32;
+    let mut coord = Coordinator::new();
+    // Attested + resolved install.
+    let mut snap = fabric_snap_5686(parent, "10.99.0.2", "02:00:00:00:00:02");
+    snap.link_authenticated = true;
+    coord.refresh_fabric_links(&[snap]);
+    assert_eq!(coord.forwarding.fabrics.len(), 1);
+    assert!(coord.forwarding.fabrics[0].link_authenticated, "attested install must carry true");
+    // Revoked + UNRESOLVED refresh (empty peer_mac): preserve path. The
+    // working link survives but the attestation must not.
+    coord.refresh_fabric_links(&[fabric_snap_5686(parent, "10.99.0.2", "")]);
+    assert_eq!(coord.forwarding.fabrics.len(), 1, "working link must survive unresolved refresh");
+    assert!(
+        !coord.forwarding.fabrics[0].link_authenticated,
+        "revoked attestation must force link_authenticated=false on the preserved link (#16023)"
+    );
+    // Worker fast-path Arc and runtime view must agree (no reader keeps true).
+    assert!(
+        coord.ha.fabrics.load().iter().all(|f| !f.link_authenticated),
+        "ha.fabrics must not retain a revoked attestation (#16023)"
+    );
+    // Re-attest + unresolved: attestation returns without a rebuild.
+    let mut snap = fabric_snap_5686(parent, "10.99.0.2", "");
+    snap.link_authenticated = true;
+    coord.refresh_fabric_links(&[snap]);
+    assert!(
+        coord.forwarding.fabrics[0].link_authenticated,
+        "re-attestation must restore link_authenticated=true on the preserved link (#16023)"
+    );
+}
+
+#[test]
 fn fabric_link_superseded_by_snapshots_only_on_same_parent_different_peer_5686() {
     let link = FabricLink {
         parent_ifindex: 80,
@@ -4012,6 +4106,7 @@ fn fabric_link_superseded_by_snapshots_only_on_same_parent_different_peer_5686()
         peer_mac: [2, 0, 0, 0, 0, 2],
         local_mac: [2, 0xbf, 0x72, 0, 0, 1],
         up: true,
+        link_authenticated: false,
     };
     // Same parent, DIFFERENT peer → superseded.
     assert!(fabric_link_superseded_by_snapshots(

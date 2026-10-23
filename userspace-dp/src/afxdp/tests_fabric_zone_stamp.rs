@@ -165,6 +165,56 @@ fn ambiguous_stamp_with_local_owner_is_adjudicated_like_local_ingress_15916() {
     );
 }
 
+/// #16023 decisive regression (end-to-end half): a third L2 speaker forges
+/// the trust(`lan`)-zone stamp to the locally-owned WAN server, permitted
+/// only lan->wan. With require-authenticated set and an unattested fabric,
+/// the frame drops at stage 9 (Invalid) in BOTH placements: split-RG
+/// (RG1 local / lan RG2 peer-owned — the shape honoured pre-fix) and
+/// all-RGs-local (#15916 ambiguous/promoted pre-fix). No session, no
+/// forward. Fail-on-revert: drop the V0 gate and both placements install
+/// + forward. Attested-link and requirement-off controls keep forwarding.
+#[test]
+fn forged_stamp_drops_when_link_authentication_required_16023() {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let placements: [(&str, BTreeMap<i32, HAGroupRuntime>); 2] = [
+        ("split-RG", BTreeMap::from([(1, active_rg(now_secs))])),
+        ("all-RGs-local", BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))])),
+    ];
+    for (name, ha_state) in &placements {
+        let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+        forwarding.require_authenticated_fabric_stamps = true;
+        let mut binding = fabric_binding();
+        let mut sessions = SessionTable::new();
+        let (batch, dbg) = txn_run_descriptor_checked(
+            &mut binding, &mut sessions, &forwarding, ha_state, &frame, meta, true,
+        );
+        assert_eq!(batch.invalid_fabric_stamp_drops, 1, "{name}: forged stamp must drop as invalid (#16023)");
+        assert_eq!(dbg.session_miss, 0, "{name}: drop must precede session lookup (#16023)");
+        assert_eq!(sessions.len(), 0, "{name}: forged stamp must install no session (#16023)");
+        assert!(binding.scratch.scratch_forwards.is_empty(), "{name}: forged stamp must not forward (#16023)");
+    }
+    // Controls: attested link forwards in split-RG; requirement off forwards.
+    for (name, attest, require) in [("attested", true, true), ("require-off", false, false)] {
+        let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+        forwarding.require_authenticated_fabric_stamps = require;
+        if attest {
+            for fabric in &mut forwarding.fabrics {
+                fabric.link_authenticated = true;
+            }
+        }
+        let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+        let mut binding = fabric_binding();
+        let mut sessions = SessionTable::new();
+        txn_run_descriptor_checked(
+            &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+        );
+        assert_eq!(sessions.len(), 2, "{name}: legitimate punt must install (forward+reverse)");
+        assert_eq!(binding.scratch.scratch_forwards.len(), 1, "{name}: legitimate punt must forward");
+    }
+}
+
 #[test]
 fn invalid_fabric_stamp_drops_instead_of_falling_back_to_main_11061() {
     let snapshot = routing_instance_fabric_snapshot_11061(false);

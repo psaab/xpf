@@ -381,6 +381,11 @@ pub(crate) struct FlowSnapshot {
     /// helper from ignoring an enabled compatibility setting.
     #[serde(rename = "allow_unstamped_fabric_ingress", default)]
     pub allow_unstamped_fabric_ingress: bool,
+    /// #16023: honour V1/V2 fabric stamps only on link-authenticated
+    /// fabric links. Missing/false preserves #10105 behaviour; the v69
+    /// fence prevents a v68 helper from ignoring an enabled requirement.
+    #[serde(rename = "require_authenticated_fabric_stamps", default)]
+    pub require_authenticated_fabric_stamps: bool,
     #[serde(rename = "tcp_mss_all_tcp", default)]
     pub tcp_mss_all_tcp: u16,
     #[serde(rename = "tcp_mss_ipsec_vpn", default)]
@@ -1104,6 +1109,11 @@ pub(crate) struct FabricSnapshot {
     /// drop the field (which would default back to true here).
     #[serde(rename = "up", default = "default_true")]
     pub up: bool,
+    /// #16023: operator attestation that this fabric link is
+    /// link-authenticated (MACsec/802.1X). Absent decodes false
+    /// (unauthenticated), fail-closed under require-authenticated mode.
+    #[serde(rename = "link_authenticated", default)]
+    pub link_authenticated: bool,
 }
 
 fn default_true() -> bool {

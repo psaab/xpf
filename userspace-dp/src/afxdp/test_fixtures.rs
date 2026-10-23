@@ -1103,6 +1103,7 @@ pub(super) fn nat_snapshot_with_fabric() -> ConfigSnapshot {
         local_mac: "02:bf:72:ff:00:01".to_string(),
         peer_mac: "00:aa:bb:cc:dd:ee".to_string(),
         up: true,
+        link_authenticated: false,
     }];
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "fab0".to_string(),

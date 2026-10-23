@@ -905,6 +905,7 @@ fn build_forwarding_state_uses_fabric_snapshot_macs_without_parent_interface() {
         local_mac: "02:bf:72:ff:00:01".to_string(),
         peer_mac: "00:aa:bb:cc:dd:ee".to_string(),
         up: true,
+        link_authenticated: false,
     }];
     let state = build_forwarding_state(&snapshot);
     let redirect = resolve_fabric_redirect(&state).expect("fabric redirect");
@@ -1273,6 +1274,71 @@ fn zone_encoded_fabric_stamp_rejected_for_zone_without_rg_members_6458() {
 // #6458 preservation pin: the legitimate split-RG shape — claimed zone
 // `lan` (RG 2) is NOT forwarding-active locally while a DIFFERENT RG (1)
 // is — plus the unicast fabric dst MAC — keeps the override working.
+#[test]
+// #16023 decisive regression (unit half): with require-authenticated set,
+// the byte-identical forged stamp that the split-RG cell below honours
+// (remote-RG zone, unicast dst) is Invalid on an unauthenticated link, in
+// both the split-RG (ProvedPeerPunt shape) and all-RGs-local
+// (AmbiguousLocalZone shape, #15916) placements. On an attested link the
+// same frames keep their pre-#16023 dispositions. Fail-on-revert: drop the
+// V0 gate in zone_encoded_fabric_stamp_disposition and the first two
+// asserts go Valid/Ambiguous.
+#[test]
+fn zone_encoded_fabric_stamp_requires_link_authentication_16023() {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        ..UserspaceDpMeta::default()
+    };
+    let mut frame = vec![0u8; 64];
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]);
+    // Split-RG placement: RG1 local, claimed lan RG2 peer-owned.
+    let split = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    // All-RGs-local placement (#15916 ambiguous shape).
+    let all_local = BTreeMap::from([
+        (1, active_ha_runtime(now_secs)),
+        (2, active_ha_runtime(now_secs)),
+    ]);
+    let mut required = build_forwarding_state(&nat_snapshot_with_fabric());
+    required.require_authenticated_fabric_stamps = true;
+    // Fixture fabric is unattested (link_authenticated=false).
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &required, &split, now_secs),
+        ZoneEncodedFabricStamp::Invalid,
+        "forged split-RG stamp on unauthenticated link must drop under require (#16023)"
+    );
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &required, &all_local, now_secs),
+        ZoneEncodedFabricStamp::Invalid,
+        "forged all-local stamp on unauthenticated link must drop, not promote (#16023/#15916)"
+    );
+    // Attested link: pre-#16023 dispositions return.
+    for fabric in &mut required.fabrics {
+        fabric.link_authenticated = true;
+    }
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &required, &split, now_secs),
+        ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
+        "attested link must honour the split-RG punt (#16023)"
+    );
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &required, &all_local, now_secs),
+        ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, ifindex: None },
+        "attested link must keep the #15916 ambiguous shape (#16023)"
+    );
+    // Control: requirement off + unattested link is unchanged (the
+    // honoured cell below pins the same shape end to end).
+    let legacy = build_forwarding_state(&nat_snapshot_with_fabric());
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &legacy, &split, now_secs),
+        ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
+    );
+}
+
 #[test]
 fn zone_encoded_fabric_stamp_honored_for_remote_rg_zone_6458() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
@@ -2282,6 +2348,7 @@ fn fabric_redirect_prefers_up_fabric_4082() {
         peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     };
     let fab1 = FabricLink {
         parent_ifindex: 22,
@@ -2290,6 +2357,7 @@ fn fabric_redirect_prefers_up_fabric_4082() {
         peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xef],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
         up: true,
+        link_authenticated: false,
     };
 
     // fab0 DOWN, fab1 UP → select fab1. This is the failover the fix delivers;
@@ -2370,6 +2438,7 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     let decision = SessionDecision {
         resolution: ForwardingResolution {
@@ -8149,6 +8218,7 @@ fn fabric_snapshot_template() -> FabricSnapshot {
         local_mac: "02:bf:72:ff:00:01".into(),
         peer_mac: "00:aa:bb:cc:dd:ee".into(),
         up: true,
+        link_authenticated: false,
     }
 }
 

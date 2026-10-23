@@ -170,6 +170,7 @@ pub(crate) fn test_forwarding_state_with_fabric() -> ForwardingState {
         peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     forwarding
 }

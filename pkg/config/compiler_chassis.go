@@ -463,6 +463,16 @@ func compileChassis(node *Node, ch *ChassisConfig) error {
 			ch.Cluster.Fabric1PeerAddress = v
 		}
 	}
+	// #16023: operator attestation that the fabric data link itself is
+	// link-authenticated (MACsec / 802.1X provided by the switching/NIC
+	// plant; xpf implements neither). Only honoured together with
+	// `security flow require-authenticated-fabric-stamps`.
+	if clusterNode.FindChild("fabric-interface-authenticated") != nil {
+		ch.Cluster.FabricLinkAuthenticated = true
+	}
+	if clusterNode.FindChild("fabric1-interface-authenticated") != nil {
+		ch.Cluster.Fabric1LinkAuthenticated = true
+	}
 	if clusterNode.FindChild("configuration-synchronize") != nil {
 		ch.Cluster.ConfigSync = true
 	}

@@ -105,16 +105,23 @@ type ClusterConfig struct {
 	// #6772: both defaults corrected. The runtime substitutes
 	// cluster.DefaultHeartbeatInterval (100ms) and
 	// cluster.DefaultHeartbeatThreshold (5); these comments said 1000 and 3.
-	HeartbeatInterval   int    // milliseconds, 0 = runtime default (100)
-	HeartbeatThreshold  int    // missed heartbeats before lost, 0 = runtime default (5)
-	ControlInterface    string // interface for heartbeat traffic (e.g. "hb0")
-	PeerAddress         string // peer node's control link IP (e.g. "10.99.0.2")
-	FabricInterface     string // interface for session/config sync (e.g. "fab0")
-	FabricPeerAddress   string // peer's fabric link IP (e.g. "10.99.1.2")
-	Fabric1Interface    string // secondary fabric interface (e.g. "fab1")
-	Fabric1PeerAddress  string // peer's secondary fabric IP
-	ConfigSync          bool   // enable config synchronization to peer on commit
-	ControlLinkRecovery bool   // enable control-link-recovery
+	HeartbeatInterval  int    // milliseconds, 0 = runtime default (100)
+	HeartbeatThreshold int    // missed heartbeats before lost, 0 = runtime default (5)
+	ControlInterface   string // interface for heartbeat traffic (e.g. "hb0")
+	PeerAddress        string // peer node's control link IP (e.g. "10.99.0.2")
+	FabricInterface    string // interface for session/config sync (e.g. "fab0")
+	FabricPeerAddress  string // peer's fabric link IP (e.g. "10.99.1.2")
+	Fabric1Interface   string // secondary fabric interface (e.g. "fab1")
+	Fabric1PeerAddress string // peer's secondary fabric IP
+	// FabricLinkAuthenticated / Fabric1LinkAuthenticated mark the fabric
+	// data link as operator-authenticated (MACsec / 802.1X) so the #16023
+	// require-authenticated-fabric-stamps gate may honour stamps on it.
+	// xpf does not implement MACsec itself; this records the operator's
+	// attestation that the segment provides link authentication.
+	FabricLinkAuthenticated  bool
+	Fabric1LinkAuthenticated bool
+	ConfigSync               bool // enable config synchronization to peer on commit
+	ControlLinkRecovery      bool // enable control-link-recovery
 	// StrictSessionAuth is the legacy #7441 node-local config leaf, retained
 	// for configuration compatibility. Since #10717, keyed-node eviction of
 	// established connections that never authenticate is the default and no

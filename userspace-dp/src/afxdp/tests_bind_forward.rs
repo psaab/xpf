@@ -475,6 +475,7 @@ fn v2_stamp_forwarding_15246() -> (ForwardingState, [u8; 6], [u8; 6]) {
         peer_mac: [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
+        link_authenticated: false,
     });
     forwarding
         .zone_id_to_name

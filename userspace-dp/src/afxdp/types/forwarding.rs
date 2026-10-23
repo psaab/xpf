@@ -476,6 +476,9 @@ pub(in crate::afxdp) struct ForwardingState {
     /// False is fail-closed; single-table deployments still retain legacy
     /// absence behavior because the receive gate is conditional on RI presence.
     pub(in crate::afxdp) allow_unstamped_fabric_ingress: bool,
+    /// #16023: when true, a V1/V2 stamp is honoured only on a
+    /// link-authenticated fabric; otherwise it is Invalid (stage-9 drop).
+    pub(in crate::afxdp) require_authenticated_fabric_stamps: bool,
     /// `security alg <proto> disable` bitfield (#2008 H3/H4): bit 0 DNS,
     /// bit 1 FTP, bit 2 SIP, bit 3 TFTP, bit 4 PPTP (#15655). Read at
     /// session-create time to suppress ALG-type tagging for a disabled ALG
@@ -1730,6 +1733,10 @@ pub(in crate::afxdp) struct FabricLink {
     /// with `up == true` so a dual-fabric cluster fails the cross-chassis
     /// redirect over to the secondary when the primary parent carrier drops.
     pub(in crate::afxdp) up: bool,
+    /// #16023: operator attestation (FabricSnapshot.link_authenticated)
+    /// that this link is link-authenticated (MACsec/802.1X). Consulted
+    /// only when ForwardingState.require_authenticated_fabric_stamps.
+    pub(in crate::afxdp) link_authenticated: bool,
 }
 
 /// #3773 (M13): why a configured fabric link was skipped during a forwarding

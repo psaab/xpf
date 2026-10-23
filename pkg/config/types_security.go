@@ -278,13 +278,19 @@ type FlowConfig struct {
 	AllowDNSReply               bool
 	AllowEmbeddedICMP           bool
 	AllowUnstampedFabricIngress bool // restore legacy MAIN handling for absent fabric stamps (#11061)
-	GREPerformanceAcceleration  bool
-	PowerModeDisable            bool
-	SynFloodProtectionMode      string // "syn-cookie" or "" (default = drop)
-	Traceoptions                *FlowTraceoptions
-	AgingEarlyAgeout            int // seconds (0 = disabled)
-	AgingHighWatermark          int // percent of max sessions (0 = disabled)
-	AgingLowWatermark           int // percent of max sessions (0 = disabled)
+	// RequireAuthenticatedFabricStamps is the #16023 opt-in: when set, the
+	// userspace dataplane honours a V1/V2 fabric stamp only if it arrives
+	// on a fabric link the control plane marked link-authenticated
+	// (operator MACsec / 802.1X). Unauthenticated stamps drop as Invalid.
+	// Off by default preserves #10105 document-and-constrain behaviour.
+	RequireAuthenticatedFabricStamps bool
+	GREPerformanceAcceleration       bool
+	PowerModeDisable                 bool
+	SynFloodProtectionMode           string // "syn-cookie" or "" (default = drop)
+	Traceoptions                     *FlowTraceoptions
+	AgingEarlyAgeout                 int // seconds (0 = disabled)
+	AgingHighWatermark               int // percent of max sessions (0 = disabled)
+	AgingLowWatermark                int // percent of max sessions (0 = disabled)
 	// AgingUnknownLeaves records `security flow aging` child keywords the
 	// compiler does not recognize (#3440 H2). The aging subtree previously
 	// silently dropped any unknown leaf; compileFlow now records them so
