@@ -44,8 +44,11 @@ type SchedulerConfig struct {
 	// time bounds, so keeping the union would resolve widest and enforce
 	// permits all day. The runtime evaluator (pkg/scheduler.isWithinWindow)
 	// fails closed for such a scheduler — never active — so permits fail
-	// closed. Populated only on the tolerant path; strict compilation
-	// rejects the conflict instead. Compile-time only; never serialized.
+	// closed; the snapshot builder keeps scheduled DENY/REJECT rules
+	// eligible (policyRuleInactiveForScheduler), since suppressing a deny
+	// would fail open. Populated only on the tolerant path; strict
+	// compilation rejects the conflict instead. Compile-time only; never
+	// serialized.
 	Unresolvable bool `json:"-"`
 
 	// Days holds per-weekday overrides keyed by lowercase weekday name

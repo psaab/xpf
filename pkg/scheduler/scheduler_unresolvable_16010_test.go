@@ -3,7 +3,9 @@ package scheduler
 // #16010: a scheduler marked Unresolvable by tolerant compile (all-day +
 // complete-window conflict) must never be active, at any time of day, on
 // any weekday — permits gated by it fail closed instead of resolving
-// widest via the all-day arm.
+// widest via the all-day arm. (Scheduled DENY/REJECT eligibility is a
+// snapshot-lowering disposition, pinned in pkg/dataplane/userspace
+// TestBuildPolicySnapshotsUnresolvableScheduler16010.)
 //
 // FAIL-ON-REVERT: removing the Unresolvable check in isWithinWindow makes
 // the all-day cases below active and this test fails.

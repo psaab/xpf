@@ -42,6 +42,24 @@ func TestPolicySchedulerConfigHashIncludesDailyExclude12822(t *testing.T) {
 	}
 }
 
+// #16010: toggling Unresolvable alone must change the generation hash so
+// apply re-primes instead of reusing the previous active state.
+func TestPolicySchedulerConfigHashIncludesUnresolvable16010(t *testing.T) {
+	mk := func(unresolvable bool) *config.Config {
+		return &config.Config{Schedulers: map[string]*config.SchedulerConfig{
+			"S": {Name: "S", AllDay: true, StartTime: "09:00:00", StopTime: "17:00:00", Unresolvable: unresolvable},
+		}}
+	}
+	markedHash, markedSet := policySchedulerConfigHash(mk(true))
+	plainHash, plainSet := policySchedulerConfigHash(mk(false))
+	if !markedSet || !plainSet {
+		t.Fatal("both scheduler configs must be represented in the hash")
+	}
+	if markedHash == plainHash {
+		t.Fatal("toggling Unresolvable must change the scheduler config hash (#16010)")
+	}
+}
+
 func TestStartPolicySchedulerLoopLockedWaitsForDaemonContext(t *testing.T) {
 	sched, _ := scheduler.NewPrimed(map[string]*config.SchedulerConfig{
 		"always": {Name: "always"},

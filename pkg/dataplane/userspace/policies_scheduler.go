@@ -39,6 +39,27 @@ func policyRuleInactiveForAction(
 	return policyRuleInactive(schedulerName, activeState)
 }
 
+// policyRuleInactiveForScheduler is policyRuleInactiveForAction plus the
+// #16010 unresolvable disposition: a scheduler the tolerant compile marked
+// Unresolvable (all-day+window conflict) is never active, so permits gated
+// by it fail closed — but scheduled DENY/REJECT rules stay eligible,
+// mirroring the fail-closed latch, because suppressing a deny would fail
+// open to a later permit. cfg may be nil (programmatic snapshots), in
+// which case only the latch disposition applies.
+func policyRuleInactiveForScheduler(
+	cfg *config.Config,
+	schedulerName string,
+	action config.PolicyAction,
+	activeState map[string]bool,
+	failClosed bool,
+) bool {
+	if schedulerName != "" && (action == config.PolicyDeny || action == config.PolicyReject) &&
+		cfg != nil && cfg.Schedulers[schedulerName] != nil && cfg.Schedulers[schedulerName].Unresolvable {
+		return false
+	}
+	return policyRuleInactiveForAction(schedulerName, action, activeState, failClosed)
+}
+
 // PolicyInactive reports whether a policy bound to schedulerName is
 // currently runtime-inactive given the daemon-maintained per-scheduler
 // active-state map (see Manager.PolicySchedulerActiveState). It is the
