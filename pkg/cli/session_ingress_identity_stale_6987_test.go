@@ -213,6 +213,11 @@ func TestDisputedIdentityReportsNoInterfaceName6987(t *testing.T) {
 func TestShowFlowSessionIfColumnDeclinesDisputedIdentity6987(t *testing.T) {
 	lo := loIfindex(t)
 	c := ingressIfColumnCLIWith(t, lo, 50, ingressIfColumnUntrustZoneID)
+	// #16065: on a host without lo.50 the disputed name cannot arise
+	// (the identity is simply unnameable, which prints the zone's
+	// single member — a different arm). Skip so the disputed-hit arm
+	// is not silently re-ascribed to the fallback.
+	requireLoUnitsNameable16065(t, c)
 	out := captureStdout(t, func() {
 		if err := c.showFlowSession(nil); err != nil {
 			t.Fatalf("showFlowSession: %v", err)

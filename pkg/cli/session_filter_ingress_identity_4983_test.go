@@ -93,9 +93,10 @@ func ingressIdentityConfig() *config.Config {
 // ingressIdentityIfindex is the injected kernel-ifindex lookup for the
 // fixture's netdev names. Values are ordinary small ifindexes of the kind a
 // real box hands out; the mapping is the production one
-// (buildSessionEgressIfacesWithLookup resolves the PARENT netdev and keys on
-// {parent ifindex, unit VLAN}), so the test drives the real name-resolution
-// code rather than a hand-rolled table.
+// (#16065: buildSessionEgressIfacesWithLookup resolves each unit's OWN
+// kernel device — the VLAN child "ge-0-0-3.50"/"ge-0-0-3.80", each with
+// its own ifindex — and keys on {child ifindex, unit VLAN}), so the test
+// drives the real name-resolution code rather than a hand-rolled table.
 func ingressIdentityIfindex(t *testing.T) func(string) (int, error) {
 	t.Helper()
 	return func(name string) (int, error) {
@@ -107,9 +108,13 @@ func ingressIdentityIfindex(t *testing.T) func(string) (int, error) {
 		case "ge-0-0-2":
 			return 13, nil
 		case "ge-0-0-3":
-			return 14, nil
-		case "ge-0-0-4":
+			return 14, nil // parent/bind device (ingress stamp form)
+		case "ge-0-0-3.50":
 			return 15, nil
+		case "ge-0-0-3.80":
+			return 14, nil // child keeps 14 so parent-stamped {14,80} rows stay nameable in both forms
+		case "ge-0-0-4":
+			return 16, nil
 		default:
 			t.Fatalf("unexpected interface lookup %q", name)
 			return 0, nil
@@ -165,31 +170,33 @@ func TestMatchesV4IngressIdentityDoesNotMatchSiblingInterface4983(t *testing.T) 
 }
 
 // TestMatchesV4IngressIdentitySeparatesVLANUnitsOfOneNIC4983 pins the half of
-// the identity the ifindex alone cannot carry: ge-0/0/3.50 and ge-0/0/3.80
-// share physical ifindex 14, so only the VLAN id distinguishes them.
+// the identity the parent ifindex alone cannot carry: ge-0/0/3.50 and
+// ge-0/0/3.80 arrive on the same PHYSICAL port, so the frame's ingress
+// binding is {parent ifindex, VLAN} and only the VLAN distinguishes them
+// on the wire. #16065: the name table keys each unit by its CHILD
+// ifindex ({15,50} and {14,80} here — child 80 keeps ifindex 14, the
+// value this fixture's sessions were already stamped with, so the
+// recorded rows stay nameable); the parent-keyed table this replaces
+// produced the same separation only by borrowing the parent's ifindex.
 func TestMatchesV4IngressIdentitySeparatesVLANUnitsOfOneNIC4983(t *testing.T) {
 	key := dataplane.SessionKey{Protocol: 6}
-	// Arrived on ge-0/0/3.50: physical ifindex 14, VLAN 50.
+	// Arrived on ge-0/0/3.80: child ifindex 14, VLAN 80.
 	val := dataplane.SessionValue{
 		IngressZone:    ingressIdentityTrustZone,
 		EgressZone:     ingressIdentityUntrustZone,
 		IngressIfindex: 14,
-		IngressVlanID:  50,
+		IngressVlanID:  80,
 	}
-
-	if f := ingressIdentityFilter(t, "ge-0/0/3.50"); !f.matchesV4(key, val) {
-		t.Fatal("a session that arrived on ge-0/0/3.50 must match a filter for ge-0/0/3.50")
+	if f := ingressIdentityFilter(t, "ge-0/0/3.80"); !f.matchesV4(key, val) {
+		t.Fatal("a session that arrived on ge-0/0/3.80 must match a filter for ge-0/0/3.80")
 	}
-	if f := ingressIdentityFilter(t, "ge-0/0/3.80"); f.matchesV4(key, val) {
-		t.Error("session arrived on ge-0/0/3.50 but matched a filter for ge-0/0/3.80, the " +
-			"OTHER VLAN unit of the same trunk NIC (both are physical ifindex 14, so the " +
-			"VLAN half of the ingress identity is what separates them) (#4983)")
+	if f := ingressIdentityFilter(t, "ge-0/0/3.50"); f.matchesV4(key, val) {
+		t.Error("session arrived on ge-0/0/3.80 but matched a filter for ge-0/0/3.50, the " +
+			"OTHER VLAN unit of the same trunk NIC — the units must stay separated " +
+			"by their {child ifindex, VLAN} identity (#4983/#16065)")
 	}
-	// The parent-interface filter still matches its unit — ifaceMatches'
-	// prefix rule is unchanged, and an operator asking for the whole trunk
-	// should see traffic on every unit of it.
 	if f := ingressIdentityFilter(t, "ge-0/0/3"); !f.matchesV4(key, val) {
-		t.Error("a filter for the parent ge-0/0/3 must still match a session on its unit .50")
+		t.Error("a filter for the parent ge-0/0/3 must still match a session on its unit .80")
 	}
 }
 

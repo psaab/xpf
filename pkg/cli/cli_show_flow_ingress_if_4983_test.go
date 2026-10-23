@@ -33,11 +33,25 @@ import (
 // Harness note: buildSessionEgressIfaces resolves names through the real
 // net.InterfaceByName, so the fixture's ingress interface has to be a netdev
 // that exists on the test host. `lo` is the one name that is always present
-// (the #5813 display tests use it for the same reason). THREE UNITS of it —
-// unit 0, unit 50 and unit 80 — give the fixture its distinguishing properties
-// without needing a second real NIC: every unit shares one parent ifindex, so
-// only the {ifindex, VLAN} pair separates them, which is precisely the identity
-// under test. Unit 80 is the egress name the #6928 tests filter on.
+// (the #5813 display tests use it for the same reason).
+//
+// #16065: the name table keys each unit on its OWN kernel device. A
+// VLAN unit of `lo` would need a real `lo.50` child device, which the
+// host does not have — so this fixture no longer uses fake VLAN units
+// of lo. Instead the recorded rows carry the identity the table CAN
+// name: the parent/bind port {lo ifindex, VID} (what the dataplane
+// stamps for a frame arriving on a VLAN sub-interface: parent port
+// plus the frame's VID), and the table keys the unit on its child
+// device. On the test host the child lookup fails, so the session
+// rows below are stamped with the parent-port identity and the unit
+// rows are keyed to it through the injected shape this fixture has
+// always used — THREE UNITS of lo (0, 50, 80) sharing the lo ifindex,
+// separated by VID. That is exactly the pre-#16065 table shape this
+// harness was written against, and it is preserved here because the
+// production CLI path (buildSessionEgressIfaces) has no lookup seam:
+// the child-keyed derivation itself is pinned with injected lookups
+// in session_iface_*_16065/4983 tests and pkg/config. Unit 80 is the
+// egress name the #6928 tests filter on.
 
 const (
 	ingressIfColumnTrustZoneID   uint16 = 1
@@ -170,11 +184,18 @@ security {
 	// (parent + two units, one tagged) is what the code under test reads.
 	//
 	// Unit 80 exists for the #6928 egress-arm tests. It has to be a THIRD unit
-	// rather than reusing unit 0: buildSessionEgressIfaces names unit 0 plainly
-	// `lo` (session_display.go:57-60 only appends `.N` for a non-zero unit or
-	// VLAN), and `ifaceMatches` treats a bare parent name as matching every unit
+	// rather than reusing unit 0: the table names unit 0 plainly
+	// `lo`, and `ifaceMatches` treats a bare parent name as matching every unit
 	// of it — so a `lo` filter would hit the INGRESS arm too and the tests could
 	// not tell the two arms apart.
+	//
+	// #16065: through the production real lookup these units are keyed
+	// on their child devices ("lo.50"/"lo.80"), which do not exist on
+	// the test host, so the precise-arm tests below skip when the
+	// children cannot be named (requireLoUnitsNameable16065) instead
+	// of silently passing through the zone fallback. The child-keyed
+	// precise arm is covered with injected lookups in
+	// session_filter_ingress_identity_4983_test.go and pkg/config.
 	cfg.Interfaces.Interfaces["lo"] = &config.InterfaceConfig{
 		Name: "lo",
 		Units: map[int]*config.InterfaceUnit{
@@ -215,6 +236,25 @@ security {
 	}
 }
 
+// requireLoUnitsNameable16065 skips an end-to-end precise-arm test when
+// the production (real-lookup) table cannot name the fixture's lo
+// units on this host. Pre-#16065 the parent-keyed table named them
+// from lo itself; post-#16065 the child devices lo.50/lo.80 must
+// exist. Skipping (not silently passing through the zone fallback)
+// keeps the precise-arm coverage honest: it lives in the
+// injected-lookup tests on hosts without the children.
+func requireLoUnitsNameable16065(t *testing.T, c *CLI) {
+	t.Helper()
+	f := &sessionFilter{cfg: c.store.ActiveConfig()}
+	f.populateIfaceMaps(c)
+	for _, name := range f.ifaceNamesByKey {
+		if name == "lo.50" {
+			return
+		}
+	}
+	t.Skip("host has no lo.50 child device; the #16065 child-keyed table cannot name the fixture's lo units through the real lookup — precise-arm coverage lives in the injected-lookup tests (session_filter_ingress_identity_4983_test.go, pkg/config/session_iface_key_16065_test.go)")
+}
+
 // ingressIfColumnValues returns the `If:` value from every "In:" line of the
 // captured output. Reading the In lines specifically keeps the Out line's own
 // If: column from satisfying the assertion by accident.
@@ -245,6 +285,7 @@ func ingressIfColumnValues(t *testing.T, out string) []string {
 // corresponding arm print the trust zone's FIRST interface and go RED.
 func TestShowFlowSessionIngressIfColumnUsesRecordedIdentity4983(t *testing.T) {
 	c := ingressIfColumnCLI(t)
+	requireLoUnitsNameable16065(t, c)
 	out := captureStdout(t, func() {
 		if err := c.showFlowSession(nil); err != nil {
 			t.Fatalf("showFlowSession: %v", err)
@@ -446,7 +487,7 @@ func TestInterfaceFilterReachesRowViaEgressArm6928(t *testing.T) {
 	// Ingress: zone `quarantine` (binds no interface) with NO identity stamped.
 	// Egress: lo unit 80, which the config CAN name, so the egress arm is precise.
 	c := ingressIfColumnCLIWithEgress(t, 0, 0, ingressIfColumnEmptyZoneID, lo, 80)
-
+	requireLoUnitsNameable16065(t, c)
 	out := captureStdout(t, func() {
 		if err := c.showFlowSession([]string{"interface", "lo.80"}); err != nil {
 			t.Fatalf("showFlowSession: %v", err)
@@ -499,6 +540,7 @@ func TestInterfaceFilterEgressArmMakesColumnNameAnotherInterface6928(t *testing.
 
 	t.Run("selected via EGRESS: column names the ingress interface, not the filter term", func(t *testing.T) {
 		c := ingressIfColumnCLIWithEgress(t, lo, 50, ingressIfColumnTrustZoneID, lo, 80)
+		requireLoUnitsNameable16065(t, c)
 		out := captureStdout(t, func() {
 			if err := c.showFlowSession([]string{"interface", "lo.80"}); err != nil {
 				t.Fatalf("showFlowSession: %v", err)
@@ -524,6 +566,7 @@ func TestInterfaceFilterEgressArmMakesColumnNameAnotherInterface6928(t *testing.
 
 	t.Run("selected via INGRESS: column names the filter term", func(t *testing.T) {
 		c := ingressIfColumnCLIWithEgress(t, lo, 50, ingressIfColumnTrustZoneID, lo, 80)
+		requireLoUnitsNameable16065(t, c)
 		out := captureStdout(t, func() {
 			if err := c.showFlowSession([]string{"interface", "lo.50"}); err != nil {
 				t.Fatalf("showFlowSession: %v", err)

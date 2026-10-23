@@ -7,35 +7,19 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-func TestSessionDisplayVLANID(t *testing.T) {
-	t.Run("prefers explicit vlan-id", func(t *testing.T) {
-		unit := &config.InterfaceUnit{Number: 80, VlanID: 50}
-		if got := sessionDisplayVLANID(unit); got != 50 {
-			t.Fatalf("sessionDisplayVLANID() = %d, want 50", got)
-		}
-	})
+// #16065: the wire-VID rule lives in config.SessionIfaceNames now: a
+// unit keys on uint16(unit.VlanID) only, never its number. The table
+// below is exercised end-to-end by the egress-map test; the old
+// sessionDisplayVLANID helper is gone with the shared derivation.
 
-	// #7153: it must NOT fall back to the unit number. A unit with no
-	// `vlan-id` is UNTAGGED on the wire — the compiler takes vlanID from
-	// unit.VlanID and networkd builds a `.N` sub-interface only when that is
-	// > 0 — so session rows for it carry VID 0. Keying under the NUMBER built
-	// {ifindex, 80} against rows that key {ifindex, 0}: a permanent miss.
-	t.Run("does not fall back to unit number: unset vlan-id is untagged", func(t *testing.T) {
-		unit := &config.InterfaceUnit{Number: 80}
-		if got := sessionDisplayVLANID(unit); got != 0 {
-			t.Fatalf("sessionDisplayVLANID() = %d, want 0 — a unit with no vlan-id is "+
-				"untagged on the wire, and a key of %d can never match a session row", got, got)
-		}
-	})
-}
-
-// #7153: renamed and re-pointed. It was TestBuildSessionEgressIfaces_UsesUnitNumberWhenVlanIDUnset
-// and synthesized `50: {Number: 50}` with no VlanID — a config the compiler
-// treats as UNTAGGED, so it asserted a map shape no session row could match.
-//
-// The cluster it cites does not have that shape: docs/ha-cluster-userspace.conf
-// sets `vlan-id 50` and `vlan-id 80` explicitly. The fixture now matches the
-// real config, so the test proves what its name claims.
+// #7153/#16065: keys on the WIRE vlan-id through the unit's OWN device.
+// It was TestBuildSessionEgressIfaces_UsesUnitNumberWhenVlanIDUnset and
+// synthesized `50: {Number: 50}` with no VlanID — a config the compiler
+// treats as UNTAGGED, so it asserted a map shape no session row could
+// match. The cluster it cites sets `vlan-id 50`/`vlan-id 80` explicitly
+// (docs/ha-cluster-userspace.conf). #16065: the lookup receives the
+// VLAN CHILD device ("ge-0-0-2.50"), which owns its ifindex — the
+// parent netdev is never looked up for a unit with its own child.
 func TestBuildSessionEgressIfaces_KeysOnWireVLANID_7153(t *testing.T) {
 	cfg := &config.Config{
 		Chassis: config.ChassisConfig{
@@ -65,7 +49,11 @@ func TestBuildSessionEgressIfaces_KeysOnWireVLANID_7153(t *testing.T) {
 	m := buildSessionEgressIfacesWithLookup(cfg, func(name string) (int, error) {
 		switch name {
 		case "ge-0-0-2":
-			return 6, nil
+			return 6, nil // RETH member parent/bind device
+		case "ge-0-0-2.50":
+			return 16, nil
+		case "ge-0-0-2.80":
+			return 18, nil
 		case "ge-7-0-2":
 			return 7, nil
 		default:
@@ -77,20 +65,26 @@ func TestBuildSessionEgressIfaces_KeysOnWireVLANID_7153(t *testing.T) {
 		t.Fatal("expected non-empty egress interface map")
 	}
 
-	var found50, found80 bool
+	var found50, found80, parent50, parent80 bool
 	for key, name := range m {
-		if key.vlanID == 50 && name == "reth0.50" {
+		if key.Ifindex == 16 && key.VlanID == 50 && name == "reth0.50" {
 			found50 = true
 		}
-		if key.vlanID == 80 && name == "reth0.80" {
+		if key.Ifindex == 18 && key.VlanID == 80 && name == "reth0.80" {
 			found80 = true
 		}
+		if key.Ifindex == 6 && key.VlanID == 50 && name == "reth0.50" {
+			parent50 = true
+		}
+		if key.Ifindex == 6 && key.VlanID == 80 && name == "reth0.80" {
+			parent80 = true
+		}
 	}
-	if !found50 {
-		t.Fatal("missing reth0.50 mapping")
+	if !found50 || !found80 {
+		t.Fatalf("missing child mappings: 50=%v 80=%v: %v", found50, found80, m)
 	}
-	if !found80 {
-		t.Fatal("missing reth0.80 mapping")
+	if !parent50 || !parent80 {
+		t.Fatalf("missing parent-form mappings {6,VID}: 50=%v 80=%v: %v", parent50, parent80, m)
 	}
 }
 
@@ -120,8 +114,8 @@ func TestMatchesV4_InterfaceFilter(t *testing.T) {
 	// Zone 1 = trust (ge-0/0/0), Zone 2 = untrust (ge-0/0/1)
 	zoneIfaces := map[uint16][]string{1: {"ge-0/0/0"}, 2: {"ge-0/0/1"}}
 	egressIfaces := map[sessionIfaceKey]string{
-		{ifindex: 10, vlanID: 0}: "ge-0/0/1",
-		{ifindex: 20, vlanID: 0}: "ge-0/0/2",
+		{Ifindex: 10, VlanID: 0}: "ge-0/0/1",
+		{Ifindex: 20, VlanID: 0}: "ge-0/0/2",
 	}
 
 	t.Run("matches ingress interface", func(t *testing.T) {

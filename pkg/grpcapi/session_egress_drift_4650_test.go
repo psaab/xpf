@@ -18,7 +18,7 @@ import (
 // assertions below go RED.
 func restEgressOracle(fibIfindex uint32, fibVlanID uint16, egressZone uint16, zoneNames map[uint16]string, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string) string {
 	if fibIfindex != 0 {
-		if name, ok := egressIfaces[sessionEgressKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && name != "" {
+		if name, ok := egressIfaces[sessionEgressKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && name != "" {
 			return name
 		}
 	}
@@ -48,8 +48,8 @@ func TestSessionEntryEgressIfaceParity_4650(t *testing.T) {
 	// FibIfindex==0 session used to mis-resolve to under the unconditional
 	// gRPC lookup. The guarded helper must never consult it.
 	egressIfaces := map[sessionEgressKey]string{
-		{ifindex: 0, vlanID: vlanID}: "ge-STALE-0",   // must be ignored (FibIfindex==0)
-		{ifindex: 7, vlanID: vlanID}: "ge-0-0-7-fib", // consulted only for FibIfindex==7
+		{Ifindex: 0, VlanID: vlanID}: "ge-STALE-0",   // must be ignored (FibIfindex==0)
+		{Ifindex: 7, VlanID: vlanID}: "ge-0-0-7-fib", // consulted only for FibIfindex==7
 	}
 
 	cases := []struct {

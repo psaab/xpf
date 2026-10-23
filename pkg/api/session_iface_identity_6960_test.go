@@ -39,6 +39,7 @@ func restIface6960Store(t *testing.T) *configstore.Store {
 	}
 	if _, err := store.LoadSet(`set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.10/24
 set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.10/24
+set interfaces ge-0/0/3 vlan-tagging
 set interfaces ge-0/0/3 unit 50 vlan-id 50
 set interfaces ge-0/0/3 unit 50 family inet address 172.16.50.8/24
 set interfaces ge-0/0/3 unit 80 vlan-id 80
@@ -69,6 +70,9 @@ func restIface6960View(t *testing.T) sessionView {
 		// The test box has no ge-0-0-* netdevs; without the injected lookup
 		// the identity table would be empty and every assertion below would
 		// pass vacuously through the zone fallback.
+		// #16065 dual keying: the lookup receives the PARENT device
+		// ("ge-0-0-3" = 14, the ingress stamp form) and each unit's OWN
+		// child device ("ge-0-0-3.50" = 15, "ge-0-0-3.80" = 16).
 		ifindexByName: func(name string) (int, error) {
 			switch name {
 			case "ge-0-0-0":
@@ -77,13 +81,22 @@ func restIface6960View(t *testing.T) sessionView {
 				return 12, nil
 			case "ge-0-0-3":
 				return 14, nil
+			case "ge-0-0-3.50":
+				return 15, nil
+			case "ge-0-0-3.80":
+				return 16, nil
 			}
 			return 0, net.UnknownNetworkError(name)
 		},
 	}
 	v := s.buildSessionView()
-	if name := v.egressIfaces[sessionEgressKey{ifindex: 14, vlanID: 80}]; name != "ge-0/0/3.80" {
-		t.Fatalf("iface name table missing the trunk unit: {14,80} = %q, want ge-0/0/3.80", name)
+	// Non-vacuous guard: a missing table entry must FAIL here. Both key
+	// forms of the trunk unit must be present.
+	if name := v.egressIfaces[sessionEgressKey{Ifindex: 14, VlanID: 80}]; name != "ge-0/0/3.80" {
+		t.Fatalf("iface name table missing the trunk unit at parent form: {14,80} = %q, want ge-0/0/3.80 (table=%v)", name, v.egressIfaces)
+	}
+	if name := v.egressIfaces[sessionEgressKey{Ifindex: 16, VlanID: 80}]; name != "ge-0/0/3.80" {
+		t.Fatalf("iface name table missing the trunk unit at child form: {16,80} = %q, want ge-0/0/3.80 (table=%v)", name, v.egressIfaces)
 	}
 	return v
 }

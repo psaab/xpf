@@ -191,22 +191,18 @@ type SessionValue struct {
 	//     interface only where the zone binds exactly ONE. Corroboration
 	//     cannot separate a recycle WITHIN one zone from the truth, on any
 	//     surface;
-	//   - the map keys a unit under `vlan-id`, else `unit number`
-	//     (`sessionDisplayVLANID`), while the row carries the VID OBSERVED ON
-	//     THE WIRE. Those agree when the unit number equals the vlan id, or
-	//     when both are 0; a unit whose number is populated and whose traffic
-	//     is untagged — a plain `ge-0/0/0 unit 3` with no `vlan-id`, the
-	//     concrete case — keys 0 on the wire and `number` in the map, and
-	//     misses. Only the VLAN half diverges there: BOTH sides name the
-	//     PHYSICAL parent netdev. The helper binds AF_XDP to the parent and
-	//     stamps that bind (`UserspaceDpMeta::ingress_ifindex`); the LOGICAL
-	//     child ifindex is what `ingress_logical_ifindex` maps the
-	//     {parent, vid} pair TO, never what the row carries. So a reader
-	//     chasing this miss should not go looking for a `ge-0-0-0.3` child
-	//     ifindex in the row — it is not there (#6928 review).
-	// (Note the collision the map DOES avoid: units do not collapse onto
-	// {ifindex, 0}, because that same number-fallback separates them; a
-	// first-writer-wins insert still decides any genuine key collision.)
+	//   - the map keys a unit under its WIRE `vlan-id` ONLY
+	//     (config.SessionIfaceTableFor, #16065; there is no unit-number
+	//     fallback — a plain `ge-0/0/0 unit 3` with no `vlan-id` keys
+	//     VID 0, matching the wire), and it registers BOTH ifindex
+	//     forms: {parent/bind ifindex, VID} — the helper binds AF_XDP
+	//     to the parent and stamps that bind
+	//     (`UserspaceDpMeta::ingress_ifindex`), which is the form THIS
+	//     row carries — and {own-device ifindex, VID} for child-stamped
+	//     identities (FIB egress devices). A key two different units
+	//     claim (wg0.0/wg0.1 on one TUN) is refused and recorded
+	//     ambiguous; a refused identity narrows an interface filter to
+	//     parent-named candidates instead of broadening to the zone.
 	//
 	// An interface-filtered CLEAR propagates to the peer unconditionally
 	// (`clearFilteredSessions`, `pkg/cli/cli_clear.go`). The peer honours the
@@ -235,9 +231,10 @@ type SessionValue struct {
 	//
 	// It is meaningful ONLY alongside a
 	// non-zero IngressIfindex: the pair {IngressIfindex, IngressVlanID} is
-	// exactly the sessionIfaceKey the CLI already resolves the EGRESS
-	// interface name by (buildSessionEgressIfaces keys on the PARENT netdev
-	// ifindex + the unit's VLAN), so the ingress side reuses that one map and
+	// exactly the SessionIfaceKey the CLI already resolves the EGRESS
+	// interface name by (config.SessionIfaceNames keys each unit on its
+	// OWN kernel device — the VLAN child included — plus the wire VID,
+	// #16065), so the ingress side reuses that one map and
 	// two VLAN units of a single trunk NIC do not alias onto each other.
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
@@ -674,22 +671,18 @@ type SessionValueV6 struct {
 	//     interface only where the zone binds exactly ONE. Corroboration
 	//     cannot separate a recycle WITHIN one zone from the truth, on any
 	//     surface;
-	//   - the map keys a unit under `vlan-id`, else `unit number`
-	//     (`sessionDisplayVLANID`), while the row carries the VID OBSERVED ON
-	//     THE WIRE. Those agree when the unit number equals the vlan id, or
-	//     when both are 0; a unit whose number is populated and whose traffic
-	//     is untagged — a plain `ge-0/0/0 unit 3` with no `vlan-id`, the
-	//     concrete case — keys 0 on the wire and `number` in the map, and
-	//     misses. Only the VLAN half diverges there: BOTH sides name the
-	//     PHYSICAL parent netdev. The helper binds AF_XDP to the parent and
-	//     stamps that bind (`UserspaceDpMeta::ingress_ifindex`); the LOGICAL
-	//     child ifindex is what `ingress_logical_ifindex` maps the
-	//     {parent, vid} pair TO, never what the row carries. So a reader
-	//     chasing this miss should not go looking for a `ge-0-0-0.3` child
-	//     ifindex in the row — it is not there (#6928 review).
-	// (Note the collision the map DOES avoid: units do not collapse onto
-	// {ifindex, 0}, because that same number-fallback separates them; a
-	// first-writer-wins insert still decides any genuine key collision.)
+	//   - the map keys a unit under its WIRE `vlan-id` ONLY
+	//     (config.SessionIfaceTableFor, #16065; there is no unit-number
+	//     fallback — a plain `ge-0/0/0 unit 3` with no `vlan-id` keys
+	//     VID 0, matching the wire), and it registers BOTH ifindex
+	//     forms: {parent/bind ifindex, VID} — the helper binds AF_XDP
+	//     to the parent and stamps that bind
+	//     (`UserspaceDpMeta::ingress_ifindex`), which is the form THIS
+	//     row carries — and {own-device ifindex, VID} for child-stamped
+	//     identities (FIB egress devices). A key two different units
+	//     claim (wg0.0/wg0.1 on one TUN) is refused and recorded
+	//     ambiguous; a refused identity narrows an interface filter to
+	//     parent-named candidates instead of broadening to the zone.
 	//
 	// An interface-filtered CLEAR propagates to the peer unconditionally
 	// (`clearFilteredSessions`, `pkg/cli/cli_clear.go`). The peer honours the
@@ -718,9 +711,10 @@ type SessionValueV6 struct {
 	//
 	// It is meaningful ONLY alongside a
 	// non-zero IngressIfindex: the pair {IngressIfindex, IngressVlanID} is
-	// exactly the sessionIfaceKey the CLI already resolves the EGRESS
-	// interface name by (buildSessionEgressIfaces keys on the PARENT netdev
-	// ifindex + the unit's VLAN), so the ingress side reuses that one map and
+	// exactly the SessionIfaceKey the CLI already resolves the EGRESS
+	// interface name by (config.SessionIfaceNames keys each unit on its
+	// OWN kernel device — the VLAN child included — plus the wire VID,
+	// #16065), so the ingress side reuses that one map and
 	// two VLAN units of a single trunk NIC do not alias onto each other.
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16

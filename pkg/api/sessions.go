@@ -1205,13 +1205,10 @@ func uint32ToIP(v uint32) net.IP {
 	return ip
 }
 
-// sessionEgressKey identifies a FIB-resolved egress interface (ifindex +
-// VLAN), mirroring the gRPC sessionEgressKey used to resolve a session's
-// egress interface name (#3419 M4).
-type sessionEgressKey struct {
-	ifindex uint32
-	vlanID  uint16
-}
+// sessionEgressKey is config.SessionIfaceKey (#16065): the derivation
+// is shared with the CLI, gRPC and daemon tables so no surface can
+// resolve a unit's device differently.
+type sessionEgressKey = config.SessionIfaceKey
 
 // sessionView holds the enrichment context shared across a single session
 // list/iteration: zone/policy/app name maps, the zone->first-interface and
@@ -1228,11 +1225,12 @@ type sessionView struct {
 	// the ingress arm of the interface filter independent of the session, so
 	// an interface-scoped REST query reported — and the same reduction on the
 	// gRPC surface DELETED — sessions on every sibling interface of the zone.
-	zoneIfaces   map[uint16][]string
-	egressIfaces map[sessionEgressKey]string
-	cfg          *config.Config
-	haActive     bool
-	haActiveRGFn func(rg int) (bool, bool)
+	zoneIfaces    map[uint16][]string
+	egressIfaces  map[sessionEgressKey]string
+	ambiguousKeys map[sessionEgressKey]struct{}
+	cfg           *config.Config
+	haActive      bool
+	haActiveRGFn  func(rg int) (bool, bool)
 }
 
 // buildSessionView precomputes the enrichment maps from the last apply
@@ -1241,10 +1239,11 @@ type sessionView struct {
 // maps stay empty and the view degrades to numeric ids).
 func (s *Server) buildSessionView() sessionView {
 	v := sessionView{
-		zoneNames:    make(map[uint16]string),
-		zoneIfaces:   make(map[uint16][]string),
-		egressIfaces: make(map[sessionEgressKey]string),
-		haActive:     true, // standalone default
+		zoneNames:     make(map[uint16]string),
+		zoneIfaces:    make(map[uint16][]string),
+		egressIfaces:  make(map[sessionEgressKey]string),
+		ambiguousKeys: make(map[sessionEgressKey]struct{}),
+		haActive:      true, // standalone default
 	}
 	if s.store != nil {
 		v.cfg = s.store.ActiveConfig()
@@ -1275,7 +1274,9 @@ func (s *Server) buildSessionView() sessionView {
 				v.zoneIfaces[zid] = append(v.zoneIfaces[zid], zone.Interfaces...)
 			}
 		}
-		v.egressIfaces = buildSessionIfaceNames(v.cfg, s.ifindexLookup())
+		table := buildSessionTable(v.cfg, s.ifindexLookup())
+		v.egressIfaces = table.Names
+		v.ambiguousKeys = table.Ambiguous
 	}
 	return v
 }
@@ -1296,39 +1297,23 @@ func (s *Server) ifindexLookup() func(string) (int, error) {
 	}
 }
 
-// buildSessionIfaceNames maps a session's {parent netdev ifindex, 802.1Q VLAN
-// id} to the Junos config name of that logical unit. BOTH directions of the
-// session filter read it: the egress side keys on the recorded FIB result, the
-// ingress side on the recorded ingress binding (#6960). Mirrors grpcapi.
-//
-// RangeInterfaces/RangeUnits skip present-but-nil InterfaceConfig/
-// InterfaceUnit slots admitted by the tolerant load / HA config-sync path
-// (#3494/#5068); a raw range nil-derefs and panics the in-process daemon
-// during a REST session query (#5813).
+// buildSessionTable builds the full session table through
+// config.SessionIfaceTableFor (#16065): each unit registers both
+// {parent/bind ifindex, VID} (the ingress stamp) and {own-device
+// ifindex, VID} (child/tunnel egress), and a key two different units
+// share (wg0.0/wg0.1 on the one TUN, both VID 0) is refused — absent
+// from Names, present in Ambiguous — so a filter matching that
+// identity narrows instead of broadening to the zone. BOTH directions
+// of the session filter read it: the egress side keys on the recorded
+// FIB result, the ingress side on the recorded ingress binding
+// (#6960). Mirrors grpcapi.
+func buildSessionTable(cfg *config.Config, lookupIfindex func(string) (int, error)) config.SessionIfaceTable {
+	return config.SessionIfaceTableFor(cfg, lookupIfindex)
+}
+
+// buildSessionIfaceNames is the Names-only view of buildSessionTable.
 func buildSessionIfaceNames(cfg *config.Config, lookupIfindex func(string) (int, error)) map[sessionEgressKey]string {
-	names := make(map[sessionEgressKey]string)
-	config.RangeInterfaces(cfg, func(ifName string, ifc *config.InterfaceConfig) {
-		resolvedParent := config.LinuxIfName(strings.SplitN(cfg.ResolveReth(ifName), ".", 2)[0])
-		parentIfindex, err := lookupIfindex(resolvedParent)
-		if err != nil {
-			return
-		}
-		config.RangeUnits(ifc, func(_ int, unit *config.InterfaceUnit) {
-			displayName := ifName
-			if unit.Number != 0 || unit.VlanID != 0 {
-				displayName = fmt.Sprintf("%s.%d", ifName, unit.Number)
-			}
-			vlanID := uint16(unit.VlanID)
-			if vlanID == 0 && unit.Number > 0 {
-				vlanID = uint16(unit.Number)
-			}
-			key := sessionEgressKey{ifindex: uint32(parentIfindex), vlanID: vlanID}
-			if _, exists := names[key]; !exists {
-				names[key] = displayName
-			}
-		})
-	})
-	return names
+	return buildSessionTable(cfg, lookupIfindex).Names
 }
 
 // sessionQuery holds the parsed REST session filter predicates. It mirrors
@@ -1470,8 +1455,8 @@ func (q *sessionQuery) matchV4(key dataplane.SessionKey, val dataplane.SessionVa
 		return false
 	}
 	if q.iface != "" {
-		inIfs := resolveSessionIngressIfaces(val.IngressIfindex, val.IngressVlanID, val.IngressZone, q.view.zoneIfaces, q.view.egressIfaces)
-		outIfs := resolveSessionEgressIfaces(val.FibIfindex, val.FibVlanID, val.EgressZone, q.view.zoneIfaces, q.view.egressIfaces)
+		inIfs := resolveSessionIngressIfacesAmb(val.IngressIfindex, val.IngressVlanID, val.IngressZone, q.view.zoneIfaces, q.view.egressIfaces, q.view.ambiguousKeys)
+		outIfs := resolveSessionEgressIfacesAmb(val.FibIfindex, val.FibVlanID, val.EgressZone, q.view.zoneIfaces, q.view.egressIfaces, q.view.ambiguousKeys)
 		if !sessionIfaceMatchesAny(q.iface, inIfs) && !sessionIfaceMatchesAny(q.iface, outIfs) {
 			return false
 		}
@@ -1514,8 +1499,8 @@ func (q *sessionQuery) matchV6(key dataplane.SessionKeyV6, val dataplane.Session
 		return false
 	}
 	if q.iface != "" {
-		inIfs := resolveSessionIngressIfaces(val.IngressIfindex, val.IngressVlanID, val.IngressZone, q.view.zoneIfaces, q.view.egressIfaces)
-		outIfs := resolveSessionEgressIfaces(val.FibIfindex, val.FibVlanID, val.EgressZone, q.view.zoneIfaces, q.view.egressIfaces)
+		inIfs := resolveSessionIngressIfacesAmb(val.IngressIfindex, val.IngressVlanID, val.IngressZone, q.view.zoneIfaces, q.view.egressIfaces, q.view.ambiguousKeys)
+		outIfs := resolveSessionEgressIfacesAmb(val.FibIfindex, val.FibVlanID, val.EgressZone, q.view.zoneIfaces, q.view.egressIfaces, q.view.ambiguousKeys)
 		if !sessionIfaceMatchesAny(q.iface, inIfs) && !sessionIfaceMatchesAny(q.iface, outIfs) {
 			return false
 		}
@@ -1592,7 +1577,7 @@ func sessionIngressIfaceIdentity(ingressIfindex uint32, ingressVlanID uint16, in
 	if ingressIfindex == 0 {
 		return "", false
 	}
-	ifName := egressIfaces[sessionEgressKey{ifindex: ingressIfindex, vlanID: ingressVlanID}]
+	ifName := egressIfaces[sessionEgressKey{Ifindex: ingressIfindex, VlanID: ingressVlanID}]
 	if ifName == "" {
 		return "", false
 	}
@@ -1606,19 +1591,68 @@ func sessionIngressIfaceIdentity(ingressIfindex uint32, ingressVlanID uint16, in
 // an ifindex the config cannot name, and an uncorroborated hit all take that
 // fallback. Mirrors grpcapi.
 func resolveSessionIngressIfaces(ingressIfindex uint32, ingressVlanID uint16, ingressZone uint16, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string) []string {
+	return resolveSessionIngressIfacesAmb(ingressIfindex, ingressVlanID, ingressZone, zoneIfaces, egressIfaces, nil)
+}
+
+// resolveSessionIngressIfacesAmb is resolveSessionIngressIfaces with
+// the table's ambiguity set: a REFUSED recorded identity (shared
+// device, wg0.0/wg0.1 on one TUN) narrows to parent-named candidates
+// instead of broadening to every zone member (#16065). Absent
+// identities keep the zone fallback. Mirrors grpcapi.
+func resolveSessionIngressIfacesAmb(ingressIfindex uint32, ingressVlanID uint16, ingressZone uint16, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string, ambiguous map[sessionEgressKey]struct{}) []string {
 	if ifName, corroborated := sessionIngressIfaceIdentity(ingressIfindex, ingressVlanID, ingressZone, zoneIfaces, egressIfaces); corroborated {
 		return []string{ifName}
 	}
+	if ingressIfindex != 0 {
+		if _, refused := ambiguous[sessionEgressKey{Ifindex: ingressIfindex, VlanID: ingressVlanID}]; refused {
+			return narrowedAmbiguousCandidates(zoneIfaces[ingressZone])
+		}
+	}
 	return zoneIfaces[ingressZone]
+}
+
+// narrowedAmbiguousCandidates returns the single common parent name
+// of a zone's members (e.g. "wg0" for [wg0.0 wg0.1]), or nil when the
+// members span several parents. Only a filter naming that parent
+// exactly matches it, so a sibling-unit filter cannot reach the row.
+// Mirrors grpcapi.
+func narrowedAmbiguousCandidates(members []string) []string {
+	parent := ""
+	for _, m := range members {
+		p := m
+		if i := strings.Index(m, "."); i >= 0 {
+			p = m[:i]
+		}
+		if parent == "" {
+			parent = p
+			continue
+		}
+		if p != parent {
+			return nil
+		}
+	}
+	if parent == "" {
+		return nil
+	}
+	return []string{parent}
 }
 
 // resolveSessionEgressIfaces resolves a session's candidate EGRESS interface
 // names from its FIB result, falling back to EVERY interface bound to the
 // egress zone (#6960). Mirrors grpcapi.
 func resolveSessionEgressIfaces(fibIfindex uint32, fibVlanID uint16, egressZone uint16, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string) []string {
+	return resolveSessionEgressIfacesAmb(fibIfindex, fibVlanID, egressZone, zoneIfaces, egressIfaces, nil)
+}
+
+// resolveSessionEgressIfacesAmb is the egress twin of
+// resolveSessionIngressIfacesAmb (#16065). Mirrors grpcapi.
+func resolveSessionEgressIfacesAmb(fibIfindex uint32, fibVlanID uint16, egressZone uint16, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string, ambiguous map[sessionEgressKey]struct{}) []string {
 	if fibIfindex != 0 {
-		if ifName, ok := egressIfaces[sessionEgressKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := egressIfaces[sessionEgressKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return []string{ifName}
+		}
+		if _, refused := ambiguous[sessionEgressKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; refused {
+			return narrowedAmbiguousCandidates(zoneIfaces[egressZone])
 		}
 	}
 	return zoneIfaces[egressZone]
@@ -1650,7 +1684,7 @@ func sessionIngressIfaceDisplay(ingressIfindex uint32, ingressVlanID uint16, ing
 // else the egress zone's single bound interface, else "". Mirrors grpcapi.
 func sessionEgressIfaceDisplay(fibIfindex uint32, fibVlanID uint16, egressZone uint16, zoneIfaces map[uint16][]string, egressIfaces map[sessionEgressKey]string) string {
 	if fibIfindex != 0 {
-		if ifName, ok := egressIfaces[sessionEgressKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := egressIfaces[sessionEgressKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return ifName
 		}
 	}

@@ -28,14 +28,33 @@ func TestUntaggedUnitResolvesOnWireVID_7153(t *testing.T) {
 		{"unit 0", &config.InterfaceUnit{Number: 0}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sessionDisplayVLANID(tc.unit); got != tc.wantVID {
-				t.Errorf("sessionDisplayVLANID(%+v) = %d, want %d", tc.unit, got, tc.wantVID)
+			// #16065: the VID rule is config.SessionIfaceNames' key
+			// derivation (uint16(unit.VlanID), never the number); the
+			// old sessionDisplayVLANID helper is gone. Exercise it
+			// through the map: a lone unit on device ge-0-0-0 (42).
+			cfg := &config.Config{
+				Interfaces: config.InterfacesConfig{
+					Interfaces: map[string]*config.InterfaceConfig{
+						"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
+							tc.unit.Number: tc.unit,
+						}},
+					},
+				},
+			}
+			m := buildSessionEgressIfacesWithLookup(cfg, func(string) (int, error) { return 42, nil })
+			for key := range m {
+				if key.VlanID != tc.wantVID {
+					t.Errorf("unit %+v keyed at VID %d, want %d (wire VID only, never the unit number)", tc.unit, key.VlanID, tc.wantVID)
+				}
 			}
 		})
 	}
 }
 
 // End to end through the map builder, which is where the miss actually bit.
+// #16065 dual keying: an untagged unit 3 registers {parent 42, VID 0}
+// (the AF_XDP ingress stamp — untagged frames arrive on the parent)
+// AND {own device 44, VID 0} ("ge-0-0-0.3"). The number is never a VID.
 func TestUntaggedUnitIsReachableInTheEgressMap_7153(t *testing.T) {
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{
@@ -47,32 +66,36 @@ func TestUntaggedUnitIsReachableInTheEgressMap_7153(t *testing.T) {
 		},
 	}
 	m := buildSessionEgressIfacesWithLookup(cfg, func(name string) (int, error) {
-		if name == "ge-0-0-0" {
+		switch name {
+		case "ge-0-0-0":
 			return 42, nil
+		case "ge-0-0-0.3":
+			return 44, nil
+		default:
+			t.Fatalf("unexpected lookup %q", name)
+			return 0, nil
 		}
-		t.Fatalf("unexpected lookup %q", name)
-		return 0, nil
 	})
 
-	// The key a session row for this unit actually carries.
-	if got, ok := m[sessionIfaceKey{ifindex: 42, vlanID: 0}]; !ok || got != "ge-0/0/0.3" {
-		t.Errorf("the WIRE key {42,0} does not resolve (got %q, ok=%v). Session rows for an "+
-			"untagged unit carry VID 0, so this is the only key that can match one; before "+
-			"#7153 the unit was filed under {42,3} and resolveIngressIfaces fell back to "+
-			"every interface on the ifindex", got, ok)
+	if got, ok := m[sessionIfaceKey{Ifindex: 42, VlanID: 0}]; !ok || got != "ge-0/0/0.3" {
+		t.Errorf("the ingress WIRE key {42,0} (parent stamp) does not resolve (got %q, ok=%v)", got, ok)
 	}
-	// And the old key must be gone, or the map merely gained an entry and the
-	// stale one still shadows a real unit 3 elsewhere.
-	if got, ok := m[sessionIfaceKey{ifindex: 42, vlanID: 3}]; ok {
-		t.Errorf("the unit is STILL filed under its number as {42,3} -> %q; the number is not "+
+	if got, ok := m[sessionIfaceKey{Ifindex: 44, VlanID: 0}]; !ok || got != "ge-0/0/0.3" {
+		t.Errorf("the own-device key {44,0} does not resolve (got %q, ok=%v)", got, ok)
+	}
+	if got, ok := m[sessionIfaceKey{Ifindex: 44, VlanID: 3}]; ok {
+		t.Errorf("the unit is STILL filed under its number as {44,3} -> %q; the number is not "+
 			"a wire VID and nothing keys there", got)
+	}
+	if got, ok := m[sessionIfaceKey{Ifindex: 42, VlanID: 3}]; ok {
+		t.Errorf("the unit is STILL filed under its number as {42,3} -> %q", got)
 	}
 }
 
-// Two units with no vlan-id on one interface collide on {ifindex, 0} — correct,
-// since only one can own the untagged traffic. First-write-wins over RangeUnits'
-// ordering must resolve it deterministically to the lowest unit rather than
-// whichever map iteration happened to land last.
+// Two untagged units of one interface share the PARENT stamp {42,0}:
+// that key is REFUSED (ambiguous), while each unit's own-device key
+// still resolves. This is the narrowed replacement for #7153's
+// lowest-unit winner.
 func TestUntaggedCollisionResolvesToLowestUnit_7153(t *testing.T) {
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{
@@ -84,13 +107,25 @@ func TestUntaggedCollisionResolvesToLowestUnit_7153(t *testing.T) {
 			},
 		},
 	}
-	for i := 0; i < 8; i++ {
-		m := buildSessionEgressIfacesWithLookup(cfg, func(string) (int, error) { return 42, nil })
-		got := m[sessionIfaceKey{ifindex: 42, vlanID: 0}]
-		if got != "ge-0/0/0" {
-			t.Fatalf("iteration %d: {42,0} = %q, want \"ge-0/0/0\" — two untagged units "+
-				"collide on VID 0 and the resolution must be deterministic, not "+
-				"map-iteration order", i, got)
+	lookup := func(name string) (int, error) {
+		switch name {
+		case "ge-0-0-0":
+			return 42, nil
+		case "ge-0-0-0.3":
+			return 44, nil
+		}
+		return 42, nil
+	}
+	for range 8 {
+		table := buildSessionTableWithLookup(cfg, lookup)
+		if _, ok := table.Names[sessionIfaceKey{Ifindex: 42, VlanID: 0}]; ok {
+			t.Fatalf("shared parent key {42,0} named %q — untagged units 0/3 share the parent stamp and must refuse it", table.Names[sessionIfaceKey{Ifindex: 42, VlanID: 0}])
+		}
+		if !table.IsAmbiguous(sessionIfaceKey{Ifindex: 42, VlanID: 0}) {
+			t.Fatal("{42,0} must be recorded ambiguous (units 0 and 3 both claim the parent stamp)")
+		}
+		if got := table.Names[sessionIfaceKey{Ifindex: 44, VlanID: 0}]; got != "ge-0/0/0.3" {
+			t.Fatalf("{44,0} = %q, want ge-0/0/0.3 (unit 3 on its own device)", got)
 		}
 	}
 }

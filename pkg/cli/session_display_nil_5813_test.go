@@ -66,26 +66,41 @@ func TestBuildSessionEgressIfacesNilSlots5813(t *testing.T) {
 		}},
 		"zz-nil-ifc": nil, // nil InterfaceConfig (tolerant path)
 	}
-	// Resolve every name so the nil-interface's ifc.Units deref and the nil
-	// unit's field read WOULD both be reached without the guards.
-	lookup := func(string) (int, error) { return 10, nil }
+	// #16065: the lookup receives each unit's OWN kernel device
+	// ("ge-0-0-0" for unit 0, the VLAN child "ge-0-0-0.50" for unit
+	// 50), each with its own ifindex. Resolve every device so the
+	// nil-interface's ifc.Units deref and the nil unit's field read
+	// WOULD both be reached without the guards.
+	lookup := func(name string) (int, error) {
+		switch name {
+		case "ge-0-0-0":
+			return 10, nil
+		case "ge-0-0-0.50":
+			return 16, nil
+		}
+		return 10, nil
+	}
 
 	var got map[sessionIfaceKey]string
 	require5813NoPanic(t, "buildSessionEgressIfacesWithLookup", func() {
 		got = buildSessionEgressIfacesWithLookup(cfg, lookup)
 	})
 
-	if name := got[sessionIfaceKey{ifindex: 10, vlanID: 0}]; name != "ge-0/0/0" {
+	if name := got[sessionIfaceKey{Ifindex: 10, VlanID: 0}]; name != "ge-0/0/0" {
 		t.Fatalf("untagged unit: got %q, want ge-0/0/0 (map=%v)", name, got)
 	}
-	if name := got[sessionIfaceKey{ifindex: 10, vlanID: 50}]; name != "ge-0/0/0.50" {
-		t.Fatalf("tagged unit: got %q, want ge-0/0/0.50 (map=%v)", name, got)
+	if name := got[sessionIfaceKey{Ifindex: 16, VlanID: 50}]; name != "ge-0/0/0.50" {
+		t.Fatalf("tagged unit child: got %q, want ge-0/0/0.50 (map=%v)", name, got)
 	}
-	// Exactly the two valid units produced entries; the nil unit and the nil
-	// InterfaceConfig contributed nothing — a nil interface/unit reference does
-	// not become an empty or wrong filter entry.
-	if len(got) != 2 {
-		t.Fatalf("egress map has %d entries, want 2 (nil slots must be omitted): %v", len(got), got)
+	// Dual keying: the tagged unit also registers its parent form.
+	if name := got[sessionIfaceKey{Ifindex: 10, VlanID: 50}]; name != "ge-0/0/0.50" {
+		t.Fatalf("tagged unit parent form: got %q, want ge-0/0/0.50 (map=%v)", name, got)
+	}
+	// Exactly the two valid units produced entries (3 keys: unit 0 plus
+	// unit 50's parent+child forms); the nil unit and the nil
+	// InterfaceConfig contributed nothing.
+	if len(got) != 3 {
+		t.Fatalf("egress map has %d entries, want 3 (nil slots must be omitted): %v", len(got), got)
 	}
 }
 

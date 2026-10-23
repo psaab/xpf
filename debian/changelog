@@ -67,6 +67,16 @@ xpf (0.0.0) unstable; urgency=medium
     redistribution-AFI canary in the same change to prove the live
     cluster chain resolver's self-forwarding instead of referencing
     the deleted wrapper, so the census stays non-vacuous.
+  * Key session and flow-export interface identity by the unit's own
+    device (#16065): the shared config.SessionIfaceNames derivation
+    resolves each unit through ResolveKernelIfName (VLAN children,
+    per-unit tunnels, RETH members) with the wire VID only, replacing
+    the parent-ifindex + unit-number keys on the CLI, gRPC and REST
+    session surfaces. A device shared by two units (wg0.0/wg0.1 on one
+    WireGuard TUN) is refused instead of first-wins named, so
+    clear-by-interface can no longer delete a sibling unit's sessions
+    and flow-export sampling no longer judges both units by one
+    sibling's name (daemon buildIfNames projects the same table).
 
 xpf (0.0.0) unstable; urgency=medium
 

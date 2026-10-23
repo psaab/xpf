@@ -66,13 +66,24 @@ type sessionFilter struct {
 	// `clear` — the interface never matched anything, so a filtered show
 	// undercounted and a filtered clear left sessions behind.
 	zoneIfaces map[uint16][]string // zone ID → all bound interface names
-	// ifaceNamesByKey resolves a {parent netdev ifindex, 802.1Q VLAN id} pair
-	// to the Junos config interface name of that logical unit. Built once by
-	// buildSessionEgressIfaces. #4983: BOTH directions read it — the egress
-	// side keys on the session's FIB result, the ingress side on the session's
-	// recorded ingress binding — so one map defines one interface identity for
-	// the whole filter.
+	// ifaceNamesByKey resolves a {ifindex, 802.1Q VLAN id} pair to the
+	// Junos config interface name of that logical unit (#16065:
+	// config.SessionIfaceTableFor registers each unit under both its
+	// parent/bind ifindex and its own-device ifindex). Built once by
+	// buildSessionEgressIfaces. #4983: BOTH directions read it — the
+	// egress side keys on the session's FIB result, the ingress side on
+	// the session's recorded ingress binding — so one map defines one
+	// interface identity for the whole filter.
 	ifaceNamesByKey map[sessionIfaceKey]string
+	// ambiguousKeys holds keys the shared table REFUSED (two different
+	// units share the device+VID, e.g. wg0.0/wg0.1 on one TUN). When
+	// an interface filter is in force and a row's identity is refused,
+	// the row matches ONLY if the filter names its zone's parent
+	// device exactly as a parent (see narrowed candidates in
+	// resolveIngressIfaces/resolveEgressIfaces); it must never be
+	// broadened to every zone member, or `clear interface wg0.1`
+	// deletes wg0.0's sessions through the fallback.
+	ambiguousKeys map[sessionIfaceKey]struct{}
 }
 
 // parseSessionFilter parses session-selector and presentation tokens for
@@ -427,7 +438,53 @@ func (f *sessionFilter) populateIfaceMaps(c *CLI) {
 		}
 	}
 	f.zoneIfaces = zoneIfaces
-	f.ifaceNamesByKey = buildSessionEgressIfaces(f.cfg)
+	table := buildSessionTableWithLookup(f.cfg, func(name string) (int, error) {
+		iface, err := net.InterfaceByName(name)
+		if err != nil {
+			return 0, err
+		}
+		return iface.Index, nil
+	})
+	f.ifaceNamesByKey = table.Names
+	f.ambiguousKeys = table.Ambiguous
+}
+
+// narrowedAmbiguousCandidates returns the candidate names for a row
+// whose recorded identity key is REFUSED (ambiguous): the zone
+// members that are units of the SAME parent interface as the filter
+// names, expressed as the parent name itself — i.e. only a filter
+// naming the shared device exactly as its parent ("wg0", or "wg0.0"
+// via the parent/unit equivalence in ifaceMatches against the parent
+// candidate) can reach the row. A filter naming a SIBLING unit
+// ("wg0.1" when the row is wg0.0's, indistinguishably) must not.
+// Concretely: the candidate set is the single parent name shared by
+// the ambiguous units, derived from the zone members — if the filter
+// is "wg0.1", ifaceMatches("wg0") is false (exact parent match only
+// for filter "wg0", and prefix "wg0."+... requires candidate to start
+// with "wg0.1."); if the filter is "wg0", it matches. Parent name is
+// the zone members' common parent among members that are units of
+// one interface; when members span several parents, the row cannot
+// be narrowed and matches nothing.
+func (f *sessionFilter) narrowedAmbiguousCandidates(zoneID uint16) []string {
+	members := f.zoneIfaces[zoneID]
+	parent := ""
+	for _, m := range members {
+		p := m
+		if i := strings.Index(m, "."); i >= 0 {
+			p = m[:i]
+		}
+		if parent == "" {
+			parent = p
+			continue
+		}
+		if p != parent {
+			return nil
+		}
+	}
+	if parent == "" {
+		return nil
+	}
+	return []string{parent}
 }
 
 // zoneDisplay applies the only display-time exception for a named quarantined
@@ -528,6 +585,18 @@ func (f *sessionFilter) resolveIngressIfaces(ingressIfindex uint32, ingressVlanI
 	if ifName, corroborated := f.ingressIfaceIdentity(ingressIfindex, ingressVlanID, ingressZone); corroborated {
 		return []string{ifName}
 	}
+	// #16065: a REFUSED (ambiguous) recorded identity is known, not
+	// absent: the row arrived on a device several units share (wg0.0/
+	// wg0.1 on one TUN). Broadening it to every zone member would let
+	// `clear interface wg0.1` delete wg0.0's sessions through the
+	// fallback, so narrow to candidates only a parent-named filter
+	// can match (see narrowedAmbiguousCandidates). A genuinely absent
+	// identity (0 / unnameable / peer-synced) keeps the zone fallback.
+	if ingressIfindex != 0 {
+		if _, refused := f.ambiguousKeys[sessionIfaceKey{Ifindex: ingressIfindex, VlanID: ingressVlanID}]; refused {
+			return f.narrowedAmbiguousCandidates(ingressZone)
+		}
+	}
 	return f.zoneIfaces[ingressZone]
 }
 
@@ -569,7 +638,7 @@ func (f *sessionFilter) ingressIfaceIdentity(ingressIfindex uint32, ingressVlanI
 	if ingressIfindex == 0 {
 		return "", false
 	}
-	ifName := f.ifaceNamesByKey[sessionIfaceKey{ifindex: ingressIfindex, vlanID: ingressVlanID}]
+	ifName := f.ifaceNamesByKey[sessionIfaceKey{Ifindex: ingressIfindex, VlanID: ingressVlanID}]
 	if ifName == "" {
 		return "", false
 	}
@@ -640,7 +709,7 @@ func (f *sessionFilter) ingressIfaceDisplay(ingressIfindex uint32, ingressVlanID
 // all of its siblings on either column of a row.
 func (f *sessionFilter) egressIfaceDisplay(fibIfindex uint32, fibVlanID uint16, egressZone uint16) string {
 	if fibIfindex != 0 {
-		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return ifName
 		}
 	}
@@ -688,8 +757,13 @@ func soleZoneIface(zoneMembers []string) string {
 // silently missed sessions egressing on any interface but the first).
 func (f *sessionFilter) resolveEgressIfaces(fibIfindex uint32, fibVlanID uint16, egressZone uint16) []string {
 	if fibIfindex != 0 {
-		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{ifindex: fibIfindex, vlanID: fibVlanID}]; ok && ifName != "" {
+		if ifName, ok := f.ifaceNamesByKey[sessionIfaceKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; ok && ifName != "" {
 			return []string{ifName}
+		}
+		// #16065: refused FIB identity — narrow as on ingress, never
+		// broaden to the whole egress zone (see resolveIngressIfaces).
+		if _, refused := f.ambiguousKeys[sessionIfaceKey{Ifindex: fibIfindex, VlanID: fibVlanID}]; refused {
+			return f.narrowedAmbiguousCandidates(egressZone)
 		}
 	}
 	return f.zoneIfaces[egressZone]
