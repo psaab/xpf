@@ -1,31 +1,16 @@
 use super::*;
 
-/// #16019 fold: node-level reply evidence for the pressure-shed
-/// victim check. Reverse-row EXISTENCE is not reply proof — both
-/// companions are published at install, before any reply packet.
-/// Proof is the reverse row's accounted reverse-packet count:
-/// `SyncedSessionEntry::rev_packets`, stamped from the live entry at
-/// publish/materialize time (`rev_packets_wire_for`) and folded from
-/// the forward entry's counters, so whichever worker accounted the
-/// reply leaves `rev_packets > 0` on the shared reverse row every
-/// worker consults. TCP rows instead fence on handshake state
-/// (Established = 4) inside `is_pressure_shed_shared_unreplied`;
-/// this helper covers the non-TCP arm keyed on the reverse tuple
-/// derived from the victim's own NAT decision.
-pub(in crate::afxdp) fn shared_session_replied(
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    forward_key: &SessionKey,
-    nat: crate::nat::NatDecision,
-) -> bool {
-    if forward_key.protocol == crate::ip_proto::PROTO_TCP {
-        return false;
-    }
-    let reverse_key = crate::session::reverse_session_key(forward_key, nat);
-    if reverse_key == *forward_key {
-        return false;
-    }
-    lookup_shared_session(shared_sessions, &reverse_key)
-        .is_some_and(|entry| entry.rev_packets > 0)
+/// #16217 (scoped completion evidence): reverse + forward packet
+/// counts observed for ONE full scoped key (`SessionKey` equality:
+/// 5-tuple + routing domain + discriminator) in the shared maps.
+/// `shared_completion_evidence`'s bare-tuple scan stays for its
+/// existing consumers; the fabric-adoption gate uses this scoped
+/// form so a same-tuple row in another VRF can never qualify a
+/// pending row here (Codex cross-VRF finding).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct SharedCompletionEvidence {
+    pub rev_packets: u64,
+    pub fwd_packets: u64,
 }
 
 pub(in crate::afxdp) fn lookup_shared_session(
@@ -37,16 +22,36 @@ pub(in crate::afxdp) fn lookup_shared_session(
     lock_shared_recover(shared_sessions).get(key).cloned()
 }
 /// Fabric-ingress adoption (#16217, FZDiag12): does the shared synced
-/// map hold an ESTABLISHED session for this exact wire tuple? The
-/// packet arrived on the fabric link already SNAT'd by the peer, so
-/// its key is the NAT'd wire tuple. The entry may sit under the
-/// canonical (pre-NAT) key with this tuple as its forward-wire alias,
-/// or directly under the wire key. Only a forward entry whose
-/// handshake wire is `Established` qualifies — Opening/Pending rows
-/// must not adopt (a SYN keeps the ordinary punt/seed behavior, and
-/// a non-SYN mid-handshake packet has no completed session to
-/// adopt). Non-TCP entries carry wire 0 and never qualify. Any
-/// ambiguity in the wire index fails closed.
+/// map hold a session Established-for-adoption for this exact wire
+/// tuple? The packet arrived on the fabric link already SNAT'd by
+/// the peer, so its key is the NAT'd wire tuple. The entry may sit
+/// under the canonical (pre-NAT) key with this tuple as its
+/// forward-wire alias, or directly under the wire key. A forward
+/// entry qualifies when EITHER:
+///
+/// (a) its handshake wire is `Established` (the original rule), OR
+/// (b) its wire is `HandshakePending` AND the canonical tuple shows
+///     completed-handshake evidence in the shared maps: an actual
+///     reverse packet count > 0 on any synced row for the tuple
+///     (incl. the reverse companion, fail-closed per FZFixWire6 —
+///     synthesized companions carry 0 and never count) AND a
+///     forward packet count > 0. This is the DECISION shape: on the
+///     new owner the canonical rows stay `SyncImport` +
+///     `HandshakePending` forever (every wire-advance collector
+///     needs an Established local row the split path never
+///     produces), while completion evidence exists only as flow
+///     activity — the old owner's flow-cache hits and this node's
+///     reverse hits after the failover trickle.
+///
+/// Scope: the evidence scan compares the FULL scoped key
+/// (`SessionKey` equality — 5-tuple + routing domain +
+/// discriminator), never `bare_tuple()`: a same-tuple row in
+/// another VRF must not qualify this row (Codex cross-VRF finding
+/// on the earlier bare-tuple evidence scan). Opening /
+/// SynAckFirstPending rows never qualify under (b) — only
+/// `HandshakePending`, the state a peer-synced row reaches once
+/// the SYN-ACK crossed. Non-TCP entries carry wire 0 and never
+/// qualify. Any ambiguity in the wire index fails closed.
 pub(in crate::afxdp) fn lookup_shared_established_for_wire(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -54,20 +59,96 @@ pub(in crate::afxdp) fn lookup_shared_established_for_wire(
     wire_key: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
     let established = crate::session::TcpHandshakeState::Established.to_wire();
-    let is_established = |entry: &SyncedSessionEntry| {
-        !entry.metadata.is_reverse && entry.tcp_handshake_state == established
+    let pending = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+    let qualifies = |entry: &SyncedSessionEntry, evidence: SharedCompletionEvidence| -> bool {
+        // Callers only reach this for HandshakePending candidates.
+        !entry.metadata.is_reverse
+            && entry.tcp_handshake_state == pending
+            && evidence.rev_packets > 0
+            && evidence.fwd_packets > 0
     };
-    if let Some(entry) = lookup_shared_session(shared_sessions, wire_key) {
-        if is_established(&entry) {
-            return Some(entry);
+    // Resolve the candidate row(s) first (clone out), then take the
+    // evidence snapshot once for the canonical key behind the wire
+    // tuple. The direct row's canonical key is itself; the alias
+    // row already carries the canonical key on `entry.key`.
+    let direct = lookup_shared_session(shared_sessions, wire_key);
+    if let Some(entry) = &direct {
+        if !entry.metadata.is_reverse && entry.tcp_handshake_state == established {
+            return Some(entry.clone());
         }
     }
-    lookup_shared_forward_wire_match(
+    let alias = lookup_shared_forward_wire_match(
         shared_forward_wire_sessions,
         shared_owner_rg_indexes,
         wire_key,
-    )
-    .filter(is_established)
+    );
+    if let Some(entry) = &alias {
+        if !entry.metadata.is_reverse && entry.tcp_handshake_state == established {
+            return Some(entry.clone());
+        }
+    }
+    for candidate in [direct, alias].into_iter().flatten() {
+        if candidate.metadata.is_reverse
+            || candidate.tcp_handshake_state != pending
+        {
+            continue;
+        }
+        let evidence = shared_scoped_completion_evidence(
+            shared_sessions,
+            shared_forward_wire_sessions,
+            &candidate.key,
+            candidate.decision.nat,
+        );
+        if qualifies(&candidate, evidence) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+/// #16217 (scoped arm): packet-count evidence for ONE canonical key,
+/// read off the shared maps under full scoped-key equality. A row
+/// vouches for the canonical tuple when its stored key IS the
+/// canonical key, its derived reverse companion
+/// (`reverse_session_key(canonical, nat)`), or its forward-wire
+/// alias (`forward_wire_key(canonical, nat)`) — all computed from
+/// the candidate's own NAT decision, so no bare-tuple scan and no
+/// cross-VRF borrowing. On every vouching row both counters count:
+/// `rev_packets` is snapshotted from the serving forward entry's
+/// admitted reverse counters (a reverse companion carries the
+/// pair's reverse count by construction), and `fwd_packets` from
+/// its admitted forward counters. A shared row's Established WIRE
+/// is deliberately NOT read: it is an output, not evidence.
+///
+/// Lock order: `shared_sessions` THEN `shared_forward_wire_sessions`
+/// — the single node-wide order (see `shared_completion_evidence`).
+pub(in crate::afxdp) fn shared_scoped_completion_evidence(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    canonical_key: &SessionKey,
+    nat: crate::nat::NatDecision,
+) -> SharedCompletionEvidence {
+    let reverse_key = crate::session::reverse_session_key(canonical_key, nat);
+    let wire_key = crate::session::forward_wire_key(canonical_key, nat);
+    let holders = lock_shared_recover(shared_sessions);
+    let wires = lock_shared_recover(shared_forward_wire_sessions);
+    let mut ev = SharedCompletionEvidence::default();
+    for map in [&*holders, &*wires] {
+        for entry in map.values() {
+            // The alias slot retains the canonical key on
+            // `entry.key`, so canonical/reverse equality covers
+            // every map; the wire-key comparison covers a row
+            // stored directly under the NAT'd tuple.
+            if entry.key != *canonical_key
+                && entry.key != reverse_key
+                && entry.key != wire_key
+            {
+                continue;
+            }
+            ev.rev_packets = ev.rev_packets.max(entry.rev_packets);
+            ev.fwd_packets = ev.fwd_packets.max(entry.fwd_packets);
+        }
+    }
+    ev
 }
 /// #16217 (FZDiag16 local-evidence arm): fabric-ingress adoption gate
 /// with the worker-local serving table as a second evidence source.
@@ -299,6 +380,51 @@ pub(in crate::afxdp) fn restamp_shared_rev_packets(
     let mut sessions = lock_shared_recover(shared_sessions);
     for candidate in [forward_key, &reverse_key] {
         if let Some(entry) = sessions.get_mut(candidate) {
+            entry.rev_packets = entry.rev_packets.max(rev_packets);
+        }
+    }
+}
+/// #16217 (scoped arm): snapshot a serving pair's ACTUAL forward +
+/// reverse packet counts onto its shared rows (canonical forward +
+/// derived reverse in `shared_sessions`, plus the forward-wire
+/// alias slot when the wire map holds one for this tuple). This is
+/// the write side of the adoption gate's completed-handshake
+/// evidence: only admitted traffic (the forward entry's counters,
+/// folded by the serving worker) ever raises a row's counts;
+/// synthesized companions publish 0 and this restamp only ever
+/// takes the max. Called on the cache-hit packet path ONLY on a
+/// handshake stage transition (GLM B1: gate cache-hit restamps
+/// behind the transition, never per-packet), so the shared-map lock
+/// cost is bounded to one acquisition per completed handshake.
+/// Lock order when both maps are taken: `shared_sessions` THEN
+/// `shared_forward_wire_sessions` (taken sequentially here, never
+/// nested in reverse).
+pub(in crate::afxdp) fn restamp_shared_packet_counts(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forward_key: &SessionKey,
+    nat: crate::nat::NatDecision,
+    fwd_packets: u64,
+    rev_packets: u64,
+) {
+    if fwd_packets == 0 && rev_packets == 0 {
+        return;
+    }
+    let reverse_key = crate::session::reverse_session_key(forward_key, nat);
+    {
+        let mut sessions = lock_shared_recover(shared_sessions);
+        for candidate in [forward_key, &reverse_key] {
+            if let Some(entry) = sessions.get_mut(candidate) {
+                entry.fwd_packets = entry.fwd_packets.max(fwd_packets);
+                entry.rev_packets = entry.rev_packets.max(rev_packets);
+            }
+        }
+    }
+    let wire_key = crate::session::forward_wire_key(forward_key, nat);
+    if wire_key != *forward_key {
+        let mut wires = lock_shared_recover(shared_forward_wire_sessions);
+        if let Some(entry) = wires.get_mut(&wire_key) {
+            entry.fwd_packets = entry.fwd_packets.max(fwd_packets);
             entry.rev_packets = entry.rev_packets.max(rev_packets);
         }
     }

@@ -743,10 +743,26 @@ pub(super) fn stage_flow_cache_hit(
         // The packet survived the cached output-filter/policer verdicts;
         // only now may a completing ACK's HA transition be published.
         sessions.emit_probe_hit_state_update(&flow.forward_key);
-        // #16217: keep the shared rows' reverse-packet evidence
-        // current on the same packet path — the serving worker's
-        // actual admitted reverse count, never a wire state.
-        {
+        // #16217 (GLM B1): shared-map evidence restamps run ONLY on
+        // the handshake stage transition into Established — the
+        // completing packet — never per-packet on steady-state hits.
+        // The forward-wire alias advance stays beside them (it is
+        // itself transition-gated by the Established wire read).
+        if sessions.take_probe_stage_transition(&flow.forward_key) {
+            // #16217: snapshot the serving pair's ACTUAL forward +
+            // reverse packet counts onto the shared rows — the
+            // adoption gate's completed-handshake evidence for a
+            // HandshakePending canonical row. Only admitted traffic
+            // raises these counts; synthesized companions carry 0.
+            crate::afxdp::shared_ops::restamp_shared_packet_counts(
+                worker_ctx.shared_sessions,
+                worker_ctx.shared_forward_wire_sessions,
+                &flow.forward_key,
+                cached_decision.nat,
+                sessions.fwd_packets_for(&flow.forward_key),
+                sessions.rev_packets_for(&flow.forward_key),
+            );
+            // Legacy reverse-count snapshot (same transition bound).
             let rev = sessions.rev_packets_for(&flow.forward_key);
             if rev > 0 {
                 crate::afxdp::shared_ops::restamp_shared_rev_packets(

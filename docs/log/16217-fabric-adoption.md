@@ -372,3 +372,75 @@ Do not merge as the aged-failover cure. Cluster restored after
 each run: clean master `2c8575b70e`, helper `2f2f5cbf…b04` both
 nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
 verification 12.9 / 14.0 Gbit/s.
+
+## Scoped completion-evidence adoption (FZFixWire9, DECISION)
+
+Proven chain going in: fw1 canonical rows stay `SyncImport` +
+`HandshakePending` forever; completion evidence exists only as flow
+activity (fw0 flow-cache hits + fw1 reverse hits post-FO trickle).
+DECISION implemented: `lookup_shared_established_for_wire` now
+qualifies a synced forward row as Established-for-adoption when
+(a) wire = Established (unchanged), OR (b) wire = HandshakePending
+AND `shared_scoped_completion_evidence` for the canonical key shows
+reverse packets > 0 on any synced row for the tuple (incl. the
+reverse companion, with an actual counter — fail-closed per
+FZFixWire6) AND forward packets > 0.
+
+- Scope: the evidence scan compares the FULL scoped key
+  (`SessionKey` equality: 5-tuple + routing domain + discriminator)
+  against the canonical key, its derived reverse companion, and its
+  forward-wire alias — never `bare_tuple()` (Codex cross-VRF
+  finding: the older bare-tuple evidence scan could borrow another
+  VRF's counts). New `SyncedSessionEntry::fwd_packets` carries the
+  forward count (monotonic per incarnation at publish, like
+  `rev_packets`); counts are snapshotted by
+  `restamp_shared_packet_counts` at publish (forward-learn /
+  promote / local-delivery / reverse-synth sites stamp the live
+  table counts) and on the cache-hit stage transition.
+- Codex alias-republish regression: `publish_shared_session`'s
+  forward-wire alias slot now applies the same monotonic
+  stage + count merge as the canonical row (same incarnation:
+  stage rank and both counts never regress; a new incarnation takes
+  the incoming stage as-is).
+- GLM B1: cache-hit shared restamps (`restamp_shared_packet_counts`,
+  the legacy `restamp_shared_rev_packets`, and the Established
+  canonical/alias restamps beside them) run only behind
+  `take_probe_stage_transition` — recorded in `probe_hit_inner`
+  when a deferred completion transitions the pair into Established,
+  consumed once by the cache-hit caller. Steady-state hits never
+  take the shared-map locks for evidence.
+
+Tests: `pending_row_adopts_on_scoped_completion_evidence_16217`
+(zero counts and forward-only counts decline; fwd+rev adopt),
+`pending_adoption_evidence_is_scope_exact_16217` (domain-7 evidence
+never leaks into domain 0), `alias_republish_never_regresses_stage_16217`,
+`cache_hit_restamp_gate_fires_only_on_stage_transition_16217`
+(gate opens once on the completing hit, never on 4 steady-state
+hits), plus the strengthened
+`fabric_ingress_adopts_established_synced_wire_session_16217`
+(pending row adopts once counts land). `cargo test 16217` 16/16,
+`16223` 24/24; `session::` 502 passed with the 2 failures identical
+on clean base (`tcp_seq_15753`, `session_decision_typed_snat_layout_11064`);
+`flow_cache` / `publish_shared_session_counts_*` failures verified
+identical on unmodified `87b447194f` (pre-existing).
+
+Live Runs 9 (build `99.16217.28.dirty`, deb sha256 3342b5490b41197955c81744ea81ed709c494c619747d7d35df94b04213c9953,
+helper sha256 `8064431b…9038` homogeneous `/proc/<pid>/exe` both
+nodes before traffic; evidence `/var/worktrees/fzadopt2/cell29/`):
+aged 30 s RG1 failover P4, all-node0, FO at 30 s — **FAIL, 25 SUM
+zero intervals (31 s→end)**, `snat_revoked=0` both nodes at every
+sample, no pre-FO zeros (9.2 Gbit/s at 29–30 s). At d28 fw1's Backup
+rows are again mixed (wire-keyed `172.16.80.8:<sport>` rows at
+Timeout 1800, canonical heavy rows at Timeout 20) and post-FO fw1
+forward `Pkts: 0` for the data tuples. So the scoped-evidence gate,
+though unit-proven, still does not rescue the heavy canonical
+tuples live: the count evidence evidently does not reach fw1's
+shared rows for those tuples before the failover instant (or the
+post-adoption forward path still blackholes). Only one live run
+was completed in this lane (the cell's restore leg overran the
+runner timeout and was finished manually); the twice-on-loss
+protocol therefore rests on the identical 25-zero signature of
+runs 5–8 plus this run. Do not merge as the aged-failover cure.
+Cluster restored: clean master `2c8575b70e`, helper `2f2f5cbf…b04`
+both nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
+verification 14.1 Gbit/s.

@@ -1858,6 +1858,12 @@ pub(crate) struct SessionTable {
     /// #15947 fold: exact pre-probe snapshots for deferring probes,
     /// held only until the cached verdict admits or drops the packet.
     pending_probe_undo: Vec<ProbeUndo>,
+    /// #16217 (GLM B1): keys whose deferred probe completion was a
+    /// handshake STAGE TRANSITION into Established — the only cache
+    /// hits allowed to restamp the shared maps' packet-count
+    /// evidence. Recorded in `probe_hit_inner` beside the deferred
+    /// Update; consumed by `take_probe_stage_transition`.
+    pending_probe_stage_transitions: Vec<SessionKey>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2224,6 +2230,7 @@ impl SessionTable {
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
             pending_probe_state_updates: Vec::new(),
             pending_probe_undo: Vec::new(),
+            pending_probe_stage_transitions: Vec::new(),
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
             reserved_session_slots: 0,
@@ -3724,6 +3731,15 @@ impl SessionTable {
             .unwrap_or(0)
     }
 
+    /// #16217: actual forward packets this table's forward entry for
+    /// `key` has forwarded (0 when absent / none served). Companion
+    /// to `rev_packets_for` for the adoption gate's forward count.
+    pub(crate) fn fwd_packets_for(&self, key: &SessionKey) -> u64 {
+        self.entry_by_key(key)
+            .map(|entry| entry.counters.fwd_packets)
+            .unwrap_or(0)
+    }
+
 
     /// #16019 fold: node-level reply evidence for the pressure-shed
     /// victim check — true once this worker's live entry has seen a
@@ -3984,6 +4000,22 @@ impl SessionTable {
             self.pressure_shed_unreplied.remove(&undo.shed_forward_key);
         }
         had_deferred
+    /// #16217 (GLM B1): did the deferred probe completion for `key`
+    /// transition the handshake stage into Established? Consumes the
+    /// record. The flow-cache hit path restamps shared-map evidence
+    /// ONLY when this returns true — a steady-state established hit
+    /// (no transition) must never take the shared-map locks.
+    pub fn take_probe_stage_transition(&mut self, key: &SessionKey) -> bool {
+        if let Some(pos) = self
+            .pending_probe_stage_transitions
+            .iter()
+            .position(|k| k == key)
+        {
+            self.pending_probe_stage_transitions.remove(pos);
+            true
+        } else {
+            false
+        }
     }
 
     fn probe_hit_inner(
@@ -4280,6 +4312,19 @@ impl SessionTable {
                     close_class_before,
                     handshake_state_before,
                 ));
+                // #16217 (GLM B1): `completing` only fires on the
+                // classic / companion completion arms, i.e. this hit
+                // TRANSITIONED the pair into Established
+                // (`handshake_state_before` was Opening/Pending).
+                // Record it so the cache-hit caller restamps shared
+                // evidence on this transition only, never per-packet.
+                if !self
+                    .pending_probe_stage_transitions
+                    .iter()
+                    .any(|k| k == &matched_key)
+                {
+                    self.pending_probe_stage_transitions.push(matched_key.clone());
+                }
             }
             self.push_to_wheel(&matched_key, now_ns);
             // #16223: a completion landed here — stamp node-level

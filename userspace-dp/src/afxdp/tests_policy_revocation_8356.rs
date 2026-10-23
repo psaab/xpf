@@ -738,7 +738,7 @@ fn drive_shared_hit_10582_t1_t2(
         tcp_flags: TCP_ACK,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
         source_nat_static: None, },
     );
     let frame = build_txn_tcp_syn_frame_v4(

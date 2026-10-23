@@ -1762,7 +1762,7 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     let replica = synced_replica_entry(&entry);
     assert!(replica.origin.is_peer_synced());
@@ -1823,7 +1823,7 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     let replica = synced_replica_entry(&entry);
     assert_eq!(replica.origin, SessionOrigin::WorkerLocalImport);
@@ -1886,7 +1886,7 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     publish_shared_session(
         &coordinator.sessions.synced,
@@ -1960,7 +1960,7 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     let worker_command_queues = WorkerCommandQueues::new(BTreeMap::from([
         (0u32, Arc::new(Mutex::new(VecDeque::new()))),
@@ -2064,7 +2064,7 @@ fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     let queues = WorkerCommandQueues::new(BTreeMap::from([(
         0u32,
@@ -3097,7 +3097,7 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, });
     let mut sibling = crate::session::SessionTable::new();
     assert!(

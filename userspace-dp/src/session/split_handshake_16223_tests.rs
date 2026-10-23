@@ -786,6 +786,65 @@ fn split_cache_hit_completion_collects_without_ct_slice_16217() {
     assert_eq!(updates[0].tcp_handshake_state, TcpHandshakeState::Established.to_wire());
 }
 
+/// #16217 (GLM B1): `take_probe_stage_transition` fires exactly once —
+/// on the cache hit that transitions the pair into Established — and
+/// never on steady-state hits. The flow-cache caller restamps shared
+/// evidence only behind this gate, so a per-packet restamp would
+/// show up here as repeated `true`.
+///
+/// MUTATION: record the transition on every probe hit (or never) and
+/// the once-only assertions fail.
+#[test]
+fn cache_hit_restamp_gate_fires_only_on_stage_transition_16217() {
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let mut serving = SessionTable::new();
+    let _reverse = install_forward_reverse_pair(&mut serving, &forward, now, TCP_SYN);
+    // SYN-ACK promotes both halves to HandshakePending.
+    let reverse = reverse_session_key(&forward, crate::nat::NatDecision::default());
+    assert!(serving.lookup_with_origin(&reverse, now + SEC, TCP_SYN | TCP_ACK).is_some());
+    // No completion yet: the gate must not fire.
+    assert!(
+        !serving.take_probe_stage_transition(&forward),
+        "no completion -> no transition gate"
+    );
+    // Completing ACK via the deferring cache-hit probe (the
+    // flow_cache_hit caller shape), then admitted.
+    assert!(serving.probe_hit_deferring_state_update(
+        &forward,
+        now + 2 * SEC,
+        1200,
+        TCP_ACK | TCP_PSH,
+        1200,
+        0
+    ));
+    serving.emit_probe_hit_state_update(&forward);
+    assert!(
+        serving.take_probe_stage_transition(&forward),
+        "the completing hit must open the restamp gate exactly here"
+    );
+    assert!(
+        !serving.take_probe_stage_transition(&forward),
+        "the gate is consumed by the first take"
+    );
+    // Steady-state hits on the Established pair never re-open it.
+    for i in 0..4u64 {
+        assert!(serving.probe_hit_deferring_state_update(
+            &forward,
+            now + (3 + i) * SEC,
+            1200,
+            TCP_ACK | TCP_PSH,
+            1200,
+            0
+        ));
+        serving.emit_probe_hit_state_update(&forward);
+        assert!(
+            !serving.take_probe_stage_transition(&forward),
+            "steady-state hit {i} must not re-open the restamp gate (per-packet restamp)"
+        );
+    }
+}
+
 /// #16217 split shape (FZFixWire): the serving pair is Established on
 fn split_serving_established_replica_pending_completes_and_announces_16217() {
     let forward = key_v4();

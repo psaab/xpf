@@ -64,6 +64,14 @@ pub(crate) struct SyncedSessionEntry {
     /// reverse traffic (forward entry's `counters.rev_packets`) ever
     /// raises it. Never set from a handshake wire.
     pub(crate) rev_packets: u64,
+    /// #16217 (adoption evidence): actual forward-direction packets
+    /// the serving node has admitted for this tuple, snapshotted
+    /// alongside `rev_packets`. Synced rows otherwise carry no
+    /// counters; the fabric-adoption gate reads this (with
+    /// `rev_packets`) only for a `HandshakePending` row, so a
+    /// zero-traffic pending row never qualifies. Monotonic per
+    /// incarnation at publish, exactly like `rev_packets`.
+    pub(crate) fwd_packets: u64,
     /// #14303: the PPTP call-id pair (`PptpCall::to_wire_call_ids`) for a
     /// `Pptp(handle)` forward session, `PPTP_CALL_IDS_ABSENT` (0) otherwise.
     /// Carried on the shared entry so the coordinator bulk export and the
