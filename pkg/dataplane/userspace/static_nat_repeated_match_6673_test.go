@@ -37,6 +37,9 @@ func repeatedMatchTree6673(t *testing.T) *config.ConfigTree {
 	t.Helper()
 	tree := &config.ConfigTree{}
 	for _, cmd := range []string{
+		// #16008: define the from-zone, else the tolerant undefined-zone
+		// record drops this rule-set before selection is observable.
+		"set security zones security-zone untrust",
 		"set security nat static rule-set rs1 from zone untrust",
 		// The shape with no coverage: two sibling destination-address nodes,
 		// NOT a bracket list.

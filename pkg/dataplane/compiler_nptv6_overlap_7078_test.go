@@ -227,3 +227,97 @@ func TestNPTv6OverlapWithExcludedRuleStillCompiles_9877(t *testing.T) {
 			"(#9877 / #1960).\n  got: %v", err)
 	}
 }
+
+// TestNPTv6OverlapSkipsDroppedUndefinedZone16008: a rule-set dropped for
+// a tolerant undefined from-zone (#16008) is dropped whole by
+// buildNptv6Snapshots, so it can neither report nor trigger an overlap —
+// in either seen-set position. RED-on-revert: drop the
+// LenientNATUndefinedZoneRuleSets consult in NPTv6OverlapConflict and
+// both rows report the overlap.
+func TestNPTv6OverlapSkipsDroppedUndefinedZone16008(t *testing.T) {
+	set := func(name, zone, match, then string) *config.StaticNATRuleSet {
+		return &config.StaticNATRuleSet{
+			Name: name, FromZone: zone,
+			Rules: []*config.StaticNATRule{{Name: name + "-r", IsNPTv6: true, Match: match, Then: then}},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		sets    []*config.StaticNATRuleSet
+		dropped string
+	}{
+		// Both sets carry zone "untrust" so they WOULD conflict without
+		// the record (the control below proves it); the record, keyed by
+		// rule-set name, is the authority that a set is dropped —
+		// mirroring how buildNptv6Snapshots consults it.
+		{"dropped first, healthy overlap second", []*config.StaticNATRuleSet{
+			set("a", "untrust", "2001:db8:9::/48", "fd00:9::/48"),
+			set("b", "untrust", "2001:db8:9::/48", "fd00:aa::/48"),
+		}, "a"},
+		{"healthy first, dropped overlap second", []*config.StaticNATRuleSet{
+			set("a", "untrust", "2001:db8:9::/48", "fd00:9::/48"),
+			set("b", "untrust", "2001:db8:9::/48", "fd00:aa::/48"),
+		}, "b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Security.NAT.Static = tc.sets
+			cfg.LenientNATUndefinedZoneRuleSets = map[config.NATRuleSetRef]bool{
+				{Kind: "static", Name: tc.dropped}: true,
+			}
+			if got := config.NPTv6OverlapConflict(cfg); got != "" {
+				t.Fatalf("want NO conflict (the dropped rule-set never reaches the helper), got %q", got)
+			}
+			// Control: without the record the same pair DOES conflict,
+			// proving the fixture actually overlaps.
+			cfg.LenientNATUndefinedZoneRuleSets = nil
+			if got := config.NPTv6OverlapConflict(cfg); got == "" {
+				t.Fatal("control: without the #16008 record the pair must conflict — fixture is vacuous")
+			}
+		})
+	}
+}
+
+// TestNPTv6DroppedUndefinedZoneStillCompiles16008 is the compile-level
+// twin (apply-blocking half of the fold): a tolerant config whose ONLY
+// overlap involves a dropped undefined-zone rule-set must reach the
+// tripwire, and a dropped rule-set carrying a helper-refused prefix
+// must warn-and-skip in compileNPTv6's per-rule loop, not hard-error.
+// RED-on-revert: drop either #16008 consult (overlap predicate or the
+// installed gate) and the pre-pass rejects before the tripwire.
+func TestNPTv6DroppedUndefinedZoneStillCompiles16008(t *testing.T) {
+	t.Run("overlap only via dropped set", func(t *testing.T) {
+		dp := &recordingDP{}
+		cfg := nptv6OverlapConfig(
+			"untrsut", "2001:db8:9::/48", "fd00:9::/48",
+			"untrust", "2001:db8:9::/48", "fd00:aa::/48",
+		)
+		cfg.LenientNATUndefinedZoneRuleSets = map[config.NATRuleSetRef]bool{
+			{Kind: "static", Name: "rs-npt-4960"}: true,
+		}
+		_, err := CompileConfig(dp, cfg, false)
+		if !errors.Is(err, errStopBeforeHostReconcile) {
+			t.Fatalf("an overlap involving a DROPPED rule-set was rejected by the "+
+				"pre-pass. The dropped set never reaches try_from_snapshots, so "+
+				"no overlap the helper could refuse exists — failing the compile "+
+				"turns a working tolerant-load config into a failed apply "+
+				"(#16008 / #1960).\n  got: %v", err)
+		}
+	})
+	t.Run("bad prefix only in dropped set", func(t *testing.T) {
+		dp := &recordingDP{}
+		cfg := nptv6OverlapConfig(
+			"untrsut", "not-a-prefix", "fd00:9::/48",
+			"untrust", "2001:db8:9::/48", "fd00:aa::/48",
+		)
+		cfg.LenientNATUndefinedZoneRuleSets = map[config.NATRuleSetRef]bool{
+			{Kind: "static", Name: "rs-npt-4960"}: true,
+		}
+		_, err := CompileConfig(dp, cfg, false)
+		if !errors.Is(err, errStopBeforeHostReconcile) {
+			t.Fatalf("a helper-refused prefix in a DROPPED rule-set was hard-rejected "+
+				"by the pre-pass. The rule never reaches the helper, so erroring "+
+				"fails an apply that succeeds today (#16008 / #1960).\n  got: %v", err)
+		}
+	})
+}

@@ -51,27 +51,43 @@ func TestStaticNATFromZoneCompiles(t *testing.T) {
 	}
 }
 
-// TestStaticNATFromZoneUndefinedWarns is the H15 regression: an undefined
-// from-zone on a static NAT rule-set silently produces a rule that the
-// dataplane will never match (static_nat.rs match_dnat requires an exact
-// ingress-zone string match), with no commit warning. Source NAT already
-// validates its from/to zones; static NAT did not. The validator must now
-// surface the typo'd zone the same way.
+// TestStaticNATFromZoneUndefinedWarns is the H15 regression, completed
+// by #16008: an undefined from-zone on a static NAT rule-set silently
+// produced a rule that the dataplane would never match (static_nat.rs
+// match_dnat requires an exact ingress-zone string match). It was
+// warn-only in ValidateConfig; now the unified #15001 walk strict-
+// rejects it at commit, and the tolerant path warns + records it for
+// the snapshot-builder drop.
 //
-// Reverting the static-NAT branch in ValidateConfig's "Validate NAT zone
-// references" loop makes this test fail (no warning emitted).
+// Reverting the static arm of natUndefinedZoneFindings makes the
+// strict compile below accept the typo and this test fail.
 func TestStaticNATFromZoneUndefinedWarns(t *testing.T) {
-	cfg := compileSetLines(t, []string{
+	tree := &ConfigTree{}
+	for _, line := range []string{
 		"set security zones security-zone untrust",
 		// Note: "untrsut" is a deliberate typo — not a defined zone.
 		"set security nat static rule-set rs1 from zone untrsut",
 		"set security nat static rule-set rs1 rule r1 match destination-address 203.0.113.5/32",
 		"set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.5/32",
-	})
-
-	warnings := ValidateConfig(cfg)
+	} {
+		path, err := ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	if _, err := CompileConfig(tree); err == nil ||
+		!strings.Contains(err.Error(), "rs1") || !strings.Contains(err.Error(), "untrsut") {
+		t.Fatalf("strict compile = %v, want undefined-zone reject naming rs1/untrsut (#16008)", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
 	var saw bool
-	for _, w := range warnings {
+	for _, w := range cfg.Warnings {
 		if strings.Contains(w, "static-nat") &&
 			strings.Contains(w, "untrsut") &&
 			strings.Contains(w, "not defined") {
@@ -79,7 +95,7 @@ func TestStaticNATFromZoneUndefinedWarns(t *testing.T) {
 		}
 	}
 	if !saw {
-		t.Fatalf("expected static-nat undefined from-zone warning, got %v", warnings)
+		t.Fatalf("expected tolerant static-nat undefined from-zone warning, got %v", cfg.Warnings)
 	}
 }
 

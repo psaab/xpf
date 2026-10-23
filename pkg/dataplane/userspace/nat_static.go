@@ -34,6 +34,16 @@ func buildStaticNATSnapshots(cfg *config.Config, natCounterIDs map[string]uint32
 		if rs == nil {
 			continue
 		}
+		// #16008: on the tolerant path config compile records static
+		// rule-sets with an undefined from-zone; drop exactly those
+		// instead of shipping the undefined name verbatim — the Rust
+		// dataplane matches FromZone by exact name equality, so the row
+		// would be a silent never-match. Healthy siblings still ship.
+		if cfg.LenientNATUndefinedZoneRuleSets[config.NATRuleSetRef{Kind: "static", Name: rs.Name}] {
+			slog.Warn("userspace snapshot: dropping static NAT rule-set with undefined from-zone (fail-closed, #16008)",
+				"ruleset", rs.Name, "from_zone", rs.FromZone)
+			continue
+		}
 		for _, rule := range rs.Rules {
 			if rule == nil || rule.IsNPTv6 {
 				continue

@@ -44,6 +44,9 @@ import (
 //   - Rules the snapshot builder DROPS are skipped: an excluded rule never
 //     reaches try_from_snapshots, so it cannot participate in a rejection the
 //     helper makes. This is the same property-1 gate the parse class uses.
+//   - Rule-sets dropped for a tolerant undefined from-zone (#16008) are
+//     skipped: buildNptv6Snapshots drops the whole rule-set, so its rules
+//     never reach the helper either and cannot report or trigger an overlap.
 //   - Rules whose prefixes do not parse are skipped, because the helper rejects
 //     those on the parse arm BEFORE it ever calls find_overlap. Reporting them
 //     as overlaps would name the wrong reason for a correct rejection.
@@ -60,6 +63,11 @@ func NPTv6OverlapConflict(cfg *Config) string {
 	// inventing a different one.
 	for _, rs := range cfg.Security.NAT.Static {
 		if rs == nil {
+			continue
+		}
+		// #16008: a tolerant undefined-zone rule-set is dropped whole by
+		// buildNptv6Snapshots; it never reaches the helper.
+		if cfg.LenientNATUndefinedZoneRuleSets[NATRuleSetRef{Kind: "static", Name: rs.Name}] {
 			continue
 		}
 		for _, rule := range rs.Rules {

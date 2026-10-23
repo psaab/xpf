@@ -22,8 +22,10 @@ func natZoneTreeDirect12245(t *testing.T, cmds ...string) *ConfigTree {
 
 // #12245 originally: typo'd DNAT from-zone warns like source/static.
 // #15001 supersedes the source/destination half: strict commit now
-// rejects naming rule-set and zone; static NAT remains warn-only.
-// The tolerant path warning is pinned in nat_undefined_zone_15001_test.go.
+// rejects naming rule-set and zone. #16008 completes the static leg:
+// a typo'd static from-zone is strict-rejected by the same unified
+// walk, and on the tolerant path it warns and is dropped by the
+// snapshot builders instead of shipping a verbatim never-match row.
 func TestDestinationNATFromZoneUndefinedWarns12245(t *testing.T) {
 	tree := natZoneTreeDirect12245(t,
 		"set security zones security-zone trust",
@@ -39,25 +41,33 @@ func TestDestinationNATFromZoneUndefinedWarns12245(t *testing.T) {
 	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "snat-typo") {
 		t.Fatalf("strict compile = %v, want undefined-zone reject naming snat-typo (#15001)", err)
 	}
-	// Static-only config still compiles strict and warns via ValidateConfig.
-	cfg, err := CompileConfig(natZoneTreeDirect12245(t,
+	// Static-only config is strict-rejected too (#16008).
+	if _, err := CompileConfig(natZoneTreeDirect12245(t,
+		"set security zones security-zone trust",
+		"set security nat static rule-set static-typo from zone untrsut",
+		"set security nat static rule-set static-typo rule R1 match destination-address 203.0.113.5/32",
+		"set security nat static rule-set static-typo rule R1 then static-nat prefix 10.0.0.5/32",
+	)); err == nil || !strings.Contains(err.Error(), "static-typo") || !strings.Contains(err.Error(), "untrsut") {
+		t.Fatalf("static-only strict compile = %v, want undefined-zone reject naming static-typo/untrsut (#16008)", err)
+	}
+	// Tolerant path warns naming the rule-set and zone (#1960).
+	cfg, err := CompileConfigLenient(natZoneTreeDirect12245(t,
 		"set security zones security-zone trust",
 		"set security nat static rule-set static-typo from zone untrsut",
 		"set security nat static rule-set static-typo rule R1 match destination-address 203.0.113.5/32",
 		"set security nat static rule-set static-typo rule R1 then static-nat prefix 10.0.0.5/32",
 	))
 	if err != nil {
-		t.Fatalf("static-only strict compile: %v", err)
+		t.Fatalf("static-only tolerant compile: %v", err)
 	}
-	want := `static-nat ruleset "static-typo": from-zone "untrsut" not defined`
 	found := false
-	for _, warning := range ValidateConfig(cfg) {
-		if warning == want {
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "static-typo") && strings.Contains(warning, "untrsut") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("missing static zone warning %q; warnings=%v", want, ValidateConfig(cfg))
+		t.Errorf("missing tolerant static zone warning naming static-typo/untrsut; warnings=%v", cfg.Warnings)
 	}
 }
 

@@ -15,6 +15,14 @@ func buildNptv6Snapshots(cfg *config.Config) []Nptv6RuleSnapshot {
 		if rs == nil {
 			continue
 		}
+		// #16008: NPTv6 rules share the Static list and FromZone scope;
+		// a tolerant-recorded undefined from-zone drops the whole
+		// rule-set rather than shipping a verbatim never-match row.
+		if cfg.LenientNATUndefinedZoneRuleSets[config.NATRuleSetRef{Kind: "static", Name: rs.Name}] {
+			slog.Warn("userspace snapshot: dropping NPTv6 rule-set with undefined from-zone (fail-closed, #16008)",
+				"rule_set", rs.Name, "from_zone", rs.FromZone)
+			continue
+		}
 		// #5818 fail-closed: the NPTv6 wire/dataplane carry only `from zone`
 		// (Nptv6RuleSnapshot has no interface/routing-instance/source field). A
 		// rule-set scoped `from interface` / `from routing-instance`, or a rule
