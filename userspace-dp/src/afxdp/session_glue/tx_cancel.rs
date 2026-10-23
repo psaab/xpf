@@ -101,22 +101,17 @@ now_ns: u64,) {
             worker_id,
         );
         if reverse_only {
-            // The pair teardown released nothing for the forward flow:
-            // its per-half release self-gates on is_reverse, and the
-            // forward half it would have released is already deleted.
-            // The allocator record is keyed byte-identically to the
-            // reserve: SourceNatFlowKey built from the FORWARD session
-            // key, translated tuple from the forward decision (the
-            // synced.rs reserve / release.rs twin pair). Reconstruct
-            // both from the surviving reverse entry. The forward key is
-            // reverse_session_key of the reverse entry under its own
-            // decision. The forward decision is the reverse decision
-            // un-reversed with the CANONICAL REVERSE tuple in natural
-            // order: NatDecision::reverse plugs its original_dst into
-            // rewrite_src, and the reverse entry's dst IS the pool
-            // tuple the reserve recorded (passing the derived forward
-            // tuple, or the swapped tuple, plugs the server address
-            // instead and the release misses the record).
+            // Idempotence (fold 4): this compensating release runs ONLY
+            // here — canonical resolved to the reverse entry, so the
+            // forward half was already gone BEFORE the pair teardown
+            // above and no forward half existed for it to release. A
+            // both-halves teardown never reaches this branch (canonical
+            // is the forward entry), so the persistent-inbound lease
+            // hold — released inside the untracked call below via the
+            // reconstructed forward decision's rewrite_dst — drops
+            // exactly once. The allocator's release_persistent_inbound
+            // also saturates at zero, so a raced duplicate cannot
+            // underflow the hold.
             let fwd_key = reverse_session_key(&canonical_key, decision.nat);
             let fwd_nat = decision.nat.reverse(
                 canonical_key.src_ip,
@@ -124,12 +119,21 @@ now_ns: u64,) {
                 canonical_key.src_port,
                 canonical_key.dst_port,
             );
-            debug_assert_eq!(
-                (fwd_nat.rewrite_src, fwd_nat.rewrite_src_port),
-                (Some(canonical_key.dst_ip), Some(canonical_key.dst_port)),
-                "reconstructed forward NAT must equal the forward \
-                 decision (pool tuple on the reverse entry's dst)"
-            );
+            // Restrict the reconstruction assert to the source-NAT
+            // shape it actually proves: the reverse decision carries a
+            // source rewrite (its rewrite_src is the DNAT'd/original
+            // source the un-reverse maps back). A valid reverse entry
+            // with NO source rewrite (plain / DNAT-only companion) has
+            // nothing to plug into rewrite_src, and asserting the pool
+            // tuple there would reject a legitimate session.
+            if decision.nat.rewrite_src.is_some() {
+                debug_assert_eq!(
+                    (fwd_nat.rewrite_src, fwd_nat.rewrite_src_port),
+                    (Some(canonical_key.dst_ip), Some(canonical_key.dst_port)),
+                    "reconstructed forward NAT must equal the forward \
+                     decision (pool tuple on the reverse entry's dst)"
+                );
+            }
             // The reservation may have been taken untracked (the
             // coordinator import path holds no worker bit — see
             // release.rs's Untracked contract and delete_synced.rs's

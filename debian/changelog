@@ -77,6 +77,11 @@ xpf (0.0.0) unstable; urgency=medium
     clear-by-interface can no longer delete a sibling unit's sessions
     and flow-export sampling no longer judges both units by one
     sibling's name (daemon buildIfNames projects the same table).
+  * Guard the #15947 reverse-only lease release against double
+    release and restrict its NAT reconstruction assert to the
+    source-NAT shape.
+
+xpf (0.0.0) unstable; urgency=medium
   * Fix the #15947 reverse-only RST teardown NAT reconstruction:
     un-reverse with the canonical reverse tuple so the pool port
     is actually freed.
