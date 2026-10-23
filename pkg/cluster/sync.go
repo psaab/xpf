@@ -3030,6 +3030,22 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 	if dropped > 0 {
 		s.stats.MalformedRecordsDropped.Add(uint64(dropped))
 	}
+	if kept > dhcpChunkMaxTotalLeases {
+		// #16036 fold: never announce a totalLeases a new receiver must
+		// refuse (kept is the totalLeases stamped below). The production
+		// producer (daemon -> GetSyncLeases) is bounded by the 64 MiB Kea
+		// response / ~200 B-per-lease JSON (~300k leases) on the socket
+		// path, but the unbounded memfile fallback and direct
+		// QueueDHCPLeaseSnapshot callers have no such bound — enforce the
+		// same [., dhcpChunkMaxTotalLeases] cap here, before any frame is
+		// written. Without this, one push would emit chunks the peer
+		// counts malformed, and the 30s heartbeat would repeat the storm
+		// while lease sync silently stays on the receiver's prior set.
+		slog.Warn("cluster sync: refusing DHCP lease chunk set over lease-count cap",
+			"family", family, "leases", kept, "cap", dhcpChunkMaxTotalLeases)
+		s.stats.MalformedRecordsDropped.Add(1)
+		return
+	}
 	for i, chunkBody := range chunks {
 		body := encodeDHCPLeaseChunkPayload(chunkBody, generation, uint32(i), uint32(len(chunks)), uint32(kept))
 		if i == len(chunks)-1 && hasMeta {
