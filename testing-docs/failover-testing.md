@@ -183,6 +183,44 @@ Minimum artifacts:
 - host-side `iperf3` JSON or log
 - any script artifact directory under `/tmp`
 
+## Observation points: in-VM tcpdump is blind to fast-path flows (#16111)
+
+in-VM `tcpdump` is blind to AF_XDP fast-path traffic. On the loss userspace
+cluster, kernel `tcpdump` captured `0 packets captured` for a live
+multi-Gbps `iperf3` flow on `any`, on the AF_XDP-bound physical NICs
+(`ge-0-0-1`, `ge-7-0-1`), on the `.80` VLAN sub-interfaces
+(`ge-0-0-2.80`, `ge-7-0-2.80`), on the fabric parents (`ge-0-0-0`,
+`ge-7-0-0`), and on `xpf-usp0`/`xpf-usp1`, while the LAN host captured the
+same flow normally and helper statistics proved the packets traversed the
+firewall. The XDP program (`xdp_userspace_prog`, `xdpgeneric` on the
+sub-interfaces) redirects fast-path frames to the AF_XDP helper before any
+AF_PACKET tap sees them, and the helper forwards them without building a
+kernel `sk_buff` for the tap. A capture on the parent interface may still
+show broadcast or other-VLAN background traffic; that background does not
+make the capture flow-visible.
+
+Therefore:
+
+- An in-VM capture with `0 packets captured` does not prove the traffic never arrived. Never read an empty in-VM pcap as "the flow never reached this node", and never use it to confirm or refute an L2/neighbor theory.
+- This applies equally to `monitor traffic`, which is a `tcpdump` (AF_PACKET) wrapper, and to `tcpdump` on `xpf-usp0`/`xpf-usp1`: the TUN only carries slow-path/exception traffic, so fast-path transit is absent there too.
+- Do not run a "capture on both nodes" play with in-VM `tcpdump` on fast-path interfaces. It produces empty files on both nodes exactly for the flows that fail over badly.
+
+Working observation points for fast-path flows:
+
+1. **LAN/WAN host captures.** Capture where the frame is on a real wire segment: on the LAN host (`cluster-userspace-host`), on the WAN host, or on the destination endpoint. Host-side `tcpdump` sees the flow normally.
+2. **Remote-target capture.** On the remote target `.200`, use the gRPC capture service documented in `testing-docs/README.md` (`capture-client` / `grpcurl`) instead of assuming local shell access; see also `.codex/skills/iperf-grpc-tcpdump/`, whose server-side and host-side captures are the wire evidence and whose firewall-side captures are kernel-visible control only.
+3. **Helper statistics deltas.** Take `show chassis cluster data-plane statistics`, `show chassis cluster data-plane interfaces`, and `show chassis cluster data-plane flows` before and after the failover event, on both nodes, and compare deltas. The aggregate counters that discriminate "node X saw flow Y" include `RX packets`, `TX packets`, `Flow cache hits`, `Flow cache misses`, `Session hits`, `Session misses`, and `Exception packets`; the same statistics surface carries `Last resolution` (the most recent packet resolution: disposition, ingress/egress ifindex, next hop, flow tuple, zones) and `Recent exceptions` (count, with per-exception records on the monitor surface below).
+4. **Per-interface helper state.** `monitor interface <interface>` on each node shows binding/queue readiness, direct/copy/in-place TX, misses, policy denies, binding errors, and recent exceptions for one interface. Use it to separate "traffic never hit the old owner" from "traffic hit the old owner and redirected across fabric" from "traffic died on the fabric path"; see [userspace-fabric-failover.md](userspace-fabric-failover.md).
+5. **Session state.** `show security flow session destination-prefix <target>` on both nodes shows whether the session exists on each node and which node owns it.
+
+The minimum-artifact protocol is therefore: record the CLI surfaces in
+(3)-(5) before and after the failover event, on both nodes, and keep the
+host/endpoint captures from (1)-(2) as the only packet-level evidence.
+In-VM `tcpdump` remains valid only for kernel-visible traffic (control
+plane, slow-path/exception traffic, and locally originated or terminated
+traffic that actually traverses the kernel stack); label any such capture
+with what it can and cannot see.
+
 For userspace RG-move testing, the hardened validator already captures these.
 
 ## Userspace Failover Test Matrix
@@ -475,17 +513,25 @@ scenario being tested.
 ## When To Use Packet Capture
 
 Use packet capture only when counters and session state are not enough to
-distinguish where the flow died.
+distinguish where the flow died, and only at a working observation point
+(see "Observation points: in-VM tcpdump is blind to fast-path flows
+(#16111)" above). In-VM `tcpdump` on a firewall — on `any`, on the
+AF_XDP-bound physical NICs, on the `.80` VLAN sub-interfaces, on the fabric
+or WAN parents, or on `xpf-usp0`/`xpf-usp1` — is not a capture target for
+fast-path flows: it will report `0 packets captured` whether or not the
+flow traversed the node.
 
-On the remote target `.200`, use the gRPC capture/tcpdump workflow already
-documented for the lab instead of assuming local shell access. Typical capture
-targets:
+Working capture targets:
 
-- host side toward the VIP/target
-- primary WAN parent
-- primary fabric parent
-- secondary fabric parent
-- `.200` endpoint
+- LAN host (`cluster-userspace-host`) toward the VIP/target
+- WAN host toward the VIP/target
+- `.200` endpoint, via the gRPC capture service documented in
+  `testing-docs/README.md` instead of assuming local shell access
+
+Pair every host/endpoint capture with the helper-statistics, `Last
+resolution` / `Recent exceptions`, `monitor interface`, and session-state
+deltas from both nodes; the counters are what answer "did node X see flow
+Y in direction Z after time T" for a fast-path flow today.
 
 ## Common Failure Shapes
 

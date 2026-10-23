@@ -1,6 +1,6 @@
 ---
 name: iperf-grpc-tcpdump
-description: Run synchronized iperf3 tests from the isolated userspace client while capturing server-side tcpdump over the gRPC capture service and simultaneous LAN/WAN tcpdumps on the active userspace firewall. Use this when debugging throughput collapse, TCP resets, or tuple corruption on the userspace dataplane.
+description: Run synchronized iperf3 tests from the isolated userspace client while capturing server-side tcpdump over the gRPC capture service and simultaneous LAN/WAN tcpdumps on the active userspace firewall (kernel-visible control only; in-VM tcpdump is blind to AF_XDP fast-path flows, #16111). Use this when debugging throughput collapse, TCP resets, or tuple corruption on the userspace dataplane.
 ---
 
 # iperf3 + gRPC tcpdump
@@ -19,6 +19,16 @@ The helper script:
 - starts LAN and WAN `tcpdump` on the active firewall
 - runs `iperf3` from `cluster-userspace-host`
 - saves artifacts under `/tmp`
+
+> **#16111 — in-VM `tcpdump` is blind to AF_XDP fast-path flows.** XDP
+> redirects fast-path frames to the AF_XDP helper before any AF_PACKET
+> tap, so the firewall-side `fw-lan.txt` / `fw-wan.txt` captures are
+> kernel-visible control only: they may show control/slow-path traffic
+> and background frames, but an empty file does not prove the iperf flow
+> never traversed the firewall. The wire evidence is `server-grpc.txt`
+> (and any LAN-host capture); prove firewall traversal with the
+> `fw-stats-before.txt` / `fw-stats-after.txt` counter deltas. See
+> `testing-docs/failover-testing.md` ("Observation points").
 
 Run:
 
@@ -46,10 +56,14 @@ Artifacts:
 Workflow:
 
 1. Run the helper script for the family and stream count you want.
-2. Read `summary.txt` first.
+2. Read `summary.txt` first; note its `firewall_tcpdump_note=` line.
 3. If throughput collapses after a strong first interval:
-   - compare `fw-wan.txt` and `server-grpc.txt`
-   - look for port drift, duplicate tuples, RSTs, or missing replies
+   - compare `server-grpc.txt` with the `fw-stats-before.txt` /
+     `fw-stats-after.txt` deltas (`RX packets`, `Flow cache hits`,
+     session hits/misses)
+   - look for port drift, duplicate tuples, RSTs, or missing replies in
+     `server-grpc.txt`; treat `fw-lan.txt` / `fw-wan.txt` as
+     kernel-visible control only, never as proof the flow was absent
 4. Use `fw-stats-before.txt` and `fw-stats-after.txt` to confirm whether the
    active firewall actually traversed the userspace dataplane.
 

@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Document that in-VM tcpdump is blind to AF_XDP fast-path flows
+    (#16111): testing-docs/failover-testing.md now names the working
+    observation points (LAN/WAN host and gRPC endpoint captures, plus
+    helper-statistics, Last resolution / Recent exceptions, monitor
+    interface, and session deltas on both nodes) and forbids reading
+    `0 packets captured` as "traffic never arrived"; the failover-test
+    and iperf-grpc-tcpdump skills and the historical HA archive carry
+    the same warning, capture_iperf.sh labels its firewall-side
+    captures as blind in summary.txt, and a docsref guard test fails
+    if the guidance is removed. Docs/skills only; no dataplane change.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Restore the opening expiry duration on the #15947 cache-drop
     rollback (fold 3): a re-pended handshake regains its snapshot
     opening duration (including any per-zone override) while keeping

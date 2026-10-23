@@ -228,6 +228,7 @@ incus exec "${PROJECT}:${ACTIVE_FW}" -- cli -c 'show chassis cluster data-plane 
   echo "active_firewall=$ACTIVE_FW"
   echo "firewall_lan_if=$FW_LAN_IF"
   echo "firewall_wan_if=$FW_WAN_IF"
+  echo "firewall_tcpdump_note=fw-lan.txt/fw-wan.txt are in-VM tcpdump and blind to AF_XDP fast-path flows (#16111); empty files do not prove the flow was absent - use server-grpc.txt plus fw-stats deltas"
   echo "client=${PROJECT}:${CLIENT_VM}"
   echo "target=$TARGET"
   echo "family=$FAMILY"
