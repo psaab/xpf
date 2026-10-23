@@ -1224,6 +1224,28 @@ else
 	bad "#11765: missing manifest gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
 fi
 
+# #16290: a manifest absent because a deploy was refused after
+# invalidation must VOID with a reason NAMING that deploy, never a bare
+# exe_check=UNAVAILABLE. The fixture records the refusal with the same
+# deploy-lib helper cmd_deploy's guard uses, then runs the gate with the
+# manifest still absent (fail-closed: verdict/exe_check unchanged).
+printf 'target=all\nfailed_at=2026-10-22T00:00:00Z\nreason=attestation manifest absent because deploy deb rolling deploy failed (rc=1); re-stage under a DISTINCT version tag (refuse-before-PREFLIGHT)\n' \
+	>"$WORK/no-manifest.json.failed"
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/no-manifest.json" \
+	BPFRX_CLUSTER_ENV='' harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-refused-deploy --adapter smoke-cells \
+	--node fake:fw0 --node-peer fake:fw1 -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "UNAVAILABLE" &&
+	"$(last_row_field void_reason)" == *"deploy all failed"* &&
+	"$(last_row_field void_reason)" == *"refuse-before-PREFLIGHT"* ]]; then
+	ok "#16290: refused deploy VOIDs naming the refused deploy, not a bare exe_check=UNAVAILABLE"
+else
+	bad "#16290: refused-deploy VOID gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) reason=$(last_row_field void_reason)"
+fi
+rm -f "$WORK/no-manifest.json.failed"
+
 printf 'fresh local rebuild with a different buildTime\n' >"$MANIFEST_ROOT/xpfd"
 local_rebuild_sha=$(sha256sum "$MANIFEST_ROOT/xpfd" | awk '{print $1}')
 manifest_helper_file="$WORK/deployed-helper"

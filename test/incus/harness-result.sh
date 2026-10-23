@@ -1347,7 +1347,18 @@ harness_result_run() {
 	# is worse than no loop layer.
 	local gate_verdict="$verdict"
 	if [[ "$verdict" != "VOID" && ( "$exe_check" == "MISMATCH" || "$exe_check" == "UNAVAILABLE" ) ]]; then
-		void_reason="exe_check=$exe_check: the running binary could not be confirmed to be the build under test (build_exe_sha256=${build_exe_sha:-<none>} running_exe_sha256=${running_exe_sha:-<none>} peer=${peer_node:-<none>} peer_running_exe_sha256=${peer_running_exe_sha:-<none>} exe_scope=${exe_scope:-<none>}) — the gate reported $verdict but of an unknown build (#2176/#9044)"
+		# #16290: when the manifest is absent because a deploy was refused
+		# or failed after invalidation, name that deploy in the VOID
+		# reason — a bare exe_check=UNAVAILABLE cannot distinguish
+		# "deploy refused, nodes still on the prior build" from "binaries
+		# unknown". The marker carries no binary identity; the row stays
+		# VOID and exe_check stays UNAVAILABLE (fail-closed).
+		local _deploy_failure=""
+		if [[ "$exe_check" == "UNAVAILABLE" ]] &&
+			declare -F deploy_manifest_failure_reason >/dev/null; then
+			_deploy_failure=$(deploy_manifest_failure_reason "$root" 2>/dev/null || true)
+		fi
+		void_reason="exe_check=$exe_check: the running binary could not be confirmed to be the build under test (build_exe_sha256=${build_exe_sha:-<none>} running_exe_sha256=${running_exe_sha:-<none>} peer=${peer_node:-<none>} peer_running_exe_sha256=${peer_running_exe_sha:-<none>} exe_scope=${exe_scope:-<none>})${_deploy_failure:+; attestation unavailable because $_deploy_failure} — the gate reported $verdict but of an unknown build (#2176/#9044)"
 		verdict="VOID"
 		headline=""
 		direction=""
@@ -1356,7 +1367,13 @@ harness_result_run() {
 	fi
 	if ((require_helper)) && [[ "$verdict" != "VOID" &&
 		"$helper_exe_check" != "MATCH" ]]; then
-		void_reason="helper_exe_check=$helper_exe_check: the running xpf-userspace-dp image could not be confirmed on both nodes (build_helper_exe_sha256=${build_helper_exe_sha:-<none>} running_helper_exe_sha256=${running_helper_exe_sha:-<none>} peer=${peer_node:-<none>} peer_running_helper_exe_sha256=${peer_running_helper_exe_sha:-<none>} helper_exe_scope=${helper_exe_scope:-<none>}) — the gate reported $verdict but helper provenance is unknown"
+		# #16290: same refused-deploy naming for the helper leg.
+		local _helper_deploy_failure=""
+		if [[ "$helper_exe_check" == "UNAVAILABLE" ]] &&
+			declare -F deploy_manifest_failure_reason >/dev/null; then
+			_helper_deploy_failure=$(deploy_manifest_failure_reason "$root" 2>/dev/null || true)
+		fi
+		void_reason="helper_exe_check=$helper_exe_check: the running xpf-userspace-dp image could not be confirmed on both nodes (build_helper_exe_sha256=${build_helper_exe_sha:-<none>} running_helper_exe_sha256=${running_helper_exe_sha:-<none>} peer=${peer_node:-<none>} peer_running_helper_exe_sha256=${peer_running_helper_exe_sha:-<none>} helper_exe_scope=${helper_exe_scope:-<none>})${_helper_deploy_failure:+; attestation unavailable because $_helper_deploy_failure} — the gate reported $verdict but helper provenance is unknown"
 		verdict="VOID"
 		headline=""
 		direction=""

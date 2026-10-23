@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Harness: a refused or failed cluster deploy no longer leaves later
+    gates with a bare exe_check=UNAVAILABLE VOID (#16290). cmd_deploy
+    arms an EXIT-trap guard after manifest invalidation that records a
+    .failed sidecar naming the deploy target and failed step; the gate
+    surfaces it in the VOID reason. The manifest itself stays absent
+    (fail-closed, no stale provenance revived); a successful deploy
+    clears the marker.
+
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Docs/harness: record the #16217 aged-failover root-cause chain
     (seed/FIB/supersession/split-handshake/wire-stage/neighbor legs
     closed, receiving-worker HA-inactive leg still open) in
