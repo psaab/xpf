@@ -519,6 +519,20 @@ impl FlowCacheEntry {
         // blackhole on a VRRP gateway MAC failover.
         neighbor_mac_epoch: u32,
     ) -> Option<Self> {
+        // #16217 (FZDiag24, arm 2): a `MissingNeighbor` decision must
+        // NEVER seed the flow cache. `is_cacheable` already excludes
+        // it, so this arm is unreachable today; the explicit guard
+        // keeps the invariant local to the seed constructor: a
+        // transient MissingNeighbor seeded during the post-failover
+        // burst (neighbor not yet resolved on the new owner) would
+        // otherwise be peeked by every silent retransmit and never
+        // evict, because a neighbor-less descriptor carries no live
+        // neighbor binding to go stale against. Fail closed: no seed,
+        // the packet takes the slow-path MissingNeighbor arm and
+        // re-resolves once the neighbor lands.
+        if decision.resolution.disposition == ForwardingDisposition::MissingNeighbor {
+            return None;
+        }
         if !Self::should_cache(meta, decision)
             || !matches!(
                 decision.resolution.disposition,

@@ -956,3 +956,108 @@ merge as the aged-failover cure.** Cluster restored after each
 run: clean master `2c8575b70e`, helper `2f2f5cbf...b04` both
 nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
 verification 14.4 Gbit/s.
+
+## Adopted MissingNeighbor restore + never-seed-cache (FZFixWire24)
+
+Diagnosis (FZDiag24, head `7fe870df9f`, scratch FILE-sink trace in
+`/var/worktrees/FZDiag24/cell/`, 24,087 fw1 records): post-FO
+transient replies hit the session-HIT on fw1 with
+`session_hit_fabric_adopted=true` (armed only by the
+shared-Established arm; the local mark never landed), yet dropped.
+The gate snapshot still read RG1 inactive, so the session-hit
+look-up answered first `ClusterTerminalHAInactive` (egress 0,
+2,688 hits) and then, once the FIB nominated the egress,
+`MissingNeighbor` (egress 14, next-hop 172.16.80.200,
+`neighbor_mac == None`, 3,308 hits). HA enforcement strips a
+`MissingNeighbor` whose egress RG is not forwarding-active to
+`HAInactive` at `forwarding/ha.rs:268` (keeping `..resolution`, so
+the neighbor-less shape survives the strip). Pre-fix
+`fabric_adopted_resolution` required `looked_up ==
+ForwardCandidate`, so the demoted `MissingNeighbor` was kept as
+`HAInactive` — the exact drop. Only 29 `ForwardCandidate`
+resolutions ever appeared (27 kept + 2 restored), 4 packets seeded
+the marked cache, and silent retransmits then peeked that seeded
+entry (`CACHEHIT mark=true invalid=None`, 10 hits) without ever
+re-entering the gate. fw0 kept serving from cache post-FO
+(23.06M hits, `forward_candidate_egress_departed=5`).
+
+Fix (both arms fail-closed, this commit):
+1. **Adopted restore handles `MissingNeighbor`.**
+   `fabric_adopted_resolution` (session_glue/resolve.rs) gains a
+   `MissingNeighbor` arm: when HA enforcement demoted it and the
+   looked-up egress RG is known (>0, tunnel-aware via
+   `owner_rg_for_resolution`), the neighbor/egress is RECOMPUTED
+   from the live FIB (`lookup_forwarding_resolution_with_dynamic`
+   for the packet's resolution target). Only a recomputed
+   `ForwardCandidate` carrying a resolved neighbor MAC and a known
+   egress RG replaces the terminal. A still-missing neighbor, an
+   unknown egress (rg 0 — including the `ClusterTerminalHAInactive`
+   shape whose egress was zeroed), or any other recomputed
+   disposition keeps the `HAInactive` terminal. The
+   `ForwardCandidate` arm is unchanged. Option (2) from the task
+   (HA enforcement must not strip the neighbor for adopted flows)
+   was NOT taken: enforcement is disposition-generic and does not
+   know the adoption proof; the restore is the single place that
+   holds both the proof (`fabric_adopted`) and the live FIB.
+2. **MissingNeighbor never seeds the flow cache.**
+   `FlowCacheEntry::from_forward_decision` refuses a
+   `MissingNeighbor` decision explicitly (backing the existing
+   `is_cacheable` exclusion at the seed constructor): a transient
+   entry seeded during the burst would be peeked by every silent
+   retransmit and never evict, because a neighbor-less descriptor
+   carries no live neighbor binding to go stale against.
+
+Tests (through the session-hit path, not helper hand-offs):
+- `adopted_missing_neighbor_recomputes_forward_candidate_16217`
+  (session_glue/tests.rs): pure arms (still-missing fail-closed,
+  resolved recompute restores with the FIB MAC, unknown-egress and
+  ClusterTerminal shapes fail-closed) PLUS end-to-end through
+  `resolve_flow_session_decision_with_conntrack_and_payload` with
+  `fabric_adopted = true` exactly as the poll session-hit site runs
+  it — non-adopted control terminates `HAInactive`, adopted hit
+  yields `ForwardCandidate` egress 12 with the resolved MAC.
+- `adopted_forward_candidate_bypasses_ha_inactive_terminal_16217`
+  updated to the new signature (its still-missing arm now asserts
+  the fail-closed terminal under the recompute).
+- `missing_neighbor_never_seeds_flow_cache_16217`
+  (flow_cache_tests.rs): production seed constructor returns None
+  for `MissingNeighbor`, Some for the same-tuple `ForwardCandidate`.
+- `cargo test 16217` 34/34 (was 32/32); `session::` 494 passed
+  with 6 failures under parallel load (4 flaky — icmp_error_budget
+  x2, routing_domain_wire x2 — pass isolated; 2 pre-existing
+  `tcp_seq_15753`, `session_decision_typed_snat_layout_11064`
+  identical on the unmodified head); `forwarding::` 390 passed
+  with the same 3 pre-existing failures; `flow_cache` 225 passed
+  with the same 5 pre-existing failures.
+
+Live aged table (all-node0, P4 60 s, RG1 fw0->fw1 at 30 s age +
+failback, deb `99.16217.49.dirty` sha256 `0c612296...211`,
+helper sha256 `850e52f5...40a4` hash-proved `/proc/<pid>/exe` on
+BOTH nodes before traffic; evidence `cell56/`, `cell57/`):
+
+| Arm | Build | SUM zero intervals | Verdict |
+|---|---|---|---|
+| Clean master (FZDiag8) | 2c8575b70e | 130 | FAIL |
+| #16215 third shape | ca91c55e5a / 99.16215.1 | 25 (all from FO+1 s) | FAIL |
+| FZFixWire23 (ct-slice emit) run 1+2 | 7fe870df9f / 99.16217.47.dirty | 29 / 29 (all from FO+1 s) | FAIL |
+| **This fix run 1 (cell56)** | **99.16217.49.dirty** | **29 (all from FO+1 s)** | **FAIL — acceptance NOT met** |
+| **This fix run 2 (cell57)** | **99.16217.49.dirty** | **25 (all from FO+1 s)** | **FAIL — twice on loss confirmed** |
+
+Pre-FO no zeros both runs (8.3-8.8 Gbit/s at 28-30 s). The
+prescribed legs are unit-proven and the neighbor leg is closed
+live (fw1 kernel `172.16.80.200 dev ge-7-0-2.80 REACHABLE` at
+d28/fo1, `Neighbor misses` 0), but the live blackhole persists:
+fw1 post-FO forward `Pkts: 0` for the heavy tuples, fw0 keeps
+serving all four streams from its flow cache post-FO (hits
+23,058,730 at fo1, `forward_candidate_egress_departed=5`, TX
+23.06M) and fw1 records 9,819 exception packets with 7,194 session
+hits yet almost no WAN TX — the client retransmits are still not
+fabric-delivered to fw1 after the transient (the FZDiag24
+residual: fw0-side supersession toward FabricRedirect / fabric
+delivery). **Do not merge as the aged-failover cure**; this closes
+the adopted-MissingNeighbor restore and the never-seed-cache legs
+FZDiag24 prescribed, not the fw0 fabric-delivery leg.
+
+Cluster restored after each run: clean master `2c8575b70e`,
+helper `2f2f5cbf...b04` both nodes (hash-proved), RG0/1/2 node0
+primary, target OK, P4 verification 13.9 / 13.7 Gbit/s.
