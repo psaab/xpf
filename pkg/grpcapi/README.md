@@ -84,6 +84,10 @@ restored across xpfd restarts, so a restart under an unchanged key no longer
 re-opens the grace; a changed key set re-anchors and gets a fresh grace. A
 missing/corrupt record or a failed persist falls back to anchoring at that
 apply (with a warning) — the residual is a wiped `/var/lib/xpf`.
+ #16027: a future-dated stamp (backwards-stepped clock) is clamped to
+`now` — shortened, never extended — with the stamp preserved on disk for clock
+recovery, and clearing the key deletes the record so reinstalling the same key
+is a fresh first keying.
 
 **Forwarded failover proxy budget (#15081).** `proxyPeerSystemAction` keeps
 the historical 5s deadline for ordinary forwarded actions, but a forwarded
