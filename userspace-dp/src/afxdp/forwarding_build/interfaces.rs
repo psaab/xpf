@@ -559,6 +559,82 @@ fn unit_rows_admit(claims: &BTreeMap<i32, UnitZoneClaim>, ifindex: i32, zone: &s
     }
 }
 
+/// #16130: pure precompute extracted from `populate_interfaces` — the
+/// ifindexes carrying at least one configured logical-unit host-inbound
+/// row (#12646). Pure over the snapshot: no `ForwardingState` access, so
+/// the walk consults exactly the set the inline computation produced.
+fn unit_host_inbound_ifindexes_precompute(snapshot: &ConfigSnapshot) -> BTreeSet<i32> {
+    snapshot
+        .interfaces
+        .iter()
+        .filter(|iface| iface.ifindex > 0 && iface.host_inbound_configured)
+        .filter(|iface| is_logical_unit_row(&iface.name, iface.is_unit))
+        .map(|iface| iface.ifindex)
+        .collect()
+}
+
+/// #16130: pure precompute extracted from `populate_interfaces` — the
+/// ifindexes whose configured unit rows DISAGREE on their effective
+/// host-inbound override (#16057), derived from the precomputed claims.
+fn disputed_host_inbound_ifindexes_precompute(
+    claims: &BTreeMap<i32, UnitHostInboundClaim>,
+) -> BTreeSet<i32> {
+    claims
+        .iter()
+        .filter(|(_, claim)| **claim == UnitHostInboundClaim::Disagree)
+        .map(|(ifindex, _)| *ifindex)
+        .collect()
+}
+
+/// #16130: pure post-walk flush extracted from `populate_interfaces` —
+/// admit an ifindex's corroborated egress zone (#6722) into
+/// `state.ifindex_unambiguous_zone_id`. Consumes only the two claim maps
+/// the walk accumulated plus `state.zone_name_to_id`; the walk's own
+/// ordering relative to the other post-walk phases is unchanged (this
+/// runs at exactly the site the inline loop occupied).
+fn flush_egress_zone_claims(
+    state: &mut ForwardingState,
+    egress_zone_claim: BTreeMap<i32, EgressZoneClaim>,
+    zones_carried: &BTreeMap<i32, BTreeSet<String>>,
+) {
+    for (ifindex, claim) in egress_zone_claim {
+        let Some(zone) = claim.resolve(zones_carried.get(&ifindex)) else {
+            continue;
+        };
+        match state.zone_name_to_id.get(&zone).copied() {
+            Some(zone_id) if zone_id != 0 => {
+                state.ifindex_unambiguous_zone_id.insert(ifindex, zone_id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// #16130: pure post-walk phase extracted from `populate_interfaces` —
+/// the #16057 disputed host-inbound sentinel install. Consumes only the
+/// disputed set plus `state`; returns the ifindexes it armed so the
+/// caller emits the warning at exactly the original site/order.
+fn install_disputed_host_inbound_sentinels(
+    state: &mut ForwardingState,
+    disputed: &BTreeSet<i32>,
+) -> BTreeSet<i32> {
+    let mut armed: BTreeSet<i32> = BTreeSet::new();
+    for ifindex in disputed {
+        if let Some(name) = state.ifindex_to_config_name.get(ifindex) {
+            if is_host_inbound_lifeline(name) {
+                continue;
+            }
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) =
+            state.ifindex_host_inbound.entry(*ifindex)
+        {
+            armed.insert(*ifindex);
+            slot.insert(crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
+        }
+    }
+    armed
+}
+
 impl EgressZoneClaim {
     fn merge(&self, egress_zone: &str) -> Self {
         match self {
@@ -657,25 +733,15 @@ pub(super) fn populate_interfaces(
     // set, keyed by the logical unit name. A unit-0 row shares its ifindex with
     // the base row, so preserve the more-specific unit's set even if snapshot
     // row order changes.
-    let unit_host_inbound_ifindexes: std::collections::BTreeSet<i32> = snapshot
-        .interfaces
-        .iter()
-        .filter(|iface| iface.ifindex > 0 && iface.host_inbound_configured)
-        .filter(|iface| is_logical_unit_row(&iface.name, iface.is_unit))
-        .map(|iface| iface.ifindex)
-        .collect();
+    let unit_host_inbound_ifindexes = unit_host_inbound_ifindexes_precompute(snapshot);
     // #16057: ifindexes whose CONFIGURED unit rows carry DIFFERENT effective
     // host-inbound overrides. Precomputed before the walk so the refusal is
     // row-order independent; the disputed override is refused in the walk
     // and the empty fail-closed sentinel is installed after it (plus a
     // warning), mirroring the #10503 contested-zone backstop.
     let unit_host_inbound_claim_map = unit_host_inbound_claims(snapshot);
-    let disputed_host_inbound_ifindexes: std::collections::BTreeSet<i32> =
-        unit_host_inbound_claim_map
-            .iter()
-            .filter(|(_, claim)| **claim == UnitHostInboundClaim::Disagree)
-            .map(|(ifindex, _)| *ifindex)
-            .collect();
+    let disputed_host_inbound_ifindexes =
+        disputed_host_inbound_ifindexes_precompute(&unit_host_inbound_claim_map);
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -1366,21 +1432,8 @@ pub(super) fn populate_interfaces(
     // the walk refused every disputed write, and the empty-zone sentinel
     // bookkeeping is left untouched), never arm a lifeline, and warn once
     // per disputed ifindex per build so the deny is observable (#8296).
-    let mut disputed_host_inbound_sentinels: std::collections::BTreeSet<i32> =
-        std::collections::BTreeSet::new();
-    for ifindex in &disputed_host_inbound_ifindexes {
-        if let Some(name) = state.ifindex_to_config_name.get(ifindex) {
-            if is_host_inbound_lifeline(name) {
-                continue;
-            }
-        }
-        if let std::collections::hash_map::Entry::Vacant(slot) =
-            state.ifindex_host_inbound.entry(*ifindex)
-        {
-            disputed_host_inbound_sentinels.insert(*ifindex);
-            slot.insert(crate::afxdp::types::ZoneHostInbound { ndp_excluded: true, ..Default::default() });
-        }
-    }
+    let disputed_host_inbound_sentinels =
+        install_disputed_host_inbound_sentinels(state, &disputed_host_inbound_ifindexes);
     for ifindex in &disputed_host_inbound_sentinels {
         eprintln!(
             "xpf-userspace-dp: WARNING host-inbound override contest on shared ifindex {}: \
@@ -1709,17 +1762,7 @@ pub(super) fn populate_interfaces(
         }
     }
 
-    for (ifindex, claim) in egress_zone_claim {
-        let Some(zone) = claim.resolve(zones_carried.get(&ifindex)) else {
-            continue;
-        };
-        match state.zone_name_to_id.get(&zone).copied() {
-            Some(zone_id) if zone_id != 0 => {
-                state.ifindex_unambiguous_zone_id.insert(ifindex, zone_id);
-            }
-            _ => {}
-        }
-    }
+    flush_egress_zone_claims(state, egress_zone_claim, &zones_carried);
 
     // #7160 (#2387): zone -> routing DOMAIN, for fabric-ingress packets where
     // the peer's encoded zone is the only ingress identity available. A zone
@@ -2487,61 +2530,175 @@ fn is_zone_gated_host_inbound_name(name: &str) -> bool {
 /// `primary` when the snapshot marks one (#15155), else the first
 /// non-link-local address in snapshot order, else the first address
 /// of the family. An unmarked snapshot behaves exactly as before.
-pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<Ipv4Addr> {
+/// #16130: diff-verified twin — `pick_interface_v4`/`_v6` differ only in
+/// the family string, the address type, and the link-local predicate
+/// (`is_link_local` vs `is_unicast_link_local`), folded here as the
+/// parameters. Bodies were verbatim after that folding (see PR diff).
+fn pick_interface_generic<A: Copy>(
+    iface: &InterfaceSnapshot,
+    family: &str,
+    parse: fn(&str) -> Option<A>,
+    is_link_local: fn(A) -> bool,
+) -> Option<A> {
     if iface.admin_disabled {
         return None;
     }
-
     let mut fallback = None;
     let mut first_non_link_local = None;
     for addr in &iface.addresses {
-        if addr.family != "inet" {
+        if addr.family != family {
             continue;
         }
-        let Ok(net) = addr.address.parse::<ipnet::Ipv4Net>() else {
+        let Some(ip) = parse(&addr.address) else {
             continue;
         };
-        let ip = net.addr();
         if addr.primary {
             return Some(ip);
         }
         if fallback.is_none() {
             fallback = Some(ip);
         }
-        if first_non_link_local.is_none() && !ip.is_link_local() {
+        if first_non_link_local.is_none() && !is_link_local(ip) {
             first_non_link_local = Some(ip);
         }
     }
     first_non_link_local.or(fallback)
+}
+
+pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<Ipv4Addr> {
+    pick_interface_generic(
+        iface,
+        "inet",
+        |address| address.parse::<ipnet::Ipv4Net>().ok().map(|net| net.addr()),
+        |ip| ip.is_link_local(),
+    )
 }
 
 pub(in crate::afxdp) fn pick_interface_v6(iface: &InterfaceSnapshot) -> Option<Ipv6Addr> {
-    if iface.admin_disabled {
-        return None;
-    }
-    let mut fallback = None;
-    let mut first_non_link_local = None;
-    for addr in &iface.addresses {
-        if addr.family != "inet6" {
-            continue;
-        }
-        let Ok(net) = addr.address.parse::<ipnet::Ipv6Net>() else {
-            continue;
-        };
-        let ip = net.addr();
-        if addr.primary {
-            return Some(ip);
-        }
-        if fallback.is_none() {
-            fallback = Some(ip);
-        }
-        if first_non_link_local.is_none() && !ip.is_unicast_link_local() {
-            first_non_link_local = Some(ip);
-        }
-    }
-    first_non_link_local.or(fallback)
+    pick_interface_generic(
+        iface,
+        "inet6",
+        |address| address.parse::<ipnet::Ipv6Net>().ok().map(|net| net.addr()),
+        |ip| ip.is_unicast_link_local(),
+    )
 }
 
+#[cfg(test)]
+mod populate_extract_16130_tests {
+    use super::*;
+
+    fn unit_row(name: &str, ifindex: i32, configured: bool) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: name.into(),
+            ifindex,
+            is_unit: Some(true),
+            host_inbound_configured: configured,
+            ..Default::default()
+        }
+    }
+
+    // FAIL-ON-REVERT: inlining these precomputes back into the walk with
+    // (say) the `ifindex > 0` or configured filter dropped reds here.
+    #[test]
+    fn precomputes_filter_exactly_16130() {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                unit_row("ge-0/0/0.0", 10, true),
+                unit_row("ge-0/0/0.1", 10, true),
+                unit_row("ge-0/0/1.0", 0, true),
+                unit_row("ge-0/0/2.0", 12, false),
+                InterfaceSnapshot {
+                    name: "ge-0/0/3".into(),
+                    ifindex: 13,
+                    is_unit: Some(false),
+                    host_inbound_configured: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            unit_host_inbound_ifindexes_precompute(&snapshot),
+            BTreeSet::from([10])
+        );
+        let mut claims: BTreeMap<i32, UnitHostInboundClaim> = BTreeMap::new();
+        claims.insert(10, UnitHostInboundClaim::Disagree);
+        claims.insert(
+            11,
+            UnitHostInboundClaim::Agreed(BTreeSet::new(), BTreeSet::new(), false),
+        );
+        assert_eq!(
+            disputed_host_inbound_ifindexes_precompute(&claims),
+            BTreeSet::from([10])
+        );
+    }
+
+    #[test]
+    fn flush_egress_zone_claims_corroborates_16130() {
+        let mut state = ForwardingState::default();
+        state.zone_name_to_id.insert("trust".into(), 7);
+        state.zone_name_to_id.insert("untrust".into(), 9);
+        let mut claims: BTreeMap<i32, EgressZoneClaim> = BTreeMap::new();
+        claims.insert(10, EgressZoneClaim::Decided("trust".into()));
+        claims.insert(11, EgressZoneClaim::Decided("untrust".into()));
+        claims.insert(12, EgressZoneClaim::Conflicting);
+        claims.insert(13, EgressZoneClaim::Decided("".into()));
+        let mut carried: BTreeMap<i32, BTreeSet<String>> = BTreeMap::new();
+        carried.insert(10, BTreeSet::from(["trust".into()]));
+        // 11 claims untrust but no row carries it: must NOT be admitted.
+        carried.insert(11, BTreeSet::from(["trust".into()]));
+        carried.insert(12, BTreeSet::from(["trust".into()]));
+        flush_egress_zone_claims(&mut state, claims, &carried);
+        assert_eq!(state.ifindex_unambiguous_zone_id.get(&10), Some(&7));
+        assert!(!state.ifindex_unambiguous_zone_id.contains_key(&11));
+        assert!(!state.ifindex_unambiguous_zone_id.contains_key(&12));
+        assert!(!state.ifindex_unambiguous_zone_id.contains_key(&13));
+    }
+
+    #[test]
+    fn install_disputed_sentinels_never_clobbers_or_arms_lifeline_16130() {
+        let mut state = ForwardingState::default();
+        state.ifindex_to_config_name.insert(10, "ge-0/0/0.0".into());
+        state.ifindex_to_config_name.insert(11, "fxp0".into());
+        state.ifindex_to_config_name.insert(12, "ge-0/0/1.0".into());
+        state.ifindex_host_inbound.insert(
+            12,
+            crate::afxdp::types::ZoneHostInbound::default(),
+        );
+        let armed = install_disputed_host_inbound_sentinels(&mut state, &BTreeSet::from([10, 11, 12]));
+        assert_eq!(armed, BTreeSet::from([10]));
+        assert!(state.ifindex_host_inbound[&10].ndp_excluded);
+        assert!(!state.ifindex_host_inbound.contains_key(&11), "lifeline unarmed");
+    }
+
+    #[test]
+    fn pick_generic_primary_and_link_local_16130() {
+        // Parity is pinned end-to-end by primary_address_15155; here the
+        // generic body itself: primary wins even when link-local, else
+        // first non-link-local, else first.
+        let iface = InterfaceSnapshot {
+            name: "ge-0/0/0".into(),
+            addresses: vec![
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "169.254.1.1/16".into(),
+                    ..Default::default()
+                },
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "192.0.2.1/24".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            pick_interface_v4(&iface),
+            Some(Ipv4Addr::new(192, 0, 2, 1))
+        );
+        assert_eq!(pick_interface_v6(&iface), None);
+    }
+}
 // #7160 (#2387) — the routing-domain half of the interface build.
 //
 // These cells guard the two maps `forwarding::ingress_routing_domain` reads
