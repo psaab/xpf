@@ -4904,7 +4904,10 @@ impl SessionTable {
             fabric_redirect_sync: false,
             created_ns: forward.created_ns,
             last_seen_ns: forward.last_seen_ns,
-            counters: SessionCounters::default(),
+            // #16217: live counters (the forward entry is in hand) so
+            // the stage-advance Update carries the service evidence
+            // the peer's adoption gate reads, not install-time zero.
+            counters: forward.counters,
             observed_tos: forward.observed_tos,
             observed_tcp_flags: forward.observed_tcp_flags,
             session_id: forward.session_id,

@@ -1242,6 +1242,14 @@ impl SessionTable {
         } else {
             self.handshake_state_wire_for(&key)
         };
+        // #16217: snapshot the LIVE counters before `key` moves into
+        // the delta, so the peer's scoped completion-evidence gate
+        // sees actual service; the old default-zero stamp made every
+        // re-export read as no evidence. Absent entry stays zero.
+        let live_counters = self
+            .entry_by_key(&key)
+            .map(|entry| entry.counters)
+            .unwrap_or_default();
         Some(SessionDelta {
             provenance,
             tcp_close_class: self.close_class_wire_for(&key),
@@ -1260,8 +1268,7 @@ impl SessionTable {
             // SESSION_CREATE frame reports no duration, so 0/unknown is fine.
             created_ns: 0,
             last_seen_ns: 0,
-            // #2501: an open carries no volume yet.
-            counters: SessionCounters::default(),
+            counters: live_counters,
             // #2749: explicit Open-delta emit, no entry in hand.
             observed_tos: 0,
             observed_tcp_flags: 0,

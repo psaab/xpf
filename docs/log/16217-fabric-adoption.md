@@ -444,3 +444,59 @@ runs 5–8 plus this run. Do not merge as the aged-failover cure.
 Cluster restored: clean master `2c8575b70e`, helper `2f2f5cbf…b04`
 both nodes (hash-proved), RG0/1/2 node0 primary, target OK, P4
 verification 14.1 Gbit/s.
+
+## Counter carriage end-to-end (FZFixWire10, per FZDiag19)
+
+FZDiag19 proved the scoped-evidence gate could never qualify live:
+every leg stamped zero. Rust Open/Update deltas carried
+`SessionCounters::default()` (only Close snapshotted live counts),
+the JSON `SessionDeltaInfo` and Go `SessionDeltaInfo`/`SessionValue`/
+`SessionSyncRequest` had no fwd/rev packet fields, and Rust import
+(`build_synced_session_entry`) hard-stamped `rev_packets: 0,
+fwd_packets: 0`. The unit arm constructed counts in-process,
+bypassing the wire — test-only-green.
+
+Fix (additive only, old peers ignore / decode 0 = no evidence):
+- Rust: `open_export_delta_with_provenance` snapshots the live
+  entry's counters; `emit_session_state_update_inner` stamps the
+  forward entry's live counters; the coordinator bulk export stamps
+  the shared row's monotonic `fwd_packets`/`rev_packets`;
+  `session_delta_info` copies them to the JSON leg; the binary
+  open/update frame appends them as trailing length-gated u64s
+  (after the NAT-scope ifindex; rule-id trailer reservation grew to
+  cover them, golden regenerated).
+- Go: `SessionDeltaInfo.FwdPackets/RevPackets` (JSON + binary-tail
+  decode), delta→`SessionValue{,V6}` copy, `SessionSyncRequest`
+  forward in both families. The derived #7194 schema fingerprint
+  changes automatically on both sides (computed from the wire-name
+  set), so mixed builds fence rather than silently zero-fill.
+- Rust import: `build_synced_session_entry` stamps
+  `req.fwd_packets/rev_packets`; the existing monotonic publish
+  merge (canonical + alias) preserves the max per incarnation.
+
+Tests: `cargo test 16217` 19/19 (new:
+`open_and_update_deltas_carry_live_counters_16217`,
+`import_stamps_request_counters_16217`,
+`session_delta_info_carries_live_counters_16217`), `16223` 26/26,
+codec 50/50; `session::` 504 passed with the 2 failures identical
+on clean base (`tcp_seq_15753`,
+`session_decision_typed_snat_layout_11064`, pre-existing). Go:
+`TestConvertCarriesPacketCounters16217`,
+`TestSyncRequestCarriesPacketCounters16217` pass; go vet clean.
+
+Live (build `99.16217.29.dirty`, deb sha256 `bd0f7f28…d75b`, helper
+sha256 `86ba65f8…c7ae` homogeneous `/proc/<pid>/exe` both nodes
+before traffic; evidence `/var/worktrees/fzadopt2/cell32/`): aged
+30 s RG1 failover P4, all-node0, FO at 30 s — **FAIL, 25 SUM zero
+intervals (31 s→end) in BOTH completed runs** — twice-on-loss
+confirmed for the counter-carriage build. No pre-FO zeros;
+`snat_revoked` fw0 0→2 at FO+1 s in run 1 (0 on fw1). At d28 fw1's
+Backup rows remain mixed (some canonical heavy rows still
+`Timeout: 20`). So the wire now carries the counts, but live the
+evidence still does not rescue the heavy tuples before the
+failover instant (or the post-adoption forward path still
+blackholes — FZDiag18's residual stands). Do not merge as the
+aged-failover cure; this closes the counter-carriage leg
+FZDiag19 prescribed. Cluster restored after each run: clean master
+`2c8575b70e`, helper `2f2f5cbf…b04` both nodes (hash-proved),
+RG0/1/2 node0 primary, target OK, P4 verification 13.7 Gbit/s.
