@@ -450,6 +450,17 @@ func assignScreenIDs(result *CompileResult, cfg *config.Config) {
 // The isRecompile flag triggers FIB generation bump for hitless restarts.
 // Optional beforeMutation callbacks run after the host-pure validation pass
 // with its result and before Phase 2 touches the host.
+//
+// #15943 (H11-01): failures at or after Phase 2 return the partial
+// *CompileResult alongside the error, never nil. Phase 2 is the first host
+// mutation and later phases have no undo, so the caller needs the result --
+// its hostMutations and pending attach state -- to run divergence accounting
+// (inherit/recordHostDivergence, abortAfterHostMutation, arm-coverage proof)
+// instead of silently dropping the split state. Pre-Phase-2 failures
+// (nil config, dataplane not loaded, the #4960 validation pre-pass, the
+// pre-mutation callback) still return nil: nothing has mutated, so there is
+// nothing to account for. Callers must check err first and only consume the
+// result for accounting on the post-mutation path.
 func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMutation ...func(*CompileResult) error) (*CompileResult, error) {
 	if len(beforeMutation) > 1 {
 		return nil, fmt.Errorf("CompileConfig accepts at most one pre-mutation callback")
@@ -507,29 +518,31 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 
 	// Phase 3: Compile address book
 	if err := compileAddressBook(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile address book: %w", err)
+		return result, fmt.Errorf("compile address book: %w", err)
 	}
 
 	// Phase 4: Compile applications
 	if err := compileApplications(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile applications: %w", err)
+		return result, fmt.Errorf("compile applications: %w", err)
 	}
 
 	// Phase 5: Compile policies
 	if err := compilePolicies(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile policies: %w", err)
+		return result, fmt.Errorf("compile policies: %w", err)
 	}
 
 	// Phase 6: Compile NAT (#14679: persistent registrations staged across
-	// NAT+NAT64 and swapped atomically only after both succeed).
+	// NAT+NAT64 and swapped atomically only after both succeed). #15943:
+	// a failure here is post-Phase-2, so return the partial result (the
+	// staging swap is correctly skipped on error by construction).
 	natStaging := newNATPersistentStaging(dp)
 	if err := compileNATWithStaging(dp, cfg, result, natStaging); err != nil {
-		return nil, fmt.Errorf("compile nat: %w", err)
+		return result, fmt.Errorf("compile nat: %w", err)
 	}
 
 	// Phase 6.5: Compile static NAT
 	if err := compileStaticNAT(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile static nat: %w", err)
+		return result, fmt.Errorf("compile static nat: %w", err)
 	}
 
 	// SNAT, DNAT, and static NAT have now recorded every per-rule counter key.
@@ -541,43 +554,43 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMut
 
 	// Phase 6.6: Compile NAT64 prefixes
 	if err := compileNAT64WithStaging(dp, cfg, result, natStaging); err != nil {
-		return nil, fmt.Errorf("compile nat64: %w", err)
+		return result, fmt.Errorf("compile nat64: %w", err)
 	}
 	natStaging.commit()
 
 	// Phase 6.7: Compile NPTv6 (RFC 6296) prefix translation rules
 	if err := compileNPTv6(dp, cfg); err != nil {
-		return nil, fmt.Errorf("compile nptv6: %w", err)
+		return result, fmt.Errorf("compile nptv6: %w", err)
 	}
 
 	// Phase 7: Compile screen profiles
 	if err := compileScreenProfiles(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile screen profiles: %w", err)
+		return result, fmt.Errorf("compile screen profiles: %w", err)
 	}
 
 	// Phase 8: Compile default policy
 	if err := compileDefaultPolicy(dp, cfg); err != nil {
-		return nil, fmt.Errorf("compile default policy: %w", err)
+		return result, fmt.Errorf("compile default policy: %w", err)
 	}
 
 	// Phase 9: Compile flow timeouts
 	if err := compileFlowTimeouts(dp, cfg); err != nil {
-		return nil, fmt.Errorf("compile flow timeouts: %w", err)
+		return result, fmt.Errorf("compile flow timeouts: %w", err)
 	}
 
 	// Phase 10: Compile firewall filters (before flow config so lo0 IDs are available)
 	if err := compileFirewallFilters(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile firewall filters: %w", err)
+		return result, fmt.Errorf("compile firewall filters: %w", err)
 	}
 
 	// Phase 10b: Compile flow config (TCP MSS clamp, lo0 filter IDs, etc.)
 	if err := compileFlowConfig(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile flow config: %w", err)
+		return result, fmt.Errorf("compile flow config: %w", err)
 	}
 
 	// Phase 11: Compile port mirroring
 	if err := compilePortMirroring(dp, cfg, result); err != nil {
-		return nil, fmt.Errorf("compile port mirroring: %w", err)
+		return result, fmt.Errorf("compile port mirroring: %w", err)
 	}
 
 	// Bump FIB generation counter on recompile so sessions re-run

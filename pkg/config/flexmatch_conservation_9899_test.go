@@ -25,7 +25,7 @@ func TestFlexMatchRunConservation9899(t *testing.T) {
 			t.Fatal(err)
 		}
 		term := firstInetTerm(t, cfg, "F")
-		want := &FlexMatchConfig{MatchStart: "layer-3", BitLength: 8, ByteOffset: 9, Value: 0x11, Mask: 0xFF}
+		want := &FlexMatchConfig{MatchStart: "layer-3", BitLength: 8, ByteOffset: 9, Value: 0x11, Mask: 0xFF, ValueSet: true}
 		if !reflect.DeepEqual(term.FlexMatch, want) || len(term.UnknownFlexMatch) != 0 {
 			t.Errorf("%s: run lost configured match fields: got=%+v unknown=%q want=%+v", shape, term.FlexMatch, term.UnknownFlexMatch, want)
 		}
@@ -46,7 +46,7 @@ func TestFlexMatchSameNameConservation9899(t *testing.T) {
 			continue
 		}
 		term := firstInetTerm(t, cfg, "F")
-		want := &FlexMatchConfig{MatchStart: "layer-3", BitLength: 8, ByteOffset: 9, Value: 0x11, Mask: 0xFF}
+		want := &FlexMatchConfig{MatchStart: "layer-3", BitLength: 8, ByteOffset: 9, Value: 0x11, Mask: 0xFF, ValueSet: true}
 		if !reflect.DeepEqual(term.FlexMatch, want) || !reflect.DeepEqual(term.FlexMatchRangeNames, []string{"R"}) {
 			t.Errorf("same-name blocks lost fields or defaulted before merge: got=%+v names=%q want=%+v", term.FlexMatch, term.FlexMatchRangeNames, want)
 		}

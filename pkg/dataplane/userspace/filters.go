@@ -372,7 +372,7 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		// byte offset is L3-relative (match-start layer-3, the only start point
 		// the compiler emits). A zero effective length is dropped (no
 		// constraint) rather than emitted as a degenerate always-fail match.
-		if len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 {
+		if len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 || !config.FlexMatchValid(term.FlexMatch) {
 			// #5823: the term names more than one flexible-match-range range;
 			// the wire matcher supports exactly one. The strict commit gate
 			// (validateFilterFlexMatchStrict) already rejects this, so a term

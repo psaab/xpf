@@ -224,6 +224,7 @@ func TestFlexMatchSingleRangeUnchanged_5823(t *testing.T) {
 	// Flat-set single range also compiles and counts exactly one.
 	ftree := buildFilterTree(t,
 		"set firewall family inet filter okflat term t from flexible-match-range range only byte-offset 9",
+		"set firewall family inet filter okflat term t from flexible-match-range range only match-value 0x11",
 		"set firewall family inet filter okflat term t then accept",
 	)
 	fcfg, ferr := CompileConfig(ftree)

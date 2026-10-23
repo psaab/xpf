@@ -1123,7 +1123,20 @@ func compileServices(node *Node, svc *ServicesConfig, warnings *[]string) error 
 		svc.ApplicationIdentification = true
 	}
 	if warnings != nil {
-		*warnings = append(*warnings, servicesAcceptedOnlyWarnings(node)...)
+		*warnings = append(*warnings, userIdentificationWarnings("services", node)...)
+		old := servicesAcceptedOnlyWarnings(node)
+		for _, w := range old {
+			dup := false
+			for _, existing := range *warnings {
+				if existing == w {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				*warnings = append(*warnings, w)
+			}
+		}
 	}
 	return nil
 }
@@ -1154,6 +1167,27 @@ func userIdentificationWarnings(root string, node *Node) []string {
 		if userIdentificationStanzas[name] && !seen[name] {
 			seen[name] = true
 			stanzas = append(stanzas, name)
+		}
+	}
+	// Packed root: a flat single-line spelling (`services
+	// user-identification authentication-source ...;` or the elided
+	// `security authentication-source { ... }`) packs the stanza path
+	// onto the ROOT node's own Keys with no children. Scan those keys
+	// so every spelling warns identically (#16296 rebase: master's
+	// child-only walk missed exactly this shape).
+	if len(node.Children) == 0 && len(node.Keys) > 1 {
+		for i, k := range node.Keys {
+			if k == "user-identification" {
+				sawUserID = true
+				if i+1 < len(node.Keys) {
+					add(node.Keys[i+1])
+				}
+			} else if i > 0 && userIdentificationStanzas[k] && node.Keys[0] != "user-identification" {
+				// Direct stanza packed on the root line:
+				// `security authentication-source { ... }`.
+				sawUserID = true
+				add(k)
+			}
 		}
 	}
 	var walk func(n *Node)

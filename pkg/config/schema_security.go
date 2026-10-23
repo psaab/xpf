@@ -547,6 +547,22 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			}},
 		}},
 	}},
+	// #15943 (H15-01): `security user-identification` is accepted-only
+	// (#10947/#15655): the compiler warns via userIdentificationWarnings
+	// and the stanza has no runtime effect, exactly as the `services`
+	// spelling. Without this node the security root's closed world
+	// rejected a stanza the compiler is wired to accept. Opaque: the
+	// sub-stanza grammar (AD/LDAP bind details) is unmodeled and carried
+	// by the raw AST, so closed-world enforcement ends here.
+	"user-identification": {desc: "User identification (accepted-only; no runtime effect)", closedWorldOpaque: true, children: map[string]*schemaNode{
+		"authentication-source": {desc: "Authentication source", closedWorldOpaque: true, children: nil},
+		"device-information":    {desc: "Device information source", closedWorldOpaque: true, children: nil},
+		"active-directory-access": {desc: "Active Directory access", closedWorldOpaque: true, children: nil},
+		"identity-management":     {desc: "Identity management", closedWorldOpaque: true, children: nil},
+		"local-authentication-table": {desc: "Local authentication table", args: 1, placeholder: "<name>", closedWorldOpaque: true, children: nil},
+	}},
+	"authentication-source": {desc: "Authentication source (accepted-only; no runtime effect)", closedWorldOpaque: true, children: nil},
+	"device-information":    {desc: "Device information source (accepted-only; no runtime effect)", closedWorldOpaque: true, children: nil},
 	"screen": {desc: "Screen options", children: map[string]*schemaNode{
 		"ids-option": {desc: "Screen profile name", args: 1, valueHint: ValueHintScreenProfile, placeholder: "<screen-name>", children: map[string]*schemaNode{
 			// #10078: the four family bodies are compiler-owned packed

@@ -1461,7 +1461,8 @@ func TestNftRuleFromTermFlexMatchUnrepresentableMatchesNothing7722(t *testing.T)
 	prefixLists := map[string]*config.PrefixList{}
 
 	// Route 1: a load width outside 1..4 bytes (40 bits -> 5).
-	wide := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 40, Value: 1, Mask: 0xff}
+	wide := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 40, Value: 1, Mask: 0xff, ValueSet: true, MaskSet: true}
+
 	got := nftRule(t, &config.FirewallFilterTerm{
 		Name: "flex-too-wide", FlexMatch: &wide, Action: config.FilterActionAccept,
 	}, "ip", prefixLists)
@@ -1489,7 +1490,8 @@ func TestNftRuleFromTermFlexMatchUnrepresentableMatchesNothing7722(t *testing.T)
 	// CONTROL. A REPRESENTABLE flex-match must still render, or the two
 	// assertions above would pass against a build that never renders a
 	// flex-match at all.
-	ok := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff}
+	ok := config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff, ValueSet: true, MaskSet: true}
+
 	got = nftRule(t, &config.FirewallFilterTerm{
 		Name: "flex-ok", FlexMatch: &ok, Action: config.FilterActionAccept,
 	}, "ip", prefixLists)

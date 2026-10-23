@@ -166,14 +166,19 @@ var knownBlindScopePairs8852 = map[string]string{
 	// #12810 admits these schema pairs; the census has no compact site for
 	// a zero-argument container head, so per-pair equivalence is measured by
 	// the sampling-instance and family-only fixtures instead.
-	"instance family": "plain-container",
-	"instance input":  "plain-container",
-	"inet output":     "plain-container",
-	"inet6 output":    "plain-container",
+	"instance family":           "plain-container",
+	"instance input":            "plain-container",
+	"inet output":               "plain-container",
+	"inet6 output":              "plain-container",
 	"forwarding-options family": "plain-container",
 	"protocols ospf3":           "plain-container",
-	"security dynamic-address":  "plain-container",
-	"system dataplane":          "plain-container",
+	// #16296: only (security, user-identification) is blind -- it is a
+	// plain container. Its identity sub-pairs and the direct security pairs
+	// now emit census sites and are adjudicated by the scope-preservation
+	// and packed/split parity cells.
+	"security user-identification": "plain-container",
+	"security dynamic-address":     "plain-container",
+	"system dataplane":             "plain-container",
 	// #8879 batch 7, shapes derived by the sentinel method.
 	"class-of-service classifiers":   "plain-container",
 	"class-of-service rewrite-rules": "plain-container",

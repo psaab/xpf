@@ -272,8 +272,8 @@ func TestDNATOffShadowCrossRuleSetDisjointScopesClean11352(t *testing.T) {
 // TestDNATOffShadowReasonTiers_9879 exercises the shared predicate directly on
 // tier shapes awkward to spell in set syntax: an off exact port holding
 // against a translate wildcard (off wins its tier), a translate range tying an
-// off range (same wildcard key), and numeric-vs-name protocol spellings (a
-// documented miss, never a fire).
+// off range (same wildcard key), and numeric-vs-name protocol spellings
+// (same IANA protocol — the witness must equate them, #15943 H11-04).
 func TestDNATOffShadowReasonTiers_9879(t *testing.T) {
 	mkRule := func(name, dst string, ports []int, protos []string, then NATThen) *NATRule {
 		return &NATRule{
@@ -302,7 +302,7 @@ func TestDNATOffShadowReasonTiers_9879(t *testing.T) {
 		{"off-wild-loses-vs-translate-exact", off("o", "192.0.2.10", nil, []string{"tcp"}), tr("t", "192.0.2.10", []int{80}, []string{"tcp"}), true},
 		{"range-ties-range", off("o", "192.0.2.10", []int{1000, 1001, 1002}, []string{"tcp"}), tr("t", "192.0.2.10", []int{1001, 1002, 1003}, []string{"tcp"}), false},
 		{"off-range-loses-vs-translate-exact-in-range", off("o", "192.0.2.10", []int{1000, 1001, 1002}, []string{"tcp"}), tr("t", "192.0.2.10", []int{1001}, []string{"tcp"}), true},
-		{"numeric-proto-spelling-miss", off("o", "192.0.2.10", nil, []string{"tcp"}), tr("t", "192.0.2.10", []int{80}, []string{"6"}), false},
+		{"numeric-proto-spelling-hit-name-vs-number", off("o", "192.0.2.10", nil, []string{"tcp"}), tr("t", "192.0.2.10", []int{80}, []string{"6"}), true},
 		{"numeric-proto-spelling-hit", off("o", "192.0.2.10", nil, []string{"6"}), tr("t", "192.0.2.10", []int{80}, []string{"6"}), true},
 	}
 	for _, tc := range cases {

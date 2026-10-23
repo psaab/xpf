@@ -4084,7 +4084,7 @@ func nftDSCPValue(name string) string {
 // capping would compare only the truncated window and BROADEN the match, which
 // is the #3406 fail-open.
 func lo0FlexMatchUnrepresentable(term *config.FirewallFilterTerm) bool {
-	if len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 {
+	if len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 || !config.FlexMatchValid(term.FlexMatch) {
 		return true
 	}
 	if term.FlexMatch == nil {

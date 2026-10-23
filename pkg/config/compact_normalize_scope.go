@@ -389,6 +389,23 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	// measurement was taken, so a gate verdict without a commit is not
 	// checkable. That is the provenance requirement applied to my own entry
 	// rather than to someone else's register.
+	// #16296 fold-2: the accepted-only security identity stanzas. Their
+	// wrapped/elided spellings pack authored detail tokens onto the stanza
+	// line; admitting exactly these pairs makes normalization split them
+	// into preserved children rather than leaving them flattened/lost
+	// under an opaque node. No typed state is consumed -- the pass only
+	// preserves the raw AST all warning/redaction/show paths already read.
+	switch containerKeyword + " " + head {
+	case "security authentication-source",
+		"security device-information",
+		"security user-identification",
+		"user-identification authentication-source",
+		"user-identification device-information",
+		"user-identification active-directory-access",
+		"user-identification identity-management",
+		"user-identification local-authentication-table":
+		return true
+	}
 	switch containerKeyword + " " + head {
 	case "dataplane control-socket",
 		"system domain-name",

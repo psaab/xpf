@@ -376,7 +376,13 @@ func TestUnsplittablePairRatchet8880(t *testing.T) {
 		// census records the new scope entry; the flat-set routing-options reader
 		// expands its declared sibling run, and #8437 rejects the fused braced
 		// spelling, so this is not an additional observed runtime loss.
-		wantArgs1 = 452
+		// #16296 grows 452 -> 453. Admitting the accepted-only security
+		// identity pairs adds exactly one distinct args>=1 pair (the
+		// local-authentication-table leaf); its residual is measured by the
+		// packed/split parity cell, and packedStatements was measured NOT
+		// applicable -- opting in reds the #8768 fixture guard without
+		// changing chain behavior.
+		wantArgs1 = 453
 	)
 	pairs2, _ := unsplittablePairs8880(2)
 	pairs1, conflict1 := unsplittablePairs8880(1)

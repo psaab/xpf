@@ -271,7 +271,7 @@ func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixL
 		// than configured — a control-plane fail-open on the chain that is the
 		// PRIMARY enforcement for host traffic.
 		FlexMatch:                lo0FlexMatch(term.FlexMatch),
-		FlexMatchUnrepresentable: len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 || lo0FlexMatchStartUnrepresentable(term.FlexMatch),
+		FlexMatchUnrepresentable: len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 || lo0FlexMatchStartUnrepresentable(term.FlexMatch) || !config.FlexMatchValid(term.FlexMatch),
 		IsFragment:               term.IsFragment,
 		Log:                      term.Log,
 		Count:                    term.Count,

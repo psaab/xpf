@@ -347,15 +347,15 @@ func runNftNetlinkParityInner(t *testing.T) {
 			name string
 			fm   config.FlexMatchConfig
 		}{
-			{"sub-byte-12-bits", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 12, Value: 0x0abc, Mask: 0x0fff}},
-			{"byte-aligned-8-bits", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 9, BitLength: 8, Value: 0x11, Mask: 0xff}},
-			{"full-32-bits", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 12, BitLength: 32, Value: 0x0a000001, Mask: 0xffffffff}},
+			{"sub-byte-12-bits", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 12, Value: 0x0abc, Mask: 0x0fff, ValueSet: true, MaskSet: true}},
+			{"byte-aligned-8-bits", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 9, BitLength: 8, Value: 0x11, Mask: 0xff, ValueSet: true, MaskSet: true}},
+			{"full-32-bits", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 12, BitLength: 32, Value: 0x0a000001, Mask: 0xffffffff, ValueSet: true, MaskSet: true}},
 			// Zero bit-length: the userspace snapshot builder DEFAULTS it to 4
 			// (32-bit). Without this row, an implementation that treated 0 as
 			// "no constraint" would render the term with no narrowing at all —
 			// the exact widening this issue is about — and every other row would
 			// still pass.
-			{"zero-bit-length-defaults-to-32", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 12, BitLength: 0, Value: 0x0a000001, Mask: 0xffffffff}},
+			{"zero-bit-length-defaults-to-32", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 12, BitLength: 0, Value: 0x0a000001, Mask: 0xffffffff, ValueSet: true, MaskSet: true}},
 			// Value carrying bits OUTSIDE the mask. Every row above has the
 			// value already inside its mask, so pre-masking is a NO-OP on both
 			// sides and a renderer that skipped it would still agree — the
@@ -363,14 +363,14 @@ func runNftNetlinkParityInner(t *testing.T) {
 			// cannot fail. nft compares the MASKED load, so an unmasked expected
 			// value never matches: a silent never-match, which is a different
 			// fail direction from the widening but just as quiet.
-			{"value-outside-mask-is-pre-masked", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 9, BitLength: 8, Value: 0xff11, Mask: 0x0f}},
+			{"value-outside-mask-is-pre-masked", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 9, BitLength: 8, Value: 0xff11, Mask: 0x0f, ValueSet: true, MaskSet: true}},
 			// #14394: match-start layer-4 must render at the TRANSPORT
 			// header base (@th) in BOTH renderers. Before the fix both
 			// dropped MatchStart and rendered @nh, so this row's @th
 			// guard below fails on the oracle and the netlink payload
 			// base diverges — parity alone could not catch it because
 			// both renderers made the identical L3 error.
-			{"layer-4-transport-base", config.FlexMatchConfig{MatchStart: "layer-4", ByteOffset: 0, BitLength: 8, Value: 0x11, Mask: 0xff}},
+			{"layer-4-transport-base", config.FlexMatchConfig{MatchStart: "layer-4", ByteOffset: 0, BitLength: 8, Value: 0x11, Mask: 0xff, ValueSet: true, MaskSet: true}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				fm := tc.fm
@@ -419,7 +419,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 					Name:                "multi-range",
 					Protocols:           []string{"tcp"},
 					FlexMatchRangeNames: []string{"r1", "r2"},
-					FlexMatch:           &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff},
+					FlexMatch:           &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff, ValueSet: true, MaskSet: true},
 					Action:              config.FilterActionAccept,
 				},
 			},
@@ -431,7 +431,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 					Name:             "unknown-token",
 					Protocols:        []string{"tcp"},
 					UnknownFlexMatch: []string{"byte-offset=not-a-number"},
-					FlexMatch:        &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff},
+					FlexMatch:        &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff, ValueSet: true, MaskSet: true},
 					Action:           config.FilterActionAccept,
 				},
 			},
@@ -445,7 +445,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 				term: &config.FirewallFilterTerm{
 					Name:      "oversized-width",
 					Protocols: []string{"tcp"},
-					FlexMatch: &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 40, Value: 1, Mask: 0xff},
+					FlexMatch: &config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 6, BitLength: 40, Value: 1, Mask: 0xff, ValueSet: true, MaskSet: true},
 					Action:    config.FilterActionAccept,
 				},
 			},
@@ -457,7 +457,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 				term: &config.FirewallFilterTerm{
 					Name:      "unrepresentable-match-start",
 					Protocols: []string{"tcp"},
-					FlexMatch: &config.FlexMatchConfig{MatchStart: "payload", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff},
+					FlexMatch: &config.FlexMatchConfig{MatchStart: "payload", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff, ValueSet: true, MaskSet: true},
 					Action:    config.FilterActionAccept,
 				},
 			},

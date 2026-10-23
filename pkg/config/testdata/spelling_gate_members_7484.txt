@@ -777,6 +777,8 @@ flag (read, but value-less)	security alg dns disable
 flag (read, but value-less)	security alg ftp disable
 flag (read, but value-less)	security alg sip disable
 flag (read, but value-less)	security alg tftp disable
+advisory (read, value ignored, warning says so)	security authentication-source
+advisory (read, value ignored, warning says so)	security device-information
 COMPARED	security dynamic-address address-name <*> profile fail-mode
 COMPARED	security dynamic-address address-name <*> profile feed-name
 COMPARED	security dynamic-address feed-server <*> feed-name <*> path
@@ -1003,6 +1005,11 @@ COMPARED	security screen ids-option <*> tcp syn-flood source-threshold
 COMPARED	security screen ids-option <*> tcp syn-flood timeout
 COMPARED	security screen ids-option <*> udp flood threshold
 unreachable (leaf changed nothing)	security ssh-known-hosts host
+advisory (read, value ignored, warning says so)	security user-identification active-directory-access
+advisory (read, value ignored, warning says so)	security user-identification authentication-source
+advisory (read, value ignored, warning says so)	security user-identification device-information
+advisory (read, value ignored, warning says so)	security user-identification identity-management
+advisory (read, value ignored, warning says so)	security user-identification local-authentication-table
 COMPARED	security zones security-zone <*> address-book address-set <*> address
 COMPARED	security zones security-zone <*> address-book address-set <*> address-set
 unreachable (leaf changed nothing)	security zones security-zone <*> address-book address-set <*> description
