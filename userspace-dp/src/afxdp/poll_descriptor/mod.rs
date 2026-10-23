@@ -5691,6 +5691,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow,
                                 telemetry.counters,
                                 from_zone_id,
+                                tcp_flags_unknown,
                             );
                             telemetry.counters.record_screen_drop(
                                 if tcp_flags_unknown {
