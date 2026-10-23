@@ -946,6 +946,19 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// Other typed-leaf violations retain the #1733/#1798/#1814 lenient policy;
 	// see freetext.go.
 	schemaErr := s.schemaValidateExpandedTree(tree)
+	// #16012: collect every independent typed-leaf violation for the
+	// tolerant log + persisted warnings; first-error schemaErr above
+	// still drives classification and the redaction-placeholder guard.
+	var typedErrs16012 []error
+	if collected, cerr := s.schemaValidateExpandedTreeCollect16012(tree); cerr == nil {
+		typedErrs16012 = collected
+	}
+	if len(typedErrs16012) > 1 {
+		for _, te := range typedErrs16012 {
+			slog.Warn("typed-leaf schema violation in tolerated config; continuing (a strict commit would reject this)",
+				"err", te, "issue", "#16012")
+		}
+	}
 	if config.IsRedactionPlaceholderIngestError(schemaErr) {
 		return nil, schemaErr
 	}
@@ -978,9 +991,20 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 			// typed compiler may discard the offending token while preserving
 			// tolerant no-brick behaviour. Schema validation owns redaction for
 			// secret leaves (#8441/#8434).
-			compiled.Warnings = append(compiled.Warnings, fmt.Sprintf(
-				"%s %s (strict commit would reject this; issue #10515)",
-				config.ToleratedTypedLeafWarningPrefix, schemaErr.Error()))
+			if len(typedErrs16012) > 0 {
+				for _, te := range typedErrs16012 {
+					if !config.IsTypedLeafSchemaError(te) {
+						continue
+					}
+					compiled.Warnings = append(compiled.Warnings, fmt.Sprintf(
+						"%s %s (strict commit would reject this; issue #10515)",
+						config.ToleratedTypedLeafWarningPrefix, te.Error()))
+				}
+			} else {
+				compiled.Warnings = append(compiled.Warnings, fmt.Sprintf(
+					"%s %s (strict commit would reject this; issue #10515)",
+					config.ToleratedTypedLeafWarningPrefix, schemaErr.Error()))
+			}
 		}
 		seenWarnings := make(map[string]struct{}, len(compiled.Warnings))
 		for _, existing := range compiled.Warnings {
@@ -1036,6 +1060,30 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 
 func (s *Store) schemaValidateExpandedTree(tree *config.ConfigTree) error {
 	return schemaValidateExpandedTreeForNode(tree, s.nodeID)
+}
+
+// schemaValidateExpandedTreeCollect16012 is the #16012 tolerant variant:
+// same expansion as schemaValidateExpandedTree, but collects every
+// independent typed-leaf violation (bounded) instead of the first only.
+// A non-typed-leaf schema error is returned as fatal (single error slice
+// is not used); callers fall back to the first-error path for those.
+func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) ([]error, error) {
+	if tree == nil {
+		return nil, nil
+	}
+	stripped := config.NormalizeCompactForScan(tree.WithoutInactive())
+	expanded := stripped.Clone()
+	if s.nodeID >= 0 {
+		vars := map[string]string{"node": fmt.Sprintf("node%d", s.nodeID)}
+		if err := expanded.ExpandGroupsWithVars(vars); err != nil {
+			return nil, fmt.Errorf("apply-groups: %w", err)
+		}
+		return config.SchemaValidateCollectTypedLeaves(expanded, stripped), nil
+	}
+	if _, err := expanded.ExpandGroupsNodeFallback15031(false); err != nil {
+		return nil, fmt.Errorf("apply-groups: %w", err)
+	}
+	return config.SchemaValidateCollectTypedLeaves(expanded, stripped), nil
 }
 
 func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) error {
