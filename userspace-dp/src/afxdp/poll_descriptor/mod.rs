@@ -2230,6 +2230,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta.pkt_len as u64,
                                     now_ns,
                                     false,
+                                    true,
                                 ),
                                 JunosHostLocalPolicy::Dropped
                             ) {
@@ -3745,6 +3746,38 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 resolved.key.dst_port,
                                 resolved.decision,
                             );
+                            // #15947 (H29-01, LocalDelivery arm): an admitted
+                            // host-bound RST tears its session down under
+                            // rst-invalidate-session, exactly as a transit
+                            // RST does — but ONLY for a packet that may act
+                            // for the session. This collection sits BEFORE
+                            // the host-inbound/lo0/junos-host gates below,
+                            // so without the `may_revoke` guard a FOREIGN
+                            // arrival's RST (arriving on a zone that did
+                            // not admit the flow, #9519) would delete
+                            // another actor's session before any admission
+                            // check runs — the same authority the deny
+                            // branches below require before they revoke.
+                            // The teardown drains after the batch; the
+                            // host-bound RST itself is delivered by the
+                            // reinject chokepoint below (it never enters
+                            // pending_forwards, so there is no trigger to
+                            // exempt). A host-bound RST with no session has
+                            // nothing to invalidate.
+                            if may_revoke
+                                && should_teardown_tcp_rst_with(
+                                    meta,
+                                    worker_ctx.forwarding.tcp_rst_invalidate_session,
+                                )
+                                && resolved.decision.resolution.disposition
+                                    == ForwardingDisposition::LocalDelivery
+                            {
+                                binding.scratch.scratch_rst_teardowns.push((
+                                    flow.forward_key.clone(),
+                                    resolved.decision.nat,
+                                    None,
+                                ));
+                            }
                             let gated = if solicited_exempt {
                                 // The owner-only TUN-origin reverse exemption
                                 // is an explicit host-inbound proof: the forward
@@ -3959,6 +3992,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta.pkt_len as u64,
                                     now_ns,
                                     true,
+                                    may_revoke,
                                 ),
                                 JunosHostLocalPolicy::Dropped
                             )
@@ -5748,6 +5782,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta.pkt_len as u64,
                                     now_ns,
                                     false,
+                                    true,
                                 )
                             } else {
                                 JunosHostLocalPolicy::NoMatch

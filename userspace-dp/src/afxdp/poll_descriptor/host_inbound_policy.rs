@@ -377,6 +377,14 @@ pub(super) fn junos_host_local_policy(
     packet_len: u64,
     now_ns: u64,
     recheck_established: bool,
+    // #15947 (H30-03 arm 2): whether a matched Deny/Reject on an
+    // established re-check may credit the denying rule. The session-hit
+    // caller passes its revocation authority (`may_revoke`): a foreign
+    // arrival that cannot act for the session must not charge the
+    // host-zone denying rule for a packet that is not that zone's
+    // traffic. Miss/flowless callers pass `true` (their counting
+    // evaluation already counted, so this flag is inert there).
+    credit_deny: bool,
 ) -> JunosHostLocalPolicy {
     let policy_icmp = policy_packet_icmp(packet_frame, meta);
     match junos_host_policy_eval(
@@ -404,7 +412,13 @@ pub(super) fn junos_host_local_policy(
             // positionally — it is the live first-match, not the admitting
             // rule). On the counting (miss) path the evaluation already
             // counted this packet, so counting again would double-count.
+            // #15947 (H30-03 arm 2): credit only when the caller holds
+            // revocation authority for this session (`credit_deny`). A
+            // foreign arrival's matched host deny still drops the
+            // packet and emits its event/reply below; it simply does
+            // not charge the host-zone denying rule.
             if recheck_established
+                && credit_deny
                 && matches!(action, PolicyAction::Deny | PolicyAction::Reject)
                 && let Some(counter) = forwarding
                     .policy

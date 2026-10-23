@@ -77,6 +77,32 @@ xpf (0.0.0) unstable; urgency=medium
     clear-by-interface can no longer delete a sibling unit's sessions
     and flow-export sampling no longer judges both units by one
     sibling's name (daemon buildIfNames projects the same table).
+  * Guard the #15947 reverse-only lease release against double
+    release and restrict its NAT reconstruction assert to the
+    source-NAT shape.
+
+xpf (0.0.0) unstable; urgency=medium
+  * Fix the #15947 reverse-only RST teardown NAT reconstruction:
+    un-reverse with the canonical reverse tuple so the pool port
+    is actually freed.
+
+xpf (0.0.0) unstable; urgency=medium
+  * Fix the #15947 RST teardown for a reverse-only survivor: run
+    under the surviving entry's own key, release the forward NAT
+    reservation and emit the forward Close; drop the duplicate
+    Prebuilt mirror copy.
+
+xpf (0.0.0) unstable; urgency=medium
+  * Gate the #15947 LocalDelivery RST-invalidate collection on
+    may_revoke: a foreign arrival's RST no longer queues a teardown
+    deleting another actor's host-bound session.
+
+xpf (0.0.0) unstable; urgency=medium
+  * Complete the remaining #15947 arms: rst-invalidate teardown now
+    releases the SNAT/NAT64 pool port and emits the forward Close
+    (pair-aware teardown), host-bound RSTs invalidate their session,
+    Prebuilt mirror copies are made only for selected samples, and a
+    foreign host-bound deny no longer charges the host-zone rule.
 
 xpf (0.0.0) unstable; urgency=medium
 

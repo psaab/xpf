@@ -154,3 +154,89 @@ fn prebuilt_nat64_frame_is_mirrored_15251() {
         "#15251: the mirror clone must carry the rewritten (NAT64) wire frame"
     );
 }
+
+#[test]
+fn prebuilt_sampled_out_frame_forwards_without_mirror_15947() {
+    // #15947 (H26-02 arm 4): with a mirror configured but the sample
+    // rate declining this packet, the Prebuilt frame must still
+    // forward and no mirror clone may be queued. (The pre-fix code
+    // cloned the Vec before learning the sample outcome; the copy
+    // itself is not observable here — what this pins is that the
+    // deferred-copy restructure keeps the forward + no-mirror
+    // behaviour intact on the sampled-out branch.)
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+        BindingWorker::new_for_mirror_test(2, 0, 33, 0),
+    ];
+    let mut forwarding = test_forwarding_with_egress_mtu(1500);
+    // Rate 3: mirror_sample_allows selects only counters divisible
+    // by the rate. The ingress sample counter is driven to 1 before
+    // dispatch below, so this packet is sampled out.
+    forwarding.mirror_configs.insert(
+        11,
+        MirrorRuntimeConfig {
+            output_ifindex: 33,
+            rate: 3,
+        },
+    );
+    bindings[0].mirror_sample_counter = 1;
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let mut frame = build_ipv4_test_packet(0);
+    frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]);
+    let mut request = test_live_forward_request_for_frame(
+        frame.len(),
+        test_forwarding_decision_to_bound_ifindex(22),
+    );
+    request.frame = PendingForwardFrame::Prebuilt(frame.clone().into());
+    request.desc.len = frame.len() as u32;
+    request.meta.flow_src_addr[..4].copy_from_slice(&frame[26..30]);
+    request.meta.flow_dst_addr[..4].copy_from_slice(&frame[30..34]);
+    request.flow_key = None;
+    let mut pending = vec![request];
+    let mut post_recycles = Vec::new();
+    let ingress_ident = bindings[0].identity();
+    let ingress_live = &*bindings[0].live as *const BindingLiveState;
+    let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
+        Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
+        BTreeMap::new();
+    let mut dbg = DebugPollCounters::default();
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    enqueue_pending_forwards(
+        left,
+        0,
+        ingress,
+        right,
+        &lookup,
+        &mirror_targets,
+        &mut pending,
+        &mut post_recycles,
+        1,
+        &forwarding,
+        None,
+        &ingress_ident,
+        unsafe { &*ingress_live },
+        None,
+        &local_tunnel_deliveries,
+        &recent_exceptions,
+        &mut dbg,
+        &mut BatchCounters::default(),
+        0,
+        &worker_commands_by_id,
+    );
+    assert_eq!(dbg.enqueue_ok, 1, "sampled-out prebuilt must still forward");
+    assert_eq!(
+        bindings[0].live.mirrored_packets.load(Ordering::Relaxed),
+        0,
+        "sampled-out prebuilt must not be mirrored"
+    );
+    assert!(
+        bindings[2].tx_pipeline.pending_tx_prepared.is_empty(),
+        "sampled-out prebuilt must not queue a mirror clone"
+    );
+}

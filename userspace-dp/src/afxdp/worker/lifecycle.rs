@@ -275,6 +275,10 @@ pub(super) fn poll_binding(
                 &mut pending_forwards,
                 shared_recycles,
                 &rst_trigger_keeps,
+                forwarding,
+                worker_commands_by_id,
+                worker_id,
+                now_ns,
             );
         }
         // #7212: evict the flow-cache slots backing every session this pass

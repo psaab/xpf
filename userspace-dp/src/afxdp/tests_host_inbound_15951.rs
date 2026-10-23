@@ -193,6 +193,46 @@ fn junos_host_reject_on_miss_credits_policy_denied_15951() {
     assert_eq!(d.policy_deny, 1, "control: the reject arm ran");
     assert_eq!(batch.policy_denied_packets, 1);
 }
+
+/// H30-03 arm 2 (#15947): an owner session-hit denied by the tightened
+/// `junos-host` rule credits the denying rule exactly once (the
+/// `may_revoke` caller may act for the session). The foreign-arrival
+/// gate (`credit_deny = may_revoke`) is pinned at the helper contract:
+/// a foreign packet that cannot revoke must not charge the host-zone
+/// denying rule — that branch needs a two-zone LocalDelivery hit
+/// fixture, which this single-zone harness does not construct; the
+/// owner half here proves the credit still fires when authority held.
+#[test]
+fn junos_host_hit_deny_credits_denying_rule_once_15947() {
+    let fw = forwarding(PLAIN);
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(16);
+    let (_b, syn) = from_wan(&fw, &mut sessions, VIP, 443, TCP_FLAG_SYN);
+    assert_eq!(syn.session_create, 1, "control: installed");
+    let closed = forwarding(Fixture {
+        junos_host: vec![junos_host_rule("no-host", "deny")],
+        ..PLAIN
+    });
+    let deny_hits = |fw: &ForwardingState| -> u64 {
+        crate::policy::flush_recorded_policy_hit_counters();
+        fw.policy
+            .rules
+            .iter()
+            .find(|r| r.rule_id.contains("no-host"))
+            .map(|r| r.hit_counter.test_packet_count())
+            .unwrap_or(u64::MAX)
+    };
+    let before = deny_hits(&closed);
+    let (batch, ack) = from_wan(&closed, &mut sessions, VIP, 443, TCP_ACK);
+    assert_eq!(ack.session_hit, 1, "the ACK must HIT the installed session");
+    assert_eq!(ack.policy_deny, 1, "control: the hit deny arm ran");
+    assert_eq!(batch.policy_denied_packets, 1, "global deny counter once");
+    assert_eq!(
+        deny_hits(&closed),
+        before + 1,
+        "owner hit deny credits the denying rule exactly once"
+    );
+}
 /// H41-02 (event): a DNAT-to-local deny record carries the translated tuple
 /// the policy was judged on, not `None`/`0`. The wire tuple stays original.
 #[test]
