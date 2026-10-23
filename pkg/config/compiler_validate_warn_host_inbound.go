@@ -246,6 +246,157 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	return warnings
 }
 
+// validateHostInboundVRRPBypassWarnings is the #16018 (A7-03) companion to
+// validateHostInboundManagedRoutingMismatch: one WARN per interface that
+// carries an active VRRP instance (explicit vrrp-group or RETH-derived)
+// whose security zone's effective host-inbound `protocols` set omits
+// `vrrp`. Unlike the managed-routing gate this is WARN-only on every path:
+// native VRRP is consumed via AF_PACKET before netfilter input, so the
+// zone token does not actually gate it — the warning tells the operator
+// the deny is bypassed rather than silently enforced, instead of
+// hard-rejecting a config whose VRRP would in fact keep working.
+func validateHostInboundVRRPBypassWarnings(cfg *Config) []string {
+	if cfg == nil || cfg.Security.Zones == nil {
+		return nil
+	}
+	ifZone := make(map[string]string)
+	znames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		znames = append(znames, name)
+	}
+	sort.Strings(znames)
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
+	for _, zname := range znames {
+		if _, excluded := excludedZones[zname]; excluded {
+			continue
+		}
+		z := cfg.Security.Zones[zname]
+		if z == nil {
+			continue
+		}
+		for _, ifEntry := range z.Interfaces {
+			for _, key := range zoneIfaceLogicalKeys(cfg, ifEntry) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
+				}
+				if _, seen := ifZone[key]; !seen {
+					ifZone[key] = zname
+				}
+			}
+		}
+	}
+	if len(ifZone) == 0 {
+		return nil
+	}
+	bareParentWithUnits := func(key string) bool {
+		if cfg.SplitInterfaceUnitRef(key).HasUnit {
+			return false
+		}
+		return len(InterfaceUnitRefKeys(cfg, key)) > 1
+	}
+	var candidates []string
+	ifnames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for name := range cfg.Interfaces.Interfaces {
+		ifnames = append(ifnames, name)
+	}
+	sort.Strings(ifnames)
+	for _, ifName := range ifnames {
+		ifc := cfg.Interfaces.Interfaces[ifName]
+		if ifc == nil {
+			continue
+		}
+		unitNums := make([]int, 0, len(ifc.Units))
+		for n := range ifc.Units {
+			unitNums = append(unitNums, n)
+		}
+		sort.Ints(unitNums)
+		for _, n := range unitNums {
+			unit := ifc.Units[n]
+			if unit != nil && len(unit.VRRPGroups) > 0 {
+				candidates = append(candidates, fmt.Sprintf("%s.%d", ifName, n))
+			}
+		}
+	}
+	// RETH-derived instances: mirror CollectRethInstances' suppression.
+	rethActive := true
+	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+		rethActive = false
+	}
+	if rethActive {
+		rgOwners := cfg.RethRGOwners()
+		for _, ifName := range ifnames {
+			rgID, owns := rgOwners[ifName]
+			if !owns || rgID <= 0 {
+				continue
+			}
+			ifc := cfg.Interfaces.Interfaces[ifName]
+			if ifc == nil {
+				continue
+			}
+			unitNums := make([]int, 0, len(ifc.Units))
+			for n := range ifc.Units {
+				unitNums = append(unitNums, n)
+			}
+			sort.Ints(unitNums)
+			for _, n := range unitNums {
+				unit := ifc.Units[n]
+				if unit == nil || len(unit.Addresses) == 0 {
+					continue
+				}
+				candidates = append(candidates, fmt.Sprintf("%s.%d", ifName, n))
+			}
+		}
+	}
+	sort.Strings(candidates)
+	lifelines := HostInboundLifelineSet(cfg)
+	seen := make(map[string]bool)
+	var warnings []string
+	for _, cand := range candidates {
+		if seen[cand] {
+			continue
+		}
+		seen[cand] = true
+		if bareParentWithUnits(cand) {
+			continue
+		}
+		if HostInboundLifelineInterface(cand, lifelines) {
+			continue
+		}
+		zname, ok := ifZone[cand]
+		if !ok {
+			continue
+		}
+		z := cfg.Security.Zones[zname]
+		if z == nil {
+			continue
+		}
+		effSvc, effProto, _ := z.InterfaceHostInboundEffective(cand)
+		admitted := false
+		for _, svc := range effSvc {
+			if HostInboundFullAdmitService(svc) {
+				admitted = true
+				break
+			}
+		}
+		if admitted || hostInboundAdmitsRoutingProtocol(effProto, "vrrp") {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"VRRP is enabled on interface %q (security zone %q), but its "+
+				"effective host-inbound-traffic protocols set omits %q; native "+
+				"VRRP is received via AF_PACKET before netfilter input, so "+
+				"the zone host-inbound setting does not gate VRRP advertisements "+
+				"on this interface — they bypass the %q denial. Restrict the "+
+				"VRRP segment with network-device ingress controls, or add "+
+				"`host-inbound-traffic protocols vrrp` to zone %q (or the "+
+				"interface override) to document the intended admission.",
+			cand, zname, "vrrp", "vrrp", zname))
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
 // validateDefaultPolicyLogWarnings emits a WARN-only commit-time message when
 // `security policies default-policy-log session-init/session-close` is
 // configured together with a default-DENY or default-REJECT verdict (#3534).

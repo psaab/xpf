@@ -65,9 +65,10 @@ func TestUnknownPriorityAdvertsWarnRateLimitedAndCount_10719(t *testing.T) {
 	}
 }
 
-// An unknown priority-255 advert reaches the normal election handler and still
-// causes the RFC priority transition, but must be detected before that source
-// can replace the previously learned master identity.
+// #16018 supersedes the apply-half of this #10719 cell: an unknown
+// priority-255 advert is still detected/counted before any transition, but
+// while the learned master is fresh it must NOT demote. The known-source
+// 255 demotion control is TestKnownPriority255AdvertIsNotReported_10719.
 func TestUnknownPriority255MasterAdvertDetectedBeforeDemotion_10719(t *testing.T) {
 	warnings := installWarningCounter10719(t)
 	vi := newGateTestInstance(t, 100, true)
@@ -82,9 +83,8 @@ func TestUnknownPriority255MasterAdvertDetectedBeforeDemotion_10719(t *testing.T
 		Priority: 255,
 		SrcIP:    net.IPv4(10, 0, 0, 3),
 	}, masterDown, advert)
-
-	if got := vi.getState(); got != StateBackup {
-		t.Fatalf("state = %s, want BACKUP: priority 255 remains an election input", got)
+	if got := vi.getState(); got != StateMaster {
+		t.Fatalf("state = %s, want MASTER: unknown priority 255 must not demote while learned master fresh (#16018)", got)
 	}
 	if got := vi.unrecognizedMasterAdverts.Load(); got != 1 {
 		t.Fatalf("unrecognized master advert count = %d, want 1", got)
