@@ -566,7 +566,19 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 					continue
 				}
 				logicalOnly = true
-				if mtu == 0 {
+				// #15944 H4-04: a configured unit MTU (family-level,
+				// folded into unit.MTU at compile) or interface MTU
+				// wins over the parent's kernel MTU. The parent MTU is
+				// only the fallback when neither is authored — the
+				// previous parent-only substitution silently dropped a
+				// per-unit `mtu` from the snapshot MTU the Rust
+				// validator consumes.
+				switch {
+				case unit.MTU > 0:
+					mtu = unit.MTU
+				case iface.MTU > 0:
+					mtu = iface.MTU
+				case mtu == 0:
 					mtu = parentMTU
 				}
 				if hardwareAddr == "" {

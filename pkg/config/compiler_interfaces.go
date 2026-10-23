@@ -795,11 +795,12 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						ifaces.MalformedAddresses = append(ifaces.MalformedAddresses, inetBad...)
 						for _, addrInst := range inetAddrs {
 							unit.Addresses = append(unit.Addresses, addrInst.name)
-							// Per-family primary/preferred (#15653): inet
-							// owns the legacy slots; inet6 owns the V6 slots
-							// below, so a dual-stack unit keeps both.
-							// Preferred is first-wins (#15222).
-							if addrInst.node.FindChild("primary") != nil {
+							// Per-family primary/preferred (#15653, #15944
+							// H4-01): inet owns ONLY the legacy (IPv4) slots.
+							// Junos family semantics are order-independent,
+							// so the first inet primary/preferred wins
+							// regardless of whether inet6 was authored first.
+							if addrInst.node.FindChild("primary") != nil && unit.PrimaryAddress == "" {
 								unit.PrimaryAddress = addrInst.name
 							}
 							if addrInst.node.FindChild("preferred") != nil && unit.PreferredAddress == "" {
@@ -920,21 +921,22 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						ifaces.MalformedAddresses = append(ifaces.MalformedAddresses, inet6Bad...)
 						for _, addrInst := range inet6Addrs {
 							unit.Addresses = append(unit.Addresses, addrInst.name)
-							// #15653: inet6 primary/preferred go to the
-							// per-family V6 slots; the legacy slots are
-							// mirrored only while empty so single-family
-							// inet6 units keep working for legacy readers.
+							// #15653/#15944 H4-01: inet6 owns ONLY the V6
+							// slots. The legacy slots are NOT mirrored even
+							// while empty: mirroring let an inet6-first unit
+							// leak its v6 primary/preferred into IPv4
+							// consumers (PreferredAddressForFamily(false),
+							// syslog/IPsec candidate lists) and blocked the
+							// later inet value behind a first-wins guard.
+							// Single-family inet6 legacy readers go through
+							// PrimaryAddressForFamily(true), which falls
+							// back to the legacy slot only when it holds a
+							// v6 CIDR (hand-built/pre-#15653 fixtures).
 							if addrInst.node.FindChild("primary") != nil && unit.PrimaryAddressV6 == "" {
 								unit.PrimaryAddressV6 = addrInst.name
-								if unit.PrimaryAddress == "" {
-									unit.PrimaryAddress = addrInst.name
-								}
 							}
 							if addrInst.node.FindChild("preferred") != nil && unit.PreferredAddressV6 == "" {
 								unit.PreferredAddressV6 = addrInst.name
-								if unit.PreferredAddress == "" {
-									unit.PreferredAddress = addrInst.name
-								}
 							}
 							// IPv6 VRRP groups (#2384): identical parse to the
 							// inet arm; the VIPs are IPv6 and the engine

@@ -121,8 +121,20 @@ func resolveSyslogSource(cfg *Config, srcIface, family string) string {
 // With a family (#15078) it honours that family's primary, then preferred,
 // then the first configured address of the family. Per-family primaries
 // (#15653) are consulted first; the legacy single slots are still checked
-// (family-filtered) for hand-built and pre-#15653 fixtures. Without a
-// family it is the legacy rule: PrimaryAddress only.
+// (family-filtered) for hand-built and pre-#15653 fixtures.
+//
+// Without a family (family == "", a hostname or empty collector on
+// ResolveSyslogSourceAddrForCollector, and every ResolveSyslogSourceAddr
+// call) resolution is family-unspecified: the IPv4 primary wins when one
+// exists, then the IPv4 preferred, then the IPv6 primary/preferred.
+// Ordering IPv4-first preserves the legacy "PrimaryAddress only" rule
+// for dual-stack units (where the legacy slot held the inet primary),
+// while the IPv6 fallback is what an IPv6-only unit needs: since
+// #15944 H4-01 its primary lives only in PrimaryAddressV6, so the
+// pre-fold `parse(unit.PrimaryAddress)` read "" and a hostname
+// collector silently got no source. Family-specified calls stay
+// strictly family-checked (a v6 primary never serves an IPv4
+// collector) via the family arguments below.
 func syslogUnitSourceAddr(unit *InterfaceUnit, family string) string {
 	parse := func(cidr string) (net.IP, string) {
 		if cidr == "" {
@@ -135,8 +147,14 @@ func syslogUnitSourceAddr(unit *InterfaceUnit, family string) string {
 		return ip, ip.String()
 	}
 	if family == "" {
-		if _, s := parse(unit.PrimaryAddress); s != "" {
-			return s
+		for _, cand := range []string{
+			unit.PrimaryAddressForFamily(false), unit.PreferredAddressForFamily(false),
+			unit.PrimaryAddressForFamily(true), unit.PreferredAddressForFamily(true),
+			unit.PrimaryAddress, unit.PreferredAddress,
+		} {
+			if _, s := parse(cand); s != "" {
+				return s
+			}
 		}
 		return ""
 	}

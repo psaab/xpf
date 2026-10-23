@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"golang.org/x/sys/unix"
 )
 
@@ -67,6 +70,45 @@ const (
 	duplicateIdentityBeaconReadLen = 128
 )
 
+// duplicateIdentityInterfaceByName resolves a LINUX-kernel interface
+// name to its addresses. It is a package var so the watcher resolution
+// (#15944 H23-02) is unit-testable without a real kernel interface.
+var duplicateIdentityInterfaceByName = func(kernelName string) ([]net.Addr, error) {
+	iface, err := net.InterfaceByName(kernelName)
+	if err != nil {
+		return nil, err
+	}
+	return iface.Addrs()
+}
+
+// duplicateIdentityKernelName maps an AUTHORED Junos control-interface
+// ref to its Linux kernel ifname. #15944 H23-02: the watcher previously
+// passed the authored spelling ("ge-0/0/0.0", a unit-suffixed or
+// device-map-aliased name) verbatim to net.InterfaceByName, which
+// expects the kernel name ("ge-0-0-0"), so the lookup failed and the
+// duplicate-identity beacon silently never started. The daemon
+// resolves heartbeat addresses through cfg.ResolveKernelIfName before
+// StartHeartbeat, so the kernel name is what normally arrives here;
+// this translation (LinuxIfName plus unit-suffix stripping to the
+// physical device, which is where the control address lives) covers
+// authored spellings that reach the watcher directly. An
+// already-kernel name passes through unchanged.
+func duplicateIdentityKernelName(iface string) string {
+	name := iface
+	if strings.Contains(name, "/") {
+		name = config.LinuxIfName(name)
+	}
+	if i := strings.LastIndexByte(name, '.'); i > 0 {
+		// A dotted suffix on a physical device names a unit/VLAN
+		// netdev ("ge-0-0-0.0" is not one); the control address is
+		// assigned to the parent device the unit rides on.
+		if _, err := strconv.Atoi(name[i+1:]); err == nil {
+			name = name[:i]
+		}
+	}
+	return name
+}
+
 // duplicateIdentityBroadcastAddr derives the IPv4 subnet broadcast for a local
 // address assigned to iface. Prefix lengths /31 and /32 have no host broadcast
 // and cannot carry this detector's beacon.
@@ -75,13 +117,10 @@ func duplicateIdentityBroadcastAddr(iface string, localIP net.IP) (*net.UDPAddr,
 	if local4 == nil {
 		return nil, fmt.Errorf("control-link address %s is not IPv4", localIP)
 	}
-	ifi, err := net.InterfaceByName(iface)
+	kernelName := duplicateIdentityKernelName(iface)
+	addrs, err := duplicateIdentityInterfaceByName(kernelName)
 	if err != nil {
-		return nil, fmt.Errorf("control interface %s: %w", iface, err)
-	}
-	addrs, err := ifi.Addrs()
-	if err != nil {
-		return nil, fmt.Errorf("addresses for control interface %s: %w", iface, err)
+		return nil, fmt.Errorf("control interface %s: %w", kernelName, err)
 	}
 	for _, addr := range addrs {
 		ip, network, err := net.ParseCIDR(addr.String())
@@ -90,7 +129,7 @@ func duplicateIdentityBroadcastAddr(iface string, localIP net.IP) (*net.UDPAddr,
 		}
 		return duplicateIdentityBroadcastForNetwork(local4, network)
 	}
-	return nil, fmt.Errorf("control-link address %s is not assigned to %s", local4, iface)
+	return nil, fmt.Errorf("control-link address %s is not assigned to %s", local4, kernelName)
 }
 
 func duplicateIdentityBroadcastForNetwork(local4 net.IP, network *net.IPNet) (*net.UDPAddr, error) {

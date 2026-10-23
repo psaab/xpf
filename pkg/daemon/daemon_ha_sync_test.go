@@ -167,7 +167,7 @@ func TestStartClusterCommsLaunchesFabricForwardingWhenPrimarySyncUnaddressed(t *
 // single-fabric SessionSync / disabled latch survived.
 func TestStartClusterCommsRebuildsDualSessionSyncWhenFab1AddressArrivesLate(t *testing.T) {
 	exhaustSyncAddressPolls15687(t)
-	if resolveClusterInterfaceAddr("lo", "127.0.0.1", "") == "" {
+	if resolveClusterInterfaceAddr(nil, "lo", "127.0.0.1", "") == "" {
 		t.Skip("loopback has no usable IPv4 address")
 	}
 	cfgLines := func(fab1Iface string) []string {

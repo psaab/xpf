@@ -1297,7 +1297,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			defer d.clusterCommsWG.Done()
 			var syncIP string
 			for i := range syncAddressPollAttempts {
-				syncIP = resolveClusterInterfaceAddr(syncIface, syncPeerAddr, "")
+				syncIP = resolveClusterInterfaceAddr(cfg, syncIface, syncPeerAddr, "")
 				if syncIP != "" {
 					break
 				}
@@ -1349,7 +1349,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			if syncTransport == "fabric" && cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
 				var fab1IP string
 				for i := range fab1AddressPollAttempts {
-					fab1IP = resolveClusterInterfaceAddr(cc.Fabric1Interface, cc.Fabric1PeerAddress, "")
+					fab1IP = resolveClusterInterfaceAddr(cfg, cc.Fabric1Interface, cc.Fabric1PeerAddress, "")
 					if fab1IP != "" {
 						break
 					}
@@ -1684,7 +1684,11 @@ func (d *Daemon) startHeartbeatWithRetryForEpoch(ctx context.Context, controlIfa
 			slog.Info("cluster: heartbeat start aborted, comms context cancelled")
 			return
 		}
-		localIP := resolveClusterInterfaceAddr(controlIface, peerAddr, "")
+		var activeCfg *config.Config
+		if d.store != nil {
+			activeCfg = d.store.ActiveConfig()
+		}
+		localIP := resolveClusterInterfaceAddr(activeCfg, controlIface, peerAddr, "")
 		if localIP == "" {
 			if i == 0 {
 				slog.Info("cluster: control interface has no usable address yet, waiting",

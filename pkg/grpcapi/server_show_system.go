@@ -763,8 +763,21 @@ func (s *Server) showBackupRouter(cfg *config.Config, buf *strings.Builder) {
 		buf.WriteString("No backup router configured\n")
 	} else {
 		fmt.Fprintf(buf, "Backup router: %s\n", cfg.System.BackupRouter)
-		if cfg.System.BackupRouterDst != "" {
-			fmt.Fprintf(buf, "  Destination: %s\n", cfg.System.BackupRouterDst)
+		// #15944 H21-01: render EVERY explicit destination, matching
+		// the local CLI (pkg/cli showBackupRouter, #15780). The scalar
+		// first-destination read hid every further prefix remotely,
+		// and the hardcoded IPv4 default mislabelled an IPv6
+		// next-hop's ::/0 default.
+		dsts := cfg.System.BackupRouterDsts
+		if len(dsts) == 0 && cfg.System.BackupRouterDst != "" {
+			dsts = []string{cfg.System.BackupRouterDst}
+		}
+		if len(dsts) > 0 {
+			for _, dst := range dsts {
+				fmt.Fprintf(buf, "  Destination: %s\n", dst)
+			}
+		} else if strings.Contains(cfg.System.BackupRouter, ":") {
+			buf.WriteString("  Destination: ::/0 (default)\n")
 		} else {
 			buf.WriteString("  Destination: 0.0.0.0/0 (default)\n")
 		}

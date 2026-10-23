@@ -149,16 +149,22 @@ type InterfaceUnit struct {
 }
 
 // PrimaryAddressForFamily returns the unit's primary address for the
-// requested family (true = IPv6). IPv4 reads PrimaryAddress; IPv6 reads
-// PrimaryAddressV6, falling back to PrimaryAddress when no inet6 primary
-// was compiled (single-family inet6 units authored before #15653 stored
-// their primary in the shared slot). (#15653)
+// requested family (true = IPv6). IPv4 reads PrimaryAddress only when it
+// holds an IPv4 CIDR; IPv6 reads PrimaryAddressV6, falling back to
+// PrimaryAddress only when that slot holds an IPv6 CIDR (single-family
+// inet6 units authored before #15653, and hand-built fixtures, stored
+// their primary in the shared slot). The family check is load-bearing:
+// an unchecked shared-slot return leaked a v6 value to IPv4 consumers
+// for inet6-first dual-stack units (#15944 H4-01). (#15653)
 func (u *InterfaceUnit) PrimaryAddressForFamily(ipv6 bool) string {
 	if u == nil {
 		return ""
 	}
 	if !ipv6 {
-		return u.PrimaryAddress
+		if u.PrimaryAddress != "" && !cidrIsIPv6(u.PrimaryAddress) {
+			return u.PrimaryAddress
+		}
+		return ""
 	}
 	if u.PrimaryAddressV6 != "" {
 		return u.PrimaryAddressV6
@@ -175,7 +181,10 @@ func (u *InterfaceUnit) PreferredAddressForFamily(ipv6 bool) string {
 		return ""
 	}
 	if !ipv6 {
-		return u.PreferredAddress
+		if u.PreferredAddress != "" && !cidrIsIPv6(u.PreferredAddress) {
+			return u.PreferredAddress
+		}
+		return ""
 	}
 	if u.PreferredAddressV6 != "" {
 		return u.PreferredAddressV6
