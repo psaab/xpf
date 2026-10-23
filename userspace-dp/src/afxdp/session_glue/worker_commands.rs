@@ -27,7 +27,16 @@ pub(in crate::afxdp) struct WorkerCommandResults {
     /// #11360: position-ready imported keys repaired from shared authority.
     /// The worker loop applies them before later queued commands.
     pub session_import_repairs: Vec<worker_queue::SessionImportRepair>,
+    /// Every `ExportOwnerRGSessions` sequence accepted this tick, in
+    /// dispatch order — one entry per command, never reset. This is
+    /// the #7201 drain-budget/order probe
+    /// (`apply_worker_commands_7201_*`), NOT the export window.
     pub exported_sequences: Vec<u64>,
+    /// #15950 (H39-02 arm 2): the sequence(s) the adopted export
+    /// window acks on completion — exactly the LAST export command
+    /// accepted this tick (last-command-wins; see
+    /// `handle_export_owner_rg_sessions`).
+    pub export_window_sequences: Vec<u64>,
     /// #2653: the owner RGs requested by the LAST
     /// `ExportOwnerRGSessions` command processed this tick (#15950:
     /// last-command-wins — see `handle_export_owner_rg_sessions`). The
@@ -44,10 +53,10 @@ pub(in crate::afxdp) struct WorkerCommandResults {
     /// #9856: kick epoch for this tick's export window, captured at the
     /// window's FIRST Export-command accept
     /// (`SessionTable::current_epoch`); a superseding accept in the same
-    /// drain re-captures it. None when no Export command was accepted.
-    /// NOTE (rebase duty): Eng9720's `transition_debt_pending` lands
-    /// LAST post-#10141-merge; this field moves after it with the two
-    /// guard strings updated in the same commit.
+    /// drain re-captures it (#15950). None when no Export command was
+    /// accepted. NOTE (rebase duty): Eng9720's
+    /// `transition_debt_pending` lands LAST post-#10141-merge; this field
+    /// moves after it with the two guard strings updated in the same commit.
     pub export_kick_epoch: Option<u64>,
     pub shaped_tx_requests: Vec<TxRequest>,
     /// #941 Work item C: set when at least one
@@ -97,6 +106,7 @@ impl WorkerCommandResults {
             stale_replay_dropped_keys: Vec::new(),
             session_import_repairs: Vec::new(),
             exported_sequences: Vec::new(),
+            export_window_sequences: Vec::new(),
             export_owner_rgs: Vec::new(),
             export_kick_epoch: None,
             shaped_tx_requests: Vec::new(),
@@ -161,9 +171,13 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
     let mut cancelled_keys_seen: rustc_hash::FxHashSet<SessionKey> =
         rustc_hash::FxHashSet::default();
     let mut exported_sequences = Vec::new();
+    // #15950: the adopted window's sequences (last export command only);
+    // `exported_sequences` above keeps every accept for #7201.
+    let mut export_window_sequences = Vec::new();
     let mut export_owner_rgs: Vec<i32> = Vec::new();
-    // #9856: first-accept-wins kick epoch for this tick's export (None when
-    // no Export command accepted). Kept out of the debt-step/gate regions.
+    // #9856: first-accept-wins kick epoch for this tick's export window
+    // (None when no Export command accepted; re-captured by a
+    // superseding accept, #15950). Kept out of the debt-step/gate regions.
     let mut export_kick_epoch: Option<u64> = None;
     let mut shaped_tx_requests = Vec::new();
     let mut vacate_all_shared_exact_slots = false;
@@ -289,6 +303,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 commands::handle_export_owner_rg_sessions(
                     sessions,
                     &mut exported_sequences,
+                    &mut export_window_sequences,
                     &mut export_owner_rgs,
                     &mut export_kick_epoch,
                     sequence,
@@ -820,6 +835,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
         stale_replay_dropped_keys,
         session_import_repairs,
         exported_sequences,
+        export_window_sequences,
         export_owner_rgs,
         export_kick_epoch,
         shaped_tx_requests,

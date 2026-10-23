@@ -21,36 +21,43 @@ use super::super::*;
 /// ring/echo + drain between slices, #9856) so the complete snapshot
 /// ships without ever overflowing the ring. The sequence is acked
 /// only after the final slice completes.
-/// #15950 (H39-02 arm 2): a batched export window must name exactly
-/// ONE kicked command — the last one. `apply_worker_commands` drains
-/// up to `WORKER_COMMAND_DRAIN_BUDGET` commands per tick, so two
-/// `ExportOwnerRGSessions` commands with different owner-RG sets can
-/// be co-resident in one drain: typically a timed-out window's queued
-/// command and its retry's command. The coordinator's
-/// global-single-export BUSY gate serialises kicks, but it cannot
-/// prevent both being legitimately queued when the worker next
-/// drains. Unioning their RG sets (the pre-fix behaviour) exports the
-/// union under the newest command's sequence token: sessions owned
-/// solely by the superseded command's RGs ship inside a window that
-/// command never scoped, and the superseded sequence is acked by a
-/// walk it did not ask for. Last-command-wins matches the worker
-/// loop's single-window adopt (`worker_export` is overwritten by the
-/// newest adopt with `purge_foreign`), which already assumes one
-/// window per tick-batch.
+/// #15950 (H39-02 arm 2): the export WINDOW named by one drain must
+/// be exactly ONE kicked command — the last one.
+/// `apply_worker_commands` drains up to `WORKER_COMMAND_DRAIN_BUDGET`
+/// commands per tick, so two `ExportOwnerRGSessions` commands with
+/// different owner-RG sets can be co-resident in one drain: typically
+/// a timed-out window's queued command and its retry's command. The
+/// coordinator's global-single-export BUSY gate serialises kicks, but
+/// it cannot prevent both being legitimately queued when the worker
+/// next drains. Unioning their RG sets (the pre-fix behaviour)
+/// exports the union under the newest command's sequence token:
+/// sessions owned solely by the superseded command's RGs ship inside
+/// a window that command never scoped. Last-command-wins matches the
+/// worker loop's single-window adopt (`worker_export` is overwritten
+/// by the newest adopt with `purge_foreign`), which already assumes
+/// one window per tick-batch.
+///
+/// `exported_sequences` is NOT the window: it records EVERY accepted
+/// command in dispatch order (the #7201 drain-budget probe), so it
+/// is appended unconditionally. The window triple —
+/// `export_window_sequences` / `export_owner_rgs` /
+/// `export_kick_epoch` — is reset by a superseding accept.
 ///
 /// Returns `true` when this accept superseded an earlier export
 /// command in the same drain.
 pub(in crate::afxdp::session_glue) fn handle_export_owner_rg_sessions(
     sessions: &mut SessionTable,
     exported_sequences: &mut Vec<u64>,
+    export_window_sequences: &mut Vec<u64>,
     export_owner_rgs: &mut Vec<i32>,
     export_kick_epoch: &mut Option<u64>,
     sequence: u64,
     owner_rgs: Vec<i32>,
 ) -> bool {
-    let superseded = !exported_sequences.is_empty();
+    exported_sequences.push(sequence);
+    let superseded = !export_window_sequences.is_empty();
     if superseded {
-        exported_sequences.clear();
+        export_window_sequences.clear();
         export_owner_rgs.clear();
         *export_kick_epoch = None;
     }
@@ -70,6 +77,6 @@ pub(in crate::afxdp::session_glue) fn handle_export_owner_rg_sessions(
             export_owner_rgs.push(rg);
         }
     }
-    exported_sequences.push(sequence);
+    export_window_sequences.push(sequence);
     superseded
 }

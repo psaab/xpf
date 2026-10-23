@@ -16,15 +16,18 @@
 // decisive check in the issue: enqueue S1([1]) + S2([2]) before one
 // drain; the export must ship only [2] under S2.
 //
-// The fix is last-command-wins at command accept: a superseding accept
-// clears the earlier window's sequences, RG set and kick epoch before
-// recording its own.
+// The fix is last-command-wins at command accept, scoped to the
+// WINDOW state only: a superseding accept clears the earlier
+// window's sequences (`export_window_sequences`), RG set and kick
+// epoch before recording its own. `exported_sequences` — the #7201
+// dispatch-order/budget probe — still records every command and is
+// never cleared; the first test pins both halves.
 //
 // FAIL-ON-REVERT: restoring the union append in
 // `handle_export_owner_rg_sessions` makes the first test see
-// `exported_sequences == [1, 2]` / `export_owner_rgs == [1, 2]` and
-// makes the second test (which drives the REAL `run_export_slice`)
-// ship the RG1 session under token 2 as well.
+// `export_window_sequences == [1, 2]` / `export_owner_rgs == [1, 2]`
+// and makes the second test (which drives the REAL
+// `run_export_slice`) ship the RG1 session under token 2 as well.
 
 use super::*;
 use crate::nat::NatDecision;
@@ -149,10 +152,16 @@ fn batched_export_commands_last_window_wins_at_accept() {
     let results = drain_batched_exports(&mut sessions);
 
     assert_eq!(
-        results.exported_sequences,
+        results.export_window_sequences,
         vec![2],
         "#15950: the batched window must name only the LAST kicked \
          command (S2); S1 was superseded in the same drain"
+    );
+    assert_eq!(
+        results.exported_sequences,
+        vec![1, 2],
+        "#7201: the dispatch log records EVERY accepted command in \
+         order — supersession must not clear it"
     );
     assert_eq!(
         results.export_owner_rgs,
@@ -192,6 +201,7 @@ fn batched_export_commands_last_window_wins_at_accept() {
         &mut VecDeque::new(),
     );
     assert_eq!(solo_results.exported_sequences, vec![7]);
+    assert_eq!(solo_results.export_window_sequences, vec![7]);
     assert_eq!(solo_results.export_owner_rgs, vec![1]);
 }
 
@@ -237,7 +247,7 @@ fn batched_export_window_ships_only_last_rgs_under_last_token() {
             &binding_lookup,
             &forwarding,
             &mut worker_export,
-            results.exported_sequences.clone(),
+            results.export_window_sequences.clone(),
             results.export_owner_rgs.clone(),
             results.export_kick_epoch,
             &export_buffer,
