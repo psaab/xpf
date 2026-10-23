@@ -1,13 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Render an `ascii-text` IPsec PSK that literally starts with `0x`
-    quoted as ASCII (#15991): the gateway-group secret fold now carries
-    each member PSK's authored encoding (pskValue{value, hex}) instead
-    of a bare `0x`-prefixed string, so a lone ASCII `0x61626364` renders
-    `secret = "0x61626364"` rather than the raw hex bytes
-    `secret = 0x61626364`, and an ASCII `0x…` member no longer collapses
-    into a hexadecimal member with the same digits. Hexadecimal keys
-    (#15027) and all other PSK renders are unchanged.
+  * Load an `ascii-text` IPsec PSK that starts with `0x`/`0s` as its
+    literal bytes (#15991): the gateway-group secret fold now carries
+    each member PSK's authored encoding (pskValue{value, hex}) and
+    emits a loader-facing token, because swanctl strips the quotes
+    then hex/base64-decodes any `0x…`/`0s…` value — so a colliding
+    ASCII value (e.g. `0x61626364`) renders base64-armored as
+    `secret = "0sMHg2MTYyNjM2NA=="`, which charon decodes back to the
+    literal string, instead of the raw hex bytes; an ASCII member no
+    longer collapses into a hexadecimal member with the same digits.
+    Hexadecimal keys (#15027) and all other PSK renders are unchanged.
 
 xpf (0.0.0) unstable; urgency=medium
 

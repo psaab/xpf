@@ -6,19 +6,30 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #15991: an `ascii-text` PSK that literally reads `0x<hex digits>` loses
-// its ASCII provenance at decode; the lone-value secret emission treated
-// any `0x`-prefixed pskValue as a hex key and rendered it unquoted, so
-// strongSwan hex-decoded the credential instead of using the literal
-// ASCII string the operator authored. The grouped-secret fold likewise
-// collapsed an ASCII `0x<digits>` and a hexadecimal `<digits>` key into
-// one element. Provenance ({value, hex}) now travels through the fold
-// and decides emission — never the string prefix.
+// #15991 (+ fold, loader semantics): an `ascii-text` PSK that
+// literally reads `0x<hex digits>` must reach charon as its literal
+// ASCII bytes. Two defects stacked: (1) the renderer discarded
+// provenance — the lone-value emission treated any `0x`-prefixed
+// string as a hex key and rendered it unquoted, and the grouped fold
+// collapsed an ASCII `0x<digits>` with a hexadecimal `<digits>`
+// member; (2) quoting does NOT protect the value: swanctl's loader
+// (strongSwan 6.1.0 load_creds.c load_secret) strips the settings
+// quotes, then hex-decodes ANY value with a `0x` prefix (either
+// case) and base64-decodes any `0s` value before the VICI
+// load-shared call — verified live against charon 6.1.0 in a
+// two-daemon lab (docs/log/15991.md), where quoted `"0x61626364"`
+// authenticated against the hex-decoded bytes, not the literal
+// string. The fix therefore keeps {value, hex} provenance through
+// the fold AND emits a loader-facing token: hex stays `0x<hex>`,
+// a colliding ASCII value (`0x`/`0X`/`0s`/`0S` prefix) is
+// base64-armored as `0s<base64 of the literal bytes>` so charon
+// base64-decodes it back to exactly the authored string, and any
+// other ASCII value renders as itself.
 //
-// FAIL-ON-REVERT: restoring the string-prefix emission (a lone
-// `strings.HasPrefix(v, "0x")` check, or the `"0x"+d` string-space fold)
-// makes the ascii-0x cells below render `secret = 0x61626364` unquoted
-// (or collapse to a single element) and every assertion goes RED.
+// FAIL-ON-REVERT: restoring either the string-prefix emission or
+// the merely-quoted render (`secret = "0x61626364"`) makes the
+// ascii-0x cells below go RED — the quoted form still hex-decodes
+// at load, so the token assertions are the decisive check.
 
 func asciiHexFixture15991(vpns map[string]*config.IPsecVPN, gateways map[string]*config.IPsecGateway) *config.IPsecConfig {
 	return &config.IPsecConfig{
@@ -39,36 +50,41 @@ func asciiHexFixture15991(vpns map[string]*config.IPsecVPN, gateways map[string]
 func TestASCIIHexPrefixedPSK15991(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 
-	t.Run("lone ascii 0x renders quoted, lone hex renders raw", func(t *testing.T) {
+	t.Run("lone ascii 0x is base64-armored, lone hex renders raw", func(t *testing.T) {
 		cfg := asciiHexFixture15991(
 			map[string]*config.IPsecVPN{
 				"ascii-0x": {Gateway: "gw-a", PSK: config.NewSecret("0x61626364")},
 				"hex":      {Gateway: "gw-b", PSK: config.NewSecret("61626364"), PSKHex: true},
-				// Uppercase ASCII control: also a literal string, never hex.
+				// Uppercase + base64-prefix controls: strcasepfx is
+				// case-insensitive, so both collide at load too.
 				"ascii-0X": {Gateway: "gw-c", PSK: config.NewSecret("0X61626364")},
+				"ascii-0s": {Gateway: "gw-d", PSK: config.NewSecret("0sQUJD")},
 			},
 			map[string]*config.IPsecGateway{
 				"gw-a": {Name: "gw-a", Address: "203.0.113.1", IKEPolicy: "pol"},
 				"gw-b": {Name: "gw-b", Address: "203.0.113.2", IKEPolicy: "pol"},
 				"gw-c": {Name: "gw-c", Address: "203.0.113.3", IKEPolicy: "pol"},
+				"gw-d": {Name: "gw-d", Address: "203.0.113.4", IKEPolicy: "pol"},
 			})
 		text, rendered, err := m.renderConfig(cfg)
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		if !rendered["gw-a"] || !rendered["gw-b"] || !rendered["gw-c"] {
+		if !rendered["gw-a"] || !rendered["gw-b"] || !rendered["gw-c"] || !rendered["gw-d"] {
 			t.Fatalf("all VPNs must render, rendered=%v:\n%s", rendered, text)
 		}
 		doc := parseSwanctlDoc(t, text)
-		// ASCII provenance decides: quoted even though the value starts
-		// with "0x". Decisive check from #15991.
-		doc.at(t, "secrets", "ike-gw-a").requireSetting(t, "secret", `"0x61626364"`)
+		// base64("0x61626364") = MHg2MTYyNjM2NA== — charon
+		// base64-decodes the 0s token back to the literal string.
+		// A merely quoted "0x61626364" would hex-decode at load.
+		doc.at(t, "secrets", "ike-gw-a").requireSetting(t, "secret", `"0sMHg2MTYyNjM2NA=="`)
 		// Hex control (#15027): unquoted raw bytes, unchanged.
 		doc.at(t, "secrets", "ike-gw-b").requireSetting(t, "secret", "0x61626364")
-		doc.at(t, "secrets", "ike-gw-c").requireSetting(t, "secret", `"0X61626364"`)
+		doc.at(t, "secrets", "ike-gw-c").requireSetting(t, "secret", `"0sMFg2MTYyNjM2NA=="`)
+		doc.at(t, "secrets", "ike-gw-d").requireSetting(t, "secret", `"0sMHNRVUpE"`)
 	})
 
-	t.Run("policy-fallback ascii 0x renders quoted", func(t *testing.T) {
+	t.Run("policy-fallback ascii 0x is base64-armored", func(t *testing.T) {
 		cfg := asciiHexFixture15991(
 			map[string]*config.IPsecVPN{
 				"site": {Gateway: "gw-a"},
@@ -84,7 +100,7 @@ func TestASCIIHexPrefixedPSK15991(t *testing.T) {
 		if !rendered["gw-a"] {
 			t.Fatalf("policy-fallback VPN must render:\n%s", text)
 		}
-		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw-a").requireSetting(t, "secret", `"0x61626364"`)
+		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw-a").requireSetting(t, "secret", `"0sMHg2MTYyNjM2NA=="`)
 	})
 
 	t.Run("grouped ascii 0x and hex same digits stay distinct", func(t *testing.T) {
@@ -100,13 +116,14 @@ func TestASCIIHexPrefixedPSK15991(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		// Pre-fix the fold's string-space dedupe collapsed both to the
-		// single raw-hex token; both credentials must survive, in sorted
-		// member order (ascii-0x first).
-		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw").requireSetting(t, "secret", `"0x61626364,0x61626364"`)
+		// Both credentials survive as distinct comma elements (sorted
+		// member order, ascii-0x first): the ASCII member armored, the
+		// hex member as its 0x token. Pre-fix these collapsed to one
+		// raw-hex token (or, armored wrongly, would hex-decode at load).
+		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw").requireSetting(t, "secret", `"0sMHg2MTYyNjM2NA==,0x61626364"`)
 	})
 
-	t.Run("grouped identical ascii 0x dedupes, ascii 0x plus plain stays quoted", func(t *testing.T) {
+	t.Run("grouped identical ascii 0x dedupes, ascii 0x plus plain", func(t *testing.T) {
 		cfg := asciiHexFixture15991(
 			map[string]*config.IPsecVPN{
 				"a1":    {Gateway: "gw", PSK: config.NewSecret("0x61626364")},
@@ -120,10 +137,27 @@ func TestASCIIHexPrefixedPSK15991(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw").requireSetting(t, "secret", `"0x61626364,other"`)
+		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw").requireSetting(t, "secret", `"0sMHg2MTYyNjM2NA==,other"`)
 	})
 
-	t.Run("lone 0x with non-hex tail renders quoted", func(t *testing.T) {
+	t.Run("grouped plain members unchanged", func(t *testing.T) {
+		cfg := asciiHexFixture15991(
+			map[string]*config.IPsecVPN{
+				"a1": {Gateway: "gw", PSK: config.NewSecret("secret-one")},
+				"a2": {Gateway: "gw", PSK: config.NewSecret("secret-two")},
+			},
+			map[string]*config.IPsecGateway{
+				"gw": {Name: "gw", Address: "203.0.113.1", IKEPolicy: "pol"},
+			})
+		text, _, err := m.renderConfig(cfg)
+		if err != nil {
+			t.Fatalf("renderConfig: %v", err)
+		}
+		// Byte-identical to the pre-#15991 grouped render.
+		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw").requireSetting(t, "secret", `"secret-one,secret-two"`)
+	})
+
+	t.Run("lone 0x with non-hex tail is base64-armored", func(t *testing.T) {
 		cfg := asciiHexFixture15991(
 			map[string]*config.IPsecVPN{
 				"ascii-0x": {Gateway: "gw-a", PSK: config.NewSecret("0xzzzz")},
@@ -135,15 +169,35 @@ func TestASCIIHexPrefixedPSK15991(t *testing.T) {
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
-		// Never raw hex bytes — and not degenerate: "0xzzzz" is not valid
-		// hex, but as ASCII it is a legitimate literal credential.
-		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw-a").requireSetting(t, "secret", `"0xzzzz"`)
+		// Bare or merely quoted, "0xzzzz" would fail chunk_from_hex
+		// at load (empty secret); armored it loads as the literal
+		// string. base64("0xzzzz") = MHh6enp6.
+		parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw-a").requireSetting(t, "secret", `"0sMHh6enp6"`)
+	})
+
+	t.Run("collision predicate boundaries", func(t *testing.T) {
+		for _, tc := range []struct {
+			v    string
+			want bool
+		}{
+			{"0x61626364", true}, {"0X61626364", true}, {"0sQUJD", true}, {"0SQUJD", true},
+			{"0x", true}, {"0s", true},
+			{"0", false}, {"", false}, {"00x1", false}, {"x0x1", false}, {"secret", false}, {" 0x1", false},
+		} {
+			if got := asciiValueCollidesWithSwanctlEncoding(tc.v); got != tc.want {
+				t.Errorf("asciiValueCollidesWithSwanctlEncoding(%q) = %v, want %v", tc.v, got, tc.want)
+			}
+		}
+		if got := swanctlSecretToken(pskValue{value: "0x61626364", hex: true}); got != "0x0x61626364" {
+			t.Errorf("hex token must prefix verbatim, got %q", got)
+		}
 	})
 }
 
 // End-to-end through the real compiler: `ascii-text 0x61626364` keeps
-// PSKHex=false and renders quoted — the exact authored spelling #15991
-// names (mirrors TestPSKHexadecimalEndToEnd15027 for the hex leg).
+// PSKHex=false and renders base64-armored so charon loads the literal
+// string — the exact authored spelling #15991 names (mirrors
+// TestPSKHexadecimalEndToEnd15027 for the hex leg).
 func TestASCIIHexPrefixedPSKEndToEnd15991(t *testing.T) {
 	tree := &config.ConfigTree{}
 	for _, cmd := range []string{
@@ -185,5 +239,5 @@ func TestASCIIHexPrefixedPSKEndToEnd15991(t *testing.T) {
 	if !rendered["gw1"] {
 		t.Fatalf("ascii 0x VPN must render:\n%s", text)
 	}
-	parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw1").requireSetting(t, "secret", `"0x61626364"`)
+	parseSwanctlDoc(t, text).at(t, "secrets", "ike-gw1").requireSetting(t, "secret", `"0sMHg2MTYyNjM2NA=="`)
 }
