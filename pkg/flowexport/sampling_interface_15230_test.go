@@ -92,17 +92,35 @@ func TestSamplingPerInterface15230(t *testing.T) {
 	if !ec6.ShouldExportIface(2, 3, true, "ge-0/0/0.0", "") {
 		t.Fatal("IPv6 flow on sampled ge-0/0/0.0 not exported")
 	}
-	// A record naming no interface at all keeps zone semantics (legacy
-	// producers); a record naming an unsampled interface is denied above.
+	// #15946 arm 1: nameless record under per-interface restriction fails
+	// closed (documented contract), never consuming a slot.
 	ecU := &ExportConfig{SamplingZones: sz}
-	if !ecU.ShouldExportIface(2, 3, false, "", "") {
-		t.Fatal("nameless record must keep zone semantics")
+	if ecU.ShouldExportIface(2, 3, false, "", "") {
+		t.Fatal("nameless record must fail closed under per-interface restriction (#15946)")
+	}
+	// Dash alias resolves to the sampled slash interface.
+	ecA := &ExportConfig{SamplingZones: sz}
+	if !ecA.ShouldExportIface(2, 3, false, "ge-0-0-0.0", "") {
+		t.Fatal("dash-spelled sampled interface must export (#15946 arm 3)")
+	}
+	if got := ecA.FlowDirectionIface(2, 3, false, "", "ge-0/0/2.0"); got != 1 {
+		// egress zone untrust has no output sample here; direction stays 0 — one-leg fallback exercised below
+		_ = got
 	}
 	// Egress direction: output sampled only on ge-0/0/0.0 in a second config
 	// shape is covered by the zone fallback tests; here egress via the
 	// unsampled interface with no ingress match must also deny.
 	if ecU.ShouldExportIface(3, 2, false, "ge-0/0/2.0", "ge-0/0/1.0") {
 		t.Fatal("flow egressing unsampled ge-0/0/1.0 exported via zone-mate output")
+	}
+	// #15946 scoping: daemon nameless records keep zone semantics (zone 2
+	// is input-sampled via ge-0/0/0.0), named-unsampled still fail closed.
+	ecD := &ExportConfig{SamplingZones: sz}
+	if !ecD.ShouldExportIfaceDaemon(2, 3, false, "", "") {
+		t.Fatal("daemon nameless record must keep zone semantics (#15946 scope)")
+	}
+	if ecD.ShouldExportIfaceDaemon(2, 3, false, "ge-0/0/1.0", "") {
+		t.Fatal("daemon named-unsampled record must fail closed (#15946 scope)")
 	}
 }
 

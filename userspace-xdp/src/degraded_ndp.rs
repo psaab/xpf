@@ -11,8 +11,9 @@
 /// `should_fallback_early`; this predicate covers unicast NDP and only grants
 /// the kernel pass when the destination is configured as local to this host.
 #[inline(always)]
-pub fn is_local_ndp_control(icmp_type: u8, destination_is_local: bool) -> bool {
-    (133..=137).contains(&icmp_type) && destination_is_local
+pub fn is_local_ndp_control(icmp_type: u8, hop_limit: u8, destination_is_local: bool) -> bool {
+    // #15946: RFC4861 hop-limit 255 proof, matching healthy NAT-external arm.
+    (133..=137).contains(&icmp_type) && hop_limit == 255 && destination_is_local
 }
 
 /// #15117: may an on-link NDP packet (ICMPv6 133-137, hop limit 255) use

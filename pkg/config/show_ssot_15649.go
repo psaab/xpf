@@ -72,7 +72,11 @@ func RenderFlowTimeouts(w io.Writer, cfg *Config) {
 	tcpRow("TCP established timeout", TCPSessionEstablishedTimeoutLeaf, tcp.EstablishedTimeout)
 	tcpRow("TCP initial timeout", TCPSessionInitialTimeoutLeaf, tcp.InitialTimeout)
 	tcpRow("TCP closing timeout", TCPSessionClosingTimeoutLeaf, tcp.ClosingTimeout)
-	tcpRow("TCP time-wait timeout", TCPSessionTimeWaitTimeoutLeaf, tcp.TimeWaitTimeout)
+	effectiveTimeWait := tcp.TimeWaitTimeout
+	if tcp.TimeWaitStateSessionTimeout > 0 {
+		effectiveTimeWait = tcp.TimeWaitStateSessionTimeout
+	}
+	tcpRow("TCP time-wait timeout", TCPSessionTimeWaitTimeoutLeaf, effectiveTimeWait)
 	fmt.Fprintf(w, "  %-30s %s\n", "UDP session timeout:", FlowTimeoutCell(flow.UDPSessionTimeout, DataplaneUDPSessionTimeoutSecs))
 	fmt.Fprintf(w, "  %-30s %s\n", "ICMP session timeout:", FlowTimeoutCell(flow.ICMPSessionTimeout, DataplaneICMPSessionTimeoutSecs))
 

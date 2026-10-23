@@ -473,7 +473,11 @@ const (
 	// MirrorConfigSnapshot carries ingress_unit. A v65 helper ignores it
 	// and keys a tunnel unit-scoped mirror by (ifindex, VID 0) alone, so
 	// wg0.1 mirrors every sibling tunnel unit sharing the wg0 netdev.
-	ProtocolVersion = 66
+	// v66 -> v67 (#15946): FlowSnapshot carries tcp_time_wait_session_ageout
+	// and tcp_time_wait_apply_to_half_closed; a v66 helper ignores them and
+	// keeps TIME_WAIT on its window even under `session-ageout`, and keeps
+	// half-closed sessions on the closing window (the defects).
+	ProtocolVersion = 67
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1234,8 +1238,11 @@ type FlowSnapshot struct {
 	TCPNoSequenceCheck    bool `json:"tcp_no_sequence_check,omitempty"`
 	TCPRstSequenceCheck   bool `json:"tcp_rst_sequence_check,omitempty"`
 	TCPMaximumWindow      int  `json:"tcp_maximum_window,omitempty"`
-	UDPSessionTimeout     int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
-	ICMPSessionTimeout    int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
+	// #15946: time-wait-state flags (Junos session-ageout / apply-to-half-closed).
+	TCPTimeWaitSessionAgeout     bool `json:"tcp_time_wait_session_ageout,omitempty"`
+	TCPTimeWaitApplyToHalfClosed bool `json:"tcp_time_wait_apply_to_half_closed,omitempty"`
+	UDPSessionTimeout            int  `json:"udp_session_timeout,omitempty"`  // seconds, 0=default
+	ICMPSessionTimeout           int  `json:"icmp_session_timeout,omitempty"` // seconds, 0=default
 	// GREAcceleration carries `security flow gre-performance-acceleration`
 	// (#3360). On vSRX this extracts the GRE key/call-id into the session tuple
 	// so multiple GRE tunnels between the same endpoints map to distinct

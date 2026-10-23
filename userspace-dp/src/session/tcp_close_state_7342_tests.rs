@@ -23,6 +23,8 @@ fn configured() -> SessionTimeouts {
         initial: INITIAL_SECS,
         closing: CLOSING_SECS,
         time_wait: TIME_WAIT_SECS,
+        time_wait_session_ageout: false,
+        time_wait_apply_to_half_closed: false,
     })
 }
 
@@ -397,4 +399,24 @@ fn fin_tuple_reuse_gets_fresh_opening_and_established_windows_10287() {
 #[test]
 fn rst_tuple_reuse_gets_fresh_opening_and_established_windows_10287() {
     reused_tuple_completes_handshake_after_close(TCP_RST);
+}
+
+#[test]
+fn time_wait_state_flags_15946() {
+    let mut t = SessionTimeouts::default();
+    t.tcp_time_wait_ns = 150_000_000_000;
+    t.tcp_closing_ns = 30_000_000_000;
+    t.tcp_established_ns = 1800_000_000_000u64;
+    // half-closed flag: Closing uses TW window.
+    t.tcp_time_wait_apply_to_half_closed = true;
+    assert_eq!(tcp_close_window_ns(TcpCloseClass::Closing, &t), 150_000_000_000);
+    // ageout: TimeWait uses established.
+    t.tcp_time_wait_session_ageout = true;
+    assert_eq!(tcp_close_window_ns(TcpCloseClass::TimeWait, &t), 1800_000_000_000);
+    assert_eq!(
+        tcp_close_window_ns_with_app(TcpCloseClass::TimeWait, &t, Some(900_000_000_000)),
+        900_000_000_000
+    );
+    // reset unaffected
+    assert_eq!(tcp_close_window_ns(TcpCloseClass::Reset, &t), TCP_RST_TIMEOUT_NS);
 }

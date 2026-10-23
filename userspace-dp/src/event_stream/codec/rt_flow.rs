@@ -439,6 +439,8 @@ impl EventFrame {
         // converted by the caller from the monotonic `created_ns`. Written LE
         // at [0:8]; 0 keeps the Go `time.Now()` fallback.
         create_unix_ns: u64,
+        // #15946: per-policy syslog gate; false = flowexport-only open.
+        log_syslog: bool,
     ) -> Self {
         let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         let base = FRAME_HEADER_SIZE;
@@ -502,8 +504,8 @@ impl EventFrame {
         // #2520 close-side fix). 0 stays the UNKNOWN sentinel.
         buf[base + 132..base + 134].copy_from_slice(&application_id.to_le_bytes());
         // [134] close reason — 0 (a create has none).
-        // [135] #2508 SYSLOG gate — always set (producer-gated).
-        buf[base + 135] = RT_FLOW_LOG_SYSLOG;
+        // [135] #2508 SYSLOG gate — #15946: reflects log_session_init.
+        buf[base + 135] = if log_syslog { RT_FLOW_LOG_SYSLOG } else { 0 };
         // #4915: [152:160] the dataplane's stable session id (LE u64), the same
         // value the matching SESSION_CLOSE frame carries. The Go decoder reads it
         // only when the frame carries it (len >= 160).

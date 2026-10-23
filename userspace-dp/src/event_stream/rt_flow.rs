@@ -244,6 +244,7 @@ impl EventStreamWorkerHandle {
                     delta.session_id,
                     // #12889: admission instant (wall-clock), rides [0:8].
                     create_unix_ns,
+                    delta.metadata.log_session_init,
                 )
             },
         );

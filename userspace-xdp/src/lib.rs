@@ -936,7 +936,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             reason,
             &parsed,
         );
-        if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
+        if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain, ingress_ifindex) {
             return pass_local_control(ctrl, reason);
         }
         return drop_degraded_transit(ctrl, reason);
@@ -1797,7 +1797,7 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     if land_gate(&parsed, ingress_ifindex) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
     }
-    let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain);
+    let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain, ingress_ifindex);
     match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
     {
         degraded_ctrl_disabled::DegradedCtrlDisabledDisposition::PassLocalControl => {
@@ -1899,6 +1899,7 @@ fn is_degraded_local_or_control(
     data_end: usize,
     parsed: &ParsedPacket,
     ingress_domain: u32,
+    ingress_ifindex: u32,
 ) -> bool {
     // #14645/#15102: a tunnel fragment has no kernel terminator for its
     // inner; in degraded mode it drops with its head rather than passing
@@ -1930,7 +1931,26 @@ fn is_degraded_local_or_control(
     }
     let destination_is_local = is_local_destination(parsed, ingress_domain);
     if parsed.protocol == PROTO_ICMPV6
-        && degraded_ndp::is_local_ndp_control(parsed.icmp_type, destination_is_local)
+        && degraded_ndp::is_local_ndp_control(parsed.icmp_type, parsed.hop_limit, destination_is_local)
+    {
+        return true;
+    }
+    // #15946: degraded twin of healthy NAT-external NDP arm (:1077).
+    if parsed.protocol == PROTO_ICMPV6
+        && degraded_ndp::is_nat_external_ndp_control(
+            parsed.icmp_type,
+            parsed.hop_limit,
+            is_interface_nat_destination(parsed, ingress_domain),
+        )
+    {
+        return true;
+    }
+    // #15946: degraded PASS_TO_KERNEL session + WG steer (healthy :1049/:982).
+    if live_userspace_session_action(parsed) == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL {
+        return true;
+    }
+    if (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
+        && wg_steer_to_kernel(ctrl, parsed, ingress_ifindex, ingress_domain)
     {
         return true;
     }

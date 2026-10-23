@@ -817,24 +817,7 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 	// interim/final records for long-lived flows. Close handling below
 	// forgets the tracker entry (the close record itself carries totals).
 	if rec.Type == "SESSION_OPEN" {
-		if b := d.flowBundle.Load(); b != nil {
-			srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
-			key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
-			for _, g := range b.groups {
-				if g.ec.GroupIsV6 == isV6 {
-					g.exp.TrackFlowOpen(key, rec.Time)
-				}
-			}
-		}
-		if b := d.ipfixBundlePtr.Load(); b != nil {
-			srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
-			key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
-			for _, g := range b.groups {
-				if g.ec.GroupIsV6 == isV6 {
-					g.exp.TrackFlowOpen(key, rec.Time)
-				}
-			}
-		}
+		d.trackFlowOpen(rec)
 		return
 	}
 	if rec.Type != "SESSION_CLOSE" {
@@ -882,29 +865,25 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 			j++
 		}
 		// Family attribution then the single per-instance sampling decision.
-		if lead.ServesFamily(sd.IsIPv6) && lead.ShouldExportIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface) {
-			// #3270 + #15230: derive flowDirection from the record's own
-			// sampled interface when per-interface data exists.
+		eligible := lead.ServesFamily(sd.IsIPv6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
+		if eligible {
 			sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
 			for k := i; k < j; k++ {
-				// #6811: fan out only to the groups of THIS address family.
-				// Groups are single-family by construction (the resolver keys
-				// them on template AND family), so this is one comparison
-				// against a precomputed flag — not a per-record collector
-				// search. Before it, the instance-level ServesFamily gate above
-				// was the ONLY family check, and an instance carrying both
-				// families passed it for either family and then fanned to EVERY
-				// group — IPv4 records to IPv6-only collectors and vice versa.
-				//
-				// The instance-level gate stays: it must run BEFORE
-				// ShouldExport so a record of a family this instance does not
-				// serve never consumes a 1-in-N sampling slot. Moving family
-				// entirely down here would change the sampling denominator.
 				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 					continue
 				}
+				// #15946: feed cumulative counters before close forgets.
+				b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
 				b.groups[k].exp.ExportSessionClose(rec, sd)
-				b.groups[k].exp.CloseFlow(flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6))
+				b.groups[k].exp.CloseFlow(key)
+			}
+		} else {
+			// #15946: unsampled close still forgets its (sampled) open.
+			for k := i; k < j; k++ {
+				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 {
+					b.groups[k].exp.CloseFlow(key)
+				}
 			}
 		}
 		i = j
@@ -913,6 +892,10 @@ func (d *Daemon) flowExportCallback(rec logging.EventRecord, raw []byte) {
 
 // ipfixExportCallback is the IPFIX equivalent of flowExportCallback.
 func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
+	if rec.Type == "SESSION_OPEN" {
+		d.trackFlowOpen(rec)
+		return
+	}
 	if rec.Type != "SESSION_CLOSE" {
 		return
 	}
@@ -952,31 +935,87 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 		for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
 			j++
 		}
-		if lead.ServesFamily(sd.IsIPv6) && lead.ShouldExportIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface) {
-			// #3270 + #15230: see flowExportCallback.
+		eligible := lead.ServesFamily(sd.IsIPv6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
+		key := flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6)
+		if eligible {
 			sd.Direction = lead.FlowDirectionIface(rec.InZone, rec.OutZone, sd.IsIPv6, rec.IngressIface, rec.EgressIface)
 			for k := i; k < j; k++ {
-				// #6811: fan out only to the groups of THIS address family.
-				// Groups are single-family by construction (the resolver keys
-				// them on template AND family), so this is one comparison
-				// against a precomputed flag — not a per-record collector
-				// search. Before it, the instance-level ServesFamily gate above
-				// was the ONLY family check, and an instance carrying both
-				// families passed it for either family and then fanned to EVERY
-				// group — IPv4 records to IPv6-only collectors and vice versa.
-				//
-				// The instance-level gate stays: it must run BEFORE
-				// ShouldExport so a record of a family this instance does not
-				// serve never consumes a 1-in-N sampling slot. Moving family
-				// entirely down here would change the sampling denominator.
 				if b.groups[k].ec.GroupIsV6 != sd.IsIPv6 {
 					continue
 				}
+				b.groups[k].exp.TouchFlow(key, rec.Time, rec.SessionPkts+rec.RevSessionPkts, rec.SessionBytes+rec.RevSessionBytes)
 				b.groups[k].exp.ExportSessionClose(rec, sd)
-				b.groups[k].exp.CloseFlow(flowexport.FlowKeyFromClose(sd.SrcIP, sd.DstIP, sd.SrcPort, sd.DstPort, rec.ProtocolNum, sd.IsIPv6))
+				b.groups[k].exp.CloseFlow(key)
+			}
+		} else {
+			for k := i; k < j; k++ {
+				if b.groups[k].ec.GroupIsV6 == sd.IsIPv6 {
+					b.groups[k].exp.CloseFlow(key)
+				}
 			}
 		}
 		i = j
+	}
+}
+
+// trackFlowOpen is the shared SESSION_OPEN tracker feed (#15946 H14-03/H42-03).
+// Both callbacks call it, so IPFIX-only deployments track opens (previously
+// only the v9 callback did). Opens are gated per-instance exactly as closes:
+// family + ShouldExportIface (which consumes the 1-in-N slot once per
+// instance, mirroring close). Template carries NAT/ifindex/TOS/flags.
+func (d *Daemon) trackFlowOpen(rec logging.EventRecord) {
+	srcIP, dstIP, isV6 := parseAddrPair(rec.SrcAddr, rec.DstAddr)
+	key := flowexport.FlowKeyFromClose(srcIP, dstIP, parseSrcPort(rec.SrcAddr), parseSrcPort(rec.DstAddr), rec.ProtocolNum, isV6)
+	tmpl := flowexport.FlowRecord{
+		SrcIP: srcIP, DstIP: dstIP, SrcPort: key.SrcPort, DstPort: key.DstPort,
+		Protocol: rec.ProtocolNum, IsIPv6: isV6, StartTime: rec.Time,
+		InIf: rec.IngressIfindex, OutIf: rec.EgressIfindex, TOS: rec.TOS, TCPFlags: rec.TCPControlBits,
+		NATSrcIP: parseHost(rec.NATSrcAddr), NATDstIP: parseHost(rec.NATDstAddr),
+		NATSrcPort: parseSrcPort(rec.NATSrcAddr), NATDstPort: parseSrcPort(rec.NATDstAddr),
+	}
+	if tmpl.NATSrcIP == nil {
+		tmpl.NATSrcIP = srcIP
+		tmpl.NATSrcPort = key.SrcPort
+	}
+	if tmpl.NATDstIP == nil {
+		tmpl.NATDstIP = dstIP
+		tmpl.NATDstPort = key.DstPort
+	}
+	if b := d.flowBundle.Load(); b != nil {
+		for i := 0; i < len(b.groups); {
+			inst := b.groups[i].ec.InstanceName
+			lead := b.groups[i].ec
+			j := i
+			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
+				j++
+			}
+			if lead.ServesFamily(isV6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
+				for k := i; k < j; k++ {
+					if b.groups[k].ec.GroupIsV6 == isV6 {
+						b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
+					}
+				}
+			}
+			i = j
+		}
+	}
+	if b := d.ipfixBundlePtr.Load(); b != nil {
+		for i := 0; i < len(b.groups); {
+			inst := b.groups[i].ec.InstanceName
+			lead := b.groups[i].ec
+			j := i
+			for j < len(b.groups) && b.groups[j].ec.InstanceName == inst {
+				j++
+			}
+			if lead.ServesFamily(isV6) && lead.ShouldExportIfaceDaemon(rec.InZone, rec.OutZone, isV6, rec.IngressIface, rec.EgressIface) {
+				for k := i; k < j; k++ {
+					if b.groups[k].ec.GroupIsV6 == isV6 {
+						b.groups[k].exp.TrackFlowOpenRecord(key, rec.Time, tmpl)
+					}
+				}
+			}
+			i = j
+		}
 	}
 }
 

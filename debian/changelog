@@ -42,6 +42,13 @@ xpf (0.0.0) unstable; urgency=medium
     or zero-filled), but no live oversized-frame/PTB measurement was
     run, so no wire consequence is claimed fixed.
 
+xpf (0.0.0) unstable; urgency=medium
+  * Fix flow/HA/export defects (#15946): effective TIME_WAIT rendering and
+    time-wait-state enforcement (protocol v67), sampled-gated session-open
+    tracking for v9+IPFIX with counter-fed timeout export, RG ownership via
+    RethRGOwners, per-interface sampling fail-closed/alias fixes, degraded
+    NDP/PASS_TO_KERNEL/WG parity, and build-time-zero ifindex retention.
+
   * Snapshot neighbor resolution netlink state once per pass: interface
     names are fetched once per link and neighbor tables once per
     (link, family) instead of once per target, preserving the usable-entry

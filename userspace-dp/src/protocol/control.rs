@@ -302,7 +302,7 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // MirrorConfigSnapshot carries ingress_unit; a v65 helper keys a
 // tunnel unit-scoped mirror by (ifindex, VID 0) alone and mirrors
 // every sibling tunnel unit — the defect.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 66;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 67;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

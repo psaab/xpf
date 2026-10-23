@@ -266,9 +266,24 @@ func (c *exporterCore) TrackFlowOpen(key FlowKey, start time.Time) {
 	}
 }
 
+// TrackFlowOpenRecord registers with a full template (#15946: NAT/ifindex/masks).
+func (c *exporterCore) TrackFlowOpenRecord(key FlowKey, start time.Time, template FlowRecord) {
+	if c.tracker != nil {
+		c.tracker.TrackFlowOpen(key, start, template)
+	}
+}
+
 // TouchFlow updates cumulative counters for a tracked flow (#15655).
 func (c *exporterCore) TouchFlow(key FlowKey, now time.Time, packets, bytes uint64) {
 	if c.tracker != nil {
 		c.tracker.Touch(key, now, packets, bytes)
 	}
+}
+
+// Tracked reports whether key is currently tracked.
+func (c *exporterCore) Tracked(key FlowKey) bool {
+	if c.tracker == nil {
+		return false
+	}
+	return c.tracker.Has(key)
 }

@@ -109,9 +109,9 @@ func (t *FlowTracker) Touch(key FlowKey, now time.Time, packets, bytes uint64) {
 	if !ok {
 		return
 	}
-	if packets > f.lastPackets || bytes > f.lastBytes {
-		// Activity is measured against exported baseline: progress since
-		// last export means the flow is not idle.
+	if packets > f.record.Packets || bytes > f.record.Bytes {
+		// #15946: progress vs cumulative record, not last-export baseline
+		// (which CollectDueExports advances, masking activity).
 		f.lastActivity = now
 	}
 	f.record.Packets = packets
@@ -183,6 +183,17 @@ func (t *FlowTracker) Len() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.flows)
+}
+
+// Has reports whether key is tracked (#15946 close-cleanup).
+func (t *FlowTracker) Has(key FlowKey) bool {
+	if !t.enabled() {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.flows[key]
+	return ok
 }
 
 // CloseFlow / TrackFlowOpen / TouchFlow / CollectDueExports adapters

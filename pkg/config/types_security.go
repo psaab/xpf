@@ -373,9 +373,15 @@ type TCPSessionConfig struct {
 	// MaximumWindow (`maximum-window <bytes>`, #15753): cap on tracked
 	// TCP receive window used for sequence validation. 0 = default.
 	MaximumWindow int
-	// TimeWaitStateSessionTimeout (`time-wait-state session-timeout`, #15753).
-	TimeWaitStateSessionTimeout    int
-	TimeWaitStateSessionAgeout     bool
+	// TimeWaitStateSessionTimeout (`time-wait-state session-timeout`, #15753):
+	// TIME_WAIT window proper; overrides TimeWaitTimeout at snapshot build.
+	TimeWaitStateSessionTimeout int
+	// TimeWaitStateSessionAgeout (`time-wait-state session-ageout`, #15946):
+	// TIME_WAIT sessions age out on the service-based established timeout.
+	TimeWaitStateSessionAgeout bool
+	// TimeWaitStateApplyToHalfClosed (`time-wait-state
+	// apply-to-half-closed-state`, #15946): TIME_WAIT window also governs
+	// half-closed (single-FIN) sessions.
 	TimeWaitStateApplyToHalfClosed bool
 	// NoSequenceCheck disables TCP sequence-number validation for flow
 	// sessions (`set security flow tcp-session no-sequence-check`, #2008 M9).

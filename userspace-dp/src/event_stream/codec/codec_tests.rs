@@ -650,6 +650,7 @@ fn test_session_create_rt_flow_wire_layout() {
         9,                         // #2615: application id
         0x1122_3344_5566_7788,     // #4915: stable session id (rides [152:160])
         1_700_000_123_456_789_012, // #12889: admission instant Unix ns ([0:8])
+        true,
     );
     assert_eq!(frame.data[4], MSG_SESSION_CREATE_RT_FLOW);
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
