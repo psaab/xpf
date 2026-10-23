@@ -37,62 +37,72 @@ forward_key: &SessionKey,
 nat: NatDecision,
 pending_forwards: &mut Vec<PendingForwardRequest>,
 shared_recycles: &mut Vec<(u32, u64)>,
-keep_triggers: &[(SessionKey, u64)],) {
+keep_triggers: &[(SessionKey, u64)],
+// #15947 (H29-01): the calling worker's id + the forwarding snapshot,
+// threaded so the teardown can release this worker's NAT holds exactly
+// as every other pair teardown does. `worker_commands_by_id` is the
+// repairing-delete queue the pair helper replicates through.
+forwarding: &ForwardingState,
+worker_commands_by_id: &WorkerCommandQueues,
+worker_id: u32,
+now_ns: u64,) {
     let reverse_key = reverse_session_key(forward_key, nat);
-    let forward_session_id = sessions.session_id_for(forward_key);
-    let reverse_session_id = sessions.session_id_for(&reverse_key);
-    sessions.delete(forward_key);
-    sessions.delete(&reverse_key);
-    delete_live_session_entry(
-        current.bpf_maps.session_map.handle(),
-        forward_key,
-        nat,
-        false,
-    );
-    delete_live_session_entry(
-        current.bpf_maps.session_map.handle(),
-        &reverse_key,
-        nat,
-        true,
-    );
-    for (key, session_id) in [
-        (forward_key, forward_session_id),
-        (&reverse_key, reverse_session_id),
-    ] {
-        if crate::afxdp::bpf_map::delete_bpf_conntrack_entry_for_session_result(
-            current.bpf_maps.conntrack_v4_fd,
-            current.bpf_maps.conntrack_v6_fd,
-            key,
-            session_id,
-        ) == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy
-        {
-            sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
-                key: key.clone(),
-                session_id,
-            });
-        }
+    // #15947 (H29-01): pair-aware teardown. The pre-fix body deleted
+    // both session rows but released NO source-NAT / NAT64 allocation
+    // and emitted NO close delta, so an rst-invalidate teardown leaked
+    // the SNAT/NAT64 pool port until idle expiry and left the HA peer
+    // holding the flow with no Close. `delete_terminal_half` (via
+    // `delete_terminal_filtered_session`) releases each half's
+    // allocation exactly once (self-gated on `is_reverse`), drops the
+    // BPF/conntrack/shared rows, replicates the delete, and emits the
+    // single forward Close — the same contract the idle reap and the
+    // terminal-filter revocation already honour. The decision/metadata
+    // are read from the live entries so a reverse-direction trigger
+    // still tears down the forward half under its own decision.
+    let hit = sessions
+        .entry_with_origin(forward_key)
+        .or_else(|| sessions.entry_with_origin(&reverse_key));
+    if let Some((decision, metadata, origin)) = hit {
+        delete_terminal_filtered_session(
+            sessions,
+            current.bpf_maps.session_map.handle(),
+            SharedSessionRefs {
+                sessions: shared_sessions,
+                nat_sessions: shared_nat_sessions,
+                forward_wire_sessions: shared_forward_wire_sessions,
+                owner_rg_indexes: shared_owner_rg_indexes,
+                peer_worker_commands,
+                worker_commands_by_id,
+                conntrack: ConntrackFds {
+                    v4: current.bpf_maps.conntrack_v4_fd,
+                    v6: current.bpf_maps.conntrack_v6_fd,
+                },
+                tick: Tick { ns: now_ns, secs: 0 },
+            },
+            forwarding,
+            forward_key,
+            decision,
+            &metadata,
+            origin,
+            worker_id,
+        );
+    } else {
+        // No live entry on either half (already reaped this tick):
+        // still drop any stale BPF rows so the steering map cannot
+        // outlive the table.
+        delete_live_session_entry(
+            current.bpf_maps.session_map.handle(),
+            forward_key,
+            nat,
+            false,
+        );
+        delete_live_session_entry(
+            current.bpf_maps.session_map.handle(),
+            &reverse_key,
+            nat,
+            true,
+        );
     }
-    remove_shared_session(
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        forward_key,
-    );
-    // #9560 round 3: release the coordinator's claim with the shared authority it
-    // stood for.
-    release_coordinator_session_rows(current.bpf_maps.session_map.handle(), forward_key);
-    remove_shared_session(
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        &reverse_key,
-    );
-    // #9560 round 3: and for the reverse half's own shared entry.
-    release_coordinator_session_rows(current.bpf_maps.session_map.handle(), &reverse_key);
-    replicate_session_delete(peer_worker_commands, forward_key);
-    replicate_session_delete(peer_worker_commands, &reverse_key);
     // #15947 (H29-01): cancel every pending forward for this flow EXCEPT
     // the triggering RST's own request (identified by flow key + desc
     // addr) — the pre-fix cancel recycled the RST itself, so with

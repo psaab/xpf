@@ -77,6 +77,11 @@ xpf (0.0.0) unstable; urgency=medium
     clear-by-interface can no longer delete a sibling unit's sessions
     and flow-export sampling no longer judges both units by one
     sibling's name (daemon buildIfNames projects the same table).
+  * Complete the remaining #15947 arms: rst-invalidate teardown now
+    releases the SNAT/NAT64 pool port and emits the forward Close
+    (pair-aware teardown), host-bound RSTs invalidate their session,
+    Prebuilt mirror copies are made only for selected samples, and a
+    foreign host-bound deny no longer charges the host-zone rule.
 
 xpf (0.0.0) unstable; urgency=medium
 

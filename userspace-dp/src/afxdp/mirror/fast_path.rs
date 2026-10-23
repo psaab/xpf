@@ -71,6 +71,20 @@ pub(in crate::afxdp) struct StagedMirrorClone {
     meta: ForwardPacketMeta,
     flow_key: Option<SessionKey>,
 }
+impl StagedMirrorClone {
+    /// Whether this sample was selected for mirroring. Callers that
+    /// must copy bytes before the primary frame is consumed (the
+    /// Prebuilt dispatch arm, #15947 H26-02 arm 4) consult this so an
+    /// unselected sample never pays for a copy.
+    pub(in crate::afxdp) fn is_selected(&self) -> bool {
+        self.selected
+    }
+
+    /// The bytes captured by [`snapshot_staged_mirror_clone`], if any.
+    pub(in crate::afxdp) fn frame_snapshot(&self) -> Option<&[u8]> {
+        self.frame.as_deref()
+    }
+}
 
 pub(in crate::afxdp) fn stage_sampled_mirror_clone(
     forwarding: &ForwardingState,

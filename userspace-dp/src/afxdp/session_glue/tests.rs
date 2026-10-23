@@ -22707,3 +22707,136 @@ fn cancel_pending_forwards_except_keeps_batch_rst_triggers_15947() {
         .collect();
     assert_eq!(recycled, vec![0x3000, 0x4000]);
 }
+
+#[test]
+fn rst_teardown_releases_nat_and_emits_close_15947() {
+    // #15947 (H29-01): the rst-invalidate teardown must release the
+    // forward flow's source-NAT pool port and emit the single forward
+    // Close delta, exactly as the idle reap / terminal-filter pair
+    // teardown do. The pre-fix teardown deleted both session rows
+    // only: the pool port leaked until idle expiry and the HA peer
+    // never received a Close.
+    let mut forwarding = ForwardingState::default();
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "p".to_string(),
+            pool_addresses: vec!["203.0.113.1/32".to_string()],
+            port_low: 1024,
+            port_high: 65535,
+            ..crate::SourceNATRuleSnapshot::default()
+        }]);
+    let fwd_key = test_key();
+    let fwd_nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let fwd_decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: fwd_nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let fwd_metadata = test_metadata();
+    let rev_key = reverse_session_key(&fwd_key, fwd_nat);
+    let rev_nat = fwd_nat.reverse(
+        fwd_key.src_ip,
+        fwd_key.dst_ip,
+        fwd_key.src_port,
+        fwd_key.dst_port,
+    );
+    let rev_decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: rev_nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut rev_metadata = test_metadata();
+    rev_metadata.is_reverse = true;
+    crate::nat::reserve_synced_source_nat_allocation(
+        &forwarding.iface_nat_allocators,
+        &forwarding.source_nat_rules,
+        &fwd_key,
+        fwd_nat,
+        false,
+        None,
+        0,
+        crate::nat::SyncedSourceNatDomains::default(),
+    );
+    assert_eq!(
+        crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,
+        1,
+        "precondition: forward flow holds one pool port"
+    );
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        fwd_key.clone(),
+        fwd_decision,
+        fwd_metadata.clone(),
+        SessionOrigin::LocalMiss,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_SYN,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        rev_key.clone(),
+        rev_decision,
+        rev_metadata.clone(),
+        SessionOrigin::LocalMiss,
+        1,
+        PROTO_TCP,
+        TCP_FLAG_SYN,
+    ));
+    let _ = sessions.drain_deltas(16);
+    sessions.account_packet(&fwd_key, 111, TCP_FLAG_ACK, 3);
+    sessions.account_packet(&rev_key, 222, TCP_FLAG_ACK, 0);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let worker_commands_by_id = crate::afxdp::empty_worker_commands_by_id();
+    let mut left: Vec<BindingWorker> = Vec::new();
+    let mut current = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    let mut right: Vec<BindingWorker> = Vec::new();
+    let mut pending_forwards: Vec<PendingForwardRequest> = Vec::new();
+    let mut shared_recycles: Vec<(u32, u64)> = Vec::new();
+    teardown_tcp_rst_flow(
+        &mut left,
+        &mut current,
+        &mut right,
+        &mut sessions,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &fwd_key,
+        fwd_nat,
+        &mut pending_forwards,
+        &mut shared_recycles,
+        &[],
+        &forwarding,
+        &worker_commands_by_id,
+        0,
+        2,
+    );
+    assert!(sessions.entry_with_origin(&fwd_key).is_none(), "forward entry gone");
+    assert!(sessions.entry_with_origin(&rev_key).is_none(), "reverse entry gone");
+    assert_eq!(
+        crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,
+        0,
+        "rst teardown must free the SNAT pool port"
+    );
+    let deltas = sessions.drain_deltas(16);
+    let closes: Vec<_> = deltas
+        .iter()
+        .filter(|d| d.kind == SessionDeltaKind::Close)
+        .collect();
+    assert_eq!(closes.len(), 1, "exactly one forward Close delta");
+    assert_eq!(closes[0].key, fwd_key);
+}
