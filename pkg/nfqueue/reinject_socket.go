@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,12 @@ type SocketReinjectSubmitter struct {
 	completePath string
 	timeout      time.Duration
 
+	// peerVerify checks the helper peer on a freshly dialed stream
+	// before any byte is written. Nil selects verifyReinjectPeer16052;
+	// tests substitute a foreign-credential decision because a
+	// non-root test binary cannot manufacture a foreign-uid peer.
+	peerVerify func(path string, conn net.Conn) error
+
 	submitMu        sync.Mutex
 	submit          net.Conn
 	announceSet     bool
@@ -141,8 +148,96 @@ func NewSocketReinjectSubmitter(submitPath, completePath string) (*SocketReinjec
 	}, nil
 }
 
+// errUntrustedReinjectPeer16052 marks a reinject helper peer that is
+// neither root nor this daemon. It is a sentinel so callers can tell
+// "the socket is held by a squatter" from "the helper is not up yet".
+var errUntrustedReinjectPeer16052 = errors.New("nfqueue: reinject socket peer is not privileged")
+
+// reinjectGetsockoptUcred16052 is the SO_PEERCRED syscall, seamed so a
+// test can force a read failure (see readReinjectPeerCred16052).
+var reinjectGetsockoptUcred16052 = unix.GetsockoptUcred
+
 func (s *SocketReinjectSubmitter) dial(path string) (net.Conn, error) {
-	return net.DialTimeout("unix", path, s.timeout)
+	conn, err := net.DialTimeout("unix", path, s.timeout)
+	if err != nil {
+		return nil, err
+	}
+	// #16052: verify the peer BEFORE any byte (ANNOUNCE, a decrypted
+	// payload, or a completion poll) crosses. SO_PEERCRED is answered
+	// by the kernel for this connection, so swapping the socket path
+	// between dial and check cannot defeat it; a squatter in a
+	// non-default writable/sticky socket dir is refused here instead
+	// of receiving payloads and returning spoofed completions.
+	verify := s.peerVerify
+	if verify == nil {
+		verify = verifyReinjectPeer16052
+	}
+	if err := verify(path, conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// verifyReinjectPeer16052 reads SO_PEERCRED from an AF_UNIX connection
+// and refuses a peer that is neither root nor this process's own euid
+// (mirrors verifyUnixPeerIsPrivileged for the control/session/event
+// sockets in pkg/dataplane/userspace). The euid arm lets a non-root
+// test binary drive the real path against a socket it binds itself;
+// in production both ends are root.
+func verifyReinjectPeer16052(path string, conn net.Conn) error {
+	cred, err := readReinjectPeerCred16052(path, conn)
+	if err != nil {
+		return err
+	}
+	return reinjectPeerTrustError16052(path, cred, uint32(os.Geteuid()))
+}
+
+// readReinjectPeerCred16052 asks the kernel who is on the other end.
+// It NEVER substitutes a zero value for a failed read — a zeroed
+// unix.Ucred has Uid 0, which the trust decision accepts as root, so
+// swallowing the error would fail OPEN. Every failure is returned.
+func readReinjectPeerCred16052(path string, conn net.Conn) (*unix.Ucred, error) {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s is not an AF_UNIX connection (%T), so its peer cannot be identified",
+			errUntrustedReinjectPeer16052, path, conn)
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: obtain raw connection: %v", errUntrustedReinjectPeer16052, path, err)
+	}
+	var (
+		cred    *unix.Ucred
+		credErr error
+	)
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = reinjectGetsockoptUcred16052(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return nil, fmt.Errorf("%w: %s: read peer credentials: %v", errUntrustedReinjectPeer16052, path, err)
+	}
+	if credErr != nil {
+		return nil, fmt.Errorf("%w: %s: read peer credentials: %v", errUntrustedReinjectPeer16052, path, credErr)
+	}
+	if cred == nil {
+		return nil, fmt.Errorf("%w: %s: kernel returned no peer credentials", errUntrustedReinjectPeer16052, path)
+	}
+	return cred, nil
+}
+
+// reinjectPeerTrustError16052 is the trust DECISION, split from the
+// syscall shell so a test can supply the hostile (foreign-uid) case a
+// non-root binary cannot manufacture as a real connection.
+func reinjectPeerTrustError16052(path string, cred *unix.Ucred, self uint32) error {
+	if cred == nil {
+		return fmt.Errorf("%w: %s: no peer credentials", errUntrustedReinjectPeer16052, path)
+	}
+	if cred.Uid != 0 && cred.Uid != self {
+		return fmt.Errorf("%w: %s is held by uid %d (pid %d), not root (uid 0) or this daemon (uid %d) — "+
+			"refusing to send it ANNOUNCE or decrypted payloads, or to trust its completions",
+			errUntrustedReinjectPeer16052, path, cred.Uid, cred.Pid, self)
+	}
+	return nil
 }
 
 // ensureSubmitLocked dials the submit stream and replays the latest authority
