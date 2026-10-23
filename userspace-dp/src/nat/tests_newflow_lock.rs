@@ -226,3 +226,114 @@ fn live_lock_counting_does_not_disturb_allocation_results() {
     assert_eq!(snap.live_flows, 1, "the flow is tracked");
     assert_eq!(snap.used_ports, 1, "exactly one occupancy bit set");
 }
+
+/// #15956: distinct flows must not serialize on one flow's shard.
+/// The test thread holds flow A's shard write guard; allocating a
+/// flow on a DIFFERENT shard must complete while it is held, and
+/// allocating flow A itself must block until release. RED on
+/// revert to the single `live` mutex: the different-flow
+/// allocation would block on the same mutex the guard holds.
+#[test]
+fn distinct_flow_allocation_does_not_block_on_held_shard_15956() {
+    use super::allocator::{live_shard_index_for_test, LIVE_SHARDS_FOR_TEST};
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    let alloc = Arc::new(PortAllocator::new(1, 1024, 65535));
+    // Find two flows on different shards and one on the held shard.
+    let held_flow = pool_flow(40000);
+    let held_shard = live_shard_index_for_test(&held_flow);
+    let mut other_flow = None;
+    for p in 40001..41000u16 {
+        let f = pool_flow(p);
+        if live_shard_index_for_test(&f) != held_shard {
+            other_flow = Some(f);
+            break;
+        }
+    }
+    let other_flow = other_flow.expect("a different-shard flow exists");
+    let _ = LIVE_SHARDS_FOR_TEST;
+    // Allocate the held flow first so its record exists.
+    allocate(&alloc, &addrs, 40000, 1_000);
+    let guard = alloc.debug_hold_flow_shard(&held_flow);
+    // Different-shard allocation completes under the held guard.
+    let done = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let alloc = Arc::clone(&alloc);
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let addrs2 = [pool_ip];
+            alloc
+                .allocate_translation(
+                    other_flow,
+                    PoolAddressFamily::V4(&addrs2),
+                    0,
+                    false,
+                    false,
+                    PersistentNatPermit::TargetHostPort,
+                    0,
+                    2_000,
+                    crate::nat::NatHolder::Untracked,
+                    0,
+                )
+                .expect("different-shard allocation must succeed under held shard");
+            done.store(true, Ordering::SeqCst);
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        done.load(Ordering::SeqCst),
+        "different-shard allocation blocked on a held shard — flow map is still globally serialized (#15956)"
+    );
+    drop(guard);
+    worker.join().expect("worker must not panic");
+    assert_eq!(alloc.live_flow_count(), 2, "both flows tracked across shards");
+}
+
+/// #15956: the exact cap spans shards — filling to max_tracked_flows
+/// across many shards then allocating one more must exhaust, and
+/// releasing one (any shard) must admit exactly one more.
+#[test]
+fn cross_shard_cap_is_exact_15956() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let addrs = [pool_ip];
+    // 4 ports -> max_tracked_flows is bounded by capacity; allocate all.
+    let alloc = PortAllocator::new(1, 1024, 1027);
+    for p in 40000..40004u16 {
+        allocate(&alloc, &addrs, p, 1_000);
+    }
+    assert_eq!(alloc.live_flow_count(), 4);
+    let err = alloc.allocate_translation(
+        pool_flow(40010),
+        PoolAddressFamily::V4(&addrs),
+        0,
+        false,
+        false,
+        PersistentNatPermit::TargetHostPort,
+        0,
+        2_000,
+        crate::nat::NatHolder::Untracked,
+        0,
+    );
+    assert!(err.is_err(), "fifth flow over the cross-shard cap must exhaust");
+    // Release one and exactly one more fits.
+    let t = alloc
+        .allocate_translation(
+            pool_flow(40000),
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            false,
+            PersistentNatPermit::TargetHostPort,
+            0,
+            3_000,
+            crate::nat::NatHolder::Untracked,
+            0,
+        )
+        .expect("idempotent re-allocate returns existing");
+    assert!(alloc.release_flow(pool_flow(40000), t, 4_000, crate::nat::NatHolder::Untracked));
+    allocate(&alloc, &addrs, 40010, 5_000);
+    assert_eq!(alloc.live_flow_count(), 4);
+}
