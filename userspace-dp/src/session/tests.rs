@@ -11175,6 +11175,9 @@ fn a_default_instance_reply_resolves_by_egress_domain_11298() {
 /// returning the first twin as Unique.
 #[test]
 fn quote_match_same_domain_dnat_shared_backend_twins_are_ambiguous_14375() {
+    // #16014 fold-2: this test MOVES the global ambiguous counter (quote
+    // bumps) — hold the shared test lock so delta readers never see it.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     const DOMAIN: u32 = 100_075;
     let mut table = SessionTable::new();
     let now = 1_000_000_000u64;
@@ -11230,6 +11233,8 @@ fn quote_match_same_domain_dnat_shared_backend_twins_are_ambiguous_14375() {
 /// #14375 control: cross-domain twins remain Ambiguous (pre-existing).
 #[test]
 fn quote_match_cross_domain_twins_still_ambiguous_14375() {
+    // #16014 fold-2: counter mover — hold the shared test lock.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     const DOMAIN_A: u32 = 100_076;
     const DOMAIN_B: u32 = 100_077;
     let mut table = SessionTable::new();

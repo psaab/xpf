@@ -339,6 +339,9 @@ fn egress_routing_domain_shared(egress_ifindex: i32) -> u32 {
 
 #[test]
 fn shared_egress_overlapping_tenants_are_ambiguous_14374() {
+    // #16014 fold-2: serialize against every test sampling the global
+    // ambiguous counter — parallel movers would inflate the delta below.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     let nat = NatDecision::default();
     let mut table = SessionTable::new();
     let forward_a = forward_key_v4(DOMAIN_A);
@@ -405,6 +408,8 @@ fn shared_egress_single_candidate_control_still_matches_14374() {
 /// bumps; single-candidate and cross-domain demux controls stay green.
 #[test]
 fn same_domain_dnat_twins_are_ambiguous_16014() {
+    // #16014 fold-2: hold the shared counter lock for every delta below.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     use std::sync::atomic::Ordering;
     const DOMAIN: u32 = 100_014;
     let nat = NatDecision {

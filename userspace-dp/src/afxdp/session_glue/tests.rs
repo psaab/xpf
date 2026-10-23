@@ -1860,6 +1860,8 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
 /// two owners; a shared candidate must not mint a reverse session.
 #[test]
 fn ambiguous_local_reverse_lookup_blocks_shared_fallback_16014() {
+    // #16014 fold-2: counter mover — hold the shared test lock.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     const DOMAIN: u32 = 100_014;
     let nat = NatDecision {
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
