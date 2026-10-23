@@ -14926,7 +14926,9 @@ the value sits in a single typed slot:
     `no-sequence-check` disables validation). New leaves
     `rst-sequence-check`, `maximum-window <bytes>`, and
     `time-wait-state { session-timeout; session-ageout;
-    apply-to-half-closed-state; }` are schema-accepted (#15753).
+    apply-to-half-closed-state; }` are schema-accepted (#15753) and
+    enforced since #15946 (protocol v67; `show` renders the effective
+    TIME_WAIT including the session-timeout override).
     (**#6539** narrowed an older sentence: the dataplane does have TCP state —
     #3152 adds OPENING vs established and #3046 distinguishes RST vs FIN close.
     Those states are precisely why the TIMEOUT leaves need a differently-worded

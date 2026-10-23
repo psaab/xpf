@@ -74,10 +74,11 @@ services {
 	return cfg
 }
 
-func closeRawWithIngress15230(ingressIfindex uint32, ingressZone, egressZone uint16) []byte {
+func rawWithIngress15230(eventType byte, ingressIfindex uint32, ingressZone, egressZone uint16) []byte {
 	buf := buildSessionCloseRawEventV4(6,
 		[4]byte{10, 0, 0, 102}, [4]byte{192, 0, 2, 200},
 		12345, 443, [4]byte{}, 0, ingressZone, egressZone)
+	buf[52] = eventType
 	// Ensure the buffer is at least the extended size so [128:132] exists.
 	if len(buf) < int(unsafe.Sizeof(dataplane.Event{})) {
 		nb := make([]byte, int(unsafe.Sizeof(dataplane.Event{})))
@@ -85,6 +86,16 @@ func closeRawWithIngress15230(ingressIfindex uint32, ingressZone, egressZone uin
 		buf = nb
 	}
 	binary.LittleEndian.PutUint32(buf[128:132], ingressIfindex)
+	return buf
+}
+
+func closeRawWithIngress15230(ingressIfindex uint32, ingressZone, egressZone uint16) []byte {
+	return rawWithIngress15230(dataplane.EventTypeSessionClose, ingressIfindex, ingressZone, egressZone)
+}
+
+func openRawWithIngress15230(ingressIfindex uint32, ingressZone, egressZone uint16) []byte {
+	buf := rawWithIngress15230(dataplane.EventTypeSessionOpen, ingressIfindex, ingressZone, egressZone)
+	buf[135] = 1 // syslog gate open; callbacks run regardless
 	return buf
 }
 
@@ -114,7 +125,11 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 		}
 	})
 
-	// Unsampled ingress: must not export.
+	// Unsampled ingress open: the single open decision must deny it
+	// without consuming a slot, so its close exports nothing.
+	if !d.eventReader.ProcessRawEvent(openRawWithIngress15230(12, trust, untrust)) {
+		t.Fatal("ProcessRawEvent rejected unsampled open")
+	}
 	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(12, trust, untrust)) {
 		t.Fatal("ProcessRawEvent rejected unsampled close")
 	}
@@ -141,7 +156,23 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 		}
 	}
 
-	// Sampled control: must export (rate 1 in this config via default).
+	// Nameless close (ifindex absent from the map) has no sampled open
+	// under the single-decision model, so it exports nothing. The strict
+	// unit-level fail-closed contract itself is pinned in pkg/flowexport.
+	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(99, trust, untrust)) {
+		t.Fatal("ProcessRawEvent rejected nameless close")
+	}
+	for _, s := range d.FlowExportSamplingStats() {
+		if s.Evaluated != 0 || s.Selected != 0 {
+			t.Fatalf("nameless flow consumed slots: %+v", s)
+		}
+	}
+
+	// Sampled control: open makes the one decision; close exports
+	// without consuming another slot (rate 1 in this config).
+	if !d.eventReader.ProcessRawEvent(openRawWithIngress15230(11, trust, untrust)) {
+		t.Fatal("ProcessRawEvent rejected sampled open")
+	}
 	if !d.eventReader.ProcessRawEvent(closeRawWithIngress15230(11, trust, untrust)) {
 		t.Fatal("ProcessRawEvent rejected sampled close")
 	}
@@ -153,5 +184,10 @@ func TestSessionCloseSamplingPerInterface15230(t *testing.T) {
 	}
 	if got := waitFlows(t, d.ipfixBundlePtr.Load().firstExp().Stats); got < 1 {
 		t.Fatalf("ipfix exported %d sampled flows, want >=1", got)
+	}
+	for _, s := range d.FlowExportSamplingStats() {
+		if s.Evaluated != 1 || s.Selected != 1 {
+			t.Fatalf("sampled open/close must consume exactly one slot per instance, got %+v", s)
+		}
 	}
 }

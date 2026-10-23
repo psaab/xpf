@@ -516,6 +516,10 @@ pub(crate) struct SessionTimeouts {
     /// `TCP_CLOSING_TIMEOUT_NS`, so an operator who sets neither leaf sees
     /// byte-identical reaping to pre-#7342.
     pub(crate) tcp_time_wait_ns: u64,
+    /// #15946: `time-wait-state session-ageout`.
+    pub(crate) tcp_time_wait_session_ageout: bool,
+    /// #15946: `time-wait-state apply-to-half-closed-state`.
+    pub(crate) tcp_time_wait_apply_to_half_closed: bool,
     pub(crate) udp_ns: u64,
     pub(crate) icmp_ns: u64,
 }
@@ -534,6 +538,12 @@ pub(crate) struct TcpSessionWindowSecs {
     pub(crate) initial: u64,
     pub(crate) closing: u64,
     pub(crate) time_wait: u64,
+    /// #15946: `time-wait-state session-ageout` — TIME_WAIT ages on the
+    /// service-based established timeout.
+    pub(crate) time_wait_session_ageout: bool,
+    /// #15946: `time-wait-state apply-to-half-closed-state` — TIME_WAIT
+    /// window also governs half-closed (CLOSING) sessions.
+    pub(crate) time_wait_apply_to_half_closed: bool,
 }
 
 impl Default for SessionTimeouts {
@@ -543,6 +553,8 @@ impl Default for SessionTimeouts {
             tcp_opening_ns: DEFAULT_TCP_OPENING_TIMEOUT_NS,
             tcp_closing_ns: TCP_CLOSING_TIMEOUT_NS,
             tcp_time_wait_ns: TCP_CLOSING_TIMEOUT_NS,
+            tcp_time_wait_session_ageout: false,
+            tcp_time_wait_apply_to_half_closed: false,
             udp_ns: DEFAULT_UDP_SESSION_TIMEOUT_NS,
             icmp_ns: DEFAULT_ICMP_SESSION_TIMEOUT_NS,
         }
@@ -568,6 +580,8 @@ impl SessionTimeouts {
             tcp_opening_ns: DEFAULT_TCP_OPENING_TIMEOUT_NS,
             tcp_closing_ns: TCP_CLOSING_TIMEOUT_NS,
             tcp_time_wait_ns: TCP_CLOSING_TIMEOUT_NS,
+            tcp_time_wait_session_ageout: false,
+            tcp_time_wait_apply_to_half_closed: false,
             udp_ns: if udp_secs > 0 {
                 secs_to_ns_saturating(udp_secs)
             } else {
@@ -601,6 +615,8 @@ impl SessionTimeouts {
         if secs.time_wait > 0 {
             self.tcp_time_wait_ns = secs_to_ns_saturating(secs.time_wait);
         }
+        self.tcp_time_wait_session_ageout = secs.time_wait_session_ageout;
+        self.tcp_time_wait_apply_to_half_closed = secs.time_wait_apply_to_half_closed;
         self
     }
 }
@@ -832,10 +848,59 @@ impl SessionEntry {
 /// drift this repo's one-formula rule exists to prevent. They all call here.
 #[inline]
 pub(crate) fn tcp_close_window_ns(class: TcpCloseClass, timeouts: &SessionTimeouts) -> u64 {
+    tcp_close_window_ns_with_app(class, timeouts, None)
+}
+
+/// #16303: production close-window entry point. Every caller that has a
+/// session entry MUST use this form so `time-wait-state session-ageout`
+/// receives the entry's service-based (per-application) inactivity
+/// timeout instead of silently falling back to the global established
+/// window. `session_timeout_ns` keeps using the no-app wrapper for its
+/// packet-flag branch: a single closing packet cannot establish
+/// TIME_WAIT, and #3227 forbids extending a closing reap from that path.
+#[inline]
+pub(crate) fn tcp_close_window_for_entry(
+    entry: &SessionEntry,
+    timeouts: &SessionTimeouts,
+) -> u64 {
+    tcp_close_window_ns_with_app(
+        entry.tcp_close_class(),
+        timeouts,
+        entry.metadata.inactivity_timeout_ns,
+    )
+}
+
+/// #15946: close window with the per-session service-based timeout.
+/// `session-ageout` makes TIME_WAIT (and, with apply-to-half-closed,
+/// CLOSING) age on the established/app window; an explicit TW
+/// session-timeout (tcp_time_wait_ns distinct via config) still wins
+/// when no app override exists — modelled by callers passing None.
+#[inline]
+pub(crate) fn tcp_close_window_ns_with_app(
+    class: TcpCloseClass,
+    timeouts: &SessionTimeouts,
+    app_override_ns: Option<u64>,
+) -> u64 {
     match class {
         TcpCloseClass::Reset => TCP_RST_TIMEOUT_NS,
-        TcpCloseClass::Closing => timeouts.tcp_closing_ns,
-        TcpCloseClass::TimeWait => timeouts.tcp_time_wait_ns,
+        TcpCloseClass::Closing => {
+            if timeouts.tcp_time_wait_apply_to_half_closed {
+                if timeouts.tcp_time_wait_session_ageout {
+                    app_override_ns.unwrap_or(timeouts.tcp_established_ns)
+                } else {
+                    timeouts.tcp_time_wait_ns
+                }
+            } else {
+                timeouts.tcp_closing_ns
+            }
+        }
+        TcpCloseClass::TimeWait => {
+            if timeouts.tcp_time_wait_session_ageout {
+                app_override_ns.unwrap_or(timeouts.tcp_established_ns)
+            } else {
+                timeouts.tcp_time_wait_ns
+            }
+        }
     }
 }
 const MAX_SESSION_DELTAS: usize = 4096;
@@ -4220,7 +4285,7 @@ impl SessionTable {
                 // ONE fin.
                 entry.fin_peer |= fin;
                 entry.last_seen_ns = now_ns;
-                entry.expires_after_ns = tcp_close_window_ns(entry.tcp_close_class(), &timeouts);
+                entry.expires_after_ns = tcp_close_window_for_entry(entry, &timeouts);
                 rebucket = true;
             }
         }
@@ -4508,7 +4573,7 @@ impl SessionTable {
                 record.entry.syn_ack_first = false;
             }
             record.entry.expires_after_ns = if record.entry.closing {
-                tcp_close_window_ns(record.entry.tcp_close_class(), &self.timeouts)
+                tcp_close_window_for_entry(&record.entry, &self.timeouts)
             } else {
                 // #3227: a real-traffic refresh re-stamps the idle window from
                 // the (possibly updated) metadata's per-app override.

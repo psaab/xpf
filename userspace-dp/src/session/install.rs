@@ -1044,7 +1044,7 @@ impl SessionTable {
                 // #9412: a delivered Close class takes precedence over the
                 // opening handshake deadline.
                 expires_after_ns: match wire_close {
-                    Some(class) => tcp_close_window_ns(class, &self.timeouts),
+                    Some(class) => tcp_close_window_ns_with_app(class, &self.timeouts, metadata.inactivity_timeout_ns),
                     None => session_timeout_ns(
                         protocol,
                         tcp_flags,

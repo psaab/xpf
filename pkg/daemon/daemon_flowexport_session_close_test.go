@@ -67,6 +67,30 @@ func buildSessionCloseRawEventV4(
 	return buf
 }
 
+// openTwinOfCloseRaw15946 returns the SESSION_OPEN twin of a raw close
+// payload: same tuple/zones/ifindexes, event byte flipped to open. The
+// #16303 single-decision model samples at open, so close-only fixtures
+// must feed the open first or the close correctly exports nothing.
+func openTwinOfCloseRaw15946(close []byte) []byte {
+	open := make([]byte, len(close))
+	copy(open, close)
+	open[52] = dataplane.EventTypeSessionOpen
+	open[135] = 1
+	return open
+}
+
+// feedOpenThenClose15946 drives the production open->close sequence for
+// one raw close payload.
+func feedOpenThenClose15946(t *testing.T, d *Daemon, close []byte) {
+	t.Helper()
+	if !d.eventReader.ProcessRawEvent(openTwinOfCloseRaw15946(close)) {
+		t.Fatal("ProcessRawEvent rejected SESSION_OPEN twin")
+	}
+	if !d.eventReader.ProcessRawEvent(close) {
+		t.Fatal("ProcessRawEvent rejected SESSION_CLOSE payload")
+	}
+}
+
 // flowIPFIXConfigPorts builds a sampling config with the v9 and IPFIX
 // collectors bound to caller-chosen ports (so a test can bind a real UDP
 // listener for each and observe the transmitted datagram). rate=1 so
@@ -160,9 +184,9 @@ func TestSessionCloseRawEventDrivesFlowExport(t *testing.T) {
 	if b := d.ipfixBundlePtr.Load(); b == nil || b.firstExp() == nil {
 		t.Fatal("ipfix exporter must be live")
 	}
-	// The two real export callbacks are registered exactly once.
-	if n := d.eventReader.CallbackCount(); n != 2 {
-		t.Fatalf("expected 2 real export callbacks (v9 + ipfix), got %d", n)
+	// The open fanout plus the two real export callbacks are registered exactly once.
+	if n := d.eventReader.CallbackCount(); n != 3 {
+		t.Fatalf("expected 3 real export callbacks (open + v9 + ipfix), got %d", n)
 	}
 
 	// Two distinct fanout callbacks standing in for the NetFlow and IPFIX
@@ -193,9 +217,7 @@ func TestSessionCloseRawEventDrivesFlowExport(t *testing.T) {
 		2, 3, // trust -> untrust
 	)
 
-	if !d.eventReader.ProcessRawEvent(payload) {
-		t.Fatal("ProcessRawEvent rejected a valid SESSION_CLOSE payload")
-	}
+	feedOpenThenClose15946(t, d, payload)
 
 	// Both SESSION_CLOSE-gated consumers fire exactly once.
 	if netflowFires != 1 {
@@ -432,7 +454,8 @@ func TestSessionCloseMultiInstanceFamilyIsolation(t *testing.T) {
 		t.Errorf("bravo must serve v6 only: v4=%v v6=%v", bravoEC.ServesFamily(false), bravoEC.ServesFamily(true))
 	}
 
-	// Feed an IPv4 SESSION_CLOSE. Only alpha (inet) must export it.
+	// Feed an IPv4 SESSION_OPEN then its SESSION_CLOSE. Only alpha (inet)
+	// must export the close.
 	payload := buildSessionCloseRawEventV4(
 		6, // TCP
 		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200},
@@ -440,9 +463,7 @@ func TestSessionCloseMultiInstanceFamilyIsolation(t *testing.T) {
 		[4]byte{172, 16, 80, 8}, 40000,
 		2, 3, // trust -> untrust
 	)
-	if !d.eventReader.ProcessRawEvent(payload) {
-		t.Fatal("ProcessRawEvent rejected a valid SESSION_CLOSE payload")
-	}
+	feedOpenThenClose15946(t, d, payload)
 
 	// alpha (the IPv4 instance) must export the flow.
 	if got := waitInstanceFlows(t, b, "alpha"); got < 1 {

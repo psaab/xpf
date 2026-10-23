@@ -94,6 +94,9 @@ func canonicalIfaceRef(ref string) string {
 	if ref == "" {
 		return ""
 	}
+	// #15946 arm 3: Linux-dash spelling (ge-0-0-0.0, as resolved from an
+	// ifindex) must alias the Junos slash spelling the zone authored.
+	ref = strings.ReplaceAll(ref, "-", "/")
 	if !strings.Contains(ref, ".") {
 		return ref + ".0"
 	}
@@ -1002,6 +1005,15 @@ func interfaceHasSampling(ifCfg *config.InterfaceConfig) bool {
 // per-interface restriction. Without per-interface data the zone maps
 // decide exactly as before.
 func (ec *ExportConfig) samplingEligible(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) bool {
+	return ec.samplingEligibleMode(inZone, outZone, isIPv6, inIface, outIface, false)
+}
+
+// samplingEligibleMode: strict mode is the ShouldExportIface unit contract
+// (#15946 arm 1). namelessZoneFallback is the daemon production scope: a
+// record whose ifindexes resolved to no name at all carries no interface
+// identity to gate on, so the pre-#15946 zone semantics decide (a record
+// that NAMES an unsampled interface still fails closed in both modes).
+func (ec *ExportConfig) samplingEligibleMode(inZone, outZone uint16, isIPv6 bool, inIface, outIface string, namelessZoneFallback bool) bool {
 	if ifaces := ec.SamplingZones.ifacesFor(isIPv6); ifaces != nil {
 		if d, ok := ec.SamplingZones.sampledInterface(inIface, isIPv6); ok && d.Input {
 			return true
@@ -1009,12 +1021,13 @@ func (ec *ExportConfig) samplingEligible(inZone, outZone uint16, isIPv6 bool, in
 		if d, ok := ec.SamplingZones.sampledInterface(outIface, isIPv6); ok && d.Output {
 			return true
 		}
-		if inIface != "" || outIface != "" {
+		if namelessZoneFallback && inIface == "" && outIface == "" {
+			// fall through to zone semantics below
+		} else {
+			// #15946 arm 1: documented fail-closed — empty refs under a
+			// per-interface restriction never consume a slot.
 			return false
 		}
-		// No interface identity at all: fall through to zone semantics
-		// below (legacy producers / direct-callback fixtures). A record
-		// that NAMES an interface is strictly per-interface.
 	}
 	if dirs := ec.SamplingZones.dirsFor(isIPv6); dirs != nil {
 		if d, ok := dirs[inZone]; ok && d.Input {
@@ -1095,6 +1108,30 @@ func (ec *ExportConfig) ShouldExportIface(inZone, outZone uint16, isIPv6 bool, i
 	return ec.sampleAfterEligible()
 }
 
+// ShouldExportIfaceDaemon is ShouldExportIface for daemon session records:
+// a record naming no interface at all (unresolved ifindexes) falls back to
+// zone semantics, while a record naming an unsampled interface still fails
+// closed. The strict empty-ref fail-closed contract stays on
+// ShouldExportIface (#15946 H42-04 scoping).
+func (ec *ExportConfig) ShouldExportIfaceDaemon(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) bool {
+	if !ec.samplingEligibleMode(inZone, outZone, isIPv6, inIface, outIface, true) {
+		ec.stats().zoneFiltered.Add(1)
+		return false
+	}
+	return ec.sampleAfterEligible()
+}
+
+// SampledForOpen reports whether this instance selected a newly opened
+// flow, consuming exactly one sampling slot. It is deliberately separate
+// from ShouldExportIfaceDaemon: a close for a sampled flow must not make
+// a second sampling decision (and consume another slot) merely to export
+// the final record. Callers persist the open decision by tracking the
+// flow; CloseFlow then removes that state whether or not the close is
+// exported by the tracker path.
+func (ec *ExportConfig) SampledForOpen(inZone, outZone uint16, isIPv6 bool, inIface, outIface string) bool {
+	return ec.ShouldExportIfaceDaemon(inZone, outZone, isIPv6, inIface, outIface)
+}
+
 // FlowDirection derives the NetFlow/IPFIX flowDirection (IE 61) for a flow
 // from the per-zone sampling-direction configuration for the flow's own
 // address family (#3270, per-family since #14608). Ingress wins ties.
@@ -1117,6 +1154,10 @@ func (ec *ExportConfig) FlowDirectionIface(inZone, outZone uint16, isIPv6 bool, 
 			return 0
 		}
 		if d, ok := ec.SamplingZones.sampledInterface(outIface, isIPv6); ok && d.Output {
+			return 1
+		}
+		// #15946 arm 2: one-leg — fall back to egress zone direction.
+		if d, ok := ec.SamplingZones.dirsFor(isIPv6)[outZone]; ok && d.Output {
 			return 1
 		}
 		return 0

@@ -838,6 +838,12 @@ func (e *IPFIXExporter) ExportSessionClose(rec logging.EventRecord, evt SessionC
 	e.exportSessionClose(rec, evt, true)
 }
 
+// ExportSessionCloseRemainder queues the close's unexported remainder
+// (lifetime minus active-interim baselines, biflow included; #16303 fold 2).
+func (e *IPFIXExporter) ExportSessionCloseRemainder(rec logging.EventRecord, evt SessionCloseData, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64) {
+	e.exportSessionCloseRemainder(rec, evt, true, basePkts, baseBytes, baseRevPkts, baseRevBytes)
+}
+
 func (e *IPFIXExporter) sendTemplates() {
 	// RFC 7011 §3.1 / §10.3.2: the IPFIX Sequence Number is the cumulative
 	// count of Data Records sent in all prior Messages for this Observation

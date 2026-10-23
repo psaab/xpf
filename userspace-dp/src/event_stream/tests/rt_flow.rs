@@ -522,6 +522,31 @@ fn test_emit_session_create_rt_flow_carries_app_id_and_ifindex() {
 }
 
 #[test]
+fn test_emit_session_create_rt_flow_carries_egress_ifindex() {
+    // #16303: output-only sampled flows need the open's egress identity.
+    // The test delta's forwarding resolution egresses ifindex 3; the
+    // frame must stamp it at [148:152] for the Go decoder.
+    let (handle, rx) = test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+    let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
+    handle.emit_session_create_rt_flow(&delta, 0, 0);
+    let frame = rx.try_recv().expect("RT_FLOW create frame");
+    let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+    assert_eq!(
+        u32::from_le_bytes(p[148..152].try_into().unwrap()),
+        3,
+        "SESSION_CREATE must carry the resolved egress ifindex"
+    );
+}
+
+#[test]
 fn test_emit_session_create_rt_flow_carries_admitting_policy_id() {
     // #3056 fail-on-revert: a session admitted by a policy must carry that
     // policy's ID on the SESSION_CREATE RT_FLOW frame so the

@@ -648,8 +648,10 @@ fn test_session_create_rt_flow_wire_layout() {
         41,                        // #11698: admitting policy generation
         77,                        // #2615: ingress ifindex
         9,                         // #2615: application id
+        88,                        // #16303: egress ifindex (rides [148:152])
         0x1122_3344_5566_7788,     // #4915: stable session id (rides [152:160])
         1_700_000_123_456_789_012, // #12889: admission instant Unix ns ([0:8])
+        true,
     );
     assert_eq!(frame.data[4], MSG_SESSION_CREATE_RT_FLOW);
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
@@ -678,6 +680,9 @@ fn test_session_create_rt_flow_wire_layout() {
     // create record logs packet-incoming-interface="N/A" / application=
     // "UNKNOWN").
     assert_eq!(u32::from_le_bytes(p[128..132].try_into().unwrap()), 77);
+    // #16303: egress ifindex rides the additive [148:152] slot so the Go
+    // decoder can name the open's output interface for sampling.
+    assert_eq!(u32::from_le_bytes(p[148..152].try_into().unwrap()), 88);
     assert_eq!(u16::from_le_bytes([p[132], p[133]]), 9);
     // #3056 fail-on-revert: the SESSION_CREATE frame carries the admitting
     // policy ID in the [44:48] policy_id slot (LE u32) — the same slot the Go

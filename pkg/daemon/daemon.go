@@ -573,7 +573,11 @@ type Daemon struct {
 	flowHash    [32]byte
 	flowHashSet bool
 	flowCBOnce  sync.Once
-	flowReconMu sync.Mutex
+	// #16303: the single SESSION_OPEN fanout callback. Separate from the
+	// two protocol close callbacks so an open is sampled once even when
+	// both exporter families are registered on the same EventReader.
+	flowOpenCBOnce sync.Once
+	flowReconMu    sync.Mutex
 	// #3742: last NetFlow v9 exporter build error. Set (under flowReconMu)
 	// when a reconcile's NewExporter build failed and the OLD exporters were
 	// kept running so export stayed up; cleared on the next successful
@@ -599,6 +603,11 @@ type Daemon struct {
 	// reconciles against; production reads the LIVE active config so a commit
 	// removing flow export converges the loop.
 	flowRetryActiveCfg func() *config.Config
+	// #16303 F5: live session-counter poll feeding the flow trackers.
+	// Started once when the first exporter with a tracker publishes;
+	// test seam overrides the per-key counter source.
+	flowLiveFeedOnce sync.Once
+	flowLiveCounters func(key flowexport.FlowKey) (fwdPkts, fwdBytes, revPkts, revBytes uint64, ok bool)
 	// #4963 fixed-cardinality handoff-drop totals. Each exporter of a family
 	// is injected (SetHandoffCounter) with a pointer to the matching counter
 	// here, so a session-close record rejected because it reached an exporter

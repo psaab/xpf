@@ -125,6 +125,9 @@ func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 			snap.TCPTimeWaitTimeout = coerceWireSessionTimeout(
 				"tcp_time_wait_timeout", ts.TimeWaitStateSessionTimeout)
 		}
+		// #15946: the two time-wait-state flags were parse-once/read-nowhere.
+		snap.TCPTimeWaitSessionAgeout = ts.TimeWaitStateSessionAgeout
+		snap.TCPTimeWaitApplyToHalfClosed = ts.TimeWaitStateApplyToHalfClosed
 	}
 	snap.ALGDisableFlags = algDisableFlags(&cfg.Security.ALG)
 	return snap

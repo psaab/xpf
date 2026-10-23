@@ -203,14 +203,20 @@ func allowsDegradedRoutingTakeover(cfg *config.Config, rgID int) bool {
 }
 
 func haRoutingRequirementsForRG(cfg *config.Config, rgID int) []haRoutingRequirement {
-	if cfg == nil || rgID < 0 {
+	if cfg == nil || rgID <= 0 {
 		return nil
 	}
 	ifaces := make(map[string]struct{})
 	localAddresses := make(map[netip.Addr]struct{})
 	localPrefixes := make([]netip.Prefix, 0)
-	for _, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil || ifc.RedundancyGroup != rgID {
+	owners := cfg.RethRGOwners()
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		// #15946: only the RETH owner (parent-ascending via #6781 SSoT)
+		// contributes; members/plain default-0 interfaces do not.
+		if ownerRG, ok := owners[name]; !ok || ownerRG != rgID {
 			continue
 		}
 		addHAInterfaceName(cfg, ifaces, ifc.Name)

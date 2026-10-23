@@ -160,9 +160,7 @@ func TestSessionCloseFlowDirectionEgress(t *testing.T) {
 		[4]byte{172, 16, 80, 8}, 40000,
 		config.StableZoneID("a"), config.StableZoneID("c"),
 	)
-	if !d.eventReader.ProcessRawEvent(payload) {
-		t.Fatal("ProcessRawEvent rejected a valid SESSION_CLOSE payload")
-	}
+	feedOpenThenClose15946(t, d, payload)
 
 	// Wait for the flow record to be transmitted.
 	if got := waitFlows(t, exp.firstExp().Stats); got < 1 {

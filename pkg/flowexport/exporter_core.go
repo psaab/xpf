@@ -34,6 +34,7 @@ package flowexport
 // copy per flow unnoticed.
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +66,14 @@ type exporterCore struct {
 	// tracker enforces active/inactive timeouts (#15655); nil means
 	// close-only export.
 	tracker *FlowTracker
+	// sampledFlows remembers flows selected at SESSION_OPEN when this
+	// exporter has no active/inactive tracker (tracker == nil). Without
+	// it, a close-only exporter could not distinguish "open was sampled"
+	// from "open was not sampled" without consuming a second 1-in-N slot
+	// at close. Keys are deleted on close, so the set is bounded by live
+	// sampled sessions for this exporter.
+	sampledMu    sync.Mutex
+	sampledFlows map[FlowKey]struct{}
 
 	batch flowBatch
 	conns *collectorConns
@@ -161,7 +170,21 @@ func (c *exporterCore) buildFlowRecord(rec logging.EventRecord, evt SessionClose
 // and queue the record. includeReverse selects the IPFIX-only biflow
 // counters (see buildFlowRecord).
 func (c *exporterCore) exportSessionClose(rec logging.EventRecord, evt SessionCloseData, includeReverse bool) {
+	c.exportSessionCloseRemainder(rec, evt, includeReverse, 0, 0, 0, 0)
+}
+
+// exportSessionCloseRemainder queues a real-close record carrying only
+// the counters not already emitted by active interims (#16303 fold 2):
+// the close event's lifetime counters minus the tracker's last-export
+// baselines. Close-only exporters pass zero baselines and keep the
+// full lifetime record. Saturating at zero guards a close whose
+// counters raced backwards (helper restart) from wrapping.
+func (c *exporterCore) exportSessionCloseRemainder(rec logging.EventRecord, evt SessionCloseData, includeReverse bool, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64) {
 	fr, stats := c.buildFlowRecord(rec, evt, includeReverse)
+	fr.Packets = satSub(fr.Packets, basePkts)
+	fr.Bytes = satSub(fr.Bytes, baseBytes)
+	fr.RevPackets = satSub(fr.RevPackets, baseRevPkts)
+	fr.RevBytes = satSub(fr.RevBytes, baseRevBytes)
 	if stats.estimatedDurations > 0 {
 		c.estimatedDurations.Add(stats.estimatedDurations)
 	}
@@ -172,6 +195,13 @@ func (c *exporterCore) exportSessionClose(rec logging.EventRecord, evt SessionCl
 		c.routeMaskUnresolved.Add(stats.routeMaskUnresolved)
 	}
 	c.batch.add(fr)
+}
+
+func satSub(v, base uint64) uint64 {
+	if v <= base {
+		return 0
+	}
+	return v - base
 }
 
 // collectDueExports drains due interim/final tracker records into the
@@ -251,11 +281,49 @@ func (c *exporterCore) CollectorHealth() []CollectorHealth {
 // Close shuts down all collector connections.
 func (c *exporterCore) Close() { c.conns.close() }
 
-// CloseFlow forgets a tracked flow on real session close (#15655).
-func (c *exporterCore) CloseFlow(key FlowKey) {
+// CloseFlow forgets a flow on real session close (#15655) and reports
+// whether it had been selected at open, together with the tracker's
+// last-export baselines. The booleans/baselines are the close-side
+// sampling + accounting decision: callers must not consume another
+// 1-in-N slot for a flow whose open already made the instance's one
+// decision, and a tracked close must subtract the baselines from the
+// event's lifetime counters so an already-emitted active interim is
+// not counted again (#16303 fold 2).
+func (c *exporterCore) CloseFlow(key FlowKey) (sampled bool, basePkts, baseBytes, baseRevPkts, baseRevBytes uint64) {
+	tracked := false
 	if c.tracker != nil {
-		c.tracker.Close(key)
+		basePkts, baseBytes, baseRevPkts, baseRevBytes, tracked = c.tracker.CloseWithBaseline(key)
 	}
+	c.sampledMu.Lock()
+	_, inSampledSet := c.sampledFlows[key]
+	if inSampledSet {
+		delete(c.sampledFlows, key)
+	}
+	c.sampledMu.Unlock()
+	return tracked || inSampledSet, basePkts, baseBytes, baseRevPkts, baseRevBytes
+}
+
+// MarkFlowSampledAtOpen records that the instance's single sampling
+// decision selected this flow at SESSION_OPEN. Tracked flows already
+// carry that fact in the tracker; close-only exporters use this set.
+func (c *exporterCore) MarkFlowSampledAtOpen(key FlowKey) {
+	if c.tracker != nil {
+		return
+	}
+	c.sampledMu.Lock()
+	if c.sampledFlows == nil {
+		c.sampledFlows = make(map[FlowKey]struct{})
+	}
+	c.sampledFlows[key] = struct{}{}
+	c.sampledMu.Unlock()
+}
+
+// ForgetFlowSampledAtOpen drops an open-side selection without treating
+// it as a close export decision (used when an exporter is retired).
+func (c *exporterCore) ForgetFlowSampledAtOpen(key FlowKey) {
+	c.sampledMu.Lock()
+	delete(c.sampledFlows, key)
+	c.sampledMu.Unlock()
 }
 
 // TrackFlowOpen registers a flow for active/inactive tracking (#15655);
@@ -266,9 +334,45 @@ func (c *exporterCore) TrackFlowOpen(key FlowKey, start time.Time) {
 	}
 }
 
+// TrackFlowOpenRecord registers with a full template (#15946: NAT/ifindex/masks).
+func (c *exporterCore) TrackFlowOpenRecord(key FlowKey, start time.Time, template FlowRecord) {
+	if c.tracker != nil {
+		c.tracker.TrackFlowOpen(key, start, template)
+	}
+}
+
 // TouchFlow updates cumulative counters for a tracked flow (#15655).
 func (c *exporterCore) TouchFlow(key FlowKey, now time.Time, packets, bytes uint64) {
 	if c.tracker != nil {
 		c.tracker.Touch(key, now, packets, bytes)
 	}
+}
+
+// TouchFlowBidirectional feeds one live session snapshot's cumulative
+// forward+reverse counters (#16303 F5).
+func (c *exporterCore) TouchFlowBidirectional(key FlowKey, now time.Time, fwdPackets, fwdBytes, revPackets, revBytes uint64) {
+	if c.tracker != nil {
+		c.tracker.TouchBidirectional(key, now, fwdPackets, fwdBytes, revPackets, revBytes)
+	}
+}
+
+// TrackedKeys snapshots this exporter's tracked flow keys for the
+// daemon live-counter poll; nil when close-only.
+func (c *exporterCore) TrackedKeys() []FlowKey {
+	if c.tracker == nil {
+		return nil
+	}
+	return c.tracker.Keys()
+}
+
+// Tracked reports whether key is currently tracked or was selected at
+// open by a close-only exporter.
+func (c *exporterCore) Tracked(key FlowKey) bool {
+	if c.tracker != nil && c.tracker.Has(key) {
+		return true
+	}
+	c.sampledMu.Lock()
+	_, ok := c.sampledFlows[key]
+	c.sampledMu.Unlock()
+	return ok
 }

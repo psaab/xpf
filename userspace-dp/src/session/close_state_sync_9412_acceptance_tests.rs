@@ -39,6 +39,8 @@ fn windows() -> SessionTimeouts {
         initial: 45,
         closing: CLOSING_SECS,
         time_wait: TIME_WAIT_SECS,
+        time_wait_session_ageout: false,
+        time_wait_apply_to_half_closed: false,
     })
 }
 

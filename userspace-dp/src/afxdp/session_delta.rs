@@ -1076,10 +1076,12 @@ pub(super) fn flush_session_deltas(
                 // logged; emitting again duplicates the audit record on
                 // every failover/failback. The HA sync frame above still
                 // fires for those legs — only the CREATE is suppressed.
-                if delta.kind == SessionDeltaKind::Open
-                    && delta.is_admission
-                    && delta.metadata.log_session_init
-                {
+                // #15946: flowexport's tracker is a real SESSION_OPEN
+                // consumer, so the log_session_init gate would starve
+                // timeout export for policies without session-init logging.
+                // Emit for every fresh admission; the Go log path gates
+                // rendering on its gate byte as for closes.
+                if delta.kind == SessionDeltaKind::Open && delta.is_admission {
                     // #2615: resolve the AppID for the new 5-tuple with the SAME
                     // app_catalog the forwarding hot path runs (mirroring the #2520
                     // close-side fix), so the SESSION_CREATE RT_FLOW record carries

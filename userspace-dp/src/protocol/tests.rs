@@ -2725,6 +2725,17 @@ fn wire_invariant_default_specimens() {
         dump(&FlowExportSnapshot::default()),
     );
     s.insert("flow_snapshot".into(), dump(&FlowSnapshot::default()));
+    // #16303: populated specimen so the v67 time-wait-state wire keys are
+    // exercised true-valued (serde bools serialize even when false, but
+    // the completeness gate wants the keys proven on a real specimen).
+    s.insert(
+        "flow_snapshot_time_wait_state_populated".into(),
+        dump(&FlowSnapshot {
+            tcp_time_wait_session_ageout: true,
+            tcp_time_wait_apply_to_half_closed: true,
+            ..Default::default()
+        }),
+    );
     s.insert(
         "flow_tuple_status".into(),
         dump(&FlowTupleStatus::default()),

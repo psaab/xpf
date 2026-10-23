@@ -192,16 +192,14 @@ func configuredInterfaceRG(cfg *config.Config, name string) int {
 	return 0
 }
 
-// rgHasRETH returns whether the given redundancy group has any RETH interfaces.
+// rgHasRETH returns whether rgID owns a RETH (#6781 SSoT, #15946).
+// Raw RedundancyGroup==rgID swept every default-0 interface into RG0.
 func rgHasRETH(cfg *config.Config, rgID int) bool {
-	if cfg == nil {
+	if cfg == nil || rgID <= 0 {
 		return false
 	}
-	for _, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		if ifc.RedundancyGroup == rgID {
+	for _, ownerRG := range cfg.RethRGOwners() {
+		if ownerRG == rgID {
 			return true
 		}
 	}

@@ -1601,6 +1601,23 @@ func revalidateSnapshotIfindexesInPlace(snap *ConfigSnapshot) (refreshed, droppe
 		}
 		live, _, _, _ := buildLinkSnapshot(resolveLinuxName)
 		if live == 0 {
+			// #15946 H44-02 scope: only rows whose netdev is expected
+			// to be created on demand (secure-tunnel / GRE-style
+			// tunnel rows) retain a build-time-zero row — their
+			// absence at apply is config-intentional, not a vanished
+			// link. A plain addressed unit whose netdev vanished,
+			// any bare base zero, and any previously-live
+			// (Ifindex>0) row that vanished still drop.
+			if row.Ifindex == 0 && !row.LogicalOnly && (row.SecureTunnel || row.Tunnel) {
+				linkUp := linuxLinkUp(resolveLinuxName)
+				row.LinkUp = &linkUp
+				kept = append(kept, row)
+				continue
+			}
+			if row.LogicalOnly && row.ParentIfindex == 0 {
+				kept = append(kept, row)
+				continue
+			}
 			slog.Warn("snapshot row dropped: interface vanished after build",
 				"name", row.Name, "linux_name", resolveLinuxName)
 			dropped++

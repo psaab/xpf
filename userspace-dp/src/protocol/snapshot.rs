@@ -428,6 +428,12 @@ pub(crate) struct FlowSnapshot {
     /// #15753: `maximum-window` cap in bytes; 0 = 65535 default.
     #[serde(rename = "tcp_maximum_window", default)]
     pub tcp_maximum_window: u32,
+    /// #15946: `time-wait-state session-ageout`.
+    #[serde(rename = "tcp_time_wait_session_ageout", default)]
+    pub tcp_time_wait_session_ageout: bool,
+    /// #15946: `time-wait-state apply-to-half-closed-state`.
+    #[serde(rename = "tcp_time_wait_apply_to_half_closed", default)]
+    pub tcp_time_wait_apply_to_half_closed: bool,
     #[serde(rename = "udp_session_timeout", default)]
     pub udp_session_timeout: u64,
     #[serde(rename = "icmp_session_timeout", default)]

@@ -238,12 +238,18 @@ impl EventStreamWorkerHandle {
                     // N/A / UNKNOWN.
                     ingress_ifindex,
                     app_id,
+                    // #16303: resolved egress ifindex from the session's
+                    // forwarding resolution (the same value the close
+                    // frame stamps), so output-only sampled flows can be
+                    // selected at open. Non-positive maps to 0/unknown.
+                    u32::try_from(delta.decision.resolution.egress_ifindex).unwrap_or(0),
                     // #4915: the stable session id assigned at install, carried
                     // in the additive [152:160] slot so this SESSION_CREATE
                     // record shares an id with its eventual SESSION_CLOSE.
                     delta.session_id,
                     // #12889: admission instant (wall-clock), rides [0:8].
                     create_unix_ns,
+                    delta.metadata.log_session_init,
                 )
             },
         );
