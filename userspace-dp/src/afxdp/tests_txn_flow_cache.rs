@@ -664,6 +664,19 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         !super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_shared, &udp_other),
         "#16019: a non-TCP replacement incarnation must survive the shed"
     );
+    // #16019 fold (1): a peer-synced shared row is never shed — its
+    // reply evidence lives outside the shedding worker's counters.
+    let mut udp_synced = udp_shared.clone();
+    udp_synced.origin = crate::session::SessionOrigin::WorkerLocalImport;
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_synced, &udp_shed),
+        "#16019 fold: peer-synced shared rows must survive pressure shedding"
+    );
+    udp_synced.origin = crate::session::SessionOrigin::SyncImport;
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_unreplied(&udp_synced, &udp_shed),
+        "#16019 fold: HA-imported shared rows must survive pressure shedding"
+    );
     if opening_a_removed {
         assert!(sessions.probe_with_origin(&opening_a_reverse).is_none());
     } else {

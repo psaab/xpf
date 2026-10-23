@@ -339,11 +339,24 @@ impl SessionTable {
         self.deferred_conntrack_deletes.append(&mut deletes);
     }
 
+    /// #16019 fold: bound on stale/ineligible index candidates skipped
+    /// in one admission call. Admission runs on the packet path at the
+    /// 90% watermark — exactly when the table is fullest — so an
+    /// unbounded cleanup loop over stale candidates is an attacker-
+    /// amplifiable stall. Stale candidates beyond the bound keep
+    /// their index entries and are revisited on the next admission.
+    pub(crate) const MAX_SHED_SCAN_PER_ADMISSION: usize = 64;
+
     /// Remove one indexed local unreplied flow (both halves when the
     /// matching reverse companion is present). Returns false when no
-    /// safe victim remains.
+    /// safe victim remains within the bounded scan.
     fn shed_one_unreplied_flow(&mut self, shed_sessions: &mut PressureShedSessions) -> bool {
+        let mut scanned = 0usize;
         loop {
+            if scanned >= Self::MAX_SHED_SCAN_PER_ADMISSION {
+                return false;
+            }
+            scanned += 1;
             let Some(key) = self.pressure_shed_unreplied.keys().next().cloned() else {
                 return false;
             };

@@ -3632,6 +3632,17 @@ impl SessionTable {
             .unwrap_or(0)
     }
 
+    /// #16019 fold: node-level reply evidence for the pressure-shed
+    /// victim check — true once this worker's live entry has seen a
+    /// reverse packet. The shed call sites combine this with the
+    /// shared-map check (`shared_session_replied`), because a flow's
+    /// forward and reverse packets may hash to different workers whose
+    /// per-worker counters each see only one direction.
+    pub(crate) fn session_replied(&self, key: &SessionKey) -> bool {
+        self.entry_by_key(key)
+            .is_some_and(|entry| entry.counters.replied())
+    }
+
     /// #13965: the live PPTP call-id pair for this key's handle.
     pub(crate) fn pptp_call_ids_wire_for(&self, key: &SessionKey) -> u64 {
         match key.discriminator {

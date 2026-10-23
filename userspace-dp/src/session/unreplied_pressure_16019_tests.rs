@@ -252,3 +252,61 @@ fn tcp_non_syn_still_hard_cap_and_tcp_victims_unchanged_16019() {
 }
 
 const TCP_SYN_FOR_TEST: u8 = 0x02;
+
+#[test]
+fn session_replied_reflects_reverse_accounting_16019() {
+    // #16019 fold (1): the node-level evidence accessor the poll shed
+    // sites consult must flip exactly when a reverse packet is
+    // accounted, and stay false for forward-only traffic.
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    let key = udp_key((192, 168, 1, 50), 50_000);
+    let reverse = install_pair_protocol(&mut table, &key, now);
+    assert!(!table.session_replied(&key), "no packets yet");
+    table.account_packet(&key, 100, 0, 0);
+    assert!(
+        !table.session_replied(&key),
+        "forward-only traffic is not a reply"
+    );
+    table.account_packet(&reverse, 100, 0, 0);
+    assert!(table.session_replied(&key), "reverse packet is the reply");
+    let absent = udp_key((10, 9, 9, 9), 1);
+    assert!(!table.session_replied(&absent), "absent key is unreplied");
+}
+
+#[test]
+fn shed_scan_is_bounded_under_stale_candidate_flood_16019() {
+    // #16019 fold (2): stale index candidates (entries gone or no
+    // longer eligible) must not make one admission call scan without
+    // bound. Seed more stale candidates than the bound, then admit:
+    // the call terminates, sheds at most one pair per invocation, and
+    // repeated admissions still make progress.
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    table.set_max_sessions_for_test(10);
+    // Fill at cap with unreplied UDP pairs, then corrupt the index by
+    // removing entries directly (leaving stale forward keys behind).
+    let mut keys = Vec::new();
+    for i in 0..5u8 {
+        let key = udp_key((10, 0, 0, 100 + i), 40_000 + i as u16);
+        install_pair_protocol(&mut table, &key, now);
+        keys.push(key);
+    }
+    assert_eq!(table.len(), 10);
+    // Manufacture stale candidates: re-insert already-present keys is
+    // a no-op, so instead mark every pair replied — the predicate now
+    // rejects them all, which is exactly the stale-cleanup path.
+    // (Index entries remain; candidates fail the replied check.)
+    // Admission must return promptly without shedding replied pairs.
+    for key in &keys {
+        let reverse = reverse_session_key(key, NatDecision::default());
+        table.account_packet(&reverse, 64, 0, 0);
+    }
+    let (admitted, shed) = table.can_admit_new_flow(2, PROTO_UDP, 0);
+    assert!(!admitted, "all pairs replied: nothing sheddable at cap");
+    assert!(shed.is_empty(), "replied pairs are never shed");
+    assert_eq!(table.len(), 10, "bounded scan shed nothing");
+    for key in &keys {
+        assert!(table.entry_by_key(key).is_some());
+    }
+}

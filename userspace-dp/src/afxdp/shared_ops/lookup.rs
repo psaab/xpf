@@ -1,5 +1,27 @@
 use super::*;
 
+/// #16019 fold: node-level reply evidence for the pressure-shed
+/// victim check. The shared map is the only store every worker
+/// consults: if a reverse companion row exists there, the flow has
+/// been published bidirectionally and a sibling worker may be
+/// accounting its reverse packets — the shedding worker's local
+/// counters (which see only packets hashed to it) must not be the
+/// sole evidence. The caller combines this with the shared row's
+/// `tcp_handshake_state`/`origin` under the removal lock; this
+/// helper is the pre-removal existence probe keyed on the reverse
+/// tuple derived from the victim's own NAT decision.
+pub(in crate::afxdp) fn shared_session_replied(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forward_key: &SessionKey,
+    nat: crate::nat::NatDecision,
+) -> bool {
+    let reverse_key = crate::session::reverse_session_key(forward_key, nat);
+    if reverse_key == *forward_key {
+        return false;
+    }
+    lookup_shared_session(shared_sessions, &reverse_key).is_some()
+}
+
 pub(in crate::afxdp) fn lookup_shared_session(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     key: &SessionKey,

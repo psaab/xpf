@@ -899,6 +899,11 @@ pub(super) fn is_pressure_shed_shared_unreplied(
     // non-TCP carries handshake state 0 by construction
     // (`tcp_handshake_state_wire`) and the session_id/decision/metadata
     // fence above is the incarnation guard.
+    // #16019 fold: peer-synced rows are never shed from shared — a
+    // SyncImport/SharedMaterialize/WorkerLocalImport row means this
+    // node (or a sibling worker) holds the flow as replicated state
+    // whose reply evidence lives outside the shedding worker's local
+    // counters; only local-origin rows may be removed here.
     current.session_id == shed.session_id
         && current.decision == shed.decision
         && current.metadata.is_reverse == shed.is_reverse
@@ -910,6 +915,7 @@ pub(super) fn is_pressure_shed_shared_unreplied(
         && current.metadata.ingress_vlan_id == shed.ingress_vlan_id
         && current.metadata.owner_rg_id == shed.owner_rg_id
         && current.metadata.policy_id == shed.policy_id
+        && !current.origin.is_peer_synced()
         && (current.key.protocol != crate::ip_proto::PROTO_TCP
             || matches!(current.tcp_handshake_state, 1..=3))
 }
@@ -6931,10 +6937,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .iter()
                                         .map(|shed| shed.key.clone())
                                         .collect();
+                                    // #16019 fold: node-level reply evidence.
+                                    // Local removal already happened on worker-local
+                                    // counters; before tearing down shared/BPF/NAT
+                                    // authority, retain any victim whose reverse row
+                                    // exists in the shared map (a sibling worker may
+                                    // account its replies) — its local rows are gone
+                                    // but shared authority must not be destroyed for
+                                    // a flow another worker still serves.
+                                    let replied_sheds: Vec<bool> = pressure_shed_sessions
+                                        .iter()
+                                        .map(|shed| {
+                                            !shed.is_reverse
+                                                && (sessions.session_replied(&shed.key)
+                                                    || crate::afxdp::shared_ops::shared_session_replied(
+                                                        worker_ctx.shared_sessions,
+                                                        &shed.key,
+                                                        shed.decision.nat,
+                                                    ))
+                                        })
+                                        .collect();
                                     let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
                                         .acquire_lease(shed_keys);
                                     if shed_lease.is_ok() {
-                                        for shed in pressure_shed_sessions {
+                                        for (shed_idx, shed) in
+                                            pressure_shed_sessions.into_iter().enumerate()
+                                        {
+                                            if replied_sheds[shed_idx] {
+                                                continue;
+                                            }
                                             // Remove shared authority before this
                                             // worker processes another descriptor
                                             // in the batch. The Close delta is
@@ -12298,10 +12329,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         .iter()
                                         .map(|shed| shed.key.clone())
                                         .collect();
+                                    // #16019 fold: node-level reply evidence (see
+                                    // the ForwardCandidate shed site).
+                                    let replied_sheds: Vec<bool> = pressure_shed_sessions
+                                        .iter()
+                                        .map(|shed| {
+                                            !shed.is_reverse
+                                                && (sessions.session_replied(&shed.key)
+                                                    || crate::afxdp::shared_ops::shared_session_replied(
+                                                        worker_ctx.shared_sessions,
+                                                        &shed.key,
+                                                        shed.decision.nat,
+                                                    ))
+                                        })
+                                        .collect();
                                     let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
                                         .acquire_lease(shed_keys);
                                     if shed_lease.is_ok() {
-                                        for shed in pressure_shed_sessions {
+                                        for (shed_idx, shed) in
+                                            pressure_shed_sessions.into_iter().enumerate()
+                                        {
+                                            if replied_sheds[shed_idx] {
+                                                continue;
+                                            }
                                             let shared_removal =
                                                 crate::afxdp::shared_ops::remove_shared_session_if(
                                                     worker_ctx.shared_sessions,
