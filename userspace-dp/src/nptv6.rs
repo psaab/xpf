@@ -79,7 +79,7 @@
 
 use crate::Nptv6RuleSnapshot;
 use crate::policy::SnapshotIntegrityError;
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 
 /// A parsed NPTv6 rule with precomputed adjustment.
 #[derive(Clone, Debug)]
@@ -495,7 +495,8 @@ impl Nptv6State {
     /// outcome use [`Self::translate_inbound_result`].
     #[inline]
     pub(crate) fn translate_inbound(&self, dst: &mut Ipv6Addr, ingress_zone: &str) -> bool {
-        self.translate_inbound_result(dst, ingress_zone).is_translated()
+        self.translate_inbound_result(dst, ingress_zone)
+            .is_translated()
     }
 
     /// Translate an inbound packet and expose scoped untranslatable
@@ -558,7 +559,8 @@ impl Nptv6State {
     /// This compatibility wrapper preserves the historical boolean API.
     #[inline]
     pub(crate) fn translate_outbound(&self, src: &mut Ipv6Addr, egress_zone: &str) -> bool {
-        self.translate_outbound_result(src, egress_zone).is_translated()
+        self.translate_outbound_result(src, egress_zone)
+            .is_translated()
     }
 
     /// Translate an outbound packet and expose scoped untranslatable
@@ -636,6 +638,54 @@ impl Nptv6State {
                 }
                 let prefix_len = (rule.prefix_words * 16) as u8;
                 (words_to_ipv6(&words), prefix_len)
+            })
+            .collect()
+    }
+}
+
+/// #16015: do any installed NPTv6 external prefixes contain `addr`?
+/// Zone-aware: only prefixes whose from-zone can match a packet with
+/// egress/ingress zone `zone` count (empty = wildcard). `None` zone
+/// means the caller has no zone axis (NAT64/synced) — zone-blind.
+/// NPTv6 publishes statelessly with the port unchanged, so prefix
+/// membership IS ownership at every port.
+pub(crate) fn nptv6_prefix_contains(
+    prefixes: &[(Ipv6Addr, u8, String)],
+    addr: IpAddr,
+    zone: Option<&str>,
+) -> bool {
+    let IpAddr::V6(v6) = addr else { return false };
+    prefixes.iter().any(|(base, len, from_zone)| {
+        if let Some(z) = zone {
+            if !(from_zone.is_empty() || from_zone == z) {
+                return false;
+            }
+        }
+        if *len == 0 {
+            return true;
+        }
+        if *len >= 128 {
+            return *base == v6;
+        }
+        let host = u128::MAX >> *len;
+        (u128::from(v6) & !host) == (u128::from(*base) & !host)
+    })
+}
+
+impl Nptv6State {
+    /// #16015: external prefixes WITH their from-zone scope, for the
+    /// pool/interface mint refusal. `external_prefixes` stays zone-less
+    /// for its existing synced-domain callers.
+    pub(crate) fn external_prefixes_zoned(&self) -> Vec<(Ipv6Addr, u8, String)> {
+        self.inbound
+            .iter()
+            .map(|rule| {
+                let mut words = [0u16; 8];
+                for i in 0..rule.prefix_words {
+                    words[i] = rule.external_prefix[i];
+                }
+                let prefix_len = (rule.prefix_words * 16) as u8;
+                (words_to_ipv6(&words), prefix_len, rule.from_zone.clone())
             })
             .collect()
     }

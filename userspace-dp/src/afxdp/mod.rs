@@ -765,6 +765,9 @@ mod tests_nat64_protocol_ineligible_8670;
 #[path = "tests_nat64_tunnel.rs"]
 mod tests_nat64_tunnel;
 #[cfg(test)]
+#[path = "tests_nptv6_pool_overlap_16015.rs"]
+mod tests_nptv6_pool_overlap_16015;
+#[cfg(test)]
 #[path = "tests_routing_domain_7160.rs"]
 mod tests_routing_domain_7160;
 #[cfg(test)]

@@ -299,6 +299,12 @@ pub(crate) struct SourceNatRule {
     /// rule's pool — every strict-accepted config — so the mint path pays
     /// one `Option::is_none`. Wired by `wire_static_overlap_peers`.
     pub(crate) static_externals: Option<Arc<crate::nat::StaticExternalIdentities>>,
+    /// #16015: installed NPTv6 zoned external prefixes covering this
+    /// rule's v6 pool (see `wire_nptv6_overlap_peers`). NPTv6 publishes
+    /// statelessly with the port unchanged, so a mint inside the prefix
+    /// can duplicate its wire tuple at the SAME port. `None` when no
+    /// prefix covers this rule's pool — every strict-accepted config.
+    pub(crate) nptv6_externals: Option<Arc<Vec<(std::net::Ipv6Addr, u8, String)>>>,
 }
 
 /// One source-NAT allocator identity: two rules sharing this key share one

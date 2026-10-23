@@ -851,6 +851,61 @@ pub(crate) fn static_owns_wire_identity(
     }
 }
 
+/// #16015: does an installed NPTv6 external prefix own `ip` (at any
+/// port — NPTv6 preserves the source port statelessly, so prefix
+/// membership IS ownership)? Zone-aware when `zone` is Some (the
+/// packet's egress zone, the axis translate_outbound gates on);
+/// zone-blind when None (NAT64 / synced callers). `None` prefixes =
+/// fast path, every strict-accepted config with no NPTv6/pool overlap.
+pub(crate) fn nptv6_owns_wire_identity(
+    prefixes: Option<&[(std::net::Ipv6Addr, u8, String)]>,
+    ip: IpAddr,
+    zone: Option<&str>,
+) -> bool {
+    match prefixes {
+        Some(p) => crate::nptv6::nptv6_prefix_contains(p, ip, zone),
+        None => false,
+    }
+}
+
+/// #16015: hand the NPTv6 zoned external prefixes to every pool rule /
+/// NAT64 prefix whose addresses they cover (zone-aware per rule where
+/// a to-zone exists; zone-blind wiring, zone-checked at mint).
+///
+/// Called from `forwarding_build` AFTER `state.nptv6` is built. A
+/// rule/prefix no prefix covers keeps `None`, so strict-accepted
+/// configs pay one `Option::is_none` per mint. One shared `Arc`.
+pub(crate) fn wire_nptv6_overlap_peers(
+    rules: &mut [SourceNatRule],
+    prefixes: &mut [crate::nat64::Nat64Prefix],
+    nptv6: Vec<(std::net::Ipv6Addr, u8, String)>,
+) {
+    if nptv6.is_empty() {
+        return;
+    }
+    let shared = Arc::new(nptv6);
+    for rule in rules.iter_mut() {
+        if !rule.pool_mode {
+            continue;
+        }
+        // Wiring is zone-blind (a rule may egress several zones via
+        // sibling rule-sets sharing the pool); the mint check is
+        // zone-aware on the packet's to_zone.
+        let touched = rule
+            .pool_addresses_v6
+            .iter()
+            .any(|a| crate::nptv6::nptv6_prefix_contains(&shared, IpAddr::V6(*a), None));
+        if touched {
+            rule.nptv6_externals = Some(Arc::clone(&shared));
+        }
+    }
+    // NAT64 prefixes take no field: their pools are v4-only and a v6
+    // NPTv6 prefix can never contain them. The parameter stays so the
+    // call site mirrors wire_static_overlap_peers and a future v6
+    // NAT64 pool has an obvious wiring point.
+    let _ = prefixes;
+}
+
 /// #14368: hand the static externals view to every pool rule and NAT64
 /// prefix whose addresses it covers.
 ///

@@ -78,6 +78,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// allocator / static external already owns this wire identity.
 /// No rollback side effect, so the retry loop can consult it BEFORE
 /// publishing (via allocator exclusions) as well as after.
+/// #16015 zone-aware variant: pool rules know their packet's egress
+/// (to) zone, the axis translate_outbound gates NPTv6 on. The plain
+/// `pat_identity_excluded` (zone-blind, via exclusions closures that
+/// lack the zone) is kept for the allocator probe; the post-mint and
+/// address-only checks use this so split-horizon NPTv6 in a disjoint
+/// zone does not refuse a legitimate mint.
+fn pat_identity_excluded_zoned(
+    rule: &SourceNatRule,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+    iface_allocs: Option<&InterfaceNatAllocators>,
+    to_zone: &str,
+) -> bool {
+    // Peer/iface/static are zone-blind already; only the NPTv6 arm
+    // differs — evaluate it zoned INSTEAD of the blind arm inside
+    // pat_identity_excluded, or disjoint-zone prefixes would still
+    // exclude via the blind term.
+    let peer = peer_owns_wire_identity(rule, flow, translated);
+    let iface = match (iface_allocs, rule.iface_overlap_owners.as_deref()) {
+        (Some(ia), Some(o)) => {
+            std::sync::atomic::fence(Ordering::SeqCst);
+            o.interface_holds(flow, translated, &rule.pool_allocator)
+                || super::nat64_ports::direct_iface_owns(ia, flow, translated)
+        }
+        (Some(ia), None) => super::nat64_ports::direct_iface_owns(ia, flow, translated),
+        _ => false,
+    };
+    let static_owns = static_owns_wire_identity(
+        rule.static_externals.as_deref(),
+        translated.ip,
+        translated.port,
+    );
+    let nptv6_owns = nptv6_owns_wire_identity(
+        rule.nptv6_externals.as_deref().map(|v| &v[..]),
+        translated.ip,
+        Some(to_zone),
+    );
+    peer || iface || static_owns || nptv6_owns
+}
+
 fn pat_identity_excluded(
     rule: &SourceNatRule,
     flow: SourceNatFlowKey,
@@ -99,7 +139,16 @@ fn pat_identity_excluded(
         translated.ip,
         translated.port,
     );
-    peer || iface || static_owns
+    // #16015 zone-blind arm for the allocator probe (no zone in the
+    // exclusion closure): conservative — the probe may skip a
+    // candidate the zoned post-mint check would have allowed, never
+    // the reverse.
+    let nptv6_owns = nptv6_owns_wire_identity(
+        rule.nptv6_externals.as_deref().map(|v| &v[..]),
+        translated.ip,
+        None,
+    );
+    peer || iface || static_owns || nptv6_owns
 }
 
 fn reject_peer_owned_address_only_identity(
@@ -109,6 +158,18 @@ fn reject_peer_owned_address_only_identity(
     now_ns: u64,
     holder: NatHolder,
     iface_allocs: Option<&InterfaceNatAllocators>,
+) -> Option<SourceNatLookup> {
+    reject_peer_owned_address_only_identity_zoned(rule, flow, translated, now_ns, holder, iface_allocs, None)
+}
+
+fn reject_peer_owned_address_only_identity_zoned(
+    rule: &SourceNatRule,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+    now_ns: u64,
+    holder: NatHolder,
+    iface_allocs: Option<&InterfaceNatAllocators>,
+    to_zone: Option<&str>,
 ) -> Option<SourceNatLookup> {
     let peer = peer_owns_wire_identity(rule, flow, translated);
     let iface = match (iface_allocs, rule.iface_overlap_owners.as_deref()) {
@@ -127,7 +188,14 @@ fn reject_peer_owned_address_only_identity(
         translated.ip,
         translated.port,
     );
-    if !peer && !iface && !static_owns {
+    // #16015: an NPTv6 external prefix covering this address publishes
+    // it at the preserved port statelessly; refuse alongside.
+    let nptv6_owns = nptv6_owns_wire_identity(
+        rule.nptv6_externals.as_deref().map(|v| &v[..]),
+        translated.ip,
+        to_zone,
+    );
+    if !peer && !iface && !static_owns && !nptv6_owns {
         return None;
     }
     rule.pool_allocator
@@ -146,7 +214,23 @@ fn reject_peer_owned_identity(
     holder: NatHolder,
     iface_allocs: Option<&InterfaceNatAllocators>,
 ) -> Option<SourceNatLookup> {
-    if !pat_identity_excluded(rule, flow, translated, iface_allocs) {
+    reject_peer_owned_identity_zoned(rule, flow, translated, now_ns, holder, iface_allocs, None)
+}
+
+fn reject_peer_owned_identity_zoned(
+    rule: &SourceNatRule,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+    now_ns: u64,
+    holder: NatHolder,
+    iface_allocs: Option<&InterfaceNatAllocators>,
+    to_zone: Option<&str>,
+) -> Option<SourceNatLookup> {
+    let excluded = match to_zone {
+        Some(z) => pat_identity_excluded_zoned(rule, flow, translated, iface_allocs, z),
+        None => pat_identity_excluded(rule, flow, translated, iface_allocs),
+    };
+    if !excluded {
         return None;
     }
     rule.pool_allocator
@@ -560,6 +644,25 @@ fn match_source_nat_result_for_tuple_inner(
             // arms cannot classify one protocol differently.
             let iface_icmp_query =
                 matches!(protocol, PROTO_ICMP | PROTO_ICMPV6) && icmp_identifier_present;
+            // #16015: an egress address inside an NPTv6 external prefix
+            // for this egress zone is published by NPTv6 statelessly;
+            // refuse before any interface mint (both arms below).
+            {
+                let nptv6_hit = rules.iter().any(|r| {
+                    nptv6_owns_wire_identity(
+                        r.nptv6_externals.as_deref().map(|v| &v[..]),
+                        rewrite_src,
+                        Some(to_zone),
+                    )
+                });
+                if nptv6_hit {
+                    crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed);
+                    return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                        rule,
+                        SourceNatFailureReason::InterfaceIdentityExhausted,
+                    ));
+                }
+            }
             if !crate::ip_proto::has_l4_ports(protocol) && !iface_icmp_query {
                 // #14367: address-only interface mint vs pool/NAT64.
                 let cand = TranslatedTuple {
@@ -1219,13 +1322,14 @@ fn match_source_nat_result_for_tuple_inner(
                             // #8115 R1: an address-only mint publishes a wire
                             // identity too, so it owes the same peer-pool check
                             // the PAT arms run.
-                            if let Some(refused) = reject_peer_owned_address_only_identity(
+                            if let Some(refused) = reject_peer_owned_address_only_identity_zoned(
                                 rule,
                                 flow,
                                 translated,
                                 now_ns,
                                 holder,
                                 Some(iface_allocs),
+                                Some(to_zone),
                             ) {
                                 return refused;
                             }
@@ -1253,7 +1357,7 @@ fn match_source_nat_result_for_tuple_inner(
                     let Some(&ip) = rule.pool_addresses_v6.get(rel) else {
                         return false;
                     };
-                    pat_identity_excluded(
+                    pat_identity_excluded_zoned(
                         rule,
                         flow,
                         TranslatedTuple {
@@ -1261,6 +1365,7 @@ fn match_source_nat_result_for_tuple_inner(
                             port,
                         },
                         Some(iface_allocs),
+                        to_zone,
                     )
                 };
                 let translated = match rule
@@ -1296,13 +1401,14 @@ fn match_source_nat_result_for_tuple_inner(
                 };
                 // #6979 F6: refuse an identity a peer pool over the same
                 // address already owns (race net).
-                if let Some(failure) = reject_peer_owned_identity(
+                if let Some(failure) = reject_peer_owned_identity_zoned(
                     rule,
                     flow,
                     translated,
                     now_ns,
                     holder,
                     Some(iface_allocs),
+                    Some(to_zone),
                 ) {
                     return failure;
                 }

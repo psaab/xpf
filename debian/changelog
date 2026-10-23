@@ -22,6 +22,14 @@ xpf (0.0.0) unstable; urgency=medium
     stamp stale so inbound lookup denies non-target remotes, while
     an unchanged any-remote permit restamps and preserves the grant.
     Exact target-host/port grants remain permitted under tighter modes.
+  * NAT: pool/interface SNAT can no longer mint inside an NPTv6
+    external prefix (#16015). Strict commit rejects a referenced
+    source-pool / NAT64-pool / interface-egress IPv6 member inside an
+    installed NPTv6 external prefix (lenient load warns); the Rust
+    dataplane refuses such pool, interface, and HA-synced mints with
+    PoolPeerAddressOverlap. NPTv6 publishes the prefix statelessly
+    with the port unchanged, so the minted tuple previously collided
+    with the NPTv6-published tuple for a different host.
 
 
 xpf (0.0.0) unstable; urgency=medium

@@ -107,5 +107,10 @@ func validateSourceNATStrictView(cfg *Config) error {
 	if _, err := validateStaticNATPoolOverlapStrict(cfg, false); err != nil {
 		return err
 	}
+	// #16015: a peer-only divergence can likewise place a referenced
+	// pool/interface member inside the peer's NPTv6 external prefix.
+	if _, err := validateNPTv6PoolOverlapStrict(cfg, false); err != nil {
+		return err
+	}
 	return nil
 }

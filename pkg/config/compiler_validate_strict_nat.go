@@ -5286,6 +5286,192 @@ func natPoolOverlapOwners(cfg *Config) []natAllocOwner {
 	return owners
 }
 
+// nptv6ExternalPrefix is one INSTALLED NPTv6 external (match) prefix: the
+// stateless range its translator publishes into with the source port
+// unchanged. A pool/interface mint landing inside it can emit the same
+// (address, port) the NPTv6 rule publishes for a different host.
+type nptv6ExternalPrefix struct {
+	ruleSet  string
+	rule     string
+	prefix   string // authored external (match) prefix text
+	fromZone string
+}
+
+// nptv6ExternalPrefixes enumerates the NPTv6 external prefixes that will
+// actually install — the same population buildNptv6Snapshots emits:
+// IsNPTv6 rules that are not scope-dropped (#5818/#9877), not in a
+// tolerated undefined-zone rule-set (#16008), and whose prefixes parse at
+// matching /48 or /64 (others are rejected by validateNPTv6Strict and
+// never install). Ordering follows config order for deterministic
+// diagnostics.
+func nptv6ExternalPrefixes(cfg *Config) []nptv6ExternalPrefix {
+	if cfg == nil || len(cfg.Security.NAT.Static) == 0 {
+		return nil
+	}
+	var out []nptv6ExternalPrefix
+	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		if cfg.LenientNATUndefinedZoneRuleSets[NATRuleSetRef{Kind: "static", Name: rs.Name}] {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || !rule.IsNPTv6 {
+				continue
+			}
+			if NPTv6ScopeUnsupported(rs, rule) || StaticNATRuleExcludedReason(rule) != "" {
+				continue
+			}
+			if _, _, ok := nptv6PrefixWords(rule.Match); !ok {
+				continue
+			}
+			if _, _, ok := nptv6PrefixWords(rule.Then); !ok {
+				continue
+			}
+			// Lengths must match for the helper to install the rule.
+			_, extNet, errExt := net.ParseCIDR(rule.Match)
+			_, intNet, errInt := net.ParseCIDR(rule.Then)
+			if errExt != nil || errInt != nil {
+				continue
+			}
+			extOnes, _ := extNet.Mask.Size()
+			intOnes, _ := intNet.Mask.Size()
+			if extOnes != intOnes {
+				continue
+			}
+			out = append(out, nptv6ExternalPrefix{
+				ruleSet: rs.Name, rule: rule.Name,
+				prefix: rule.Match, fromZone: rs.FromZone,
+			})
+		}
+	}
+	return out
+}
+
+// validateNPTv6PoolOverlapStrict (#16015) rejects a pool/interface member
+// inside an INSTALLED NPTv6 external prefix. It is a DEDICATED pairwise
+// check like #14368, not another owner in the shared #5144 sweep:
+// appending NPTv6 prefixes as sweep owners would newly reject
+// NPTv6-vs-NPTv6 pairs (already owned by #2241) and within-pool members
+// that merely sit inside the prefix must report against the PREFIX, not
+// against each other. Each installed external prefix is paired ONLY
+// against the non-static owners natPoolOverlapOwners enumerates —
+// referenced source pools, reachable NAT64 pools, and interface-mode
+// egress addresses (a bare host member, so it collides only when the
+// host itself is inside the prefix).
+//
+// Zone scoping: NPTv6 publishes only where its from-zone can match a
+// packet (#5176). A pool rule is checked only when a zone exists that
+// BOTH the source rule-set and the NPTv6 rule-set can match — for
+// outbound minting that is the EGRESS (to-zone) of the source rule, the
+// same zone translate_outbound gates on. Two distinct non-empty zones
+// are disjoint and cannot collide for that pool rule. The NAT64 arm has
+// no source to-zone dimension on the same axis, so it is checked
+// zone-blind (conservative — over-refusal, never under-refusal).
+//
+// Strict: hard-reject naming both sides. Lenient: warning via
+// emitNATOverlap (#1960 no-brick).
+func validateNPTv6PoolOverlapStrict(cfg *Config, lenient bool) ([]string, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	nptv6s := nptv6ExternalPrefixes(cfg)
+	if len(nptv6s) == 0 {
+		return nil, nil
+	}
+	owners := natPoolOverlapOwners(cfg)
+	if len(owners) == 0 {
+		return nil, nil
+	}
+	// Expand owners into v6 intervals once (v4 can never be inside a v6
+	// prefix; the colon-strict family rule already keeps them apart).
+	type ownerInterval struct {
+		lo, hi netip.Addr
+		member string
+	}
+	perOwner := make([][]ownerInterval, len(owners))
+	for idx := range owners {
+		for _, m := range owners[idx].expandedMembers() {
+			n := parsePoolAddr(m)
+			if n == nil {
+				continue
+			}
+			if natAddrFamily(natCIDRIPPart(m)) != "v6" {
+				continue
+			}
+			lo, hi, ok := natV6IntervalOf(n)
+			if !ok {
+				continue
+			}
+			perOwner[idx] = append(perOwner[idx], ownerInterval{lo: lo, hi: hi, member: m})
+		}
+	}
+	for _, np := range nptv6s {
+		npNet := parsePoolAddr(np.prefix)
+		if npNet == nil {
+			continue
+		}
+		npLo, npHi, ok := natV6IntervalOf(npNet)
+		if !ok {
+			continue
+		}
+		for idx := range owners {
+			if !nptv6OwnerZoneOverlaps(cfg, np, owners[idx]) {
+				continue
+			}
+			for _, iv := range perOwner[idx] {
+				if iv.lo.Compare(npHi) <= 0 && npLo.Compare(iv.hi) <= 0 {
+					return emitNATOverlap(lenient, fmt.Sprintf(
+						"security nat: %s member %q is inside nptv6 external prefix %q (static rule-set %q rule %q); NPTv6 publishes that prefix statelessly with the source port unchanged while the pool/interface allocator can mint the same (address, port) for a different internal host, and the reverse NAT index cannot disambiguate the return flow (reply misdelivery) — move the pool/interface address outside every NPTv6 external prefix, or move the NPTv6 external prefix (#16015)",
+						owners[idx].desc, iv.member, np.prefix, np.ruleSet, np.rule))
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
+// nptv6OwnerZoneOverlaps reports whether the NPTv6 rule-set's from-zone
+// can share a packet's egress zone with at least one source rule-set
+// behind this owner. Pool owners are checked per referencing rule-set
+// (its TO-zone is the egress zone outbound NPTv6 gates on); NAT64 and
+// interface-egress owners carry no single to-zone and are checked
+// zone-blind (conservative).
+func nptv6OwnerZoneOverlaps(cfg *Config, np nptv6ExternalPrefix, owner natAllocOwner) bool {
+	if owner.pool == nil {
+		return true // NAT64 / interface-egress: no to-zone axis
+	}
+	// Find every source rule-set referencing this pool.
+	referenced := false
+	for _, rs := range cfg.Security.NAT.Source {
+		if rs == nil {
+			continue
+		}
+		uses := false
+		for _, rule := range rs.Rules {
+			if rule != nil && rule.Then.PoolName != "" &&
+				cfg.Security.NAT.SourcePools[rule.Then.PoolName] == owner.pool {
+				uses = true
+				break
+			}
+		}
+		if !uses {
+			continue
+		}
+		referenced = true
+		if zonesConflictNPTv6(np.fromZone, rs.ToZone) {
+			return true
+		}
+	}
+	if referenced {
+		return false
+	}
+	// NAT64-backed pool (no source rule-set references it): the NAT64
+	// mint has no to-zone on this axis, so zone-blind.
+	return true
+}
+
 // emitNATOverlap renders a #5144 overlap finding as a strict error or a lenient
 // warning, mirroring validateNPTv6Strict's emit helper.
 func emitNATOverlap(lenient bool, msg string) ([]string, error) {

@@ -1055,6 +1055,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                                 rule.static_externals.as_deref(),
                                 pre.ip,
                                 pre.port,
+                            )
+                            || nptv6_owns_wire_identity(
+                                rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                                pre.ip,
+                                None,
                             ))
                     {
                         return SyncedReserveOutcome::Refused;
@@ -1067,6 +1072,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                             rule.static_externals.as_deref(),
                             translated.ip,
                             translated.port,
+                        )
+                        || nptv6_owns_wire_identity(
+                            rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                            translated.ip,
+                            None,
                         ))
                 {
                     let snapshot = incumbent_snapshot.clone();
@@ -1204,6 +1214,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     rule.static_externals.as_deref(),
                     translated.ip,
                     translated.port,
+                )
+                || nptv6_owns_wire_identity(
+                    rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                    translated.ip,
+                    None,
                 ))
         {
             return SyncedReserveOutcome::Refused;
@@ -1230,6 +1245,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                         rule.static_externals.as_deref(),
                         translated.ip,
                         translated.port,
+                    )
+                    || nptv6_owns_wire_identity(
+                        rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                        translated.ip,
+                        None,
                     ))
             {
                 let snapshot = incumbent_snapshot.clone();
