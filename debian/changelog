@@ -8,6 +8,8 @@ xpf (0.0.0) unstable; urgency=medium
     Conforming packets meter exactly once; their handles are stored
     on the installed session for hit replay.
 
+xpf (0.0.0) unstable; urgency=medium
+
   * DHCP relay: add bounded per-sender fairness ahead of the
     per-interface aggregate token bucket (#16087, folded 6x on
     #16322). One sender sustaining the maximum-packet-rate no longer
