@@ -1402,14 +1402,10 @@ fn write_userspace_meta(
             dscp: parsed.dscp,
             dscp_rewrite: 0xff,
             // #16007: a TCP first fragment with declared L4 < 14 stamps
-            // flags=0 as UNKNOWN. `first_fragment_l4` returns
-            // payload_offset == l4_offset for exactly that shape (every
-            // proven-flags TCP parse advances past the header), so the
-            // unknown bit folds out of the existing fields with no new
-            // ParsedPacket state for the verifier to carry.
-            tcp_flags_unknown: (parsed.is_fragment
-                && parsed.protocol == PROTO_TCP
-                && parsed.payload_offset == parsed.l4_offset) as u8,
+            // flags=0 as UNKNOWN. Only that arm sets tcp_flags_unknown;
+            // truncated/partial first fragments whose flags byte is in
+            // the declared datagram remain known.
+            tcp_flags_unknown: parsed.tcp_flags_unknown as u8,
             reserved: 0,
             flow_src_port: parsed.flow_src_port,
             flow_dst_port: parsed.flow_dst_port,
@@ -2169,6 +2165,10 @@ struct ParsedPacket {
     // False for a datagram with no readable payload byte and for every non-UDP
     // protocol.
     udp_wg_transport_data: bool,
+    // #16007: TCP flags byte is outside the declared first fragment.
+    // Kept as a bool beside the other packet-classification bools; the
+    // meta writer is the only consumer.
+    tcp_flags_unknown: bool,
     // #14645: this packet is one fragment (first or non-first) of a larger
     // IP datagram. Set from the IPv4 flags/offset or the IPv6 Fragment
     // header; false for a whole datagram. Read by the native-GRE and
@@ -2349,6 +2349,14 @@ fn parse_ipv4(
         } else {
             parse_l4(data, data_end, l4_offset, protocol, l4_end)?
         };
+    // Only a TCP first fragment whose declared datagram ends before
+    // L4+14 leaves the flags byte unread. A first fragment carrying at
+    // least 14 L4 bytes (including a full TCP header) has known flags,
+    // even though first_fragment_l4 deliberately reports payload_offset
+    // as l4_offset for every first fragment.
+    let tcp_flags_unknown = first_fragment
+        && protocol == PROTO_TCP
+        && l4_end < l4_offset as usize + 14;
     let src_bytes = unsafe { read_bytes(data, data_end, l3_offset as usize + 12, 4) }?;
     let dst_bytes = unsafe { read_bytes(data, data_end, l3_offset as usize + 16, 4) }?;
     let mut src_addr = [0u8; 16];
@@ -2364,6 +2372,7 @@ fn parse_ipv4(
         payload_offset,
         udp_wg_transport_data,
         is_fragment: (frag_field & 0x2000) != 0 || non_first_fragment,
+        tcp_flags_unknown: tcp_flags_unknown,
         addr_family: AF_INET,
         protocol,
         wire_protocol: iph[9],
@@ -2482,6 +2491,7 @@ fn parse_ipv6(
         l4_offset: offset,
         udp_wg_transport_data,
         is_fragment: walk.fragment_seen,
+        tcp_flags_unknown: false,
         payload_offset,
         addr_family: AF_INET6,
         protocol,

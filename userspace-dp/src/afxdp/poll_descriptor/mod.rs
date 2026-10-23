@@ -5634,13 +5634,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // mid-stream ACK/data, while strict-syn-check
                         // overrides it. `tcp-rst` answers only non-SYN misses
                         // dropped here; an inbound RST is never answered.
-                        // Counted in the aggregate `screen_drops` flow-statistics
-                        // tally (no per-reason ordinal — that array mirrors the
-                        // Junos SCREEN checks, and this is a flow tcp-session
-                        // control; it joins the syn-cookie / icmp-fragment
-                        // aggregate-only class). No per-packet event is emitted:
-                        // a non-SYN session-miss flood must not become a log
-                        // storm.
+                        // Proven non-SYN drops are counted as
+                        // `strict-syn-check` in the aggregate `screen_drops`
+                        // tally. A #16007 flags-unknown drop instead uses
+                        // the existing `syn-frag` per-reason counter: the
+                        // packet is a first fragment whose unseen flags are
+                        // precisely the syn-frag screen's subject, so
+                        // fallback admission (when stage 10 did not drop
+                        // it first) must not hide it in the strict-SYN tally.
+                        // No per-packet event is emitted: a non-SYN
+                        // session-miss flood must not become a log storm.
                         // #10729 X2-F6: evaluate the SYN gate on the flowless
                         // effective protocol — a v6+AH non-SYN must not be
                         // dropped as a TCP miss (it is flowless proto 51, and
@@ -5690,7 +5693,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 from_zone_id,
                             );
                             telemetry.counters.record_screen_drop(
-                                "strict-syn-check",
+                                if tcp_flags_unknown {
+                                    "syn-frag"
+                                } else {
+                                    "strict-syn-check"
+                                },
                                 from_zone_id,
                                 &worker_ctx.forwarding.flood_counter_slot_map,
                             );

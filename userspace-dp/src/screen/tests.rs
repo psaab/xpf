@@ -5836,7 +5836,12 @@ fn extract_info_from_ipv4_frame() {
     frame[20] = 0x20; // flags=MF, offset=0
     frame[21] = 0x00;
 
-    let info = extract_screen_info(
+    // #16007: total_len=20 declares ZERO L4 bytes on an MF first
+    // fragment, so the TCP flags byte is outside the declared datagram
+    // even though the caller stamped TCP_SYN. This is no longer a
+    // parseable "valid IPv4 frame" for screen purposes: it must fail
+    // closed as syn-frag rather than trust the stamped SYN.
+    let err = extract_screen_info(
         &frame,
         libc::AF_INET as u8,
         PROTO_TCP,
@@ -5848,12 +5853,10 @@ fn extract_info_from_ipv4_frame() {
         80,
         14,
     )
-    .expect("valid IPv4 frame parses");
+    .expect_err("header-only MF first fragment must fail closed");
 
-    assert_eq!(info.ip_ihl, 5);
-    assert_eq!(info.ip_total_len, 20);
-    assert!(info.is_fragment); // MF bit set
-    assert_eq!(info.protocol, PROTO_TCP);
+    assert_eq!(err, ScreenParseError::TinyFirstFragmentFlagsUnknown);
+    assert_eq!(err.screen_reason(), "syn-frag");
 }
 
 // ================================================================

@@ -1279,6 +1279,62 @@ fn deny_reply_zone_tcp_rst_policy_deny_is_silent_11304() {
     assert!(pipeline.pending_tx_local.is_empty());
 }
 
+/// #16007: a flags-unknown tiny first fragment must not be answered
+/// with a synthesized RST: its stamped flags/seq are not proven TCP
+/// header fields. Zone `tcp-rst` is enabled so the unknown guard is
+/// the only reason for silence; the known-flags control still replies.
+#[test]
+fn session_miss_rst_unknown_flags_is_silent_16007() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    frame[47] = 0x10;
+    meta.tcp_flags = 0x10; // ACK-shaped stamp, as a non-SYN miss would carry
+    meta.tcp_flags_unknown = 1;
+    let mut pipeline = tx_pipeline(SYN_COOKIE_REPLY_PENDING_RESERVE * 2, SYN_COOKIE_REPLY_PENDING_RESERVE + 1);
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_tcp_rst.insert(5, true);
+    let mut counters = BatchCounters::default();
+    let sent = enqueue_session_miss_rst(
+        &mut pipeline,
+        &forwarding,
+        None,
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        5,
+    );
+    assert!(!sent, "#16007: unknown-flags fragment must not get a RST reply");
+    assert!(pipeline.pending_tx_local.is_empty());
+    assert_eq!(counters.policy_reject_sent, 0);
+
+    // Control: same packet with known flags still gets the RST reply.
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    frame[47] = 0x10;
+    meta.tcp_flags = 0x10;
+    meta.tcp_flags_unknown = 0;
+    let mut pipeline = tx_pipeline(SYN_COOKIE_REPLY_PENDING_RESERVE * 2, SYN_COOKIE_REPLY_PENDING_RESERVE + 1);
+    let mut counters = BatchCounters::default();
+    let sent = enqueue_session_miss_rst(
+        &mut pipeline,
+        &forwarding,
+        None,
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        5,
+    );
+    assert!(sent, "control: known non-SYN miss must still get tcp-rst reply");
+}
+
 /// #11304: a plain TCP `deny` stays silent when no ingress zone has
 /// `tcp-rst` enabled; explicit `then reject` remains an active reply.
 #[test]
