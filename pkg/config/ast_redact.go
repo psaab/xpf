@@ -969,22 +969,25 @@ func secretIndices(fp []string) []int {
 
 // isADUserPasswordLeaf15996 reports whether fp[i] (a `user-password` token)
 // is the value leaf of the AD identity stanza in one of the spellings the
-// issue names. Structural position — never an ancestor scan — so a config
-// group or any other subtree merely NAMED active-directory-access /
-// user-identification cannot arm it, and a login user named user-password
-// (system login user …) never matches.
+// issue names. Structural position — never an ancestor scan — so any other
+// subtree merely NAMED active-directory-access / user-identification cannot
+// arm it, and a login user named user-password (system login user …) never
+// matches.
 //
-// Accepted flattened shapes (root = services|security, ADA =
-// active-directory-access, UP = user-password at i):
+// Accepted flattened shapes (prefix = "" | "groups <name>", root =
+// services|security, ADA = active-directory-access, UP = user-password at i):
 //
-//	root ADA [user-name <name>] UP           (root spellings, pair optional)
-//	root user-identification ADA [user-name <name>] UP
+//	prefix root ADA [user-name <name>] UP    (root spellings, pair optional)
+//	prefix root user-identification ADA [user-name <name>] UP
 //
+// The groups spelling is the same stanza DEFINED inside a config group
+// (`groups g1 services user-identification …`, applied via apply-groups);
+// the raw groups render is itself a PermView surface, so it must mask too.
 // The stanza may carry sibling leaves before user-password (domain-name,
 // user-name <name>, … — Junos AD access profiles do), but the identity
-// stanza must be the leaf's parent chain rooted at services/security:
-// nothing may intervene between root and the stanza, nor between ADA and
-// the user-name/user-password pair.
+// stanza must be the leaf's parent chain rooted at services/security
+// (optionally under one groups <name> prefix): nothing may intervene
+// between root and the stanza, nor between ADA and the pair.
 func isADUserPasswordLeaf15996(fp []string, i int) bool {
 	if i < 2 || i >= len(fp) || fp[i] != "user-password" {
 		return false
@@ -995,6 +998,10 @@ func isADUserPasswordLeaf15996(fp []string, i int) bool {
 	if fp[0] == "set" {
 		off = 1
 	}
+	// Optional config-group definition prefix: groups <name>.
+	if off+1 < len(fp) && fp[off] == "groups" {
+		off += 2
+	}
 	p := i - 1 // index of the token immediately before user-password
 	// Optional bind-user pair: user-name <name> directly before it.
 	if p-off >= 2 && fp[p-1] == "user-name" {
@@ -1004,9 +1011,9 @@ func isADUserPasswordLeaf15996(fp []string, i int) bool {
 		return false
 	}
 	switch p - off {
-	case 1: // root ADA …
+	case 1: // [prefix] root ADA …
 		return fp[off] == "services" || fp[off] == "security"
-	case 2: // root user-identification ADA …
+	case 2: // [prefix] root user-identification ADA …
 		return (fp[off] == "services" || fp[off] == "security") && fp[off+1] == "user-identification"
 	}
 	return false

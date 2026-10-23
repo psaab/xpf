@@ -35,7 +35,13 @@ func renders15996(t *testing.T, tree *ConfigTree, root string) map[string]string
 func assertMasked15996(t *testing.T, label string, tree *ConfigTree, root, secret, keep string) {
 	t.Helper()
 	for name, rendered := range renders15996(t, tree, root) {
+		// The inheritance renderers legitimately render "" for a groups
+		// scope (no inherited-from annotation); leak/placeholder checks
+		// apply to every non-empty arm, emptiness only fails the others.
 		if rendered == "" {
+			if name == "Inheritance" || name == "InheritanceScoped" {
+				continue
+			}
 			t.Errorf("%s/%s: render empty (test must not pass vacuously)", label, name)
 			continue
 		}
@@ -302,6 +308,113 @@ func TestGroupNamedIdentityDoesNotMaskLoginUser15996(t *testing.T) {
 	} {
 		if isSecretValueIndex(fp, len(fp)-1) {
 			t.Errorf("non-AD position wrongly marked secret: %v", fp)
+		}
+	}
+}
+
+// TestGroupedADUserPasswordRedacted15996 is the fold-3 regression: the AD
+// stanza DEFINED inside a config group (`groups g1 services
+// user-identification …`, applied elsewhere via apply-groups) starts
+// `groups <name>`, so the root-anchored structural gate missed it and the
+// raw groups render leaked. The matcher now allows one leading
+// `groups <name>` prefix; the login-user group shapes in
+// TestGroupNamedIdentityDoesNotMaskLoginUser15996 (groups named after the
+// identity stanzas, wrapping system login) stay unmasked because their
+// chain after the prefix is system login, not services/security.
+func TestGroupedADUserPasswordRedacted15996(t *testing.T) {
+	const secret = "LEAK-AD-USER-PASSWORD-15996"
+	const user = "bind-svc-account"
+
+	shapes := []struct {
+		name string
+		tree *ConfigTree
+	}{
+		{
+			name: "flat groups services user-identification",
+			tree: buildRedactTree(t, []string{
+				"set groups g1 services user-identification active-directory-access user-name " + user + " user-password " + secret,
+				"set services apply-groups g1",
+			}),
+		},
+		{
+			name: "flat groups security-root",
+			tree: buildRedactTree(t, []string{
+				"set groups g1 security active-directory-access user-password " + secret,
+			}),
+		},
+		{
+			name: "hierarchical groups services user-identification",
+			tree: parseHierText(t, `groups {
+    g1 {
+        services {
+            user-identification {
+                active-directory-access {
+                    user-name `+user+`;
+                    user-password `+secret+`;
+                }
+            }
+        }
+    }
+}`),
+		},
+	}
+	for _, tc := range shapes {
+		t.Run(tc.name, func(t *testing.T) {
+			keep := user
+			if tc.name == "flat groups security-root" {
+				keep = ""
+			}
+			assertMasked15996(t, tc.name, tc.tree, "groups", secret, keep)
+			// Raw group render + scoped/compare/inheritance arms, explicitly.
+			red := tc.tree.RedactedClone()
+			inh, err := tc.tree.FormatPathInheritanceRedactedForNode([]string{"groups"}, -1)
+			if err != nil {
+				t.Fatalf("inheritance render: %v", err)
+			}
+			for name, rendered := range map[string]string{
+				"raw Format":        red.Format(),
+				"raw FormatSet":     red.FormatSet(),
+				"scoped FormatPath": red.FormatPathRedacted([]string{"groups"}),
+				"compare":           FormatCompareRedacted(&ConfigTree{}, tc.tree),
+				"compareAtPath":     FormatCompareRedactedAtPath(&ConfigTree{}, tc.tree, []string{"groups"}),
+				"inheritanceScoped": inh,
+			} {
+				// The inheritance renderer legitimately renders "" for a
+				// groups scope (groups carry no inherited-from annotation);
+				// the leak check still applies whenever it renders, and the
+				// placeholder is required only on the non-empty arms.
+				if name == "inheritanceScoped" && rendered == "" {
+					continue
+				}
+				if rendered == "" {
+					t.Errorf("%s: render empty (must not pass vacuously)", name)
+					continue
+				}
+				if strings.Contains(rendered, secret) {
+					t.Errorf("%s leaked grouped AD user-password:\n%s", name, rendered)
+				}
+				if !strings.Contains(rendered, SecretDataPlaceholder) {
+					t.Errorf("%s did not mask grouped AD user-password:\n%s", name, rendered)
+				}
+			}
+		})
+	}
+	// Structural positives/negatives for the groups prefix.
+	for _, fp := range [][]string{
+		{"groups", "g1", "services", "user-identification", "active-directory-access", "user-password", "x"},
+		{"groups", "g1", "security", "active-directory-access", "user-name", "u", "user-password", "x"},
+		{"set", "groups", "g1", "services", "active-directory-access", "user-password", "x"},
+	} {
+		if !isSecretValueIndex(fp, len(fp)-1) {
+			t.Errorf("grouped AD leaf not marked secret: %v", fp)
+		}
+	}
+	for _, fp := range [][]string{
+		{"groups", "active-directory-access", "system", "login", "user", "user-password", "class", "super-user"},
+		{"groups", "g1", "system", "active-directory-access", "user-password", "x"},
+	} {
+		if isSecretValueIndex(fp, len(fp)-1) {
+			t.Errorf("non-AD grouped position wrongly marked secret: %v", fp)
 		}
 	}
 }
