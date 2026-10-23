@@ -31,6 +31,21 @@ import (
 // rewrite. A mismatch in one slot rejects that slot; matching later slots remain
 // independently verifiable. Zero is legacy (pre-#10723 sidecar without these
 // fields): generation and active-generation checks are skipped.
+//
+// Next-active preparation (#16064): immediately before WriteActive, Commit
+// durably writes rollback preparation metadata. Its primary active binding
+// still describes the current history, while next_active_* describes the
+// committed tree that is about to become active. PendingHash on each entry
+// names the post-commit slot at that same position. If power is lost after
+// the active rename, history slots retain their old bytes but load at their
+// old pre-shift positions; each is admitted only when its hash equals the
+// previous committed entry at index-1 (or the previous active hash for slot
+// 1). If power is lost after some slot rewrites, those rewritten slots also
+// retain pre-shift indices and are admitted from PendingHash. Active identity
+// mismatch alone therefore no longer mass-tombstones byte-verifiable history;
+// unrelated active content and unmatched bytes still fail closed. A normal
+// completed commit publishes current metadata with all preparation fields
+// cleared before it returns.
 type rollbackMetadataFile struct {
 	Version       int                         `json:"version"`
 	Generation    uint64                      `json:"generation,omitempty"`
@@ -39,6 +54,10 @@ type rollbackMetadataFile struct {
 	ActiveInode   uint64                      `json:"active_inode,omitempty"`
 	ActiveModTime time.Time                   `json:"active_mod_time,omitempty"`
 	Entries       []rollbackSlotMetadataEntry `json:"entries"`
+	// NextActiveHash is the guarded hash of the committed tree whose active
+	// rename this preparation record immediately precedes (#16064). It certifies
+	// the one-generation skew only when the durable active.json hash matches it.
+	NextActiveHash string `json:"next_active_hash,omitempty"`
 }
 
 type rollbackSlotMetadataEntry struct {
@@ -49,6 +68,10 @@ type rollbackSlotMetadataEntry struct {
 	Timestamp  time.Time `json:"timestamp"`
 	Comment    string    `json:"comment,omitempty"`
 	Generation uint64    `json:"generation,omitempty"`
+	// PendingHash (#16064) is the rollback-slot content hash that will occupy
+	// this same slot position during a prepared in-flight commit. It lets boot
+	// recover partially rewritten history without shifting positions.
+	PendingHash string `json:"pending_hash,omitempty"`
 }
 
 const (
@@ -106,16 +129,22 @@ func rollbackSlotIdentityForPath(path string) (rollbackSlotIdentity, bool) {
 }
 
 func (s *Store) writeRollbackMetadataGeneration(generation uint64, entries []rollbackSlotMetadataEntry) error {
+	return s.writeRollbackMetadataGenerationNext(generation, entries, "")
+}
+
+func (s *Store) writeRollbackMetadataGenerationNext(generation uint64,
+	entries []rollbackSlotMetadataEntry, nextActiveHash string) error {
 	path := s.rollbackMetadataPath()
 	activeHash, activeIdentity := s.rollbackActiveBindingForWrite()
 	data, err := json.MarshalIndent(rollbackMetadataFile{
-		Version:       rollbackMetadataVersion,
-		Generation:    generation,
-		ActiveHash:    activeHash,
-		ActiveDevice:  activeIdentity.Device,
-		ActiveInode:   activeIdentity.Inode,
-		ActiveModTime: activeIdentity.ModTime,
-		Entries:       entries,
+		Version:        rollbackMetadataVersion,
+		Generation:     generation,
+		ActiveHash:     activeHash,
+		ActiveDevice:   activeIdentity.Device,
+		ActiveInode:    activeIdentity.Inode,
+		ActiveModTime:  activeIdentity.ModTime,
+		Entries:        entries,
+		NextActiveHash: nextActiveHash,
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal rollback metadata: %w", err)
@@ -258,30 +287,133 @@ func (s *Store) rebindRollbackMetadataLocked() {
 		// counts as success).
 		s.rollbackPersistDegraded = false
 	}
+// rollbackMetadataSnapshot is the parsed rollback sidecar: generation, active
+// binding, and entries are the durable #10723 binding; NextActiveHash carries
+// the #16064 preparation binding for a commit whose active rename may already
+// have landed.
+type rollbackMetadataSnapshot struct {
+	Generation     uint64
+	ActiveHash     string
+	Identity       rollbackSlotIdentity
+	Entries        []rollbackSlotMetadataEntry
+	NextActiveHash string
+}
+
+func (s *Store) readRollbackMetadata() []rollbackSlotMetadataEntry {
+	return s.readRollbackMetadataSnapshotFull().Entries
 }
 
 func (s *Store) readRollbackMetadataSnapshot() (uint64, string, rollbackSlotIdentity, []rollbackSlotMetadataEntry) {
+	snap := s.readRollbackMetadataSnapshotFull()
+	return snap.Generation, snap.ActiveHash, snap.Identity, snap.Entries
+}
+
+func (s *Store) readRollbackMetadataSnapshotFull() rollbackMetadataSnapshot {
 	path := s.rollbackMetadataPath()
 	data, err := ReadBoundedFile(path, MaxConfigSize)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			slog.Warn("ignoring unreadable rollback metadata", "path", path, "err", err)
 		}
-		return 0, "", rollbackSlotIdentity{}, nil
+		return rollbackMetadataSnapshot{}
 	}
 	var file rollbackMetadataFile
 	if err := json.Unmarshal(data, &file); err != nil {
 		slog.Warn("ignoring malformed rollback metadata", "path", path, "err", err)
-		return 0, "", rollbackSlotIdentity{}, nil
+		return rollbackMetadataSnapshot{}
 	}
 	if file.Version != rollbackMetadataVersion {
 		slog.Warn("ignoring unsupported rollback metadata", "path", path, "version", file.Version)
-		return 0, "", rollbackSlotIdentity{}, nil
+		return rollbackMetadataSnapshot{}
 	}
-	return file.Generation, file.ActiveHash,
-		rollbackSlotIdentity{
+	return rollbackMetadataSnapshot{
+		Generation: file.Generation,
+		ActiveHash: file.ActiveHash,
+		Identity: rollbackSlotIdentity{
 			Device: file.ActiveDevice, Inode: file.ActiveInode, ModTime: file.ActiveModTime,
-		}, file.Entries
+		},
+		Entries:        file.Entries,
+		NextActiveHash: file.NextActiveHash,
+	}
+}
+
+// prepareRollbackForCommit durably publishes current history plus the #16064
+// next-active dual binding BEFORE WriteActive. The post-push order is
+// [previous active, current history...]. Slot 1 of that order will hold the
+// previous active tree; slot i>1 will hold current history slot i-1. The
+// committed Hash fields stay bound to the pre-commit sidecar that boot may
+// still be holding, and PendingHash describes only a partially completed
+// future history rewrite. Generation remains the committed generation.
+// Skipped when there is no primary binding to preserve (fresh or legacy DB).
+func (s *Store) prepareRollbackForCommit(committedTree *config.ConfigTree) error {
+	if s.filePath == "" || s.db == nil || s.active == nil || committedTree == nil {
+		return nil
+	}
+	snap := s.readRollbackMetadataSnapshotFull()
+	if snap.Generation == 0 || snap.ActiveHash == "" || snap.Identity.Inode == 0 {
+		return nil
+	}
+	if snap.ActiveHash != guardedConfigHash(s.active) {
+		return nil
+	}
+	futureEntries := []*HistoryEntry{{Config: s.active.Clone()}}
+	futureEntries = append(futureEntries, s.history.List()...)
+	limit := s.history.MaxSize()
+	if limit > 0 && len(futureEntries) > limit {
+		futureEntries = futureEntries[:limit]
+	}
+	prepared := make([]rollbackSlotMetadataEntry, len(futureEntries))
+	for i, entry := range futureEntries {
+		data := []byte(rollbackTombstoneMarker)
+		if entry != nil && entry.Config != nil {
+			data = []byte(entry.Config.Format())
+		}
+		preparedEntry := rollbackSlotMetadataEntry{}
+		if i < len(snap.Entries) {
+			preparedEntry = snap.Entries[i]
+		}
+		preparedEntry.PendingHash = rollbackSlotHash(data)
+		prepared[i] = preparedEntry
+	}
+	return s.writeRollbackMetadataGenerationNext(
+		snap.Generation, prepared, guardedConfigHash(committedTree))
+}
+
+// classifyRollbackSlotBytes applies the #16064 generation-skew rules to slot
+// pos (0-based), whose on-disk bytes hash to slotHash, during boot of the
+// certified next-active generation (pendingOK). It reports whether the bytes
+// may be admitted in their CURRENT pre-shift position. pendingOK == false
+// means the caller is not on the certified skew path (it never reaches this
+// helper with admission intent). While pendingOK is true the verdicts are:
+//
+//   - future == committed[pos-1] with pendingHash == future's hash at this
+//     position: a slot whose rewrite landed still carries the predecessor
+//     committed hash chain (rewritten slot i holds old slot i-1's bytes) —
+//     admitted as forward-certified.
+//   - committed[pos] itself with pending[pos-1] stepped past: the slot that
+//     steps one past the shift carries its own committed hash but no forward
+//     edge reaches it, so it is admitted ONLY when pendingPreShift does not
+//     bar it AND slotGenerationValid actually authorizes this position.
+//
+// consumedByStep bars every verdict once an earlier backward step has been
+// consumed, so one consumed hash cannot certify two slots. The helper is the
+// classifier characterization of the inline gate in loadRollbackHistory; the
+// inline gate implements the same three binding checks directly.
+func classifyRollbackSlotBytes(pendingOK, slotGenerationValid, pendingPreShift, consumedByStep bool,
+	committed []string, pending []string, pos int, slotHash string) (admit, forward bool) {
+	if !pendingOK || consumedByStep {
+		return false, false
+	}
+	if pos >= 1 && pos-1 < len(committed) && pos < len(pending) &&
+		committed[pos-1] != "" && pending[pos] != "" &&
+		slotHash == committed[pos-1] && slotHash == pending[pos] {
+		return true, true
+	}
+	if pos < len(committed) && committed[pos] != "" && slotHash == committed[pos] &&
+		!pendingPreShift && slotGenerationValid {
+		return true, false
+	}
+	return false, false
 }
 
 func (s *Store) rollbackActivePath() string {
