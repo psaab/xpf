@@ -399,23 +399,16 @@ fn reserve_synced_source_nat_allocation_with_holder(
     let Some(rewrite_src) = nat.rewrite_src else {
         return true;
     };
-    // #15191: a static-NAT external or an NPTv6 external owns no
-    // allocator on either node, so there is nothing to reserve and
-    // nothing to refuse. Booking it into the interface registry (the
-    // pre-fix fall-through) retained one allocator per distinct
-    // address and refused imports past the 256 cap.
-    if domains.owns_no_reservation(nat, rewrite_src) {
-        return true;
-    }
-    // #16015 fold: a DYNAMIC synced rewrite_src inside an installed
-    // NPTv6 external prefix names a pool/interface tuple NPTv6 also
-    // publishes statelessly — but domains.owns_no_reservation above
-    // cannot express it: it has no pool-rule view and its NPTv6 arm
-    // answers "no reservation needed" (the NPTv6-rewrite shape), which
-    // would publish this import as success BEFORE any overlap check.
-    // A pool/NAT decision (not the NPTv6 bit, not static provenance)
-    // whose address a covered pool rule's NPTv6 view owns must refuse
-    // here, before PASS1/PASS2/interface success returns below.
+    // #16015 fold-2: this guard MUST precede owns_no_reservation.
+    // That predicate returns true for ANY v6 rewrite_src inside a
+    // local NPTv6 external prefix (its address arm ignores provenance)
+    // — including a DYNAMIC pool/interface SNAT rewrite that merely
+    // LANDS inside the prefix. Returning true there publishes the
+    // import as success before any overlap check. So first: a dynamic
+    // rewrite (not the NPTv6 bit, not static provenance) whose address
+    // a covered pool rule's NPTv6 view owns refuses here. Genuine
+    // NPTv6-bit and static-provenance rewrites skip this and keep the
+    // #15191 no-reservation success below.
     if !nat.nptv6
         && domains.source_nat_static != Some(true)
         && rules.iter().any(|r| {
@@ -428,6 +421,14 @@ fn reserve_synced_source_nat_allocation_with_holder(
         })
     {
         return false;
+    }
+    // #15191: a static-NAT external or an NPTv6 external owns no
+    // allocator on either node, so there is nothing to reserve and
+    // nothing to refuse. Booking it into the interface registry (the
+    // pre-fix fall-through) retained one allocator per distinct
+    // address and refused imports past the 256 cap.
+    if domains.owns_no_reservation(nat, rewrite_src) {
+        return true;
     }
     let flow = SourceNatFlowKey {
         protocol: key.protocol,

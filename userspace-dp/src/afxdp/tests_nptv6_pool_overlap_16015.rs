@@ -354,3 +354,79 @@ fn ha_iface_import_inside_nptv6_external_is_refused_16015() {
         "HA interface import inside an NPTv6 external prefix must refuse, not book success"
     );
 }
+
+#[test]
+fn ha_dynamic_import_with_populated_prefixes_is_refused_16015() {
+    // Fold-2 production shape: domains carries the REAL populated
+    // NPTv6 prefix list (as session_import/upsert_synced build it from
+    // forwarding.nptv6.external_prefixes()). owns_no_reservation's
+    // address arm would return true for this dynamic rewrite merely
+    // because it lands inside the prefix — the guard must run first.
+    let mut snapshot = base_snapshot(INSIDE);
+    snapshot.nptv6_rules = vec![nptv6_rule("wan")];
+    let state = build_forwarding_state(&snapshot);
+    let prefixes = state.nptv6.external_prefixes();
+    assert!(
+        !prefixes.is_empty(),
+        "fixture: production domains must carry populated prefixes"
+    );
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some(INSIDE.parse().expect("rewrite")),
+        rewrite_src_port: Some(PORT),
+        // dynamic SNAT: nptv6 bit clear, provenance Some(false)
+        ..Default::default()
+    };
+    assert!(!nat.nptv6, "fixture: dynamic rewrite, not an NPTv6 rewrite");
+    let ok = crate::nat::reserve_synced_source_nat_allocation_untracked(
+        &state.iface_nat_allocators,
+        &state.source_nat_rules,
+        &ha_key(),
+        nat,
+        false,
+        Some(("lan", "wan")),
+        0,
+        crate::nat::SyncedSourceNatDomains {
+            source_nat_static: Some(false),
+            static_externals: None,
+            nptv6_external_prefixes: &prefixes,
+        },
+    );
+    assert!(
+        !ok,
+        "dynamic HA import inside the prefix must refuse even with populated domains prefixes"
+    );
+}
+
+#[test]
+fn ha_genuine_nptv6_import_with_populated_prefixes_still_succeeds_16015() {
+    // Control: a genuine NPTv6 rewrite (bit set) with populated
+    // prefixes keeps the #15191 no-reservation success — the fold-2
+    // guard must not refuse the shape it exists to protect.
+    let mut snapshot = base_snapshot(INSIDE);
+    snapshot.nptv6_rules = vec![nptv6_rule("wan")];
+    let state = build_forwarding_state(&snapshot);
+    let prefixes = state.nptv6.external_prefixes();
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some(INSIDE.parse().expect("rewrite")),
+        nptv6: true,
+        ..Default::default()
+    };
+    let ok = crate::nat::reserve_synced_source_nat_allocation_untracked(
+        &state.iface_nat_allocators,
+        &state.source_nat_rules,
+        &ha_key(),
+        nat,
+        false,
+        Some(("lan", "wan")),
+        0,
+        crate::nat::SyncedSourceNatDomains {
+            source_nat_static: None,
+            static_externals: None,
+            nptv6_external_prefixes: &prefixes,
+        },
+    );
+    assert!(
+        ok,
+        "control: genuine NPTv6 import must keep no-reservation success"
+    );
+}
