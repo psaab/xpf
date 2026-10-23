@@ -938,7 +938,9 @@ mod lookup;
 pub(crate) use install::PMechInstallPlan;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
-pub(crate) use lookup::{Defer, ExportWalkOutcome, IpsecReplyAliasLookup, SeqVerdict, SessionQuery};
+pub(crate) use lookup::{
+    Defer, ExportWalkOutcome, ForwardNatMatchLookup, IpsecReplyAliasLookup, SeqVerdict, SessionQuery,
+};
 use lookup::TcpStatePropagation;
 
 /// #7212: the `(config generation, logical ingress interface)` pair a session's
@@ -1598,6 +1600,20 @@ pub(crate) static EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL: AtomicU64 = Atomi
 /// both first-wins matchers; surfaced as
 /// `xpf_userspace_nat_reverse_ambiguous_total`.
 pub(crate) static NAT_REVERSE_AMBIGUOUS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// #16014 fold-2: the ONE mutex serializing tests that sample
+/// `NAT_REVERSE_AMBIGUOUS_TOTAL` (delta assertions). Module scope beside
+/// the counter — a function-local static is unnameable from other tests
+/// and serializes nobody (#6872). Every test that moves OR reads this
+/// counter through an ambiguous lookup must hold it, otherwise parallel
+/// tests inflate each other's deltas. Poison is recovered: a panicking
+/// sibling has already failed on its own terms.
+#[cfg(test)]
+pub(crate) fn nat_reverse_ambiguous_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Single-TAT GCRA consume on a worker-owned `u64` (no atomics: every call
 /// site runs under `&mut` on the owning worker). Init 0 = full: `0 -

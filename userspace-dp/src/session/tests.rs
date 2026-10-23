@@ -6415,16 +6415,15 @@ fn nat_reverse_1n_collision_preserves_displaced_return_path() {
          the aggregate collision counter bumps twice for this one flow-pair",
     );
 
-    // A reply on K resolves to a LIVE forward session. Both validate — the
-    // wire tuple is genuinely ambiguous under no-PAT interface SNAT — so the
-    // multimap returns the first-installed S1 deterministically instead of
-    // "whatever was written last".
+    // #16014: a reply on K is AMBIGUOUS while both live — both validate and
+    // share one domain, so first-wins rewrites for the wrong internal host.
+    // The multimap still preserves both handles (below): survivor resolves.
     assert_eq!(
         table
             .find_forward_nat_match(&reply, |_| reply.routing_domain)
             .map(|m| m.key),
-        Some(s1.clone()),
-        "reply on K resolves to the first-installed forward session",
+        None,
+        "reply on K with two live same-domain candidates must drop ambiguous (#16014)",
     );
 
     // RED-on-revert: close S2 (the LAST-installed). The single-value map
@@ -11176,6 +11175,9 @@ fn a_default_instance_reply_resolves_by_egress_domain_11298() {
 /// returning the first twin as Unique.
 #[test]
 fn quote_match_same_domain_dnat_shared_backend_twins_are_ambiguous_14375() {
+    // #16014 fold-2: this test MOVES the global ambiguous counter (quote
+    // bumps) — hold the shared test lock so delta readers never see it.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     const DOMAIN: u32 = 100_075;
     let mut table = SessionTable::new();
     let now = 1_000_000_000u64;
@@ -11231,6 +11233,8 @@ fn quote_match_same_domain_dnat_shared_backend_twins_are_ambiguous_14375() {
 /// #14375 control: cross-domain twins remain Ambiguous (pre-existing).
 #[test]
 fn quote_match_cross_domain_twins_still_ambiguous_14375() {
+    // #16014 fold-2: counter mover — hold the shared test lock.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     const DOMAIN_A: u32 = 100_076;
     const DOMAIN_B: u32 = 100_077;
     let mut table = SessionTable::new();

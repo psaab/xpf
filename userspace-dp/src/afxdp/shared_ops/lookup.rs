@@ -1144,6 +1144,7 @@ fn lookup_forward_nat_across_scopes_inner(
         }
         ReverseDomainAdmission::QuotedTupleOnly => reply_key.routing_domain,
     };
+    // #16014: local AMBIGUOUS is terminal — never fall through to shared.
     let local_match = match now_ns {
         Some(now) => match sessions.find_forward_nat_match_expiry(reply_key, now, &egress_domain) {
             crate::session::ForwardNatExpiryProbe::Live(hit) => Some(hit),
@@ -1151,9 +1152,14 @@ fn lookup_forward_nat_across_scopes_inner(
                 // Do not resurrect an expired local entry from its shared clone.
                 return None;
             }
+            crate::session::ForwardNatExpiryProbe::Ambiguous => return None,
             crate::session::ForwardNatExpiryProbe::Absent => None,
         },
-        None => sessions.find_forward_nat_match(reply_key, &egress_domain),
+        None => match sessions.find_forward_nat_match_lookup(reply_key, &egress_domain) {
+            crate::session::ForwardNatMatchLookup::Unique(hit) => Some(hit),
+            crate::session::ForwardNatMatchLookup::Ambiguous => return None,
+            crate::session::ForwardNatMatchLookup::NoMatch => None,
+        },
     };
     if let Some(local) = local_match {
         if is_fabric_wire_placeholder(

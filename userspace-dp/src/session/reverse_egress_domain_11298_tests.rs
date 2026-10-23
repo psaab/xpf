@@ -339,6 +339,9 @@ fn egress_routing_domain_shared(egress_ifindex: i32) -> u32 {
 
 #[test]
 fn shared_egress_overlapping_tenants_are_ambiguous_14374() {
+    // #16014 fold-2: serialize against every test sampling the global
+    // ambiguous counter — parallel movers would inflate the delta below.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
     let nat = NatDecision::default();
     let mut table = SessionTable::new();
     let forward_a = forward_key_v4(DOMAIN_A);
@@ -363,7 +366,7 @@ fn shared_egress_overlapping_tenants_are_ambiguous_14374() {
                 1_000_000_000,
                 egress_routing_domain_shared
             ),
-            ForwardNatExpiryProbe::Absent
+            ForwardNatExpiryProbe::Ambiguous
         ),
         "#14374: expiry matcher must also fail closed on shared-egress ambiguity"
     );
@@ -397,4 +400,71 @@ fn shared_egress_single_candidate_control_still_matches_14374() {
         ),
         "#14374: single-candidate expiry probe must stay Live"
     );
+}
+
+/// #16014 (A2-C6): same-domain DNAT twins — one client tuple reaching two
+/// VIPs that both DNAT to one backend — share one post-NAT reverse tuple.
+/// All ordinary matchers + quote must drop ambiguous with delta counter
+/// bumps; single-candidate and cross-domain demux controls stay green.
+#[test]
+fn same_domain_dnat_twins_are_ambiguous_16014() {
+    // #16014 fold-2: hold the shared counter lock for every delta below.
+    let _counter_guard = crate::session::nat_reverse_ambiguous_test_lock();
+    use std::sync::atomic::Ordering;
+    const DOMAIN: u32 = 100_014;
+    let nat = NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
+        ..NatDecision::default()
+    };
+    let mut forward1 = forward_key_v4(DOMAIN);
+    forward1.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+    forward1.dst_port = 80;
+    let mut forward2 = forward1.clone();
+    forward2.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2));
+    let dec = decision(IFINDEX_EGRESS_A, nat);
+    let egress = |ifindex: i32| -> u32 {
+        if ifindex == IFINDEX_EGRESS_A { DOMAIN } else { 0 }
+    };
+    let mut table = SessionTable::new();
+    install(&mut table, &forward1, dec);
+    install(&mut table, &forward2, dec);
+    let reply = reply_key(&forward1, nat, DOMAIN);
+    assert_eq!(reply_key(&forward2, nat, DOMAIN), reply, "twins share reverse tuple");
+    // Delta assertions (process-global counter).
+    let b = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed);
+    assert!(table.find_forward_nat_match(&reply, egress).is_none(), "inner must drop ambiguous");
+    assert_eq!(crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed) - b, 1);
+    let b = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed);
+    assert!(table.find_forward_nat_match_at(&reply, 1_000_000_000, egress).is_none());
+    assert_eq!(crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed) - b, 1);
+    let b = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed);
+    assert!(matches!(
+        table.find_forward_nat_match_expiry(&reply, 1_000_000_000, egress),
+        ForwardNatExpiryProbe::Ambiguous
+    ), "expiry must report Ambiguous, not Absent");
+    assert_eq!(crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed) - b, 1);
+    let b = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed);
+    assert!(matches!(
+        table.find_forward_nat_match_lookup(&reply, &egress),
+        ForwardNatMatchLookup::Ambiguous
+    ));
+    assert_eq!(crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed) - b, 1);
+    let b = crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed);
+    assert!(matches!(
+        table.find_forward_nat_quote_match_at(&reply, 1_000_000_000),
+        ForwardNatQuoteLookup::Ambiguous
+    ), "quote must report Ambiguous");
+    assert_eq!(crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL.load(Ordering::Relaxed) - b, 1, "quote ambiguity must bump counter");
+    // Single-candidate control.
+    let mut single = SessionTable::new();
+    install(&mut single, &forward1, dec);
+    assert_eq!(single.find_forward_nat_match(&reply, egress).expect("single").key, forward1);
+    // Cross-domain demux control (egress-filtered, not ambiguous).
+    let mut cross = SessionTable::new();
+    let fwd_a = forward_key_v4(DOMAIN_A);
+    let fwd_b = forward_key_v4(DOMAIN_B);
+    install(&mut cross, &fwd_a, decision(IFINDEX_EGRESS_A, NatDecision::default()));
+    install(&mut cross, &fwd_b, decision(IFINDEX_EGRESS_B, NatDecision::default()));
+    let reply_a = reply_key(&fwd_a, NatDecision::default(), DOMAIN_A);
+    assert_eq!(cross.find_forward_nat_match(&reply_a, egress_routing_domain).expect("demux").key, fwd_a);
 }

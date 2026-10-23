@@ -255,6 +255,17 @@ pub(crate) enum IpsecReplyAliasLookup {
     PMechBlocked(PMechDirectoryProbe),
 }
 
+/// #16014: tri-state result of the ordinary reverse-NAT matchers, extending
+/// #14374's cross-domain ambiguity to same-domain distinct candidates.
+/// `Ambiguous` is terminal: callers MUST NOT fall through to a shared/alias
+/// fallback that could mint a reverse session from another scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ForwardNatMatchLookup {
+    NoMatch,
+    Ambiguous,
+    Unique(ForwardSessionMatch),
+}
+
 impl SessionTable {
     #[inline]
     pub(super) fn resolve_lookup_handle(&self, key: &SessionKey) -> Option<(u32, bool)> {
@@ -1151,7 +1162,10 @@ impl SessionTable {
     where
         F: Fn(i32) -> u32,
     {
-        self.find_forward_nat_match_inner(reply_key, None, &egress_routing_domain)
+        match self.find_forward_nat_match_inner(reply_key, None, &egress_routing_domain) {
+            ForwardNatMatchLookup::Unique(m) => Some(m),
+            ForwardNatMatchLookup::NoMatch | ForwardNatMatchLookup::Ambiguous => None,
+        }
     }
 
     /// Expiry-aware reverse-NAT probe used by packet admission and embedded
@@ -1165,7 +1179,36 @@ impl SessionTable {
     where
         F: Fn(i32) -> u32,
     {
-        self.find_forward_nat_match_inner(reply_key, Some(now_ns), &egress_routing_domain)
+        match self.find_forward_nat_match_inner(reply_key, Some(now_ns), &egress_routing_domain) {
+            ForwardNatMatchLookup::Unique(m) => Some(m),
+            ForwardNatMatchLookup::NoMatch | ForwardNatMatchLookup::Ambiguous => None,
+        }
+    }
+
+    /// #16014: tri-state probe for callers layering a shared fallback on a
+    /// local miss; `Ambiguous` must propagate as terminal.
+    pub(crate) fn find_forward_nat_match_lookup<F>(
+        &self,
+        reply_key: &SessionKey,
+        egress_routing_domain: &F,
+    ) -> ForwardNatMatchLookup
+    where
+        F: Fn(i32) -> u32,
+    {
+        self.find_forward_nat_match_inner(reply_key, None, egress_routing_domain)
+    }
+
+    /// #16014: expiry-aware tri-state variant.
+    pub(crate) fn find_forward_nat_match_lookup_at<F>(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: u64,
+        egress_routing_domain: &F,
+    ) -> ForwardNatMatchLookup
+    where
+        F: Fn(i32) -> u32,
+    {
+        self.find_forward_nat_match_inner(reply_key, Some(now_ns), egress_routing_domain)
     }
     /// Expiry-aware NAT lookup that records stale candidates during the same
     /// reverse-index walk used to select a live candidate.
@@ -1226,11 +1269,14 @@ impl SessionTable {
                 aux: SessionLookupAux::default(),
             };
             if let Some(prev) = &first {
-                if prev.key != m.key && prev.key.routing_domain != m.key.routing_domain {
-                    // #14374: second distinct forward passes — ambiguous.
+                // #16014 (extends #14374): any second passing candidate with
+                // a different forward key or NAT decision is ambiguous,
+                // including same-domain DNAT twins sharing one backend.
+                // A repeat of the SAME key/decision is not ambiguity.
+                if prev.key != m.key || prev.decision.nat != m.decision.nat {
                     crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
                         .fetch_add(1, AtomicOrdering::Relaxed);
-                    return ForwardNatExpiryProbe::Absent;
+                    return ForwardNatExpiryProbe::Ambiguous;
                 }
                 continue;
             }
@@ -1296,6 +1342,9 @@ impl SessionTable {
                 // domains imply different forward keys). A repeat handle
                 // for the SAME forward key/decision is not ambiguity.
                 if previous.key != record.key || previous.entry.decision.nat != entry.decision.nat {
+                    // #16014 fold: quote ambiguity counts too.
+                    crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return ForwardNatQuoteLookup::Ambiguous;
                 }
             } else {
@@ -1363,7 +1412,7 @@ impl SessionTable {
         reply_key: &SessionKey,
         now_ns: Option<u64>,
         egress_routing_domain: &F,
-    ) -> Option<ForwardSessionMatch>
+    ) -> ForwardNatMatchLookup
     where
         F: Fn(i32) -> u32,
     {
@@ -1389,7 +1438,9 @@ impl SessionTable {
             zeroed = reverse_match_key(reply_key);
             &zeroed
         };
-        let bucket = self.nat_reverse_index.get(probe)?;
+        let Some(bucket) = self.nat_reverse_index.get(probe) else {
+            return ForwardNatMatchLookup::NoMatch;
+        };
         let mut first: Option<ForwardSessionMatch> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
@@ -1428,17 +1479,23 @@ impl SessionTable {
                 aux: SessionLookupAux::default(),
             };
             if let Some(prev) = &first {
-                if prev.key != m.key && prev.key.routing_domain != m.key.routing_domain {
-                    // #14374: second distinct forward passes — ambiguous.
+                // #16014 (extends #14374): any second passing candidate with
+                // a different forward key or NAT decision is ambiguous,
+                // including same-domain DNAT twins sharing one backend.
+                // A repeat of the SAME key/decision is not ambiguity.
+                if prev.key != m.key || prev.decision.nat != m.decision.nat {
                     crate::session::NAT_REVERSE_AMBIGUOUS_TOTAL
                         .fetch_add(1, AtomicOrdering::Relaxed);
-                    return None;
+                    return ForwardNatMatchLookup::Ambiguous;
                 }
                 continue;
             }
             first = Some(m);
         }
-        first
+        match first {
+            Some(m) => ForwardNatMatchLookup::Unique(m),
+            None => ForwardNatMatchLookup::NoMatch,
+        }
     }
 
     /// #10130/#10674: session-gated discriminator for a flowless reply fragment.
