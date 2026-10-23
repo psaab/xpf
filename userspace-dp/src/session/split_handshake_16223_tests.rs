@@ -1269,3 +1269,74 @@ fn export_stamp_update_established_on_node_and_shared_evidence_16217() {
     );
 }
 
+/// #16217 (counter carriage): the Open export and the stage-advance
+/// Update must snapshot the LIVE counters, not the install-time
+/// zero — otherwise the peer import stamps (0,0) and the scoped
+/// adoption gate can never qualify (FZDiag19). The serving pair is
+/// driven with real accounted traffic first.
+///
+/// MUTATION: restore `SessionCounters::default()` in
+/// `open_export_delta_with_provenance` or
+/// `emit_session_state_update_inner` and the matching arm reads 0.
+#[test]
+fn open_and_update_deltas_carry_live_counters_16217() {
+    let (mut table, forward, reverse, _now) = opening_pair();
+    // Serve real traffic: forward packets on the forward key, replies
+    // on the reverse key (folded onto the forward entry).
+    table.account_packet(&forward, 1200, 0, 0);
+    table.account_packet(&forward, 1200, 0, 0);
+    table.account_packet(&reverse, 800, 0, 0);
+    let live = table.session_counters(&forward).expect("forward entry");
+    assert!(live.fwd_packets > 0 && live.rev_packets > 0, "premise: live counters nonzero: {live:?}");
+    let delta = table
+        .open_export_delta_with_provenance(
+            forward.clone(),
+            decision(),
+            metadata(),
+            SessionOrigin::ForwardFlow,
+            false,
+            ExportProvenance::Incremental,
+        )
+        .expect("forward export");
+    assert_eq!(delta.counters.fwd_packets, live.fwd_packets, "#16217: Open export must carry live fwd count");
+    assert_eq!(delta.counters.rev_packets, live.rev_packets, "#16217: Open export must carry live rev count");
+    // Update leg: force a transition emit and read its counters.
+    table.drain_deltas(64);
+    table.emit_session_state_update(&forward, 9, TcpHandshakeState::Opening.to_wire());
+    let updates: Vec<_> = table
+        .drain_deltas(64)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(updates.len(), 1, "transition must emit one Update");
+    assert_eq!(updates[0].counters.fwd_packets, live.fwd_packets, "#16217: Update must carry live fwd count");
+    assert_eq!(updates[0].counters.rev_packets, live.rev_packets, "#16217: Update must carry live rev count");
+}
+
+/// #16217 (counter carriage): `build_synced_session_entry` stamps the
+/// request's counters onto the imported entry, and the monotonic
+/// publish merge preserves the max on republication.
+///
+/// MUTATION: restore `rev_packets: 0, fwd_packets: 0` in
+/// `build_synced_session_entry` and the imported entry reads (0,0).
+#[test]
+fn import_stamps_request_counters_16217() {
+    let req = crate::protocol::SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.61.102".to_string(),
+        dst_ip: "172.16.80.200".to_string(),
+        src_port: 43210,
+        dst_port: 5211,
+        fwd_packets: 12345,
+        rev_packets: 6789,
+        ..crate::protocol::SessionSyncRequest::default()
+    };
+    let zones: rustc_hash::FxHashMap<String, u16> = rustc_hash::FxHashMap::default();
+    let entry = crate::server::helpers::build_synced_session_entry(&req, &zones, 0)
+        .expect("import builds");
+    assert_eq!(entry.fwd_packets, 12345, "#16217: import must stamp fwd count");
+    assert_eq!(entry.rev_packets, 6789, "#16217: import must stamp rev count");
+}
+

@@ -364,9 +364,16 @@ impl crate::afxdp::Coordinator {
                 // no duration, so 0/unknown is correct here.
                 created_ns: 0,
                 last_seen_ns: 0,
-                // #2501: HA bulk-export Open delta; no volume yet (and the
-                // synced entry carries no per-direction counters).
-                counters: crate::session::SessionCounters::default(),
+                // #16217: carry the shared row's snapshotted live
+                // counts (monotonic at publish/restamp) so the peer's
+                // scoped evidence gate sees actual service; a row that
+                // never served stays zero (no evidence, fail-closed).
+                counters: crate::session::SessionCounters {
+                    fwd_packets: entry.fwd_packets,
+                    fwd_bytes: 0,
+                    rev_packets: entry.rev_packets,
+                    rev_bytes: 0,
+                },
                 // #2749: HA bulk-export Open delta; no observed ToS / TCP
                 // flags (and not routed through the RT_FLOW close exporter).
                 observed_tos: 0,

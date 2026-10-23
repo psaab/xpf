@@ -38,6 +38,8 @@ impl EventFrame {
             0,
             None,
             0,
+            0,
+            0,
         )
     }
 
@@ -54,6 +56,8 @@ impl EventFrame {
         tcp_handshake_state: u8,
         source_nat_static: Option<bool>,
         pptp_call_ids: u64,
+        fwd_packets: u64,
+        rev_packets: u64,
     ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_OPEN,
@@ -68,6 +72,8 @@ impl EventFrame {
             tcp_handshake_state,
             source_nat_static,
             pptp_call_ids,
+            fwd_packets,
+            rev_packets,
         )
     }
 
@@ -95,6 +101,8 @@ impl EventFrame {
             0,
             None,
             0,
+            0,
+            0,
         )
     }
 
@@ -111,6 +119,8 @@ impl EventFrame {
         tcp_handshake_state: u8,
         source_nat_static: Option<bool>,
         pptp_call_ids: u64,
+        fwd_packets: u64,
+        rev_packets: u64,
     ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_UPDATE,
@@ -125,6 +135,8 @@ impl EventFrame {
             tcp_handshake_state,
             source_nat_static,
             pptp_call_ids,
+            fwd_packets,
+            rev_packets,
         )
     }
 
@@ -142,6 +154,8 @@ impl EventFrame {
         tcp_handshake_state: u8,
         source_nat_static: Option<bool>,
         pptp_call_ids: u64,
+        fwd_packets: u64,
+        rev_packets: u64,
     ) -> Self {
         let mut buf = [0u8; EVENT_FRAME_CAPACITY];
         let mut pos = FRAME_HEADER_SIZE; // skip header, fill later
@@ -421,7 +435,7 @@ impl EventFrame {
         // then panicked past the 512-byte frame when the 8-byte pair was
         // written. Reserving all 10 tail bytes makes the fallback correct:
         // either the full trailer fits and is written, or rule_id_len is 0.
-        const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8 + 4;
+        const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8 + 4 + 8 + 8;
         let rule_id_len = if rule_id.len() <= u16::MAX as usize
             && pos + 2 + rule_id.len() + RULE_ID_TRAILER_BYTES <= buf.len()
         {
@@ -451,6 +465,14 @@ impl EventFrame {
         // the PPTP pair. 0 = no scope recorded; old Go decoders length-skip.
         buf[pos..pos + 4].copy_from_slice(&nat_scope_ifindex.to_le_bytes());
         pos += 4;
+        // #16217: trailing per-direction packet counters (u64 LE each),
+        // length-gated after the NAT-scope ifindex. The scoped
+        // completion-evidence gate on the peer reads these; an old Go
+        // decoder length-skips them and imports zero (no evidence).
+        buf[pos..pos + 8].copy_from_slice(&fwd_packets.to_le_bytes());
+        pos += 8;
+        buf[pos..pos + 8].copy_from_slice(&rev_packets.to_le_bytes());
+        pos += 8;
 
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;

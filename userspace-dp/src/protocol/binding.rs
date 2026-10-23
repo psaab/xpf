@@ -1710,4 +1710,18 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "purge_retirement", default)]
     pub purge_retirement: bool,
+    /// #16217: live per-direction packet counters snapshotted from the
+    /// serving entry at delta production (Open/Update carry the live
+    /// counts, not the install-time zero). Carried so the peer's
+    /// scoped completion-evidence gate sees actual fwd/rev service
+    /// instead of the import-time zero. Additive: an old daemon
+    /// ignores the keys, an old helper omits them and `default`
+    /// decodes 0 (no evidence — fail-closed, pre-#16217 behavior).
+    ///
+    /// The renames MUST match the Go struct tags
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "fwd_packets", default)]
+    pub fwd_packets: u64,
+    #[serde(rename = "rev_packets", default)]
+    pub rev_packets: u64,
 }

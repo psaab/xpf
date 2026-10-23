@@ -690,6 +690,9 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// #9412: the helper's close class rides the synced value to the peer.
 	val.TCPCloseClass = delta.TCPCloseClass
 	val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(delta.TCPHandshakeState)
+	// #16217: live packet counters ride the synced value to the peer.
+	val.FwdPackets = delta.FwdPackets
+	val.RevPackets = delta.RevPackets
 	// #9752: the helper's installing-table identity rides the synced value
 	// to the peer, so a PBR-steered session re-resolves in its table after
 	// failover instead of inet.0. Opaque here. (0,0) = default table.
@@ -852,6 +855,9 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// #9412: the helper's close class rides the synced value to the peer.
 	val.TCPCloseClass = delta.TCPCloseClass
 	val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(delta.TCPHandshakeState)
+	// #16217: live packet counters ride the synced value to the peer.
+	val.FwdPackets = delta.FwdPackets
+	val.RevPackets = delta.RevPackets
 	// #9752: v6 analogue of the installing-table mapping above.
 	val.InstallTableDomain = delta.InstallTableDomain
 	val.InstallTableCheck = delta.InstallTableCheck

@@ -135,6 +135,21 @@ fn session_delta_info_carries_rt_flow_session_id_6312() {
     assert_eq!(info.ingress_zone, "lan", "conversion resolved zone names");
 }
 
+/// #16217: the JSON leg carries the delta's live packet counters.
+/// MUTATION: drop the fwd/rev copy in `session_delta_info` and both
+/// read 0.
+#[test]
+fn session_delta_info_carries_live_counters_16217() {
+    let mut delta = delta_with_session_id(42);
+    delta.counters = SessionCounters { fwd_packets: 111, fwd_bytes: 0, rev_packets: 222, rev_bytes: 0 };
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    assert_eq!(info.fwd_packets, 111, "#16217: JSON leg must carry fwd count");
+    assert_eq!(info.rev_packets, 222, "#16217: JSON leg must carry rev count");
+    let wire = serde_json::to_value(&info).expect("serialize delta info");
+    assert_eq!(wire["fwd_packets"], 111);
+    assert_eq!(wire["rev_packets"], 222);
+}
+
 /// The wire KEY is the cross-language contract: the Go consumer decodes this
 /// field as `SessionDeltaInfo.RTFlowSessionID` with `json:"rt_flow_session_id"`
 /// (pkg/dataplane/userspace/protocol_ha.go). A rename on this side would ship a
