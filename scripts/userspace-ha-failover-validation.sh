@@ -403,6 +403,7 @@ wait_for_session_sync_idle() {
 	source_node="$(node_name "$SOURCE_NODE")"
 	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
+	local baseline_sent="" baseline_received=""
 	while (( tries > 0 )); do
 		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
 		capture_sync_snapshot "$TARGET_VM" "${label}-target"
@@ -410,7 +411,7 @@ wait_for_session_sync_idle() {
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
 		local sample_status sample_diagnostic
-		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" 2>&1)"; then
+		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" 2>&1)"; then
 			sample_status=0
 		else
 			sample_status=$?
@@ -419,6 +420,9 @@ wait_for_session_sync_idle() {
 			void "${label}: session sync evidence blind: ${sample_diagnostic}"
 			return 0
 		fi
+		# The helper verdicts above are fail-closed on blind evidence, so
+		# these re-reads cannot fail on the paths that use their values
+		# (0/1/3 all imply the helper parsed every field).
 		local source_sent target_recv target_pending target_drained
 		source_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)"
 		target_recv="$(ha_sync_stats_value "$target_path" "Session create" received)"
@@ -430,8 +434,22 @@ wait_for_session_sync_idle() {
 				pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
 				return 0
 			fi
+		elif (( sample_status == 3 )); then
+			# #16289: counter rewind (daemon restart / epoch reset) is
+			# the ONLY re-baseline trigger.
+			stable=0
+			baseline_sent="$source_sent"
+			baseline_received="$target_recv"
 		else
 			stable=0
+			# Ordinary not-idle. Establish the baseline only when none
+			# exists yet (first sample); otherwise keep it — an
+			# outstanding unreceived delta must persist until
+			# received, never be absorbed into a new baseline.
+			if [[ -z "$baseline_sent" ]]; then
+				baseline_sent="$source_sent"
+				baseline_received="$target_recv"
+			fi
 		fi
 		prev_source_sent="$source_sent"
 		prev_target_recv="$target_recv"

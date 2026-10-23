@@ -313,6 +313,7 @@ ha_sync_idle_timeout_verdict() {
 ha_wait_for_session_sync_idle() {
 	local label="$1" source_id="$2" source_node="$3" target_id="$4" target_node="$5"
 	local attempt stable=0 source_path target_path rc
+	local baseline_sent="" baseline_received="" baseline_next_sent baseline_next_received
 	for ((attempt = 1; attempt <= SESSION_SYNC_IDLE_TIMEOUT; attempt++)); do
 		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
@@ -322,7 +323,15 @@ ha_wait_for_session_sync_idle() {
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
 			return 2
 		fi
-		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path"; then
+		# The helper only reads/compares; baseline state lives here.
+		# Capture the baseline values up front; a parse failure is VOID
+		# exactly as before (the helper returns 2 on blind evidence).
+		if ! baseline_next_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)" ||
+			! baseline_next_received="$(ha_sync_stats_value "$target_path" "Session create" received)"; then
+			void "${label}: session sync statistics malformed (${source_id}->${target_id})"
+			return 2
+		fi
+		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path" "$baseline_sent" "$baseline_received"; then
 			stable=$((stable + 1))
 			if (( stable >= SESSION_SYNC_IDLE_STABLE_SAMPLES )); then
 				pass "${label}: session sync idle (${source_id}->${target_id}, ${stable} consecutive samples)"
@@ -331,8 +340,29 @@ ha_wait_for_session_sync_idle() {
 		else
 			rc=$?
 			case "$rc" in
-			1) stable=0 ;;
+			1)
+				stable=0
+				# Ordinary not-idle. Establish the baseline only when
+				# none exists yet (first sample); otherwise keep it —
+				# an outstanding unreceived delta must persist until
+				# received, never be absorbed into a new baseline.
+				if [[ -z "$baseline_sent" ]]; then
+					baseline_sent="$baseline_next_sent"
+					baseline_received="$baseline_next_received"
+				fi
+				;;
+			3)
+				# #16289: counter rewind (daemon restart / epoch
+				# reset) is the ONLY re-baseline trigger.
+				stable=0
+				baseline_sent="$baseline_next_sent"
+				baseline_received="$baseline_next_received"
+				;;
 			2)
+				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
+				return 2
+				;;
+			*)
 				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
 				return 2
 				;;
