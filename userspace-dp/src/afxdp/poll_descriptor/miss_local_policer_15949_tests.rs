@@ -1,0 +1,949 @@
+//! #15949 (H34-04 arm 2): miss-path LocalDelivery late-metering tests.
+//!
+//! The input-filter precheck defers three-color policer metering to the
+//! TX-selection leg, which host-bound traffic never takes. The late arms
+//! at the LocalDelivery install site used to meter only after the
+//! PERMIT `FilterLog`, the lo0 evaluation, and the junos-host policy
+//! evaluation — so a red packet left a false PERMIT audit record,
+//! lo0/junos-host counter increments, an evicted closing pair (for an
+//! `owner_syn_reuse` SYN), and a skipped persistent-hold rollback. The
+//! early gate (`meter_miss_local_input_policers`) meters before all of
+//! those side effects and owns exactly the packets both LocalDelivery
+//! arms serve.
+//!
+//! These cells are the decisive regression check from the issue: a
+//! miss-path test with a red policer asserting no PERMIT `FilterLog`,
+//! no lo0/junos-host counter increments, and the closing-TCP pair
+//! intact. Helper-level cells pin the gate itself (red drop, conforming
+//! pass with handles, empty pass); poll-level cells pin the ordering
+//! through the real descriptor path.
+
+// #15949 arm 2 tests: sibling test module under poll_descriptor.
+// Visible items: `meter_miss_local_input_policers` /
+// `MissLocalPolicerVerdict` (this module's parent), `ForwardingState`
+// and the forwarding builder (afxdp glob), `SessionFlow` (afxdp glob).
+
+use super::super::test_fixtures::*;
+use super::super::tests_support::*;
+use super::*;
+use crate::{
+    FirewallFilterSnapshot, FirewallTermSnapshot, PolicyRuleSnapshot, ThreeColorPolicerSnapshot,
+};
+use std::net::Ipv4Addr;
+use std::sync::atomic::Ordering;
+
+fn policed_forwarding_snapshot() -> crate::protocol::ConfigSnapshot {
+    // Base on the GRE-to-self fixture so the destination (10.255.0.1,
+    // the gr- interface address) resolves LocalDelivery with a real
+    // local_ifindex and the lo0 evaluation actually runs.
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            log: true,
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    // lo0 term with a counter: a late-metered packet must not charge it.
+    snapshot.flow.lo0_filter_input_v4 = "protect-re".into();
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "protect-re".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "lo0-count".into(),
+            protocols: vec!["tcp".into()],
+            count: "lo0-web".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    });
+    // junos-host permit: a late-metered packet must not charge it.
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "host-permit".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "junos-host".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+    snapshot
+}
+
+fn policed_forwarding() -> ForwardingState {
+    build_forwarding_state(&policed_forwarding_snapshot())
+}
+
+fn flow_to_local() -> SessionFlow {
+    SessionFlow {
+        src_ip: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: std::net::IpAddr::V4(Ipv4Addr::new(10, 255, 0, 1)),
+        forward_key: crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: std::net::IpAddr::V4(Ipv4Addr::new(10, 255, 0, 1)),
+            src_port: 12345,
+            dst_port: 179,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        },
+    }
+}
+
+fn meta_900() -> UserspaceDpMeta {
+    let mut meta = txn_meta_v4(24, TCP_FLAG_SYN, 900);
+    meta.pkt_len = 900;
+    meta
+}
+
+fn frame_900() -> Vec<u8> {
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    frame.resize(900, 0);
+    frame
+}
+
+/// Helper-level: a red packet drops at the gate and the gate reports
+/// the drop verdict; the conforming first packet passes WITH its
+/// handles (so the cacheable arm stores them without re-metering).
+#[test]
+fn miss_local_gate_red_drops_and_conforming_passes_with_handles_15949() {
+    let forwarding = policed_forwarding();
+    let flow = flow_to_local();
+    let frame = frame_900();
+    let meta = meta_900();
+
+    let (first, handles) =
+        meter_miss_local_input_policers(&forwarding, &frame, &flow, meta, 123_000_000_000);
+    assert_eq!(
+        first,
+        MissLocalPolicerVerdict::Pass,
+        "#15949: conforming first packet must pass the early gate"
+    );
+    assert!(
+        !handles.is_empty(),
+        "#15949: conforming pass must carry the policer handles for session storage"
+    );
+
+    let (second, _) =
+        meter_miss_local_input_policers(&forwarding, &frame, &flow, meta, 123_000_000_000);
+    assert_eq!(
+        second,
+        MissLocalPolicerVerdict::Drop,
+        "#15949: over-rate second packet must drop at the early gate"
+    );
+    let status = forwarding.filter_state.three_color_policer_statuses();
+    assert!(
+        status[0].drop_packets >= 1,
+        "#15949: the gate must charge the policer drop counter"
+    );
+}
+
+/// Helper-level: a flow with no policer handles passes with an empty
+/// set (the common no-policer case pays no meter).
+#[test]
+fn miss_local_gate_no_policer_passes_empty_15949() {
+    let mut snapshot = nat_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.source_nat_rules.clear();
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow = flow_to_local();
+    let frame = frame_900();
+    let meta = meta_900();
+    let (verdict, handles) =
+        meter_miss_local_input_policers(&forwarding, &frame, &flow, meta, 123_000_000_000);
+    assert_eq!(verdict, MissLocalPolicerVerdict::Pass);
+    assert!(handles.is_empty());
+}
+
+/// Poll-level decisive cell: two 900-byte SYNs to a firewall-local
+/// address against a burst-1000 policer. The first installs and
+/// delivers; the second is policer-red. At HEAD (late metering) the
+/// second packet emitted a PERMIT FilterLog, charged the lo0 term
+/// counter, and charged the junos-host permit counter before the late
+/// meter dropped it. After the fix none of those side effects fire for
+/// the red packet: exactly one FilterLog total (the first packet's
+/// PERMIT), lo0 and junos-host counters stay at 1, no second session,
+/// no second delivery.
+#[test]
+fn miss_local_red_policer_leaves_no_permit_log_or_gate_counters_15949() {
+    let forwarding = policed_forwarding();
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        16,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+
+    let frame = frame_900();
+    let meta = meta_900();
+
+    let lo0_count = |f: &ForwardingState| -> u64 {
+        crate::filter::flush_recorded_filter_counters();
+        f.filter_state
+            .filters
+            .values()
+            .find(|filter| filter.name.as_str() == "protect-re")
+            .map(|filter| filter.terms[0].counter.packets.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    };
+    let junos_count = |f: &ForwardingState| -> u64 {
+        crate::policy::flush_recorded_policy_hit_counters();
+        f.policy
+            .counter_snapshots()
+            .into_iter()
+            .find(|c| c.rule_id.contains("host-permit"))
+            .map(|c| c.packets)
+            .unwrap_or(0)
+    };
+
+    // Packet 1 (conforming): installs, delivers, logs PERMIT once.
+    let (_b1, dbg1) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbg1.local, 1, "first SYN must take LocalDelivery");
+    assert_eq!(sessions.len(), 1, "first SYN must install one session");
+    assert_eq!(
+        event_handle.dataplane_event_stats().filter_log.sent,
+        1,
+        "#15949: conforming first packet emits its PERMIT FilterLog exactly once"
+    );
+    let first_event = event_rx
+        .try_recv()
+        .expect("#15949: first packet must emit a FilterLog event")
+        .decode_dataplane_event()
+        .expect("filter-log payload");
+    assert_eq!(
+        first_event.kind,
+        crate::event_stream::codec::DataplaneEventKind::FilterLog
+    );
+    assert_eq!(
+        first_event.action, 1,
+        "#15949: first packet's FilterLog must be PERMIT (action=1)"
+    );
+    assert_eq!(lo0_count(&forwarding), 1, "lo0 counter after packet 1");
+    assert_eq!(
+        junos_count(&forwarding),
+        1,
+        "junos-host counter after packet 1"
+    );
+    let deliveries_after_first = binding.live.slow_path_drops.load(Ordering::Relaxed);
+    assert_eq!(deliveries_after_first, 1, "first packet reinjects once");
+
+    // Packet 2 (same tuple, session HIT would normally serve it — use a
+    // fresh source port so it takes the MISS path again as a new flow).
+    let mut frame2 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12346,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    frame2.resize(900, 0);
+    let (_b2, dbg2) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame2,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbg2.local, 1, "red packet is accounted as a local drop");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "#15949: red packet must NOT install a second session"
+    );
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        deliveries_after_first,
+        "#15949: red packet must NOT be delivered/reinjected"
+    );
+    // Fold 3: the red packet's FilterLog must be present and DENY
+    // (action=0, the truthful policer-drop record), never PERMIT.
+    let mut red_filter_logs = 0usize;
+    while let Ok(frame) = event_rx.try_recv() {
+        if let Some(event) = frame.decode_dataplane_event() {
+            if event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog
+                && event.src_port == 12346
+            {
+                red_filter_logs += 1;
+                assert_eq!(
+                    event.action, 0,
+                    "#15949 fold 3: red packet's FilterLog must be DENY (action=0)"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        red_filter_logs, 1,
+        "#15949 fold 3: red packet must emit exactly one DENY FilterLog"
+    );
+}
+
+/// Poll-level: the non-cacheable arm (non-SYN ACK first packet) is
+/// owned by the same early gate — a red ACK leaves no PERMIT log and
+/// no gate counters, and is not delivered. Mirrors the #14317 e2e
+/// shape but asserts the ordering side effects.
+#[test]
+fn miss_local_non_syn_red_leaves_no_permit_log_15949() {
+    let forwarding = policed_forwarding();
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        16,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+
+    const ACK_PSH: u8 = 0x18;
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        ACK_PSH,
+        TEST_LAN_MAC,
+    );
+    frame.resize(900, 0);
+    let mut meta = txn_meta_v4(24, ACK_PSH, 900);
+    meta.pkt_len = 900;
+
+    // Packet 1 conforming: delivered, no session (non-SYN declines cache).
+    let (_b1, _d1) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(sessions.len(), 0, "non-SYN packet must not cache");
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "conforming ACK reinjects"
+    );
+    while event_rx.try_recv().is_ok() {}
+
+    // Packet 2 red: not delivered, no PERMIT log.
+    let (_b2, _d2) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "#15949: red non-cacheable packet must NOT be delivered"
+    );
+    // Fold 3: present-and-DENY, exactly one.
+    let mut red_filter_logs = 0usize;
+    while let Ok(frame) = event_rx.try_recv() {
+        if let Some(event) = frame.decode_dataplane_event() {
+            if event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog {
+                red_filter_logs += 1;
+                assert_eq!(
+                    event.action, 0,
+                    "#15949 fold 3: red non-cacheable packet's FilterLog must be DENY"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        red_filter_logs, 1,
+        "#15949 fold 3: red non-cacheable packet must emit exactly one DENY FilterLog"
+    );
+}
+
+/// Fold (Opus) classifier pin: the gate covers exactly the
+/// LocalDelivery decision kind — every transit/other disposition is
+/// excluded, so a ForwardCandidate routed via a local-set VIP cannot
+/// be double-metered, and a LocalDelivery target outside the address
+/// sets cannot be skipped. This is the classification the address-set
+/// version got wrong in both directions.
+#[test]
+fn gate_covers_only_local_delivery_kind_15949() {
+    assert!(miss_input_policer_gate_covers(
+        ForwardingDisposition::LocalDelivery
+    ));
+    for disposition in [
+        ForwardingDisposition::ForwardCandidate,
+        ForwardingDisposition::FabricRedirect,
+        ForwardingDisposition::HAInactive,
+        ForwardingDisposition::ClusterTerminalHAInactive,
+        ForwardingDisposition::PolicyDenied,
+        ForwardingDisposition::NoRoute,
+        ForwardingDisposition::MissingNeighbor,
+        ForwardingDisposition::DiscardRoute,
+        ForwardingDisposition::RejectRoute,
+        ForwardingDisposition::NextTableUnsupported,
+        ForwardingDisposition::TableUnavailable,
+    ] {
+        assert!(
+            !miss_input_policer_gate_covers(disposition),
+            "#15949 fold: {disposition:?} must NOT be covered by the LocalDelivery gate"
+        );
+    }
+}
+
+fn policer_counts(f: &ForwardingState) -> (u64, u64) {
+    let status = f.filter_state.three_color_policer_statuses();
+    let s = status
+        .iter()
+        .find(|s| s.name == "host-pol")
+        .expect("host-pol policer status");
+    (s.green_packets, s.drop_packets)
+}
+
+/// Fold shape 1 (LocalDelivery outside the address sets): the WAN
+/// interface address 172.16.80.8 is excluded from `local_v4` by the
+/// interface-mode SNAT egress matrix (lan->wan in `nat_snapshot`), yet
+/// a packet to it resolves LocalDelivery. The address-set gate skipped
+/// it (unmetered); the decision-kind gate must meter it: the second
+/// 900-byte packet turns red, is not delivered, and emits no PERMIT.
+#[test]
+fn snat_excluded_local_target_still_meters_15949() {
+    let mut snapshot = nat_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    // Keep the lan->wan interface-mode SNAT rules from nat_snapshot:
+    // they are what excludes 172.16.80.8 from local_v4.
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            log: true,
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        !forwarding.local_v4.contains(&Ipv4Addr::new(172, 16, 80, 8)),
+        "precondition: SNAT matrix must exclude the WAN address from local_v4"
+    );
+    assert!(
+        forwarding
+            .configured_iface_v4
+            .contains(&Ipv4Addr::new(172, 16, 80, 8)),
+        "precondition: the WAN address is still a configured interface address"
+    );
+
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        16,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(172, 16, 80, 8),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    frame.resize(900, 0);
+    let meta = meta_900();
+
+    let (_b1, dbg1) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbg1.local, 1, "WAN-address packet must take LocalDelivery");
+    assert_eq!(
+        policer_counts(&forwarding).0,
+        1,
+        "first packet meters green"
+    );
+    while event_rx.try_recv().is_ok() {}
+
+    let (_b2, _dbg2) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "#15949 fold: red packet to a set-excluded LocalDelivery target must NOT be delivered"
+    );
+    assert!(
+        policer_counts(&forwarding).1 >= 1,
+        "#15949 fold: set-excluded LocalDelivery target must still be metered (drop charged)"
+    );
+    let mut saw_permit = false;
+    while let Ok(frame) = event_rx.try_recv() {
+        if let Some(event) = frame.decode_dataplane_event() {
+            if event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog
+                && event.action == 1
+            {
+                saw_permit = true;
+            }
+        }
+    }
+    assert!(
+        !saw_permit,
+        "#15949 fold: red set-excluded LocalDelivery packet must NOT emit PERMIT"
+    );
+}
+
+/// Fold shape 2 (transit via a local-set VIP): the DNAT VIP
+/// 172.16.80.8:443 IS in `local_v4` (late-stage NAT append), but the
+/// packet translates to backend 10.0.61.102:8443 and resolves
+/// ForwardCandidate — transit. The address-set gate metered it at the
+/// miss gate AND again in TX selection; the decision-kind gate must
+/// leave it to TX selection alone: exactly one green charge for the
+/// forwarded packet, no miss-gate drop.
+#[test]
+fn transit_via_local_vip_not_double_metered_15949() {
+    let mut snapshot = inbound_dnat_snapshot(wan_to_lan_permit("10.0.61.102/32", "wan-in"));
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            log: true,
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1_000_000,
+        committed_burst_bytes: 1_000_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 12 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        forwarding.local_v4.contains(&Ipv4Addr::new(172, 16, 80, 8)),
+        "precondition: the DNAT VIP must be in local_v4 (the old gate's trigger)"
+    );
+
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    // Client on WAN -> VIP 172.16.80.8:443 (DNAT to 10.0.61.102:8443).
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(198, 51, 100, 10),
+        Ipv4Addr::new(172, 16, 80, 8),
+        54321,
+        443,
+        TCP_FLAG_SYN,
+        TEST_WAN_MAC,
+    );
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.pkt_len = frame.len() as u16;
+
+    let (_b, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(dbg.session_miss, 1, "packet must take the miss path");
+    assert_eq!(dbg.forward, 1, "transit packet must forward via DNAT");
+    let (green, drop) = policer_counts(&forwarding);
+    assert_eq!(
+        green, 1,
+        "#15949 fold: transit via a local VIP must meter exactly once (TX selection), not twice"
+    );
+    assert_eq!(drop, 0, "#15949 fold: no miss-gate drop on transit");
+}
+
+/// Fold 2 (Opus): an input-filter ACCEPT with `then log` that is then
+/// dropped by the miss-path screen (here: per-source session limit)
+/// must STILL emit its FilterLog. The deferred emit runs before the
+/// screen drop branch; at the fold-1 head the screen branch
+/// `continue`d past the emit and the log was lost.
+///
+/// Shape: zone `lan` screen profile with `session_limit_src = 1`.
+/// Packet 1 (SYN #1) installs the LocalDelivery session and emits its
+/// PERMIT log. Packet 2 (new source port, same source IP) is filter-
+/// accepted with `then log` but trips the session limit — it must emit
+/// the PERMIT FilterLog AND the screen-drop event, install nothing,
+/// and not be delivered.
+#[test]
+fn accepted_then_screen_dropped_still_emits_filter_log_15949() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police-tcp".into(),
+            protocols: vec!["tcp".into()],
+            action: "accept".into(),
+            log: true,
+            ..Default::default()
+        }],
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    snapshot.screens = vec![crate::ScreenProfileSnapshot {
+        zone: "lan".to_string(),
+        session_limit_src: 1,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        32,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+
+    let frame1 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let meta1 = txn_meta_v4(24, TCP_FLAG_SYN, frame1.len() as u16);
+    let (_b1, dbg1) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame1,
+        meta1,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbg1.local, 1, "packet 1 must take LocalDelivery");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "packet 1 installs the one allowed session"
+    );
+    let mut p1_filter_logs = 0usize;
+    while let Ok(f) = event_rx.try_recv() {
+        if let Some(ev) = f.decode_dataplane_event() {
+            if ev.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog {
+                p1_filter_logs += 1;
+                assert_eq!(ev.action, 1, "packet 1 FilterLog must be PERMIT");
+            }
+        }
+    }
+    assert_eq!(p1_filter_logs, 1, "packet 1 emits exactly one FilterLog");
+
+    // Packet 2: new flow (fresh source port), same source IP — the
+    // session limit (1) now trips.
+    let frame2 = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12346,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, frame2.len() as u16);
+    let (_b2, _dbg2) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame2,
+        meta2,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(sessions.len(), 1, "screen-dropped packet installs nothing");
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "screen-dropped packet must not be delivered (only packet 1 reinjected)"
+    );
+    let mut filter_logs = 0usize;
+    let mut screen_drops = 0usize;
+    while let Ok(f) = event_rx.try_recv() {
+        if let Some(ev) = f.decode_dataplane_event() {
+            match ev.kind {
+                crate::event_stream::codec::DataplaneEventKind::FilterLog => {
+                    filter_logs += 1;
+                    assert_eq!(ev.src_port, 12346, "FilterLog must be packet 2's");
+                    assert_eq!(ev.action, 1, "accepted packet's FilterLog stays PERMIT");
+                }
+                crate::event_stream::codec::DataplaneEventKind::ScreenDrop => {
+                    screen_drops += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        filter_logs, 1,
+        "#15949 fold 2: accepted-then-screen-dropped packet must still emit its FilterLog"
+    );
+    assert_eq!(
+        screen_drops, 1,
+        "the screen drop itself must still emit its drop event"
+    );
+}
+
+/// Fold 3 (Opus) combined cell: a packet that is BOTH policer-red AND
+/// screen-dropped must produce BOTH audit records — the policer DENY
+/// FilterLog (the drop reason) and the ScreenDrop event + screen-drop
+/// accounting — while installing and delivering nothing. At the fold-2
+/// head the policer gate recycled first and the screen verdict was
+/// never emitted/counted.
+///
+/// Shape: LocalDelivery policer fixture + `session_limit_src = 1`.
+/// Packet A (port 12345) installs the one allowed session (and charges
+/// the policer green). Packet B (port 12346, 900 bytes) trips the
+/// session limit AND turns policer-red.
+#[test]
+fn red_plus_screen_drop_emits_both_audits_15949() {
+    let mut snapshot = policed_forwarding_snapshot();
+    snapshot.screens = vec![crate::ScreenProfileSnapshot {
+        zone: "lan".to_string(),
+        session_limit_src: 1,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::BTreeMap::new(),
+    ));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        32,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+        },
+    );
+
+    // Packet A: conforming, installs, meters green.
+    let frame_a = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let mut meta_a = txn_meta_v4(24, TCP_FLAG_SYN, 900);
+    meta_a.pkt_len = 900;
+    let mut frame_a900 = frame_a.clone();
+    frame_a900.resize(900, 0);
+    let (_ba, dbga) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame_a900,
+        meta_a,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(dbga.local, 1, "packet A must take LocalDelivery");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "packet A installs the one allowed session"
+    );
+    while event_rx.try_recv().is_ok() {}
+
+    // Packet B: red + session-limit.
+    let mut frame_b = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 0, 1),
+        12346,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    frame_b.resize(900, 0);
+    let (batch_b, _dbg_b) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame_b,
+        meta_a,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    assert_eq!(sessions.len(), 1, "combined-drop packet installs nothing");
+    assert_eq!(
+        binding.live.slow_path_drops.load(Ordering::Relaxed),
+        1,
+        "combined-drop packet must not be delivered (only packet A reinjected)"
+    );
+    assert_eq!(
+        batch_b.screen_drops, 1,
+        "#15949 fold 3: screen-drop accounting must fire even when the policer drops first"
+    );
+    let mut deny_logs = 0usize;
+    let mut screen_drops = 0usize;
+    while let Ok(f) = event_rx.try_recv() {
+        if let Some(ev) = f.decode_dataplane_event() {
+            match ev.kind {
+                crate::event_stream::codec::DataplaneEventKind::FilterLog => {
+                    assert_eq!(ev.src_port, 12346, "FilterLog must be packet B's");
+                    assert_eq!(
+                        ev.action, 0,
+                        "#15949 fold 3: combined drop keeps the policer DENY as its FilterLog"
+                    );
+                    deny_logs += 1;
+                }
+                crate::event_stream::codec::DataplaneEventKind::ScreenDrop => {
+                    assert_eq!(ev.src_port, 12346, "ScreenDrop must be packet B's");
+                    screen_drops += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        deny_logs, 1,
+        "#15949 fold 3: exactly one policer DENY FilterLog"
+    );
+    assert_eq!(
+        screen_drops, 1,
+        "#15949 fold 3: exactly one ScreenDrop event alongside the policer DENY"
+    );
+    assert!(
+        policer_counts(&forwarding).1 >= 1,
+        "#15949 fold 3: the policer drop itself must be charged"
+    );
+}

@@ -4740,19 +4740,39 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             } else {
                                 false
                             };
-                        if let Some(cached_log) = input_filter_eval.cached_log {
-                            emit_input_filter_log_match(
-                                worker_ctx.forwarding,
-                                worker_ctx.event_stream,
-                                flow,
-                                meta,
-                                cached_log,
-                                FilterLogSource::Input,
-                                reject_reply_enqueued,
-                                now_ns,
-                            );
-                        }
+                        // #15949 (H34-04 arm 2): the input-filter PERMIT
+                        // log is NOT emitted here. Whether this packet's
+                        // ingress policer meters at the early LocalDelivery
+                        // gate below depends on its FINAL disposition
+                        // (route/PBR/HA resolution has not run yet), so
+                        // emission defers until that classification is
+                        // known — immediately after HA finalization,
+                        // before lo0/junos-host. At HEAD the emit fired
+                        // here unconditionally and the LocalDelivery
+                        // policer metered only at the install site, so a
+                        // red host-bound packet left a false PERMIT audit
+                        // record. Classifying on the effective target's
+                        // address-family sets instead (the first attempt)
+                        // missed LocalDelivery targets outside
+                        // local_v4/local_v6 and double-metered transit
+                        // packets routed via a local-set VIP; the gate
+                        // below keys on `decision.resolution.disposition`
+                        // via `miss_input_policer_gate_covers`.
+                        let mut miss_local_input_policers =
+                            crate::filter::CachedThreeColorPolicers::default();
                         if input_filter_eval.action != crate::filter::FilterAction::Accept {
+                            if let Some(cached_log) = input_filter_eval.cached_log {
+                                emit_input_filter_log_match(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_log,
+                                    FilterLogSource::Input,
+                                    reject_reply_enqueued,
+                                    now_ns,
+                                );
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -5219,6 +5239,123 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 event_now_ns_from_secs(now_secs),
                             );
                         }
+                        // #15949 fold 2 (Opus): this gate block now runs BEFORE the screen drop branch; HA finalization is
+                        // folded into the gate block immediately below
+                        // (before the screen drop branch), so the
+                        // deferred log emit and the LocalDelivery
+                        // policer gate classify on the FINAL disposition
+                        // and run before a screen drop can consume the
+                        // packet. `decision.resolution` is stamped there.
+                        {
+                            let final_resolution = finalize_new_flow_ha_resolution(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
+                                decision.resolution,
+                                packet_fabric_ingress,
+                                fabric_link_ingress,
+                                meta.ingress_ifindex as i32,
+                                from_zone_id,
+                                ha_startup_grace_until_secs,
+                            );
+                            decision.resolution = final_resolution;
+                            if miss_input_policer_gate_covers(final_resolution.disposition) {
+                                let (verdict, policers) = meter_miss_local_input_policers(
+                                    worker_ctx.forwarding,
+                                    packet_frame,
+                                    flow,
+                                    meta,
+                                    now_ns,
+                                );
+                                miss_local_input_policers = policers;
+                                if verdict == MissLocalPolicerVerdict::Drop {
+                                    // #15949 fold 3 (Opus): the screen
+                                    // verdict was already computed above;
+                                    // a red policer drop pre-empts the
+                                    // screen branch below, but the screen
+                                    // audit must not be lost. When the
+                                    // packet is ALSO a screen drop, emit
+                                    // and count the ScreenDrop here (the
+                                    // drop reason stays the policer DENY
+                                    // below). alarm-without-drop keeps
+                                    // its log-only semantics: the alarm
+                                    // fires, no drop is counted (the
+                                    // packet still drops — on the
+                                    // policer, not the screen).
+                                    if let Some(reason) = new_flow_screen_reason {
+                                        if screen.alarm_without_drop(from_zone) {
+                                            emit_screen_alarm_event(
+                                                worker_ctx.event_stream,
+                                                &screen_pkt,
+                                                meta,
+                                                from_zone_id,
+                                                reason,
+                                                event_now_ns_from_secs(now_secs),
+                                            );
+                                            crate::afxdp::flood_counters::record_zone_flood_alarm(
+                                                &worker_ctx.forwarding.flood_counter_slot_map,
+                                                from_zone_id,
+                                                reason,
+                                            );
+                                            screen.record_alarm_without_drop();
+                                        } else {
+                                            emit_screen_drop_event(
+                                                worker_ctx.event_stream,
+                                                &screen_pkt,
+                                                meta,
+                                                from_zone_id,
+                                                reason,
+                                                event_now_ns_from_secs(now_secs),
+                                            );
+                                            telemetry.counters.record_screen_drop(
+                                                reason,
+                                                from_zone_id,
+                                                &worker_ctx.forwarding.flood_counter_slot_map,
+                                            );
+                                        }
+                                    }
+                                    if let Some(mut cached_log) = input_filter_eval.cached_log {
+                                        cached_log.log_match.action =
+                                            crate::filter::FilterAction::Discard;
+                                        emit_input_filter_log_match(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.event_stream,
+                                            flow,
+                                            meta,
+                                            cached_log,
+                                            FilterLogSource::Input,
+                                            false,
+                                            now_ns,
+                                        );
+                                    }
+                                    telemetry.dbg.local += 1;
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    if persistent_lease_hold_outer.is_some() {
+                                        rollback_persistent_inbound_hold(
+                                            worker_ctx.forwarding,
+                                            persistent_lease_hold,
+                                            now_ns,
+                                        );
+                                        persistent_lease_hold_outer = None;
+                                    }
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                            }
+                            if let Some(cached_log) = input_filter_eval.cached_log {
+                                emit_input_filter_log_match(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    flow,
+                                    meta,
+                                    cached_log,
+                                    FilterLogSource::Input,
+                                    reject_reply_enqueued,
+                                    now_ns,
+                                );
+                            }
+                        }
                         if let Some(reason) = new_flow_screen_reason {
                             // The screen verdict is already decided; reuse
                             // the single parse above for the drop/alarm
@@ -5265,17 +5402,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 continue;
                             }
                         }
-                        decision.resolution = finalize_new_flow_ha_resolution(
-                            worker_ctx.forwarding,
-                            worker_ctx.ha_state,
-                            now_secs,
-                            decision.resolution,
-                            packet_fabric_ingress,
-                            fabric_link_ingress,
-                            meta.ingress_ifindex as i32,
-                            from_zone_id,
-                            ha_startup_grace_until_secs,
-                        );
                         // Triple-review fold: a cryptographically
                         // validated SYN-cookie ACK earns its ACK-RST only
                         // now, after this miss path has selected the
@@ -5801,17 +5927,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // reinjection is rejected by the physical-ingress
                         // WireGuard owner-zone guard. Leave listener tuples
                         // sessionless so handshake traffic reaches its socket.
-                        // #14317: EVERY LocalDelivery miss meters its input
-                        // policer before reinjection — not only the
-                        // session-cacheable subset below. The precheck above
-                        // deferred (`DeferToTxSelection`), but host-bound
-                        // traffic never takes a TX-selection leg, so a
-                        // non-SYN TCP packet (ACK/RST/data-first: declines to
-                        // cache by design) or a WireGuard listener tuple
-                        // (sessionless by design) was delivered unmetered on
-                        // every packet. The cacheable arm below replays the
-                        // stored handles instead and must NOT charge twice:
-                        // this arm owns exactly the packets that arm declines.
+                        // #14317/#15949 (H34-04 arm 2): EVERY LocalDelivery
+                        // miss already metered its input policer at the
+                        // early gate above (before the PERMIT log, lo0,
+                        // and junos-host), which owns exactly the packets
+                        // both arms below serve — cacheable and not. The
+                        // late per-arm meters are gone so no packet is
+                        // charged twice; the cacheable arm stores the
+                        // gate's handles on the installed session.
                         let cache_local_delivery = resolution.disposition
                             == ForwardingDisposition::LocalDelivery
                             && should_cache_local_delivery_session_on_miss(
@@ -5828,49 +5951,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta,
                                     worker_ctx.forwarding,
                                 ));
-                        if resolution.disposition == ForwardingDisposition::LocalDelivery
-                            && !cache_local_delivery
-                        {
-                            let local_miss_policers = evaluate_non_pbr_input_filter_policers_cached(
-                                worker_ctx.forwarding,
-                                crate::afxdp::frame::term_match_extra_from_frame(
-                                    packet_frame,
-                                    meta,
-                                ),
-                                Some(flow),
-                                meta,
-                            );
-                            if !local_miss_policers.is_empty() {
-                                let miss_action = crate::filter::apply_cached_three_color_policers(
-                                    &local_miss_policers,
-                                    now_ns,
-                                    meta.pkt_len as u64,
-                                );
-                                if miss_action.drop {
-                                    telemetry.dbg.local += 1;
-                                    telemetry.dbg.policy_deny += 1;
-                                    telemetry.counters.touched = true;
-                                    binding.scratch.scratch_recycle.push(desc.addr);
-                                    continue;
-                                }
-                            }
-                        }
-                        if resolution.disposition == ForwardingDisposition::LocalDelivery
-                            && should_cache_local_delivery_session_on_miss(
-                                worker_ctx.forwarding,
-                                effective_resolution_target,
-                                resolution,
-                                meta.protocol,
-                                meta.tcp_flags,
-                            )
-                            && !(flow.forward_key.protocol == PROTO_UDP
-                                && crate::afxdp::wg::decap::is_wg_listener_tuple(
-                                    flow.forward_key.dst_port,
-                                    flow.forward_key.dst_ip,
-                                    meta,
-                                    worker_ctx.forwarding,
-                                ))
-                        {
+                        if cache_local_delivery {
                             // #3706: a matching `to-zone junos-host then permit
                             // [log ...]` policy admitted this host-bound flow, so
                             // stamp its log selection, admitting policy id, and
@@ -6012,36 +6093,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta.tcp_flags,
                                 );
                             }
-                            // #14120: a host-bound flow never takes the
-                            // TX-selection leg, so capture its input-filter
-                            // policer handles now: meter THIS first packet
-                            // and store the handles on the installed entry
-                            // for per-hit replay. A red first packet is
-                            // silently dropped and never installs.
-                            let local_input_policers =
-                                evaluate_non_pbr_input_filter_policers_cached(
-                                    worker_ctx.forwarding,
-                                    crate::afxdp::frame::term_match_extra_from_frame(
-                                        packet_frame,
-                                        meta,
-                                    ),
-                                    Some(flow),
-                                    meta,
-                                );
-                            if !local_input_policers.is_empty() {
-                                let first_action = crate::filter::apply_cached_three_color_policers(
-                                    &local_input_policers,
-                                    now_ns,
-                                    meta.pkt_len as u64,
-                                );
-                                if first_action.drop {
-                                    telemetry.dbg.local += 1;
-                                    telemetry.dbg.policy_deny += 1;
-                                    telemetry.counters.touched = true;
-                                    binding.scratch.scratch_recycle.push(desc.addr);
-                                    continue;
-                                }
-                            }
+                            // #14120/#15949 (H34-04 arm 2): the early gate
+                            // already metered THIS first packet and captured
+                            // its handles; store them on the installed entry
+                            // for per-hit replay without metering twice.
+                            let local_input_policers = miss_local_input_policers.clone();
                             // #15951: a cacheable host-bound packet whose session
                             // cannot be installed must NOT fall through to the
                             // Trusted slow-path reinject: delivery without an
@@ -13083,6 +13139,87 @@ pub(super) fn poll_binding_process_descriptor(
         telemetry,
     );
 }
+/// #15949 (H34-04 arm 2): verdict of the miss-path LocalDelivery
+/// late-meter gate. `Drop` means an ingress three-color policer marked
+/// this host-bound packet red; the caller must recycle the packet
+/// without delivering it, without installing its session, without
+/// evicting the closing pair an `owner_syn_reuse` SYN would replace,
+/// and without anchoring a persistent-inbound lease hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MissLocalPolicerVerdict {
+    Pass,
+    Drop,
+}
+
+/// #15949 fold (Opus): whether a miss-path packet's input policer is
+/// owned by the LocalDelivery early gate. This is a function of the
+/// packet's FINAL decision (its forwarding disposition), not of any
+/// address-family/ownership set: a `LocalDelivery` target that is not
+/// in `local_v4`/`local_v6` — e.g. a NAT64/NPTv6-translated host
+/// target, or an interface address excluded from those sets by the
+/// SNAT egress matrix — still never takes a TX-selection leg, so its
+/// policer must meter here; a transit `ForwardCandidate` whose
+/// destination happens to be a local-set address (e.g. a DNAT VIP on
+/// an interface IP translating to a backend host) meters exactly once
+/// in TX selection and must NOT also meter here. Classifying on the
+/// address sets got both directions wrong.
+#[inline]
+pub(super) fn miss_input_policer_gate_covers(disposition: ForwardingDisposition) -> bool {
+    disposition == ForwardingDisposition::LocalDelivery
+}
+
+/// #15949 (H34-04 arm 2): the miss-path LocalDelivery policer must
+/// meter BEFORE the input-filter PERMIT `FilterLog`, the lo0
+/// evaluation, and the junos-host policy evaluation produce their
+/// side effects for a packet the policer drops. The input-filter
+/// precheck defers metering to the TX-selection leg
+/// (`InputPolicerMeter::DeferToTxSelection`), which host-bound traffic
+/// never takes, so the LocalDelivery arms at the install site used to
+/// meter only after those side effects — leaving a false PERMIT audit
+/// record, lo0/junos-host counter increments, an evicted closing pair
+/// (for an `owner_syn_reuse` SYN), and a persistent-hold side effect
+/// for a dropped packet. This helper is the single early gate: it
+/// captures the flow's cached policer handles once, meters this
+/// packet, and hands the handles to the caller so the cacheable arm
+/// stores them on the installed session without metering twice and
+/// the non-cacheable arm needs no second capture. Packets with no
+/// policer handles pass with an empty handle set. The session-HIT
+/// path already folds policer drops to Discard before logging (see
+/// `policer_drop_action` consumers); this restores the same ordering
+/// on the miss path.
+#[cold]
+#[inline(never)]
+pub(super) fn meter_miss_local_input_policers(
+    forwarding: &ForwardingState,
+    packet_frame: &[u8],
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    now_ns: u64,
+) -> (
+    MissLocalPolicerVerdict,
+    crate::filter::CachedThreeColorPolicers,
+) {
+    let policers = evaluate_non_pbr_input_filter_policers_cached(
+        forwarding,
+        crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta),
+        Some(flow),
+        meta,
+    );
+    if policers.is_empty() {
+        return (MissLocalPolicerVerdict::Pass, policers);
+    }
+    let action =
+        crate::filter::apply_cached_three_color_policers(&policers, now_ns, meta.pkt_len as u64);
+    if action.drop {
+        (MissLocalPolicerVerdict::Drop, policers)
+    } else {
+        (MissLocalPolicerVerdict::Pass, policers)
+    }
+}
+
+#[cfg(test)]
+#[path = "miss_local_policer_15949_tests.rs"]
+mod miss_local_policer_15949_tests;
 
 #[cfg(test)]
 mod pptp_control_teardown_tests_11053 {
