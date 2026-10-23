@@ -473,6 +473,96 @@ func TestFairLimiter_IdleEvictionAdmitsNewcomer(t *testing.T) {
 	}
 }
 
+// TestFairLimiter_EvictionReconcilesRotation pins fold 4: when
+// evictIdle removes a sender-table entry, the evicted key's rotation
+// state goes with it — no orphan waiter (which would break
+// len(waiters) <= len(table)) and no orphan ticket (whose phantom
+// holder could still be admitted). Churn: fill the table with queued
+// senders plus one ticket holder, idle them all past fairIdleEvict,
+// then admit a newcomer (forcing eviction of the longest-idle entry,
+// which is the ticket holder queued first) and assert reconciliation.
+func TestFairLimiter_EvictionReconcilesRotation(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	agg := newTokenBucket(1, relayBurstFor(1), clock)
+	fair := newFairLimiter[fairSenderKeyV4](1, clock)
+
+	mk := func(i int) fairSenderKeyV4 {
+		k := fairSenderKeyV4{hlen: 6}
+		k.chaddr[0] = 0x02
+		k.chaddr[4] = byte(i >> 8)
+		k.chaddr[5] = byte(i)
+		return k
+	}
+	// Victim: first sender in, so it is the longest-idle at eviction.
+	victim := mk(0)
+	// Burn the victim's fairness burst so its next packets queue it,
+	// then queue two more senders behind it.
+	for range 8 {
+		admit(fair, agg, victim)
+	}
+	admit(fair, agg, victim) // queues victim
+	admit(fair, agg, mk(1))  // queues second
+	admit(fair, agg, mk(2))  // queues third
+	if len(fair.waiters) != 3 {
+		t.Fatalf("waiters = %d, want 3 queued senders", len(fair.waiters))
+	}
+	// Fill the rest of the table with plain entries (touched now, so
+	// the victim stays longest-idle along with its queued peers).
+	for i := 3; i < maxFairSenders; i++ {
+		fair.allowSender(mk(i))
+	}
+	if len(fair.table) != maxFairSenders {
+		t.Fatalf("table = %d, want full %d", len(fair.table), maxFairSenders)
+	}
+	// Bank one refill so the queue head (victim) is granted a ticket.
+	now = now.Add(time.Second)
+	admit(fair, agg, mk(1))
+	if !fair.hasTick || fair.ticket != victim {
+		t.Fatalf("ticket = (%v, %v), want granted to victim (queue head)", fair.ticket, fair.hasTick)
+	}
+	// Idle everything past fairIdleEvict, then a newcomer forces
+	// eviction of the longest-idle entry. All three queued entries were
+	// last touched at t0 (their queueing admits), same as the victim's
+	// peers — evictIdle picks one of them; to target the victim
+	// deterministically, refresh every other entry first.
+	now = now.Add(fairIdleEvict + time.Second)
+	for i := 1; i < maxFairSenders; i++ {
+		if fb, ok := fair.table[mk(i)]; ok {
+			fb.last = now
+		}
+	}
+	newcomer := fairSenderKeyV4{hlen: 6, chaddr: [16]byte{0x02, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE}}
+	if !fair.allowSender(newcomer) {
+		t.Fatal("newcomer denied — idle eviction did not free a slot")
+	}
+	if _, ok := fair.table[victim]; ok {
+		t.Fatal("victim entry still in table after eviction")
+	}
+	if fair.waiting[victim] {
+		t.Error("evicted victim still marked waiting — orphan waiter state")
+	}
+	for _, w := range fair.waiters {
+		if w == victim {
+			t.Error("evicted victim still in waiters FIFO — orphan waiter")
+		}
+	}
+	if len(fair.waiters) > len(fair.table) {
+		t.Errorf("waiters %d > table %d after eviction — invariant broken", len(fair.waiters), len(fair.table))
+	}
+	if fair.hasTick && fair.ticket == victim {
+		t.Error("evicted victim still holds the ticket — orphan ticket")
+	}
+	// The phantom must not be admittable via the stale ticket: present
+	// the victim again; it is a brand-new sender now (fresh fairness
+	// burst) — admitted only through the normal path, and crucially the
+	// ticket check must not fire. Assert the ticket is gone, which is
+	// the state the admission path consults.
+	if fair.hasTick {
+		t.Errorf("ticket still outstanding for %v after eviction", fair.ticket)
+	}
+}
+
 // TestRunRelay_Fairness_SecondMACCompletesDORA is the issue's decisive
 // end-to-end check through the live relay: MAC-A floods DISCOVERs at the
 // frozen instant while MAC-B runs a full DORA. Post-fix B's DISCOVER and

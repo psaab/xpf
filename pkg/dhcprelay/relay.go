@@ -463,7 +463,13 @@ func (f *fairLimiter[K]) leaveRotation(key K) {
 }
 
 // evictIdle removes the longest-idle bucket if it has been untouched for
-// at least fairIdleEvict, reporting whether a slot was freed.
+// at least fairIdleEvict, reporting whether a slot was freed. Fold 4:
+// eviction reconciles the rotation state for the evicted key — it is
+// dropped from waiters/waiting, and if it held the outstanding ticket
+// the ticket is forfeited (tickAt zeroed with hasTick). Without this, a
+// table-full eviction left an orphan waiter (inflating the queue past
+// the len(waiters) <= len(table) invariant) and an orphan ticket whose
+// phantom holder could still be admitted by a later key match.
 func (f *fairLimiter[K]) evictIdle(now time.Time) bool {
 	var oldest K
 	var oldestAt time.Time
@@ -477,6 +483,11 @@ func (f *fairLimiter[K]) evictIdle(now time.Time) bool {
 		return false
 	}
 	delete(f.table, oldest)
+	f.leaveRotation(oldest)
+	if f.hasTick && f.ticket == oldest {
+		f.hasTick = false
+		f.tickAt = time.Time{}
+	}
 	return true
 }
 
