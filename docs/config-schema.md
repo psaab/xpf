@@ -6983,7 +6983,8 @@ configured key), which is the right direction on the strict path. Since
 a non-empty `authentication-key` shorter than
 `MinAdvisedControlLinkKeyLen` = 16 characters is rejected. The sole
 migration exception is the documented #6630 no-outage rotation: an existing
-short primary is tolerated on strict commit while a distinct
+short primary is tolerated on strict commit only when that same short
+primary is the persisted/current signing key and a distinct
 `additional-authentication-key` of at least 16 characters is staged on both
 nodes; the operator then swaps the staged key into `authentication-key`,
 moves the old key to the additional slot, and finalizes by deleting the

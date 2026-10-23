@@ -66,6 +66,15 @@ import (
 // the whole point of Secret (compiler_system.go) is that it never reaches a log
 // or a CLI render.
 func validateClusterAuthKeyStrict(cfg *Config) error {
+	return validateClusterAuthKeyStrictWithCurrent(cfg, nil)
+}
+
+// validateClusterAuthKeyStrictWithCurrent is validateClusterAuthKeyStrict
+// with the persisted/current signing primary supplied by the candidate
+// pipeline (#16025 fold 2). currentPrimary is the trimmed primary of the
+// config active immediately before the candidate, or nil when there is
+// no such state (fresh candidate, day-0 check, direct CompileConfig).
+func validateClusterAuthKeyStrictWithCurrent(cfg *Config, currentPrimary *string) error {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
@@ -82,23 +91,34 @@ func validateClusterAuthKeyStrict(cfg *Config) error {
 	// (lenientClusterAuthKey), so a persisted weak key still boots with a
 	// warning and never bricks.
 	//
-	// ROTATION EXCEPTION (#16025 fold): an existing short primary may remain
-	// temporarily on the strict path while a distinct additional key of at
-	// least the floor is staged. That is step 1/2 of the documented
-	// no-outage #6630 rotation: the node still signs with the existing
-	// primary, accepts the staged replacement, and can then swap the primary
-	// in steps 3/4 without either peer rejecting its frames. Without this
-	// exception, the operator would have to replace the signing key before
-	// the replacement was accepted anywhere, recreating the outage the
-	// overlap exists to avoid. The exception is migration-only: a short or
-	// identical additional key does not satisfy it, and the short primary is
-	// still rejected once no qualifying replacement is staged.
+	// ROTATION EXCEPTION (#16025 folds 1-2): an EXISTING short primary may
+	// remain temporarily on the strict path while a distinct additional
+	// key of at least the floor is staged. That is step 1/2 of the
+	// documented no-outage #6630 rotation: the node still signs with the
+	// existing primary, accepts the staged replacement, and can then swap
+	// the primary in steps 3/4 without either peer rejecting its frames.
+	//
+	// Fold 2 gates the exception on persisted/current state, not on the
+	// candidate's shape alone. A fresh candidate can author the identical
+	// short-primary + strong-additional pair, so candidate-only proof
+	// would let any new cluster commit a weak signing key indefinitely
+	// by staging a strong accept-only key beside it. The exception opens
+	// only when currentPrimary — the trimmed primary of the config active
+	// immediately before this candidate, supplied by configstore from
+	// its compiled active config — is present, is itself below the floor,
+	// and EQUALS the candidate primary (the same old key being migrated,
+	// not a newly chosen short one). Nil current (fresh store, day-0
+	// CheckText, direct CompileConfig) keeps the exception closed. A
+	// short or identical additional key never satisfies it.
 	if key := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()); key != "" {
 		if len(key) >= MinAdvisedControlLinkKeyLen {
 			return nil
 		}
 		alt := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKeyAlt.Reveal())
-		if len(alt) >= MinAdvisedControlLinkKeyLen && alt != key {
+		persistedShortPrimary := currentPrimary != nil &&
+			len(*currentPrimary) < MinAdvisedControlLinkKeyLen &&
+			len(*currentPrimary) > 0 && *currentPrimary == key
+		if persistedShortPrimary && len(alt) >= MinAdvisedControlLinkKeyLen && alt != key {
 			return nil
 		}
 		return fmt.Errorf("chassis cluster: `authentication-key` is %d "+
@@ -225,7 +245,7 @@ var clusterAuthKeyPlaceholderMarkers = []string{"change-me", "example-only"}
 // PRIMARY keys are rejected on strict commit by
 // validateClusterAuthKeyStrict unless a distinct replacement of at least
 // MinAdvisedControlLinkKeyLen is staged as additional-authentication-key
-// for the #6630 migration; on the tolerant path, and during that staged
+// for the #6630 migration (persisted primary only, fold 2); on the tolerant path, and during that staged
 // rotation, short keys warn rather than refusing the config. A short
 // additional key likewise warns on both paths (it is accept-only and the
 // staged value must be replaced before it becomes the signing primary,

@@ -3037,8 +3037,10 @@ satisfy the runtime's `len(key) > 0` test while being no key at all). Since
 a non-empty `authentication-key` shorter than `MinAdvisedControlLinkKeyLen`
 (16 characters) is rejected, because its HMAC over known control frames is
 an offline dictionary oracle. There is one migration exception: an existing
-short primary is tolerated on strict commit while a distinct
-`additional-authentication-key` of at least 16 characters is staged. Stage
+short primary is tolerated on strict commit only when that same short
+primary is the persisted/current signing key and a distinct
+`additional-authentication-key` of at least 16 characters is staged (a
+fresh candidate authoring the identical shape is rejected). Stage
 that replacement on both nodes first (rotation steps 1–2), then swap it into
 `authentication-key` and move the old primary to the additional slot (steps
 3–4), and finalize by deleting the additional key (step 5). A short or

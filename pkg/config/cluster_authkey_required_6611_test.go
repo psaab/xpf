@@ -139,12 +139,24 @@ func TestShortClusterAuthKeyRejectedOnStrict16025(t *testing.T) {
 // strict commit while a distinct floor-length replacement is staged as
 // additional-authentication-key. Short/identical staging does not qualify.
 func TestShortPrimaryWithStagedStrongAdditionalKeyCommits16025(t *testing.T) {
+	// Persisted/current state: same short primary was already active.
+	current, err := CompileConfigLenient(buildTree(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster authentication-key legacy-short",
+	}))
+	if err != nil {
+		t.Fatalf("current fixture: %v", err)
+	}
 	staged := buildTree(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster authentication-key legacy-short",
 		"set chassis cluster additional-authentication-key 1234567890123456",
 	})
-	cfg, err := CompileConfig(staged)
+	// Fresh candidate (no current) with identical shape must reject.
+	if _, err := CompileConfig(staged); err == nil {
+		t.Fatal("fresh candidate with short primary + strong additional passed; exception must require persisted short primary")
+	}
+	cfg, err := CompileConfigWithCurrentClusterPrimary(staged, current)
 	if err != nil {
 		t.Fatalf("strict commit rejected short primary with strong staged replacement: %v", err)
 	}
@@ -178,7 +190,19 @@ func TestShortPrimaryWithStagedStrongAdditionalKeyCommits16025(t *testing.T) {
 			if _, err := CompileConfig(tree); err == nil {
 				t.Fatalf("strict commit accepted short primary with %s", name)
 			}
+			if _, err := CompileConfigWithCurrentClusterPrimary(tree, current); err == nil {
+				t.Fatalf("current-aware commit accepted short primary with %s", name)
+			}
 		})
+	}
+	// A newly chosen different short primary is not the persisted one.
+	different := buildTree(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster authentication-key other-short1",
+		"set chassis cluster additional-authentication-key 1234567890123456",
+	})
+	if _, err := CompileConfigWithCurrentClusterPrimary(different, current); err == nil {
+		t.Fatal("different short primary passed staged exception; must equal persisted primary")
 	}
 	// Final rotation state: strong primary + old short additional warns but
 	// commits (accept-only), and deleting the additional slot remains clean.
