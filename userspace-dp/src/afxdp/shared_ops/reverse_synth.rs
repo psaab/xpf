@@ -287,7 +287,7 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
     // import. With 0, every close-state Update (and the takeover prewarm)
     // re-installed the reverse copy on the established window, and
     // `companion_keeps_alive` then held the closing forward alive with it.
-    tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: entry.rev_packets, pptp_call_ids: 0,
+    tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: entry.rev_packets, fwd_packets: entry.fwd_packets, pptp_call_ids: 0,
     source_nat_static: entry.source_nat_static, })
 }
 
@@ -606,7 +606,7 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
         // worker-namespaced id and the identity-captured
         // DeletePolicyBatch companion check missed on W-1 workers.
         session_id: sessions.session_id_for(reverse_key),
-        tcp_close_class: 0, tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key), rev_packets: sessions.rev_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), pptp_call_ids: 0,
+        tcp_close_class: 0, tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key), rev_packets: sessions.rev_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), fwd_packets: sessions.fwd_packets_for(&crate::session::reverse_session_key(reverse_key, reverse.decision.nat)), pptp_call_ids: 0,
         source_nat_static: reverse.aux.source_nat_static, };
         publish_shared_session(
             shared_sessions,

@@ -170,7 +170,7 @@ fn tun_origin_reverse_exempt_lookup_10038() {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     let fresh_shared = || Arc::new(Mutex::new(FastMap::default()));
 
@@ -332,7 +332,7 @@ fn tun_origin_legacy_ha_transit_import_does_not_match_10038() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
         source_nat_static: None, },
     );
     assert!(
@@ -5813,7 +5813,7 @@ fn nat64_deterministic_stale_geometry_revokes_15178() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 15178,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     let flow = SessionFlow {
         src_ip: key.src_ip,
@@ -6017,7 +6017,7 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 15932,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     let flow = SessionFlow {
         src_ip: key.src_ip,
@@ -6069,7 +6069,7 @@ fn nat64_scoped_cross_generation_revalidation_15932() {
     tcp_flags: entry.tcp_flags,
     generation: entry.generation,
     session_id: entry.session_id,
-    tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: 0u64, pptp_call_ids: entry.pptp_call_ids,
+    tcp_close_class: entry.tcp_close_class, tcp_handshake_state: entry.tcp_handshake_state, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: entry.pptp_call_ids,
     source_nat_static: entry.source_nat_static, };
     let forwarding = mk_forwarding(crate::nat64::Nat64State::from_snapshots(&[
         det_a.clone(),

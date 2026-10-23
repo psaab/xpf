@@ -231,7 +231,7 @@ mod flow_cache_invalidation_tests {
         tcp_flags: 0,
         generation: 0,
         session_id,
-        tcp_close_class: 0, tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(), rev_packets: 0u64, pptp_call_ids: 0, }
+        tcp_close_class: 0, tcp_handshake_state: crate::session::TcpHandshakeState::Established.to_wire(), rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, }
     }
 
     // #16223 B4: a WorkerLocalImport replica's expiry must NOT evict
@@ -664,7 +664,7 @@ mod flow_cache_invalidation_tests {
                 tcp_flags: crate::tcp_flags::TCP_ACK,
                 generation: 0,
                 session_id: 0,
-                tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0, },
+                tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
             );
             let shared_sessions = Arc::new(Mutex::new(shared_sessions_map));
             let unrelated_key = if replacement_id.is_none() {

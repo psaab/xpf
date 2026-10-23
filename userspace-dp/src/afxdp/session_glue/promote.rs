@@ -253,7 +253,7 @@ fn promote_synced_session_with_conntrack(
         session_id: sessions.session_id_for(key),
         // #9412: republish the promoted session with its LIVE close class, so
         // a worker materializing it from the shared maps keeps the close state.
-        tcp_close_class: sessions.close_class_wire_for(key), tcp_handshake_state: sessions.handshake_state_wire_for(key), rev_packets: sessions.rev_packets_for(key), pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
+        tcp_close_class: sessions.close_class_wire_for(key), tcp_handshake_state: sessions.handshake_state_wire_for(key), rev_packets: sessions.rev_packets_for(key), fwd_packets: sessions.fwd_packets_for(key), pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
         source_nat_static: sessions.source_nat_static_for(key), };
         publish_shared_session(
             shared.sessions,

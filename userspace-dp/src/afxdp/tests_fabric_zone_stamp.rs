@@ -480,7 +480,7 @@ fn established_ri_snat_forward_11061(
     tcp_flags: TCP_FLAG_ACK,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
     source_nat_static: None, };
     (forwarding, sessions, shared_entry)
 }
@@ -5445,7 +5445,7 @@ fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0, };
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
                 let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -5750,7 +5750,7 @@ fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) ->
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0, };
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -5981,7 +5981,7 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0, };
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -6436,7 +6436,7 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(forwarding: &Forwardi
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, pptp_call_ids: 0, };
+        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )

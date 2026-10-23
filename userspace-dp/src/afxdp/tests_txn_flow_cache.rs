@@ -489,7 +489,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
                 tcp_flags: TCP_FLAG_SYN,
                 generation: 0,
                 session_id: victim_id,
-                tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, pptp_call_ids: 0, },
+                tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
             );
     }
     assert_eq!(sessions.len(), 9);
@@ -842,7 +842,7 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
         tcp_flags: TCP_FLAG_SYN,
         generation: 0,
         session_id: sessions.session_id_for(&victim_key),
-        tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, pptp_call_ids: 0, },
+        tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
     );
     let held_lease = crate::afxdp::bpf_map::global_tuple_gate()
         .acquire_lease([victim_key.clone()])
@@ -1039,7 +1039,7 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
             tcp_flags: TCP_FLAG_SYN,
             generation: 0,
             session_id: sessions.session_id_for(&victim_key),
-            tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, pptp_call_ids: 0, },
+            tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
         );
     let _held_lease = if gate_blocks_cleanup {
         Some(

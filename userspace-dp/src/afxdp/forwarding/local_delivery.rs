@@ -124,7 +124,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     // (`emit_open_delta_with_origin`), not via this shared replica — so 0
     // here (a cross-worker materialize of this entry re-allocs a local id).
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: sessions.handshake_state_wire_for(key), rev_packets: sessions.rev_packets_for(key), pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
+    tcp_close_class: 0, tcp_handshake_state: sessions.handshake_state_wire_for(key), rev_packets: sessions.rev_packets_for(key), fwd_packets: sessions.fwd_packets_for(key), pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
     source_nat_static: None, };
     // #15950: publish LocalMiss to the shared map. The cross-worker
     // FragAssoc liveness callback consults shared_sessions (by key +
