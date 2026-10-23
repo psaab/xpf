@@ -457,6 +457,7 @@ func TestStaticNATMatchAddresses6659MultiRejected(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(setTree6659(t,
+				"set security zones security-zone untrust",
 				"set security nat static rule-set rs1 from zone untrust",
 				"set security nat static rule-set rs1 rule r1 match destination-address "+tc.addrs,
 				"set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32",
@@ -506,6 +507,7 @@ func TestStaticNATMatchAddresses6659MultiRejected(t *testing.T) {
 // the tail escaped it entirely. It now walks MatchAddresses.
 func TestStaticNATMatchAddresses6659TolerantPathValidatesEveryPrefix(t *testing.T) {
 	cfg, err := CompileConfigLenient(setTree6659(t,
+		"set security zones security-zone untrust",
 		"set security nat static rule-set rs1 from zone untrust",
 		"set security nat static rule-set rs1 rule r1 match destination-address [ 192.0.2.1/32 not-an-address ]",
 		"set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32",
@@ -539,6 +541,7 @@ func TestStaticNATMatchAddresses6659TolerantPathValidatesEveryPrefix(t *testing.
 	// Negative control on the same path: a well-formed list warns about the
 	// multi-value collapse but must NOT produce a prefix complaint.
 	okCfg, err := CompileConfigLenient(setTree6659(t,
+		"set security zones security-zone untrust",
 		"set security nat static rule-set rs1 from zone untrust",
 		"set security nat static rule-set rs1 rule r1 match destination-address [ 192.0.2.1/32 192.0.2.2/32 ]",
 		"set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32",
@@ -560,12 +563,13 @@ func staticNAT6659Trees(t *testing.T, match, then string) map[string]*ConfigTree
 	t.Helper()
 	return map[string]*ConfigTree{
 		"flat-set": setTree6659(t,
+			"set security zones security-zone untrust",
 			"set security nat static rule-set rs1 from zone untrust",
 			"set security nat static rule-set rs1 rule r1 match destination-address "+match,
 			"set security nat static rule-set rs1 rule r1 then static-nat prefix "+then,
 		),
 		"hier block": parseHierText(t, `
-security { nat { static { rule-set rs1 {
+security { zones { security-zone untrust; } nat { static { rule-set rs1 {
     from zone untrust;
     rule r1 {
         match { destination-address `+match+`; }
@@ -686,6 +690,7 @@ func TestStaticNATMatchAddresses6659ThenSideKeepsInstalledPair(t *testing.T) {
 // carrying the prefix the dataplane snapshot lowers to.
 func TestStaticNATMatchAddresses6659SingleUnchanged(t *testing.T) {
 	cfg := mustCompile6659(t, setTree6659(t,
+		"set security zones security-zone untrust",
 		"set security nat static rule-set rs1 from zone untrust",
 		"set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32",
 		"set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32",
@@ -1048,6 +1053,7 @@ event-options {
 
 	t.Run("two static NAT rules stay independent", func(t *testing.T) {
 		cfg := mustCompile6659(t, setTree6659(t,
+			"set security zones security-zone untrust",
 			"set security nat static rule-set rs1 from zone untrust",
 			"set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32",
 			"set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32",

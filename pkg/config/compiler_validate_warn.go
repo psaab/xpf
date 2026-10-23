@@ -325,28 +325,11 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 		}
 	}
 
-	// Source/destination NAT undefined-zone references are no longer
-	// warned here: validateNATUndefinedZoneStrict (#15001) hard-rejects
-	// them at commit and emits the warning on the tolerant load /
-	// peer-sync path. Keeping the warn-only loop would duplicate the
-	// tolerant warning. Static NAT (below) has no dataplane zone error
-	// and remains warn-only.
-	// Static NAT rule-sets carry a `from zone` scope that the dataplane
-	// enforces on the inbound (DNAT) direction (static_nat.rs match_dnat:
-	// the entry is skipped unless its from_zone matches the ingress zone
-	// name exactly). A typo'd or undefined zone therefore yields a rule
-	// that silently never matches, with no other operator signal — mirror
-	// the source-NAT zone validation above so the divergence surfaces at
-	// commit (#2008 H15).
-	for _, rs := range cfg.Security.NAT.Static {
-		if rs == nil {
-			continue
-		}
-		if rs.FromZone != "" && !zones[rs.FromZone] {
-			warnings = append(warnings, fmt.Sprintf(
-				"static-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
-		}
-	}
+	// Source/destination/static NAT undefined-zone references are no
+	// longer warned here: validateNATUndefinedZoneStrict
+	// (#15001/#16008) hard-rejects them at commit and emits the warning
+	// on the tolerant load / peer-sync path. Keeping a warn-only loop
+	// would duplicate the tolerant warning.
 	// Destination NAT undefined from-zone: validateNATUndefinedZoneStrict
 	// (#15001) — see the source-NAT note above.
 

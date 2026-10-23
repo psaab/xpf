@@ -6,6 +6,7 @@ import (
 )
 
 // #16146: property test for the unified NAT undefined-zone predicate.
+// #16008 extends the walk to static-NAT from-zone.
 //
 // strict-rejected <=> offenders non-empty <=> skip-set exact, across the
 // table below. The three projections must agree because they now derive
@@ -13,18 +14,19 @@ import (
 //
 //   - strict: validateNATUndefinedZoneStrict errors iff len(offenders)>0,
 //     and its message is exactly offenders[0] (per-field, source
-//     from -> to -> destination from order);
+//     from -> to -> destination from -> static from order);
 //   - tolerant skip-set: NATUndefinedZoneRuleSets contains exactly the
 //     distinct {Kind,Name} refs that appear in offenders (per rule-set:
 //     a source rule-set with BOTH zones undefined yields two offenders
 //     but one skip entry);
-//   - kind separation: a source and a destination rule-set sharing a
-//     name are distinct refs.
+//   - kind separation: a source, destination, and static rule-set
+//     sharing a name are distinct refs.
 //
 // FAIL-ON-REVERT: restoring the two independent walks (or collapsing
 // per-field granularity into a per-rule-set boolean) breaks at least
 // the both-zones cell (offender count / first message) or the
-// same-name cell (skip-set cardinality).
+// same-name cell (skip-set cardinality); removing the static arm
+// breaks the static cells.
 func TestNATUndefinedZoneUnifiedProjections16146(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -141,6 +143,51 @@ func TestNATUndefinedZoneUnifiedProjections16146(t *testing.T) {
 				{Kind: "source", Name: "bad"}: true,
 			},
 			wantStrict: true,
+		},
+		{
+			name: "static from",
+			cfg: &Config{Security: SecurityConfig{
+				NAT: NATConfig{Static: []*StaticNATRuleSet{
+					{Name: "st1", FromZone: "nope"},
+				}},
+			}},
+			wantOff: []string{`static-nat rule-set "st1": from-zone "nope" not defined`},
+			wantSkip: map[NATRuleSetRef]bool{
+				{Kind: "static", Name: "st1"}: true,
+			},
+			wantStrict: true,
+		},
+		{
+			name: "static after source and destination, same name distinct kinds",
+			cfg: &Config{Security: SecurityConfig{
+				NAT: NATConfig{
+					Source: []*NATRuleSet{{Name: "shared", FromZone: "bad-s"}},
+					Destination: &DestinationNATConfig{RuleSets: []*NATRuleSet{
+						{Name: "shared", FromZone: "bad-d"},
+					}},
+					Static: []*StaticNATRuleSet{{Name: "shared", FromZone: "bad-st"}},
+				},
+			}},
+			wantOff: []string{
+				`source-nat rule-set "shared": from-zone "bad-s" not defined`,
+				`destination-nat rule-set "shared": from-zone "bad-d" not defined`,
+				`static-nat rule-set "shared": from-zone "bad-st" not defined`,
+			},
+			wantSkip: map[NATRuleSetRef]bool{
+				{Kind: "source", Name: "shared"}:      true,
+				{Kind: "destination", Name: "shared"}: true,
+				{Kind: "static", Name: "shared"}:      true,
+			},
+			wantStrict: true,
+		},
+		{
+			name: "static unscoped and defined are not offenders, nil skipped",
+			cfg: &Config{Security: SecurityConfig{
+				Zones: map[string]*ZoneConfig{"trust": {}},
+				NAT: NATConfig{Static: []*StaticNATRuleSet{
+					nil, {Name: "global"}, {Name: "good", FromZone: "trust"},
+				}},
+			}},
 		},
 		{
 			name: "nil destination config",

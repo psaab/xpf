@@ -164,7 +164,7 @@ func TestStaticNATBlankExternalPrefix7216PreservesTheCardinalityContract(t *test
 	//     prefix, not the blank.
 	t.Run("blank slot, non-blank selection, still commits", func(t *testing.T) {
 		tree := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 "" ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 		cfg, err := CompileConfig(tree)
@@ -184,7 +184,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 	//     violation (#6673 fold) — still true with #7216 in place.
 	t.Run("repeated identical prefix still commits", func(t *testing.T) {
 		tree := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 192.0.2.1/32; destination-address 192.0.2.1/32; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 		if _, err := CompileConfig(tree); err != nil {

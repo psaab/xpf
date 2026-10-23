@@ -11,9 +11,11 @@ import (
 	"strings"
 )
 
-// validateNATUndefinedZoneStrict (#15001, A08-04) hard-rejects a source-NAT
-// rule-set whose non-empty FromZone/ToZone, or a destination-NAT rule-set
-// whose non-empty FromZone, does not name a configured security zone.
+// validateNATUndefinedZoneStrict (#15001, A08-04; static leg #16008)
+// hard-rejects a source-NAT rule-set whose non-empty FromZone/ToZone, a
+// destination-NAT rule-set whose non-empty FromZone, or a static-NAT
+// rule-set whose non-empty FromZone does not name a configured security
+// zone.
 //
 // Before #15001 ValidateConfig only warned on this typo, yet the dataplane
 // compileNAT pre-pass (pkg/dataplane/compiler_nat.go, run from
@@ -26,18 +28,27 @@ import (
 // downgrades to a warning via opts.lenientNATUndefinedZone (#1960
 // no-brick) and records the offending rule-sets in
 // cfg.LenientNATUndefinedZoneRuleSets so compileNAT can skip exactly
-// those rule-sets and their healthy siblings still apply. Static NAT has
-// no dataplane zone error and stays warn-only (out of scope).
+// those rule-sets and their healthy siblings still apply.
+//
+// Static NAT (#16008) was left warn-only by #15001, but the snapshot
+// builder (buildStaticNATSnapshots) shipped the undefined name verbatim
+// in FromZone and the Rust dataplane matches it by exact name equality
+// (static_nat.rs), so a typo'd static from-zone silently never matched
+// — silent loss, never widening. It now joins the same strict reject /
+// tolerant warn-and-skip disposition: the tolerant snapshot builders
+// drop the offending static rule-set (including its NPTv6 rules, which
+// share the same Static list and FromZone scope) instead of shipping a
+// verbatim never-match row.
 //
 // #16146: the strict error, the per-field offender list, and the
 // per-rule-set tolerant skip-set are three projections of the single
 // natUndefinedZoneFindings walk below, so they cannot drift.
-
+//
 // NATRuleSetRef identifies one NAT rule-set by kind and authored name.
 // It replaces the former "kind\x00name" string key so consumers never
 // re-derive the separator encoding (#16146).
 type NATRuleSetRef struct {
-	Kind string // "source" or "destination"
+	Kind string // "source", "destination", or "static"
 	Name string
 }
 
@@ -62,11 +73,11 @@ func (f natUndefinedZoneFinding) message() string {
 }
 
 // natUndefinedZoneFindings is the single undefined-zone walk. It
-// returns per-field findings in deterministic source-then-destination
-// order. Empty zone fields are unscoped and are not findings; nil
-// rule-sets are skipped (#3494 tolerant shape). Zone membership is a
-// direct map lookup on cfg.Security.Zones — no intermediate zones map
-// is allocated.
+// returns per-field findings in deterministic source-then-destination-
+// then-static order. Empty zone fields are unscoped and are not
+// findings; nil rule-sets are skipped (#3494 tolerant shape). Zone
+// membership is a direct map lookup on cfg.Security.Zones — no
+// intermediate zones map is allocated.
 func natUndefinedZoneFindings(cfg *Config) []natUndefinedZoneFinding {
 	if cfg == nil {
 		return nil
@@ -100,6 +111,19 @@ func natUndefinedZoneFindings(cfg *Config) []natUndefinedZoneFinding {
 						Field: "from-zone",
 						Zone:  rs.FromZone})
 				}
+			}
+		}
+	}
+	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		if rs.FromZone != "" {
+			if _, ok := cfg.Security.Zones[rs.FromZone]; !ok {
+				out = append(out, natUndefinedZoneFinding{
+					Ref:   NATRuleSetRef{Kind: "static", Name: rs.Name},
+					Field: "from-zone",
+					Zone:  rs.FromZone})
 			}
 		}
 	}

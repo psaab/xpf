@@ -2211,13 +2211,15 @@ type compileOpts struct {
 	// leniently-loaded bad config is inert. Same doctrine as
 	// lenientPolicyZoneRefs / lenientNATHostMask.
 	lenientDestNATAddresses bool
-	// lenientNATUndefinedZone (#15001) downgrades the NAT undefined-zone
-	// gate (validateNATUndefinedZoneStrict) to a warning on tolerant load /
-	// peer-sync (#1960 no-brick). Strict commit rejects a source-NAT
-	// from/to zone or destination-NAT from zone naming no configured zone;
-	// tolerant loads warn and record the rule-sets in
-	// cfg.LenientNATUndefinedZoneRuleSets so dataplane compileNAT skips
-	// them instead of aborting every apply.
+	// lenientNATUndefinedZone (#15001/#16008) downgrades the NAT
+	// undefined-zone gate (validateNATUndefinedZoneStrict) to a warning
+	// on tolerant load / peer-sync (#1960 no-brick). Strict commit
+	// rejects a source-NAT from/to zone, destination-NAT from zone, or
+	// static-NAT from zone naming no configured zone; tolerant loads
+	// warn and record the rule-sets in
+	// cfg.LenientNATUndefinedZoneRuleSets so dataplane compileNAT and
+	// the userspace snapshot builders skip them instead of aborting
+	// every apply or shipping a never-match row.
 	lenientNATUndefinedZone  bool
 	lenientNATUndefinedScope bool // #15278 tolerant downgrade
 	// lenientLoginUserClassRef (#15717) downgrades the post-compile

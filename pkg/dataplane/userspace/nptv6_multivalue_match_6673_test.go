@@ -30,7 +30,8 @@ func hierTree6673(t *testing.T, text string) *config.ConfigTree {
 // external prefix, with the widened tail nowhere on the wire.
 func TestNPTv6MultiValueMatch6673ReachesTheWireAsTheSelectedPrefix(t *testing.T) {
 	tree := hierTree6673(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; }
+nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 2001:db8:1::/48 2001:db8:1:2::/48 ]; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
 
@@ -82,7 +83,8 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // wire.
 func TestNPTv6RepeatedMatch6673LowersOnceAndUnchanged(t *testing.T) {
 	tree := hierTree6673(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; }
+nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 2001:db8:1::/48 2001:db8:1::/48 ]; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
 	cfg, err := config.CompileConfig(tree)
@@ -119,7 +121,8 @@ func TestStaticNATDropCauses6673AreVisibleInTheSnapshot(t *testing.T) {
 			// from_snapshots records a parse error and installs nothing.
 			name: "then prefix does not parse",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; }
+nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; destination-address 192.0.2.1/32; }
               then { static-nat prefix not-an-addr; } } } } } }`,
 			check: func(t *testing.T, snaps []StaticNATRuleSnapshot) string {
@@ -140,7 +143,8 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// static_nat_block_with_port_is_dropped.
 			name: "block pair with a port",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; }
+nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 10.1.1.0/24 198.51.100.0/25 ];
                       destination-port 80; }
               then { static-nat { prefix 10.0.0.0/24; mapped-port 8080; } } } } } } }`,

@@ -822,6 +822,20 @@ func compileNATWithStaging(dp DataPlane, cfg *config.Config, result *CompileResu
 func compileStaticNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 	count := 0
 	for _, rs := range cfg.Security.NAT.Static {
+		if rs == nil {
+			continue
+		}
+		// #16008: on the tolerant path config compile records static
+		// rule-sets with an undefined from-zone; skip exactly those so no
+		// counter ID claims hits for an inert rule-set. A cfg without the
+		// record (strict, hand-built, or JSON-round-tripped) is unaffected:
+		// static NAT has no dataplane zone error, and the strict gate
+		// already rejected the typo at commit.
+		if cfg.LenientNATUndefinedZoneRuleSets[config.NATRuleSetRef{Kind: "static", Name: rs.Name}] {
+			compileWarn(dp, "static NAT rule-set skipped: undefined zone",
+				"rule-set", rs.Name, "from", rs.FromZone)
+			continue
+		}
 		for _, rule := range rs.Rules {
 			if rule.IsNPTv6 {
 				continue // handled by compileNPTv6

@@ -161,11 +161,11 @@ security { nat { proxy-arp { interface ge-0-0-0 { address 192.0.2.1 { 192.0.2.2;
 		{
 			name: "static-NAT match destination-address",
 			mixed: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 192.0.2.1/32 { 198.51.100.1/32; } }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`,
 			bracket: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 198.51.100.1/32 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`,
 			wantSub: "declares 2 `match destination-address` prefixes",
@@ -250,7 +250,7 @@ func TestEventOptions6673IdentifierSlotValueIsDropped(t *testing.T) {
 // plain static NAT (whose Rust consumer masks too) and the WRONG one for NPTv6.
 func TestNPTv6MatchAddr6673HostBitsTailIsNotCollapsed(t *testing.T) {
 	tree := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 2001:db8:1::/48 2001:db8:1:2::/48 ]; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
 
@@ -293,7 +293,7 @@ func TestNPTv6MatchAddr6673IdenticalRepeatStillCollapses(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address `+tc.list+`; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
 			if _, err := CompileConfig(tree); err != nil {
@@ -312,7 +312,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // selected one by cardinality, a value identical to it by this gate.
 func TestNPTv6MatchAddr6673HostBitsAloneStillRejected(t *testing.T) {
 	tree := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 2001:db8:1:2::/48; }
               then { static-nat { nptv6-prefix 2001:db8:2::/48; } } } } } } }`)
 	err := CompileConfig6673MustFail(t, tree)
@@ -337,7 +337,7 @@ func CompileConfig6673MustFail(t *testing.T, tree *ConfigTree) error {
 // same host route still lower to one row and must still count once.
 func TestStaticNATMatchAddr6673PlainRuleStillMasks(t *testing.T) {
 	tree := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 192.0.2.1 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 	if _, err := CompileConfig(tree); err != nil {

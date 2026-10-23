@@ -273,33 +273,36 @@ func TestStaticNATMatch6673EmptyValueStaysInTheList(t *testing.T) {
 	}{
 		// The reported repro: a valid prefix, then a statement that blanks it.
 		{"flat set: valid prefix then an empty bracket", setTree6659(t,
+			`set security zones security-zone untrust`,
 			`set security nat static rule-set rs1 from zone untrust`,
 			`set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32`,
 			`set security nat static rule-set rs1 rule r1 match destination-address [ ]`,
 			`set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32`), ""},
 		{"flat set: valid prefix then a bare empty value", setTree6659(t,
+			`set security zones security-zone untrust`,
 			`set security nat static rule-set rs1 from zone untrust`,
 			`set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32`,
 			`set security nat static rule-set rs1 rule r1 match destination-address ""`,
 			`set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32`), ""},
 		{"bracket, empty in FIRST slot", parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ "" 192.0.2.1/32 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), ""},
 		{"bracket, empty in a NON-FIRST slot", parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 "" ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), "192.0.2.1/32"},
 		{"block, empty in FIRST slot", parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address { ""; 192.0.2.1/32; } }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), ""},
 		{"bare empty value only", parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address ""; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`), ""},
 		// GREEN CONTROL.
 		{"single valid prefix", setTree6659(t,
+			`set security zones security-zone untrust`,
 			`set security nat static rule-set rs1 from zone untrust`,
 			`set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32`,
 			`set security nat static rule-set rs1 rule r1 then static-nat prefix 10.0.0.1/32`), "192.0.2.1/32"},
@@ -401,6 +404,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // compile on some path.
 func TestStaticNATMatch6673EmptySlotIsNotASecondPrefix(t *testing.T) {
 	blanked := setTree6659(t,
+		`set security zones security-zone untrust`,
 		`set security nat static rule-set rs1 from zone untrust`,
 		`set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32`,
 		`set security nat static rule-set rs1 rule r1 match destination-address [ ]`,
@@ -427,6 +431,7 @@ func TestStaticNATMatch6673EmptySlotIsNotASecondPrefix(t *testing.T) {
 	}
 
 	twoReal := setTree6659(t,
+		`set security zones security-zone untrust`,
 		`set security nat static rule-set rs1 from zone untrust`,
 		`set security nat static rule-set rs1 rule r1 match destination-address 192.0.2.1/32`,
 		`set security nat static rule-set rs1 rule r1 match destination-address 198.51.100.1/32`,
@@ -730,7 +735,7 @@ func TestStaticNATMatch6673TailWarningDoesNotClaimTheRuleDropped(t *testing.T) {
 	// complaint is reachable only on the tolerant path, which is exactly where
 	// the operator reads it.
 	tolerant := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 not-an-address ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 	cfg, err := CompileConfigLenient(tolerant)
@@ -758,7 +763,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 	// The mirror case: when the malformed value is the SELECTED one, the rule
 	// really is dropped and the warning must still say so.
 	selected := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address not-an-address; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 	cfg2, err := CompileConfigLenient(selected)
@@ -776,7 +781,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // same guard for the host-mask loop, which shares the suffix helper.
 func TestStaticNATMatch6673NonHostTailWarningDoesNotClaimTheRuleDropped(t *testing.T) {
 	tolerant := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 198.51.100.0/24 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 	cfg, err := CompileConfigLenient(tolerant)
@@ -799,7 +804,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 	// Mirror: when the non-host prefix is the SELECTED value the rule really is
 	// dropped, and the message must still say so.
 	selected := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 	cfg2, err := CompileConfigLenient(selected)
@@ -825,7 +830,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // parse_nat_prefix("") returns None, so from_snapshots drops the whole mapping.
 func TestStaticNATMatch6673EmptySelectionSuffixDoesNotClaimAnActiveRule(t *testing.T) {
 	tolerant := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ "" not-an-address ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 	cfg, err := CompileConfigLenient(tolerant)
@@ -845,7 +850,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			"SELECTED value is the authored blank", got, "")
 	}
 	swapped := parseHierText(t, `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ not-an-address "" ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`)
 	cfgSwapped, err := CompileConfigLenient(swapped)
@@ -908,7 +913,7 @@ func TestStaticNATMatch6673NonSelectedSuffixChecksTheSelectedValueToo(t *testing
 			// Parse leg: neither value is a literal address.
 			name: "selected value does not parse",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address bad-old; destination-address bad-selected; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`,
 			wantSelected: "bad-selected",
@@ -921,7 +926,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// the dataplane drops the rule on the SELECTED one all the same.
 			name: "selected value parses but is a non-host mask",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; destination-address 203.0.113.0/24; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`,
 			wantSelected: "203.0.113.0/24",
@@ -937,7 +942,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// way, telling the operator a working rule is dropped.
 			name: "selected value is a legal block pair and does install",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 203.0.113.0/25; destination-address 198.51.100.0/24; }
               then { static-nat prefix 10.0.0.0/24; } } } } } }`,
 			wantSelected:        "198.51.100.0/24",
@@ -1021,7 +1026,7 @@ routing-options { forwarding-table { export [ "" p1 p2 ]; } }`,
 		{
 			name: "static NAT match destination-address",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ "" 192.0.2.1/32 198.51.100.1/32 ]; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`,
 			wantSubs:   []string{"selected value is EMPTY", "NONE of them takes effect", "drops the rule"},
@@ -1702,7 +1707,7 @@ func TestStaticNATMatch6673RuleVerdictIsObservedNotMirrored(t *testing.T) {
 			// match value was selected.
 			name: "then prefix does not parse",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; destination-address 192.0.2.1/32; }
               then { static-nat prefix not-an-addr; } } } } } }`,
 			nonSelectedSub:  `destination-address "198.51.100.0/24" must be a host route`,
@@ -1718,7 +1723,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// pair that installs (192.0.2.1/32 <-> 0.0.0.0/0 is).
 			name: "zero-length block pair in a non-selected slot",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 0.0.0.0/0; destination-address 192.0.2.1/32; }
               then { static-nat prefix 0.0.0.0/0; } } } } } }`,
 			nonSelectedSub:  `zero-length (/0) prefix (match destination-address "0.0.0.0/0"`,
@@ -1733,7 +1738,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// the /0 loop would look correct.
 			name: "zero-length block pair IS the selected value",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 192.0.2.0/24; destination-address 0.0.0.0/0; }
               then { static-nat prefix 0.0.0.0/0; } } } } } }`,
 			nonSelectedSub:  `destination-address "192.0.2.0/24" must be a host route`,
@@ -1753,7 +1758,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// "every rule-dropping check participates" true rather than claimed.
 			name: "match destination-port out of range drops the whole rule",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 192.0.2.1/32 198.51.100.0/24 ];
                       destination-port 70000; }
               then { static-nat { prefix 10.0.0.1/32; mapped-port 8080; } } } } } } }`,
@@ -1773,7 +1778,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// emitSuffix and left the verdict unset.
 			name: "block pair with a port drops the whole rule",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address [ 10.1.1.0/24 198.51.100.0/25 ];
                       destination-port 80; }
               then { static-nat { prefix 10.0.0.0/24; mapped-port 8080; } } } } } } }`,
@@ -1787,7 +1792,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 			// degenerating into "never promise anything".
 			name: "selected value installs and the rule survives",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; destination-address 192.0.2.1/32; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`,
 			nonSelectedSub: `destination-address "198.51.100.0/24" must be a host route`,
@@ -1891,7 +1896,7 @@ func TestStaticNATMatch6673PortVerdictsDoNotDropTheRule(t *testing.T) {
 		{
 			name: "malformed mapped-port folds to 0 and the rule installs a plain 1:1",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; destination-address 192.0.2.1/32;
                       destination-port 80; }
               then { static-nat prefix 10.0.0.1/32 mapped-port 70000; } } } } } }`,
@@ -1901,7 +1906,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		{
 			name: "match destination-port without a mapped-port installs a port-scoped 1:1",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; destination-address 192.0.2.1/32;
                       destination-port 80; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`,
@@ -1911,7 +1916,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 		{
 			name: "mapped-port without a match destination-port installs a plain 1:1",
 			cfg: `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address 198.51.100.0/24; destination-address 192.0.2.1/32; }
               then { static-nat { prefix 10.0.0.1/32; mapped-port 8080; } } } } } } }`,
 			portFaultSub:   "mapped-port 8080 requires a matching",
@@ -1975,7 +1980,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // something else would be a different bug wearing this test as cover.
 func TestStaticNATMatchAddresses6673RepeatedIdenticalPrefixCommits(t *testing.T) {
 	const wrap = `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { %s
               then { static-nat prefix %s; } } } } } }`
 	for _, tc := range []struct {
@@ -2087,7 +2092,7 @@ security { nat { static { rule-set rs1 { from zone untrust;
 // loud is the feature, and only exact repeats may be collapsed.
 func TestStaticNATMatchAddresses6673DistinctPrefixesStillRejected(t *testing.T) {
 	const wrap = `
-security { nat { static { rule-set rs1 { from zone untrust;
+security { zones { security-zone untrust; } nat { static { rule-set rs1 { from zone untrust;
     rule r1 { match { destination-address %s; }
               then { static-nat prefix 10.0.0.1/32; } } } } } }`
 	for _, tc := range []struct {
