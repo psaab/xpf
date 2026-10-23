@@ -881,7 +881,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `sanitizeSwanctlValue` control-char belt (sanitize first, then
   escape). Identity values are now always emitted quoted so a DN with
   spaces/commas parses as a single value.
-- **Hexadecimal PSKs (#15027, A16-04).** A key authored as
+- **Hexadecimal PSKs (#15027, A16-04; provenance + loader #15991).** A key authored as
   `pre-shared-key hexadecimal <hex>` (IKE policy or VPN level) carries
   `PSKHex` on the compiled policy/VPN and renders unquoted as
   `secret = 0x<hex>`, so strongSwan hex-decodes it to the raw bytes a
@@ -890,7 +890,20 @@ all files stay in `package ipsec`, so the public API is unchanged.
   hexadecimal value is refused at strict commit
   (`validateIPsecPSKQualifierStrict`, warning on tolerant load), and
   a hex-flagged value reaching render in a malformed state is
-  skipped by name rather than rendered as ASCII digits.
+  skipped by name rather than rendered as ASCII digits. The authored
+  encoding travels through the gateway-group fold as `pskValue{value,
+  hex}` (#15991): emission is decided by the flag, never the string
+  prefix — and quoting alone does NOT protect an ASCII value, because
+  swanctl's loader strips the quotes and then hex-decodes any value
+  starting with `0x` (either case) or base64-decodes any `0s` value
+  (strongSwan 6.1.0 `load_creds.c` `load_secret`; verified live
+  against charon 6.1.0, `docs/log/15991.md`). An `ascii-text` value
+  colliding with either prefix (e.g. `ascii-text 0x61626364`) is
+  therefore base64-armored as `secret = "0s<base64 of the literal
+  bytes>"`, which charon decodes back to exactly the authored
+  string; it also stays a distinct grouped element from a
+  hexadecimal key with the same digits. Non-colliding ASCII renders
+  are byte-identical to before.
 - **PSK secret `id` selectors (#3952).** Each `secrets { ike-<conn> {
   secret = ... } }` PSK block now emits `id-<n>` selector(s) scoping the
   secret to its peer (`pskIDSelectors` in `policy.go`). A PSK secret with

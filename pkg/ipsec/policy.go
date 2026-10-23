@@ -46,8 +46,24 @@ type gatewayConn struct {
 	dpdDelay       int
 	dpdTimeout     int
 	children       []childSelector
-	pskValues      []string
+	pskValues      []pskValue
 	pskSelectorKey string
+}
+
+// pskValue is one member PSK with its authored encoding (#15991,
+// fold): hex is true only for a `pre-shared-key hexadecimal` value
+// (#15027), which renders as the token `0x<value>` so strongSwan
+// hex-decodes it. An ASCII value must reach charon as its literal
+// bytes: swanctl's loader (strongSwan 6.1.0 load_creds.c load_secret)
+// strips the settings quotes, then hex-decodes ANY value starting
+// with "0x" (strcasepfx, either case) and base64-decodes any "0s"
+// value — quoting changes nothing. An ASCII value starting with
+// either prefix therefore renders base64-armored as `0s<base64 of
+// the bytes>` (see swanctlSecretToken); every other ASCII value
+// renders as the plain quoted string.
+type pskValue struct {
+	value string
+	hex   bool
 }
 
 func gatewayKeyFor(ipsecCfg *config.IPsecConfig, name string, vpn *config.IPsecVPN, gw *config.IPsecGateway) string {
@@ -530,22 +546,20 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 		gc.children = append(gc.children, enriched...)
 		renderedMembers[name] = true
 		if d, ok := decodedPSKs[name]; ok {
-			// #15027: a hex PSK joins the group's list as its
-			// render token `0x<hex>` so dedupe and emission keep
-			// its encoding (an ASCII value that literally reads
-			// 0x<same digits> is quoted at emission and stays a
-			// distinct element).
-			if hexPSKs[name] {
-				d = "0x" + d
-			}
+			// #15991: carry the authored encoding with the value
+			// through the gateway-group fold. A hex PSK and an
+			// ASCII value that literally starts with "0x" are
+			// distinct credentials and must dedupe and render
+			// distinctly — never by string prefix alone.
+			pv := pskValue{value: d, hex: hexPSKs[name]}
 			seen := false
 			for _, v := range gc.pskValues {
-				if v == d {
+				if v == pv {
 					seen = true
 				}
 			}
 			if !seen {
-				gc.pskValues = append(gc.pskValues, d)
+				gc.pskValues = append(gc.pskValues, pv)
 			}
 		}
 	}
@@ -694,20 +708,21 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 		}
 		remoteAddr, localAddr, gw, _ := resolveRemoteAddr(ipsecCfg, gc.vpn)
 		fmt.Fprintf(&b, "  ike-%s {\n", gc.name)
-		if len(gc.pskValues) == 1 && strings.HasPrefix(gc.pskValues[0], "0x") {
+		if len(gc.pskValues) == 1 && gc.pskValues[0].hex {
 			// #15027 (A16-04): a lone hexadecimal PSK renders as
 			// raw bytes — swanctl's `0x` prefix makes strongSwan
 			// hex-decode the value (validated hex, no quoting
 			// needed), matching the peer holding the same Junos
 			// hex key. Quoting it derived the ASCII digits.
-			fmt.Fprintf(&b, "    secret = %s\n", gc.pskValues[0])
+			fmt.Fprintf(&b, "    secret = 0x%s\n", gc.pskValues[0].value)
 		} else {
-			// All-ASCII (the #15024 grouped shape): one quoted
-			// comma-joined value, byte-identical to the pre-#15027
-			// render. A mixed hex/ASCII group (not constructible
-			// from one Junos gateway stanza today) falls back to
-			// element-wise quoting so no hex token is mis-derived.
-			fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(strings.Join(gc.pskValues, ","))))
+			// ASCII and grouped renders go through
+			// swanctlSecretRendered: the loader decodes the
+			// VALUE, not the quoting (#15991 fold) — a quoted
+			// "0x…" still hex-decodes, so a colliding ASCII
+			// value is base64-armored (`0s<base64>`), which
+			// charon base64-decodes back to the literal bytes.
+			fmt.Fprintf(&b, "    secret = \"%s\"\n", escapeSwanctlQuoted(sanitizeSwanctlValue(swanctlSecretRendered(gc.pskValues))))
 		}
 		// Scope this PSK to its peer with id selectors (#3952). A PSK
 		// secret with NO id matches ANY peer, so with two or more PSK

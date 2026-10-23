@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Load an `ascii-text` IPsec PSK that starts with `0x`/`0s` as its
+    literal bytes (#15991): the gateway-group secret fold now carries
+    each member PSK's authored encoding (pskValue{value, hex}) and
+    emits a loader-facing token, because swanctl strips the quotes
+    then hex/base64-decodes any `0x…`/`0s…` value — so a colliding
+    ASCII value (e.g. `0x61626364`) renders base64-armored as
+    `secret = "0sMHg2MTYyNjM2NA=="`, which charon decodes back to the
+    literal string, instead of the raw hex bytes; an ASCII member no
+    longer collapses into a hexadecimal member with the same digits.
+    Hexadecimal keys (#15027) and all other PSK renders are unchanged.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Document that in-VM tcpdump is blind to AF_XDP fast-path flows
     (#16111): testing-docs/failover-testing.md now names the working
     observation points (LAN/WAN host and gRPC endpoint captures, plus
