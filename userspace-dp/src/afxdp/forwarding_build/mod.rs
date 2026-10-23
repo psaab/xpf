@@ -850,6 +850,16 @@ fn build_fallible_forwarding_state(
         nptv6.retain_counters_from(&previous.nptv6);
     }
     state.nptv6 = nptv6;
+    // #16015: hand the installed NPTv6 zoned external prefixes to every
+    // pool rule they cover, so a mint inside the prefix is refused
+    // instead of publishing a duplicate wire tuple. Must run after
+    // state.nptv6 is assigned. Interface-mode rules read the same view
+    // via sibling pool rules at mint time (see match_rules).
+    crate::nat::wire_nptv6_overlap_peers(
+        &mut state.source_nat_rules,
+        &mut state.nat64.prefixes,
+        state.nptv6.external_prefixes_zoned(),
+    );
     state.screen_profiles = build_screen_profiles(snapshot);
     state.screen_missing_profiles = build_screen_missing_profiles(snapshot);
     state.screen_inert_profiles = build_screen_inert_profiles(snapshot);

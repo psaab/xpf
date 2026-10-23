@@ -399,6 +399,29 @@ fn reserve_synced_source_nat_allocation_with_holder(
     let Some(rewrite_src) = nat.rewrite_src else {
         return true;
     };
+    // #16015 fold-2: this guard MUST precede owns_no_reservation.
+    // That predicate returns true for ANY v6 rewrite_src inside a
+    // local NPTv6 external prefix (its address arm ignores provenance)
+    // — including a DYNAMIC pool/interface SNAT rewrite that merely
+    // LANDS inside the prefix. Returning true there publishes the
+    // import as success before any overlap check. So first: a dynamic
+    // rewrite (not the NPTv6 bit, not static provenance) whose address
+    // a covered pool rule's NPTv6 view owns refuses here. Genuine
+    // NPTv6-bit and static-provenance rewrites skip this and keep the
+    // #15191 no-reservation success below.
+    if !nat.nptv6
+        && domains.source_nat_static != Some(true)
+        && rules.iter().any(|r| {
+            r.pool_mode
+                && nptv6_owns_wire_identity(
+                    r.nptv6_externals.as_deref().map(|v| &v[..]),
+                    rewrite_src,
+                    None,
+                )
+        })
+    {
+        return false;
+    }
     // #15191: a static-NAT external or an NPTv6 external owns no
     // allocator on either node, so there is nothing to reserve and
     // nothing to refuse. Booking it into the interface registry (the
@@ -681,6 +704,20 @@ fn reserve_synced_interface_identity(
         return false;
     };
     let translated_port = nat.rewrite_src_port.unwrap_or(flow.src_port);
+    // #16015 fold: an interface-domain import whose address sits inside
+    // an installed NPTv6 external prefix (carried on the interface rule
+    // itself or a sibling pool rule) collides with the stateless
+    // NPTv6 publish at the preserved port — refuse before booking.
+    if rules.iter().any(|r| {
+        nptv6_owns_wire_identity(
+            r.nptv6_externals.as_deref().map(|v| &v[..]),
+            rewrite_src,
+            None,
+        )
+    }) {
+        crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
     // #15146: refuse when a pool/NAT64 peer already owns this identity.
     // This is the synced twin of the #14367 interface-mint peer check
     // (`peer_owns_for_interface`); without it an import lands on an
@@ -1055,6 +1092,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                                 rule.static_externals.as_deref(),
                                 pre.ip,
                                 pre.port,
+                            )
+                            || nptv6_owns_wire_identity(
+                                rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                                pre.ip,
+                                None,
                             ))
                     {
                         return SyncedReserveOutcome::Refused;
@@ -1067,6 +1109,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                             rule.static_externals.as_deref(),
                             translated.ip,
                             translated.port,
+                        )
+                        || nptv6_owns_wire_identity(
+                            rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                            translated.ip,
+                            None,
                         ))
                 {
                     let snapshot = incumbent_snapshot.clone();
@@ -1204,6 +1251,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     rule.static_externals.as_deref(),
                     translated.ip,
                     translated.port,
+                )
+                || nptv6_owns_wire_identity(
+                    rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                    translated.ip,
+                    None,
                 ))
         {
             return SyncedReserveOutcome::Refused;
@@ -1230,6 +1282,11 @@ fn reserve_synced_on_first_pool_owner<'a>(
                         rule.static_externals.as_deref(),
                         translated.ip,
                         translated.port,
+                    )
+                    || nptv6_owns_wire_identity(
+                        rule.nptv6_externals.as_deref().map(|v| &v[..]),
+                        translated.ip,
+                        None,
                     ))
             {
                 let snapshot = incumbent_snapshot.clone();

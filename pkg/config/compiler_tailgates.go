@@ -274,6 +274,18 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return err
 	}
 	cfg.Warnings = append(cfg.Warnings, staticOverlapWarnings...)
+	// #16015: NPTv6 external prefix vs referenced pool / NAT64 pool /
+	// interface-egress gate. NPTv6 publishes its external prefix
+	// statelessly with the port unchanged, so it owns no occupancy bit a
+	// pool mint could consult; a pool/interface member inside the prefix
+	// lets the allocator mint the same (address, port) NPTv6 emits for a
+	// different host. Strict rejects naming both sides; lenient warns
+	// (#1960 no-brick). Runs right after the #14368 gate.
+	nptv6PoolWarnings, err := validateNPTv6PoolOverlapStrict(cfg, opts.lenientNATPoolOverlap)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, nptv6PoolWarnings...)
 
 	// #1434 multi-peer WireGuard: per-tunnel commit gate. Strict (commit /
 	// commit-check): hard-reject a WG tunnel with a missing/invalid

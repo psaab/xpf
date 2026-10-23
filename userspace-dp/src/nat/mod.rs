@@ -336,6 +336,7 @@ pub(crate) use source::{
     nat64_refuse_if_interface_owns,
     nat64_refuse_if_peer_owns,
     nat64_refuse_if_static_owns,
+    nptv6_owns_wire_identity,
     parse_source_nat_rules,
     parse_source_nat_rules_with_previous,
     peer_owns_identity_in,
@@ -358,6 +359,7 @@ pub(crate) use source::{
     static_owns_wire_identity,
     sync_interface_overlap_peers,
     wire_nat64_overlap_peers,
+    wire_nptv6_overlap_peers,
     wire_static_overlap_peers,
 };
 // #6211 F2: test-only untracked entry points (see their doc comments).
