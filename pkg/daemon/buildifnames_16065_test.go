@@ -42,10 +42,12 @@ func TestBuildIfNamesRefusesSharedWireGuard16065(t *testing.T) {
 		switch name {
 		case "wg0":
 			return 20, nil
-		case "ge-0-0-3.80":
+		case "ge-0-0-3":
 			return 14, nil
+		case "ge-0-0-3.80":
+			return 16, nil
 		}
-		t.Fatalf("unexpected lookup %q (want the unit's OWN device)", name)
+		t.Fatalf("unexpected lookup %q", name)
 		return 0, nil
 	}
 
@@ -54,7 +56,14 @@ func TestBuildIfNamesRefusesSharedWireGuard16065(t *testing.T) {
 		t.Fatalf("shared TUN ifindex 20 named %q — flow export would attribute both "+
 			"wg units' records to one sibling (#16065)", name)
 	}
+	// The parent ifindex has exactly ONE unit name across all its keys
+	// (only .80 exists in this fixture), so the bare projection names
+	// it after that unit — agreed, not a sibling pick. (With .50 also
+	// present it would be refused; see pkg/config C5 test.)
 	if name := names[14]; name != "ge-0/0/3.80" {
-		t.Fatalf("VLAN child ifindex 14 = %q, want ge-0/0/3.80 (child-keyed, not parent)", name)
+		t.Fatalf("parent ifindex 14 = %q, want ge-0/0/3.80 (sole claimant)", name)
+	}
+	if name := names[16]; name != "ge-0/0/3.80" {
+		t.Fatalf("VLAN child ifindex 16 = %q, want ge-0/0/3.80 (child-keyed)", name)
 	}
 }

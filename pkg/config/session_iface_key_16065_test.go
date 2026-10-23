@@ -53,25 +53,28 @@ func wgTwoUnitCfg16065() *Config {
 }
 
 // lookup16065 is the fixed kernel table: wg0 (the shared TUN) = 20,
-// the VLAN children own 15/14, the GRE units own 30/31. Any other
-// device name is a fixture bug — in particular the PARENT "ge-0-0-3"
-// must never be looked up for its VLAN units (#16065 child keying).
+// the ge-0/0/3 PARENT/bind device = 14 with VLAN children 15 (.50) and
+// 16 (.80), the GRE units own 30/31. Both key forms are looked up:
+// the parent for the {parent, VID} ingress stamp, each child for the
+// {child, VID} egress form.
 func lookup16065(t *testing.T) func(string) (int, error) {
 	t.Helper()
 	return func(name string) (int, error) {
 		switch name {
 		case "wg0":
 			return 20, nil
+		case "ge-0-0-3":
+			return 14, nil
 		case "ge-0-0-3.50":
 			return 15, nil
 		case "ge-0-0-3.80":
-			return 14, nil
+			return 16, nil
 		case "gr-0-0-0":
 			return 30, nil
 		case "gr-0-0-0u1":
 			return 31, nil
 		}
-		t.Fatalf("unexpected kernel lookup %q (units must resolve to their OWN device)", name)
+		t.Fatalf("unexpected kernel lookup %q", name)
 		return 0, fmt.Errorf("no such device %q", name)
 	}
 }
@@ -111,28 +114,81 @@ func TestSessionIfaceNamesChildAndPerUnitDevices16065(t *testing.T) {
 	cfg := wgTwoUnitCfg16065()
 	names := SessionIfaceNames(cfg, lookup16065(t))
 
-	// VLAN units key on the CHILD ifindex, not the parent's: the parent
-	// "ge-0-0-3" is never looked up (lookup16065 fails the test if it
-	// is), and no entry exists at a parent-derived key.
+	// VLAN units register BOTH key forms: {parent 14, VID} (the ingress
+	// stamp AF_XDP records) and {child, VID} (own-device/FIB form).
+	if name := names[SessionIfaceKey{Ifindex: 14, VlanID: 50}]; name != "ge-0/0/3.50" {
+		t.Errorf("{14,50} = %q, want ge-0/0/3.50 (parent/bind ingress form)", name)
+	}
+	if name := names[SessionIfaceKey{Ifindex: 14, VlanID: 80}]; name != "ge-0/0/3.80" {
+		t.Errorf("{14,80} = %q, want ge-0/0/3.80 (parent/bind ingress form)", name)
+	}
 	if name := names[SessionIfaceKey{Ifindex: 15, VlanID: 50}]; name != "ge-0/0/3.50" {
 		t.Errorf("{15,50} = %q, want ge-0/0/3.50 (VLAN child ifindex)", name)
 	}
-	if name := names[SessionIfaceKey{Ifindex: 14, VlanID: 80}]; name != "ge-0/0/3.80" {
-		t.Errorf("{14,80} = %q, want ge-0/0/3.80 (VLAN child ifindex)", name)
+	if name := names[SessionIfaceKey{Ifindex: 16, VlanID: 80}]; name != "ge-0/0/3.80" {
+		t.Errorf("{16,80} = %q, want ge-0/0/3.80 (VLAN child ifindex)", name)
 	}
-	// Per-unit tunnel devices key distinctly (no collision to refuse).
-	if name := names[SessionIfaceKey{Ifindex: 30, VlanID: 0}]; name != "gr-0/0/0" {
-		t.Errorf("{30,0} = %q, want gr-0/0/0 (unit 0 renders bare)", name)
-	}
+	// Unit 1's own u1 device keys distinctly. Unit 0 is REFUSED here —
+	// correctly: the bare-interface parent claim registers
+	// "gr-0/0/0.0" (sessionParentDevice resolves the bare iface ref to
+	// the same device, and the parent-form claim uses the unit display
+	// for a unit ref... see the builder: the parent claim for unit 0
+	// uses display "gr-0/0/0" while unit 1's parent claim at {30,0}
+	// would be "gr-0/0/0.1" — no: both units' PARENT claims land on
+	// {30,0} (parent device, VID 0) with different displays, so the
+	// key is ambiguous and refused. That is the intended narrowing: an
+	// ingress row stamped {30,0} cannot be attributed to unit 0 vs
+	// unit 1 from the parent stamp alone; only child-stamped rows
+	// (unit 1 at {31,0}) resolve precisely, and unit 0's child form
+	// coincides with the refused parent key.
 	if name := names[SessionIfaceKey{Ifindex: 31, VlanID: 0}]; name != "gr-0/0/0.1" {
 		t.Errorf("{31,0} = %q, want gr-0/0/0.1 (its own u1 device)", name)
+	}
+	if !SharedSessionIfaceKey(cfg, lookup16065(t), SessionIfaceKey{Ifindex: 30, VlanID: 0}) {
+		t.Error("SharedSessionIfaceKey({30,0}) = false, want true (gr units 0/1 share the parent stamp at VID 0)")
+	}
+	if SharedSessionIfaceKey(cfg, lookup16065(t), SessionIfaceKey{Ifindex: 31, VlanID: 0}) {
+		t.Error("SharedSessionIfaceKey({31,0}) = true, want false (unit 1 alone claims its u1 device)")
 	}
 	if SharedSessionIfaceKey(cfg, lookup16065(t), SessionIfaceKey{Ifindex: 14, VlanID: 80}) {
 		t.Error("SharedSessionIfaceKey({14,80}) = true, want false (one claimant)")
 	}
-	// Exactly the four un-shared units produce entries.
-	if len(names) != 4 {
-		t.Errorf("SessionIfaceNames has %d entries, want 4 (wg pair refused): %v", len(names), names)
+	if SharedSessionIfaceKey(cfg, lookup16065(t), SessionIfaceKey{Ifindex: 16, VlanID: 80}) {
+		t.Error("SharedSessionIfaceKey({16,80}) = true, want false (one claimant)")
+	}
+}
+
+// F3: a TAGGED unit 0 keeps its ".0" identity (it owns a distinct VLAN
+// child); only an untagged unit 0 renders bare.
+func TestSessionIfaceNamesTaggedUnitZero16065(t *testing.T) {
+	cfg := &Config{Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{
+			0: {Number: 0, VlanID: 100},
+		}},
+		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*InterfaceUnit{
+			0: {Number: 0},
+		}},
+	}}}
+	lookup := func(name string) (int, error) {
+		switch name {
+		case "ge-0-0-0":
+			return 40, nil
+		case "ge-0-0-0.100":
+			return 41, nil
+		case "ge-0-0-1":
+			return 42, nil
+		}
+		return 0, fmt.Errorf("no device %q", name)
+	}
+	names := SessionIfaceNames(cfg, lookup)
+	if name := names[SessionIfaceKey{Ifindex: 41, VlanID: 100}]; name != "ge-0/0/0.0" {
+		t.Errorf("tagged unit 0 child {41,100} = %q, want ge-0/0/0.0 (.0 identity kept)", name)
+	}
+	if name := names[SessionIfaceKey{Ifindex: 40, VlanID: 100}]; name != "ge-0/0/0.0" {
+		t.Errorf("tagged unit 0 parent {40,100} = %q, want ge-0/0/0.0", name)
+	}
+	if name := names[SessionIfaceKey{Ifindex: 42, VlanID: 0}]; name != "ge-0/0/1" {
+		t.Errorf("untagged unit 0 {42,0} = %q, want bare ge-0/0/1", name)
 	}
 }
 
@@ -147,11 +203,27 @@ func TestSessionIfNamesByIfindexRefusesShared16065(t *testing.T) {
 		t.Fatalf("byIndex[20] = %q — the shared TUN is named after a sibling; "+
 			"flow-export sampling would judge both wg units by %q (#16065)", name, name)
 	}
-	if name := byIndex[14]; name != "ge-0/0/3.80" {
-		t.Errorf("byIndex[14] = %q, want ge-0/0/3.80", name)
+	// The parent ifindex carries two different unit names at different
+	// VIDs (.50/.80) — the bare-ifindex projection cannot name it
+	// without picking a sibling, so it is nameless too (C5).
+	if name, ok := byIndex[14]; ok {
+		t.Fatalf("byIndex[14] = %q — parent shared by .50/.80 at different VIDs must be nameless", name)
+	}
+	if name := byIndex[16]; name != "ge-0/0/3.80" {
+		t.Errorf("byIndex[16] = %q, want ge-0/0/3.80 (child uniquely claims it)", name)
 	}
 	if name := byIndex[31]; name != "gr-0/0/0.1" {
 		t.Errorf("byIndex[31] = %q, want gr-0/0/0.1", name)
+	}
+	// Deterministic across rebuilds despite Go map iteration.
+	for range 16 {
+		again := SessionIfNamesByIfindex(cfg, lookup16065(t))
+		if _, ok := again[20]; ok {
+			t.Fatal("rebuild named the shared TUN — projection refusal must be deterministic")
+		}
+		if _, ok := again[14]; ok {
+			t.Fatal("rebuild named the multi-VID parent — projection refusal must be deterministic")
+		}
 	}
 }
 

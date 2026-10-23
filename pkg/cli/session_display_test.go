@@ -48,12 +48,16 @@ func TestBuildSessionEgressIfaces_KeysOnWireVLANID_7153(t *testing.T) {
 
 	m := buildSessionEgressIfacesWithLookup(cfg, func(name string) (int, error) {
 		switch name {
+		case "ge-0-0-2":
+			return 6, nil // RETH member parent/bind device
 		case "ge-0-0-2.50":
 			return 16, nil
 		case "ge-0-0-2.80":
 			return 18, nil
+		case "ge-7-0-2":
+			return 7, nil
 		default:
-			t.Fatalf("unexpected lookup name %q (want the VLAN child device)", name)
+			t.Fatalf("unexpected lookup name %q", name)
 			return 0, nil
 		}
 	})
@@ -61,7 +65,7 @@ func TestBuildSessionEgressIfaces_KeysOnWireVLANID_7153(t *testing.T) {
 		t.Fatal("expected non-empty egress interface map")
 	}
 
-	var found50, found80 bool
+	var found50, found80, parent50, parent80 bool
 	for key, name := range m {
 		if key.Ifindex == 16 && key.VlanID == 50 && name == "reth0.50" {
 			found50 = true
@@ -69,12 +73,18 @@ func TestBuildSessionEgressIfaces_KeysOnWireVLANID_7153(t *testing.T) {
 		if key.Ifindex == 18 && key.VlanID == 80 && name == "reth0.80" {
 			found80 = true
 		}
+		if key.Ifindex == 6 && key.VlanID == 50 && name == "reth0.50" {
+			parent50 = true
+		}
+		if key.Ifindex == 6 && key.VlanID == 80 && name == "reth0.80" {
+			parent80 = true
+		}
 	}
-	if !found50 {
-		t.Fatalf("missing reth0.50 mapping at {16,50}: %v", m)
+	if !found50 || !found80 {
+		t.Fatalf("missing child mappings: 50=%v 80=%v: %v", found50, found80, m)
 	}
-	if !found80 {
-		t.Fatalf("missing reth0.80 mapping at {18,80}: %v", m)
+	if !parent50 || !parent80 {
+		t.Fatalf("missing parent-form mappings {6,VID}: 50=%v 80=%v: %v", parent50, parent80, m)
 	}
 }
 

@@ -70,24 +70,33 @@ func restIface6960View(t *testing.T) sessionView {
 		// The test box has no ge-0-0-* netdevs; without the injected lookup
 		// the identity table would be empty and every assertion below would
 		// pass vacuously through the zone fallback.
-		// #16065: the lookup receives the unit's OWN kernel device
-		// ("ge-0-0-3.80", the VLAN child), not the parent netdev.
+		// #16065 dual keying: the lookup receives the PARENT device
+		// ("ge-0-0-3" = 14, the ingress stamp form) and each unit's OWN
+		// child device ("ge-0-0-3.50" = 15, "ge-0-0-3.80" = 16).
 		ifindexByName: func(name string) (int, error) {
 			switch name {
 			case "ge-0-0-0":
 				return 11, nil
 			case "ge-0-0-1":
 				return 12, nil
+			case "ge-0-0-3":
+				return 14, nil
 			case "ge-0-0-3.50":
 				return 15, nil
 			case "ge-0-0-3.80":
-				return 14, nil
+				return 16, nil
 			}
 			return 0, net.UnknownNetworkError(name)
 		},
 	}
 	v := s.buildSessionView()
+	// Non-vacuous guard: a missing table entry must FAIL here. Both key
+	// forms of the trunk unit must be present.
 	if name := v.egressIfaces[sessionEgressKey{Ifindex: 14, VlanID: 80}]; name != "ge-0/0/3.80" {
+		t.Fatalf("iface name table missing the trunk unit at parent form: {14,80} = %q, want ge-0/0/3.80 (table=%v)", name, v.egressIfaces)
+	}
+	if name := v.egressIfaces[sessionEgressKey{Ifindex: 16, VlanID: 80}]; name != "ge-0/0/3.80" {
+		t.Fatalf("iface name table missing the trunk unit at child form: {16,80} = %q, want ge-0/0/3.80 (table=%v)", name, v.egressIfaces)
 	}
 	return v
 }

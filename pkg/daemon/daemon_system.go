@@ -177,22 +177,24 @@ func currentHostnameForFingerprint15231() string {
 // interface-name map (#15094), through config.SessionIfNamesByIfindex
 // (#16065): the SAME per-unit derivation the session surfaces use, so
 // flow-export / RT_FLOW attribution cannot drift from session display.
-// Each unit keys on its OWN kernel device (per-unit tunnel devices,
-// VLAN children — whose ifindex is the child's, not the parent's — the
-// shared WireGuard TUN), resolved through cfg.ResolveKernelIfName, and
-// an ifindex two DIFFERENT units share (wg0.0/wg0.1 on the one TUN,
-// both VID 0) is REFUSED: no name is stored, so a record on that device
-// resolves nameless ("", zone semantics for flow-export sampling)
-// instead of being named after whichever sibling first-wins picked.
-// The pre-#16065 builder used sorted first-wins, which named every
-// record on a shared TUN after the first-visited sibling.
+// Each unit registers both its parent/bind device and its OWN kernel
+// device (per-unit tunnels, VLAN children, the shared WireGuard TUN),
+// resolved through cfg.ResolveKernelIfName; the bare-ifindex
+// projection names an ifindex only when every key for it agrees on
+// one name and none was refused. An ifindex two DIFFERENT units share
+// (wg0.0/wg0.1 on the one TUN, both VID 0; a parent carrying .50/.80)
+// is REFUSED: no name is stored, so a record on that device resolves
+// nameless ("", zone semantics for flow-export sampling) instead of
+// being named after whichever sibling first-wins picked. The
+// pre-#16065 builder used sorted first-wins, which named every record
+// on a shared TUN after the first-visited sibling.
 //
-// Unit 0 renders as the bare authored name; a RETH spelling is
-// preferred over its member for a shared device (both are the same
-// display claim through the shared derivation, so this is not
-// ambiguity). A bare parent with no unit contributes no entry — the
-// session tables have always required a unit, and an event on such a
-// device resolves nameless as before.
+// An UNTAGGED unit 0 renders as the bare authored name (a tagged unit
+// 0 keeps ".0"); a RETH spelling and its member naming one device
+// under the same display name is agreement, not ambiguity. A bare
+// parent with no unit contributes no entry — the session tables have
+// always required a unit, and an event on such a device resolves
+// nameless as before.
 func buildIfNames(cfg *config.Config) map[uint32]string {
 	return buildIfNamesWithLookup(cfg, func(name string) (int, error) {
 		link, err := netlink.LinkByName(name)

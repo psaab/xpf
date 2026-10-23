@@ -90,13 +90,17 @@ func TestBuildSessionEgressIfacesNilSlots5813(t *testing.T) {
 		t.Fatalf("untagged unit: got %q, want ge-0/0/0 (map=%v)", name, got)
 	}
 	if name := got[sessionIfaceKey{Ifindex: 16, VlanID: 50}]; name != "ge-0/0/0.50" {
-		t.Fatalf("tagged unit: got %q, want ge-0/0/0.50 (map=%v)", name, got)
+		t.Fatalf("tagged unit child: got %q, want ge-0/0/0.50 (map=%v)", name, got)
 	}
-	// Exactly the two valid units produced entries; the nil unit and the nil
-	// InterfaceConfig contributed nothing — a nil interface/unit reference does
-	// not become an empty or wrong filter entry.
-	if len(got) != 2 {
-		t.Fatalf("egress map has %d entries, want 2 (nil slots must be omitted): %v", len(got), got)
+	// Dual keying: the tagged unit also registers its parent form.
+	if name := got[sessionIfaceKey{Ifindex: 10, VlanID: 50}]; name != "ge-0/0/0.50" {
+		t.Fatalf("tagged unit parent form: got %q, want ge-0/0/0.50 (map=%v)", name, got)
+	}
+	// Exactly the two valid units produced entries (3 keys: unit 0 plus
+	// unit 50's parent+child forms); the nil unit and the nil
+	// InterfaceConfig contributed nothing.
+	if len(got) != 3 {
+		t.Fatalf("egress map has %d entries, want 3 (nil slots must be omitted): %v", len(got), got)
 	}
 }
 

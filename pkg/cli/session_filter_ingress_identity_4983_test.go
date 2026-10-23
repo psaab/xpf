@@ -107,10 +107,12 @@ func ingressIdentityIfindex(t *testing.T) func(string) (int, error) {
 			return 12, nil
 		case "ge-0-0-2":
 			return 13, nil
+		case "ge-0-0-3":
+			return 14, nil // parent/bind device (ingress stamp form)
 		case "ge-0-0-3.50":
 			return 15, nil
 		case "ge-0-0-3.80":
-			return 14, nil
+			return 14, nil // child keeps 14 so parent-stamped {14,80} rows stay nameable in both forms
 		case "ge-0-0-4":
 			return 16, nil
 		default:

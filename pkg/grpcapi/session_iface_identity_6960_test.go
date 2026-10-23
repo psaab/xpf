@@ -75,10 +75,12 @@ func ifaceIdentity6960Ifindex(t *testing.T) func(string) (int, error) {
 			return 11, nil
 		case "ge-0-0-1":
 			return 12, nil
+		case "ge-0-0-3":
+			return 14, nil // parent/bind device: parent-stamped ingress {14,VID}
 		case "ge-0-0-3.50":
 			return 15, nil
 		case "ge-0-0-3.80":
-			return 14, nil
+			return 16, nil
 		}
 		return 0, net.UnknownNetworkError(name)
 	}
@@ -172,10 +174,17 @@ func TestSessionFilterKeepsEveryZoneInterface6960(t *testing.T) {
 
 	// The {ifindex, VLAN} name table must actually be populated, or every
 	// identity assertion below would pass vacuously via the zone fallback.
-	// #16065: keyed by the VLAN CHILD ifindex (14 = ge-0-0-3.80), not the
-	// parent's.
+	// #16065 dual keying: BOTH the parent form {14,80} (the ingress
+	// stamp these fixtures record) and the child form {16,80} must name
+	// the trunk unit. A missing entry fails here, not silently.
 	if name := f.egressIfaces[sessionEgressKey{Ifindex: 14, VlanID: 80}]; name != "ge-0/0/3.80" {
-		t.Fatalf("iface name table missing the trunk unit: {14,80} = %q, want ge-0/0/3.80", name)
+		t.Fatalf("iface name table missing the trunk unit at parent form: {14,80} = %q, want ge-0/0/3.80 (table=%v)", name, f.egressIfaces)
+	}
+	if name := f.egressIfaces[sessionEgressKey{Ifindex: 16, VlanID: 80}]; name != "ge-0/0/3.80" {
+		t.Fatalf("iface name table missing the trunk unit at child form: {16,80} = %q, want ge-0/0/3.80 (table=%v)", name, f.egressIfaces)
+	}
+	if name := f.egressIfaces[sessionEgressKey{Ifindex: 15, VlanID: 50}]; name != "ge-0/0/3.50" {
+		t.Fatalf("iface name table missing the sibling unit at child form: {15,50} = %q, want ge-0/0/3.50 (table=%v)", name, f.egressIfaces)
 	}
 }
 
