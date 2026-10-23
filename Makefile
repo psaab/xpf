@@ -1481,7 +1481,7 @@ test-failover:
 # verdicts; the candidate .deb is built before the gate acquires the cluster lock.
 test-rolling-upgrade: deb
 	./test/incus/with-cluster.sh "test-rolling-upgrade #12200" -- \
-		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) XPF_DEPLOY_DEB_PATH="$(DEB_OUT)/xpf_$(DEB_VERSION)_amd64.deb" ./test/incus/harness-result.sh run \
 		--gate test-rolling-upgrade --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		-- ./test/incus/test-rolling-upgrade.sh

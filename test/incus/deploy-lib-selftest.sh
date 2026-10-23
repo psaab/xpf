@@ -2349,6 +2349,10 @@ test_cluster_setup_selects_by_version_wiring() {
 	local setup="$SCRIPT_DIR/cluster-setup.sh" rolling="$SCRIPT_DIR/test-rolling-upgrade.sh" missing=()
 	grep -q 'deploy_select_deb "$PROJECT_ROOT/dist-deb"' "$setup" || missing+=("cluster-setup deploy/attest selection")
 	grep -q 'deploy_select_deb "$PROJECT_ROOT/dist-deb"' "$rolling" || missing+=("rolling-upgrade selection")
+	grep -q 'XPF_DEPLOY_DEB_PATH' "$rolling" || missing+=("rolling-upgrade names its pin (fail-closed VOID)")
+	if ! awk '/^test-rolling-upgrade:/,/^$/' "$SCRIPT_DIR/../../Makefile" | grep -q 'XPF_DEPLOY_DEB_PATH="$(DEB_OUT)/xpf_$(DEB_VERSION)_amd64.deb"'; then
+		missing+=("Makefile test-rolling-upgrade does not pin the built candidate")
+	fi
 	if grep -Eq 'ls -t .*dist-deb/xpf_' "$setup" "$rolling"; then
 		missing+=("retired ls -t dist-deb selection still present")
 	fi
@@ -2357,7 +2361,7 @@ test_cluster_setup_selects_by_version_wiring() {
 	fi
 	grep -q 'prepare-deb' "$SCRIPT_DIR/../../Makefile" || missing+=("Makefile prepare-deb")
 	if (( ${#missing[@]} == 0 )); then
-		ok "wiring: cluster-setup + rolling select by version; Makefile uses prepare-deb (#16308)"
+		ok "wiring: cluster-setup selects by version; rolling pins its built candidate; Makefile uses prepare-deb (#16308)"
 	else
 		bad "wiring #16308: ${missing[*]}"
 	fi
@@ -2377,6 +2381,53 @@ test_deb_select_version_wins_and_missing_dies() {
 	fi
 	teardown_deb_fixture
 }
+
+# Fold (#16324 Opus): test-rolling-upgrade builds its candidate via the
+# `deb` prerequisite, so its selection MUST be scoped to that candidate —
+# highest-version fallback would attest a foreign prebuilt (e.g. a 99.0.x
+# dropped in dist-deb/ by another tree) instead of the bits this gate
+# just built. The Makefile pins XPF_DEPLOY_DEB_PATH per invocation.
+test_rolling_upgrade_candidate_is_pinned_to_built_deb() {
+	setup_make_fixture
+	setup_deb_fixture
+	# Foreign high-version deb present in the fixture DEB_OUT; the gate's
+	# own candidate (stock version from the Makefile) must still be pinned.
+	: > "$MAKE_FIXTURE_OUT/xpf_99.0.16308+601c5462a991_amd64.deb"
+	local out rc pin
+	out=$(_make_n test-rolling-upgrade); rc=$?
+	pin=$(printf '%s\n' "$out" | grep -o 'XPF_DEPLOY_DEB_PATH="[^"]*"' | head -1 || true)
+	if [[ $rc -eq 0 && "$out" == *"dpkg-buildpackage"* && -n "$pin" && "$pin" != *99.0.16308* && "$pin" == *"$MAKE_FIXTURE_OUT/xpf_"* ]]; then
+		ok "rolling-upgrade: Makefile pins candidate to the just-built deb, not the foreign 99.0.x"
+	else
+		bad "rolling-upgrade pin: rc=$rc pin='$pin' out=$(printf '%s' "$out" | tail -3)"
+	fi
+	# Selector level: with that pin set, deploy_select_deb returns the
+	# pinned stock deb even though a higher foreign deb sits beside it;
+	# without the pin it would (wrongly, for this gate) pick the foreign one.
+	local pinned_deb="xpf_0.0.23372+g9dff3bbd6ca8_amd64.deb"
+	: > "$MAKE_FIXTURE_OUT/$pinned_deb"
+	local got
+	got=$(XPF_DEPLOY_DEB_PATH="$MAKE_FIXTURE_OUT/$pinned_deb" deploy_select_deb "$MAKE_FIXTURE_OUT") || { bad "rolling-upgrade: pinned select failed"; teardown_make_fixture; teardown_deb_fixture; return; }
+	if [[ "$got" == *"$pinned_deb" ]]; then
+		ok "rolling-upgrade: pinned selection returns the built candidate over the foreign 99.0.x"
+	else
+		bad "rolling-upgrade: pinned selection picked $got"
+	fi
+	got=$(deploy_select_deb "$MAKE_FIXTURE_OUT") || got=""
+	if [[ "$got" == *99.0.16308* ]]; then
+		ok "rolling-upgrade: unpinned fallback would pick the foreign deb (pins are load-bearing)"
+	else
+		bad "rolling-upgrade: unpinned fallback picked '$got' — interaction cell is vacuous"
+	fi
+	# Missing pinned candidate dies rather than falling back (fail-closed).
+	if ( XPF_DEPLOY_DEB_PATH="$MAKE_FIXTURE_OUT/xpf_0.0.99999+gmissing_amd64.deb" deploy_select_deb "$MAKE_FIXTURE_OUT" ) >/dev/null 2>&1; then
+		bad "rolling-upgrade: missing pinned candidate must die, not fall back"
+	else
+		ok "rolling-upgrade: missing pinned candidate dies (no fallback to foreign deb)"
+	fi
+	teardown_make_fixture
+	teardown_deb_fixture
+}
 # ── Run ───────────────────────────────────────────────────────────────
 test_deb_version_parses_filename
 test_deb_newest_picks_highest_version_not_newest_mtime
@@ -2387,6 +2438,7 @@ test_prepare_deb_reuses_prebuilt_99
 test_prepare_deb_fresh_tree_builds_stock
 test_prepare_deb_explicit_version_builds
 test_prepare_deb_older_only_rebuilds
+test_rolling_upgrade_candidate_is_pinned_to_built_deb
 test_prepare_deb_fast_never_builds_deb
 test_cluster_setup_selects_by_version_wiring
 test_rolling_secondary_node0_primary
