@@ -207,16 +207,12 @@ fn parsed_nat_rules_share_store_counters() {
     // Static NAT entry with a counter.
     let static_tbl = StaticNatTable::from_snapshots(
         &[StaticNATRuleSnapshot {
-            source_addresses: Vec::new(),
             name: "static-counted".to_string(),
             from_zone: "untrust".to_string(),
-            from_interface: String::new(),
-            from_routing_instance: String::new(),
             external_ip: "203.0.113.10".to_string(),
             internal_ip: "192.168.1.10".to_string(),
-            match_destination_port: 0,
-            mapped_port: 0,
             counter_id: 22,
+            ..Default::default()
         }],
         &store,
     );

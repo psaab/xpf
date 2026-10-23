@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Convert every exhaustive StaticNATRuleSnapshot (35) and
+    ThreeColorPolicerSnapshot (5) literal to a
+    `..Default::default()` tail, dropping only default-valued
+    fields, and tighten both additive-wire ceilings to 0
+    (#16267); also tighten the already-zero NAT64RuleSnapshot
+    ceiling 3 -> 0 and lower the population non-vacuity floor
+    80 -> 25 for the literals removed/miscounted. Test/fixture
+    literals only; no wire or runtime behaviour changes.
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Verify SO_PEERCRED on the Kea lease-sync control-socket dial
     (#16058): the client previously bare-dialed the socket pathname,
     so a wrong/squatted server was trusted as Kea and its fabricated

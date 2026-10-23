@@ -6172,9 +6172,9 @@ fn pbr_classify_then_route_snapshot() -> ConfigSnapshot {
             color_blind: true,
             committed_rate_bytes_per_sec: 1,
             committed_burst_bytes: 1,
-            peak_or_excess_rate_bytes_per_sec: 0,
             peak_or_excess_burst_bytes: 1,
             then_action: "discard".into(),
+            ..Default::default()
         }],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
@@ -6506,9 +6506,9 @@ fn input_count_policer_snapshot() -> ConfigSnapshot {
             color_blind: true,
             committed_rate_bytes_per_sec: 1,
             committed_burst_bytes: 1,
-            peak_or_excess_rate_bytes_per_sec: 0,
             peak_or_excess_burst_bytes: 1,
             then_action: "discard".into(),
+            ..Default::default()
         }],
         class_of_service: Some(count_fc_two_class_service()),
         ..Default::default()
@@ -8135,9 +8135,9 @@ fn h18_input_l3_policer_snapshot() -> ConfigSnapshot {
             color_blind: true,
             committed_rate_bytes_per_sec: 1,
             committed_burst_bytes: 1,
-            peak_or_excess_rate_bytes_per_sec: 0,
             peak_or_excess_burst_bytes: 1,
             then_action: "discard".into(),
+            ..Default::default()
         }],
         class_of_service: Some(count_fc_two_class_service()),
         ..Default::default()
@@ -8798,9 +8798,9 @@ fn generated_reply_deferred_classify_defers_count_and_policer_15268() {
             color_blind: true,
             committed_rate_bytes_per_sec: 1,
             committed_burst_bytes: 1,
-            peak_or_excess_rate_bytes_per_sec: 0,
             peak_or_excess_burst_bytes: 1,
             then_action: "discard".into(),
+            ..Default::default()
         }],
         ..Default::default()
     };
