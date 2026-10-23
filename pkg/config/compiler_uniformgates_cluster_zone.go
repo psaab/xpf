@@ -630,7 +630,7 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 			return err
 		}
 	}
-	if err := validateClusterAuthKeyStrict(cfg); err != nil {
+	if err := validateClusterAuthKeyStrictWithCurrent(cfg, opts.currentClusterPrimary16025); err != nil {
 		if opts.lenientClusterAuthKey {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))
@@ -639,12 +639,13 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
-	// #6611 key-strength advisories. Absence is binary and is rejected above;
-	// strength is a continuum, so a short key or one copied verbatim from a
-	// published reference config WARNS on both paths rather than failing the
-	// config. Rejecting those would create a new brick class (including via
-	// bootstrapFromFile, an unattended path) for an operator who already
-	// configured authentication.
+	// #6611/#16025 key-strength policy. Absence is rejected above. A short
+	// primary is also rejected on strict commit unless the same short
+	// primary is the persisted/current signing key and a distinct,
+	// floor-length replacement is staged as the additional key for the
+	// #6630 rotation; the tolerant path downgrades that rejection to a
+	// warning. Short additional keys and published placeholders warn on
+	// both paths rather than failing the config.
 	cfg.Warnings = append(cfg.Warnings, ClusterAuthKeyStrengthWarnings(cfg)...)
 
 	return nil

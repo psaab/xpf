@@ -6978,15 +6978,20 @@ first-error slot) **rejects on the strict path** a `chassis cluster` stanza
 whose `authentication-key` is absent or whitespace-only. The whitespace case is
 an EMPTINESS normalization: trimming makes the gate STRICTER than the
 runtime's `len(key) > 0` test (the runtime would treat `"   "` as a
-configured key), which is the right direction on the strict path. It is not
-an entropy floor — a one-character key passes. Key strength is a continuum and is reported by
-`ClusterAuthKeyStrengthWarnings` as a `cfg.Warnings` entry on BOTH paths
-(below `MinAdvisedControlLinkKeyLen` = 16 characters, or a key matching one of
-this repository's published `CHANGE-ME`/`EXAMPLE-ONLY` placeholders) rather
-than rejected — hard-rejecting a weak-but-real key would create a new brick
-class for an operator who already configured authentication. The same PSK
-signs the authenticated duplicate-identity beacon; a weak or published value
-can therefore forge the beacon's warn-only duplicate-node-id signal, but these
+configured key), which is the right direction on the strict path. Since
+#16025, the strict gate is also an entropy floor for the signing primary:
+a non-empty `authentication-key` shorter than
+`MinAdvisedControlLinkKeyLen` = 16 characters is rejected. The sole
+migration exception is the documented #6630 no-outage rotation: an existing
+short primary is tolerated on strict commit only when that same short
+primary is the persisted/current signing key and a distinct
+`additional-authentication-key` of at least 16 characters is staged on both
+nodes; the operator then swaps the staged key into `authentication-key`,
+moves the old key to the additional slot, and finalizes by deleting the
+additional key. A short or identical additional key does not qualify. On
+the tolerant load/sync path, a short primary still loads with a warning.
+`ClusterAuthKeyStrengthWarnings` reports short and published-placeholder
+keys (`CHANGE-ME`/`EXAMPLE-ONLY`) as `cfg.Warnings` entries on both paths;
 warnings never disclose the key.
 
 ### The rotation overlap leaf (#6630)

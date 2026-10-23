@@ -57,7 +57,7 @@ func TestRedundancyGroupIDBoundedByDataplaneArray8317(t *testing.T) {
 			for _, line := range []string{
 				"set chassis cluster cluster-id 1",
 				"set chassis cluster node 0",
-				"set chassis cluster authentication-key secret123",
+				"set chassis cluster authentication-key secret1234567890ab",
 				"set chassis cluster redundancy-group " + tc.id + " node 0 priority 200",
 				"set chassis cluster redundancy-group " + tc.id + " node 1 priority 100",
 			} {

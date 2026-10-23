@@ -22,7 +22,7 @@ func TestHandleClusterEventPreemptDualActiveWinSchedulesDirectAnnounce(t *testin
 	for _, line := range []string{
 		"chassis cluster cluster-id 1",
 		"chassis cluster node 0",
-		"chassis cluster authentication-key test-10426-psk",
+		"chassis cluster authentication-key test-10426-psk-16chars",
 		"chassis cluster no-reth-vrrp",
 	} {
 		if err := store.SetFromInput(line); err != nil {

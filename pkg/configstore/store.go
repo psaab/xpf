@@ -709,25 +709,28 @@ func (s *Store) SetNodeID(id int) {
 // (#1319 PR 2 boot safety). cfg is nil at this point because we haven't
 // compiled yet; the typed-leaf validators shipped so far don't need it.
 func (s *Store) compileTree(tree *config.ConfigTree) (*config.Config, error) {
-	return compileTreeStrict(tree, s.nodeID)
+	return compileTreeStrictWithCurrent(tree, s.nodeID, s.compiled)
 }
 
-// compileTreeStrict is the package-level strict commit-check pipeline
-// (typed-leaf SchemaValidate gate on the apply-groups-expanded view,
-// then strict compile). It backs both Store.compileTree (every
-// operator-driven commit / commit-check) and CheckText (check.go —
-// the #1879 `xpfd check-config` day-0 validation gate), so the two
-// callers can never drift apart.
+// compileTreeStrictWithCurrent is compileTreeStrict with the compiled
+// config active immediately before the candidate supplied for the
+// #16025 fold-2 staged-rotation gate. Only Store candidate paths pass a
+// non-nil current; CheckText/day-0 callers use compileTreeStrict (nil),
+// so a fresh candidate cannot claim the migration exception.
 func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, error) {
+	return compileTreeStrictWithCurrent(tree, nodeID, nil)
+}
+
+func compileTreeStrictWithCurrent(tree *config.ConfigTree, nodeID int, current *config.Config) (*config.Config, error) {
 	if err := schemaValidateExpandedTreeForNode(tree, nodeID); err != nil {
 		return nil, err
 	}
 	var compiled *config.Config
 	var err error
 	if nodeID >= 0 {
-		compiled, err = config.CompileConfigForNode(tree, nodeID)
+		compiled, err = config.CompileConfigForNodeWithCurrentClusterPrimary(tree, nodeID, current)
 	} else {
-		compiled, err = config.CompileConfig(tree)
+		compiled, err = config.CompileConfigWithCurrentClusterPrimary(tree, current)
 	}
 	if err != nil {
 		return nil, err
@@ -790,7 +793,13 @@ func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, err
 	// specific messages; this then runs the whole strict pipeline on the same
 	// rewritten peer tree, which covers every other strict gate and also the
 	// peer view that does not compile at all (the registry's skip arm).
-	if err := validatePeerStrictPipeline(peerTree, nodeID); err != nil {
+	// #16025 fold 3: the peer compile receives the same persisted current
+	// config as the local compile — in a synced cluster both nodes persist
+	// the same active primary, so the peer's staged-rotation exception is
+	// judged against the peer's own persisted primary derived from that
+	// active config, not left nil (which rejected every clustered staged
+	// migration at the peer gate even when the local gate admitted it).
+	if err := validatePeerStrictPipelineWithCurrent(peerTree, nodeID, current); err != nil {
 		return nil, err
 	}
 	return compiled, nil

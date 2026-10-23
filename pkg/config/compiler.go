@@ -142,6 +142,32 @@ func CompileConfig(tree *ConfigTree) (*Config, error) {
 	return compileTree(tree, compileOpts{lenientFlexMatchValueMissing: true}, nil)
 }
 
+// CompileConfigWithCurrentClusterPrimary is CompileConfig with the
+// persisted signing primary supplied for the #16025 staged-rotation
+// exception (fold 2). current is the *Config active immediately before
+// the candidate (configstore passes its compiled active config), or nil
+// for a fresh candidate. Only the cluster-auth gate reads it.
+func CompileConfigWithCurrentClusterPrimary(tree *ConfigTree, current *Config) (*Config, error) {
+	opts := compileOpts{lenientFlexMatchValueMissing: true}
+	opts.currentClusterPrimary16025 = currentClusterPrimary(current)
+	return compileTree(tree, opts, nil)
+}
+
+// CompileConfigForNodeWithCurrentClusterPrimary is the node-aware form.
+func CompileConfigForNodeWithCurrentClusterPrimary(tree *ConfigTree, nodeID int, current *Config) (*Config, error) {
+	opts := compileOpts{lenientFlexMatchValueMissing: true}
+	opts.currentClusterPrimary16025 = currentClusterPrimary(current)
+	return compileTree(tree, opts, &nodeID)
+}
+
+func currentClusterPrimary(cfg *Config) *string {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return nil
+	}
+	k := strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal())
+	return &k
+}
+
 // CompileConfigLenient is CompileConfig with the tolerant-path
 // downgrades enabled (#1798 control-char sanitize-in-place, lenient
 // VRRP track duplicates). Use on TOLERANT paths that compile an

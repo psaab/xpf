@@ -93,7 +93,7 @@ func TestStartClusterCommsLaunchesFabricForwardingWhenPrimarySyncUnaddressed(t *
 	d := newVRFBindingRetryDaemon12168(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
-		"set chassis cluster authentication-key 15687-test",
+		"set chassis cluster authentication-key 15687-test-cluster-psk",
 		"set chassis cluster fabric-interface xpf-nonexistent-15687",
 		"set chassis cluster fabric-peer-address 127.0.0.2",
 		"set chassis cluster ipsec-session-synchronization",
@@ -174,7 +174,7 @@ func TestStartClusterCommsRebuildsDualSessionSyncWhenFab1AddressArrivesLate(t *t
 		return []string{
 			"set chassis cluster cluster-id 1",
 			"set chassis cluster node 0",
-			"set chassis cluster authentication-key 15687-test",
+			"set chassis cluster authentication-key 15687-test-cluster-psk",
 			"set chassis cluster fabric-interface lo",
 			"set chassis cluster fabric-peer-address 127.0.0.2",
 			"set chassis cluster fabric1-interface " + fab1Iface,

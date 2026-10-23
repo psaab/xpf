@@ -134,12 +134,12 @@ func c2DebtStore12168(t *testing.T, clustered bool) *configstore.Store {
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
-	lines := []string{"system host-name c2-debt-12168"}
+	lines := []string{"system host-name c2-debt-12168-16ch"}
 	if clustered {
 		lines = append(lines,
 			"chassis cluster cluster-id 1",
 			"chassis cluster node 0",
-			"chassis cluster authentication-key c2-debt-12168",
+			"chassis cluster authentication-key c2-debt-12168-16ch",
 			"chassis cluster control-interface fxp0",
 			"chassis cluster peer-address 192.0.2.2")
 	}

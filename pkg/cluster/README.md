@@ -3031,15 +3031,23 @@ path does not exist. Tracked as **#6630**.
 
 ### Key strength
 
-The commit gate is an **emptiness floor, not an entropy floor**: it rejects an
-absent or whitespace-only key (whitespace would satisfy the runtime's
-`len(key) > 0` test while being no key at all), but a one-character key
-passes. Strength is a continuum, so `ClusterAuthKeyStrengthWarnings` reports
-it as a **warning** on both paths rather than rejecting — hard-rejecting a
-short key would create a new brick class, including via the unattended
-`bootstrapFromFile` path, for an operator who already configured
-authentication. It warns below `MinAdvisedControlLinkKeyLen` (16 characters)
-and when the key looks like one of this repository's published placeholders.
+The commit gate rejects an absent or whitespace-only key (whitespace would
+satisfy the runtime's `len(key) > 0` test while being no key at all). Since
+#16025 it is also an entropy floor for the signing primary on strict commit:
+a non-empty `authentication-key` shorter than `MinAdvisedControlLinkKeyLen`
+(16 characters) is rejected, because its HMAC over known control frames is
+an offline dictionary oracle. There is one migration exception: an existing
+short primary is tolerated on strict commit only when that same short
+primary is the persisted/current signing key and a distinct
+`additional-authentication-key` of at least 16 characters is staged (a
+fresh candidate authoring the identical shape is rejected). Stage
+that replacement on both nodes first (rotation steps 1–2), then swap it into
+`authentication-key` and move the old primary to the additional slot (steps
+3–4), and finalize by deleting the additional key (step 5). A short or
+identical additional key does not open the exception. On the tolerant
+load/sync path a short primary still boots with a warning, preserving the
+no-brick upgrade path. `ClusterAuthKeyStrengthWarnings` continues to warn
+below 16 characters and for published placeholders on both paths.
 These checks cover the duplicate-identity beacon too: anyone who knows a weak
 or published PSK can sign a beacon that passes authentication and triggers its
 warn-only duplicate-node-id signal. Warnings never disclose the key.
